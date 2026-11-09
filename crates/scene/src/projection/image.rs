@@ -7,7 +7,7 @@
 //! image over the face once it has it; until then, the face shows where it will be. See `design/projection.md`.
 use tomori_protocol::{Image, Panel};
 
-use super::{BODY_ROWS, BRIGHT, COLUMNS, DIM, FIT_COLUMNS, FIT_ROWS, Fit, PADDING, PIXEL, TEXT};
+use super::{BRIGHT, DIM, FIT_COLUMNS, FIT_ROWS, Fit, PADDING, PIXEL, TEXT};
 use crate::canvas::{Canvas, CanvasImage, Rect};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, wrap};
 
@@ -44,7 +44,7 @@ fn caption(panel: &Panel, columns: usize, most: usize) -> Vec<Vec<crate::ui_text
 /// caption, and never narrower than its title and metadata, within the same bounds.
 pub(super) fn fit(panel: &Panel, image: &Image, fit: Fit) -> (usize, usize) {
     match fit {
-        Fit::Slot => (COLUMNS, BODY_ROWS),
+        Fit::Slot(cells) => (cells.columns, cells.body),
         Fit::Text => {
             let captioned = caption(panel, FIT_COLUMNS.1, CAPTION_ROWS.1).len();
             let (width, height) = shown(
@@ -77,7 +77,7 @@ fn shown(image: &Image, width: f32, height: f32) -> (f32, f32) {
 pub(super) fn face(panel: &Panel, image: &Image, fit: Fit, border: Option<[f32; 4]>) -> Canvas {
     let (columns, body) = self::fit(panel, image, fit);
     let most = match fit {
-        Fit::Slot => CAPTION_ROWS.0,
+        Fit::Slot(_) => CAPTION_ROWS.0,
         Fit::Text => CAPTION_ROWS.1,
     };
     let captioned = caption(panel, columns, most.min(body.saturating_sub(IMAGE_ROWS)));
@@ -150,7 +150,7 @@ mod tests {
     fn in_a_slot_an_image_fits_keeping_its_shape_centred_above_its_caption() {
         for (width, height) in [(1600, 900), (900, 1600), (500, 500), (4000, 100)] {
             let shown = panel(width, height, "The session browser, as a render.");
-            let canvas = super::super::face(&shown, false, false, Fit::Slot);
+            let canvas = super::super::face(&shown, false, false, Fit::SLOT);
             // A slot's size, whatever the image.
             assert_eq!(
                 canvas.size(),
@@ -201,7 +201,7 @@ mod tests {
                 "{shape}: as large as a floating panel may be"
             );
             // In a slot, a slot's size, the image letterboxed in it, keeping its shape.
-            let slot = super::super::face(&shown, false, false, Fit::Slot);
+            let slot = super::super::face(&shown, false, false, Fit::SLOT);
             assert_eq!(slot.size(), super::super::panel_size(), "{shape}");
             let (image, _) = placed(&slot);
             assert!(
@@ -244,7 +244,7 @@ mod tests {
         assert!(super::super::fit(&titled, Fit::Text).0 >= titled.title.len());
         // A long caption is cut, leaving the image room.
         let long = panel(1600, 900, &"words ".repeat(200));
-        let canvas = super::super::face(&long, false, false, Fit::Slot);
+        let canvas = super::super::face(&long, false, false, Fit::SLOT);
         let (image, _) = placed(&canvas);
         assert!(image.height >= ((IMAGE_ROWS * CELL_HEIGHT) - 2) as f32 - 1e-3);
         assert!(canvas.plain().trim_end().ends_with('…'));

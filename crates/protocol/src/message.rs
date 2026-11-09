@@ -452,10 +452,30 @@ pub enum ClientMessage {
     AddWall {
         pose: Pose,
     },
-    /// Remove the wall `wall`, one an owner added, from the current space's environment, with the panels on it. Owners
-    /// only, and only to a server whose [`crate::SpaceState::projection`] is set.
+    /// Remove the wall `wall`, one an owner added, from the current space's environment. Owners only, and only to a
+    /// server whose [`crate::SpaceState::projection`] is set. A server whose [`crate::SpaceState::walls`] is set leaves
+    /// the panels on it floating where they were; an older one removes them with it.
     RemoveWall {
         wall: String,
+    },
+    /// Change the wall `wall` for everyone in the space: its `grid` of slots, how large its slots are, `scale` times a
+    /// flat wall's, its `shape`, flat or curved, and, for a wall an owner added, its `pose`. Each left out stays as it
+    /// is. Panels in slots it no longer has go into its nearest free slots, or else float where they were. Participants
+    /// only, and only to a server whose [`crate::SpaceState::walls`] is set. See `design/projection.md`.
+    SetWall {
+        wall: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grid: Option<crate::Grid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+        /// The shape of its slots, their width over their height, within [`crate::wall::ASPECTS`]: `0` for a standard
+        /// slot's. An older server ignores it, leaving its slots their shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aspect: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape: Option<crate::WallShape>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose: Option<Pose>,
     },
     /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, in `slot` where it says, or, without a
     /// wall, leave it floating at `pose`, in the space's coordinates, for everyone in the space. Participants only, and

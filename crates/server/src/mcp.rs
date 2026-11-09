@@ -395,6 +395,57 @@ fn tools() -> Value {
             "annotations": change,
         },
         {
+            "name": "set_wall",
+            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 2, or width picks it to make the wall that many metres wide; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat; place, front or front NAME, stands a wall someone added in front of them. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wall": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "columns": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_COLUMNS },
+                    "rows": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_ROWS },
+                    "scale": { "type": "number", "minimum": tomori_protocol::wall::SCALES.0, "maximum": tomori_protocol::wall::SCALES.1 },
+                    "width": { "type": "number", "exclusiveMinimum": 0 },
+                    "aspect": { "type": ["number", "string"], "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "slot_width": { "type": "number", "exclusiveMinimum": 0 },
+                    "slot_height": { "type": "number", "exclusiveMinimum": 0 },
+                    "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["wall"],
+            },
+            "annotations": change,
+        },
+        {
+            "name": "add_wall",
+            "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked; columns, rows, scale, aspect or slot_width and slot_height, and radius lay it out as set_wall does, by default three columns of two rows of standard slots, flat. At most six are added in each environment. Only when someone in the space asks; then tell them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "columns": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_COLUMNS },
+                    "rows": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_ROWS },
+                    "scale": { "type": "number", "minimum": tomori_protocol::wall::SCALES.0, "maximum": tomori_protocol::wall::SCALES.1 },
+                    "aspect": { "type": ["number", "string"], "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "slot_width": { "type": "number", "exclusiveMinimum": 0 },
+                    "slot_height": { "type": "number", "exclusiveMinimum": 0 },
+                    "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                },
+            },
+            "annotations": change,
+        },
+        {
+            "name": "remove_wall",
+            "description": "Remove a wall someone added to your space, for everyone in it, by its identity or name as presence lists it, or looking or near, with a name or for whoever asked. The panels on it float where they were. The Tomori wall and an environment's own walls cannot be removed. Only when someone in the space asks; then tell them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wall": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["wall"],
+            },
+            "annotations": change,
+        },
+        {
             "name": "set_speech",
             "description": "Set how much of each of your replies is spoken in your space, from the next reply on, for everyone in it: full, or brief, which speaks the start of each message and leaves the rest on the panel. Only when someone in the space asks; then tell them.",
             "inputSchema": {
@@ -569,6 +620,9 @@ async fn call(
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
         "panels" => session.and_then(|session| hub.tool_panels(session).map(structured)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
+        "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
+        "add_wall" => session.and_then(|session| add_wall(hub, session, arguments)),
+        "remove_wall" => session.and_then(|session| remove_wall(hub, session, arguments)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "rename_space" => session.and_then(|session| rename_space(hub, session, arguments)),
@@ -669,6 +723,144 @@ fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
         place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
     };
     hub.agent_update_panel(session, update).map(structured)
+}
+
+/// The optional text `name` of `arguments`, bounded as an identifier.
+fn optional_identifier<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let value = value.as_str().ok_or_else(|| format!("{name} is text."))?;
+            crate::limits::check(value, crate::limits::IDENTIFIER_BYTES, name)?;
+            Ok(Some(value))
+        }
+    }
+}
+
+/// The optional number `name` of `arguments`.
+fn optional_number(arguments: &Value, name: &str) -> Result<Option<f32>, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(|value| Some(value as f32))
+            .ok_or_else(|| format!("{name} is a number.")),
+    }
+}
+
+/// The shape of slots `arguments` ask for as `aspect`, their width over their height: a number, or a ratio such as
+/// `9:16`, and 0 or `standard` for a standard slot's, as `Some(None)`; left out, `None`.
+fn optional_aspect(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+    let refused = || {
+        "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.".to_owned()
+    };
+    let aspect = match arguments.get("aspect") {
+        None | Some(Value::Null) => return Ok(None),
+        // Any number JSON holds is one, but one too large for a slot is no aspect.
+        Some(Value::Number(number)) => number.as_f64().unwrap_or(f64::NAN) as f32,
+        Some(Value::String(text)) if text.trim().eq_ignore_ascii_case("standard") => 0.0,
+        Some(Value::String(text)) => {
+            crate::limits::check(text, crate::limits::IDENTIFIER_BYTES, "aspect")?;
+            let (wide, tall) = text.split_once([':', '/', 'x']).ok_or_else(refused)?;
+            let wide: f32 = wide.trim().parse().map_err(|_| refused())?;
+            let tall: f32 = tall.trim().parse().map_err(|_| refused())?;
+            if !(wide > 0.0 && tall > 0.0) {
+                return Err(refused());
+            }
+            ((wide / tall * 10_000.0).round() / 10_000.0).max(f32::MIN_POSITIVE)
+        }
+        Some(_) => return Err(refused()),
+    };
+    if !aspect.is_finite() || aspect < 0.0 {
+        return Err(refused());
+    }
+    Ok(Some((aspect != 0.0).then_some(aspect)))
+}
+
+/// The sizes in metres `arguments` ask for: the wall's `width`, and its slots' `slot_width` and `slot_height`.
+fn metres(arguments: &Value) -> Result<crate::hub::tools::Metres, String> {
+    Ok(crate::hub::tools::Metres {
+        width: optional_number(arguments, "width")?,
+        slot_width: optional_number(arguments, "slot_width")?,
+        slot_height: optional_number(arguments, "slot_height")?,
+    })
+}
+
+/// The columns, rows, scale and curve `arguments` ask for: each left out, `None`; a radius of 0, flat.
+#[allow(clippy::type_complexity)]
+fn wall_layout(
+    arguments: &Value,
+) -> Result<((Option<u32>, Option<u32>), Option<f32>, Option<Option<f32>>), String> {
+    let count = |name: &str| -> Result<Option<u32>, String> {
+        match arguments.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| format!("{name} is a whole number.")),
+        }
+    };
+    let grid = (count("columns")?, count("rows")?);
+    let radius =
+        optional_number(arguments, "radius")?.map(|radius| (radius != 0.0).then_some(radius));
+    Ok((grid, optional_number(arguments, "scale")?, radius))
+}
+
+/// The `set_wall` tool.
+fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let wall = text(arguments, "wall")?;
+    crate::limits::check(wall, crate::limits::IDENTIFIER_BYTES, "wall")?;
+    let place = optional_identifier(arguments, "place")?;
+    let (grid, scale, radius) = wall_layout(arguments)?;
+    let change = crate::stage::WallChange {
+        grid: None,
+        scale,
+        aspect: optional_aspect(arguments)?,
+        radius,
+        pose: None,
+    };
+    hub.agent_set_wall(session, wall, change, grid, metres(arguments)?, place)
+        .map(structured)
+}
+
+/// The `add_wall` tool.
+fn add_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let place = optional_identifier(arguments, "place")?;
+    let flat = crate::stage::Layout::FLAT;
+    let ((columns, rows), scale, radius) = wall_layout(arguments)?;
+    let mut aspect = optional_aspect(arguments)?.flatten();
+    let mut scale = scale.unwrap_or(flat.scale);
+    let metres = metres(arguments)?;
+    if metres.width.is_some() {
+        return Err("Give a new wall its slots' size, not its width.".to_owned());
+    }
+    if metres.slot_width.is_some() || metres.slot_height.is_some() {
+        if arguments.get("scale").is_some_and(|value| !value.is_null()) || aspect.is_some() {
+            return Err("Say the slots' size either as slot_width and slot_height, or as scale and aspect, not both.".to_owned());
+        }
+        let (sized, shaped) = metres.slot(tomori_protocol::wall::SLOT_SIZE)?;
+        (scale, aspect) = (sized, Some(shaped));
+    }
+    let aspect =
+        aspect.filter(|aspect| (aspect - tomori_protocol::wall::STANDARD_ASPECT).abs() > 1e-3);
+    let layout = crate::stage::Layout {
+        grid: tomori_protocol::Grid::from((
+            columns.unwrap_or(flat.grid.columns),
+            rows.unwrap_or(flat.grid.rows),
+        )),
+        scale,
+        aspect,
+        radius: radius.unwrap_or(flat.radius),
+    };
+    hub.agent_add_wall(session, place, layout).map(structured)
+}
+
+/// The `remove_wall` tool.
+fn remove_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let wall = text(arguments, "wall")?;
+    crate::limits::check(wall, crate::limits::IDENTIFIER_BYTES, "wall")?;
+    hub.agent_remove_wall(session, wall).map(structured)
 }
 
 /// The `set_speech` tool.

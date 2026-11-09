@@ -1728,6 +1728,7 @@ impl SpaceModel {
             environment_changes: true,
             // Set by the hub.
             projection: false,
+            walls: false,
             // Set by the hub, which knows the board.
             cards: false,
             // Set by the hub, which knows the backends.

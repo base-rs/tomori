@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tomori_protocol::{Panel, Place, Pose, Projection, WALL_SLOTS, Wall, WallKind};
+use tomori_protocol::{Panel, Place, Pose, Projection, Wall, WallKind, wall as layout};
 
 use crate::stage::{Destination, Placement};
 
@@ -30,22 +30,12 @@ const HEAD_RADIUS: f32 = 0.3;
 /// Half of a headset's field of view, across and up and down, in degrees: about a Quest 3's.
 const VIEW: (f32, f32) = (50.0, 45.0);
 
-/// The size of a panel in a flat wall's slot, in metres, as clients draw it: 318 by 190 font pixels of 1.9 mm.
-const PANEL: (f32, f32) = (0.6042, 0.361);
-
-/// The size of a flat wall, in metres: 1,050 by 462 font pixels of 1.9 mm.
-const FLAT_WALL: (f32, f32) = (1.995, 0.8778);
-
-/// Where the middle of each column and row of a flat wall's slots is, from its middle, in metres.
-const COLUMNS: [f32; 3] = [-0.6498, 0.0, 0.6498];
-const ROWS: [f32; 2] = [0.2071, -0.1995];
-
-/// How much smaller a curved wall's slots are than a flat wall's, and how far apart, in metres.
-const ARC_SCALE: f32 = 0.7;
-const ARC_GAP: f32 = 0.03;
+/// The size of a panel in a flat wall's slot, and of one floating as the server takes it, in metres, as clients draw
+/// it: 318 by 190 font pixels of 1.9 mm.
+const PANEL: (f32, f32) = layout::SLOT_SIZE;
 
 /// How far in front of its wall a panel stands, in metres.
-const LIFT: f32 = 0.01;
+const LIFT: f32 = layout::LIFT;
 
 /// What a participant's client last reported of where they are, in the space's scene coordinates.
 #[derive(Clone, Debug)]
@@ -249,44 +239,15 @@ impl Rectangle {
     }
 }
 
-/// The radius of `wall`'s arc, if it is curved as clients draw one: any other shape, or too tight an arc, is flat.
-fn arc(wall: &Wall) -> Option<f32> {
-    match wall.shape {
-        tomori_protocol::WallShape::Arc { radius } if radius.is_finite() && radius >= 1.0 => {
-            Some(radius)
-        }
-        _ => None,
-    }
-}
-
-/// Where each of `wall`'s slots stands, as clients draw a panel in it: a flat wall's in its plane, three columns of two
-/// rows; a curved wall's along its arc, left to right, each facing the point the arc curves about.
+/// Where each of `wall`'s slots stands, as clients draw a panel in it, as `tomori_protocol::wall` lays them out: a flat
+/// wall's in its plane, its columns and rows numbered from its top left; a curved wall's along its arc, each facing the
+/// line the arc curves about.
 fn slots(wall: &Wall) -> Vec<Rectangle> {
-    let Some(radius) = arc(wall) else {
-        return (0..WALL_SLOTS as usize)
-            .map(|slot| Rectangle::at(&wall.pose, [COLUMNS[slot % 3], ROWS[slot / 3], LIFT], PANEL))
-            .collect();
-    };
-    let pitch = (PANEL.0 * ARC_SCALE + ARC_GAP) / radius;
-    (0..WALL_SLOTS)
-        .map(|slot| {
-            let angle = (slot as f32 - (WALL_SLOTS as f32 - 1.0) / 2.0) * pitch;
-            let (sin, cos) = (angle / 2.0).sin_cos();
-            // The slot's own pose: along the arc, turned about the vertical to face the arc's middle.
-            let turn = [0.0, -sin, 0.0, cos];
-            let [x, y, z, w] = wall.pose.orientation;
-            let [_, b, _, d] = turn;
-            let orientation = [x * d - z * b, y * d + w * b, z * d + x * b, w * d - y * b];
-            let at = [radius * angle.sin(), 0.0, radius * (1.0 - angle.cos())];
-            let pose = Pose {
-                position: add(wall.pose.position, rotate(wall.pose.orientation, at)),
-                orientation,
-            };
-            Rectangle::at(
-                &pose,
-                [0.0, 0.0, LIFT],
-                (PANEL.0 * ARC_SCALE, PANEL.1 * ARC_SCALE),
-            )
+    wall.slot_frames()
+        .iter()
+        .map(|frame| {
+            let pose = frame.pose(&wall.pose);
+            Rectangle::at(&pose, [0.0; 3], (frame.size[0], frame.size[1]))
         })
         .collect()
 }
@@ -325,9 +286,9 @@ pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
 
 /// The parts of `wall` a ray can meet: its slots, and, for a flat wall, the board they stand on.
 fn surfaces(wall: &Wall) -> (Vec<Rectangle>, Option<Rectangle>) {
-    let board = arc(wall)
-        .is_none()
-        .then(|| Rectangle::at(&wall.pose, [0.0; 3], FLAT_WALL));
+    let board = wall
+        .board()
+        .map(|size| Rectangle::at(&wall.pose, [0.0; 3], size));
     (slots(wall), board)
 }
 
@@ -636,7 +597,7 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                     _ => None,
                 })
                 .collect();
-            let used: Vec<Value> = (0..WALL_SLOTS)
+            let used: Vec<Value> = (0..wall.slots())
                 .filter_map(|slot| {
                     held.iter().find(|(at, _)| *at == slot).map(|(_, panel)| {
                         named(
@@ -652,24 +613,18 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                     })
                 })
                 .collect();
-            let free: Vec<u32> = (0..WALL_SLOTS)
+            let free: Vec<u32> = (0..wall.slots())
                 .filter(|slot| !held.iter().any(|(at, _)| at == slot))
                 .collect();
             // A wall's face looks along its +Z.
             let (yaw, _) = angles(rotate(wall.pose.orientation, [0.0, 0.0, 1.0]));
-            let (kind, shape, size) = match (wall.kind, arc(wall)) {
-                (_, Some(radius)) => {
-                    let slots = slots(wall);
-                    let width = length(sub(slots[0].middle, slots[slots.len() - 1].middle))
-                        + PANEL.0 * ARC_SCALE;
-                    (
-                        wall.kind,
-                        json!({ "arc": round(radius, 2) }),
-                        (width, PANEL.1 * ARC_SCALE),
-                    )
-                }
-                (kind, None) => (kind, json!("flat"), FLAT_WALL),
-            };
+            // Its size along its face, curved or not, and its grid and slots' size, which the agent may change.
+            let shape = wall
+                .radius()
+                .map_or(json!("flat"), |radius| json!({ "arc": round(radius, 2) }));
+            let size = wall.size();
+            let grid = wall.grid();
+            let kind = wall.kind;
             json!({
                 "id": wall.id,
                 "name": wall_name(projection, wall),
@@ -678,6 +633,9 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 "position": position(wall.pose.position),
                 "facing_yaw": round(yaw, 0),
                 "size": [round(size.0, 2), round(size.1, 2)],
+                "columns": grid.columns,
+                "rows": grid.rows,
+                "slot_size": [round(wall.slot_size().0, 2), round(wall.slot_size().1, 2)],
                 "used": used,
                 "free": free,
             })
@@ -788,6 +746,22 @@ fn looking_at(head: &Pose, projection: &Projection) -> Destination {
 /// Floating in front of someone whose head is at `head`, facing them, level, the way they face about the vertical, or,
 /// looking straight up or down, the way the top of their head faces.
 fn in_front(head: &Pose) -> Destination {
+    Destination::Free(ahead_of(head, FRONT))
+}
+
+/// How far in front of someone a wall the agent adds for them stands, in metres, and how far below their eyes its
+/// middle is: as a wall a participant adds from the hand menu stands.
+const WALL_FRONT: (f32, f32) = (1.8, 0.1);
+
+/// Where a wall the agent adds for someone whose head is at `head` stands: [`WALL_FRONT`] ahead of them, level, a little
+/// below their eyes, upright and facing them.
+pub(crate) fn wall_in_front(head: &Pose) -> Pose {
+    ahead_of(head, WALL_FRONT)
+}
+
+/// The pose `distance` ahead of someone whose head is at `head`, level with where they face, `drop` below their eyes,
+/// upright and facing them; looking straight down or up, ahead is the way the top of their head faces, or its back.
+fn ahead_of(head: &Pose, (distance, drop): (f32, f32)) -> Pose {
     let ahead = forward(head);
     let top = rotate(head.orientation, [0.0, 1.0, 0.0]);
     let level = |[x, _, z]: Vec3| x.hypot(z);
@@ -799,8 +773,74 @@ fn in_front(head: &Pose) -> Destination {
         (toward * top[0] / length, toward * top[2] / length)
     };
     let [px, py, pz] = head.position;
-    let at = [px + x * FRONT.0, py - FRONT.1, pz + z * FRONT.0];
-    Destination::Free(Pose::upright_facing(at, [px, py - FRONT.1, pz]))
+    let at = [px + x * distance, py - drop, pz + z * distance];
+    Pose::upright_facing(at, [px, py - drop, pz])
+}
+
+/// The wall `named` means in `projection`, by its identity: a wall by its identity or name, such as `Tomori wall` or
+/// `added wall 2`, with or without `wall` or `the` before it; or the wall someone is looking at or is nearest, in the
+/// forms `looking [NAME]` and `near [NAME]`, of whoever asked, whose head was at `asker`, or of one of `people`. Or why
+/// none is meant, as for `front`, which names no wall.
+pub(crate) fn which_wall(
+    named: &str,
+    asker: Option<&Pose>,
+    people: &[(String, Pose)],
+    projection: &Projection,
+) -> Result<String, String> {
+    let by_name = Placement::Wall(named.to_owned());
+    if let Ok(Destination::Wall { wall, .. }) = destination(&by_name, asker, people, projection) {
+        return Ok(wall);
+    }
+    let place = Placement::parse(named).ok_or_else(|| {
+        format!(
+            "There is no wall called {:?} here: name one as presence does, or say looking or near, with a name or for whoever asked.",
+            crate::space::one_line(named, 80)
+        )
+    })?;
+    let (name, looking) = match place {
+        Placement::Near(name) => (name, false),
+        Placement::Looking(name) => (name, true),
+        Placement::Front(_) => {
+            return Err(
+                "front names no wall: say which wall, or looking or near someone.".to_owned(),
+            );
+        }
+        // Named after `wall`, it is a wall by its identity or name, which no wall here has.
+        Placement::Wall(named) => {
+            return Err(format!("There is no wall called {named:?} here."));
+        }
+    };
+    let head = head_of(name.as_deref(), asker, people)?;
+    // The wall they are looking at, if they are, or else the one nearest them; there is always the Tomori wall.
+    let seen = looking.then(|| looking_at(&head, projection));
+    Ok(match seen {
+        Some(Destination::Wall { wall, .. }) => wall,
+        _ => nearest_wall(&projection.walls, head.position)
+            .map_or(tomori_protocol::TOMORI_WALL.to_owned(), |(wall, _)| {
+                wall.id.clone()
+            }),
+    })
+}
+
+/// Where the head of the participant `name`, of `people`, is, as they last reported, or, naming nobody, of whoever
+/// asked, whose head was at `asker` as they began speaking; or why not.
+pub(crate) fn head_of(
+    name: Option<&str>,
+    asker: Option<&Pose>,
+    people: &[(String, Pose)],
+) -> Result<Pose, String> {
+    match name {
+        Some(name) => people
+            .iter()
+            .find(|(person, _)| person.to_lowercase() == name.to_lowercase())
+            .map(|(_, head)| *head)
+            .ok_or_else(|| {
+                format!("Nobody called {name:?} in this space has reported where they are.")
+            }),
+        None => asker.copied().ok_or_else(|| {
+            "Nobody asked for this as they spoke, so name whom it is for.".to_owned()
+        }),
+    }
 }
 
 /// Where `place` puts the agent's panel, in `projection`, for whoever asked, whose head was at `asker` as they began
@@ -813,20 +853,7 @@ pub(crate) fn destination(
     people: &[(String, Pose)],
     projection: &Projection,
 ) -> Result<Destination, String> {
-    let whose = |name: &Option<String>| -> Result<Pose, String> {
-        match name {
-            Some(name) => people
-                .iter()
-                .find(|(person, _)| person.to_lowercase() == name.to_lowercase())
-                .map(|(_, head)| *head)
-                .ok_or_else(|| {
-                    format!("Nobody called {name:?} in this space has reported where they are.")
-                }),
-            None => asker.copied().ok_or_else(|| {
-                "Nobody asked for this as they spoke, so name whom it is for.".to_owned()
-            }),
-        }
-    };
+    let whose = |name: &Option<String>| head_of(name.as_deref(), asker, people);
     Ok(match place {
         Placement::Near(name) => Destination::Nearest(whose(name)?.position),
         Placement::Looking(name) => looking_at(&whose(name)?, projection),

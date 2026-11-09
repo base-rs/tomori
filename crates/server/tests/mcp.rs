@@ -433,6 +433,9 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "panels",
             "update_panel",
             "move_panel",
+            "set_wall",
+            "add_wall",
+            "remove_wall",
             "set_speech",
             "set_environment",
             "rename_space",
@@ -1742,4 +1745,566 @@ fn the_agent_shows_an_image_file_as_a_panel_whose_image_everyone_who_shows_image
     });
     assert_eq!(titled, "render.png");
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_where_someone_looks() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    // Her client reads what is projected, so that she sees each change.
+    let mut ada = tomori_server::test_support::TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    let space = create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let slots = tomori_slots();
+    let home = [0.0, 1.6, 0.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, slots[4]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    // A wall four wide and one high, in front of Ada, facing her.
+    let added = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 4, "rows": 1}),
+    );
+    assert_ne!(added["isError"], true, "{added}");
+    let content = &added["structuredContent"];
+    assert_eq!(content["space"], space);
+    assert_eq!(content["name"], "added wall 1");
+    assert_eq!(
+        content["now"],
+        "4 slots wide and 1 high, 2.6 by 0.5 m, its slots 60 by 36 cm, flat"
+    );
+    assert!(
+        content["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("Tell everyone")
+    );
+    let wall = content["wall"].as_str().unwrap().to_owned();
+    let listed = eventually(|| {
+        let walls = walls();
+        (walls.as_array()?.len() == 2).then_some(walls)
+    });
+    assert_eq!(
+        (listed[1]["columns"].clone(), listed[1]["rows"].clone()),
+        (json!(4), json!(1))
+    );
+    assert_eq!(listed[1]["free"], json!([0, 1, 2, 3]));
+    // The notice of it is on the Tomori wall.
+    assert_eq!(listed[0]["used"][0]["title"], "Walls");
+
+    // This wall, the one Ada is looking at, the Tomori wall: four wide, flat.
+    let changed = tool(
+        "set_wall",
+        json!({"wall": "looking Ada", "columns": 4, "radius": 0}),
+    );
+    assert_ne!(changed["isError"], true, "{changed}");
+    let content = &changed["structuredContent"];
+    assert_eq!(
+        (content["wall"].clone(), content["changed"].clone()),
+        (json!("tomori"), json!(true))
+    );
+    assert!(
+        content["now"]
+            .as_str()
+            .unwrap()
+            .ends_with("its slots 42 by 25 cm, flat")
+    );
+    assert_eq!(
+        tool("set_wall", json!({"wall": "Tomori wall", "columns": 4}))["structuredContent"]["changed"],
+        false
+    );
+    // The added wall curved, four metres wide, by name; its slots grow to make it so.
+    let wide = tool(
+        "set_wall",
+        json!({"wall": "the added wall 1", "radius": 3, "width": 4}),
+    );
+    assert_ne!(wide["isError"], true, "{wide}");
+    let now = wide["structuredContent"]["now"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(now.starts_with("4 slots wide and 1 high, 4.0 by"), "{now}");
+    assert!(now.ends_with("curved at a radius of 3.0 m"), "{now}");
+    let listed = eventually(|| {
+        let walls = walls();
+        (walls[1]["shape"] == json!({"arc": 3.0})).then_some(walls)
+    });
+    assert_eq!(listed[1]["size"][0], 4.0);
+    // The change reached Ada's client too.
+    let projection = ada.wait_for(|message| match message {
+        tomori_protocol::ServerMessage::Projection { projection }
+            if projection
+                .wall(&wall)
+                .is_some_and(|shown| shown.radius() == Some(3.0)) =>
+        {
+            Some(projection.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(projection.wall(&wall).unwrap().slots(), 4);
+
+    // What it cannot do, it says, and changes nothing.
+    for (arguments, error) in [
+        (
+            json!({"wall": "Tomori wall", "rows": 2}),
+            "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.",
+        ),
+        (
+            json!({"wall": "front"}),
+            "front names no wall: say which wall, or looking or near someone.",
+        ),
+        (
+            json!({"wall": wall, "scale": 1.0, "width": 3}),
+            "Say either scale or width, not both.",
+        ),
+        (
+            json!({"wall": wall, "columns": 9}),
+            "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+        ),
+        (
+            json!({"wall": wall, "columns": "four"}),
+            "columns is a whole number.",
+        ),
+        (
+            json!({"wall": wall, "place": "near Ada"}),
+            "A wall is put in front of someone: say front with their name, or front for whoever asked.",
+        ),
+        (
+            json!({"wall": "Tomori wall", "place": "front Ada"}),
+            "Only a wall an owner added can be moved.",
+        ),
+        (
+            json!({"wall": "near Zed"}),
+            "Nobody called \"Zed\" in this space has reported where they are.",
+        ),
+        (json!({}), "This tool needs wall, as text."),
+    ] {
+        assert_eq!(failure(&tool("set_wall", arguments)), error);
+    }
+    assert!(
+        failure(&tool("set_wall", json!({"wall": "attic"})))
+            .starts_with("There is no wall called \"attic\" here")
+    );
+    assert_eq!(
+        failure(&tool("add_wall", json!({}))),
+        "Nobody asked for this as they spoke, so name whom it is for."
+    );
+    assert_eq!(
+        failure(&tool("remove_wall", json!({"wall": "Tomori wall"}))),
+        "Only a wall an owner added can be removed."
+    );
+
+    // Moved in front of Ada again, then removed, its panels left floating.
+    agent_replies(
+        &sessions[0],
+        "m1",
+        "```panel\ntitle: Plan\nplace: wall added wall 1\n---\nSteps.\n```\n",
+    );
+    eventually(|| (walls()[1]["used"].as_array()?.len() == 1).then_some(()));
+    let moved = tool("set_wall", json!({"wall": wall, "place": "front Ada"}));
+    assert_ne!(moved["isError"], true, "{moved}");
+    let removed = tool("remove_wall", json!({"wall": "added wall 1"}));
+    assert_ne!(removed["isError"], true, "{removed}");
+    assert_eq!(removed["structuredContent"]["floating"], 1);
+    assert_eq!(
+        removed["structuredContent"]["next"],
+        "Tell everyone in the space that you removed the added wall 1; the panel on it floats where it was."
+    );
+    let floating = eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        let floating = presence["structuredContent"]["floating"].clone();
+        (presence["structuredContent"]["walls"].as_array()?.len() == 1
+            && floating.as_array()?.len() == 1)
+            .then_some(floating)
+    });
+    assert_eq!(floating[0]["title"], "Plan");
+    // Each change was logged, naming the space.
+    let logs = logged();
+    assert!(
+        logs.iter()
+            .any(|line| line.contains(&format!("The agent of space {space} added {wall}")))
+    );
+    assert!(
+        logs.iter()
+            .any(|line| line.contains(&format!("The agent of space {space} changed tomori")))
+    );
+    assert!(
+        logs.iter()
+            .any(|line| line.contains(&format!("The agent of space {space} removed {wall}")))
+    );
+}
+
+#[test]
+fn the_agent_gives_a_wall_slots_of_any_shape_by_their_aspect_or_their_size_in_metres() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = tomori_server::test_support::TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let home = [0.0, 1.6, 0.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, [0.0, 9.0, -0.01]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
+    let now = |result: &Value| {
+        assert_ne!(result["isError"], true, "{result}");
+        result["structuredContent"]["now"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Three tall slots across, 9:16: as wide as a standard slot, their text its size, and taller.
+    let added = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 3, "rows": 1, "aspect": "9:16"}),
+    );
+    assert_eq!(
+        now(&added),
+        "3 slots wide and 1 high, 2.0 by 1.2 m, its slots 60 by 107 cm, flat"
+    );
+    let wall = added["structuredContent"]["wall"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listed = eventually(|| {
+        let walls = walls();
+        (walls.as_array()?.len() == 2).then_some(walls)
+    });
+    assert_eq!(listed[1]["slot_size"], json!([0.6, 1.07]));
+    // Her client is sent the slots' shape.
+    let shown = ada.wait_for(|message| match message {
+        tomori_protocol::ServerMessage::Projection { projection } => {
+            projection.wall(&wall).cloned()
+        }
+        _ => None,
+    });
+    assert_eq!(shown.aspect, Some(0.5625));
+    // Square slots half a metre across, by their size in metres: their text as large as the narrower allows.
+    let square = tool(
+        "set_wall",
+        json!({"wall": "added wall 1", "slot_width": 0.5, "slot_height": 0.5}),
+    );
+    assert!(
+        now(&square).ends_with("its slots 50 by 50 cm, flat"),
+        "{square}"
+    );
+    // Only taller, the width kept.
+    let taller = tool("set_wall", json!({"wall": wall, "slot_height": 0.8}));
+    assert!(
+        now(&taller).ends_with("its slots 50 by 80 cm, flat"),
+        "{taller}"
+    );
+    // Back to a standard slot's shape, the text kept its size; and wide, as a number.
+    let standard = tool("set_wall", json!({"wall": wall, "aspect": "standard"}));
+    assert!(
+        now(&standard).ends_with("its slots 50 by 30 cm, flat"),
+        "{standard}"
+    );
+    let wide = tool("set_wall", json!({"wall": wall, "aspect": 3}));
+    assert!(
+        now(&wide).ends_with("its slots 90 by 30 cm, flat"),
+        "{wide}"
+    );
+    // What cannot be, or is said twice over, is refused, saying why.
+    for (name, arguments, error) in [
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": "tall"}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": "0:4"}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": 0.1}),
+            "A wall's slots are from four times as tall as they are wide to four times as wide.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "slot_width": 0.5, "scale": 1.0}),
+            "Say the slots' size either as slot_width and slot_height, or as scale, aspect or width, not both.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "slot_height": 0}),
+            "A slot's width and height are numbers of metres.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "aspect": "1:1"}),
+            "The Tomori wall's slots stay their size, so that it stays clear of the swarm and the workers.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "width": 3}),
+            "Give a new wall its slots' size, not its width.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "slot_width": 0.5, "aspect": 1}),
+            "Say the slots' size either as slot_width and slot_height, or as scale and aspect, not both.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "slot_height": 0.5, "scale": 1}),
+            "Say the slots' size either as slot_width and slot_height, or as scale and aspect, not both.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "slot_width": -1}),
+            "A slot's width and height are numbers of metres.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "aspect": "wide"}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "slot_height": "tall"}),
+            "slot_height is a number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "slot_width": "wide"}),
+            "slot_width is a number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": "x".repeat(2_000)}),
+            "The aspect is too long; the limit is 1024 bytes.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": "a:16"}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": "9:b"}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": true}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": -1}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": wall, "aspect": 1e300}),
+            "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.",
+        ),
+    ] {
+        assert_eq!(failure(&tool(name, arguments)), error, "{name}");
+    }
+    // A new wall can be given its slots' size in metres too.
+    let sized = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 2, "rows": 1, "slot_width": 0.4, "slot_height": 0.9}),
+    );
+    assert!(
+        now(&sized).ends_with("its slots 40 by 90 cm, flat"),
+        "{sized}"
+    );
+}
+
+#[test]
+fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_space_and_say_how_many_panels_float()
+ {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = tomori_server::test_support::TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let home = [0.0, 1.6, 0.0];
+    // Ada looks straight up, at no wall.
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, [0.0, 9.0, -0.01]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
+    // A session bound to no space changes no wall.
+    for name in ["set_wall", "add_wall", "remove_wall"] {
+        let result = call(
+            &server,
+            &token,
+            Some("ses_nobody"),
+            name,
+            json!({"wall": "Tomori wall"}),
+        );
+        assert_eq!(result["isError"], true, "{name}: {result}");
+    }
+    // Arguments of the wrong kind or size are refused, saying which.
+    let long = "x".repeat(2_000);
+    for (name, arguments, error) in [
+        (
+            "set_wall",
+            json!({"wall": long}),
+            "The wall is too long; the limit is 1024 bytes.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "place": 5}),
+            "place is text.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "place": long}),
+            "The place is too long; the limit is 1024 bytes.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "width": "wide"}),
+            "width is a number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "radius": "round"}),
+            "radius is a number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "scale": "big"}),
+            "scale is a number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "rows": -1}),
+            "rows is a whole number.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "Tomori wall", "width": 0}),
+            "A width is a number of metres.",
+        ),
+        ("add_wall", json!({"place": 5}), "place is text."),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "columns": "four"}),
+            "columns is a whole number.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "columns": 8, "rows": 4}),
+            "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Zed"}),
+            "Nobody called \"Zed\" in this space has reported where they are.",
+        ),
+        ("remove_wall", json!({}), "This tool needs wall, as text."),
+        (
+            "remove_wall",
+            json!({"wall": long}),
+            "The wall is too long; the limit is 1024 bytes.",
+        ),
+        (
+            "remove_wall",
+            json!({"wall": "wall attic"}),
+            "There is no wall called \"attic\" here.",
+        ),
+    ] {
+        assert_eq!(failure(&tool(name, arguments)), error, "{name}");
+    }
+    // Two walls in front of her, laid out as asked, one curved; looking at none, the one nearest her is hers.
+    let first = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 1, "rows": 1, "scale": 1.5, "radius": 0}),
+    );
+    assert_ne!(first["isError"], true, "{first}");
+    assert_eq!(
+        first["structuredContent"]["now"],
+        "1 slot wide and 1 high, 1.0 by 0.7 m, its slots 91 by 54 cm, flat"
+    );
+    let near = tool("set_wall", json!({"wall": "near Ada", "columns": 2}));
+    assert_eq!(near["structuredContent"]["name"], "added wall 1", "{near}");
+    let looking = tool("set_wall", json!({"wall": "looking Ada", "rows": 2}));
+    assert_eq!(
+        looking["structuredContent"]["name"], "added wall 1",
+        "{looking}"
+    );
+    let second = tool(
+        "add_wall",
+        json!({"place": "front Ada", "radius": 3, "columns": 2, "rows": 1}),
+    );
+    assert_ne!(second["isError"], true, "{second}");
+    // Removed, each says how many of its panels float: none, or two.
+    agent_replies(
+        &sessions[0],
+        "m1",
+        "```panel\ntitle: One\nplace: wall added wall 1\n---\nA.\n```\n\n```panel\ntitle: Two\nplace: wall added wall 1\n---\nB.\n```\n",
+    );
+    eventually(|| (walls()[1]["used"].as_array()?.len() == 2).then_some(()));
+    let removed = tool("remove_wall", json!({"wall": "added wall 2"}));
+    assert_eq!(removed["structuredContent"]["floating"], 0);
+    assert_eq!(
+        removed["structuredContent"]["next"],
+        "Tell everyone in the space that you removed the added wall 2."
+    );
+    let removed = tool("remove_wall", json!({"wall": "added wall 1"}));
+    assert_eq!(
+        removed["structuredContent"]["next"],
+        "Tell everyone in the space that you removed the added wall 1; the 2 panels on it float where they were."
+    );
 }

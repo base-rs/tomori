@@ -3780,13 +3780,54 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
+                let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                match record.stage.add_wall(&record.model.environment, &pose) {
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.add_wall(&walls, &pose, None) {
                     Ok(_) => {
                         state.touch_projection(&space);
                         deferred.push(Deferred::Keep);
                     }
                     Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::SetWall {
+                wall,
+                grid,
+                scale,
+                aspect,
+                shape,
+                pose,
+            } => {
+                if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
+                    state.error(participant, error);
+                    return;
+                }
+                let change = match crate::stage::WallChange::new(grid, scale, aspect, shape, pose) {
+                    Ok(change) => change,
+                    Err(error) => {
+                        state.error(participant, error);
+                        return;
+                    }
+                };
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.set_wall(&walls, &wall, change) {
+                    Ok(true) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    // Already so, it is sent again, so that a client showing it otherwise meanwhile shows it as it is.
+                    Ok(false) => state.touch_projection(&space),
+                    Err(error) => {
+                        state.error(participant, error);
+                        // Sent again, so that a client that showed the change at once shows the wall as it is.
+                        state.touch_projection(&space);
+                    }
                 }
             }
             ClientMessage::RemoveWall { wall } => {
@@ -3797,8 +3838,10 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
+                let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                match record.stage.remove_wall(&record.model.environment, &wall) {
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.remove_wall(&walls, &wall) {
                     Ok(()) => {
                         state.touch_projection(&space);
                         deferred.push(Deferred::Keep);
@@ -5363,6 +5406,8 @@ impl Hub {
                 state.environment_version = environments.version(&space.model.environment);
                 // Every space projects. See `design/projection.md`.
                 state.projection = true;
+                // Participants adjust walls, and an owner's removal leaves a wall's panels floating.
+                state.walls = true;
                 // An owner may delete any space, and its session too where its backend deletes sessions. See `design/spaces.md`.
                 state.deletes = true;
                 state.deletes_session = self

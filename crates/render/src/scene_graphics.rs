@@ -1343,6 +1343,177 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_WALL_LAYOUT_PREVIEW` to a PNG path to save what this renders: a flat wall four slots wide and one
+    /// high to the left of home, and a wall curved about home of four columns of two rows to the right, each with panels in
+    /// its slots, as the server lays them out, from home looking at each, and the curved wall from beside it.
+    #[test]
+    fn walls_of_their_own_grid_size_and_curve_are_drawn_with_a_panel_in_every_slot() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Grid, Panel, Place, Wall, WallKind, WallShape};
+        let ahead = Vec3::new(-2.5, 1.45, -1.0);
+        let right = Vec3::new(2.3, 1.45, -0.8);
+        let wide = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(ahead.to_array(), [0.0, 1.45, 0.0]),
+        )
+        .with_grid(Grid::new(4, 1).unwrap())
+        .with_scale(1.0);
+        let curved = Wall::new(
+            "wall-2",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(right.to_array(), [0.0, 1.45, 0.0]),
+        )
+        .with_shape(WallShape::Arc { radius: 2.4 })
+        .with_grid(Grid::new(4, 2).unwrap())
+        .with_scale(0.75);
+        let titles = ["Build", "Tests", "Coverage", "Release"];
+        let mut shown: Vec<Panel> = titles
+            .iter()
+            .enumerate()
+            .map(|(slot, title)| {
+                Panel::new(
+                    format!("panel-{slot}"),
+                    *title,
+                    format!("**{title}** is green.\n\n- one\n- two"),
+                    Place::Wall {
+                        wall: "wall-1".into(),
+                        slot: slot as u32,
+                    },
+                )
+            })
+            .collect();
+        shown.extend((0..8).map(|slot| {
+            Panel::new(
+                format!("panel-c{slot}"),
+                format!("Slot {}", slot + 1),
+                "Curved about home.",
+                Place::Wall {
+                    wall: "wall-2".into(),
+                    slot,
+                },
+            )
+        }));
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall layout test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let at_wide = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
+            let at_curved = lens * Mat4::look_at_rh(arrival::HOME, right, Vec3::Y);
+            // From beside it, to see it curve.
+            let beside = lens * Mat4::look_at_rh(Vec3::new(0.6, 2.4, 1.6), right, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let mut drawn = |panels_shown: Vec<Panel>| {
+                let mut conversation = joined();
+                show_projection(
+                    &mut conversation,
+                    vec![wide.clone(), curved.clone()],
+                    panels_shown,
+                );
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                (
+                    capture(&renderer, &panels, at_wide),
+                    capture(&renderer, &panels, at_curved),
+                    capture(&renderer, &panels, beside),
+                )
+            };
+            let (wide_full, curved_full, beside_full) = drawn(shown.clone());
+            let (wide_empty, curved_empty, _) = drawn(Vec::new());
+            // Where a slot's middle is drawn, in pixels.
+            let pixel = |matrix: Mat4, at: Vec3| {
+                let clip = matrix * at.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                assert!(x.abs() < 1.0 && y.abs() < 1.0, "{at} is in view");
+                (
+                    ((x + 1.0) / 2.0 * WIDTH as f32) as u32,
+                    ((1.0 - y) / 2.0 * HEIGHT as f32) as u32,
+                )
+            };
+            let frame_of = |wall: &Wall| {
+                Mat4::from_rotation_translation(
+                    glam::Quat::from_array(wall.pose.orientation),
+                    Vec3::from_array(wall.pose.position),
+                )
+            };
+            // A panel is drawn in each of the four slots of the wide wall, its fourth past where a wall of three ends,
+            // and in each of the curved wall's eight, its second row below its first.
+            for (wall, matrix, full, empty) in [
+                (&wide, at_wide, &wide_full, &wide_empty),
+                (&curved, at_curved, &curved_full, &curved_empty),
+            ] {
+                let slots = tomori_scene::projection::slot_frames(wall, frame_of(wall));
+                assert_eq!(slots.len() as u32, wall.slots());
+                for (index, slot) in slots.iter().enumerate() {
+                    // A little above its middle, on its title or first rows.
+                    let at = slot.transform_point3(Vec3::new(0.0, 0.05, 0.0));
+                    let (x, y) = pixel(matrix, at);
+                    let around = |image: &image::RgbaImage| -> Vec<[u8; 4]> {
+                        (x.saturating_sub(12)..x + 12)
+                            .flat_map(|x| (y.saturating_sub(12)..y + 12).map(move |y| (x, y)))
+                            .map(|(x, y)| image.get_pixel(x, y).0)
+                            .collect()
+                    };
+                    assert_ne!(around(full), around(empty), "{} slot {index}", wall.id);
+                }
+            }
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            image::imageops::replace(&mut sheet, &wide_full, 0, 0);
+            image::imageops::replace(&mut sheet, &curved_full, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &beside_full, 0, (HEIGHT * 2).into());
+            crate::test_support::preview("TOMORI_WALL_LAYOUT_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// What `texture`, `width` by `height`, holds once drawn.
     fn read_back(
         device: &wgpu::Device,

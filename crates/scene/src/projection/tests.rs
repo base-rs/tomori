@@ -2,7 +2,15 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use tomori_protocol::{Meta, TOMORI_WALL};
+use tomori_protocol::{Grid, Meta, TOMORI_WALL, WALL_SLOTS, WallShape};
+
+/// How a curved wall's slots are sized unless it says otherwise.
+const ARC_SCALE: f32 = layout::ARC_SCALE;
+
+/// The middle of `slot` of a wall like `wall`, in its own frame.
+fn slot_offset(wall: &Wall, slot: u32) -> Vec3 {
+    Vec3::from_array(wall.slot_frames()[slot as usize].position)
+}
 
 /// A wall `distance` in front of home, facing it.
 fn wall(id: &str, kind: WallKind, x: f32, distance: f32) -> Wall {
@@ -65,19 +73,25 @@ fn at(point: Vec3) -> Option<Ray> {
 
 /// Where the middle of `slot` of the Tomori wall is, in the scene.
 fn slot_centre(projection: &Projection, slot: u32) -> Vec3 {
-    model(&projection.wall(TOMORI_WALL).unwrap().pose)
+    let wall = projection.wall(TOMORI_WALL).unwrap();
+    model(&wall.pose)
         .unwrap()
-        .transform_point3(slot_offset(slot))
+        .transform_point3(slot_offset(wall, slot))
 }
 
 #[test]
 fn a_wall_holds_its_slots_in_three_columns_of_two_the_first_at_the_top_left() {
-    let (wall_width, wall_height) = wall_size();
+    let flat = wall(TOMORI_WALL, WallKind::Tomori, 0.0, 3.0);
+    let (wall_width, wall_height) = wall_size(&flat);
     let (width, height) = panel_size();
     assert!((wall_width - 1.995).abs() < 0.001, "{wall_width}");
     assert!((wall_height - 0.878).abs() < 0.001, "{wall_height}");
     assert!((width - 0.604).abs() < 0.001 && (height - 0.361).abs() < 0.001);
-    let offsets: Vec<Vec3> = (0..WALL_SLOTS).map(slot_offset).collect();
+    // A panel drawn here is the size of a slot as the server lays walls out.
+    assert_eq!(panel_size(), layout::SLOT_SIZE);
+    let offsets: Vec<Vec3> = (0..WALL_SLOTS)
+        .map(|slot| slot_offset(&flat, slot))
+        .collect();
     for (index, offset) in offsets.iter().enumerate() {
         // Within the wall, in front of it.
         assert!(offset.x.abs() + width / 2.0 < wall_width / 2.0);
@@ -109,8 +123,59 @@ fn a_wall_holds_its_slots_in_three_columns_of_two_the_first_at_the_top_left() {
 }
 
 #[test]
+fn a_flat_wall_of_any_grid_draws_its_board_and_marks_its_slots_where_its_panels_stand() {
+    for (columns, rows) in [(4, 1), (1, 1), (8, 3), (2, 4)] {
+        let grid = Grid::new(columns, rows).unwrap();
+        for scale in [0.5, 1.0, 1.5] {
+            let wall = wall("wall-1", WallKind::Added, 0.0, 3.0)
+                .with_grid(grid)
+                .with_scale(scale);
+            let face = wall_face(&wall);
+            // Its face is its board, drawn at its scale.
+            let (width, height) = face.size();
+            let (board_width, board_height) = wall.board().unwrap();
+            assert!((width * scale - board_width).abs() < 1e-5);
+            assert!((height * scale - board_height).abs() < 1e-5);
+            assert_eq!(face.shapes.len() as u32, grid.slots());
+            // Each slot marked where a panel in it stands, in the face's own pixels from its top left.
+            let frames = slot_frames(&wall, Mat4::IDENTITY);
+            for (shape, frame) in face.shapes.iter().zip(&frames) {
+                let middle = Vec3::new(
+                    (shape.x + shape.width / 2.0 + WALL_PADDING.0 as f32) * PIXEL - width / 2.0,
+                    height / 2.0 - (shape.y + shape.height / 2.0 + WALL_PADDING.1 as f32) * PIXEL,
+                    0.0,
+                ) * scale;
+                let at = frame.w_axis.truncate();
+                assert!((at.x - middle.x).abs() < 1e-4 && (at.y - middle.y).abs() < 1e-4);
+                assert!((frame.x_axis.truncate().length() - scale).abs() < 1e-5);
+            }
+            // Its label fits, however narrow.
+            assert!(face.plain().contains("WALL"));
+        }
+    }
+}
+
+#[test]
+fn panels_stand_in_any_slot_of_a_walls_grid_and_none_past_its_last() {
+    let wide = wall("wall-1", WallKind::Added, 0.0, 3.0).with_grid(Grid::new(4, 1).unwrap());
+    let projection = Projection::new("s", "sky")
+        .with_walls(vec![wide.clone()])
+        .with_panels(vec![
+            panel("a", on("wall-1", 3)),
+            panel("b", on("wall-1", 4)),
+        ]);
+    let mut projector = Projector::default();
+    let output = projector.update(input(&projection, None, 0.0, Instant::now()));
+    let frame = model(&wide.pose).unwrap();
+    let fourth = slot_frames(&wide, frame)[3];
+    // The board and the panel in its fourth slot, and nothing for the slot past its last.
+    assert_eq!(output.sheets.len(), 2);
+    assert_eq!(output.sheets[1].model, Some(fourth));
+}
+
+#[test]
 fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
-    let shown = face(&panel("1", on(TOMORI_WALL, 0)), false, false, Fit::Slot);
+    let shown = face(&panel("1", on(TOMORI_WALL, 0)), false, false, Fit::SLOT);
     let text = shown.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines.len(), ROWS);
@@ -122,11 +187,11 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
     assert!(!text.contains("**"));
     assert_eq!(shown.border, Some(FRAME));
     assert_eq!(
-        face(&panel("1", on(TOMORI_WALL, 0)), true, true, Fit::Slot).border,
+        face(&panel("1", on(TOMORI_WALL, 0)), true, true, Fit::SLOT).border,
         Some(HIGHLIGHT)
     );
     assert_eq!(
-        face(&panel("1", on(TOMORI_WALL, 0)), false, true, Fit::Slot).border,
+        face(&panel("1", on(TOMORI_WALL, 0)), false, true, Fit::SLOT).border,
         Some(NEWEST)
     );
     // A body longer than the panel ends with "…" on its last row, and nothing is drawn past the panel's columns.
@@ -139,7 +204,7 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
             .join("\n\n"),
         Place::Unknown,
     );
-    let text = face(&long, false, false, Fit::Slot).plain();
+    let text = face(&long, false, false, Fit::SLOT).plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines.len(), ROWS);
     assert!(lines[ROWS - 1].trim_end().ends_with('…'), "{text}");
@@ -156,6 +221,125 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
 }
 
 /// A checklist the agent calls `agenda`, some of its items ticked.
+#[test]
+fn a_panel_in_a_tall_or_wide_slot_shows_more_rows_or_columns_at_its_text_s_size_and_fills_it() {
+    let shaped = |aspect: f32| {
+        wall("wall-1", WallKind::Added, 0.0, 3.0)
+            .with_grid(Grid::from((3, 1)))
+            .with_scale(1.0)
+            .with_aspect(Some(aspect))
+    };
+    assert_eq!(
+        Cells::of(&wall("w", WallKind::Added, 0.0, 3.0)),
+        Cells::STANDARD
+    );
+    assert_eq!(
+        Cells::of(
+            &wall(TOMORI_WALL, WallKind::Tomori, 0.0, 3.0)
+                .with_shape(WallShape::Arc { radius: 2.3 })
+        ),
+        Cells::STANDARD
+    );
+    let tall = Cells::of(&shaped(9.0 / 16.0));
+    let wide = Cells::of(&shaped(3.0));
+    // Tall: its text wraps at a standard slot's width and it holds nearly three times the rows; wide, the reverse.
+    assert_eq!((tall.columns, tall.code_columns), (COLUMNS, CODE_COLUMNS));
+    assert!(tall.body >= 40 && tall.code_rows >= 50, "{tall:?}");
+    assert_eq!((wide.body, wide.code_rows), (BODY_ROWS, SLOT_CODE_ROWS));
+    assert!(wide.columns >= 60 && wide.code_columns >= 85, "{wide:?}");
+    // Each face fits within its slot and fills it to within a cell, whatever its shape.
+    for aspect in [0.25, 9.0 / 16.0, 0.75, 1.0, 16.0 / 9.0, 3.0, 4.0] {
+        let wall = shaped(aspect);
+        let fit = Fit::Slot(Cells::of(&wall));
+        let (width, height) = slot_unit(&wall);
+        let mut code = code_panel("c", 3);
+        code.place = on("wall-1", 0);
+        for panel in [panel("t", on("wall-1", 0)), code] {
+            let (face_width, face_height) = fitted_size(&panel, fit);
+            let drawn = face(&panel, false, false, fit).size();
+            assert!(
+                face_width <= width + 1e-4 && face_height <= height + 1e-4,
+                "{aspect}"
+            );
+            assert!(
+                width - face_width < 10.0 * PIXEL && height - face_height < 13.0 * PIXEL,
+                "{aspect}: {face_width}x{face_height} in {width}x{height}"
+            );
+            // A code panel's face is drawn in its own smaller cells, within one of them of its slot's.
+            let cell = 12.0 * CODE_PIXEL;
+            assert!(
+                (drawn.0 - face_width).abs() < cell && (drawn.1 - face_height).abs() < cell,
+                "{aspect}: {drawn:?}"
+            );
+        }
+    }
+    // A long list shows more of itself in a tall slot, cut with "…" only where it ends.
+    let mut long = panel("t", on("wall-1", 0));
+    long.body = (1..=30)
+        .map(|item| format!("- item {item}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let standard = face(&long, false, false, Fit::SLOT).plain();
+    let taller = face(&long, false, false, Fit::Slot(tall)).plain();
+    assert!(standard.contains('…') && !standard.contains("item 30"));
+    assert!(
+        !taller.contains('…') && taller.contains("item 30"),
+        "{taller}"
+    );
+    // A long line of code wraps on fewer rows in a wide slot.
+    let mut code = code_panel("c", 1);
+    code.body = format!(
+        "let total = {};",
+        (0..30)
+            .map(|n| format!("value_{n}"))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    );
+    code.code = Some(Code::new("rust", 1));
+    let rows = |columns: usize| {
+        CodeLayout::new(&code, code.code.as_ref().unwrap(), columns)
+            .rows
+            .len()
+    };
+    assert!(rows(wide.code_columns) < rows(CODE_COLUMNS));
+    // Panels on such a wall stand in its slots, at their size, and are pointed at across them.
+    let projection = Projection::new("s", "sky")
+        .with_walls(vec![shaped(9.0 / 16.0)])
+        .with_panels(vec![long.clone()]);
+    let mut projector = Projector::default();
+    let frame = model(&projection.walls[0].pose).unwrap();
+    let middle = frame.transform_point3(slot_offset(&projection.walls[0], 0));
+    let (_, height) = projection.walls[0].slot_size();
+    // Near the bottom of the tall slot, below where a standard slot would end.
+    let low = middle - Vec3::Y * (height / 2.0 - 0.05);
+    let output = projector.update(input(&projection, at(low), 0.0, Instant::now()));
+    assert_eq!(
+        output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+        Some("t")
+    );
+    assert_eq!(
+        projector
+            .stands(&long, &[(&projection.walls[0], frame)])
+            .map(|(_, fit)| fit),
+        Some(Fit::Slot(tall))
+    );
+    // A code panel on a wall of wide slots is laid out at as many columns as they hold, and kept so.
+    code.place = on("wall-1", 0);
+    let projection = Projection::new("s", "sky")
+        .with_walls(vec![shaped(3.0)])
+        .with_panels(vec![code.clone()]);
+    let mut projector = Projector::default();
+    projector.update(input(&projection, None, 0.0, Instant::now()));
+    let laid = projector.layout("c", Fit::Slot(wide)).unwrap();
+    assert_eq!(laid.columns, wide.code_columns);
+    assert_eq!(
+        projector.layout("c", Fit::Text).unwrap().columns,
+        CODE_COLUMNS
+    );
+    projector.update(input(&projection, None, 0.0, Instant::now()));
+    assert_eq!(projector.layouts["c"].layouts.len(), 2);
+}
+
 fn checklist(id: &str, place: Place) -> Panel {
     Panel::new(
         id,
@@ -168,7 +352,7 @@ fn checklist(id: &str, place: Place) -> Panel {
 
 #[test]
 fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
-    let text = face(&checklist("1", on(TOMORI_WALL, 0)), false, false, Fit::Slot).plain();
+    let text = face(&checklist("1", on(TOMORI_WALL, 0)), false, false, Fit::SLOT).plain();
     let lines: Vec<&str> = text.split('\n').map(str::trim_end).collect();
     assert_eq!(lines[3], "To cover:");
     assert_eq!(lines[4], "☑ Panel ids");
@@ -176,7 +360,7 @@ fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
     assert_eq!(lines[6], "  before the next release");
     assert_eq!(lines[7], "  ☐ Nested");
     for (place, fit) in [
-        (on(TOMORI_WALL, 0), Fit::Slot),
+        (on(TOMORI_WALL, 0), Fit::SLOT),
         (
             Place::Free {
                 pose: Pose::upright_facing([0.5, 1.5, -1.5], [0.0, 1.6, 0.0]),
@@ -224,22 +408,22 @@ fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
     // Scrolled, the row under the ray is the one scrolled to: the first body row, scrolled 10 rows down, is the 11th item.
     let items: Vec<String> = (0..30).map(|item| format!("- [ ] Item {item}")).collect();
     let long = Panel::new("long", "Long", items.join("\n"), on(TOMORI_WALL, 0));
-    let (columns, body) = self::fit(&long, Fit::Slot);
+    let (columns, body) = self::fit(&long, Fit::SLOT);
     let (_, height) = sized(columns, body);
     let first = Vec3::new(
         -0.05,
         height / 2.0 - (PADDING.1 as f32 + 3.5 * CELL_HEIGHT as f32) * PIXEL,
         0.0,
     );
-    assert_eq!(item_at(&long, Mat4::IDENTITY, Fit::Slot, 0, first), Some(0));
+    assert_eq!(item_at(&long, Mat4::IDENTITY, Fit::SLOT, 0, first), Some(0));
     assert_eq!(
-        item_at(&long, Mat4::IDENTITY, Fit::Slot, 10, first),
+        item_at(&long, Mat4::IDENTITY, Fit::SLOT, 10, first),
         Some(10)
     );
     // A code panel names no item.
     let code = code_panel("c", 4);
     assert_eq!(
-        item_at(&code, Mat4::IDENTITY, Fit::Slot, 0, Vec3::ZERO),
+        item_at(&code, Mat4::IDENTITY, Fit::SLOT, 0, Vec3::ZERO),
         None
     );
     // Off the panel, above it, none either.
@@ -247,7 +431,7 @@ fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
         item_at(
             &checklist("1", Place::Unknown),
             Mat4::IDENTITY,
-            Fit::Slot,
+            Fit::SLOT,
             0,
             Vec3::new(0.0, 1.0, 0.0)
         ),
@@ -285,7 +469,7 @@ fn colours(row: &crate::ui_text::Row, text: &str) -> Vec<crate::ui_text::Rgba> {
 
 #[test]
 fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
-    let canvas = face(&code_panel("c", 3), false, false, Fit::Slot);
+    let canvas = face(&code_panel("c", 3), false, false, Fit::SLOT);
     // The same size as a text panel, at a finer pixel, so that it fits its slot.
     let (width, height) = canvas.size();
     let (panel_width, panel_height) = panel_size();
@@ -315,11 +499,11 @@ fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
     assert!(crate::ui_text::whole(&rows[4].cells));
     // Highlighted or newest, it is framed as a text panel is.
     assert_eq!(
-        face(&code_panel("c", 3), true, false, Fit::Slot).border,
+        face(&code_panel("c", 3), true, false, Fit::SLOT).border,
         Some(HIGHLIGHT)
     );
     assert_eq!(
-        face(&code_panel("c", 3), false, true, Fit::Slot).border,
+        face(&code_panel("c", 3), false, true, Fit::SLOT).border,
         Some(NEWEST)
     );
 }
@@ -343,7 +527,7 @@ fn a_long_line_of_code_wraps_under_a_hanging_indent_with_its_highlighting() {
             Span::new(start, 13, TokenKind::String),
         ]),
     );
-    let canvas = face(&panel, false, false, Fit::Slot);
+    let canvas = face(&panel, false, false, Fit::SLOT);
     let rows: Vec<String> = canvas.rows.iter().map(row_text).collect();
     // Lines that fit are as they were.
     assert_eq!(rows[3], " 1 fn main() {");
@@ -418,7 +602,7 @@ fn the_maintainers_block_wraps_every_line_whole_onto_as_many_rows_as_it_needs() 
         Code::new("rust", 11).with_spans(vec![Span::new(start, length, TokenKind::Comment)]),
     );
     // In a slot, as on the headset.
-    let canvas = face(&panel, false, false, Fit::Slot);
+    let canvas = face(&panel, false, false, Fit::SLOT);
     let rows = code_rows(&canvas);
     assert_eq!(
         rows,
@@ -489,7 +673,7 @@ fn a_line_of_code_wraps_onto_as_many_rows_as_it_needs_within_the_panel_s_columns
         Place::Unknown,
     )
     .with_code(Code::new("rust", 3));
-    let canvas = face(&panel, false, false, Fit::Slot);
+    let canvas = face(&panel, false, false, Fit::SLOT);
     let rows = code_rows(&canvas);
     let lines = joined(&rows);
     assert_eq!(
@@ -562,7 +746,7 @@ fn where_the_server_cuts_code_is_never_shown_but_as_the_panel_running_out() {
         let cut = body.last().unwrap().ends_with('…');
         let panel = Panel::new("c", "text", body.join("\n"), Place::Unknown)
             .with_code(Code::new("", lines as u32 + u32::from(cut)));
-        let canvas = face(&panel, false, false, Fit::Slot);
+        let canvas = face(&panel, false, false, Fit::SLOT);
         let rows = code_rows(&canvas);
         let drawn = joined(&rows);
         for (row, text) in rows.iter().enumerate() {
@@ -649,7 +833,7 @@ fn a_first_line_of_code_taller_than_the_panel_is_cut_and_says_there_is_more() {
     let line = format!("{}{}", " ".repeat(28), "語".repeat(200));
     let panel = Panel::new("c", "text", format!("{line}\nnext"), Place::Unknown)
         .with_code(Code::new("", 2));
-    let canvas = face(&panel, false, false, Fit::Slot);
+    let canvas = face(&panel, false, false, Fit::SLOT);
     let rows: Vec<String> = canvas.rows.iter().map(row_text).collect();
     assert_eq!(rows.len(), CODE_ROWS);
     // Every row of code is the first line's, the last ending with a dim "…", and the next line counted as more.
@@ -689,7 +873,7 @@ fn a_code_panel_floating_fits_its_code_and_takes_a_slot_s_size_on_a_wall() {
         .collect();
     let long = Panel::new("c", "javascript", lines.join("\n"), on(TOMORI_WALL, 0))
         .with_code(Code::new("javascript", 17));
-    let slot = face(&long, false, false, Fit::Slot);
+    let slot = face(&long, false, false, Fit::SLOT);
     assert_eq!(slot.rows.len(), CODE_ROWS);
     assert!(row_text(&slot.rows[CODE_ROWS - 1]).starts_with("↓ "));
     let floating = face(&long, false, false, Fit::Text);
@@ -711,8 +895,8 @@ fn a_code_panel_floating_fits_its_code_and_takes_a_slot_s_size_on_a_wall() {
     assert!(height > 0.7 && height < 0.8, "{height}");
     // On a wall, every code panel is a slot's size.
     for panel in [&short, &long, &tall] {
-        assert_eq!(fitted_size(panel, Fit::Slot), panel_size());
-        assert_eq!(face(panel, false, false, Fit::Slot).rows.len(), CODE_ROWS);
+        assert_eq!(fitted_size(panel, Fit::SLOT), panel_size());
+        assert_eq!(face(panel, false, false, Fit::SLOT).rows.len(), CODE_ROWS);
     }
 }
 
@@ -727,7 +911,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
     let mut panel = Panel::new("c", "text", body, Place::Unknown)
         .with_code(Code::new("", 40))
         .with_pinned(true);
-    let canvas = face(&panel, false, false, Fit::Slot);
+    let canvas = face(&panel, false, false, Fit::SLOT);
     let text = canvas.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[1].trim_end(), "40 lines · 0m · pinned");
@@ -749,7 +933,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
         .collect::<Vec<_>>()
         .join("\n");
     panel.body = body;
-    let text = face(&panel, false, false, Fit::Slot).plain();
+    let text = face(&panel, false, false, Fit::SLOT).plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[3 + SLOT_CODE_ROWS - 1].trim_end(), "16 line 16");
     // Every line it holds fits, and the rest of its block, which it was not sent, is only in the transcript.
@@ -760,20 +944,20 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
     // One more line, which it was not sent, is said as one.
     panel.code = Some(Code::new("", SLOT_CODE_ROWS as u32 + 1));
     assert!(
-        face(&panel, false, false, Fit::Slot)
+        face(&panel, false, false, Fit::SLOT)
             .plain()
             .ends_with("1 more line in the transcript")
     );
     // A code panel of one line says so; a server's lines beyond what a panel holds are not drawn.
     let one = Panel::new("c", "sh", "ls", Place::Unknown).with_code(Code::new("sh", 1));
     assert!(
-        face(&one, false, false, Fit::Slot)
+        face(&one, false, false, Fit::SLOT)
             .plain()
             .contains("sh · 1 line · 0m")
     );
     let many = Panel::new("c", "sh", vec!["x"; 40].join("\n"), Place::Unknown)
         .with_code(Code::new("sh", 40));
-    let text = face(&many, false, false, Fit::Slot).plain();
+    let text = face(&many, false, false, Fit::SLOT).plain();
     assert_eq!(text.split('\n').count(), CODE_ROWS);
     assert!(text.ends_with("↓ 24 more"));
 }
@@ -791,7 +975,7 @@ fn a_code_panel_whose_spans_are_not_valid_is_drawn_plain() {
     ] {
         let mut panel = code_panel("c", 3);
         panel.code = Some(Code::new("rust", 3).with_spans(spans));
-        let canvas = face(&panel, false, false, Fit::Slot);
+        let canvas = face(&panel, false, false, Fit::SLOT);
         assert_eq!(colours(&canvas.rows[3], "fn main"), [TEXT; 7]);
     }
     // Every kind has its colour, distinct from the others, and plain, as a kind this client does not know, is text.
@@ -832,7 +1016,7 @@ fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
     let text = panel("1", on(TOMORI_WALL, 0)).with_pinned(true);
     assert!(!lines(&text).concat().contains("pinned"));
     assert!(
-        !face(&text, false, false, Fit::Slot)
+        !face(&text, false, false, Fit::SLOT)
             .plain()
             .contains("pinned")
     );
@@ -998,7 +1182,8 @@ fn a_panel_let_go_near_a_wall_snaps_into_its_layout() {
     assert_eq!(projector.held(), Some("a"));
     // Carried over to the added wall, a little in front of it and past its edge, and let go.
     let added = model(&shown.wall("wall-1").unwrap().pose).unwrap();
-    let near = added.transform_point3(Vec3::new(wall_size().0 / 2.0 + 0.1, 0.0, 0.3));
+    let width = wall_size(shown.wall("wall-1").unwrap()).0;
+    let near = added.transform_point3(Vec3::new(width / 2.0 + 0.1, 0.0, 0.3));
     let distance = HOME.distance(slot_centre(&shown, 0));
     let direction = (near - HOME).normalize();
     let toward = Ray::new(near - direction * distance, direction);
@@ -1376,7 +1561,7 @@ fn a_curved_wall_stands_its_slots_in_a_row_along_its_arc_each_facing_home() {
         let flat = curved().with_shape(shape);
         assert_eq!(
             slot_frames(&flat, frame)[0],
-            frame * Mat4::from_translation(slot_offset(0))
+            frame * Mat4::from_translation(slot_offset(&flat, 0))
         );
     }
 }
@@ -1675,8 +1860,8 @@ fn a_floating_panel_fits_its_text_within_bounds_and_takes_a_slot_s_size_on_a_wal
     assert!(text.lines().last().unwrap().trim_end().ends_with('…'));
     // On a wall, any of them is a slot's size, cut as before.
     for panel in [&short, &long_line, &tall] {
-        assert_eq!(fit(panel, Fit::Slot), (COLUMNS, BODY_ROWS));
-        assert_eq!(face(panel, false, false, Fit::Slot).size(), panel_size());
+        assert_eq!(fit(panel, Fit::SLOT), (COLUMNS, BODY_ROWS));
+        assert_eq!(face(panel, false, false, Fit::SLOT).size(), panel_size());
     }
     // Floating in the space, a panel is drawn and pointed at at its fitted size.
     let shown = Projection::new("s", "sky").with_panels(vec![Panel::new(
@@ -1975,7 +2160,10 @@ fn footer(canvas: &Canvas) -> String {
 
 /// `panel`'s face sized as `fit` says, scrolled `scroll` rows down.
 fn scrolled(panel: &Panel, fit: Fit, scroll: usize) -> Canvas {
-    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    let layout = panel
+        .code
+        .as_ref()
+        .map(|code| CodeLayout::new(panel, code, CODE_COLUMNS));
     scrolled_face(panel, false, false, fit, scroll, layout.as_ref())
 }
 
@@ -1996,11 +2184,11 @@ fn the_right_stick_scrolls_faster_the_further_it_is_pushed_up_for_forward() {
 #[test]
 fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
     let panel = reported_block();
-    let layout = CodeLayout::new(&panel, panel.code.as_ref().unwrap());
-    let most = layout.most_scroll(Fit::Slot);
+    let layout = CodeLayout::new(&panel, panel.code.as_ref().unwrap(), CODE_COLUMNS);
+    let most = layout.most_scroll(Fit::SLOT);
     assert!(most > 0);
     // At the top, the lines below that do not fit, as on the headset, and the bar's thumb at the top of its track.
-    let top = scrolled(&panel, Fit::Slot, 0);
+    let top = scrolled(&panel, Fit::SLOT, 0);
     assert!(footer(&top).starts_with("↓ "), "{}", footer(&top));
     assert!(!footer(&top).contains('↑'));
     let [track, thumb] = top.shapes.as_slice() else {
@@ -2015,7 +2203,7 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
     assert_eq!(track.y, (3 * CELL_HEIGHT) as f32);
     assert_eq!(track.height, (SLOT_CODE_ROWS * CELL_HEIGHT) as f32);
     // Scrolled to the end, the last line is the last row, nothing is below, and the lines above are counted.
-    let end = scrolled(&panel, Fit::Slot, most);
+    let end = scrolled(&panel, Fit::SLOT, most);
     let rows: Vec<String> = end.rows[3..CODE_ROWS - 1].iter().map(row_text).collect();
     assert_eq!(joined(&rows).last().unwrap().0, 17);
     assert!(!rows.last().unwrap().is_empty());
@@ -2030,9 +2218,9 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
     };
     assert!((thumb.y + thumb.height - (track.y + track.height)).abs() < 1e-3);
     // No further, however far it is asked.
-    assert_eq!(scrolled(&panel, Fit::Slot, most + 50).plain(), end.plain());
+    assert_eq!(scrolled(&panel, Fit::SLOT, most + 50).plain(), end.plain());
     // In between, both, every line counted once, those not whole below and those starting above.
-    let middle = scrolled(&panel, Fit::Slot, most / 2);
+    let middle = scrolled(&panel, Fit::SLOT, most / 2);
     let text = footer(&middle);
     let (up, down) = text.split_once(" · ").expect("above and below");
     let count = |part: &str| -> usize { part.split(' ').nth(1).unwrap().parse().unwrap() };
@@ -2051,12 +2239,12 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
         .iter()
         .position(|row| !row.first)
         .expect("a line wraps");
-    let partway = scrolled(&panel, Fit::Slot, wrapped);
+    let partway = scrolled(&panel, Fit::SLOT, wrapped);
     assert!(row_text(&partway.rows[3]).starts_with(" ↪ "));
     assert!(footer(&partway).starts_with(&format!("↑ {} above", layout.rows[wrapped].line + 1)));
     // Every row of every scroll is within the panel's columns, and the face the same size.
     for scroll in 0..=most {
-        let canvas = scrolled(&panel, Fit::Slot, scroll);
+        let canvas = scrolled(&panel, Fit::SLOT, scroll);
         assert_eq!(canvas.rows.len(), CODE_ROWS);
         assert!(
             canvas
@@ -2067,10 +2255,10 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
     }
     // A panel that shows all of itself has no bar and nothing to scroll.
     let short = code_panel("s", 3);
-    let layout = CodeLayout::new(&short, short.code.as_ref().unwrap());
-    assert_eq!(layout.most_scroll(Fit::Slot), 0);
-    assert!(scrolled(&short, Fit::Slot, 5).shapes.is_empty());
-    assert_eq!(footer(&scrolled(&short, Fit::Slot, 5)), "");
+    let layout = CodeLayout::new(&short, short.code.as_ref().unwrap(), CODE_COLUMNS);
+    assert_eq!(layout.most_scroll(Fit::SLOT), 0);
+    assert!(scrolled(&short, Fit::SLOT, 5).shapes.is_empty());
+    assert_eq!(footer(&scrolled(&short, Fit::SLOT, 5)), "");
 }
 
 #[test]
@@ -2081,9 +2269,9 @@ fn a_code_panel_says_how_many_lines_it_was_not_sent_below_the_last_it_holds() {
         Panel::new("c", "text", body.join("\n"), Place::Unknown).with_code(Code::new("", 200));
     // Those below, sent or not, are counted as more until the last it holds is shown; then those it was not sent, as
     // only in the transcript.
-    assert_eq!(footer(&scrolled(&panel, Fit::Slot, 0)), "↓ 184 more");
+    assert_eq!(footer(&scrolled(&panel, Fit::SLOT, 0)), "↓ 184 more");
     assert_eq!(
-        footer(&scrolled(&panel, Fit::Slot, usize::MAX)),
+        footer(&scrolled(&panel, Fit::SLOT, usize::MAX)),
         "↑ 14 above · 170 more lines in the transcript"
     );
     // Floating, it shows every line it holds, and says so.
@@ -2093,7 +2281,7 @@ fn a_code_panel_says_how_many_lines_it_was_not_sent_below_the_last_it_holds() {
     assert!(floating.shapes.is_empty());
     // A line the server cut ends with a dim "…".
     let cut = Panel::new("c", "text", "a\nbcd…", Place::Unknown).with_code(Code::new("", 9));
-    let canvas = scrolled(&cut, Fit::Slot, 0);
+    let canvas = scrolled(&cut, Fit::SLOT, 0);
     assert_eq!(
         canvas.rows[4].cells.last().unwrap(),
         &('…', Style::plain(DIM))
@@ -2105,14 +2293,14 @@ fn a_code_panel_says_how_many_lines_it_was_not_sent_below_the_last_it_holds() {
 fn a_text_panel_longer_than_its_face_scrolls_too() {
     let body: Vec<String> = (1..=20).map(|line| format!("- step {line}")).collect();
     let panel = Panel::new("t", "Steps", body.join("\n"), on(TOMORI_WALL, 0));
-    let most = most_scroll(&panel, Fit::Slot, None);
+    let most = most_scroll(&panel, Fit::SLOT, None);
     assert_eq!(most, 20 - BODY_ROWS);
     // At the top, cut with "…", with a bar beside the body; at the end, its last row shown whole.
-    let top = scrolled(&panel, Fit::Slot, 0);
+    let top = scrolled(&panel, Fit::SLOT, 0);
     assert!(row_text(&top.rows[3 + BODY_ROWS - 1]).ends_with('…'));
     assert_eq!(top.shapes.len(), 2);
     assert_eq!(top.shapes[0].height, (BODY_ROWS * CELL_HEIGHT) as f32);
-    let end = scrolled(&panel, Fit::Slot, most + 3);
+    let end = scrolled(&panel, Fit::SLOT, most + 3);
     assert_eq!(row_text(&end.rows[3]).trim(), "• step 9");
     assert_eq!(row_text(&end.rows[3 + BODY_ROWS - 1]).trim(), "• step 20");
     assert_eq!(end.rows.len(), 3 + BODY_ROWS);
@@ -2183,13 +2371,13 @@ fn each_participant_scrolls_a_panel_for_themselves_alone() {
     });
     assert_eq!(mine.scroll("t"), 0);
     // Its code is laid out once, and again only when it changes.
-    let laid = Arc::clone(&mine.layouts["c"].layout);
+    let laid = Arc::clone(&mine.layouts["c"].layouts[0]);
     mine.update(input(&shown, None, 0.0, now));
-    assert!(Arc::ptr_eq(&laid, &mine.layouts["c"].layout));
+    assert!(Arc::ptr_eq(&laid, &mine.layouts["c"].layouts[0]));
     let mut changed = shown.clone();
     changed.panels[0].body.push_str("\n  done();");
     mine.update(input(&changed, None, 0.0, now));
-    assert!(!Arc::ptr_eq(&laid, &mine.layouts["c"].layout));
+    assert!(!Arc::ptr_eq(&laid, &mine.layouts["c"].layouts[0]));
     // Gone, it is forgotten, as is everything once nothing is projected.
     mine.update(scroll(3.0));
     let gone = projection(vec![panel("t", on(TOMORI_WALL, 1))]);

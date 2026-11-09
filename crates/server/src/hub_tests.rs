@@ -3539,11 +3539,12 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
             space: space.clone(),
         });
     }
-    // Every space projects, and says so in its state; the Tomori wall stands beside the swarm, empty.
+    // Every space projects, and says so in its state, with that participants change its walls; the Tomori wall stands
+    // beside the swarm, empty.
     let messages = ada.read();
     assert!(messages.iter().any(|message| matches!(
         message,
-        ServerMessage::Space { state } if state.projection
+        ServerMessage::Space { state } if state.projection && state.walls
     )));
     let projection = messages
         .into_iter()
@@ -3972,6 +3973,102 @@ fn only_owners_add_and_remove_walls() {
 }
 
 #[test]
+fn participants_change_walls_for_everyone_while_visitors_change_none() {
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let cy = Client::projecting(
+        &hub,
+        Access {
+            principal: Some("token:cy".to_owned()),
+            name: None,
+            grant: Grant::Collaborator {
+                space: space.clone(),
+            },
+        },
+        "cy",
+    );
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    for client in [&ada, &cy, &vic] {
+        client.join(&space);
+    }
+    let set = |grid: Option<(u32, u32)>, shape: Option<tomori_protocol::WallShape>| {
+        ClientMessage::SetWall {
+            wall: tomori_protocol::TOMORI_WALL.to_owned(),
+            grid: grid.map(tomori_protocol::Grid::from),
+            scale: None,
+            aspect: None,
+            shape,
+            pose: None,
+        }
+    };
+    // A visitor changes nothing.
+    vic.send(set(Some((4, 1)), None));
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // A collaborator makes the Tomori wall four wide and flat, for everyone, the visitor included.
+    cy.send(set(Some((4, 1)), Some(tomori_protocol::WallShape::Grid)));
+    for client in [&ada, &cy, &vic] {
+        let projection = client.projection();
+        let tomori = &projection.walls[0];
+        assert_eq!((tomori.slots(), tomori.radius()), (4, None));
+    }
+    // What a wall cannot be is refused, saying why.
+    cy.send(set(Some((4, 2)), None));
+    cy.send(set(None, Some(tomori_protocol::WallShape::Unknown)));
+    cy.send(ClientMessage::SetWall {
+        wall: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+    });
+    assert_eq!(
+        cy.errors(),
+        [
+            "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.".to_owned(),
+            "Tomori does not know that shape of wall.".to_owned(),
+            format!("The wall is too long; the limit is {} bytes.", limits::IDENTIFIER_BYTES),
+        ]
+    );
+    assert_eq!(ada.projection().walls[0].slots(), 4);
+    // Asked again for what it is, it is sent again, and nothing else; outside a space, nothing changes.
+    cy.send(set(Some((4, 1)), None));
+    assert!(cy.errors().is_empty());
+    let lobby = Client::projecting(&hub, Access::open(), "lee");
+    lobby.send(set(Some((2, 1)), None));
+    assert_eq!(lobby.errors(), ["Join a space first."]);
+    assert_eq!(ada.projection().walls[0].slots(), 4);
+    // An owner's added wall, removed, leaves its panels floating where they were.
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let projection = ada.projection();
+    let (added, panel) = (projection.walls[1].clone(), projection.panels[0].id.clone());
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: Some(added.id.clone()),
+        slot: Some(2),
+        pose: None,
+    });
+    ada.send(ClientMessage::RemoveWall {
+        wall: added.id.clone(),
+    });
+    let after = cy.projection();
+    assert_eq!(after.walls.len(), 1);
+    assert_eq!(
+        after.panel(&panel).unwrap().place,
+        tomori_protocol::Place::Free {
+            pose: added.slot_pose(2).unwrap()
+        }
+    );
+}
+
+#[test]
 fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tomori_wall_moves() {
     let (hub, _jobs) = hub_waiting();
     let stage = upright([0.0, 1.5, -4.0]);
@@ -4094,6 +4191,29 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
         ada.send(ClientMessage::AddWall {
             pose: upright([0.0, 1.5, 3.0]),
         });
+        // Its grid, its slots' size and its curve are kept, and the Tomori wall's.
+        let added = ada.projection().walls[1].id.clone();
+        ada.send(ClientMessage::SetWall {
+            wall: added,
+            grid: Some(tomori_protocol::Grid::from((4, 1))),
+            scale: Some(1.25),
+            aspect: None,
+            shape: Some(tomori_protocol::WallShape::Arc { radius: 3.0 }),
+            pose: None,
+        });
+        ada.send(ClientMessage::SetWall {
+            wall: tomori_protocol::TOMORI_WALL.to_owned(),
+            grid: Some(tomori_protocol::Grid::from((3, 1))),
+            scale: None,
+            aspect: None,
+            shape: None,
+            pose: None,
+        });
+        let projection = ada.projection();
+        assert_eq!(
+            (projection.walls[0].slots(), projection.walls[1].slots()),
+            (3, 4)
+        );
         let panel = ada.projection().panels[0].id.clone();
         ada.send(ClientMessage::PlacePanel {
             panel,

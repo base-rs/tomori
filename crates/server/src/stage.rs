@@ -13,7 +13,10 @@
 //! something only in that environment's geometry: they are hidden while the space is in another environment, and shown
 //! again, where they were, when it comes back.
 //!
-//! **Layout.** A wall has [`WALL_SLOTS`] slots, the most prominent first. A panel the agent projects takes its wall's
+//! **Layout.** A wall has a grid of slots, numbered from its top left, the most prominent first, laid out as
+//! `tomori_protocol::wall` lays them out for every client too; participants and the agent change its grid, how large its
+//! slots are and whether it is curved, and a panel keeps its column and row as they do, or, in one the wall no longer
+//! has, goes into its nearest free slot or floats where it was. A panel the agent projects takes its wall's
 //! most prominent free slot. A participant puts a panel in the slot they choose, and it is then arranged: when that slot
 //! holds another panel, the two change places, the other going where the one put there came from, or into a free slot
 //! on the same wall when it came from elsewhere and one is free. When a wall is full, the panel that has been on it
@@ -34,8 +37,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tomori_protocol::{
-    Code, Meta, Panel, Place, Pose, Projection, Span, TOMORI_WALL, WALL_SLOTS, Wall, WallKind,
-    WallShape,
+    Code, Grid, Meta, Panel, Place, Pose, Projection, Span, TOMORI_WALL, WALL_SLOTS, Wall,
+    WallKind, WallShape, wall as layout,
 };
 
 /// The most walls owners may add in one environment of a space.
@@ -52,11 +55,27 @@ pub const FLOATING: usize = 12;
 /// environment left longest ago.
 pub const ROOMS: usize = 8;
 
-/// The most panels kept for a space, shown or hidden. A space shows at most [`WALL_SLOTS`] on the Tomori wall and, in
-/// its current environment, [`WALL_SLOTS`] on each of [`DECLARED_WALLS`] and [`ADDED_WALLS`] walls and [`FLOATING`]
-/// floating, fewer than this, so that beyond it the hidden panel put where it is longest ago is forgotten, and what a
-/// space keeps stays bounded however many environments it has been in.
+/// The most slots the walls shown in one environment of a space have together: as many as the Tomori wall and each of
+/// [`DECLARED_WALLS`] and [`ADDED_WALLS`] walls have unless they say otherwise, so that a projection at every limit fits
+/// in one frame however its walls are laid out. A change to a wall, or a new one, that would take them past it is
+/// refused.
+pub const SLOTS: usize = WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS);
+
+/// The most panels kept for a space, shown or hidden. A space shows at most [`SLOTS`] on its walls and [`FLOATING`]
+/// floating, with one more floating for each slot its walls have fewer than [`SLOTS`], fewer than this, so that beyond
+/// it the hidden panel put where it is longest ago is forgotten, and what a space keeps stays bounded however many
+/// environments it has been in.
 pub const PANELS: usize = 120;
+
+/// The widest and tallest a wall may be, in metres.
+pub const WALL_SIZE: (f32, f32) = (8.0, 4.0);
+
+/// The longest radius a wall is curved at, in metres; a longer one is all but flat.
+pub const LONGEST_RADIUS: f32 = 50.0;
+
+/// The most columns of the Tomori wall, in its one row, so that it stays within the 40° either side of straight ahead
+/// of home that the workers' stations leave clear.
+pub const TOMORI_COLUMNS: u32 = 6;
 
 /// How far from the space's origin, on each axis, a wall or a floating panel may be, in metres.
 pub const REACH: f32 = 20.0;
@@ -120,9 +139,91 @@ fn fit(projection: &mut Projection, placed: &[u64], budget: usize) {
     }
 }
 
+/// How a wall's slots are laid out, as the stage keeps it: its grid, how large its slots are, as a proportion of a flat
+/// wall's, the size of their text, their shape, as their width over their height, if it is not a standard slot's, and
+/// the radius of the arc it is curved along, if it is curved.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    pub grid: Grid,
+    pub scale: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+}
+
+impl Layout {
+    /// The Tomori wall's unless it is changed: six in a curved row, about home.
+    pub const TOMORI: Layout = Layout {
+        grid: layout::ARC_GRID,
+        scale: layout::ARC_SCALE,
+        aspect: None,
+        radius: Some(ARC_RADIUS),
+    };
+
+    /// Every other wall's unless it is changed: three columns of two rows, flat.
+    pub const FLAT: Layout = Layout {
+        grid: layout::FLAT_GRID,
+        scale: 1.0,
+        aspect: None,
+        radius: None,
+    };
+
+    /// `wall`, laid out so, saying its grid and scale only where they are not its shape's, as an older client reads it,
+    /// and its slots' aspect only where it is not a standard slot's.
+    pub(crate) fn apply(&self, wall: Wall) -> Wall {
+        let shape = self
+            .radius
+            .map_or(WallShape::Grid, |radius| WallShape::Arc { radius });
+        let wall = wall.with_shape(shape).with_aspect(self.aspect);
+        if wall.grid() == self.grid && wall.scale() == self.scale {
+            wall
+        } else {
+            wall.with_grid(self.grid).with_scale(self.scale)
+        }
+    }
+}
+
 /// How many bytes `value` takes as JSON.
 fn json_size(value: &impl Serialize) -> usize {
     serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// What a participant or the agent changes of a wall: each left out stays as it is. `radius` is `Some(None)` to flatten
+/// it, and `aspect` `Some(None)` to give it standard slots.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WallChange {
+    pub grid: Option<Grid>,
+    pub scale: Option<f32>,
+    pub aspect: Option<Option<f32>>,
+    pub radius: Option<Option<f32>>,
+    pub pose: Option<Pose>,
+}
+
+impl WallChange {
+    /// The change `SetWall` asks for, or why it cannot be one: a shape a server does not know is refused, and an
+    /// `aspect` of 0 is a standard slot's.
+    pub fn new(
+        grid: Option<Grid>,
+        scale: Option<f32>,
+        aspect: Option<f32>,
+        shape: Option<WallShape>,
+        pose: Option<Pose>,
+    ) -> Result<Self, &'static str> {
+        let radius = match shape {
+            None => None,
+            Some(WallShape::Grid) => Some(None),
+            Some(WallShape::Arc { radius }) => Some(Some(radius)),
+            Some(_) => return Err("Tomori does not know that shape of wall."),
+        };
+        Ok(Self {
+            grid,
+            scale,
+            aspect: aspect.map(|aspect| (aspect != 0.0).then_some(aspect)),
+            radius,
+            pose,
+        })
+    }
 }
 
 /// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; for a code
@@ -374,6 +475,9 @@ impl Kept {
 struct AddedWall {
     id: String,
     pose: Pose,
+    /// How it is laid out, when changed from a flat wall's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<Layout>,
 }
 
 /// What a space keeps for one environment: the walls owners added and the panels on the environment's walls or
@@ -385,6 +489,9 @@ struct Room {
     used: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     walls: Vec<AddedWall>,
+    /// How the environment's own walls are laid out in this space, by identity, where changed from a flat wall's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    layouts: BTreeMap<String, Layout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     panels: Vec<Kept>,
 }
@@ -406,6 +513,9 @@ pub struct Stage {
     /// The latest of each kind of Tomori's own notices, by kind, as [`Stage::project_notice`] projected it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     notices: BTreeMap<String, String>,
+    /// How the Tomori wall is laid out, in every environment, when changed from [`Layout::TOMORI`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tomori_layout: Option<Layout>,
 }
 
 fn schema() -> u32 {
@@ -420,6 +530,7 @@ impl Default for Stage {
             tomori: Vec::new(),
             rooms: BTreeMap::new(),
             notices: BTreeMap::new(),
+            tomori_layout: None,
         }
     }
 }
@@ -475,7 +586,7 @@ fn ago(seconds: u64) -> String {
 impl Stage {
     /// Whether it holds nothing, so that a space keeps nothing for it.
     pub fn is_empty(&self) -> bool {
-        self.tomori.is_empty() && self.rooms.is_empty()
+        self.tomori.is_empty() && self.rooms.is_empty() && self.tomori_layout.is_none()
     }
 
     /// The next number in the stage's order.
@@ -487,21 +598,69 @@ impl Stage {
     /// The walls panels can be put on in `walls`' environment: the Tomori wall, then the environment's own, then those
     /// its owners added.
     fn walls(&self, walls: &Walls<'_>) -> Vec<Wall> {
+        let room = self.rooms.get(walls.environment);
         let mut shown = vec![
-            Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori)
-                .with_shape(WallShape::Arc { radius: ARC_RADIUS }),
+            self.tomori_layout
+                .unwrap_or(Layout::TOMORI)
+                .apply(Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori)),
         ];
         shown.extend(walls.declared.iter().take(DECLARED_WALLS).enumerate().map(
-            |(index, pose)| Wall::new(format!("environment-{index}"), WallKind::Environment, *pose),
+            |(index, pose)| {
+                let id = format!("environment-{index}");
+                let layout = room
+                    .and_then(|room| room.layouts.get(&id))
+                    .copied()
+                    .unwrap_or(Layout::FLAT);
+                layout.apply(Wall::new(id, WallKind::Environment, *pose))
+            },
         ));
-        if let Some(room) = self.rooms.get(walls.environment) {
-            shown.extend(
-                room.walls
-                    .iter()
-                    .map(|wall| Wall::new(wall.id.clone(), WallKind::Added, wall.pose)),
-            );
+        if let Some(room) = room {
+            shown.extend(room.walls.iter().map(|wall| {
+                wall.layout.unwrap_or(Layout::FLAT).apply(Wall::new(
+                    wall.id.clone(),
+                    WallKind::Added,
+                    wall.pose,
+                ))
+            }));
         }
         shown
+    }
+
+    /// The wall `wall` shown in `walls`' environment, if it is.
+    fn shown_wall(&self, walls: &Walls<'_>, wall: &str) -> Option<Wall> {
+        self.walls(walls).into_iter().find(|shown| shown.id == wall)
+    }
+
+    /// How many slots the wall `wall` shown in `walls`' environment has, or none when it is not shown.
+    fn slots_of(&self, walls: &Walls<'_>, wall: &str) -> u32 {
+        self.shown_wall(walls, wall)
+            .map_or(0, |shown| shown.slots())
+    }
+
+    /// How many panels float in `environment`.
+    fn floating(&self, environment: &str) -> usize {
+        self.rooms.get(environment).map_or(0, |room| {
+            room.panels
+                .iter()
+                .filter(|kept| matches!(kept.place, Placed::Free { .. }))
+                .count()
+        })
+    }
+
+    /// How many panels may float in an environment whose walls have `slots` slots together, counting those its walls
+    /// gave up: [`FLOATING`], and one more for each slot fewer than [`SLOTS`], so that a wall giving up slots never takes
+    /// a panel away, while the walls' slots and the panels floating stay within [`SLOTS`] and [`FLOATING`] together. A
+    /// wall is given more slots only while it holds.
+    fn floating_room(slots: usize) -> usize {
+        FLOATING + SLOTS.saturating_sub(slots)
+    }
+
+    /// How many slots the walls shown in `walls`' environment have together.
+    fn slots_shown(&self, walls: &Walls<'_>) -> usize {
+        self.walls(walls)
+            .iter()
+            .map(|wall| wall.slots() as usize)
+            .sum()
     }
 
     /// The room of `environment`, made if the space has none for it yet, forgetting the room left longest ago when
@@ -602,23 +761,30 @@ impl Stage {
         Some(room.panels.remove(index))
     }
 
-    /// The most prominent slot of the wall `wall` that none of `list` is in.
-    fn free_slot(list: &[Kept], wall: &str) -> Option<u32> {
+    /// The most prominent of the `slots` slots of the wall `wall` that none of `list` is in.
+    fn free_slot(list: &[Kept], wall: &str, slots: u32) -> Option<u32> {
         let taken: Vec<u32> = list
             .iter()
             .filter_map(|other| other.slot_on(wall))
             .collect();
-        (0..WALL_SLOTS).find(|slot| !taken.contains(slot))
+        (0..slots).find(|slot| !taken.contains(slot))
     }
 
-    /// Put `kept` on the wall `wall` in `environment`, `arranged` by a participant or not, in its most prominent free
-    /// slot, or else in the slot of the panel that has been on it longest of those not arranged, or, when all are, of
-    /// them all, which leaves.
-    fn put_on(&mut self, environment: &str, mut kept: Kept, wall: &str, arranged: bool) {
+    /// Put `kept` on the wall `wall`, of `slots` slots, in `environment`, `arranged` by a participant or not, in its most
+    /// prominent free slot, or else in the slot of the panel that has been on it longest of those not arranged, or, when
+    /// all are, of them all, which leaves.
+    fn put_on(
+        &mut self,
+        environment: &str,
+        mut kept: Kept,
+        wall: &str,
+        slots: u32,
+        arranged: bool,
+    ) {
         kept.placed = self.tick();
         kept.arranged = arranged;
         let list = self.list(environment, Some(wall));
-        let slot = match Self::free_slot(list, wall) {
+        let slot = match Self::free_slot(list, wall, slots) {
             Some(slot) => slot,
             None => {
                 let (index, slot) = list
@@ -646,7 +812,14 @@ impl Stage {
     /// Put `kept`, which came from `from`, in the slot `slot` of the wall `wall` in `environment`, arranged. A panel
     /// already there changes places with it: into the slot it came from on the same wall, or else into the wall's most
     /// prominent free slot, or else where it came from, on another wall or floating.
-    fn put_in(&mut self, environment: &str, mut kept: Kept, from: Placed, wall: &str, slot: u32) {
+    fn put_in(
+        &mut self,
+        environment: &str,
+        mut kept: Kept,
+        from: Placed,
+        (wall, slots): (&str, u32),
+        slot: u32,
+    ) {
         kept.placed = self.tick();
         kept.arranged = true;
         kept.place = Placed::Wall {
@@ -660,7 +833,7 @@ impl Stage {
             .position(|other| other.slot_on(wall) == Some(slot))
             .map(|index| list.remove(index));
         list.push(kept);
-        let free = Self::free_slot(list, wall);
+        let free = Self::free_slot(list, wall, slots);
         let Some(mut occupant) = occupant else {
             return;
         };
@@ -734,7 +907,8 @@ impl Stage {
             Destination::Nearest(origin) => crate::presence::nearest_wall(&shown, *origin)
                 .map_or(tomori, |(wall, _)| Spot::Wall(wall.id.clone(), None)),
             Destination::Wall { wall, slot } if shown.iter().any(|shown| shown.id == *wall) => {
-                Spot::Wall(wall.clone(), slot.filter(|slot| *slot < WALL_SLOTS))
+                let slots = self.slots_of(walls, wall);
+                Spot::Wall(wall.clone(), slot.filter(|slot| *slot < slots))
             }
             Destination::Free(pose) => valid(pose).map_or(tomori, Spot::Free),
             Destination::Wall { .. } | Destination::Tomori => tomori,
@@ -793,18 +967,20 @@ impl Stage {
     /// Put the agent's panel `kept` where `to` says in `walls`' environment, not arranged.
     fn put(&mut self, walls: &Walls<'_>, kept: Kept, to: &Destination) {
         match self.resolve(walls, to) {
-            Spot::Wall(wall, slot) => self.put_at(walls.environment, kept, &wall, slot),
-            Spot::Free(pose) => self.float(walls.environment, kept, pose),
+            Spot::Wall(wall, slot) => self.put_at(walls, kept, &wall, slot),
+            Spot::Free(pose) => self.float(walls, kept, pose),
         }
     }
 
-    /// Put the agent's panel `kept` on the wall `wall` in `environment`, in `slot` if it is free, and otherwise as
+    /// Put the agent's panel `kept` on the wall `wall` in `walls`' environment, in `slot` if it is free, and otherwise as
     /// [`Stage::put_on`] puts it.
-    fn put_at(&mut self, environment: &str, mut kept: Kept, wall: &str, slot: Option<u32>) {
+    fn put_at(&mut self, walls: &Walls<'_>, mut kept: Kept, wall: &str, slot: Option<u32>) {
+        let slots = self.slots_of(walls, wall);
+        let environment = walls.environment;
         let list = self.list(environment, Some(wall));
         let free = slot.filter(|slot| !list.iter().any(|other| other.slot_on(wall) == Some(*slot)));
         let Some(slot) = free else {
-            return self.put_on(environment, kept, wall, false);
+            return self.put_on(environment, kept, wall, slots, false);
         };
         kept.placed = self.tick();
         kept.arranged = false;
@@ -815,18 +991,21 @@ impl Stage {
         self.list(environment, Some(wall)).push(kept);
     }
 
-    /// Leave `kept` floating at `pose` in `environment`, not arranged; too many floating, the one floating longest goes.
-    fn float(&mut self, environment: &str, mut kept: Kept, pose: Pose) {
+    /// Leave `kept` floating at `pose` in `walls`' environment, not arranged; more than [`FLOATING`] floating, the one
+    /// floating longest goes. Panels a wall gave up may float beyond it, as [`Stage::floating_room`] allows, and are the
+    /// newest to float, so the last to go.
+    fn float(&mut self, walls: &Walls<'_>, mut kept: Kept, pose: Pose) {
+        let room = FLOATING;
         kept.place = Placed::Free { pose };
         kept.arranged = false;
         kept.placed = self.tick();
-        let list = self.list(environment, None);
+        let list = self.list(walls.environment, None);
         list.push(kept);
         let floating = list
             .iter()
             .filter(|kept| matches!(kept.place, Placed::Free { .. }))
             .count();
-        if floating > FLOATING
+        if floating > room
             && let Some(index) = list
                 .iter()
                 .enumerate()
@@ -1014,47 +1193,286 @@ impl Stage {
         Ok(true)
     }
 
-    /// Add a wall at `pose` in `environment`, for its owners. Returns its identity, or why it was refused.
+    /// Add a wall at `pose` in `walls`' environment, for its owners, laid out as `layout` says, or else flat, three
+    /// columns of two rows. Returns its identity, or why it was refused.
     pub(crate) fn add_wall(
         &mut self,
-        environment: &str,
+        walls: &Walls<'_>,
         pose: &Pose,
+        layout: Option<Layout>,
     ) -> Result<String, &'static str> {
         let pose = valid(pose).ok_or("A wall must stand within 20 m of the space's middle.")?;
         if self
             .rooms
-            .get(environment)
+            .get(walls.environment)
             .is_some_and(|room| room.walls.len() >= ADDED_WALLS)
         {
             return Err("This environment has as many added walls as it can take.");
         }
+        let layout = layout.unwrap_or(Layout::FLAT);
+        let wall = layout.apply(Wall::new("", WallKind::Added, pose));
+        Self::fits(&wall, layout)?;
+        self.has_room(walls, wall.slots() as usize)?;
         let id = format!("wall-{}", self.tick());
-        self.room(environment).walls.push(AddedWall {
+        self.room(walls.environment).walls.push(AddedWall {
             id: id.clone(),
             pose,
+            layout: (layout != Layout::FLAT).then_some(layout),
         });
         Ok(id)
     }
 
-    /// Remove the added wall `wall` from `environment`, and the panels on it with it. Returns why it was refused.
+    /// Whether `walls`' environment has room for walls of `more` slots than it has now, with the panels floating there,
+    /// or why not.
+    fn has_room(&self, walls: &Walls<'_>, more: usize) -> Result<(), &'static str> {
+        let slots = self.slots_shown(walls) + more;
+        if slots > SLOTS {
+            return Err(
+                "The walls here hold as many slots as they can together: make another wall smaller first.",
+            );
+        }
+        if self.floating(walls.environment) > Self::floating_room(slots) {
+            return Err(
+                "Too many panels float here to give the walls more slots: put some on a wall or throw some away first.",
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether `wall`, laid out as `layout` says, is one a wall can be, or why not: its grid within bounds, its slots
+    /// within [`layout::SCALES`] of a flat wall's, its curve, if it has one, of a radius from [`layout::LEAST_RADIUS`] to
+    /// [`LONGEST_RADIUS`] about no more than half a circle, and no wider or taller than [`WALL_SIZE`].
+    fn fits(wall: &Wall, layout: Layout) -> Result<(), &'static str> {
+        if !layout.grid.valid() {
+            return Err(
+                "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+            );
+        }
+        if !(layout.scale.is_finite()
+            && (layout::SCALES.0..=layout::SCALES.1).contains(&layout.scale))
+        {
+            return Err("A wall's slots are from half to twice a standard slot's size.");
+        }
+        if let Some(aspect) = layout.aspect
+            && !(aspect.is_finite() && (layout::ASPECTS.0..=layout::ASPECTS.1).contains(&aspect))
+        {
+            return Err(
+                "A wall's slots are from four times as tall as they are wide to four times as wide.",
+            );
+        }
+        if let Some(radius) = layout.radius {
+            if !(radius.is_finite() && (layout::LEAST_RADIUS..=LONGEST_RADIUS).contains(&radius)) {
+                return Err("A wall is curved at a radius from 1 m to 50 m.");
+            }
+            if wall.radius().is_none() {
+                return Err(
+                    "Curved that tightly, its slots would go around more than half a circle: curve it less, or give it fewer columns.",
+                );
+            }
+        }
+        let (width, height) = wall.size();
+        if width > WALL_SIZE.0 + 1e-3 || height > WALL_SIZE.1 + 1e-3 {
+            return Err(
+                "A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.",
+            );
+        }
+        Ok(())
+    }
+
+    /// Change the wall `wall` in `walls`' environment as `change` says: its grid, how large its slots are, whether it is
+    /// curved, and, for a wall an owner added, where it stands. The Tomori wall stays one row of at most
+    /// [`TOMORI_COLUMNS`], its slots its own size, where the environment puts it; an environment's own walls stay where
+    /// it puts them. A panel keeps its column and row, or, in one the wall no longer has, goes into its nearest free slot,
+    /// or else floats where it was: none is taken away. Returns whether that changed anything, or why it was refused.
+    pub(crate) fn set_wall(
+        &mut self,
+        walls: &Walls<'_>,
+        wall: &str,
+        change: WallChange,
+    ) -> Result<bool, &'static str> {
+        let Some(before) = self.shown_wall(walls, wall) else {
+            return Err("That wall is not here.");
+        };
+        let kind = before.kind;
+        let old = Layout {
+            grid: before.grid(),
+            scale: before.scale(),
+            aspect: before.aspect,
+            radius: before.radius(),
+        };
+        // A standard slot's shape, said, is none.
+        let aspect = change
+            .aspect
+            .unwrap_or(old.aspect)
+            .filter(|aspect| aspect.is_nan() || (aspect - layout::STANDARD_ASPECT).abs() > 1e-4);
+        let new = Layout {
+            grid: change.grid.unwrap_or(old.grid),
+            scale: change.scale.unwrap_or(old.scale),
+            aspect,
+            radius: change.radius.unwrap_or(old.radius),
+        };
+        let pose = match (change.pose, kind) {
+            (None, _) => before.pose,
+            (Some(pose), WallKind::Added) => {
+                valid(&pose).ok_or("A wall must stand within 20 m of the space's middle.")?
+            }
+            (Some(_), _) => return Err("Only a wall an owner added can be moved."),
+        };
+        if kind == WallKind::Tomori {
+            if new.grid.rows != 1 || new.grid.columns > TOMORI_COLUMNS {
+                return Err(
+                    "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.",
+                );
+            }
+            if new.scale != old.scale || new.aspect != old.aspect {
+                return Err(
+                    "The Tomori wall's slots stay their size, so that it stays clear of the swarm and the workers.",
+                );
+            }
+        }
+        let after = new.apply(Wall::new(wall, kind, pose));
+        Self::fits(&after, new)?;
+        if new == old && pose == before.pose {
+            return Ok(false);
+        }
+        let more = after.slots() as usize;
+        let fewer = before.slots() as usize;
+        if more > fewer {
+            self.has_room(walls, more - fewer)?;
+        }
+        // Kept as the Tomori wall's for the space, an environment wall's for the space in its environment, or the added
+        // wall's own.
+        match kind {
+            WallKind::Tomori => {
+                self.tomori_layout = (new != Layout::TOMORI).then_some(new);
+            }
+            WallKind::Environment => {
+                let layouts = &mut self.room(walls.environment).layouts;
+                if new == Layout::FLAT {
+                    layouts.remove(wall);
+                } else {
+                    layouts.insert(wall.to_owned(), new);
+                }
+            }
+            _ => {
+                let room = self.room(walls.environment);
+                let added = room
+                    .walls
+                    .iter_mut()
+                    .find(|added| added.id == wall)
+                    .expect("an added wall shown is kept");
+                added.layout = (new != Layout::FLAT).then_some(new);
+                added.pose = pose;
+            }
+        }
+        self.rearrange(walls, &before, &after);
+        Ok(true)
+    }
+
+    /// Put the panels on the wall `before` as it has become, `after`: each in the same column and row, or, in one it no
+    /// longer has, in its nearest free slot, those a participant put where they are first and then the newest, or else
+    /// floating where its slot was, facing as it faced.
+    fn rearrange(&mut self, walls: &Walls<'_>, before: &Wall, after: &Wall) {
+        let (old, new) = (before.grid(), after.grid());
+        let environment = walls.environment;
+        let list = self.list(environment, Some(&before.id));
+        let mut kept: Vec<u32> = Vec::new();
+        let mut displaced: Vec<(usize, (u32, u32))> = Vec::new();
+        for (index, panel) in list.iter_mut().enumerate() {
+            let Some(slot) = panel.slot_on(&before.id) else {
+                continue;
+            };
+            let (column, row) = old.cell(slot).unwrap_or((u32::MAX, u32::MAX));
+            match new.slot(column, row) {
+                Some(slot) => {
+                    panel.place = Placed::Wall {
+                        wall: before.id.clone(),
+                        slot,
+                    };
+                    kept.push(slot);
+                }
+                None => displaced.push((index, (column.min(old.columns), row.min(old.rows)))),
+            }
+        }
+        // Those a participant put where they are first, then the newest.
+        displaced.sort_by_key(|(index, _)| {
+            let panel = &list[*index];
+            (
+                !(panel.pinned || panel.arranged),
+                std::cmp::Reverse(panel.placed),
+            )
+        });
+        let mut floating = Vec::new();
+        for (index, (column, row)) in displaced {
+            let nearest = (0..new.slots())
+                .filter(|slot| !kept.contains(slot))
+                .min_by_key(|slot| {
+                    let (at, down) = new.cell(*slot).expect("a slot of the grid");
+                    let across = i64::from(at) - i64::from(column);
+                    let down = i64::from(down) - i64::from(row);
+                    (across * across + down * down, *slot)
+                });
+            let panel = &mut list[index];
+            match nearest {
+                Some(slot) => {
+                    panel.place = Placed::Wall {
+                        wall: before.id.clone(),
+                        slot,
+                    };
+                    kept.push(slot);
+                }
+                None => {
+                    let slot = old.slot(column, row).unwrap_or_default();
+                    floating.push((panel.id.clone(), before.slot_pose(slot)));
+                }
+            }
+        }
+        // Floating, a panel belongs to the environment, as one a participant leaves floating does; none is taken away.
+        for (id, pose) in floating {
+            let mut panel = self.take(environment, &id).expect("a panel on the wall");
+            panel.place = Placed::Free {
+                pose: pose.and_then(|pose| valid(&pose)).unwrap_or(before.pose),
+            };
+            panel.arranged = false;
+            panel.placed = self.tick();
+            self.list(environment, None).push(panel);
+        }
+    }
+
+    /// Remove the added wall `wall` from `walls`' environment, leaving each panel on it floating where its slot was,
+    /// facing as it faced. Returns why it was refused.
     pub(crate) fn remove_wall(
         &mut self,
-        environment: &str,
+        walls: &Walls<'_>,
         wall: &str,
     ) -> Result<(), &'static str> {
-        let room = self
+        let added = self
             .rooms
-            .get_mut(environment)
-            .filter(|room| room.walls.iter().any(|added| added.id == wall));
-        let Some(room) = room else {
+            .get(walls.environment)
+            .is_some_and(|room| room.walls.iter().any(|added| added.id == wall));
+        let shown = self.shown_wall(walls, wall).filter(|_| added);
+        let Some(shown) = shown else {
             return Err(if wall == TOMORI_WALL || wall.starts_with("environment-") {
                 "Only a wall an owner added can be removed."
             } else {
                 "That wall is not here."
             });
         };
+        let tick = self.tick();
+        let room = self.room(walls.environment);
         room.walls.retain(|added| added.id != wall);
-        room.panels.retain(|kept| kept.slot_on(wall).is_none());
+        for panel in &mut room.panels {
+            if let Some(slot) = panel.slot_on(wall) {
+                panel.place = Placed::Free {
+                    pose: shown
+                        .slot_pose(slot)
+                        .and_then(|pose| valid(&pose))
+                        .unwrap_or(shown.pose),
+                };
+                panel.arranged = false;
+                panel.placed = tick;
+            }
+        }
         Ok(())
     }
 
@@ -1067,9 +1485,10 @@ impl Stage {
         target: Target,
     ) -> Result<bool, &'static str> {
         let shown = |wall: &str| self.walls(walls).iter().any(|shown| shown.id == wall);
+        let slots = |wall: &str| self.slots_of(walls, wall);
         let target = match target {
             Target::Wall(wall) if shown(&wall) => Target::Wall(wall),
-            Target::Slot(wall, slot) if shown(&wall) && slot < WALL_SLOTS => {
+            Target::Slot(wall, slot) if shown(&wall) && slot < slots(&wall) => {
                 Target::Slot(wall, slot)
             }
             Target::Slot(wall, _) if shown(&wall) => return Err("That wall has no such slot."),
@@ -1097,17 +1516,19 @@ impl Stage {
                 Ok(pinned || changed)
             }
             Target::Wall(wall) => {
-                self.put_on(walls.environment, kept, &wall, true);
+                let slots = self.slots_of(walls, &wall);
+                self.put_on(walls.environment, kept, &wall, slots, true);
                 Ok(true)
             }
             Target::Slot(wall, slot) => {
                 let from = kept.place.clone();
-                self.put_in(walls.environment, kept, from, &wall, slot);
+                let slots = self.slots_of(walls, &wall);
+                self.put_in(walls.environment, kept, from, (&wall, slots), slot);
                 Ok(true)
             }
             Target::Free(pose) => {
                 let changed = pinned || kept.place != Placed::Free { pose };
-                self.float(walls.environment, kept, pose);
+                self.float(walls, kept, pose);
                 Ok(changed)
             }
         }
@@ -1268,6 +1689,11 @@ mod tests {
         }
     }
 
+    /// The walls of `environment`, with the Tomori wall as in Sky and none of its own.
+    fn room(environment: &str) -> Walls<'_> {
+        Walls { environment, ..SKY }
+    }
+
     const SKY: Walls<'static> = Walls {
         environment: "sky",
         tomori: Pose {
@@ -1339,7 +1765,7 @@ mod tests {
             ..SKY
         };
         let mut stage = Stage::default();
-        let added = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
+        let added = stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         // Nobody asked: the Tomori wall.
         stage.project(&walls, content("a"), None, 0);
         // Nearest the environment's wall, the added wall and the Tomori wall in turn.
@@ -1587,7 +2013,9 @@ mod tests {
     #[test]
     fn a_panel_put_in_a_slot_takes_it_and_changes_places_with_the_one_there() {
         let mut stage = Stage::default();
-        let added = stage.add_wall("sky", &pose(-2.0, -2.0)).unwrap();
+        let added = stage
+            .add_wall(&room("sky"), &pose(-2.0, -2.0), None)
+            .unwrap();
         let ids: Vec<String> = ["a", "b", "c"]
             .iter()
             .map(|title| stage.project(&SKY, content(title), None, 0))
@@ -1759,7 +2187,7 @@ mod tests {
         let mut stage = Stage::default();
         let one = stage.project(&SKY, content("one"), None, 10);
         let two = stage.project(&SKY, content("two"), None, 10);
-        let added = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
+        let added = stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         // Pulled off, it floats where it was left.
         let free = pose(0.5, -1.0);
         assert_eq!(stage.place(&SKY, &one, Target::Free(free)), Ok(true));
@@ -1873,7 +2301,7 @@ mod tests {
         };
         let mut stage = Stage::default();
         let on_tomori = stage.project(&SKY, content("tomori"), None, 0);
-        let wall = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
+        let wall = stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         let on_added = stage.project(&SKY, content("added"), Some([0.0, 1.5, 3.0]), 0);
         let floating = stage.project(&SKY, content("floating"), None, 0);
         stage
@@ -1896,7 +2324,7 @@ mod tests {
             Err("That panel is not here.")
         );
         assert_eq!(
-            stage.remove_wall("farmyard", &wall),
+            stage.remove_wall(&room("farmyard"), &wall),
             Err("That wall is not here.")
         );
         // A panel pulled off the Tomori wall in the farmyard stays in the farmyard.
@@ -1912,26 +2340,47 @@ mod tests {
     }
 
     #[test]
-    fn only_added_walls_are_removed_with_their_panels_and_their_number_is_bounded() {
+    fn only_added_walls_are_removed_their_panels_left_floating_and_their_number_is_bounded() {
         let mut stage = Stage::default();
         let walls: Vec<String> = (0..ADDED_WALLS)
-            .map(|index| stage.add_wall("sky", &pose(index as f32, 3.0)).unwrap())
+            .map(|index| {
+                stage
+                    .add_wall(&room("sky"), &pose(index as f32, 3.0), None)
+                    .unwrap()
+            })
             .collect();
         assert_eq!(
-            stage.add_wall("sky", &pose(0.0, 3.0)),
+            stage.add_wall(&room("sky"), &pose(0.0, 3.0), None),
             Err("This environment has as many added walls as it can take.")
         );
         assert_eq!(
-            stage.add_wall("farmyard", &pose(30.0, 3.0)),
+            stage.add_wall(&room("farmyard"), &pose(30.0, 3.0), None),
             Err("A wall must stand within 20 m of the space's middle.")
         );
         let on_it = stage.project(&SKY, content("on it"), Some([0.0, 1.5, 3.0]), 0);
         let elsewhere = stage.project(&SKY, content("elsewhere"), None, 0);
-        assert_eq!(stage.remove_wall("sky", &walls[0]), Ok(()));
+        let beside = Destination::Wall {
+            wall: walls[1].clone(),
+            slot: None,
+        };
+        let other = stage.project_to(&SKY, content("other"), &beside, 0);
+        let slot = stage
+            .view("s", &SKY, 0)
+            .wall(&walls[0])
+            .unwrap()
+            .slot_pose(0)
+            .unwrap();
+        assert_eq!(stage.remove_wall(&room("sky"), &walls[0]), Ok(()));
         let view = stage.view("s", &SKY, 0);
         assert!(view.wall(&walls[0]).is_none());
-        assert!(view.panel(&on_it).is_none());
-        assert!(view.panel(&elsewhere).is_some());
+        // The panel on it floats where its slot was, facing as it faced, rather than going with it.
+        assert_eq!(
+            view.panel(&on_it).unwrap().place,
+            Place::Free { pose: slot }
+        );
+        // Panels on other walls stay where they are.
+        assert_eq!(view.panel(&elsewhere).unwrap().place, on(TOMORI_WALL, 0));
+        assert_eq!(view.panel(&other).unwrap().place, on(&walls[1], 0));
         for (wall, error) in [
             (TOMORI_WALL, "Only a wall an owner added can be removed."),
             (
@@ -1940,10 +2389,10 @@ mod tests {
             ),
             (walls[0].as_str(), "That wall is not here."),
         ] {
-            assert_eq!(stage.remove_wall("sky", wall), Err(error));
+            assert_eq!(stage.remove_wall(&room("sky"), wall), Err(error));
         }
         // Removed, it makes room for another.
-        assert!(stage.add_wall("sky", &pose(0.0, 3.0)).is_ok());
+        assert!(stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).is_ok());
     }
 
     #[test]
@@ -1951,12 +2400,14 @@ mod tests {
         let mut stage = Stage::default();
         for index in 0..ROOMS {
             stage
-                .add_wall(&format!("e{index}"), &pose(0.0, 3.0))
+                .add_wall(&room(&format!("e{index}")), &pose(0.0, 3.0), None)
                 .unwrap();
         }
         // Visiting the first again keeps it.
-        stage.add_wall("e0", &pose(0.0, 3.0)).unwrap();
-        stage.add_wall("another", &pose(0.0, 3.0)).unwrap();
+        stage.add_wall(&room("e0"), &pose(0.0, 3.0), None).unwrap();
+        stage
+            .add_wall(&room("another"), &pose(0.0, 3.0), None)
+            .unwrap();
         assert_eq!(stage.rooms.len(), ROOMS);
         assert!(stage.rooms.contains_key("e0"));
         assert!(!stage.rooms.contains_key("e1"));
@@ -1966,7 +2417,9 @@ mod tests {
         let next = stage.next;
         stage.leave("unknown");
         assert_eq!(stage.next, next);
-        stage.add_wall("more", &pose(0.0, 3.0)).unwrap();
+        stage
+            .add_wall(&room("more"), &pose(0.0, 3.0), None)
+            .unwrap();
         assert!(stage.rooms.contains_key("e2"));
         assert!(!stage.rooms.contains_key("e3"));
     }
@@ -2005,7 +2458,7 @@ mod tests {
         assert!(hidden.contains(&"hidden-11"));
         assert!(stage.view("s", &SKY, 0).panel(&shown).is_some());
         // Every panel a space can show in one environment is fewer than the limit.
-        assert!(WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS) + FLOATING < PANELS);
+        const { assert!(SLOTS + FLOATING < PANELS) };
     }
 
     #[test]
@@ -2044,7 +2497,7 @@ mod tests {
         let [x, y, z, w] = upright(stage.view("s", &SKY, 0).panel(&id).unwrap().place.clone());
         assert!(x == 0.0 && z == 0.0 && y.abs() < 1e-5 && (w.abs() - 1.0).abs() < 1e-5);
         // A wall too.
-        let wall = stage.add_wall("sky", &tilted).unwrap();
+        let wall = stage.add_wall(&room("sky"), &tilted, None).unwrap();
         let shown = stage.view("s", &SKY, 0);
         let [x, _, z, _] = shown.wall(&wall).unwrap().pose.orientation;
         assert!(x == 0.0 && z == 0.0);
@@ -2087,7 +2540,7 @@ mod tests {
             .map(|index| pose(index as f32 - 3.0, 5.0))
             .collect();
         for pose in &added {
-            stage.add_wall("sky", pose).unwrap();
+            stage.add_wall(&walls, pose, None).unwrap();
         }
         let near = std::iter::once(None).chain(
             declared
@@ -2280,7 +2733,7 @@ mod tests {
             .map(|index| pose(index as f32 - 3.0, 5.0))
             .collect();
         for pose in &added {
-            stage.add_wall("sky", pose).unwrap();
+            stage.add_wall(&walls, pose, None).unwrap();
         }
         let near = std::iter::once(None).chain(
             declared
@@ -2399,7 +2852,7 @@ mod tests {
             stage.describe(&SKY, &id, None, 1_130).unwrap(),
             "panel \"Build status\" (on the Tomori wall, projected 2 minutes ago; source: \"CI\")"
         );
-        let wall = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
+        let wall = stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         stage.place(&SKY, &id, Target::Wall(wall)).unwrap();
         assert!(
             stage
@@ -2469,7 +2922,7 @@ mod tests {
         let mut stage = Stage::default();
         assert!(stage.is_empty());
         let id = stage.project(&SKY, content("kept"), None, 5);
-        stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
+        stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         let floating = stage.project(&SKY, content("floating"), None, 5);
         stage
             .place(&SKY, &floating, Target::Free(pose(0.0, -1.0)))
@@ -2744,5 +3197,555 @@ mod tests {
                 .unwrap()
                 .contains("item")
         );
+    }
+
+    fn grid(columns: u32, rows: u32) -> WallChange {
+        WallChange {
+            grid: Some(Grid::new(columns, rows).unwrap()),
+            ..WallChange::default()
+        }
+    }
+
+    /// Where each panel shown is, by title, sorted by title.
+    fn by_title(stage: &Stage, walls: &Walls<'_>) -> Vec<(String, Place)> {
+        let mut shown = shown(stage, walls);
+        shown.sort_by(|a, b| a.0.cmp(&b.0));
+        shown
+    }
+
+    #[test]
+    fn a_wall_four_wide_and_one_high_holds_four_panels_and_none_past_its_last() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        assert_eq!(stage.set_wall(&SKY, &wall, grid(4, 1)), Ok(true));
+        // Already so, it changes nothing.
+        assert_eq!(stage.set_wall(&SKY, &wall, grid(4, 1)), Ok(false));
+        let view = stage.view("s", &SKY, 0);
+        let shown = view.wall(&wall).unwrap();
+        assert_eq!((shown.grid(), shown.slots()), (Grid::new(4, 1).unwrap(), 4));
+        // Said on the wire, as a flat wall of its own grid.
+        assert_eq!(shown.grid, Some(Grid::new(4, 1).unwrap()));
+        let near = Some([0.0, 1.5, 3.0]);
+        for index in 0..4 {
+            stage.project(&SKY, content(&format!("p{index}")), near, 0);
+        }
+        let slots: Vec<Place> = by_title(&stage, &SKY)
+            .into_iter()
+            .map(|(_, place)| place)
+            .collect();
+        assert_eq!(
+            slots,
+            (0..4).map(|slot| on(&wall, slot)).collect::<Vec<_>>()
+        );
+        // A fifth replaces the oldest, as on any full wall, and a slot past the last is refused.
+        stage.project(&SKY, content("p4"), near, 0);
+        assert_eq!(stage.view("s", &SKY, 0).panels.len(), 4);
+        let panel = stage.view("s", &SKY, 0).panels[0].id.clone();
+        assert_eq!(
+            stage.place(&SKY, &panel, Target::Slot(wall.clone(), 4)),
+            Err("That wall has no such slot.")
+        );
+        // An unchanged wall says neither grid nor scale, as an older server's walls do not.
+        let plain = stage.add_wall(&SKY, &pose(3.0, 3.0), None).unwrap();
+        let view = stage.view("s", &SKY, 0);
+        let plain = view.wall(&plain).unwrap();
+        assert_eq!((plain.grid, plain.scale), (None, None));
+    }
+
+    #[test]
+    fn panels_keep_their_column_and_row_and_those_a_grid_loses_go_to_the_nearest_free_slot_or_float()
+     {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let near = Some([0.0, 1.5, 3.0]);
+        for title in ["a", "b", "c", "d"] {
+            stage.project(&SKY, content(title), near, 0);
+        }
+        let ids: BTreeMap<String, String> = stage
+            .view("s", &SKY, 0)
+            .panels
+            .into_iter()
+            .map(|panel| (panel.title, panel.id))
+            .collect();
+        // b, put in the top row's last slot by a participant, changes places with c: a, c and b along the top, d below.
+        assert_eq!(
+            stage.place(&SKY, &ids["b"], Target::Slot(wall.clone(), 2)),
+            Ok(true)
+        );
+        // Four columns: each keeps its column and row, so d, below on the left, is numbered anew.
+        stage.set_wall(&SKY, &wall, grid(4, 2)).unwrap();
+        let expect = |slots: [Place; 4]| -> Vec<(String, Place)> {
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|title| title.to_string())
+                .zip(slots)
+                .collect()
+        };
+        assert_eq!(
+            by_title(&stage, &SKY),
+            expect([on(&wall, 0), on(&wall, 2), on(&wall, 1), on(&wall, 4)])
+        );
+        // One row of four: d loses its row, and goes into the free slot nearest it.
+        stage.set_wall(&SKY, &wall, grid(4, 1)).unwrap();
+        assert_eq!(
+            by_title(&stage, &SKY),
+            expect([on(&wall, 0), on(&wall, 2), on(&wall, 1), on(&wall, 3)])
+        );
+        // Two columns, with a dismissed: b and d lose theirs, b, which a participant put where it is, first, into the
+        // only free slot, though d is newer, and d floats where its slot was, facing as it faced.
+        stage.dismiss("sky", &ids["a"]).unwrap();
+        let before = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
+        stage.set_wall(&SKY, &wall, grid(2, 1)).unwrap();
+        let after = by_title(&stage, &SKY);
+        assert_eq!(after[0], ("b".into(), on(&wall, 0)));
+        assert_eq!(after[1], ("c".into(), on(&wall, 1)));
+        assert_eq!(
+            after[2].1,
+            Place::Free {
+                pose: before.slot_pose(3).unwrap()
+            }
+        );
+        // Nothing was taken away, and the change is kept across a restart.
+        assert_eq!(after.len(), 3);
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept.view("s", &SKY, 0), stage.view("s", &SKY, 0));
+    }
+
+    #[test]
+    fn panels_a_wall_gives_up_float_beyond_the_limit_and_the_walls_grow_again_only_while_they_hold()
+    {
+        let mut stage = Stage::default();
+        let walls: Vec<String> = (0..ADDED_WALLS)
+            .map(|index| {
+                stage
+                    .add_wall(&SKY, &pose(index as f32 * 3.0 - 9.0, 6.0), None)
+                    .unwrap()
+            })
+            .collect();
+        // The Tomori wall's six and six walls of twelve, as many slots as there can be; three walls full, and twelve
+        // panels floating.
+        for wall in &walls {
+            stage.set_wall(&SKY, wall, grid(4, 3)).unwrap();
+        }
+        for wall in &walls[..3] {
+            for index in 0..12 {
+                let to = Destination::Wall {
+                    wall: wall.clone(),
+                    slot: None,
+                };
+                stage.project_to(&SKY, content(&format!("{wall}-{index}")), &to, 0);
+            }
+        }
+        for index in 0..FLOATING {
+            let id = stage.project(&SKY, content(&format!("f{index}")), None, 0);
+            stage
+                .place(&SKY, &id, Target::Free(pose(index as f32 - 6.0, 0.0)))
+                .unwrap();
+        }
+        // Each of the three down to one slot, the other 33 float beside the twelve already floating: none is taken away.
+        for wall in &walls[..3] {
+            stage.set_wall(&SKY, wall, grid(1, 1)).unwrap();
+        }
+        assert_eq!(stage.floating("sky"), FLOATING + 33);
+        assert_eq!(stage.view("s", &SKY, 0).panels.len(), 36 + FLOATING);
+        // The walls' slots and the panels floating stay within the limits together, so a wall grows again only once some
+        // are put back or thrown away.
+        let refused = "Too many panels float here to give the walls more slots: put some on a wall or throw some away first.";
+        assert_eq!(stage.set_wall(&SKY, &walls[0], grid(2, 1)), Err(refused));
+        assert_eq!(
+            stage.add_wall(&SKY, &pose(0.0, 3.0), None),
+            Err("This environment has as many added walls as it can take.")
+        );
+        let floating: Vec<String> = stage
+            .view("s", &SKY, 0)
+            .panels
+            .into_iter()
+            .filter(|panel| matches!(panel.place, Place::Free { .. }))
+            .map(|panel| panel.id)
+            .collect();
+        stage.dismiss("sky", &floating[0]).unwrap();
+        assert_eq!(stage.set_wall(&SKY, &walls[0], grid(2, 1)), Ok(true));
+        let shown = stage.view("s", &SKY, 0);
+        let slots: u32 = shown.walls.iter().map(Wall::slots).sum();
+        assert_eq!(slots as usize + stage.floating("sky"), SLOTS + FLOATING);
+        // Leaving another floating takes away the one floating longest, as ever, of the first twelve.
+        let id = stage.project(&SKY, content("late"), None, 0);
+        stage
+            .place(&SKY, &id, Target::Free(pose(0.0, -1.0)))
+            .unwrap();
+        assert!(
+            by_title(&stage, &SKY)
+                .iter()
+                .all(|(title, _)| title != "f0")
+        );
+        assert_eq!(stage.floating("sky"), FLOATING + 32);
+    }
+
+    #[test]
+    fn the_tomori_wall_changes_within_its_limits_for_the_space_in_every_environment() {
+        let mut stage = Stage::default();
+        let farmyard = Walls {
+            environment: "farmyard",
+            ..SKY
+        };
+        assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, grid(4, 1)), Ok(true));
+        let flat = WallChange {
+            radius: Some(None),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, flat), Ok(true));
+        for walls in [&SKY, &farmyard] {
+            let view = stage.view("s", walls, 0);
+            let tomori = &view.walls[0];
+            assert_eq!((tomori.slots(), tomori.radius()), (4, None));
+            assert_eq!(tomori.scale(), layout::ARC_SCALE);
+        }
+        for (change, error) in [
+            (
+                grid(7, 1),
+                "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.",
+            ),
+            (
+                grid(3, 2),
+                "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.",
+            ),
+            (
+                WallChange {
+                    scale: Some(1.0),
+                    ..WallChange::default()
+                },
+                "The Tomori wall's slots stay their size, so that it stays clear of the swarm and the workers.",
+            ),
+            (
+                WallChange {
+                    pose: Some(pose(0.0, 1.0)),
+                    ..WallChange::default()
+                },
+                "Only a wall an owner added can be moved.",
+            ),
+        ] {
+            assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, change), Err(error));
+        }
+        // Curved again as it was, it keeps nothing of its own.
+        let back = WallChange {
+            grid: Some(layout::ARC_GRID),
+            radius: Some(Some(ARC_RADIUS)),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, back), Ok(true));
+        assert!(stage.is_empty());
+    }
+
+    #[test]
+    fn an_environment_s_walls_change_for_the_space_in_that_environment_but_stay_where_it_puts_them()
+    {
+        let declared = [pose(-3.0, -3.0)];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let farmyard = Walls {
+            environment: "farmyard",
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let curved = WallChange {
+            grid: Some(Grid::new(4, 1).unwrap()),
+            scale: Some(1.5),
+            aspect: None,
+            radius: Some(Some(4.0)),
+            pose: None,
+        };
+        assert_eq!(stage.set_wall(&walls, "environment-0", curved), Ok(true));
+        let view = stage.view("s", &walls, 0);
+        let wall = view.wall("environment-0").unwrap();
+        assert_eq!(
+            (wall.slots(), wall.scale(), wall.radius()),
+            (4, 1.5, Some(4.0))
+        );
+        assert_eq!(wall.pose, declared[0]);
+        // Another environment's wall of the same identity is its own.
+        assert_eq!(
+            stage
+                .view("s", &farmyard, 0)
+                .wall("environment-0")
+                .unwrap()
+                .slots(),
+            6
+        );
+        assert_eq!(
+            stage.set_wall(
+                &walls,
+                "environment-0",
+                WallChange {
+                    pose: Some(pose(0.0, 0.0)),
+                    ..WallChange::default()
+                }
+            ),
+            Err("Only a wall an owner added can be moved.")
+        );
+        assert_eq!(
+            stage.set_wall(&walls, "environment-5", grid(1, 1)),
+            Err("That wall is not here.")
+        );
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept.view("s", &walls, 0).walls, view.walls);
+        // Laid out again as the environment's walls are by default, the space keeps nothing of its own for it.
+        let back = WallChange {
+            grid: Some(layout::FLAT_GRID),
+            scale: Some(1.0),
+            aspect: None,
+            radius: Some(None),
+            pose: None,
+        };
+        assert_eq!(stage.set_wall(&walls, "environment-0", back), Ok(true));
+        assert!(stage.rooms["sky"].layouts.is_empty());
+    }
+
+    #[test]
+    fn a_wall_s_slots_take_any_shape_kept_with_the_space_their_panels_staying_and_within_bounds() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let id = stage.project(&SKY, content("on it"), Some([0.0, 1.5, 3.0]), 0);
+        let shaped = |aspect: Option<Option<f32>>| WallChange {
+            aspect,
+            ..WallChange::default()
+        };
+        // Tall slots, three across and one down: as wide as before, taller, their text the same size.
+        let tall = WallChange {
+            grid: Some(Grid::new(3, 1).unwrap()),
+            aspect: Some(Some(9.0 / 16.0)),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, tall), Ok(true));
+        let view = stage.view("s", &SKY, 0);
+        let shown = view.wall(&wall).unwrap();
+        assert_eq!((shown.slots(), shown.scale()), (3, 1.0));
+        let (width, height) = shown.slot_size();
+        assert!(
+            (width - layout::SLOT_SIZE.0).abs() < 1e-5 && (width / height - 0.5625).abs() < 1e-4
+        );
+        assert_eq!(view.panel(&id).unwrap().place, on(&wall, 0));
+        // Kept across a restart, and sent as it is kept.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept.view("s", &SKY, 0).walls, view.walls);
+        let json = serde_json::to_value(&view.walls).unwrap();
+        assert_eq!(json[1]["aspect"], 0.5625);
+        // The same shape again changes nothing; its size alone keeps its shape.
+        assert_eq!(
+            stage.set_wall(&SKY, &wall, shaped(Some(Some(0.5625)))),
+            Ok(false)
+        );
+        let bigger = WallChange {
+            scale: Some(1.5),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, bigger), Ok(true));
+        let shown = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
+        assert!((shown.aspect() - 0.5625).abs() < 1e-6 && shown.scale() == 1.5);
+        // Beyond its bounds, or nonsense, it is refused and nothing changes.
+        for aspect in [0.1, 5.0, f32::NAN, -1.0] {
+            assert_eq!(
+                stage.set_wall(&SKY, &wall, shaped(Some(Some(aspect)))),
+                Err(
+                    "A wall's slots are from four times as tall as they are wide to four times as wide."
+                )
+            );
+        }
+        // Too tall a wall of them is refused too.
+        let towering = WallChange {
+            grid: Some(Grid::new(1, 4).unwrap()),
+            aspect: Some(Some(0.25)),
+            ..WallChange::default()
+        };
+        assert_eq!(
+            stage.set_wall(&SKY, &wall, towering),
+            Err("A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.")
+        );
+        // A standard slot's shape, said or as 0, is kept as none.
+        assert_eq!(
+            WallChange::new(None, None, Some(0.0), None, None).unwrap(),
+            shaped(Some(None))
+        );
+        assert_eq!(stage.set_wall(&SKY, &wall, shaped(Some(None))), Ok(true));
+        assert_eq!(stage.view("s", &SKY, 0).wall(&wall).unwrap().aspect, None);
+        let standard = shaped(Some(Some(layout::STANDARD_ASPECT)));
+        assert_eq!(stage.set_wall(&SKY, &wall, standard), Ok(false));
+        // The Tomori wall's slots keep their shape.
+        assert_eq!(
+            stage.set_wall(&SKY, TOMORI_WALL, shaped(Some(Some(0.5)))),
+            Err(
+                "The Tomori wall's slots stay their size, so that it stays clear of the swarm and the workers."
+            )
+        );
+        // A stage kept before slots had shapes reads as standard ones.
+        let older: Layout =
+            serde_json::from_value(serde_json::json!({"grid": [3, 2], "scale": 1.0})).unwrap();
+        assert_eq!(older, Layout::FLAT);
+    }
+
+    #[test]
+    fn an_added_wall_moves_with_its_panels_and_is_made_upright() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let id = stage.project(&SKY, content("on it"), Some([0.0, 1.5, 3.0]), 0);
+        let tilted = Pose {
+            position: [2.0, 1.4, 4.0],
+            orientation: [0.2, 0.0, 0.0, 0.98],
+        };
+        let change = WallChange {
+            pose: Some(tilted),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, change), Ok(true));
+        let view = stage.view("s", &SKY, 0);
+        let moved = view.wall(&wall).unwrap();
+        assert_eq!(moved.pose.position, tilted.position);
+        assert!(moved.pose.orientation[0].abs() < 1e-6 && moved.pose.orientation[2].abs() < 1e-6);
+        assert_eq!(view.panel(&id).unwrap().place, on(&wall, 0));
+        let far = WallChange {
+            pose: Some(pose(30.0, 0.0)),
+            ..WallChange::default()
+        };
+        assert_eq!(
+            stage.set_wall(&SKY, &wall, far),
+            Err("A wall must stand within 20 m of the space's middle.")
+        );
+    }
+
+    #[test]
+    fn a_wall_is_refused_a_grid_size_or_curve_it_cannot_have() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let change = |grid: Option<(u32, u32)>, scale: Option<f32>, radius: Option<Option<f32>>| {
+            WallChange {
+                grid: grid.map(Grid::from),
+                scale,
+                aspect: None,
+                radius,
+                pose: None,
+            }
+        };
+        for (change, error) in [
+            (
+                change(Some((9, 1)), None, None),
+                "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+            ),
+            (
+                change(Some((8, 4)), None, None),
+                "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+            ),
+            (
+                change(Some((0, 1)), None, None),
+                "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
+            ),
+            (
+                change(None, Some(2.5), None),
+                "A wall's slots are from half to twice a standard slot's size.",
+            ),
+            (
+                change(None, Some(f32::NAN), None),
+                "A wall's slots are from half to twice a standard slot's size.",
+            ),
+            (
+                change(None, None, Some(Some(0.5))),
+                "A wall is curved at a radius from 1 m to 50 m.",
+            ),
+            (
+                change(None, None, Some(Some(80.0))),
+                "A wall is curved at a radius from 1 m to 50 m.",
+            ),
+            (
+                change(Some((8, 1)), None, Some(Some(1.0))),
+                "Curved that tightly, its slots would go around more than half a circle: curve it less, or give it fewer columns.",
+            ),
+            (
+                change(Some((8, 3)), Some(2.0), None),
+                "A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.",
+            ),
+        ] {
+            assert_eq!(stage.set_wall(&SKY, &wall, change), Err(error));
+        }
+        assert_eq!(
+            stage.set_wall(&SKY, "wall-99", grid(1, 1)),
+            Err("That wall is not here.")
+        );
+        assert_eq!(
+            WallChange::new(None, None, None, Some(WallShape::Unknown), None),
+            Err("Tomori does not know that shape of wall.")
+        );
+        assert_eq!(
+            WallChange::new(None, Some(1.5), Some(0.0), Some(WallShape::Grid), None),
+            Ok(WallChange {
+                scale: Some(1.5),
+                aspect: Some(None),
+                radius: Some(None),
+                ..WallChange::default()
+            })
+        );
+        // Nothing refused changed anything.
+        assert_eq!(stage.view("s", &SKY, 0).wall(&wall).unwrap().grid, None);
+    }
+
+    #[test]
+    fn the_walls_in_one_environment_hold_at_most_so_many_slots_together() {
+        let mut stage = Stage::default();
+        let walls: Vec<String> = (0..ADDED_WALLS)
+            .map(|index| {
+                stage
+                    .add_wall(&SKY, &pose(index as f32 - 3.0, 3.0), None)
+                    .unwrap()
+            })
+            .collect();
+        // The Tomori wall's six and six walls of twelve make 78.
+        for wall in &walls {
+            assert_eq!(stage.set_wall(&SKY, wall, grid(4, 3)), Ok(true));
+        }
+        assert_eq!(stage.slots_shown(&SKY), SLOTS);
+        assert_eq!(
+            stage.set_wall(&SKY, &walls[0], grid(5, 3)),
+            Err(
+                "The walls here hold as many slots as they can together: make another wall smaller first."
+            )
+        );
+        // Made smaller, another may grow.
+        stage.set_wall(&SKY, &walls[1], grid(2, 3)).unwrap();
+        assert_eq!(stage.set_wall(&SKY, &walls[0], grid(6, 3)), Ok(true));
+        // A new wall is refused while the walls hold as many as they can: the Tomori wall's six and three of 24.
+        let mut more = Stage::default();
+        for index in 0..3 {
+            let wall = more
+                .add_wall(&SKY, &pose(index as f32 * 5.0 - 5.0, 3.0), None)
+                .unwrap();
+            more.set_wall(&SKY, &wall, grid(6, 4)).unwrap();
+        }
+        assert_eq!(more.slots_shown(&SKY), SLOTS);
+        assert_eq!(
+            more.add_wall(&SKY, &pose(5.0, 3.0), None),
+            Err(
+                "The walls here hold as many slots as they can together: make another wall smaller first."
+            )
+        );
+        // Added laid out as asked, a wall is kept so.
+        let mut laid = Stage::default();
+        let layout = Layout {
+            grid: Grid::new(4, 1).unwrap(),
+            scale: 1.2,
+            aspect: None,
+            radius: Some(3.0),
+        };
+        let wall = laid.add_wall(&SKY, &pose(0.0, 3.0), Some(layout)).unwrap();
+        let view = laid.view("s", &SKY, 0);
+        let shown = view.wall(&wall).unwrap();
+        assert_eq!(
+            (shown.slots(), shown.scale(), shown.radius()),
+            (4, 1.2, Some(3.0))
+        );
+        let bad = Layout {
+            grid: Grid::from((9, 9)),
+            ..layout
+        };
+        assert!(laid.add_wall(&SKY, &pose(0.0, 3.0), Some(bad)).is_err());
     }
 }

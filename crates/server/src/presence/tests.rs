@@ -4,7 +4,9 @@
 use super::*;
 use std::f32::consts::FRAC_1_SQRT_2;
 
-use tomori_protocol::{Code, Hand, Joint, TOMORI_WALL, WallShape};
+use tomori_protocol::{Code, Grid, Hand, Joint, TOMORI_WALL, WALL_SLOTS, WallShape};
+
+const ARC_SCALE: f32 = layout::ARC_SCALE;
 
 /// A pose at `position` whose -Z, the way a head looks or a controller points, faces `target`.
 fn looking(position: Vec3, target: Vec3) -> Pose {
@@ -116,6 +118,45 @@ fn a_flat_wall_s_slots_stand_in_three_columns_of_two_rows_in_its_plane() {
 }
 
 #[test]
+fn a_wall_of_any_grid_has_a_slot_for_each_of_its_columns_and_rows_as_clients_lay_it_out() {
+    let wide = Wall::new(
+        "wall-1",
+        WallKind::Added,
+        Pose::upright_facing([0.0, 1.5, -2.0], [0.0, 1.5, 0.0]),
+    )
+    .with_grid(Grid::new(4, 1).unwrap())
+    .with_scale(1.5);
+    let centres = slot_centres(&wide);
+    assert_eq!(centres.len(), 4);
+    // In one row, at the wall's height, left to right, a scaled slot and gutter apart.
+    assert!(
+        centres
+            .iter()
+            .all(|centre| (centre[1] - centres[0][1]).abs() < 1e-5)
+    );
+    let pitch = (layout::SLOT_SIZE.0 + layout::GUTTER) * 1.5;
+    assert!(
+        centres
+            .windows(2)
+            .all(|pair| (pair[1][0] - pair[0][0] - pitch).abs() < 1e-4)
+    );
+    // Each slot is a scaled panel, and the board as wide as the wall says.
+    let slots = slots(&wide);
+    assert!((slots[0].half.0 * 2.0 - layout::SLOT_SIZE.0 * 1.5).abs() < 1e-5);
+    let (_, board) = surfaces(&wide);
+    assert!((board.unwrap().half.0 * 2.0 - wide.size().0).abs() < 1e-5);
+    // Curved, it has no board, and its two rows stand one above the other.
+    let curved = wide
+        .clone()
+        .with_shape(WallShape::Arc { radius: 3.0 })
+        .with_grid(Grid::new(3, 2).unwrap());
+    let (slots, board) = surfaces(&curved);
+    assert!(board.is_none());
+    assert_eq!(slots.len(), 6);
+    assert!(slots[0].middle[1] > slots[3].middle[1]);
+}
+
+#[test]
 fn a_curved_wall_s_slots_stand_along_its_arc_each_facing_home() {
     let wall = tomori();
     let slots = slots(&wall);
@@ -143,7 +184,7 @@ fn a_curved_wall_s_slots_stand_along_its_arc_each_facing_home() {
     assert!((slots[0].middle[0] + slots[5].middle[0]).abs() < 1e-4);
     // A shape too tight to draw curved is drawn flat, as clients do.
     let tight = tomori().with_shape(WallShape::Arc { radius: 0.5 });
-    assert!(arc(&tight).is_none());
+    assert!(tight.radius().is_none());
     assert_eq!(
         slot_centres(&tight),
         slot_centres(&Wall::new(TOMORI_WALL, WallKind::Tomori, tight.pose))
@@ -236,7 +277,7 @@ fn a_ray_meets_the_nearest_panel_slot_wall_or_person_along_it() {
     assert_eq!(at(looking(home, [0.0, 9.0, 0.0]), &[]), None);
     // A ray along a wall's plane never meets it.
     assert!(
-        Rectangle::at(&right_wall().pose, [0.0; 3], FLAT_WALL)
+        Rectangle::at(&right_wall().pose, [0.0; 3], right_wall().board().unwrap())
             .meets([3.0, 1.5, 5.0], [0.0, 0.0, -1.0])
             .is_none()
     );
