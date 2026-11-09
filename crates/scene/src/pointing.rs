@@ -21,11 +21,11 @@ pub struct Beam {
 }
 
 /// A pull starts once the trigger passes this, and attracts the swarm when it does not choose.
-const PULL: f32 = 0.2;
+pub(crate) const PULL: f32 = 0.2;
 /// A pull that began on a target chooses it once the trigger passes this.
-const PRESS: f32 = 0.55;
+pub(crate) const PRESS: f32 = 0.55;
 /// A pull ends once the trigger falls below this, so a trigger resting near [`PULL`] does not flicker.
-const RELEASE: f32 = 0.1;
+pub(crate) const RELEASE: f32 = 0.1;
 
 /// A half-line in scene coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]

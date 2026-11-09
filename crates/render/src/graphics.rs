@@ -148,7 +148,7 @@ pub struct Renderer {
     panels: crate::ui_panel::Pipeline,
     /// Image panels' images, drawn over their faces. See `design/projection.md`.
     images: crate::panel_images::PanelImages,
-    glyphs: crate::glyphs::Glyphs,
+    glyphs: crate::glyphs::SharedGlyphs,
 }
 
 impl Renderer {
@@ -297,22 +297,22 @@ impl Renderer {
         let depth = Self::depth_views(device, width, height, samples);
         let multisampled = Self::multisampled_views(device, format, width, height, samples);
         let controllers = Controllers::new(device, queue, format, &camera_layout, samples);
-        let glyphs = crate::glyphs::Glyphs::new(device);
+        let glyphs = crate::glyphs::SharedGlyphs::new(device);
         let workspace = crate::workspace_graphics::WorkspaceGraphics::new(
             device,
             format,
             &camera_layout,
-            &glyphs,
+            glyphs.glyphs(),
             samples,
         );
         let arrival = crate::arrival_graphics::ArrivalLabels::new(
             device,
             format,
             &camera_layout,
-            &glyphs,
+            glyphs.glyphs(),
             samples,
         );
-        let panels = crate::ui_panel::Pipeline::new(device, format, &glyphs, samples);
+        let panels = crate::ui_panel::Pipeline::shared(device, format, &glyphs, samples);
         let images =
             crate::panel_images::PanelImages::new(device, format, samples, panels.transforms());
         let blink_pipeline = blink_pipeline(device, format, samples);
@@ -323,14 +323,15 @@ impl Renderer {
             landing: None,
             blink: 0.0,
             blink_pipeline,
-            sceneries: sceneries.create(&crate::scenery::Target {
+            sceneries: sceneries.create(&crate::scenery::Target::new(
                 device,
                 queue,
                 format,
                 width,
                 height,
                 samples,
-            }),
+                glyphs.clone(),
+            )),
             environments: sceneries.environments(),
             pipeline,
             vertices,
@@ -367,6 +368,12 @@ impl Renderer {
     /// The images drawn over image panels, and their textures.
     pub fn images(&mut self) -> &mut crate::panel_images::PanelImages {
         &mut self.images
+    }
+
+    /// The atlas its sceneries are given, for tests that check they share it.
+    #[cfg(test)]
+    pub(crate) fn shared_glyphs(&self) -> &crate::glyphs::SharedGlyphs {
+        &self.glyphs
     }
 
     /// A panel drawn by this renderer's scene pass, holding at most `capacity` vertices.
@@ -661,7 +668,7 @@ impl Renderer {
         assert_eq!(targets.len(), matrices.len());
         assert!((1..=2).contains(&targets.len()));
         // The glyphs that this frame's meshes were built with, which may be new.
-        self.glyphs.sync(device, queue);
+        self.glyphs.glyphs().sync(device, queue);
         let glyphs = self.glyphs.binding();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("swarm frame"),
@@ -670,7 +677,8 @@ impl Renderer {
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
-                scenery.prepare(queue, eye, scene_to_clip);
+                let position = crate::scenery::eye(scene_to_clip);
+                scenery.prepare_eye(queue, eye, scene_to_clip, position);
                 scenery.encode(&mut encoder, eye);
             }
             // Separate buffers are important: two writes to one buffer before

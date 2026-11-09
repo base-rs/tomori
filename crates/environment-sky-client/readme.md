@@ -36,7 +36,9 @@ clock, random seed or animation phase needs synchronizing yet.
 1. Create `Sky::new(device, queue, color_format, width, height)` once per
    device/target format. Call `resize` when the render target dimensions change.
 2. Before drawing, call `prepare_eye(queue, eye, scene_to_clip)` with the full
-   projection × view × scene-anchor transform. Eye indices are 0 or 1.
+   projection × view × scene-anchor transform. Eye indices are 0 or 1. This is
+   `Sky`'s own method, which differs from the `Scenery::prepare_eye` trait method,
+   which also takes the eye's position and which, by default, calls `prepare`.
 3. Call `encode_clouds(encoder, eye)` to render that eye's low-resolution cloud
    texture, before beginning the main render pass.
 4. Call `draw(pass, eye)` before application content in a pass with a cleared

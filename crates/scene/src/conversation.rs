@@ -40,6 +40,48 @@ pub const MICROPHONE_REQUEST: &str = "Waiting for microphone permission...";
 /// How long B must be held to leave a space, so that a press meant for something else never leaves. See `design/interaction.md`.
 pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
 
+/// Whose a press of B is, declared in B's order, which their ordering follows: each rung takes it only if none before it
+/// wants it, so that B never reaches what is further down, the environment's client side above all, while something of
+/// Tomori's own is carried, open or pointed at. The frame step decides the first three, which the conversation does
+/// not hold, and [`Conversation::back_or_environment`] the rest, in this order, each rung acting as it takes B; holding
+/// B to leave starts with any press but one on a panel carried. A new use of B is a new rung, declared where it
+/// belongs: a wall carried, which a quick press removes, and a wall taken hold of, which a press lets go of, are to
+/// follow [`Back::Carried`] in that order, before [`Back::Pinned`]. See `design/interaction.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Back {
+    /// A projected panel carried with the grip, which a quick press throws away.
+    Carried,
+    /// A wall carried with the grip, which a quick press removes, for an owner, asking again when it holds panels.
+    CarriedWall,
+    /// A wall taken hold of but not carried, whose handles show, which it lets go of.
+    HeldWall,
+    /// The hand menu pinned with Y, which it lets go of.
+    Pinned,
+    /// The right wrist's transcript, while it shows with something to back out of, such as a turn in focus or a problem.
+    Wrist,
+    /// The list of the agent's modes, which it closes.
+    Modes,
+    /// A selected queue entry, which it lets go of.
+    Queued,
+    /// Waiting for a new name, which it stops.
+    Naming,
+    /// The card saying no speech was heard, which it takes away.
+    Unheard,
+    /// This participant's own problem, which it dismisses.
+    Problem,
+    /// The space's ongoing problem, which it dismisses.
+    SpaceProblem,
+    /// A projected panel pointed at, which the notice says how to throw away.
+    Panel,
+    /// The environment's client side, its selectable object pointed at.
+    Environment,
+    /// Nothing: the notice says that holding B leaves.
+    Nothing,
+    /// Outside a space, where it dismisses what the lobby shows or goes back.
+    Lobby,
+}
+
 /// How briefly B must be pressed, and let go, while a panel is carried to throw it away, so that a hold never does. See
 /// `design/projection.md`.
 pub const DISMISS_PRESS: Duration = Duration::from_millis(400);
@@ -3010,42 +3052,57 @@ impl Conversation {
 
     /// B: in a space, close what is open, or dismiss the problem shown; it never decides an approval, cancels input or leaves, which takes holding it (see [`Self::hold_back`]). In the lobby, dismiss what is shown or return to the server list.
     pub fn back(&mut self) {
+        self.back_or_environment(false);
+    }
+
+    /// B, as [`Self::back`], while the environment's client side is in focus, its selectable object pointed at, or not: in a space with nothing of its own to close or dismiss, B is then the client side's, [`Back::Environment`], in place of the notice that holding it leaves. Returns whose it was, of the rungs from [`Back::Modes`] on, in their order. See `design/interaction.md`.
+    pub fn back_or_environment(&mut self, environment: bool) -> Back {
         self.jumping = false;
         match self.mode {
-            Mode::Servers => {}
+            Mode::Servers => Back::Lobby,
             Mode::Lobby if self.dismissable() => {
                 self.error = None;
                 self.ended = None;
+                Back::Lobby
             }
             // At the spaces there is nothing to return from, so go to the server list.
-            Mode::Lobby if self.step == LobbyStep::Spaces => self.leave_server(),
-            Mode::Lobby => self.back_ring(),
+            Mode::Lobby if self.step == LobbyStep::Spaces => {
+                self.leave_server();
+                Back::Lobby
+            }
+            Mode::Lobby => {
+                self.back_ring();
+                Back::Lobby
+            }
             Mode::Space => {
-                if self.space_menu.take().is_some() || self.queue_selected.take().is_some() {
-                    return;
+                if self.space_menu.take().is_some() {
+                    return Back::Modes;
+                }
+                if self.queue_selected.take().is_some() {
+                    return Back::Queued;
                 }
                 // Stop waiting for a new name or title, and dismiss why the last was not changed.
                 if std::mem::take(&mut self.naming) | std::mem::take(&mut self.titling) {
                     if matches!(self.outcome, Some((Outcome::NameFailed(..), _))) {
                         self.error = None;
                     }
-                    return;
+                    return Back::Naming;
                 }
                 // The card saying that no speech was heard, which is no problem.
                 if let Some((Outcome::Unheard, at)) = self.outcome
                     && self.unheard_shown(Instant::now(), at)
                 {
                     self.outcome = None;
-                    return;
+                    return Back::Unheard;
                 }
                 if self.error.take().is_some() {
-                    return;
+                    return Back::Problem;
                 }
                 if let Some(error) = self.space.as_ref().and_then(|space| space.error.clone())
                     && self.dismissed.as_ref() != Some(&error)
                 {
                     self.dismissed = Some(error);
-                    return;
+                    return Back::SpaceProblem;
                 }
                 // B on its own never dismisses a panel, which takes carrying it with the grip; pointed at one, a
                 // participant is told how. See `design/projection.md`.
@@ -3056,9 +3113,13 @@ impl Conversation {
                         .is_some_and(|projection| projection.panel(panel).is_some())
                 {
                     self.notice = Some(THROW_HOW.into());
-                    return;
+                    return Back::Panel;
+                }
+                if environment {
+                    return Back::Environment;
                 }
                 self.notice = Some("Hold B to leave the space.".into());
+                Back::Nothing
             }
         }
     }

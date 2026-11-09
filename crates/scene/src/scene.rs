@@ -5,6 +5,8 @@
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
 pub mod headset;
+mod precedence;
+use precedence::Ladder as _;
 
 use std::time::Instant;
 
@@ -193,7 +195,8 @@ pub struct Frame<'a> {
     pub environment: Option<crate::client_side::Drawn>,
 }
 
-/// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there.
+/// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there,
+/// as [`precedence::Right`] orders.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum RightStick {
     /// At the middle.
@@ -204,25 +207,69 @@ enum RightStick {
     /// Nothing was carried, and the ray pointed at this panel, which has more than it shows: the push scrolls it, for
     /// this participant alone.
     Scrolled(String),
-    /// Nothing was carried, nor a panel that scrolls pointed at: the push moves the transcript's focus or pages cards,
-    /// as ever.
+    /// The transcript showed, or the ray was on something else of Tomori's, or on nothing with no environment's client
+    /// side to take it: the push moves the transcript's focus or pages cards, as ever.
     Other,
+    /// Nothing of Tomori's took it, in a space with an environment's client side: the push is the client side's. See
+    /// `design/environments.md`.
+    Environment,
 }
 
 impl RightStick {
-    /// Whose the push is with the stick at `stick`, `carrying` a panel or not, pointing at a panel that `scrolls` or not.
-    fn update(self, stick: Vec2, carrying: bool, scrolls: Option<&str>) -> Self {
+    /// Whose the push is with the stick at `stick`: the owner `claim` names, as it leaves the middle, or else whose it
+    /// was.
+    fn update(self, stick: Vec2, claim: impl FnOnce() -> Self) -> Self {
         // A stick that reads nonsense is at the middle.
         if !stick.is_finite() || stick.length() < STICK_CENTRE {
             return Self::Free;
         }
-        match (self, scrolls) {
-            (Self::Free, _) if carrying => Self::Carried,
-            (Self::Free, Some(panel)) => Self::Scrolled(panel.to_owned()),
-            (Self::Free, None) => Self::Other,
-            (owner, _) => owner,
+        match self {
+            Self::Free => claim(),
+            owner => owner,
         }
     }
+}
+
+/// Whose a push of the left stick is: each push belongs to what took it as it left the middle, until it returns there,
+/// as [`precedence::Left`] orders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LeftStick {
+    /// At the middle.
+    #[default]
+    Free,
+    /// Travel's, where the environment allows it, or nothing's.
+    Other,
+    /// In a space whose environment has a client side, which allows no travel here, with the ray on nothing of
+    /// Tomori's: the client side's. See `design/environments.md`.
+    Environment,
+}
+
+impl LeftStick {
+    /// Whose the push is with the stick at `stick`: the owner `claim` names, as it leaves the middle, or else whose it
+    /// was.
+    fn update(self, stick: Vec2, claim: impl FnOnce() -> Self) -> Self {
+        // A stick that reads nonsense is at the middle.
+        if !stick.is_finite() || stick.length() < STICK_CENTRE {
+            return Self::Free;
+        }
+        match self {
+            Self::Free => claim(),
+            owner => owner,
+        }
+    }
+}
+
+/// The client side of the joined space's environment, for that space and environment, with what the participant does
+/// with it. See `design/environments.md`.
+struct Client {
+    space: String,
+    environment: crate::environment::Environment,
+    side: Box<dyn crate::client_side::ClientSide>,
+    /// The selectable object of its that the ray pointed at last frame, which the trigger and B act on.
+    focus: Option<String>,
+    /// What the trigger and B did for it since its last frame, which it is told on its next.
+    select: Option<crate::client_side::Select>,
+    back: bool,
 }
 
 /// How near the middle the right stick returns to end a push.
@@ -314,17 +361,26 @@ pub struct Step {
     /// The wall carried as B was pressed, and when: removed for everyone, or asked to confirm, if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     removing: Option<(String, Instant)>,
+    /// What the ray pointed at last frame, Tomori's own interface first, which decides whose the trigger and the sticks
+    /// are as they begin. See `design/interaction.md`.
+    aim: precedence::Aim,
     /// The panel carried as B was pressed, and when: thrown away for everyone if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     throwing: Option<(String, Instant)>,
     /// The controls the hint beside a panel carried names.
     controls: crate::projection::Controls,
     /// The client side of the joined space's environment, for that space and environment. See `design/environments.md`.
-    client: Option<(
-        String,
-        crate::environment::Environment,
-        Box<dyn crate::client_side::ClientSide>,
-    )>,
+    client: Option<Client>,
+    /// The left and right sticks, where they are the client side's, from the last buttons.
+    environment_sticks: (Vec2, Vec2),
+    /// Whose the left stick's push is, from when it left the middle until it returns.
+    left_stick: LeftStick,
+    /// The pulls of the trigger on the client side's selectable objects, which outlive a client side, so that a pull
+    /// begun for one is nobody's once it has gone. See `design/environments.md`.
+    selector: crate::client_side::Selector,
+    /// Whose the last press of B was, for tests that check the order.
+    #[cfg(test)]
+    last_back: Option<crate::conversation::Back>,
 }
 
 impl Default for Step {
@@ -361,10 +417,16 @@ impl Default for Step {
             scroll_stick: None,
             wheel: None,
             pointed_panel: None,
+            aim: precedence::Aim::Nothing,
             throwing: None,
             removing: None,
             controls: crate::projection::Controls::default(),
             client: None,
+            environment_sticks: (Vec2::ZERO, Vec2::ZERO),
+            left_stick: LeftStick::Free,
+            selector: crate::client_side::Selector::default(),
+            #[cfg(test)]
+            last_back: None,
         }
     }
 }
@@ -390,6 +452,11 @@ impl Step {
         self.wheel = None;
         self.throwing = None;
         self.removing = None;
+        self.environment_sticks = (Vec2::ZERO, Vec2::ZERO);
+        self.left_stick = LeftStick::Free;
+        if let Some(client) = self.client.as_mut() {
+            client.back = false;
+        }
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -436,8 +503,29 @@ impl Step {
         now: Instant,
     ) {
         let stick = buttons.left_stick;
+        // Whose each push of a stick is, decided as it leaves the middle, until it returns there: the first rung of
+        // `precedence` that claims it, Tomori's own interface first, so that the environment's client side has it only
+        // with the ray on something of its own or on nothing of Tomori's. See `design/interaction.md`.
+        let environment = self.client.is_some();
+        let aim = self.aim;
+        let travels = !matches!(conversation.locomotion(), locomotion::Locomotion::None);
+        self.left_stick = self.left_stick.update(stick, || {
+            match precedence::Left::first(|rung| match rung {
+                precedence::Left::Travel => travels,
+                precedence::Left::Tomori => aim == precedence::Aim::Tomori,
+                precedence::Left::Environment => environment,
+                precedence::Left::Nothing => true,
+            }) {
+                precedence::Left::Environment => LeftStick::Environment,
+                _ => LeftStick::Other,
+            }
+        });
+        let (travel_stick, environment_left) = match self.left_stick {
+            LeftStick::Environment => (Vec2::ZERO, stick),
+            _ => (stick, Vec2::ZERO),
+        };
         // In a space whose environment allows it, the left stick travels, which the frame step does with the ray; see `design/locomotion.md`.
-        self.travel_stick = if focused { stick } else { Vec2::ZERO };
+        self.travel_stick = if focused { travel_stick } else { Vec2::ZERO };
         let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
         let navigate = moving && !self.stick_latched;
         self.stick_latched = moving;
@@ -458,16 +546,40 @@ impl Step {
             .as_deref()
             .filter(|panel| !wrist_active && self.projector.scrollable(panel));
         self.right_stick =
-            std::mem::take(&mut self.right_stick).update(buttons.right_stick, carrying, scrolls);
-        let (carry_stick, right) = match self.right_stick {
-            RightStick::Carried => (buttons.right_stick, Vec2::ZERO),
-            RightStick::Scrolled(_) => (Vec2::ZERO, Vec2::ZERO),
-            _ => (Vec2::ZERO, buttons.right_stick),
+            std::mem::take(&mut self.right_stick).update(buttons.right_stick, || {
+                match precedence::Right::first(|rung| match rung {
+                    precedence::Right::Carried => carrying,
+                    precedence::Right::Transcript => wrist_active,
+                    precedence::Right::Scroll => scrolls.is_some(),
+                    precedence::Right::Tomori => aim == precedence::Aim::Tomori,
+                    precedence::Right::Environment => environment,
+                    precedence::Right::Cards => true,
+                }) {
+                    precedence::Right::Carried => RightStick::Carried,
+                    precedence::Right::Scroll => scrolls.map_or(RightStick::Other, |panel| {
+                        RightStick::Scrolled(panel.to_owned())
+                    }),
+                    precedence::Right::Environment => RightStick::Environment,
+                    precedence::Right::Transcript
+                    | precedence::Right::Tomori
+                    | precedence::Right::Cards => RightStick::Other,
+                }
+            });
+        let (carry_stick, right, environment_right) = match self.right_stick {
+            RightStick::Carried => (buttons.right_stick, Vec2::ZERO, Vec2::ZERO),
+            RightStick::Scrolled(_) => (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
+            RightStick::Environment => (Vec2::ZERO, Vec2::ZERO, buttons.right_stick),
+            RightStick::Free | RightStick::Other => (Vec2::ZERO, buttons.right_stick, Vec2::ZERO),
         };
         self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
         self.scroll_stick = match &self.right_stick {
             RightStick::Scrolled(panel) if focused => Some((panel.clone(), buttons.right_stick.y)),
             _ => None,
+        };
+        self.environment_sticks = if focused {
+            (environment_left, environment_right)
+        } else {
+            (Vec2::ZERO, Vec2::ZERO)
         };
         // The mouse's wheel scrolls the panel pointed at, unless one is carried or the transcript shows.
         if let Some(panel) = &self.pointed_panel
@@ -486,6 +598,8 @@ impl Step {
         // while the panel is still carried, it throws the panel away for everyone; held longer, it does nothing, and
         // never leaves the space. B on its own never dismisses a panel. See `design/projection.md`.
         let thrown = buttons.back && carrying;
+        // Whether what B was pressed on was a panel, before it is thrown away.
+        let panel_thrown = thrown && self.projector.held().is_some();
         if thrown {
             self.throwing = self.projector.held().map(|panel| (panel.to_owned(), now));
             self.removing = self
@@ -524,6 +638,8 @@ impl Step {
             }
         }
         let back = buttons.back && !thrown && !released_wall;
+        // A press on a wall held, not carried, still starts holding to leave, as every rung but what is carried does.
+        let leaving = buttons.back && !thrown;
         // B lets go of a menu pinned with Y first.
         let unpinned = back && self.hand_menu.unpin();
         let wrist_input = self.wrist.input(
@@ -543,13 +659,40 @@ impl Step {
         if wrist_input.chose {
             feedback.emit(feedback::Event::Choose, now);
         }
-        let back_taken = wrist_input.back || unpinned;
-        if back && !back_taken {
-            conversation.back();
+        // Whose B is, in the order `conversation::Back` sets out: the first three here, which the conversation does not
+        // hold, and the rest in the conversation, which ends with the environment's client side, while the ray points at
+        // a selectable object of its. It still starts holding to leave, below. See `design/interaction.md`.
+        let taken = if !buttons.back {
+            None
+        } else if panel_thrown {
+            Some(crate::conversation::Back::Carried)
+        } else if thrown {
+            Some(crate::conversation::Back::CarriedWall)
+        } else if released_wall {
+            Some(crate::conversation::Back::HeldWall)
+        } else if unpinned {
+            Some(crate::conversation::Back::Pinned)
+        } else if wrist_input.back {
+            Some(crate::conversation::Back::Wrist)
+        } else {
+            let focus = self
+                .client
+                .as_ref()
+                .is_some_and(|client| client.focus.is_some());
+            Some(conversation.back_or_environment(focus))
+        };
+        if taken == Some(crate::conversation::Back::Environment)
+            && let Some(client) = self.client.as_mut()
+        {
+            client.back = true;
+        }
+        #[cfg(test)]
+        if taken.is_some() {
+            self.last_back = taken;
         }
         // Only a hold whose press is in a space, and not on a panel carried, can leave it, so B held while joining does
         // not.
-        if back && conversation.joined_space().is_some() {
+        if leaving && conversation.joined_space().is_some() {
             self.back_since = Some(now);
         }
         match self.back_since {
@@ -767,8 +910,32 @@ impl Step {
         let in_arrival = conversation.arrival().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         let scenery = self.motion.scenery(self.arrival_time);
+        // Whose a pull of the trigger is, decided as it begins, until it is let go: the first rung of
+        // `precedence::Trigger` that claims it, as the ray found things last frame, Tomori's own interface first. A pull
+        // that begins on a selectable object of the environment's client side, with nothing of Tomori's taking it, is the
+        // client side's, and does not attract the swarm. See `design/interaction.md` and `design/environments.md`.
+        let focus = self
+            .client
+            .as_ref()
+            .and_then(|client| client.focus.as_deref());
+        let aim = self.aim;
+        let rung = precedence::Trigger::first(|rung| match rung {
+            precedence::Trigger::Menu => menu_shown || in_arrival,
+            precedence::Trigger::Transcript => wrist_active,
+            precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
+            precedence::Trigger::Environment => focus.is_some(),
+            precedence::Trigger::Swarm => true,
+        });
+        let select = self.selector.update(
+            focus.filter(|_| rung == precedence::Trigger::Environment),
+            senses.trigger,
+        );
+        if let Some(client) = self.client.as_mut() {
+            client.select = client.select.take().or(select);
+        }
+        let selecting = self.selector.owns();
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
-        let attracting = pointing.attracting && !menu_shown && !wrist_active;
+        let attracting = pointing.attracting && !menu_shown && !wrist_active && !selecting;
         let attractor = senses.attractor.filter(|_| attracting);
         self.swarm.step(dt, attractor);
         let marker = match senses.marker {
@@ -899,15 +1066,27 @@ impl Step {
             .map(|(space, _)| space.id.clone());
         match (shown, space) {
             (Some((environment, factory)), Some(space)) => {
-                let current = self.client.as_ref().is_some_and(|(in_space, drawn, _)| {
-                    *in_space == space && *drawn == environment
+                let current = self.client.as_ref().is_some_and(|client| {
+                    client.space == space && client.environment == environment
                 });
                 if !current {
-                    let client = factory(&space);
-                    self.client = Some((space, environment, client));
+                    let side = factory(&space);
+                    self.client = Some(Client {
+                        space,
+                        environment,
+                        side,
+                        focus: None,
+                        select: None,
+                        back: false,
+                    });
+                    self.selector.abandon();
                 }
             }
-            _ => self.client = None,
+            _ => {
+                if self.client.take().is_some() {
+                    self.selector.abandon();
+                }
+            }
         }
         let nearest = card
             .as_ref()
@@ -927,7 +1106,7 @@ impl Step {
                     .ray
                     .filter(|_| in_space && self.board.held().is_none()),
             )
-            .and_then(|((_, _, client), ray)| client.pick(&ray));
+            .and_then(|(client, ray)| client.side.pick(&ray));
         let object = picked.clone().filter(|picked| picked.distance < nearest);
         let (card, worker) = if object.is_some() {
             (None, None)
@@ -948,6 +1127,36 @@ impl Step {
         } else {
             (card, worker, object)
         };
+        // What the ray is on, Tomori's own interface first, which the trigger and the sticks act on next frame: a wall's
+        // board, bar or handles, where the participant may take hold of walls, or a wall carried, count as Tomori's too.
+        let on_wall = projected.hit.is_some_and(|hit| {
+            hit.held
+                || picked
+                    .as_ref()
+                    .is_none_or(|picked| hit.distance < picked.distance)
+        });
+        self.aim = if menu_shown
+            || on_wall
+            || wrist_active
+            || travel.aiming
+            || self.highlighted.is_some()
+            || panel.is_some()
+            || card.is_some()
+            || worker.is_some()
+        {
+            precedence::Aim::Tomori
+        } else if object.is_some() {
+            precedence::Aim::Environment
+        } else {
+            precedence::Aim::Nothing
+        };
+        // What the trigger and B act on next frame.
+        if let Some(client) = self.client.as_mut() {
+            client.focus = object
+                .as_ref()
+                .filter(|picked| picked.selectable)
+                .map(|picked| picked.object.clone());
+        }
         // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
         // While a teleport is aimed, only finding a landing ticks, even with a panel carried.
         let target = if travel.aiming {
@@ -1046,13 +1255,18 @@ impl Step {
         // What the environment's server side sent reaches its client side, which says what to ask, what it sounds and
         // what its scenery draws.
         let drawn = match self.client.as_mut() {
-            Some((_, environment, client)) => {
+            Some(client) => {
+                let environment = client.environment;
                 let updates =
                     conversation.environment_updates(environment.id(), environment.version());
                 let head = senses.head_pose.map(|pose| Vec3::from_array(pose.position));
-                let output = client.update(
+                let (left, right) = self.environment_sticks;
+                let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
-                        .pointing(object.as_ref().map(|picked| picked.object.as_str()), head),
+                        .pointing(object.as_ref().map(|picked| picked.object.as_str()), head)
+                        .with_select(client.select.take())
+                        .with_back(std::mem::take(&mut client.back))
+                        .with_sticks(left, right),
                 );
                 for intent in output.intents {
                     conversation.environment_intent(
@@ -1566,6 +1780,788 @@ mod tests {
                 .environment
                 .is_none()
         );
+    }
+
+    /// What a client side with a selectable object was told each frame: the trigger, B and the sticks.
+    pub(super) type Done = std::sync::Arc<
+        std::sync::Mutex<Vec<(Option<crate::client_side::Select>, bool, Vec2, Vec2)>>,
+    >;
+
+    /// A client side whose lamp, a metre along any ray ahead, is selectable, or not, as the farmyard's chickens are not,
+    /// keeping what the participant did with it.
+    struct Lamp {
+        done: Done,
+        selectable: bool,
+    }
+
+    impl crate::client_side::ClientSide for Lamp {
+        fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
+            let lamp = crate::client_side::Picked::new("lamp", "the lamp", 1.0);
+            (ray.direction.z < 0.0).then(|| {
+                if self.selectable {
+                    lamp.selectable()
+                } else {
+                    lamp
+                }
+            })
+        }
+
+        fn update(&mut self, input: crate::client_side::Input<'_>) -> crate::client_side::Output {
+            self.done.lock().unwrap().push((
+                input.select,
+                input.back,
+                input.left_stick,
+                input.right_stick,
+            ));
+            crate::client_side::Output::new()
+        }
+    }
+
+    /// Joined to [`SPACE`] with a [`Lamp`], selectable or not, for Sky, where `locomotion` lets the participant travel,
+    /// and what it is told.
+    pub(super) fn lamp(
+        locomotion: crate::locomotion::Locomotion,
+        selectable: bool,
+    ) -> (Conversation, Done) {
+        let done = Done::default();
+        let factory: crate::client_side::Factory = {
+            let done = done.clone();
+            std::sync::Arc::new(move |_: &str| {
+                Box::new(Lamp {
+                    done: done.clone(),
+                    selectable,
+                }) as Box<dyn crate::client_side::ClientSide>
+            })
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_client_sides(vec![(crate::test_support::SKY, factory)]);
+        conversation.set_locomotion(vec![(crate::test_support::SKY, locomotion)]);
+        conversation.apply(space(|_| {}));
+        conversation.take_actions();
+        (conversation, done)
+    }
+
+    /// `step` on until the space's scenery has grown in, as `senses` find it.
+    fn grow(step: &mut Step, conversation: &mut Conversation, senses: &Senses, now: Instant) {
+        for _ in 0..400 {
+            step.update(senses, conversation, &mut felt(), now, FRAME);
+        }
+    }
+
+    /// In [`SPACE`] with a selectable [`Lamp`] grown in, pointing at it, with what it is told and `locomotion` for Sky.
+    fn lit(locomotion: crate::locomotion::Locomotion) -> (Conversation, Step, Senses, Done) {
+        let (mut conversation, done) = lamp(locomotion, true);
+        let mut step = Step::default();
+        let senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            ..senses()
+        };
+        grow(&mut step, &mut conversation, &senses, Instant::now());
+        done.lock().unwrap().clear();
+        (conversation, step, senses, done)
+    }
+
+    /// The selects the lamp was told since this was last asked.
+    fn selects(done: &Done) -> Vec<crate::client_side::Select> {
+        done.lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|done| done.0)
+            .collect()
+    }
+
+    #[test]
+    fn a_pull_that_outlives_its_client_side_is_nobody_s_until_it_is_let_go() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        let to = |environment: &'static str| {
+            move |conversation: &mut Conversation| {
+                conversation.apply(space(|state| state.environment = environment.into()));
+            }
+        };
+        type Change = Box<dyn Fn(&mut Conversation)>;
+        let changes: [Vec<Change>; 2] = [
+            // The space moves to an environment with no client side, and back.
+            vec![Box::new(to("minimal")), Box::new(to("sky"))],
+            // Another space.
+            vec![Box::new(|conversation: &mut Conversation| {
+                conversation.apply(space(|state| state.id = "space-2".into()));
+            })],
+        ];
+        for change in changes {
+            let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+            senses.trigger = Some(0.3);
+            assert!(
+                !step
+                    .update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                    .attracting
+            );
+            // Changed mid-pull, its client side goes and is made anew, and the pull, held hard, never attracts halfway,
+            // nor selects the new one's lamp.
+            senses.trigger = Some(1.0);
+            for change in &change {
+                change(&mut conversation);
+                for _ in 0..400 {
+                    let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                    assert!(!frame.attracting);
+                }
+            }
+            assert!(step.client.is_some());
+            assert!(selects(&done).is_empty());
+            // Let go, the next pull on the lamp is the new client side's.
+            senses.trigger = Some(0.0);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            senses.trigger = Some(1.0);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        }
+        // A pull begun before there was a client side attracts on, once it is made, as it began.
+        let (mut conversation, done) = lamp(Default::default(), true);
+        let mut step = Step::default();
+        let senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            trigger: Some(1.0),
+            ..senses()
+        };
+        let mut attracting = Vec::new();
+        for _ in 0..400 {
+            attracting.push(
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                    .attracting,
+            );
+        }
+        assert!(step.client.is_some());
+        assert!(attracting.iter().all(|attracting| *attracting));
+        assert!(selects(&done).is_empty());
+    }
+
+    #[test]
+    fn b_goes_to_the_first_rung_that_wants_it_and_to_the_environment_only_when_none_does() {
+        use crate::conversation::Back;
+        use tomori_client::Event;
+        use tomori_protocol::{Panel, Place, QueueEntry, QueueState, ServerMessage, SpeechSetting};
+        /// A projected panel 0.6 m ahead, nearer than the lamp, so that the ray points at it.
+        fn panel(conversation: &mut Conversation) {
+            let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -0.6);
+            fixtures::show_projection(
+                conversation,
+                Vec::new(),
+                vec![Panel::new(
+                    "panel-1",
+                    "Build status",
+                    "Green.",
+                    Place::Free {
+                        pose: tomori_protocol::Pose::upright_facing(
+                            ahead.to_array(),
+                            arrival::HOME.to_array(),
+                        ),
+                    },
+                )],
+            );
+        }
+        /// A wall of `kind` 0.6 m ahead, an empty slot of its top row where the ray meets it, nearer than the lamp, taken
+        /// hold of with the grip: carried, if someone added it, or else held, its handles showing.
+        fn wall(
+            conversation: &mut Conversation,
+            step: &mut Step,
+            senses: &mut Senses,
+            now: Instant,
+            kind: tomori_protocol::WallKind,
+        ) {
+            let middle = arrival::HOME + Vec3::new(0.0, -0.3, -0.6);
+            fixtures::show_editable_walls(
+                conversation,
+                vec![tomori_protocol::Wall::new(
+                    "wall-1",
+                    kind,
+                    tomori_protocol::Pose::upright_facing(
+                        middle.to_array(),
+                        [arrival::HOME.x, middle.y, arrival::HOME.z],
+                    ),
+                )],
+                Vec::new(),
+            );
+            grow(step, conversation, senses, now);
+            senses.grip = Some(1.0);
+            step.update(senses, conversation, &mut felt(), now, FRAME);
+            if kind != tomori_protocol::WallKind::Added {
+                senses.grip = Some(0.0);
+                step.update(senses, conversation, &mut felt(), now, FRAME);
+            }
+            assert_eq!(step.projector.editing_wall(), Some("wall-1"));
+        }
+        fn failed(conversation: &mut Conversation, error: &str) {
+            conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+                utterance: "utterance-9".into(),
+                error: error.into(),
+            }));
+        }
+        type Setup = fn(&mut Conversation, &mut Step, &mut Senses, Instant);
+        let rows: [(Back, Setup); 14] = [
+            (Back::Carried, |conversation, step, senses, now| {
+                panel(conversation);
+                senses.grip = Some(1.0);
+                grow(step, conversation, senses, now);
+                assert!(step.projector.held().is_some());
+            }),
+            (Back::CarriedWall, |conversation, step, senses, now| {
+                wall(
+                    conversation,
+                    step,
+                    senses,
+                    now,
+                    tomori_protocol::WallKind::Added,
+                );
+                assert_eq!(step.projector.carried_wall(), Some("wall-1"));
+            }),
+            (Back::HeldWall, |conversation, step, senses, now| {
+                wall(
+                    conversation,
+                    step,
+                    senses,
+                    now,
+                    tomori_protocol::WallKind::Environment,
+                );
+                assert_eq!(step.projector.carried_wall(), None);
+            }),
+            (Back::Pinned, |conversation, step, _, now| {
+                step.buttons(
+                    &press(|buttons| buttons.y = true),
+                    true,
+                    conversation,
+                    &mut felt(),
+                    now,
+                );
+                assert!(step.pinned());
+            }),
+            // Showing, with something to back out of: here a problem, which it dismisses ahead of the space.
+            (Back::Wrist, |conversation, step, senses, now| {
+                senses.right_palm = Some(palm_up(0.0));
+                wrist_after(step, conversation, senses, now);
+                assert!(step.wrist.state().active());
+                failed(conversation, "The recogniser failed.");
+            }),
+            (Back::Modes, |conversation, _, _, _| {
+                conversation.apply(space(|state| state.speech = SpeechSetting::Full));
+                conversation.refresh();
+            }),
+            (Back::Queued, |conversation, _, _, _| {
+                conversation.apply(space(|state| {
+                    state.queue = vec![QueueEntry {
+                        id: "entry-1".into(),
+                        source: 1,
+                        speaker: "Ada".into(),
+                        text: "Fix the parser.".into(),
+                        state: QueueState::Queued,
+                    }]
+                }));
+                conversation.select_queued(1);
+            }),
+            (Back::Naming, |conversation, _, _, _| {
+                conversation.apply(Event::Message(ServerMessage::Name { name: "Ada".into() }));
+                conversation.choose_menu(crate::hand_menu::Choice::Rename);
+            }),
+            (Back::Unheard, |conversation, _, _, _| {
+                failed(conversation, tomori_protocol::NO_SPEECH)
+            }),
+            (Back::Problem, |conversation, _, _, _| {
+                failed(conversation, "The recogniser failed.")
+            }),
+            (Back::SpaceProblem, |conversation, _, _, _| {
+                conversation.apply(space(|state| {
+                    state.error = Some("The agent stopped.".into())
+                }));
+            }),
+            (Back::Panel, |conversation, step, senses, now| {
+                panel(conversation);
+                grow(step, conversation, senses, now);
+            }),
+            (Back::Environment, |_, _, _, _| {}),
+            (Back::Nothing, |conversation, step, senses, now| {
+                senses.ray = Ray::new(arrival::HOME, Vec3::Z);
+                step.update(senses, conversation, &mut felt(), now, FRAME);
+            }),
+        ];
+        for (rung, setup) in rows {
+            let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+            let now = Instant::now();
+            setup(&mut conversation, &mut step, &mut senses, now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            // The rungs the conversation holds take B even while the lamp is pointed at.
+            let pointed = step.client.as_ref().unwrap().focus.is_some();
+            if matches!(
+                rung,
+                Back::Modes
+                    | Back::Queued
+                    | Back::Naming
+                    | Back::Unheard
+                    | Back::Problem
+                    | Back::SpaceProblem
+                    | Back::Environment
+            ) {
+                assert!(pointed, "{rung:?}");
+            }
+            done.lock().unwrap().clear();
+            let b = |step: &mut Step, conversation: &mut Conversation, pressed, at| {
+                step.buttons(
+                    &press(|buttons| {
+                        buttons.back = pressed;
+                        buttons.back_held = true;
+                    }),
+                    true,
+                    conversation,
+                    &mut felt(),
+                    at,
+                );
+            };
+            b(&mut step, &mut conversation, true, now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(step.last_back, Some(rung));
+            let told = done.lock().unwrap().iter().filter(|done| done.1).count();
+            assert_eq!(told, usize::from(rung == Back::Environment), "{rung:?}");
+            // Held, it leaves after a second, except on a panel or a wall carried, where it never does.
+            b(&mut step, &mut conversation, false, now + LEAVE_HOLD / 2);
+            assert!(conversation.joined_space().is_some(), "{rung:?}");
+            b(&mut step, &mut conversation, false, now + LEAVE_HOLD);
+            let left = conversation
+                .take_actions()
+                .contains(&Action::Send(tomori_protocol::ClientMessage::Leave));
+            assert_eq!(
+                left,
+                !matches!(rung, Back::Carried | Back::CarriedWall),
+                "{rung:?}"
+            );
+        }
+        // The rows are in the order `Back` declares its rungs, which is B's order.
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        // Any two rungs at once, the later set up first, as what was open before: the earlier takes B, and the
+        // environment is told nothing. Nothing is what is left when no rung wants B, so it pairs with none; and a panel
+        // carried is the panel pointed at, is not taken up while the hand menu is pinned or the transcript shows, and
+        // keeps the transcript away, so it pairs with none of those.
+        for (index, (first, before)) in rows.iter().enumerate() {
+            for (then, after) in &rows[index + 1..] {
+                // A wall carried is let go as a panel carried is; no wall is taken hold of while the hand menu is
+                // pinned or the transcript shows, as they take the ray; and each shows its own projection, which a
+                // panel's replaces.
+                if *then == Back::Nothing
+                    || (matches!(first, Back::Carried | Back::CarriedWall)
+                        && matches!(
+                            then,
+                            Back::CarriedWall
+                                | Back::HeldWall
+                                | Back::Pinned
+                                | Back::Wrist
+                                | Back::Panel
+                        ))
+                    || (*first == Back::HeldWall
+                        && matches!(then, Back::Pinned | Back::Wrist | Back::Panel))
+                {
+                    continue;
+                }
+                let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+                let now = Instant::now();
+                after(&mut conversation, &mut step, &mut senses, now);
+                before(&mut conversation, &mut step, &mut senses, now);
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                done.lock().unwrap().clear();
+                step.buttons(
+                    &press(|buttons| buttons.back = true),
+                    true,
+                    &mut conversation,
+                    &mut felt(),
+                    now,
+                );
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                assert_eq!(step.last_back, Some(*first), "{first:?} before {then:?}");
+                let told = done.lock().unwrap().iter().filter(|done| done.1).count();
+                assert_eq!(told, 0, "{first:?} before {then:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trigger_pull_on_a_selectable_object_is_the_environment_s_and_never_attracts() {
+        use crate::client_side::Select;
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        let now = Instant::now();
+        let mut pulls = Vec::new();
+        for trigger in [0.3, 1.0, 1.0, 0.0] {
+            senses.trigger = Some(trigger);
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            pulls.push(frame.attracting);
+        }
+        assert_eq!(pulls, [false; 4], "a pull on the lamp never attracts");
+        let selects: Vec<_> = done
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|done| done.0)
+            .collect();
+        assert_eq!(
+            selects,
+            [
+                Select::Pressed("lamp".into()),
+                Select::Released("lamp".into())
+            ]
+        );
+        // Pointing at nothing of the environment's, a pull attracts the swarm as before, and selects nothing.
+        senses.ray = Ray::new(arrival::HOME, Vec3::Z);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        senses.trigger = Some(1.0);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(frame.attracting);
+        assert!(done.lock().unwrap().iter().all(|done| done.0.is_none()));
+    }
+
+    #[test]
+    fn b_is_the_environment_s_only_while_its_object_is_pointed_at_and_nothing_else_wants_it() {
+        let (mut conversation, mut step, senses, done) = lit(Default::default());
+        let now = Instant::now();
+        let mut feedback = felt();
+        let mut b = |step: &mut Step, conversation: &mut Conversation, pressed, held, at| {
+            step.buttons(
+                &press(|buttons| {
+                    buttons.back = pressed;
+                    buttons.back_held = held;
+                }),
+                true,
+                conversation,
+                &mut feedback,
+                at,
+            );
+        };
+        let backs = |done: &Done| done.lock().unwrap().drain(..).filter(|done| done.1).count();
+        // Pointed at, B is the lamp's, once, without the notice that holding it leaves.
+        b(&mut step, &mut conversation, true, false, now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(backs(&done), 1);
+        assert_eq!(conversation.notice(), None);
+        // A problem shown takes B first.
+        conversation.apply(space(|state| {
+            state.error = Some("The agent stopped.".into())
+        }));
+        b(&mut step, &mut conversation, true, false, now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(backs(&done), 0);
+        // Losing focus forgets a press not yet told.
+        b(&mut step, &mut conversation, true, false, now);
+        step.blur(&mut conversation);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(backs(&done), 0);
+        // Held, it still leaves, after a second, as ever.
+        let later = now + Duration::from_secs(5);
+        b(&mut step, &mut conversation, true, true, later);
+        step.update(&senses, &mut conversation, &mut felt(), later, FRAME);
+        assert_eq!(backs(&done), 1);
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            true,
+            later + LEAVE_HOLD / 2,
+        );
+        assert!(conversation.joined_space().is_some());
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            true,
+            later + LEAVE_HOLD,
+        );
+        assert!(
+            conversation
+                .take_actions()
+                .contains(&Action::Send(tomori_protocol::ClientMessage::Leave))
+        );
+    }
+
+    #[test]
+    fn b_pointing_elsewhere_keeps_its_meaning() {
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        let now = Instant::now();
+        senses.ray = Ray::new(arrival::HOME, Vec3::Z);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        step.buttons(
+            &press(|buttons| buttons.back = true),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(done.lock().unwrap().iter().all(|done| !done.1));
+        assert_eq!(conversation.notice(), Some("Hold B to leave the space."));
+    }
+
+    /// The sticks a [`Lamp`] is told after `buttons`, `focused` or not, and a frame as `senses` find it.
+    fn sticks(
+        step: &mut Step,
+        conversation: &mut Conversation,
+        senses: &Senses,
+        done: &Done,
+        buttons: Buttons,
+        focused: bool,
+    ) -> (Vec2, Vec2) {
+        step.buttons(&buttons, focused, conversation, &mut felt(), Instant::now());
+        step.update(senses, conversation, &mut felt(), Instant::now(), FRAME);
+        let last = done.lock().unwrap().last().cloned().unwrap();
+        (last.2, last.3)
+    }
+
+    fn both(left: Vec2, right: Vec2) -> Buttons {
+        press(|buttons| {
+            buttons.left_stick = left;
+            buttons.right_stick = right;
+        })
+    }
+
+    #[test]
+    fn the_left_stick_reaches_the_environment_only_where_it_travels_nowhere_from_the_start_of_a_push()
+     {
+        use crate::locomotion::{Locomotion, Surface};
+        let push = both(Vec2::X, Vec2::ZERO);
+        let rest = Buttons::default();
+        // In an environment without travel, it is the environment's, but not without focus.
+        let (mut conversation, mut step, senses, done) = lit(Locomotion::None);
+        let told = |step: &mut Step, conversation: &mut Conversation, buttons, focused| {
+            sticks(step, conversation, &senses, &done, buttons, focused).0
+        };
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::X);
+        assert_eq!(told(&mut step, &mut conversation, push, false), Vec2::ZERO);
+        // Where the environment lets the participant travel, it is travel's, until travel is turned off here, from the
+        // next push: a push begun while it travelled stays travel's until it returns to the middle.
+        let teleport =
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]);
+        let (mut conversation, mut step, senses, done) = lit(teleport);
+        let told = |step: &mut Step, conversation: &mut Conversation, buttons, focused| {
+            sticks(step, conversation, &senses, &done, buttons, focused).0
+        };
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::ZERO);
+        conversation.toggle_travel();
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::ZERO);
+        told(&mut step, &mut conversation, rest, true);
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::X);
+        // And the other way: a push begun as the environment's stays its own as travel is turned on again.
+        conversation.toggle_travel();
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::X);
+        assert_eq!(step.travel_stick, Vec2::ZERO);
+        told(&mut step, &mut conversation, rest, true);
+        assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::ZERO);
+        // Losing focus forgets whose the push was.
+        step.blur(&mut conversation);
+        assert_eq!(step.left_stick, LeftStick::Free);
+        assert_eq!(
+            LeftStick::Other.update(Vec2::NAN, || LeftStick::Environment),
+            LeftStick::Free
+        );
+    }
+
+    #[test]
+    fn the_right_stick_reaches_the_environment_only_where_nothing_else_takes_it() {
+        let push = both(Vec2::ZERO, Vec2::NEG_Y);
+        let rest = Buttons::default();
+        // With nothing carried and the transcript closed, it is the environment's, whether or not its objects are
+        // selectable, as the farmyard's chickens are not; but not without focus.
+        for selectable in [true, false] {
+            let (mut conversation, done) = lamp(Default::default(), selectable);
+            let mut step = Step::default();
+            let senses = Senses {
+                ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+                ..senses()
+            };
+            grow(&mut step, &mut conversation, &senses, Instant::now());
+            let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
+            assert_eq!(told.1, Vec2::NEG_Y);
+            let told = sticks(&mut step, &mut conversation, &senses, &done, push, false);
+            assert_eq!(told.1, Vec2::ZERO);
+        }
+        // While the right wrist's transcript shows, a push is its own.
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        senses.right_palm = Some(palm_up(0.0));
+        let now = Instant::now();
+        wrist_after(&mut step, &mut conversation, &senses, now);
+        assert!(step.wrist.state().active());
+        let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
+        assert_eq!(told.1, Vec2::ZERO);
+        assert_eq!(step.right_stick, RightStick::Other);
+        // While a panel is carried, a push is the panel's.
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -0.6);
+        fixtures::show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![tomori_protocol::Panel::new(
+                "panel-1",
+                "Build status",
+                "Green.",
+                tomori_protocol::Place::Free {
+                    pose: tomori_protocol::Pose::upright_facing(
+                        ahead.to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                },
+            )],
+        );
+        senses.grip = Some(1.0);
+        grow(&mut step, &mut conversation, &senses, now);
+        assert!(step.projector.held().is_some());
+        sticks(&mut step, &mut conversation, &senses, &done, rest, true);
+        let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
+        assert_eq!(told.1, Vec2::ZERO);
+        assert_eq!(step.right_stick, RightStick::Carried);
+        // A push is the environment's only if nothing else takes it as it leaves the middle, until it returns there.
+        assert_eq!(
+            RightStick::Environment.update(Vec2::Y, || RightStick::Carried),
+            RightStick::Environment
+        );
+    }
+
+    /// A code panel of `lines` lines floating 0.6 m ahead, nearer than the lamp, so that the ray points at it.
+    fn code_ahead(conversation: &mut Conversation, lines: u32) {
+        use tomori_protocol::{Code, Panel, Place, Pose};
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -0.6);
+        let body: Vec<String> = (1..=lines)
+            .map(|line| format!("let x{line} = {line};"))
+            .collect();
+        fixtures::show_projection(
+            conversation,
+            Vec::new(),
+            vec![
+                Panel::new(
+                    "panel-1",
+                    "rust",
+                    body.join("\n"),
+                    Place::Free {
+                        pose: Pose::upright_facing(ahead.to_array(), arrival::HOME.to_array()),
+                    },
+                )
+                .with_code(Code::new("rust", lines)),
+            ],
+        );
+    }
+
+    #[test]
+    fn pointing_at_a_panel_the_sticks_are_tomori_s_and_never_the_environment_s() {
+        use crate::locomotion::Locomotion;
+        let push = both(Vec2::X, Vec2::NEG_Y);
+        let rest = Buttons::default();
+        let now = Instant::now();
+        // In an environment without travel, whose client side would take both sticks, a panel in front of its lamp
+        // takes them: one with more than it shows scrolls with the right stick, one that shows everything takes it to
+        // do nothing, and neither gives the left stick to the environment.
+        for (lines, scrolls) in [(200, true), (1, false)] {
+            let (mut conversation, mut step, senses, done) = lit(Locomotion::None);
+            code_ahead(&mut conversation, lines);
+            grow(&mut step, &mut conversation, &senses, now);
+            assert_eq!(step.aim, precedence::Aim::Tomori);
+            assert_eq!(step.projector.scrollable("panel-1"), scrolls);
+            let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
+            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
+            assert_eq!(step.left_stick, LeftStick::Other);
+            if scrolls {
+                assert_eq!(step.right_stick, RightStick::Scrolled("panel-1".into()));
+                step.update(&senses, &mut conversation, &mut felt(), now, 0.5);
+                assert!(step.projector.scroll("panel-1") > 0);
+            } else {
+                assert_eq!(step.right_stick, RightStick::Other);
+            }
+            // A push begun on the panel stays Tomori's as the ray moves off it, until it returns to the middle.
+            let away = Senses {
+                ray: Ray::new(arrival::HOME, Vec3::Z),
+                ..senses
+            };
+            let told = sticks(&mut step, &mut conversation, &away, &done, push, true);
+            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
+            // Back to the middle with the ray on nothing of Tomori's, nor of the environment's, the next push is the
+            // environment's.
+            sticks(&mut step, &mut conversation, &away, &done, rest, true);
+            assert_eq!(step.aim, precedence::Aim::Nothing);
+            let told = sticks(&mut step, &mut conversation, &away, &done, push, true);
+            assert_eq!(told, (Vec2::X, Vec2::NEG_Y), "{lines}");
+            // Carried, the panel takes the right stick before anything else, and the left stick is not the
+            // environment's.
+            sticks(&mut step, &mut conversation, &senses, &done, rest, true);
+            let gripped = Senses {
+                grip: Some(1.0),
+                ..senses
+            };
+            step.update(&gripped, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(step.projector.held(), Some("panel-1"));
+            let told = sticks(&mut step, &mut conversation, &gripped, &done, push, true);
+            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
+            assert_eq!(step.right_stick, RightStick::Carried);
+            assert_eq!(step.left_stick, LeftStick::Other);
+        }
+    }
+
+    #[test]
+    fn a_trigger_pull_on_a_panel_in_front_of_a_selectable_object_is_tomori_s() {
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        let now = Instant::now();
+        code_ahead(&mut conversation, 1);
+        grow(&mut step, &mut conversation, &senses, now);
+        assert_eq!(step.aim, precedence::Aim::Tomori);
+        done.lock().unwrap().clear();
+        // The pull attracts the swarm, as on any panel, and selects nothing behind it.
+        let mut attracting = Vec::new();
+        for trigger in [0.3, 1.0, 1.0, 0.0] {
+            senses.trigger = Some(trigger);
+            attracting.push(
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                    .attracting,
+            );
+        }
+        assert_eq!(attracting, [true, true, true, false]);
+        assert!(selects(&done).is_empty());
+        // Nor does a pull begun on the panel select the lamp once the panel has gone from in front of it.
+        senses.trigger = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        fixtures::show_projection(&mut conversation, Vec::new(), Vec::new());
+        for _ in 0..4 {
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        }
+        assert_eq!(step.aim, precedence::Aim::Environment);
+        assert!(selects(&done).is_empty());
+        // Let go, the next pull on the lamp is the environment's.
+        senses.trigger = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        senses.trigger = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(
+            selects(&done),
+            [crate::client_side::Select::Pressed("lamp".into())]
+        );
+    }
+
+    #[test]
+    fn without_a_client_side_the_right_stick_pages_no_result_card_in_a_space() {
+        // In a space whose environment has no client side, a push is the cards', as ever, which never page there.
+        let mut conversation = joined();
+        let mut step = Step::default();
+        let senses = senses();
+        let now = Instant::now();
+        grow(&mut step, &mut conversation, &senses, now);
+        assert!(step.client.is_none());
+        for direction in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y] {
+            step.buttons(
+                &both(Vec2::ZERO, direction),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            assert_eq!(step.right_stick, RightStick::Other);
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!((frame.card, frame.content), (0, 0));
+            step.buttons(
+                &Buttons::default(),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+        }
     }
 
     #[test]
@@ -2361,7 +3357,7 @@ mod tests {
         step.blur(&mut conversation);
         assert_eq!(step.right_stick, RightStick::Free);
         assert_eq!(
-            RightStick::Other.update(Vec2::NAN, true, None),
+            RightStick::Other.update(Vec2::NAN, || RightStick::Carried),
             RightStick::Free
         );
     }
@@ -4290,6 +5286,8 @@ mod tests {
             ends.end,
             bar.middle
         );
+        // The bar is Tomori's, so the environment takes neither the trigger nor a stick there.
+        assert_eq!(step.aim, precedence::Aim::Tomori);
         // Taken hold of, at a handle, at the handle, however near the board behind it.
         senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
         senses.grip = Some(1.0);

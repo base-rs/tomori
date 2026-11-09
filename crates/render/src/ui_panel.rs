@@ -25,6 +25,27 @@ impl Pipeline {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
+        Self::with_layout(device, format, glyphs.layout(), samples)
+    }
+
+    /// As [`Pipeline::new`], drawing from the atlas a scenery is given in its
+    /// [`Target`](crate::scenery::Target), so that a scenery draws panels and labels of its own in the eye's pass. See
+    /// `design/text.md`.
+    pub fn shared(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        glyphs: &crate::glyphs::SharedGlyphs,
+        samples: u32,
+    ) -> Self {
+        Self::with_layout(device, format, glyphs.layout(), samples)
+    }
+
+    fn with_layout(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        glyphs: &wgpu::BindGroupLayout,
+        samples: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("ui_panel.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel transform layout"),
@@ -41,7 +62,7 @@ impl Pipeline {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("panel pipeline layout"),
-            bind_group_layouts: &[Some(&layout), Some(glyphs.layout())],
+            bind_group_layouts: &[Some(&layout), Some(glyphs)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
