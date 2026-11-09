@@ -773,6 +773,7 @@ mod tests {
             environment_state: false,
             projection: true,
             pairing_window: false,
+            images: false,
         });
         client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
         client.create_space("Studio");

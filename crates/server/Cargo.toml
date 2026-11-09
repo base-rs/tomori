@@ -101,12 +101,15 @@ event-listener = "5"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 gethostname = "1.1"
+# Decoding the files the agent shows as image panels, with pure Rust decoders, and encoding them again for clients.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 log = "0.4"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 tomori-security = { version = "0.2.0", path = "../security", features = ["issue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tomori-speech = { version = "0.2.0", path = "../speech", optional = true }
 
 [target.'cfg(unix)'.dependencies]

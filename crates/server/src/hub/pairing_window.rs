@@ -255,6 +255,7 @@ impl Hub {
                 meta: vec![("source".to_owned(), "Tomori".to_owned())],
                 code: None,
                 slug: None,
+                image: None,
             };
             // Opening it again replaces the notice rather than adding another. See `design/projection.md`.
             let panel = record.stage.project_notice(

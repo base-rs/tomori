@@ -37,6 +37,7 @@ fn items(outbox: &Outbox) -> Vec<Item> {
         items.push(match frame.kind {
             FrameKind::Control => Item::Control(frame.to_client_message().unwrap()),
             FrameKind::Audio => Item::Audio(frame.to_audio().unwrap().sequence),
+            FrameKind::Image => unreachable!("a client sends no images"),
         });
     }
     decoder.finish().unwrap();
@@ -367,6 +368,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        images: false,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

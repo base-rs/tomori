@@ -260,6 +260,7 @@ impl Hub {
                     meta: vec![("source".to_owned(), "Tomori".to_owned())],
                     code: None,
                     slug: None,
+                    image: None,
                 };
                 let panel = record.stage.project_to(
                     &walls,

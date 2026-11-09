@@ -82,7 +82,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
                         encode(&message, output);
                     }
                 }
-                Popped::Audio(frame) => output.extend_from_slice(&frame),
+                Popped::Audio(frame) | Popped::Image(frame) => output.extend_from_slice(&frame),
                 Popped::Empty => break,
                 Popped::Closed => return false,
             }

@@ -2,10 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use event_listener::{Event, EventListener};
-use tomori_protocol::ServerMessage;
+use tomori_protocol::{Frame, ImageChunk, ServerMessage};
 
 /// Participant audio frames waiting for one connection. Older frames are dropped beyond this, so playback stays real time.
 const AUDIO_LIMIT: usize = 32;
@@ -20,6 +20,10 @@ const ERROR_LIMIT: usize = 8;
 
 /// Control items waiting for one connection. Presence and partial transcripts replace their queued predecessors and errors are capped, so only a client that keeps making requests without reading the replies reaches this; its connection is closed rather than queueing without bound.
 const CONTROL_LIMIT: usize = 1024;
+
+/// Images waiting to be sent on one connection, that its client asked for: further requests are refused until these
+/// are sent. A client asks only for images its space shows that it does not have, at most a few dozen.
+const IMAGE_LIMIT: usize = 32;
 
 /// Something to send on one connection, in order.
 #[derive(Debug)]
@@ -42,6 +46,8 @@ pub enum Popped {
     Control(Outgoing),
     /// An encoded audio frame.
     Audio(Vec<u8>),
+    /// An encoded [`tomori_protocol::FrameKind::Image`] frame: part of an image.
+    Image(Vec<u8>),
     Empty,
     Closed,
 }
@@ -53,9 +59,17 @@ enum Agent {
     Audio(Vec<u8>),
 }
 
+/// An image being sent, from `offset`, by its SHA-256.
+struct Transfer {
+    hash: [u8; 32],
+    png: Arc<[u8]>,
+    offset: usize,
+}
+
 /// The outbound queue of one connection. Producers never block; the connection body drains it.
 ///
-/// Keepalive messages go first, then control messages, then the agent speech stream, then participant audio. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
+/// Keepalive messages go first, then control messages, then the agent speech stream, then participant audio, then
+/// images, one chunk at a time, so that an image never holds up anything else for longer than a chunk takes to send. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
 #[derive(Default)]
 pub struct Outbox {
     inner: Mutex<Inner>,
@@ -70,6 +84,7 @@ struct Inner {
     agent: VecDeque<Agent>,
     agent_frames: usize,
     audio: VecDeque<Vec<u8>>,
+    images: VecDeque<Transfer>,
     space_pending: bool,
     spaces_pending: bool,
     cards_pending: bool,
@@ -275,6 +290,27 @@ impl Outbox {
         });
     }
 
+    /// Send the image `png`, whose SHA-256 is `hash`, in chunks after everything else. Returns false, queueing nothing,
+    /// if it is already queued, or [`IMAGE_LIMIT`] images are.
+    pub fn image(&self, hash: [u8; 32], png: Arc<[u8]>) -> bool {
+        let mut queued = false;
+        self.update(|inner| {
+            if inner.images.len() == IMAGE_LIMIT
+                || inner.images.iter().any(|transfer| transfer.hash == hash)
+            {
+                return false;
+            }
+            inner.images.push_back(Transfer {
+                hash,
+                png,
+                offset: 0,
+            });
+            queued = true;
+            true
+        });
+        queued
+    }
+
     /// Discard queued audio and agent speech, such as when the participant moves to another space.
     pub fn clear_audio(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -317,6 +353,21 @@ impl Outbox {
         if let Some(frame) = inner.audio.pop_front() {
             return Popped::Audio(frame);
         }
+        if let Some(transfer) = inner.images.front_mut() {
+            let end =
+                (transfer.offset + tomori_protocol::IMAGE_CHUNK_BYTES).min(transfer.png.len());
+            let chunk = ImageChunk::new(
+                transfer.hash,
+                transfer.offset as u32,
+                transfer.png.len() as u32,
+                transfer.png[transfer.offset..end].to_vec(),
+            );
+            transfer.offset = end;
+            if end == transfer.png.len() {
+                inner.images.pop_front();
+            }
+            return Popped::Image(Frame::image(&chunk).encode());
+        }
         if inner.closed {
             Popped::Closed
         } else {
@@ -331,6 +382,7 @@ impl Outbox {
             || !inner.control.is_empty()
             || !inner.agent.is_empty()
             || !inner.audio.is_empty()
+            || !inner.images.is_empty()
     }
 
     /// Wait for the outbox to change. Check [`is_ready`](Self::is_ready) after creating the listener to avoid a lost wakeup.
@@ -377,6 +429,52 @@ mod tests {
         })
         .collect();
         assert_eq!(popped, [state("other", 1), event, state("garden", 3)]);
+    }
+
+    #[test]
+    fn images_go_in_chunks_after_everything_else_once_each_and_bounded() {
+        let outbox = Outbox::new();
+        let png: Arc<[u8]> = (0..tomori_protocol::IMAGE_CHUNK_BYTES * 2 + 1)
+            .map(|index| index as u8)
+            .collect();
+        assert!(outbox.image([1; 32], png.clone()));
+        // Asked for again while it is queued, it is not queued twice.
+        assert!(!outbox.image([1; 32], png.clone()));
+        assert!(outbox.is_ready());
+        outbox.audio(vec![9]);
+        outbox.message(ServerMessage::LEFT);
+        let Popped::Control(_) = outbox.pop() else {
+            unreachable!("control first");
+        };
+        let Popped::Audio(_) = outbox.pop() else {
+            unreachable!("audio before images");
+        };
+        let mut joined = Vec::new();
+        let mut chunks = 0;
+        while let Popped::Image(bytes) = outbox.pop() {
+            let mut decoder = tomori_protocol::FrameDecoder::new();
+            decoder.push(&bytes);
+            let chunk = decoder.next_frame().unwrap().unwrap().to_image().unwrap();
+            assert_eq!((chunk.hash, chunk.offset as usize), ([1; 32], joined.len()));
+            joined.extend(chunk.data);
+            chunks += 1;
+            // Speech that arrives part way through an image goes before the rest of it.
+            if chunks == 1 {
+                outbox.agent_audio(vec![7]);
+                let Popped::Audio(frame) = outbox.pop() else {
+                    unreachable!("speech before the rest of the image");
+                };
+                assert_eq!(frame, [7]);
+            }
+        }
+        assert_eq!((chunks, &joined[..]), (3, &png[..]));
+        assert!(!outbox.is_ready());
+        // Sent, it may be asked for again; beyond the limit, more are refused.
+        assert!(outbox.image([1; 32], png.clone()));
+        for index in 2..=IMAGE_LIMIT as u8 {
+            assert!(outbox.image([index; 32], png.clone()));
+        }
+        assert!(!outbox.image([0; 32], png));
     }
 
     #[test]

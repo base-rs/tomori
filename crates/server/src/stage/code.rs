@@ -147,6 +147,7 @@ impl Lines {
             meta: Vec::new(),
             code: Some(Code::new(language.clone(), total)),
             slug: None,
+            image: None,
         };
         Some(Found::code(content, Source { language, lines }).placed(self.place))
     }

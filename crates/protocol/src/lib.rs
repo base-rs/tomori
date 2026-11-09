@@ -29,8 +29,9 @@ pub use message::{
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use projection::{
-    CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Meta, Panel, Place, Projection, Span, TOMORI_WALL,
-    TokenKind, WALL_SLOTS, Wall, WallKind, WallShape, valid_spans,
+    CODE_CHARS, CODE_LINES, CODE_SPANS, Code, IMAGE_BYTES, IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image,
+    ImageChunk, ImageChunkError, Meta, Panel, Place, Projection, Span, TOMORI_WALL, TokenKind,
+    WALL_SLOTS, Wall, WallKind, WallShape, hash_bytes, hash_text, valid_spans,
 };
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,

@@ -22,6 +22,7 @@ mod environments;
 mod exit;
 mod highlighting;
 mod hub;
+mod images;
 mod instructions;
 pub mod kept;
 mod server_sides;

@@ -120,6 +120,7 @@ impl<B: ReadableBody> Session<B> {
                 audio.source = ECHO_SOURCE;
                 self.output.push_back(Frame::audio(&audio).encode());
             }
+            FrameKind::Image => unreachable!("a client sends no images"),
             FrameKind::Control => {
                 let message = frame.to_client_message().unwrap();
                 self.record(Received::Message(message.clone()));
@@ -158,6 +159,14 @@ impl<B: ReadableBody> Session<B> {
                     ClientMessage::Ping { nonce } => self.reply(ServerMessage::Pong { nonce }),
                     // A test hook: end the response, which disconnects the client.
                     ClientMessage::Answer { text, .. } if text == "kick" => self.ended = true,
+                    // A test hook: send part of an image the client never asked for, then name it.
+                    ClientMessage::Answer { text, .. } if text == "image" => {
+                        let chunk = tomori_protocol::ImageChunk::new([7; 32], 0, 3, vec![1, 2, 3]);
+                        self.output.push_back(Frame::image(&chunk).encode());
+                        self.reply(ServerMessage::Name {
+                            name: "After the image".into(),
+                        });
+                    }
                     // A test hook: ping the client, which answers with a Pong.
                     ClientMessage::Answer { text, .. } if text == "ping" => {
                         self.reply(ServerMessage::Ping { nonce: 7 })

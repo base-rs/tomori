@@ -307,9 +307,173 @@ impl Code {
     }
 }
 
+/// The longest side of an image panel's image, in pixels: the server scales a larger image down to it.
+pub const IMAGE_SIDE: u32 = 2048;
+
+/// The most bytes of an image panel's image, as it is sent: the server scales an image down further until its PNG fits.
+pub const IMAGE_BYTES: u32 = 8 * 1024 * 1024;
+
+/// The most bytes of an image in one [`crate::FrameKind::Image`] frame, so that an image never holds up the frames
+/// behind it for long.
+pub const IMAGE_CHUNK_BYTES: usize = 32 * 1024;
+
+/// The bytes of an [`ImageChunk`]'s header: the image's SHA-256, where the chunk starts and how long the image is.
+const CHUNK_HEADER: usize = 32 + 4 + 4;
+
+/// What makes a panel an image panel: the image the server made of a file the agent showed, by its SHA-256, which a
+/// client fetches with [`crate::ClientMessage::FetchImage`] and keeps by, so that it fetches each image once however
+/// many panels show it. Its body is the image's caption. The image is a PNG of 8-bit RGB, no larger than
+/// [`IMAGE_SIDE`] on its longer side or [`IMAGE_BYTES`], without metadata, which is the only format a client decodes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Image {
+    /// The SHA-256 of its PNG, as 64 lower-case hexadecimal digits.
+    pub hash: String,
+    /// Its size, in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// How many bytes its PNG has.
+    pub bytes: u32,
+}
+
+impl Image {
+    /// The image whose PNG of `bytes` bytes has the SHA-256 `hash`, `width` by `height` pixels.
+    pub fn new(hash: impl Into<String>, width: u32, height: u32, bytes: u32) -> Self {
+        Self {
+            hash: hash.into(),
+            width,
+            height,
+            bytes,
+        }
+    }
+
+    /// Whether it is one a client can fetch and show: its hash is 64 lower-case hexadecimal digits, it has pixels, and
+    /// it is within [`IMAGE_SIDE`] and [`IMAGE_BYTES`].
+    pub fn is_valid(&self) -> bool {
+        hash_bytes(&self.hash).is_some()
+            && (1..=IMAGE_SIDE).contains(&self.width)
+            && (1..=IMAGE_SIDE).contains(&self.height)
+            && (1..=IMAGE_BYTES).contains(&self.bytes)
+    }
+}
+
+/// `hash`, 64 lower-case hexadecimal digits, as the 32 bytes of a SHA-256, or `None` if it is not one.
+pub fn hash_bytes(hash: &str) -> Option<[u8; 32]> {
+    let digits = hash.as_bytes();
+    if digits.len() != 64 {
+        return None;
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut bytes = [0; 32];
+    for (index, pair) in digits.chunks(2).enumerate() {
+        bytes[index] = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(bytes)
+}
+
+/// The 32 bytes of a SHA-256 as 64 lower-case hexadecimal digits, as [`Image::hash`] names it.
+pub fn hash_text(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Why an [`ImageChunk`] could not be read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageChunkError {
+    /// Shorter than its header.
+    Truncated,
+    /// It reaches past the end of its image, or its image is larger than [`IMAGE_BYTES`].
+    OutOfBounds,
+}
+
+impl std::fmt::Display for ImageChunkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated => write!(formatter, "header is truncated"),
+            Self::OutOfBounds => write!(formatter, "chunk is outside its image"),
+        }
+    }
+}
+
+impl std::error::Error for ImageChunkError {}
+
+/// Part of an image's PNG, sent in a [`crate::FrameKind::Image`] frame: the image's SHA-256, where the part starts in
+/// it, how many bytes the whole image has, and the part, at most [`IMAGE_CHUNK_BYTES`]. Encoded as the hash's 32 bytes,
+/// then the start and the length, each a little-endian `u32`, then the part. The server sends an image's chunks in
+/// order, from its start, and nothing else of that image between them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImageChunk {
+    pub hash: [u8; 32],
+    pub offset: u32,
+    pub total: u32,
+    pub data: Vec<u8>,
+}
+
+impl ImageChunk {
+    pub fn new(hash: [u8; 32], offset: u32, total: u32, data: Vec<u8>) -> Self {
+        Self {
+            hash,
+            offset,
+            total,
+            data,
+        }
+    }
+
+    /// The chunks of `image`, whose SHA-256 is `hash`, in order, each of at most [`IMAGE_CHUNK_BYTES`].
+    pub fn split(hash: [u8; 32], image: &[u8]) -> impl Iterator<Item = ImageChunk> + '_ {
+        let total = image.len() as u32;
+        image
+            .chunks(IMAGE_CHUNK_BYTES)
+            .enumerate()
+            .map(move |(index, data)| {
+                ImageChunk::new(
+                    hash,
+                    (index * IMAGE_CHUNK_BYTES) as u32,
+                    total,
+                    data.to_vec(),
+                )
+            })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(CHUNK_HEADER + self.data.len());
+        bytes.extend_from_slice(&self.hash);
+        bytes.extend_from_slice(&self.offset.to_le_bytes());
+        bytes.extend_from_slice(&self.total.to_le_bytes());
+        bytes.extend_from_slice(&self.data);
+        bytes
+    }
+
+    /// The chunk `bytes` encode, if it lies within its image, and its image within [`IMAGE_BYTES`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, ImageChunkError> {
+        if bytes.len() < CHUNK_HEADER {
+            return Err(ImageChunkError::Truncated);
+        }
+        let word =
+            |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+        let (offset, total) = (word(32), word(36));
+        let data = bytes[CHUNK_HEADER..].to_vec();
+        let end = u64::from(offset) + data.len() as u64;
+        if total > IMAGE_BYTES || end > u64::from(total) {
+            return Err(ImageChunkError::OutOfBounds);
+        }
+        Ok(Self {
+            hash: bytes[..32].try_into().expect("32 bytes"),
+            offset,
+            total,
+            data,
+        })
+    }
+}
+
 /// A panel: a title, a body, and a little metadata, all bounded and cleaned by the server. A text panel's body is
 /// Markdown-lite text, which is drawn as text and never as HTML; a code panel's, with [`Panel::code`], the first lines
-/// of a block of code, drawn as they are, coloured by its spans.
+/// of a block of code, drawn as they are, coloured by its spans; an image panel's, with [`Panel::image`], its image's
+/// caption, drawn below it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Panel {
@@ -336,6 +500,10 @@ pub struct Panel {
     /// An older client ignores it, and draws the panel's new text as it draws any change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    /// What makes it an image panel, if it is one. Sent only to a client whose `Hello` sets `images`; another is sent
+    /// the panel as a text panel saying that it is an image, with its caption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<Image>,
 }
 
 impl Panel {
@@ -356,12 +524,19 @@ impl Panel {
             code: None,
             pinned: false,
             slug: None,
+            image: None,
         }
     }
 
     /// The panel, which the agent calls `slug`.
     pub fn with_slug(mut self, slug: Option<String>) -> Self {
         self.slug = slug;
+        self
+    }
+
+    /// The panel, an image panel of `image`.
+    pub fn with_image(mut self, image: Image) -> Self {
+        self.image = Some(image);
         self
     }
 
@@ -502,6 +677,71 @@ mod tests {
             let json = serde_json::to_value(kind).unwrap();
             assert_eq!(serde_json::from_value::<TokenKind>(json).unwrap(), kind);
         }
+    }
+
+    #[test]
+    fn an_image_panel_names_its_image_by_hash_and_older_panels_have_none() {
+        let hash = "0123456789abcdef".repeat(4);
+        let place = Place::Wall {
+            wall: TOMORI_WALL.into(),
+            slot: 2,
+        };
+        let panel = Panel::new("panel-3", "Layout", "The session browser", place)
+            .with_image(Image::new(hash.clone(), 1600, 900, 123_456));
+        let json = serde_json::json!({
+            "id": "panel-3", "title": "Layout", "body": "The session browser", "age": 0,
+            "place": {"kind": "wall", "wall": "tomori", "slot": 2},
+            "image": {"hash": hash, "width": 1600, "height": 900, "bytes": 123_456}
+        });
+        assert_eq!(serde_json::to_value(&panel).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Panel>(json).unwrap(), panel);
+        assert!(panel.image.as_ref().unwrap().is_valid());
+        // A text panel says nothing of images, and a newer image's fields are ignored.
+        let text = Panel::new("panel-1", "t", "b", Place::Unknown);
+        assert!(serde_json::to_value(&text).unwrap().get("image").is_none());
+        let newer: Image = serde_json::from_value(serde_json::json!({
+            "hash": hash, "width": 1, "height": 1, "bytes": 1, "format": "avif"
+        }))
+        .unwrap();
+        assert!(newer.is_valid());
+        // Only an image a client can fetch and show is valid.
+        let invalid = [
+            Image::new("ABCDEF".repeat(10) + "abcd", 10, 10, 10),
+            Image::new(hash.replace('0', "g"), 10, 10, 10),
+            Image::new(&hash[1..], 10, 10, 10),
+            Image::new(hash.clone(), 0, 10, 10),
+            Image::new(hash.clone(), 10, IMAGE_SIDE + 1, 10),
+            Image::new(hash.clone(), 10, 10, 0),
+            Image::new(hash.clone(), 10, 10, IMAGE_BYTES + 1),
+        ];
+        for image in invalid {
+            assert!(!image.is_valid(), "{image:?}");
+        }
+        // Hashes are read from and written as lower-case hexadecimal.
+        let bytes = hash_bytes(&hash).unwrap();
+        assert_eq!(bytes[..2], [0x01, 0x23]);
+        assert_eq!(hash_text(&bytes), hash);
+        assert!(hash_bytes("é".repeat(32).as_str()).is_none());
+        assert!(hash_bytes(&format!("0g{}", "0".repeat(62))).is_none());
+        // Fetching one names it by its hash.
+        let fetch = crate::ClientMessage::FetchImage {
+            image: hash.clone(),
+        };
+        let json = serde_json::json!({"type": "fetch_image", "image": hash});
+        assert_eq!(serde_json::to_value(&fetch).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<crate::ClientMessage>(json).unwrap(),
+            fetch
+        );
+        // An older client's Hello shows no images; a newer one's says it does.
+        let hello: crate::ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "images": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            hello,
+            crate::ClientMessage::Hello { images: true, .. }
+        ));
     }
 
     #[test]

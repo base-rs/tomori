@@ -319,6 +319,8 @@ async fn exchange(
             projection: true,
             // Every client built with this crate reads whether pairing is open, which it hands on as any other message. See `design/security.md`.
             pairing_window: true,
+            // It does not show image panels yet, so it is sent each as a text panel of its caption.
+            images: false,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -515,6 +517,8 @@ fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disco
             // Playback is real time: if the application falls behind, newer audio is dropped rather than queued without bound.
             let _ = context.audio.try_send(audio);
         }
+        // This client asks for no images, so a server sends it none; one sent anyway is ignored.
+        FrameKind::Image => {}
     }
     Ok(())
 }

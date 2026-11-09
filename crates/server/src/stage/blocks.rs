@@ -272,6 +272,7 @@ impl Content {
                 meta,
                 code: None,
                 slug: id.flatten(),
+                image: None,
             },
             place.flatten(),
         ))
@@ -323,6 +324,7 @@ mod tests {
                 .collect(),
             code: None,
             slug: None,
+            image: None,
         }
     }
 

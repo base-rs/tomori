@@ -47,6 +47,9 @@ const SECRET_FIELDS: [&str; 3] = ["authorization", "cookie", "proxy-authorizatio
 /// What the agent is told about Tomori's MCP server when it connects.
 const INSTRUCTIONS: &str = "Tomori is the shared spatial workspace whose participants talk to you aloud. The space tools act on the Tomori space your session is bound to.";
 
+/// The longest title or caption taken for an image, in bytes, before it is cleaned and cut.
+const SHOWN_TEXT_BYTES: usize = 4096;
+
 /// The longest pairing code taken, with spaces: six digits as the device shows them, with room for how someone wrote them.
 const CODE_BYTES: usize = 32;
 
@@ -498,6 +501,26 @@ fn tools() -> Value {
                 "openWorldHint": false,
             },
         },
+        {
+            "name": "show_image",
+            "description": "Show an image file on this machine as a panel on a wall in your space, for everyone in it: a PNG, JPEG, WebP or GIF (its first frame), of at most 20 MB, by its absolute path or one relative to your working directory. Use it when seeing helps, such as a render, a diagram, a screenshot or a preview you made or found; give it a short title and a caption, and say in a sentence what it shows, since it is not read aloud. Tomori scales it to at most 2048 pixels on a side.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "maxLength": crate::images::PATH_BYTES, "description": "The image file, absolute or relative to your working directory." },
+                    "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line; the file's name if none." },
+                    "caption": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "What it shows, in a sentence, drawn below it." },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for move_panel: near NAME, looking NAME, front NAME or wall WALL, or near, looking or front for whoever asked. Where they were looking as they asked, if not given." },
+                },
+                "required": ["path"],
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+            },
+        },
     ])
 }
 
@@ -557,6 +580,10 @@ async fn call(
         "workers" => session.and_then(|session| hub.tool_workers(session).map(structured)),
         "remove_workers" => match session {
             Ok(session) => remove_workers(hub, session, arguments).await,
+            Err(error) => Err(error),
+        },
+        "show_image" => match session {
+            Ok(session) => show_image(hub, session, arguments).await,
             Err(error) => Err(error),
         },
         _ => return None,
@@ -694,6 +721,63 @@ fn requested_by(arguments: &Value) -> Result<Option<&str>, String> {
         Some(Value::String(name)) => Ok(Some(name)),
         Some(_) => Err("requested_by is a participant's name, as text.".to_owned()),
     }
+}
+
+/// The optional text argument `name` of `arguments`, empty when it is not given.
+fn shown_text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(""),
+        Some(Value::String(text)) if text.len() <= SHOWN_TEXT_BYTES => Ok(text),
+        Some(Value::String(_)) => Err(format!("The {name} is too long.")),
+        Some(_) => Err(format!("The {name} is text.")),
+    }
+}
+
+/// The `show_image` tool: the file is read, decoded and made into the image clients are sent on a thread of its own,
+/// one at a time, and kept, before its panel is projected, so that neither the hub's lock nor the scheduler waits for
+/// it. See `design/projection.md`.
+async fn show_image(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let path = text(arguments, "path")?.to_owned();
+    let title = shown_text(arguments, "title")?;
+    let caption = shown_text(arguments, "caption")?;
+    // Where it goes is checked before the file is read, so that a mistake there costs nothing.
+    let place = shown_text(arguments, "place")?;
+    let place = (!place.trim().is_empty())
+        .then(|| crate::hub::tools::placement(place))
+        .transpose()?;
+    // Only a space's own session may read a file for it, and a relative path is in its directory.
+    let directory = hub.calling_directory(session)?;
+    let title = if title.trim().is_empty() {
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        title.to_owned()
+    };
+    let store = hub.images.clone();
+    let (sender, receiver) = async_channel::bounded(1);
+    // A thread that cannot start drops its sender, so that it ends as one that ends without an answer.
+    if let Err(error) = crate::system::spawn("tomori-image", move || {
+        let prepared = crate::images::prepare(&directory, &path)
+            .and_then(|prepared| store.put(&prepared).map(|()| prepared.image));
+        let _ = sender.try_send(prepared);
+    }) {
+        log::warn!("Could not start reading an image the agent showed: {error}.");
+    }
+    let image = match receiver.recv().await {
+        Ok(prepared) => prepared?,
+        Err(_) => return Err("Tomori could not read the image.".to_owned()),
+    };
+    let (width, height) = (image.width, image.height);
+    let shown = hub.agent_show_image(session, &title, caption, place.as_ref(), image)?;
+    Ok(structured(json!({
+        "space": shown.space,
+        "panel": shown.panel,
+        "width": width,
+        "height": height,
+        "next": "Everyone in the space sees it now. Say in a sentence what it shows, since it is not read aloud.",
+    })))
 }
 
 /// The `confirm_pairing` tool.

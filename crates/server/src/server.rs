@@ -2350,6 +2350,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,
