@@ -204,53 +204,90 @@ pub const TICKED: char = '☑';
 pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
     markdown_lines(text, width)
         .into_iter()
-        .map(|(row, _)| row)
+        .map(|line| line.cells)
+        .collect()
+}
+
+/// One row of Markdown-lite laid out, as [`markdown_lines`] lays it out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Line {
+    pub cells: Vec<Cell>,
+    /// For a row of a list item, the line of the source the item begins on, from 0.
+    pub item: Option<usize>,
+    /// For a row of a table, where the table's rows are.
+    pub table: Option<TableRows>,
+}
+
+/// Where a table's rows are among the rows laid out: from `start` to before `end`, the first `header` of them its header
+/// and the rule below it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TableRows {
+    pub start: usize,
+    pub header: usize,
+    pub end: usize,
+}
+
+/// `text`, marked as Markdown-lite marks it, as spans in `base`: strong text bold, and inline code on a tint.
+pub(crate) fn styled(text: &[(String, Inline)], base: Style) -> Vec<Span> {
+    text.iter()
+        .map(|(text, inline)| {
+            let style = match inline {
+                Inline::Plain | Inline::Emphasis => base,
+                Inline::Strong => Style { bold: true, ..base },
+                Inline::Code => Style {
+                    background: Some(CODE),
+                    ..base
+                },
+            };
+            Span::new(text.as_str(), style)
+        })
         .collect()
 }
 
 /// `text`'s Markdown-lite as rows `width` wide, as [`parse_markdown`] lays them out, each with the line of `text` the list
-/// item it belongs to begins on, from 0, for a row of a list item. A task item, `- [ ]` or `- [x]`, shows a box in place
-/// of its bullet, after its number, empty or ticked, and a ticked one's text is dimmed, so that what is done recedes.
-pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<(Vec<Cell>, Option<usize>)> {
-    let mut lines = Vec::new();
+/// item it belongs to begins on, from 0, for a row of a list item, and where its table is, for a row of a table. A task
+/// item, `- [ ]` or `- [x]`, shows a box in place of its bullet, after its number, empty or ticked, and a ticked one's
+/// text is dimmed, so that what is done recedes. A table is a grid, or cards where its columns do not fit, as
+/// [`crate::table`] lays it out.
+pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<Line> {
+    let mut lines: Vec<Line> = Vec::new();
+    // Where the text of each open list item begins, the outermost first.
+    let mut hangs: Vec<usize> = Vec::new();
     for block in markdown_lite::parse(text) {
         let mut rows = Vec::new();
-        let spans = |base: Style| -> Vec<Span> {
-            block
-                .text
-                .iter()
-                .map(|(text, inline)| {
-                    let style = match inline {
-                        Inline::Plain | Inline::Emphasis => base,
-                        Inline::Strong => Style { bold: true, ..base },
-                        Inline::Code => Style {
-                            background: Some(CODE),
-                            ..base
-                        },
-                    };
-                    Span::new(text.as_str(), style)
-                })
-                .collect()
-        };
+        let spans = |base: Style| styled(&block.text, base);
+        if !matches!(block.kind, Kind::Item { .. }) {
+            hangs.clear();
+        }
         match &block.kind {
             Kind::Paragraph => rows.extend(wrap(&spans(style(TEXT)), width, Wrap::default())),
             Kind::Heading(_) => {
                 rows.extend(wrap(&spans(Style::bold(BRIGHT)), width, Wrap::default()))
             }
-            Kind::Quote => {
-                let mut quoted = vec![Span::new("│ ", style(DIM))];
-                quoted.extend(spans(style(DIM)));
-                rows.extend(wrap(
-                    &quoted,
-                    width,
-                    Wrap {
-                        hanging: 2,
-                        ..Default::default()
-                    },
-                ));
-            }
+            // Every row of a quote has its bar, so that one that wraps still reads as quoted.
+            Kind::Quote => rows.extend(
+                wrap(&spans(style(DIM)), width.saturating_sub(2), Wrap::default())
+                    .into_iter()
+                    .map(|row| {
+                        let mut quoted = vec![('│', style(DIM)), (' ', style(DIM))];
+                        quoted.extend(row);
+                        quoted
+                    }),
+            ),
             Kind::Item { depth, marker } => {
-                let indent = 2 * depth.saturating_sub(1);
+                // An item stands under the text of the item it is in, and a later paragraph of an item under its own
+                // text, however wide the marker before it, such as "1." or "10.".
+                let depth = (*depth).max(1);
+                let continued = marker.is_none();
+                hangs.truncate(if continued { depth } else { depth - 1 });
+                let indent = if continued {
+                    hangs.get(depth - 1).copied()
+                } else {
+                    depth
+                        .checked_sub(2)
+                        .and_then(|parent| hangs.get(parent).copied())
+                }
+                .unwrap_or(2 * (depth - 1));
                 // A task item's box stands in place of its bullet, as GitHub shows it, and after its number.
                 let mut marker = match marker.as_deref() {
                     Some(marker) if !(block.task.is_some() && marker == "•") => {
@@ -275,12 +312,20 @@ pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<(Vec<Cell>, Option
                     None => TEXT,
                 };
                 item.extend(spans(style(text)));
+                let hanging = if continued {
+                    indent
+                } else {
+                    indent + crate::ui_text::width(&marker).max(2)
+                };
+                if !continued {
+                    hangs.push(hanging);
+                }
                 rows.extend(wrap(
                     &item,
                     width,
                     Wrap {
                         indent,
-                        hanging: indent + crate::ui_text::width(&marker).max(2),
+                        hanging,
                         continuation: None,
                     },
                 ));
@@ -293,17 +338,27 @@ pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<(Vec<Cell>, Option
                     ..Default::default()
                 },
             )),
-            Kind::TableRow { header } => {
-                let base = if *header {
-                    Style::bold(BRIGHT)
-                } else {
-                    style(TEXT)
+            Kind::Table(table) => {
+                let laid = crate::table::lay_out(table, width);
+                let start = lines.len();
+                let span = TableRows {
+                    start,
+                    header: laid.header,
+                    end: start + laid.rows.len(),
                 };
-                rows.push(cut(&spans(base), width));
+                lines.extend(laid.rows.into_iter().map(|cells| Line {
+                    cells,
+                    item: None,
+                    table: Some(span),
+                }));
             }
             Kind::Rule => rows.push(cut(&[Span::new("─".repeat(width), style(DIM))], width)),
         }
-        lines.extend(rows.into_iter().map(|row| (row, block.line)));
+        lines.extend(rows.into_iter().map(|cells| Line {
+            cells,
+            item: block.line,
+            table: None,
+        }));
     }
     lines
 }
@@ -1690,7 +1745,7 @@ mod tests {
         );
         let text: Vec<(String, Option<usize>)> = lines
             .iter()
-            .map(|(row, line)| (row.iter().map(|(ch, _)| *ch).collect(), *line))
+            .map(|line| (line.cells.iter().map(|(ch, _)| *ch).collect(), line.item))
             .collect();
         assert_eq!(
             text,
@@ -1705,10 +1760,10 @@ mod tests {
             ]
         );
         // The empty box is bright and the ticked one green, both bold, and a ticked item's text dim.
-        let (unticked, _) = &lines[1];
+        let unticked = &lines[1].cells;
         assert_eq!(unticked[0], (UNTICKED, Style::bold(BRIGHT)));
         assert_eq!(unticked[2].1, style(TEXT));
-        let (ticked, _) = &lines[3];
+        let ticked = &lines[3].cells;
         assert_eq!(ticked[0], (TICKED, Style::bold(GREEN)));
         assert!(ticked[2..].iter().all(|(_, style)| style.color == DIM));
         // Both boxes are drawn from a bundled font, one cell each.
@@ -1722,8 +1777,8 @@ mod tests {
         );
     }
 
-    fn lines_of(lines: Vec<(Vec<Cell>, Option<usize>)>) -> Vec<Vec<Cell>> {
-        lines.into_iter().map(|(row, _)| row).collect()
+    fn lines_of(lines: Vec<Line>) -> Vec<Vec<Cell>> {
+        lines.into_iter().map(|line| line.cells).collect()
     }
 
     fn approval_of(text: &str) -> Approval {
@@ -1750,6 +1805,33 @@ mod tests {
     }
 
     #[test]
+    fn nested_items_stand_under_their_parent_s_text_and_a_quote_wrapped_keeps_its_bar() {
+        let rows = parse_markdown(
+            "1. First item long enough to wrap\n   - Nested under it, wrapping too\n\n   Later paragraph of the first\n\n> A quoted line long enough to wrap\n\n10. Tenth\n    - Under ten\n\nOne<br>two",
+            24,
+        );
+        let text: Vec<String> = rows.iter().map(|row| crate::ui_text::plain(row)).collect();
+        assert_eq!(
+            text,
+            [
+                "1. First item long",
+                "   enough to wrap",
+                "   • Nested under it,",
+                "     wrapping too",
+                "   Later paragraph of",
+                "   the first",
+                "│ A quoted line long",
+                "│ enough to wrap",
+                "10. Tenth",
+                "    • Under ten",
+                "One",
+                "two",
+            ]
+        );
+        assert!(rows.iter().all(|row| row.len() <= 24));
+    }
+
+    #[test]
     fn markdown_quotes_tables_and_rules_are_drawn_and_its_cache_is_bounded() {
         let rows = parse_markdown("> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n", 12);
         let text: Vec<String> = rows
@@ -1758,9 +1840,9 @@ mod tests {
             .collect();
         assert_eq!(
             text,
-            ["│ quoted", "a │ b", "1 │ 2", "─".repeat(12).as_str()]
+            ["│ quoted", "a ▏b", "────", "1 ▏2", "─".repeat(12).as_str()]
         );
-        assert!(rows[1][0].1.bold && !rows[2][0].1.bold);
+        assert!(rows[1][0].1.bold && !rows[3][0].1.bold);
         for n in 0..=CACHED {
             markdown("m", &format!("text {n}"), 20);
         }

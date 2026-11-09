@@ -369,6 +369,19 @@ pub fn width(text: &str) -> usize {
     drawn(text).count()
 }
 
+/// The cells the widest piece of `text` takes that [`wrap`] keeps on one row where it can: its longest word, or, among
+/// CJK characters, the longest run it may not break, such as one before closing punctuation. A column narrower than this
+/// breaks a word.
+pub fn longest_word(text: &str) -> usize {
+    let cells = graphemes([(text, WHITE)]);
+    cells
+        .split(|(ch, _)| *ch == '\n' || breaks(*ch))
+        .flat_map(pieces)
+        .map(span)
+        .max()
+        .unwrap_or_default()
+}
+
 /// `text` on one row of exactly `width` cells: cut with "…", as [`clip`] does, and padded with spaces after it.
 pub fn pad(text: &str, width: usize) -> String {
     let text = clip(text, width);
@@ -585,6 +598,17 @@ mod tests {
         hanging: 0,
         continuation: Some('↵'),
     };
+
+    #[test]
+    fn the_longest_word_is_the_widest_piece_wrap_keeps_whole() {
+        assert_eq!(longest_word("Rebase, then Recommendation\nnow"), 14);
+        assert_eq!(longest_word(""), 0);
+        // Between CJK characters a line may break, but not before closing punctuation.
+        assert_eq!(longest_word("日本語のテキスト"), 2);
+        assert_eq!(longest_word("完了。"), 4);
+        // A non-breaking space joins the words either side of it.
+        assert_eq!(longest_word("10\u{a0}km away"), 5);
+    }
 
     #[test]
     fn typographic_characters_are_drawn_as_themselves_and_tabs_and_line_breaks_as_spaces() {

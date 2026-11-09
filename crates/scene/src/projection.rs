@@ -26,7 +26,7 @@ use crate::{
     manipulation::Manipulation,
     pointing::Ray,
     recording::facing,
-    transcript::{BRIGHT, DIM, TEXT},
+    transcript::{BRIGHT, DIM, Line, TEXT},
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style, cut},
 };
 
@@ -39,6 +39,9 @@ const ROWS: usize = BODY_ROWS + 3;
 /// comfortable width, nor shorter or taller.
 pub const FIT_COLUMNS: (usize, usize) = (24, 48);
 pub const FIT_ROWS: (usize, usize) = (3, 30);
+/// The widest a floating panel's face grows to show a table, in cells: about a metre, 38° from 1.5 m, so that a row of
+/// the table is still read by moving the eyes, not the head.
+pub const TABLE_COLUMNS: usize = 60;
 /// The furthest along the ray a slot is aimed at to put a panel carried in it, in metres.
 const AIM_REACH: f32 = 8.0;
 /// How far beyond a slot's edges the ray still aims at it, so that the gaps between slots aim at one, in metres.
@@ -232,8 +235,32 @@ pub fn panel_size() -> (f32, f32) {
 
 /// A panel's body, as the rows its face shows at `columns`, styled as the transcript styles a message. The one place a
 /// panel's content becomes rows, so that every kind of content sizes alike.
-fn body_rows(panel: &Panel, columns: usize) -> Vec<Vec<crate::ui_text::Cell>> {
-    crate::transcript::parse_markdown(&panel.body, columns)
+fn body_lines(panel: &Panel, columns: usize) -> Vec<Line> {
+    crate::transcript::markdown_lines(&panel.body, columns)
+}
+
+/// The `count` rows of `lines` a face shows scrolled `scroll` rows down. Scrolled into a table's body, the table's header
+/// and the rule below it stay at the top, over the rows they cover, so that each column is still named, while the face
+/// has room for two rows below them; as the table's last row passes under them, what follows it pushes them up and away,
+/// so that every row scrolled moves what is shown by one.
+fn shown(lines: &[Line], scroll: usize, count: usize) -> Vec<Line> {
+    let end = lines.len().min(scroll + count);
+    let pinned = lines
+        .get(scroll)
+        .and_then(|line| line.table)
+        .filter(|table| table.header > 0 && scroll > table.start && table.header + 2 <= count);
+    match pinned {
+        Some(table) => {
+            // How many of the header's rows show: all of them, or as many as there are of the table below the top.
+            let header = table.header.min(table.end - scroll);
+            lines[table.start + table.header - header..table.start + table.header]
+                .iter()
+                .chain(&lines[(scroll + header).min(end)..end])
+                .cloned()
+                .collect()
+        }
+        None => lines[scroll.min(end)..end].to_vec(),
+    }
 }
 
 /// The line of `panel`'s body, from 0, that the list item `point` is on begins on, where the ray meets a text panel drawn
@@ -254,14 +281,14 @@ pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3)
     // Below the title, the metadata and the rule.
     let row = (from_top / CELL_HEIGHT as f32) as usize;
     let body = row.checked_sub(3).filter(|body| *body < body_count)?;
-    let (_, line) = crate::transcript::markdown_lines(&panel.body, columns)
-        .into_iter()
-        .nth(scroll + body)?;
-    line.and_then(|line| u32::try_from(line).ok())
+    let lines = body_lines(panel, columns);
+    let line = shown(&lines, scroll, body_count).into_iter().nth(body)?;
+    line.item.and_then(|line| u32::try_from(line).ok())
 }
 
 /// How many columns and body rows a text panel's face has when it is sized as `fit` says: a slot's, or, to fit its
-/// text, as wide as its widest row, title and metadata, within [`FIT_COLUMNS`], its body wrapped at that width, as many
+/// text, as wide as its widest row, title and metadata, within [`FIT_COLUMNS`], or [`TABLE_COLUMNS`] for a body with a
+/// table, its body wrapped at that width, as many
 /// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
 /// [`CodeLayout`]'s.
 pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
@@ -271,14 +298,22 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
     match fit {
         Fit::Slot(cells) => (cells.columns, cells.body),
         Fit::Text => {
-            let widest = body_rows(panel, FIT_COLUMNS.1)
+            // A table may make it wider, to show more of its columns side by side.
+            let mut lines = body_lines(panel, FIT_COLUMNS.1);
+            let most = if lines.iter().any(|line| line.table.is_some()) {
+                lines = body_lines(panel, TABLE_COLUMNS);
+                TABLE_COLUMNS
+            } else {
+                FIT_COLUMNS.1
+            };
+            let widest = lines
                 .iter()
-                .map(Vec::len)
+                .map(|line| line.cells.len())
                 .chain([heading_width(panel)])
                 .max()
                 .unwrap_or_default();
-            let columns = widest.clamp(FIT_COLUMNS.0, FIT_COLUMNS.1);
-            let rows = body_rows(panel, columns)
+            let columns = widest.clamp(FIT_COLUMNS.0, most);
+            let rows = body_lines(panel, columns)
                 .len()
                 .clamp(FIT_ROWS.0, FIT_ROWS.1);
             (columns, rows)
@@ -336,7 +371,7 @@ fn most_scroll(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> usize {
         Some(layout) => layout.most_scroll(fit),
         None => {
             let (columns, count) = self::fit(panel, fit);
-            body_rows(panel, columns).len().saturating_sub(count)
+            body_lines(panel, columns).len().saturating_sub(count)
         }
     }
 }
@@ -468,18 +503,19 @@ fn scrolled_face(
         Row::text(&about(panel), Style::plain(DIM), columns),
         Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
     ];
-    let mut body = body_rows(panel, columns);
-    let total = body.len();
+    let lines = body_lines(panel, columns);
+    let total = lines.len();
     let scroll = scroll.min(total.saturating_sub(body_count));
-    body.drain(..scroll);
-    if body.len() > body_count {
-        body.truncate(body_count);
-        let last = &mut body[body_count - 1];
-        last.truncate(columns - 1);
-        last.push(('…', Style::plain(TEXT)));
+    let mut body = shown(&lines, scroll, body_count);
+    if total > scroll + body_count
+        && let Some(last) = body.last_mut()
+        && last.table.is_none()
+        && last.cells.len() < columns
+    {
+        last.cells.push(('…', Style::plain(TEXT)));
     }
-    body.resize(body_count, Vec::new());
-    rows.extend(body.into_iter().map(Row::new));
+    body.resize_with(body_count, Default::default);
+    rows.extend(body.into_iter().map(|line| Row::new(line.cells)));
     canvas.rows = rows;
     canvas.shapes = scroll_bar(columns, body_count, total, scroll);
     canvas

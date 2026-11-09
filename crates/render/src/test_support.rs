@@ -73,3 +73,43 @@ fn undrawn_kanji_are_not_in_the_atlas_until_drawn() {
     }
     assert!(!undrawn('\u{9e40}', 2).contains(kanji.chars().next().unwrap()));
 }
+
+/// What `texture`, `width` by `height`, holds once drawn.
+pub fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    (width, height): (u32, u32),
+) -> image::RgbaImage {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test readback"),
+        size: (width * height * 4) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    receiver.recv().unwrap().unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+    buffer.unmap();
+    image::RgbaImage::from_raw(width, height, data).unwrap()
+}
