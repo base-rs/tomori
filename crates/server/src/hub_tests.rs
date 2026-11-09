@@ -2571,7 +2571,7 @@ fn cards_are_rendered_only_for_a_watcher_in_a_space_that_shows_them() {
     let ada = Client::greeted(&hub, Access::open(), "ada");
     // Without a board, nothing is due and no space shows cards.
     assert_eq!(hub.cards_next(Instant::now()), crate::cards::Next::Idle);
-    hub.offer_environment(crate::Environment::new("github", "GitHub"));
+    hub.set_environment(crate::Environment::new("github", "GitHub"));
     hub.set_board(crate::cards::Board::new("github", "o/r", "GitHub"));
     let (commands, _receiver) = async_channel::unbounded();
     let id = hub
@@ -2619,7 +2619,7 @@ fn cards_are_rendered_only_for_a_watcher_in_a_space_that_shows_them() {
 /// A hub offering GitHub's cards, with two spaces that show them.
 fn hub_with_cards() -> (Arc<Hub>, async_channel::Receiver<Job>, [String; 2]) {
     let (hub, jobs) = hub();
-    hub.offer_environment(crate::Environment::new("github", "GitHub"));
+    hub.set_environment(crate::Environment::new("github", "GitHub"));
     hub.set_board(crate::cards::Board::new("github", "o/r", "GitHub"));
     let spaces = ["first", "second"].map(|title| {
         let (commands, _receiver) = async_channel::unbounded();
@@ -2753,7 +2753,7 @@ fn fetched_card(number: u64, title: &str) -> crate::cards::FetchedCard {
 #[test]
 fn a_card_attended_to_as_the_words_begin_is_described_from_the_board_before_them() {
     let (hub, _jobs) = hub_waiting();
-    hub.offer_environment(crate::Environment::new("github", "GitHub"));
+    hub.set_environment(crate::Environment::new("github", "GitHub"));
     hub.set_board(crate::cards::Board::new("github", "o/r", "GitHub"));
     let register = |environment: &str| {
         running(
