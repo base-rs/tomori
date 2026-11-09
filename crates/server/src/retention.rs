@@ -712,11 +712,11 @@ mod tests {
             for (to, delivery) in deliveries {
                 assert_eq!(to, participant);
                 match delivery {
-                    Delivery::Message(ServerMessage::Speech { text, replay, .. }) => {
-                        heard.texts.push((text, replay))
-                    }
                     Delivery::Message(message) => {
-                        unreachable!("only speech is kept, not {message:?}")
+                        let ServerMessage::Speech { text, replay, .. } = message else {
+                            unreachable!("only speech is kept, not {message:?}");
+                        };
+                        heard.texts.push((text, replay));
                     }
                     Delivery::Frame(frame) => {
                         heard
