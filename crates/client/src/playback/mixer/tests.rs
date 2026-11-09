@@ -8,14 +8,23 @@ use crate::playback::spatial::Listener;
 
 const RATE: u32 = 1_000;
 
+/// Options at `sample_rate` with `jitter` for every source, agent speech's included.
+fn options(sample_rate: u32, jitter: JitterOptions) -> MixerOptions {
+    MixerOptions {
+        sample_rate,
+        jitter,
+        agent_jitter: jitter,
+    }
+}
+
 fn mixer() -> Mixer {
-    Mixer::new(MixerOptions {
-        sample_rate: RATE,
-        jitter: JitterOptions {
+    Mixer::new(options(
+        RATE,
+        JitterOptions {
             target_latency: Duration::from_millis(4),
             latency_limit: Duration::from_millis(40),
         },
-    })
+    ))
 }
 
 fn frame(source: u32, sequence: u32, value: i16) -> AudioFrame {
@@ -44,6 +53,80 @@ fn defaults_suit_a_headset() {
     assert_eq!(mixer.agent_volume(), 1.0);
     assert!(!mixer.is_agent_muted());
     assert_eq!(mix(&mut mixer, 480), vec![0; 480]);
+}
+
+#[test]
+fn agent_speech_sent_ahead_plays_through_a_hitch_shorter_than_the_lead_without_a_gap() {
+    // The headset's defaults, with 24 kHz speech of 20 ms frames sent a fifth of a second ahead, as the server's pacer
+    // sends it, played by a speaker that asks for 4 ms at a time.
+    let mut mixer = Mixer::new(MixerOptions::default());
+    let speech = |sequence: u32| AudioFrame {
+        gate: Gate::Live,
+        source: AGENT_SOURCE,
+        sequence,
+        timestamp: u64::from(sequence) * 20_000,
+        sample_rate: 24_000,
+        samples: vec![1_000; 480],
+    };
+    // A burst of the lead, ten frames, as the segment starts.
+    let mut sent = 0;
+    while sent < 10 {
+        mixer.push(speech(sent));
+        sent += 1;
+    }
+    let mut output = vec![0; 192];
+    let mut played = Vec::new();
+    for burst in 0..500 {
+        // Every 20 ms of output, the next frame, save for the 180 ms from 400 ms in, when nothing arrives, as when the
+        // pacer, the network or this client's connection thread is held up, and then what was held up all at once.
+        let at = burst * 4;
+        if at % 20 == 0 && !(400..580).contains(&at) {
+            while sent < 10 + at / 20 + 1 && sent < 100 {
+                mixer.push(speech(sent));
+                sent += 1;
+            }
+        }
+        mixer.mix(&mut output);
+        played.extend_from_slice(&output);
+    }
+    // Two seconds of speech play without a silent sample up to the last frame, which ends the stream, and nothing is
+    // discarded.
+    let last = 99 * 960;
+    assert!(
+        played[..last].iter().all(|sample| *sample == 1_000),
+        "silent at {:?}",
+        played[..last].iter().position(|sample| *sample != 1_000)
+    );
+    let statistics = mixer.statistics();
+    assert_eq!(
+        (statistics.discarded_frames, statistics.late_frames),
+        (0, 0)
+    );
+    // A participant's voice keeps no more than a quarter of a second, as before.
+    assert_eq!(
+        MixerOptions::default().jitter.latency_limit,
+        Duration::from_millis(250)
+    );
+}
+
+#[test]
+fn a_cue_over_agent_speech_is_added_to_it_and_speech_plays_on_from_the_next_sample() {
+    let mut mixer = mixer();
+    for sequence in 0..10 {
+        mixer.push(frame(AGENT_SOURCE, sequence, 1_000));
+    }
+    let before = mix(&mut mixer, 8);
+    assert_eq!(before, [1_000; 8]);
+    let cue: Vec<f32> = Bank::new(RATE).samples(Earcon::Choose).to_vec();
+    mixer.play(Earcon::Choose, Direction::Right);
+    let during = mix(&mut mixer, 32);
+    // Each sample is the speech's and the cue's together: the cue neither resets, ducks nor replaces speech.
+    let expected: Vec<i16> = (0..32)
+        .map(|index| (1_000.0 + cue.get(index).copied().unwrap_or(0.0)).round() as i16)
+        .collect();
+    assert_eq!(during, expected);
+    assert!(mixer.is_source_playing(AGENT_SOURCE));
+    assert_eq!(mixer.statistics(), PlaybackStatistics::default());
 }
 
 #[test]
@@ -395,13 +478,13 @@ fn silencing_fades_out_received_audio_and_cues_but_not_the_opening_tick() {
         assert_eq!(peak.unwrap() > 1_000, heard, "{earcon:?}");
     }
     // Unsilenced, playback fades back in over 10 ms, and cues play again.
-    let mut faded = Mixer::new(MixerOptions {
-        sample_rate: 1_000,
-        jitter: JitterOptions {
+    let mut faded = Mixer::new(options(
+        1_000,
+        JitterOptions {
             target_latency: Duration::ZERO,
             latency_limit: Duration::from_millis(100),
         },
-    });
+    ));
     faded.silence_now();
     for sequence in 0..4 {
         faded.push(AudioFrame {
@@ -468,13 +551,13 @@ fn without_a_scene_stereo_plays_the_mono_mix_in_both_ears() {
 
 #[test]
 fn places_each_source_on_its_side_and_agent_speech_played_again_at_the_agent() {
-    let mut mixer = Mixer::new(MixerOptions {
-        sample_rate: 48_000,
-        jitter: JitterOptions {
+    let mut mixer = Mixer::new(options(
+        48_000,
+        JitterOptions {
             target_latency: Duration::ZERO,
             latency_limit: Duration::from_millis(200),
         },
-    });
+    ));
     *mixer.scene_mut() = Scene {
         listener: Some(listener()),
         sources: vec![(1, [-2.0, 1.6, 0.0]), (AGENT_SOURCE, [2.0, 1.6, 0.0])],
@@ -684,10 +767,7 @@ fn an_ambient_sound_never_plays_over_speech() {
 
 #[test]
 fn an_ambient_sound_is_heard_from_where_it_is() {
-    let mut mixer = Mixer::new(MixerOptions {
-        sample_rate: 48_000,
-        jitter: JitterOptions::default(),
-    });
+    let mut mixer = Mixer::new(options(48_000, JitterOptions::default()));
     *mixer.scene_mut() = Scene {
         listener: Some(listener()),
         sources: Vec::new(),

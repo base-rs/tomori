@@ -26,8 +26,11 @@ pub const RETAINED_AUDIO: Duration = Duration::from_secs(300);
 /// The most replies whose speech is retained per space: the latest, and the one before it, so that a listener still catching up on one reply when the next starts keeps hearing it.
 pub const RETAINED_REPLIES: usize = 2;
 
-/// How far ahead of its playback time a frame is sent, to cover network jitter. Kept well below the client's jitter buffer limit.
-pub const LEAD: Duration = Duration::from_millis(100);
+/// How far ahead of its playback time a frame is sent, to cover a hitch anywhere between the pacer and a listener's
+/// speaker: the pacer's thread, the network, or the client receiving it. A stall shorter than this is not heard. Kept
+/// below the jitter buffer limit of clients built before agent speech had a limit of its own, 250 ms, so that they never
+/// discard what is sent ahead. See `design/live-audio.md`.
+pub const LEAD: Duration = Duration::from_millis(200);
 
 /// A breath between spoken segments, so that a list or a series of paragraphs does not run together.
 pub const SEGMENT_GAP: Duration = Duration::from_millis(400);
@@ -798,9 +801,12 @@ mod tests {
         retention.joined("ada", Some(Engagement::Engaged));
         let (_, values, end) = drain(&mut retention, "ada", start);
         assert_eq!(values.len(), 50);
-        // A second of audio is sent over about a second, only slightly ahead.
+        // A second of audio is sent over about a second, only [`LEAD`] ahead.
         let elapsed = end - start;
-        assert!(elapsed >= Duration::from_millis(880), "{elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_secs(1) - LEAD - Duration::from_millis(20),
+            "{elapsed:?}"
+        );
         assert!(elapsed <= Duration::from_secs(1), "{elapsed:?}");
     }
 

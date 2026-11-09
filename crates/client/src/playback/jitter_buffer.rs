@@ -14,7 +14,7 @@ const CONCEALMENT_LIMIT: u64 = 3;
 /// A frame this many sequence numbers behind the latest one is not reordered or late: the source has restarted its sequence, for example after reconnecting. At 20 ms per frame this is one second, well beyond any latency limit, so such a frame could never be played in order anyway.
 const RESTART_LIMIT: u64 = 50;
 
-/// Jitter buffer timing, shared by every source in a [`super::Mixer`].
+/// Jitter buffer timing, shared by every participant's source in a [`super::Mixer`], and by agent speech with its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JitterOptions {
@@ -29,6 +29,19 @@ impl Default for JitterOptions {
         Self {
             target_latency: Duration::from_millis(60),
             latency_limit: Duration::from_millis(250),
+        }
+    }
+}
+
+impl JitterOptions {
+    /// For agent speech, which the server sends a fifth of a second ahead of when it plays, so that a hitch shorter than
+    /// that between its pacer and this speaker is not heard: it starts as soon as other sources do, and keeps up to half
+    /// a second, room for what is sent ahead and for the speaker falling behind, before discarding any. See
+    /// `design/live-audio.md`.
+    pub fn agent_speech() -> Self {
+        Self {
+            latency_limit: Duration::from_millis(500),
+            ..Self::default()
         }
     }
 }

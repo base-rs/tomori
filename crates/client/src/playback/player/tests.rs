@@ -14,16 +14,17 @@ const FRAME: usize = 4;
 
 fn player() -> (SyncSender<AudioFrame>, Player, PlayerControl) {
     let (sender, audio) = mpsc::sync_channel(64);
-    let (player, control) = Player::new(
-        audio,
+    let (player, control) = Player::new(audio, {
+        let jitter = JitterOptions {
+            target_latency: Duration::from_millis(4),
+            latency_limit: Duration::from_millis(200),
+        };
         MixerOptions {
             sample_rate: 48_000,
-            jitter: JitterOptions {
-                target_latency: Duration::from_millis(4),
-                latency_limit: Duration::from_millis(200),
-            },
-        },
-    );
+            jitter,
+            agent_jitter: jitter,
+        }
+    });
     (sender, player, control)
 }
 

@@ -80,7 +80,10 @@ impl Layout {
 pub struct MixerOptions {
     /// The output device rate.
     pub sample_rate: u32,
+    /// For each participant's source.
     pub jitter: JitterOptions,
+    /// For agent speech, live and played again.
+    pub agent_jitter: JitterOptions,
 }
 
 impl Default for MixerOptions {
@@ -88,6 +91,18 @@ impl Default for MixerOptions {
         Self {
             sample_rate: 48_000,
             jitter: JitterOptions::default(),
+            agent_jitter: JitterOptions::agent_speech(),
+        }
+    }
+}
+
+impl MixerOptions {
+    /// The jitter buffer timing for `source`.
+    fn jitter(&self, source: u32) -> JitterOptions {
+        if is_agent(source) {
+            self.agent_jitter
+        } else {
+            self.jitter
         }
     }
 }
@@ -509,20 +524,14 @@ impl Mixer {
         if frame.gate == Gate::Off || Some(frame.source) == self.local_source {
             return;
         }
-        let source = self.sources.entry(frame.source).or_insert_with(|| {
-            Source::new(
-                frame.sample_rate,
-                self.options.sample_rate,
-                self.options.jitter,
-            )
-        });
+        let jitter = self.options.jitter(frame.source);
+        let source = self
+            .sources
+            .entry(frame.source)
+            .or_insert_with(|| Source::new(frame.sample_rate, self.options.sample_rate, jitter));
         if source.buffer.sample_rate() != frame.sample_rate {
             // A new speech segment can change rate; restart the source rather than play mismatched audio.
-            *source = Source::new(
-                frame.sample_rate,
-                self.options.sample_rate,
-                self.options.jitter,
-            );
+            *source = Source::new(frame.sample_rate, self.options.sample_rate, jitter);
         }
         if !source.buffer.has_audio() {
             source.arrived = self.arrivals;

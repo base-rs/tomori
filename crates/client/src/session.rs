@@ -23,6 +23,7 @@ use tomori_protocol::{
 use tomori_security::{Fingerprint, Pinned};
 
 use crate::client::Shared;
+use crate::lateness::Lateness;
 use crate::outbox::{Batch, Outbox};
 use crate::resolve::resolve_in_background;
 use crate::{ConnectionState, Disconnect, Event, Options, Transport};
@@ -357,9 +358,10 @@ async fn exchange(
             welcomed.set(Some(context.scheduler.now()));
             let frames = async {
                 let mut receiving = None;
+                let mut lateness = Lateness::default();
                 loop {
                     let frame = reader.next().await?;
-                    deliver(context, frame, source, &mut receiving)?;
+                    deliver(context, frame, source, &mut receiving, &mut lateness)?;
                 }
             };
             let keepalive = keepalive(
@@ -525,12 +527,13 @@ pub(crate) fn receive_image(
 }
 
 /// Hand one frame to the application. `source` is this client's participant number on this connection; `receiving` is
-/// the image being received on it, if any.
+/// the image being received on it, if any; `lateness`, how agent speech has arrived on it.
 fn deliver(
     context: &Context<'_>,
     frame: Frame,
     source: u32,
     receiving: &mut Option<Receiving>,
+    lateness: &mut Lateness,
 ) -> Result<(), Disconnect> {
     let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
     match frame.kind {
@@ -568,6 +571,7 @@ fn deliver(
             if audio.source == source {
                 return Ok(());
             }
+            lateness.arrived(&audio, context.scheduler.now());
             // Playback is real time: if the application falls behind, newer audio is dropped rather than queued without bound.
             let _ = context.audio.try_send(audio);
         }

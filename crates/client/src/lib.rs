@@ -22,6 +22,7 @@ mod backoff;
 mod client;
 mod connection_state;
 mod events;
+mod lateness;
 mod microphone;
 mod options;
 mod outbox;

@@ -118,6 +118,10 @@ mod enabled {
     /// Frames per second of agent speech: 20 ms frames.
     const FRAMES_PER_SECOND: u32 = 50;
 
+    /// How often a pacer that keeps falling behind says so, at most, as the clients' logging does (see
+    /// `design/client-logging.md`).
+    const BEHIND_REPORT: Duration = Duration::from_secs(30);
+
     /// The longest piece of text in one speech segment. In the `block` mode, synthesis is in whole
     /// document-level blocks, as the incremental parser hands them over, so a block keeps the
     /// cadence of the paragraph it came from; the limit only splits the pathological block, a single
@@ -429,6 +433,55 @@ mod enabled {
         sequence: u32,
         /// Whether synthesis has been reported as stopped.
         stopped: bool,
+        /// Whether the last item sent was a frame, so that the next frame of the segment is due as it ends.
+        framing: bool,
+        /// Whether, since then, the pacer had nothing more of the segment to send, waiting for synthesis.
+        starved: bool,
+        /// Frames of a segment sent after they were due to play, and how far behind, since that was last said.
+        behind: Behind,
+    }
+
+    /// Frames a pacer sent after they were due to play, so that listeners heard a gap: when it last said so, and how many
+    /// more since, of them how many waited for synthesis, and the furthest behind of them.
+    #[derive(Debug, Default)]
+    struct Behind {
+        said: Option<Instant>,
+        count: u32,
+        starved: u32,
+        worst: Duration,
+    }
+
+    impl Behind {
+        /// A frame was sent `late` after it was due to play, at `now`, after waiting for synthesis if `starved`, as when
+        /// the server is too busy to synthesize in time, or else held up, as when its thread or the hub's lock was: what
+        /// to log, at most once every [`BEHIND_REPORT`], counting those in between.
+        fn late(&mut self, late: Duration, starved: bool, now: Instant) -> Option<String> {
+            self.count += 1;
+            self.starved += u32::from(starved);
+            self.worst = self.worst.max(late);
+            if self
+                .said
+                .is_some_and(|said| now.saturating_duration_since(said) < BEHIND_REPORT)
+            {
+                return None;
+            }
+            let said = format!(
+                "fell {} ms behind its playback{}, so listeners heard a gap",
+                self.worst.as_millis(),
+                match (self.count, self.starved) {
+                    (1, 1) => " waiting for synthesis".to_owned(),
+                    (1, _) => ", held up".to_owned(),
+                    (count, starved) => {
+                        format!(" {count} times, {starved} of them waiting for synthesis")
+                    }
+                }
+            );
+            *self = Self {
+                said: Some(now),
+                ..Self::default()
+            };
+            Some(said)
+        }
     }
 
     /// Reported once per space when synthesis has stopped: a panic disabled it, or the server is shutting down.
@@ -463,6 +516,9 @@ mod enabled {
                 epoch: Instant::now(),
                 sequence: 0,
                 stopped: false,
+                framing: false,
+                starved: false,
+                behind: Behind::default(),
             }
         }
 
@@ -481,7 +537,11 @@ mod enabled {
                     }
                 }
                 let live = match self.pending.front() {
-                    None => None,
+                    // Part way through a segment, the next of it is still being synthesized.
+                    None => {
+                        self.starved |= self.framing;
+                        None
+                    }
                     Some((_, Item::Frame { .. })) => {
                         let clock = self.clock.filter(|clock| *clock >= now).unwrap_or(now);
                         let due = clock.checked_sub(LEAD).unwrap_or(clock);
@@ -534,6 +594,18 @@ mod enabled {
             let Some(hub) = self.hub.upgrade() else {
                 return false;
             };
+            // A frame that follows another of its segment was due as that one ended; sent after that, it plays late, so
+            // listeners hear a gap, as when this thread, synthesis or the hub's lock held it back beyond [`LEAD`].
+            if let (Item::Frame { .. }, true, Some(clock)) = (&item, self.framing, self.clock)
+                && let Some(late) = now
+                    .checked_duration_since(clock)
+                    .filter(|late| !late.is_zero())
+                && let Some(said) = self.behind.late(late, self.starved, now)
+            {
+                log::info!("Agent speech in {} {said}.", self.space);
+            }
+            self.framing = matches!(item, Item::Frame { .. });
+            self.starved = false;
             match item {
                 Item::Announce(message) => hub.agent_speech(&self.space, reply, message),
                 Item::Failed(error) => hub.speech_failed(&self.space, error),
@@ -853,12 +925,82 @@ mod enabled {
         }
 
         #[test]
+        fn a_frame_sent_after_it_was_due_to_play_is_said_at_most_every_thirty_seconds() {
+            let (hub, space) = space();
+            let (mut pacer, _sender) = pacer(&hub, &space);
+            // Six frames of 20 ms.
+            pacer.audio(chunk(16_000, 1_920));
+            let start = Instant::now();
+            let ms = |ms: u64| start + Duration::from_millis(ms);
+            let send = |pacer: &mut Pacer, at: Instant| {
+                let (reply, item) = pacer.pending.pop_front().unwrap();
+                assert!(pacer.send(reply, item, at));
+            };
+            // The first frame of a segment starts the clock, however late it is.
+            send(&mut pacer, start);
+            assert_eq!(pacer.behind.count, 0);
+            assert!(pacer.behind.said.is_none());
+            // The next was due as the first ended, at 20 ms: sent at 70 ms, it is said at once.
+            send(&mut pacer, ms(70));
+            assert_eq!(pacer.behind.said, Some(ms(70)));
+            assert_eq!(pacer.behind.count, 0);
+            // Sent ahead of when it plays, at 90 ms, nothing is behind.
+            send(&mut pacer, ms(80));
+            assert_eq!(pacer.behind.count, 0);
+            // Late again within thirty seconds, 190 ms after it was due and then 80 ms, each is counted, and the furthest
+            // behind kept, rather than said.
+            send(&mut pacer, ms(300));
+            send(&mut pacer, ms(400));
+            assert_eq!(
+                (pacer.behind.count, pacer.behind.worst),
+                (2, Duration::from_millis(190))
+            );
+            // Thirty seconds on, the next is said with those.
+            send(&mut pacer, ms(30_100));
+            assert_eq!(pacer.behind.said, Some(ms(30_100)));
+            assert_eq!(pacer.behind.count, 0);
+            // A breath and a new segment start the clock again.
+            pacer.pending.push_back((0, Item::Gap));
+            send(&mut pacer, ms(40_000));
+            assert!(!pacer.framing);
+        }
+
+        #[test]
+        fn falling_behind_says_how_far_and_how_often() {
+            let now = Instant::now();
+            let mut behind = Behind::default();
+            assert_eq!(
+                behind
+                    .late(Duration::from_millis(120), false, now)
+                    .as_deref(),
+                Some("fell 120 ms behind its playback, held up, so listeners heard a gap")
+            );
+            assert_eq!(behind.late(Duration::from_millis(40), true, now), None);
+            assert_eq!(
+                behind
+                    .late(Duration::from_millis(30), false, now + BEHIND_REPORT)
+                    .as_deref(),
+                Some(
+                    "fell 40 ms behind its playback 2 times, 1 of them waiting for synthesis, so listeners heard a gap"
+                )
+            );
+            assert_eq!(
+                behind
+                    .late(Duration::from_millis(60), true, now + BEHIND_REPORT * 2)
+                    .as_deref(),
+                Some(
+                    "fell 60 ms behind its playback waiting for synthesis, so listeners heard a gap"
+                )
+            );
+        }
+
+        #[test]
         fn the_pacer_sends_what_is_queued_once_nothing_can_wake_it() {
             let (hub, space) = space();
             let (mut pacer, sender) = pacer(&hub, &space);
             drop(sender);
-            // A fifth of a second, twice the lead, so that it waits for the later frames to be due.
-            pacer.audio(chunk(16_000, 3_200));
+            // Twice the lead, so that it waits for the later frames to be due.
+            pacer.audio(chunk(16_000, (2 * LEAD.as_millis() as usize) * 16));
             // Returns once the frames are sent.
             pacer.run();
         }

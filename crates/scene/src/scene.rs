@@ -1963,6 +1963,81 @@ mod tests {
     }
 
     #[test]
+    fn taking_hold_of_a_wall_while_the_agent_speaks_leaves_its_speech_playing_sample_for_sample() {
+        use tomori_client::playback::{Layout, MixerOptions, Player};
+        use tomori_protocol::{AGENT_SOURCE, AudioFrame, Gate, Pose, Wall, WallKind};
+        let mut conversation = joined();
+        let middle = arrival::HOME + Vec3::new(0.0, -0.3, -0.6);
+        fixtures::show_editable_walls(
+            &mut conversation,
+            vec![Wall::new(
+                "wall-1",
+                WallKind::Added,
+                Pose::upright_facing(
+                    middle.to_array(),
+                    [arrival::HOME.x, middle.y, arrival::HOME.z],
+                ),
+            )],
+            Vec::new(),
+        );
+        let mut step = Step::default();
+        let mut senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            grip: Some(0.0),
+            ..senses()
+        };
+        let start = Instant::now();
+        grow(&mut step, &mut conversation, &senses, start);
+        conversation.take_actions();
+        // The agent speaks, its 20 ms frames at 24 kHz sent a fifth of a second ahead, each a step louder than the last,
+        // so that a gap, a repeat or a reset would show, into a player rendered as the headset's speaker renders it.
+        let (sender, audio) = std::sync::mpsc::sync_channel(64);
+        let (mut player, control) = Player::new(audio, MixerOptions::default());
+        let speech = |sequence: u32| AudioFrame {
+            gate: Gate::Live,
+            source: AGENT_SOURCE,
+            sequence,
+            timestamp: u64::from(sequence) * 20_000,
+            sample_rate: 24_000,
+            samples: vec![100 + sequence as i16; 480],
+        };
+        for sequence in 0..10 {
+            sender.send(speech(sequence)).unwrap();
+        }
+        let mut feedback = felt();
+        let mut played = Vec::new();
+        let mut asked = Vec::new();
+        // Sixty frames of 10 ms: the grip squeezes on the wall at the twentieth and lets go at the fortieth.
+        for index in 0..60_u32 {
+            let now = start + Duration::from_millis(u64::from(index) * 10);
+            if index % 2 == 0 {
+                sender.send(speech(10 + index / 2)).unwrap();
+            }
+            senses.grip = Some(if (20..40).contains(&index) { 1.0 } else { 0.0 });
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            if index == 20 {
+                assert_eq!(step.projector.carried_wall(), Some("wall-1"));
+            }
+            asked.extend(conversation.take_actions());
+            let mut output = vec![0; 480];
+            player.render(48_000, Layout::Mono, &mut output);
+            played.extend(output);
+        }
+        // Taking hold of the wall and carrying it asked nothing of the connection, so nothing muted, skipped, silenced or
+        // stopped speech, and played no sound; it was felt, as a tick.
+        assert_eq!(asked, []);
+        assert_eq!(feedback.take_earcons().count(), 0);
+        assert!(!felt_on(&mut feedback, Side::Right, start).is_empty());
+        assert!(!control.is_silenced());
+        // Every sample played, and each frame followed the last, from the first frame to the thirtieth.
+        assert!(played.iter().all(|sample| *sample >= 100), "a gap");
+        assert!(played.windows(2).all(|pair| pair[1] >= pair[0]), "a reset");
+        assert_eq!(played[0], 100);
+        assert!((129..=130).contains(played.last().unwrap()));
+        assert!(control.agent_speech().0);
+    }
+
+    #[test]
     fn a_pull_that_outlives_its_client_side_is_nobody_s_until_it_is_let_go() {
         use crate::client_side::Select;
         let now = Instant::now();

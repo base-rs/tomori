@@ -383,19 +383,27 @@ pub mod playback {
         stream
             .request_start()
             .map_err(|error| format!("Cannot start the speaker: {error}"))?;
+        // How much the device holds ahead of what plays, which a late callback can use up before it is heard.
         log::info!(
-            "Speaker opened at {} Hz, {} channels, as {}",
+            "Speaker opened at {} Hz, {} channels, as {}, holding {} frames of {} at most, {} each callback",
             stream.sample_rate(),
             stream.channel_count(),
             match session {
                 Some(session) => format!("voice communication in session {session}"),
                 None => "media".into(),
-            }
+            },
+            stream.buffer_size_in_frames(),
+            stream.buffer_capacity_in_frames(),
+            stream.frames_per_burst()
         );
-        Ok(match session {
-            Some(session) => Output::communicating(Stream(stream), session),
-            None => Output::new(Stream(stream)),
-        })
+        // Kept by the output and asked, on the speaker thread, how often the device ran out of audio to play.
+        let stream = std::rc::Rc::new(Stream(stream));
+        let counted = stream.clone();
+        let output = match session {
+            Some(session) => Output::communicating(stream, session),
+            None => Output::new(stream),
+        };
+        Ok(output.with_underruns(move || counted.0.x_run_count().max(0) as u32))
     }
 
     /// Stops the stream before closing it.
