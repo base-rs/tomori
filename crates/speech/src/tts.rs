@@ -4,7 +4,9 @@
 //! Ordered speech synthesis for a space's agent speech stream.
 //!
 //! [`Speech`] owns one [`Synthesizer`] on a dedicated thread and synthesizes queued segments in order, delivering audio as soon as each chunk is produced. Synthesis never waits for playback, so segment N+1 is synthesized while segment N plays. A panic in the synthesizer disables this stream: it is logged once, and that segment and every later one fail with [`Error::Stopped`]. There is deliberately no way to interrupt, skip or truncate queued speech: participant input never stops agent speech (`design/speech.md`).
+mod english;
 mod kokoro;
+mod phonemes;
 
 use std::{
     panic::{self, AssertUnwindSafe},

@@ -203,7 +203,7 @@ A workspace setting, such as `ignore = ["crates/client-quest/src/xr\\.rs"]`, is 
   - The new tracking issue, [rust-lang/rust#134749](https://github.com/rust-lang/rust/issues/134749), is open, with sign-off and documentation steps outstanding.
   - cargo-llvm-cov recommends `#[cfg_attr(coverage_nightly, coverage(off))]`, which works only when coverage is built with nightly.
 - **Against:**
-  - Tomori builds with stable and with its minimum version, 1.90, so this would need a separate nightly coverage job.
+  - Tomori builds with stable and with its minimum version, 1.92, so this would need a separate nightly coverage job.
   - The markers would be scattered, and a summary can't list them without scanning source.
   - The compiler documents the attribute as a hint whose precise effect may change.
 - **Verdict:** rejected, even once it's stable, for the scattering alone.
