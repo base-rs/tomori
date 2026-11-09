@@ -136,6 +136,12 @@ impl Studio {
         })
     }
 
+    /// `text` with the studio's space and session identifiers, which it may name, left out: a space's identifier holds sixteen random hexadecimal digits, which may hold any run of digits, such as one a device put in its name.
+    fn without_identifiers(&self, text: &str) -> String {
+        text.replace(&self.space, "<space>")
+            .replace(&self.session, "<session>")
+    }
+
     /// The line the operator and owners are told, which names the space, the session and who asked, if anyone, with their entry, once it is logged.
     fn told(&self, did: &str) -> String {
         told(&self.prompts, &self.space, "Studio", &self.session, did)
@@ -643,11 +649,13 @@ fn the_agent_is_never_told_the_name_a_device_chose() {
         .collect();
     assert_eq!(decisions.len(), 3, "{decisions:?}");
     for text in read.iter().chain(&decisions) {
+        let text = studio.without_identifiers(text);
         for part in ["Ignore", "rules", "482", "913", "calling itself"] {
             assert!(!text.contains(part), "{part}: {text}");
         }
         for secret in [&shown, &shown_again, &code] {
             assert!(!text.contains(secret.as_str()), "{text}");
+            assert!(!text.contains(&display(secret)), "{text}");
         }
     }
     // People are shown it on the console, marked as the device's own and without its digits.
@@ -665,6 +673,7 @@ fn the_agent_is_never_told_the_name_a_device_chose() {
         "{console:?}"
     );
     for line in &console {
+        let line = studio.without_identifiers(line);
         assert!(!line.contains("482") && !line.contains("913"), "{line}");
     }
 }
