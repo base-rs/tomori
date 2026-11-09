@@ -10,8 +10,9 @@ use glam::{Mat4, Quat, Vec3};
 
 use tomori_protocol::{TranscriptPart, TranscriptStage};
 
-use crate::canvas::{Canvas, Rect};
+use crate::canvas::Canvas;
 use crate::controller::Pose;
+use crate::shapes::{Mark, Shape};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, cut, fit, wrap};
 
 /// The indicator's width, in cells.
@@ -206,9 +207,10 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                 None => ("REC", color),
             };
             let dot = [color[0], color[1], color[2], 0.45 + 0.55 * pulse];
-            let mut header = Row::new(cut(
+            let header = Row::new(cut(
                 &[
-                    Span::new("● ", Style::plain(dot)),
+                    Mark::Dot.span(1, Style::plain(dot)),
+                    Span::new(" ", Style::plain(dot)),
                     Span::new(format!("{label} "), Style::bold(label_color)),
                     Span::new(clock(*elapsed, limit), Style::plain(color)),
                 ],
@@ -216,15 +218,16 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             ));
             if let Some(limit) = limit.filter(|limit| !limit.is_zero()) {
                 let fraction = (elapsed.as_secs_f32() / limit.as_secs_f32()).min(1.0);
-                header.meter = Some((fraction, color));
-                // The rest of the bar, so that how much is left shows.
-                let width = (COLUMNS * CELL_WIDTH) as f32;
-                canvas.shapes.push(Rect {
-                    x: width * fraction,
+                // Along the header's bottom, its track showing how much is left.
+                canvas.shapes.push(Shape::Bar {
+                    x: 0.0,
                     y: CELL_HEIGHT as f32 - 1.5,
-                    width: width * (1.0 - fraction),
+                    width: (COLUMNS * CELL_WIDTH) as f32,
                     height: 1.5,
-                    color: TRACK,
+                    track: TRACK,
+                    fill: color,
+                    from: 0.0,
+                    to: fraction,
                 });
             }
             let rows = &mut canvas.rows;
@@ -330,7 +333,8 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             let rows = &mut canvas.rows;
             rows.push(Row::new(cut(
                 &[
-                    Span::new("● ", Style::plain(dot)),
+                    Mark::Dot.span(1, Style::plain(dot)),
+                    Span::new(" ", Style::plain(dot)),
                     Span::new(what.tag(), Style::bold(AMBER)),
                     Span::new(clock(*elapsed, None), Style::plain(AMBER)),
                 ],
@@ -394,10 +398,11 @@ pub fn badge(pulse: f32) -> Canvas {
     canvas.background = [0.01, 0.02, 0.04, 0.9];
     canvas.rows.push(Row::new(cut(
         &[
-            Span::new(
-                "● ",
+            Mark::Dot.span(
+                1,
                 Style::plain([GREEN[0], GREEN[1], GREEN[2], 0.4 + 0.6 * pulse]),
             ),
+            Span::new(" ", Style::plain(GREEN)),
             Span::new("LIVE", Style::bold(GREEN)),
         ],
         6,
@@ -505,6 +510,19 @@ mod tests {
         }
     }
 
+    /// How far the bar of the time used is filled, and in what colour.
+    fn bar(canvas: &Canvas) -> Option<(f32, [f32; 4])> {
+        canvas.shapes.iter().find_map(|shape| match *shape {
+            Shape::Bar {
+                fill,
+                from: 0.0,
+                to,
+                ..
+            } => Some((to, fill)),
+            _ => None,
+        })
+    }
+
     #[test]
     fn the_time_is_shown_against_the_limit_when_the_server_gives_one() {
         let limit = Some(Duration::from_secs(300));
@@ -513,11 +531,14 @@ mod tests {
             text(&canvas),
             "● REC 1:42 / 5:00\n\"and then check the CI\"\nRelease X to send"
         );
-        assert!((canvas.rows[0].meter.unwrap().0 - 0.34).abs() < 1e-6);
+        assert!((bar(&canvas).unwrap().0 - 0.34).abs() < 1e-6);
         // Without one, only the time so far, and no bar.
         let canvas = canvas_without_limit();
         assert!(text(&canvas).starts_with("● REC 1:42\n"));
-        assert!(canvas.rows[0].meter.is_none());
+        assert!(bar(&canvas).is_none());
+        let mut other = Canvas::new(1, 1.0);
+        other.shapes.push(Shape::rect(0.0, 0.0, 1.0, 1.0, RED));
+        assert!(bar(&other).is_none());
     }
 
     #[test]
@@ -574,7 +595,7 @@ mod tests {
         assert_eq!(warning(Duration::from_secs(400), None), (RED, None));
         let warned = canvas(&recording(272, ""), limit, 0.0);
         assert!(text(&warned).ends_with("0:28 left: release X"));
-        assert_eq!(warned.rows[0].meter.unwrap().1, AMBER);
+        assert_eq!(bar(&warned).unwrap().1, AMBER);
     }
 
     #[test]
@@ -837,9 +858,11 @@ mod tests {
             let canvas = canvas(&phase, limit, 0.5);
             let (width, height) = canvas.size();
             assert!(width < 0.2 && height < 0.07, "{width} × {height}");
+            // Its shapes' antialiased edges may reach two font pixels beyond, as its border's does.
+            let beyond = 2.0 * canvas.pixel + 1e-6;
             assert!(canvas.mesh().iter().all(|vertex| {
-                vertex.position[0].abs() <= width / 2.0 + 1e-6
-                    && vertex.position[1].abs() <= height / 2.0 + 1e-6
+                vertex.position[0].abs() <= width / 2.0 + beyond
+                    && vertex.position[1].abs() <= height / 2.0 + beyond
             }));
         }
         assert_eq!(badge(1.0).plain(), "● LIVE");

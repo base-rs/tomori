@@ -1,10 +1,11 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up: a quad per glyph, drawn from its tile in `tomori-text`'s atlas, but one for each run of box drawing's straight lines, such as a table's rules, so that a translucent line is as bright all along, and filled quads, drawn from the atlas's solid block, so that one pipeline draws both. It needs no GPU, so that layouts are tested without one. The renderer's panels draw it.
+//! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up: a quad per glyph, drawn from its tile in `tomori-text`'s atlas, but one for each run of box drawing's straight lines in its text, such as a code block's, so that a translucent line is as bright all along; its shapes, its frame, speakers' bars, meters and the cells its layout marks, such as rules and checkboxes, as [`shapes`](crate::shapes) draws them, from the atlas's shape tiles; and filled quads, drawn from the atlas's solid block, so that one pipeline draws them all. It needs no GPU, so that layouts are tested without one. The renderer's panels draw it.
 use bytemuck::{Pod, Zeroable};
 use tomori_text::atlas::SOLID;
 
+use crate::shapes::{Join, Piece, Shape};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Quad, Rgba, Row, glyph, quads};
 
 #[repr(C)]
@@ -16,16 +17,6 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// How much bolder, in the atlas's distance field's units.
     pub weight: f32,
-}
-
-/// A rectangle in font pixels from the canvas's top-left corner, inside its padding.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    pub color: Rgba,
 }
 
 /// An image a canvas shows, by the SHA-256 that names it (see [`tomori_protocol::Image`]), in a rectangle in font pixels
@@ -54,8 +45,9 @@ pub struct Canvas {
     pub padding: (usize, usize),
     /// A frame around the panel, a font pixel wide.
     pub border: Option<Rgba>,
-    /// Shapes drawn over the rows' backgrounds and under the text.
-    pub shapes: Vec<Rect>,
+    /// Shapes drawn over the rows' backgrounds and under the text, in font pixels from the canvas's top-left corner
+    /// inside its padding, as its text is.
+    pub shapes: Vec<Shape>,
     /// An image drawn over everything else, as an image panel shows.
     pub image: Option<CanvasImage>,
 }
@@ -125,10 +117,11 @@ impl Canvas {
         let (width, height) = (width as f32, height as f32);
         mesh.quad(0.0, 0.0, width, height, self.background);
         if let Some(border) = self.border {
-            mesh.quad(0.0, 0.0, width, 1.0, border);
-            mesh.quad(0.0, height - 1.0, width, 1.0, border);
-            mesh.quad(0.0, 0.0, 1.0, height, border);
-            mesh.quad(width - 1.0, 0.0, 1.0, height, border);
+            mesh.shape(
+                &Shape::frame(0.0, 0.0, [width, height], 1.0, border),
+                0.0,
+                0.0,
+            );
         }
         let (left, top) = (self.padding.0 as f32, self.padding.1 as f32);
         let text_width = (self.columns * CELL_WIDTH) as f32;
@@ -162,28 +155,40 @@ impl Canvas {
                     );
                 }
             }
-            if let Some(bar) = row.bar {
-                mesh.quad(left + 1.0, y, 3.0, CELL_HEIGHT as f32, bar);
-            }
             if let Some((fraction, color)) = row.meter {
                 let fraction = fraction.clamp(0.0, 1.0);
-                mesh.quad(
+                mesh.shape(
+                    &Shape::rect(
+                        0.0,
+                        y + CELL_HEIGHT as f32 - 1.5,
+                        text_width * fraction,
+                        1.5,
+                        color,
+                    ),
                     left,
-                    y + CELL_HEIGHT as f32 - 1.5,
-                    text_width * fraction,
-                    1.5,
-                    color,
+                    0.0,
                 );
             }
         }
+        // A speaker's bar down the rows they said, one bar for each run of rows in one colour, so that it has no seams.
+        let mut index = 0;
+        while index < self.rows.len() {
+            let bar = self.rows[index].bar;
+            let start = index;
+            while index < self.rows.len() && self.rows[index].bar == bar {
+                index += 1;
+            }
+            if let Some(bar) = bar {
+                let (from, to) = (start * CELL_HEIGHT, index * CELL_HEIGHT);
+                let rect = Shape::rect(1.0, from as f32, 3.0, (to - from) as f32, bar);
+                mesh.shape(&rect, left, top);
+            }
+        }
         for shape in &self.shapes {
-            mesh.quad(
-                left + shape.x,
-                top + shape.y,
-                shape.width,
-                shape.height,
-                shape.color,
-            );
+            mesh.shape(shape, left, top);
+        }
+        for shape in marks(&self.rows, self.columns) {
+            mesh.shape(&shape, left, top);
         }
         let rows: Vec<&[Cell]> = self
             .rows
@@ -224,7 +229,7 @@ impl Canvas {
             let cells: Vec<Cell> = cells
                 .iter()
                 .zip(&lined[index])
-                .map(|(&(ch, style), &lined)| (if lined { ' ' } else { ch }, style))
+                .map(|(&cell, &lined)| (if lined || marked(cell) { ' ' } else { cell.0 }, cell.1))
                 .collect();
             for (quad, style) in quads(&cells, left, row_top(index), height, |style| style.bold) {
                 mesh.glyph(quad, style.color);
@@ -232,6 +237,71 @@ impl Canvas {
         }
         mesh.vertices
     }
+}
+
+/// Whether `cell` is drawn as the shape its style marks it with, rather than as a glyph: where it holds the character
+/// that stands in for it.
+fn marked((ch, style): Cell) -> bool {
+    style.mark.is_some_and(|mark| mark.stand_in() == ch)
+}
+
+/// The shapes that draw `rows`' marked cells, cut to `columns`, in font pixels from their top-left corner: a run of a
+/// line's cells in one colour, along a row or down a column as it joins, one line, and every other mark a shape in its
+/// cell.
+fn marks(rows: &[Row], columns: usize) -> Vec<Shape> {
+    let rows: Vec<&[Cell]> = rows
+        .iter()
+        .map(|row| &row.cells[..row.cells.len().min(columns)])
+        .collect();
+    let mark = |cell: Option<&Cell>| {
+        let &(ch, style) = cell?;
+        style
+            .mark
+            .filter(|mark| mark.stand_in() == ch)
+            .map(|mark| (mark, style.color))
+    };
+    let mut shapes = Vec::new();
+    let (width, height) = (CELL_WIDTH as f32, CELL_HEIGHT as f32);
+    for (row, cells) in rows.iter().enumerate() {
+        let mut column = 0;
+        while column < cells.len() {
+            let start = column;
+            column += 1;
+            let Some((kind, color)) = mark(cells.get(start)) else {
+                continue;
+            };
+            match kind.joins() {
+                Join::Down => continue,
+                Join::Across => {
+                    while mark(cells.get(column)) == Some((kind, color)) {
+                        column += 1;
+                    }
+                }
+                Join::Alone => {}
+            }
+            let (x, y) = (start as f32 * width, row as f32 * height);
+            shapes.extend(kind.shapes(x, y, column - start, color));
+        }
+    }
+    for column in 0..columns {
+        let mut row = 0;
+        while row < rows.len() {
+            let start = row;
+            row += 1;
+            let Some((kind, color)) = mark(rows[start].get(column)) else {
+                continue;
+            };
+            if kind.joins() != Join::Down {
+                continue;
+            }
+            while row < rows.len() && mark(rows[row].get(column)) == Some((kind, color)) {
+                row += 1;
+            }
+            let (x, y) = (column as f32 * width, start as f32 * height);
+            shapes.extend(kind.shapes(x, y, row - start, color));
+        }
+    }
+    shapes
 }
 
 /// Which way a character of box drawing draws a straight line through its cell, from edge to edge: across, as `─`, or
@@ -268,7 +338,7 @@ fn runs(
     let lines = cells
         .enumerate()
         .filter_map(|(at, cell)| Some((at, cell?)))
-        .filter(|(_, (ch, _))| Stroke::of(*ch) == Some(stroke));
+        .filter(|&(_, cell)| !marked(cell) && Stroke::of(cell.0) == Some(stroke));
     for (at, (ch, style)) in lines {
         match runs.last_mut() {
             Some((run, (last, was)))
@@ -324,11 +394,8 @@ impl Mesh {
         }
     }
 
-    /// A filled quad.
+    /// A filled quad: the backing, and the rows' and cells' backgrounds, none of which is ever empty.
     fn quad(&mut self, x: f32, y: f32, width: f32, height: f32, color: Rgba) {
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
         self.textured(
             Quad {
                 x,
@@ -347,16 +414,38 @@ impl Mesh {
         self.textured(quad, color);
     }
 
+    /// `shape`, placed `x`, `y` from the canvas's top-left corner.
+    fn shape(&mut self, shape: &Shape, x: f32, y: f32) {
+        let mut pieces = Vec::new();
+        shape.pieces(&mut pieces);
+        for piece in pieces {
+            self.piece(&piece, x, y);
+        }
+    }
+
+    fn piece(&mut self, piece: &Piece, x: f32, y: f32) {
+        for (corner, uv) in piece.triangles() {
+            self.vertices.push(Vertex {
+                position: self.place(corner[0] + x, corner[1] + y),
+                color: piece.color,
+                uv,
+                weight: 0.0,
+            });
+        }
+    }
+
+    /// Where `x`, `y` font pixels from the canvas's top-left corner is, in metres from its middle, +Y up.
+    fn place(&self, x: f32, y: f32) -> [f32; 2] {
+        [
+            (x - self.origin.0) * self.pixel,
+            (self.origin.1 - y) * self.pixel,
+        ]
+    }
+
     fn textured(&mut self, quad: Quad, color: Rgba) {
         if color[3] <= 0.0 {
             return;
         }
-        let place = |x: f32, y: f32| {
-            [
-                (x - self.origin.0) * self.pixel,
-                (self.origin.1 - y) * self.pixel,
-            ]
-        };
         let [u, v, tile_width, tile_height] = quad.tile;
         let (left, top) = (quad.x, quad.y);
         let (right, bottom) = (quad.x + quad.width, quad.y + quad.height);
@@ -369,7 +458,7 @@ impl Mesh {
             (left, bottom, 0.0, 1.0),
         ] {
             self.vertices.push(Vertex {
-                position: place(x, y),
+                position: self.place(x, y),
                 color,
                 uv: [u + across * tile_width, v + down * tile_height],
                 weight: quad.weight,
@@ -403,9 +492,11 @@ mod tests {
         let (width, height) = canvas.size();
         let mesh = canvas.mesh();
         assert_eq!(mesh.len() % 6, 0);
+        // But for its border's antialiased edge, two font pixels beyond it.
+        let beyond = 2.0 * canvas.pixel + 1e-5;
         assert!(mesh.iter().all(|vertex| {
-            vertex.position[0].abs() <= width / 2.0 + 1e-5
-                && vertex.position[1].abs() <= height / 2.0 + 1e-5
+            vertex.position[0].abs() <= width / 2.0 + beyond
+                && vertex.position[1].abs() <= height / 2.0 + beyond
         }));
         // The backing is the first quad, from corner to corner.
         assert_eq!(mesh[0].position, [-width / 2.0, height / 2.0]);

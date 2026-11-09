@@ -7,14 +7,20 @@
 //!
 //! **Cards.** A table whose columns do not all fit at [`NARROWEST`] cells is laid out as a card for each row, one `Header: value` line for each of its cells, wrapped under a hanging indent, with a rule between cards, since a grid of columns too narrow for words reads worse than lines.
 use crate::markdown_lite::{Align, Table, Text, plain};
+use crate::shapes::Mark;
 use crate::transcript::{BRIGHT, DIM, TEXT, styled};
 use crate::ui_text::{Cell, Rgba, Span, Style, Wrap, longest_word, width, wrap};
 
 /// The cells between two columns: a space, then a faint line at the left edge of the next, so that the line stands about
 /// a cell from the text either side of it.
 pub const GAP: usize = 2;
-/// The line between columns, drawn at its cell's left edge.
-const LINE: char = '▏';
+/// The line between columns, drawn near its cell's left edge, as a line rather than a glyph.
+const LINE: char = Mark::Line.stand_in();
+/// A cell of the rule below the header, or between cards, drawn as a line.
+const RULE: Cell = (
+    Mark::Rule.stand_in(),
+    Style::plain(SEPARATOR).marked(Mark::Rule),
+);
 /// The fewest cells a column of the grid takes, unless its widest cell takes fewer: narrower, many words would break.
 pub const NARROWEST: usize = 10;
 
@@ -126,9 +132,9 @@ fn grid(table: &Table, widths: &[usize]) -> Laid {
         let mut rule = Vec::new();
         for (column, &width) in widths.iter().enumerate() {
             if column > 0 {
-                rule.extend(std::iter::repeat_n(('─', Style::plain(SEPARATOR)), GAP));
+                rule.extend(std::iter::repeat_n(RULE, GAP));
             }
-            rule.extend(std::iter::repeat_n(('─', Style::plain(SEPARATOR)), width));
+            rule.extend(std::iter::repeat_n(RULE, width));
         }
         rows.push(rule);
     }
@@ -172,7 +178,8 @@ fn row(
         let mut out = Vec::new();
         for (column, &width) in widths.iter().enumerate() {
             if column > 0 {
-                out.extend([' ', LINE].map(|ch| (ch, on(Style::plain(SEPARATOR)))));
+                let style = on(Style::plain(SEPARATOR));
+                out.extend([(' ', style), (LINE, style.marked(Mark::Line))]);
             }
             let text: Vec<Cell> = wrapped[column]
                 .get(line)
@@ -213,7 +220,7 @@ fn cards(table: &Table, room: usize) -> Laid {
     }
     for (index, cells) in table.rows.iter().enumerate() {
         if index > 0 {
-            rows.push(vec![('─', Style::plain(SEPARATOR)); room]);
+            rows.push(vec![RULE; room]);
         }
         for column in 0..table.columns() {
             let value = cell(cells, column);
@@ -313,7 +320,12 @@ pub(crate) mod tests {
                 .iter()
                 .all(|(_, style)| style.background == Some(STRIPE))
         );
-        assert_eq!(laid.rows[2][5], (LINE, Style::plain(SEPARATOR)));
+        // The line between columns is drawn as a line, as is the rule.
+        assert_eq!(
+            laid.rows[2][5],
+            (LINE, Style::plain(SEPARATOR).marked(Mark::Line))
+        );
+        assert_eq!(laid.rows[1][0], RULE);
         for glyph in [LINE, '─'] {
             assert!(tomori_text::fonts::covers(glyph), "{glyph}");
         }

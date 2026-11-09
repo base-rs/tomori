@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The glyph atlas: one single-channel texture of signed distance fields, a tile per glyph, filled on demand as characters are first drawn and never moved or evicted, so that a mesh built from it stays valid. A fragment shader draws a glyph's edge where its field crosses one half, antialiased by the field's rate of change on screen, so that text stays crisp and smooth at any distance and tilt.
+//! The glyph atlas: one single-channel texture of signed distance fields, a tile per glyph, filled on demand as characters are first drawn and never moved or evicted, so that a mesh built from it stays valid. A fragment shader draws a glyph's edge where its field crosses one half, antialiased by the field's rate of change on screen, so that text stays crisp and smooth at any distance and tilt. Beside its solid block, for filled quads, it holds the fields of a square, a disc, a ring, a frame and a wedge, [`SQUARE`], [`DISC`], [`RING`], [`FRAME`] and [`WEDGE`], from which shapes are drawn as geometry, antialiased the same way.
 //!
 //! Tiles are packed on shelves, left to right and top to bottom, each shelf as tall as its tallest tile; the atlas is [`WIDTH`] pixels wide and grows downwards, doubling, up to [`MAX_HEIGHT`]. The texture only needs the rows from the open shelf down uploaded after a change, as earlier shelves are closed. One atlas, behind [`with`], is shared by every panel and label in the process, so that each glyph is drawn into it once.
 //!
@@ -28,6 +28,120 @@ pub const MAX_HEIGHT: u32 = 8192;
 pub const SPREAD: f32 = 4.0;
 /// The middle of a solid block of the atlas, in its pixels, for quads that are filled rather than drawn from a glyph, such as backgrounds, so that one pipeline draws both.
 pub const SOLID: [f32; 2] = [2.0, 2.0];
+
+/// A shape's tile, drawn into the atlas beside the solid block when it is made, from which lines, boxes, bars and dots
+/// are drawn as shapes rather than glyphs (see `tomori_scene::shapes`): a distance field of a square, a disc or a ring,
+/// with empty field all round it, so that a quad drawn from part of it, stretched where the field is flat, has the
+/// shape's edge, antialiased by the same shader as a glyph's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Figure {
+    /// The tile's middle, in the atlas's pixels.
+    pub middle: [f32; 2],
+    /// How far its edge is from its middle, in the atlas's pixels: half the square's side, or the disc's or ring's
+    /// radius.
+    pub reach: f32,
+}
+
+/// Pixels of empty field around a shape's tile, beyond the field's spread, so that where a pixel spans several of the
+/// atlas's, as far away, the samples the shader averages across it find nothing rather than a neighbour.
+const FIGURE_MARGIN: f32 = 8.0;
+/// A square 32 pixels a side, whose field is flat at its middle: the ends and corners of lines and boxes, and the sides
+/// of boxes too wide for [`WEDGE`].
+pub const SQUARE: Figure = Figure {
+    middle: [5.0 + 28.0, 28.0],
+    reach: 16.0,
+};
+/// A disc of radius twelve pixels: dots and rounded corners.
+pub const DISC: Figure = Figure {
+    middle: [62.0 + 24.0, 24.0],
+    reach: 12.0,
+};
+/// A ring of radius twelve pixels and [`RING_WIDTH`] wide, inside its radius.
+pub const RING: Figure = Figure {
+    middle: [111.0 + 24.0, 24.0],
+    reach: 12.0,
+};
+
+/// A band that widens along its length, from nothing at its start to [`Wedge::widest`] pixels at its end, so that any
+/// line up to that wide is drawn across from one column of it, where it is as wide, its field continuous from one side to
+/// the other, so that where a pixel spans several of the atlas's, the samples the shader averages across it find the
+/// line as it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wedge {
+    /// Where it starts, at its middle line, in the atlas's pixels.
+    pub start: [f32; 2],
+    pub length: f32,
+    pub widest: f32,
+}
+
+impl Wedge {
+    /// Where across the atlas the column is where it is `width` pixels wide.
+    pub fn column(&self, width: f32) -> f32 {
+        self.start[0] + width.clamp(0.0, self.widest) * self.length / self.widest
+    }
+}
+
+/// A square's frame, [`FRAME_WIDTH`] wide inside a square 32 pixels a side: frames and checkboxes, their corners and
+/// sides each drawn from it, so that the field is continuous across their width.
+pub const FRAME: Figure = Figure {
+    middle: [313.0 + 28.0, 28.0],
+    reach: 16.0,
+};
+/// How wide [`FRAME`]'s band is, in the atlas's pixels.
+pub const FRAME_WIDTH: f32 = 4.0;
+
+/// The wedge, a quarter as wide as it is long, so that its sides lean by a fraction of a degree under 8 and its field is
+/// within one percent of a band's.
+pub const WEDGE: Wedge = Wedge {
+    start: [160.0 + FIGURE_MARGIN + SPREAD, 28.0],
+    length: 128.0,
+    widest: 32.0,
+};
+/// How wide [`RING`]'s band is, in the atlas's pixels.
+pub const RING_WIDTH: f32 = 4.0;
+
+/// [`WEDGE`]'s tile, and its width and height.
+fn wedge() -> (u32, u32, Vec<u8>) {
+    let margin = FIGURE_MARGIN + SPREAD;
+    let (width, height) = (WEDGE.length + 2.0 * margin, WEDGE.widest + 2.0 * margin);
+    let (size, rows) = (width as u32, height as u32);
+    // Its sides lean by `slope`, so a point's distance from one is its distance across, less the half width there, as
+    // far as the side leans, scaled to the side's normal.
+    let slope = WEDGE.widest / (2.0 * WEDGE.length);
+    let normal = 1.0 / slope.hypot(1.0);
+    let tile = (0..size * rows)
+        .map(|index| {
+            let (x, y) = (
+                (index % size) as f32 + 0.5 - margin,
+                (index / size) as f32 + 0.5,
+            );
+            let across = (y - height / 2.0).abs();
+            // Before it starts, as far as its tip; after, as wide as its widest.
+            let distance = if x < 0.0 {
+                -x.hypot(across)
+            } else {
+                (x.min(WEDGE.length) * slope - across) * normal
+            };
+            ((0.5 + distance / (2.0 * SPREAD)).clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+        .collect();
+    (size, rows, tile)
+}
+
+/// The tile of `figure`, whose signed distance from its edge, inside positive, at a point from its middle, is
+/// `inside`: as wide and tall as its reach, the field's spread and [`FIGURE_MARGIN`] either side.
+fn figure(figure: Figure, inside: impl Fn(f32, f32) -> f32) -> (u32, Vec<u8>) {
+    let half = figure.reach + SPREAD + FIGURE_MARGIN;
+    let size = (2.0 * half) as u32;
+    let tile = (0..size * size)
+        .map(|index| {
+            let (x, y) = ((index % size) as f32 + 0.5, (index / size) as f32 + 0.5);
+            let distance = inside(x - half, y - half);
+            ((0.5 + distance / (2.0 * SPREAD)).clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+        .collect();
+    (size, tile)
+}
 
 /// A glyph in the atlas, with where to draw its tile.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -173,6 +287,33 @@ impl Atlas {
         };
         let solid = vec![255; 16];
         atlas.place(4, 4, &solid);
+        // A point's signed distance from the edge of a square `reach` from its middle, inside positive.
+        let box_distance = |x: f32, y: f32, reach: f32| {
+            let (x, y) = (x.abs() - reach, y.abs() - reach);
+            -(x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0))
+        };
+        let square = |x: f32, y: f32| box_distance(x, y, SQUARE.reach);
+        let disc = |x: f32, y: f32| DISC.reach - x.hypot(y);
+        let ring = |x: f32, y: f32| {
+            RING_WIDTH / 2.0 - (x.hypot(y) - (RING.reach - RING_WIDTH / 2.0)).abs()
+        };
+        // Inside the outer square and outside the inner, the nearer of the two.
+        let frame = |x: f32, y: f32| {
+            box_distance(x, y, FRAME.reach).min(-box_distance(x, y, FRAME.reach - FRAME_WIDTH))
+        };
+        for (shape, inside) in [
+            (SQUARE, &square as &dyn Fn(f32, f32) -> f32),
+            (DISC, &disc),
+            (RING, &ring),
+        ] {
+            // Where the constants say, as a test checks.
+            let (size, tile) = figure(shape, inside);
+            atlas.place(size, size, &tile);
+        }
+        let (width, height, tile) = wedge();
+        atlas.place(width, height, &tile);
+        let (size, tile) = figure(FRAME, frame);
+        atlas.place(size, size, &tile);
         // Drawn whatever this thread's budget, as it stands in for every glyph once the atlas is full.
         let (face, id) = fonts::find('?').expect("Noto Sans Mono has `?`");
         atlas.replacement = atlas.add('?', face, id);
@@ -372,9 +513,71 @@ mod tests {
         assert_eq!(pixel(&atlas, SOLID[0], SOLID[1]), 255);
         assert_eq!(pixel(&atlas, 0.0, 0.0), 255);
         let replacement = atlas.replacement.unwrap();
-        assert_eq!(replacement.tile[0], 5.0);
+        assert_eq!(replacement.tile[0], 370.0);
         assert_eq!(atlas.stats().glyphs, 1);
         assert_eq!(atlas.stats().bytes, (WIDTH * START_HEIGHT) as usize);
+    }
+
+    #[test]
+    fn the_shapes_tiles_are_where_their_constants_say_with_their_edges_at_their_reach() {
+        let atlas = Atlas::default();
+        // The field at a point `(x, y)` from a figure's middle, between the pixels about it, as a sampler reads it.
+        let field = |figure: Figure, x: f32, y: f32| {
+            let [u, v] = [figure.middle[0] + x - 0.5, figure.middle[1] + y - 0.5];
+            let at = |u: f32, v: f32| f32::from(pixel(&atlas, u, v)) / 255.0;
+            let (fu, fv) = (u.fract(), v.fract());
+            let (u, v) = (u.floor(), v.floor());
+            (at(u, v) * (1.0 - fu) + at(u + 1.0, v) * fu) * (1.0 - fv)
+                + (at(u, v + 1.0) * (1.0 - fu) + at(u + 1.0, v + 1.0) * fu) * fv
+        };
+        for figure in [SQUARE, DISC] {
+            // Full at the middle, a half at the edge, and nothing beyond the spread.
+            assert_eq!(field(figure, 0.0, 0.0), 1.0);
+            assert!((field(figure, figure.reach, 0.0) - 0.5).abs() < 0.01);
+            assert!((field(figure, 0.0, -figure.reach) - 0.5).abs() < 0.01);
+            assert_eq!(field(figure, figure.reach + SPREAD + 1.0, 0.0), 0.0);
+            // Its corners are empty, out to its tile's.
+            let half = figure.reach + SPREAD + FIGURE_MARGIN;
+            assert_eq!(field(figure, half - 1.0, half - 1.0), 0.0);
+        }
+        // A disc's edge is round, and a square's corner square, inside.
+        let diagonal = DISC.reach / 2f32.sqrt();
+        assert!((field(DISC, diagonal, diagonal) - 0.5).abs() < 0.01);
+        assert!((field(SQUARE, 15.5, 15.5) - 0.5625).abs() < 0.01);
+        // A ring is full halfway through its band, and empty at its middle.
+        let band = RING.reach - RING_WIDTH / 2.0;
+        assert!(field(RING, band, 0.0) > 0.65);
+        assert!((field(RING, RING.reach, 0.0) - 0.5).abs() < 0.01);
+        assert!((field(RING, RING.reach - RING_WIDTH, 0.0) - 0.5).abs() < 0.01);
+        assert_eq!(field(RING, 0.0, 0.0), 0.0);
+        // The wedge's column for a band 4 pixels wide is a half at 2 pixels either side of its middle line, fuller between,
+        // as full at its middle as a sampler reads a band's, and empty past the spread; and it is empty before it starts.
+        let wedge = |x: f32, y: f32| {
+            field(
+                Figure {
+                    middle: [x, WEDGE.start[1]],
+                    reach: 0.0,
+                },
+                0.0,
+                y,
+            )
+        };
+        let column = WEDGE.column(4.0);
+        assert!(
+            (wedge(column, 2.0) - 0.5).abs() < 0.02 && (wedge(column, -2.0) - 0.5).abs() < 0.02
+        );
+        assert!(wedge(column, 0.0) > 0.65);
+        assert_eq!(wedge(column, 2.0 + SPREAD + 0.5), 0.0);
+        assert_eq!(wedge(WEDGE.start[0] - SPREAD - 1.0, 0.0), 0.0);
+        assert_eq!(WEDGE.column(100.0), WEDGE.start[0] + WEDGE.length);
+        assert_eq!(atlas.shelf.1, 56);
+        // A frame is full halfway through its band, all round, and empty inside it.
+        let band = FRAME.reach - FRAME_WIDTH / 2.0;
+        assert!(field(FRAME, band, 0.3) > 0.65 && field(FRAME, 0.3, -band) > 0.65);
+        assert!((field(FRAME, FRAME.reach, 0.3) - 0.5).abs() < 0.01);
+        assert!((field(FRAME, FRAME.reach - FRAME_WIDTH, 0.3) - 0.5).abs() < 0.01);
+        assert_eq!(field(FRAME, 0.0, 0.0), 0.0);
+        assert!(field(FRAME, band, band) > 0.65);
     }
 
     #[test]

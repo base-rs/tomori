@@ -21,11 +21,12 @@ use tomori_protocol::{
 use crate::{
     arrival::HOME,
     board::{Grip, model, pose},
-    canvas::{Canvas, Rect},
+    canvas::Canvas,
     controller_ui::Sheet,
     manipulation::Manipulation,
     pointing::Ray,
     recording::facing,
+    shapes::{Mark, Shape},
     transcript::{BRIGHT, DIM, Line, TEXT},
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style, cut},
 };
@@ -501,7 +502,7 @@ fn scrolled_face(
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),
         Row::text(&about(panel), Style::plain(DIM), columns),
-        Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
+        Mark::Rule.row(columns, Style::plain(DIM)),
     ];
     let lines = body_lines(panel, columns);
     let total = lines.len();
@@ -524,7 +525,7 @@ fn scrolled_face(
 /// The slim bar at the right edge of a body of `total` rows, `shown` of them at once in a face `columns` wide, scrolled
 /// `scroll` rows down: a faint track as tall as the rows shown, and on it a brighter thumb, as tall and as far down as
 /// the rows shown are of them all. None where every row shows.
-fn scroll_bar(columns: usize, shown: usize, total: usize, scroll: usize) -> Vec<Rect> {
+fn scroll_bar(columns: usize, shown: usize, total: usize, scroll: usize) -> Vec<Shape> {
     if total <= shown {
         return Vec::new();
     }
@@ -533,22 +534,16 @@ fn scroll_bar(columns: usize, shown: usize, total: usize, scroll: usize) -> Vec<
     let track = (shown * CELL_HEIGHT) as f32;
     let height = (track * shown as f32 / total as f32).max(SCROLL_BAR.2);
     let y = (top + track * scroll as f32 / total as f32).min(top + track - height);
-    vec![
-        Rect {
-            x,
-            y: top,
-            width: SCROLL_BAR.1,
-            height: track,
-            color: SCROLL_TRACK,
-        },
-        Rect {
-            x,
-            y,
-            width: SCROLL_BAR.1,
-            height,
-            color: SCROLL_THUMB,
-        },
-    ]
+    vec![Shape::Bar {
+        x,
+        y: top,
+        width: SCROLL_BAR.1,
+        height: track,
+        track: SCROLL_TRACK,
+        fill: SCROLL_THUMB,
+        from: (y - top) / track,
+        to: (y - top + height) / track,
+    }]
 }
 
 /// One row of a code panel's code, as wrapped: the line it is of, from 0, whether it is that line's first, and its
@@ -672,7 +667,7 @@ fn code_face(panel: &Panel, layout: &CodeLayout, fit: Fit, scroll: usize) -> Can
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),
         Row::text(&about(panel), Style::plain(DIM), columns),
-        Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
+        Mark::Rule.row(columns, Style::plain(DIM)),
     ];
     let first = layout.rows.get(scroll).map(|row| row.line);
     let mut at = scroll;
@@ -860,13 +855,13 @@ fn wall_face(wall: &Wall) -> Canvas {
     canvas.shapes = (0..grid.slots())
         .map(|slot| {
             let (left, top, width, height) = wall.slot_rect(slot);
-            Rect {
-                x: left - WALL_PADDING.0 as f32,
-                y: top - WALL_PADDING.1 as f32,
+            Shape::rect(
+                left - WALL_PADDING.0 as f32,
+                top - WALL_PADDING.1 as f32,
                 width,
                 height,
-                color: SLOT,
-            }
+                SLOT,
+            )
         })
         .collect();
     canvas

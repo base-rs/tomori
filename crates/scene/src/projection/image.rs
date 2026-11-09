@@ -8,7 +8,8 @@
 use tomori_protocol::{Image, Panel};
 
 use super::{BRIGHT, DIM, FIT_COLUMNS, FIT_ROWS, Fit, PADDING, PIXEL, TEXT};
-use crate::canvas::{Canvas, CanvasImage, Rect};
+use crate::canvas::{Canvas, CanvasImage};
+use crate::shapes::{Mark, Shape};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, wrap};
 
 /// The most rows of a caption, in a slot and floating.
@@ -88,7 +89,7 @@ pub(super) fn face(panel: &Panel, image: &Image, fit: Fit, border: Option<[f32; 
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),
         Row::text(&super::about(panel), Style::plain(DIM), columns),
-        Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
+        Mark::Rule.row(columns, Style::plain(DIM)),
     ];
     let image_rows = body - captioned.len();
     rows.extend(std::iter::repeat_n(Row::new(Vec::new()), image_rows));
@@ -104,7 +105,7 @@ pub(super) fn face(panel: &Panel, image: &Image, fit: Fit, border: Option<[f32; 
         (area_width - width) / 2.0,
         (3 * CELL_HEIGHT) as f32 + 1.0 + (area_height - height) / 2.0,
     );
-    canvas.shapes.push(Rect {
+    canvas.shapes.push(Shape::Fill {
         x,
         y,
         width,
@@ -172,7 +173,7 @@ mod tests {
                 "{width}×{height}: {left}, {above}"
             );
             // Where it will be is shown until it arrives.
-            assert_eq!(canvas.shapes[0].width, image.width);
+            assert!(matches!(canvas.shapes[0], Shape::Fill { width, .. } if width == image.width));
             assert!(canvas.plain().contains("The session browser, as a render."));
         }
     }

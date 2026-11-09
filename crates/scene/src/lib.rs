@@ -40,6 +40,7 @@ pub mod pointing;
 pub mod projection;
 pub mod recording;
 pub mod scene;
+pub mod shapes;
 pub mod spatial_audio;
 mod speakers;
 pub mod swarm;

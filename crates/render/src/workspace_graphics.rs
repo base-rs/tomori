@@ -6,6 +6,7 @@
 use crate::delegation::{State, Station, Workspace};
 use bytemuck::{Pod, Zeroable};
 use tomori_scene::cards::{COLUMNS, ContentCache, MAX_RESULTS, ROWS, clip, results};
+use tomori_scene::shapes::Shape;
 use tomori_text::atlas::SOLID;
 
 const MAX_LABELS: usize = 128;
@@ -28,7 +29,7 @@ const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 struct Vertex {
     position: [f32; 3],
     color: [f32; 4],
-    /// Where in the glyph atlas, in its pixels: a glyph's tile, or the solid block for everything else.
+    /// Where in the glyph atlas, in its pixels: a glyph's tile, a shape's, or the solid block for everything else.
     uv: [f32; 2],
     weight: f32,
 }
@@ -52,6 +53,8 @@ struct Panel {
     accent: [f32; 3],
     opacity: f32,
     sign: Option<Sign>,
+    /// The row drawn as a rule across the panel rather than as text, such as between a card's header and its content.
+    rule: Option<usize>,
 }
 
 #[derive(Default)]
@@ -661,7 +664,9 @@ fn layout(
             content.len().max(1),
             if workspace.stale { " [STALE]" } else { "" }
         ));
-        lines.push("-".repeat(COLUMNS));
+        // A rule between the header and the content, drawn as a line.
+        let rule = Some(lines.len());
+        lines.push(String::new());
         // Every card has at least one page of content, even if only to say it is empty.
         lines.extend(content.get(content_page).into_iter().flatten().cloned());
         // Keep the card's field dimensions stable even on the last page.
@@ -675,6 +680,7 @@ fn layout(
             accent: [0.25, 0.8, 0.95],
             opacity: 1.0,
             sign: None,
+            rule,
         });
     }
     if workspace.stale {
@@ -725,6 +731,7 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
             state,
             station: station.position,
         }),
+        rule: None,
     }
 }
 
@@ -846,6 +853,7 @@ fn notice(lines: Vec<String>) -> Panel {
         accent: [1.0, 0.75, 0.3],
         opacity: 1.0,
         sign: None,
+        rule: None,
     }
 }
 
@@ -886,29 +894,39 @@ fn textured(mesh: &mut Vec<Vertex>, rect: [f32; 5], color: [f32; 4], tile: [f32;
     }
 }
 
-// Small, font-independent line symbols. Coordinates are local panel metres.
-fn stroke(mesh: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], width: f32, color: [f32; 4]) {
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let length = dx.hypot(dy);
-    if length <= f32::EPSILON || mesh.len() + 6 > MAX_VERTICES {
-        return;
+/// `shape`, from the shared shapes, in font pixels `p` metres each from the panel's text origin, with y down, at depth
+/// `z`, as the panel's glyphs are placed; each piece cut into strips no wider than the sign's strips, so that it follows
+/// a sign's bow.
+fn shape(mesh: &mut Vec<Vertex>, shape: &Shape, p: f32, z: f32) {
+    let mut pieces = Vec::new();
+    shape.pieces(&mut pieces);
+    for piece in pieces {
+        for piece in piece.strips(STRIP_PIXELS) {
+            if mesh.len() + 6 > MAX_VERTICES {
+                return;
+            }
+            mesh.extend(piece.triangles().map(|([x, y], uv)| Vertex {
+                position: [x * p, -y * p, z],
+                color: piece.color,
+                uv,
+                weight: 0.0,
+            }));
+        }
     }
-    let [nx, ny] = [-dy * width / (2.0 * length), dx * width / (2.0 * length)];
-    let points = [
-        [a[0] + nx, a[1] + ny],
-        [b[0] + nx, b[1] + ny],
-        [b[0] - nx, b[1] - ny],
-        [a[0] + nx, a[1] + ny],
-        [b[0] - nx, b[1] - ny],
-        [a[0] - nx, a[1] - ny],
-    ];
-    mesh.extend(points.map(|[x, y]| Vertex {
-        position: [x, y, 0.001],
+}
+
+/// The widest strip of a shape on a panel, in font pixels: a sign's backing's, 24 strips across its 28 cells.
+const STRIP_PIXELS: f32 = 10.0;
+
+/// A line symbol from `a` to `b`, in local panel metres with y up, `width` across, `p` metres to a font pixel.
+fn stroke(mesh: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], width: f32, p: f32, color: [f32; 4]) {
+    let rule = Shape::Rule {
+        from: [a[0] / p, -a[1] / p],
+        to: [b[0] / p, -b[1] / p],
+        width: width / p,
         color,
-        uv: SOLID,
-        weight: 0.0,
-    }));
+    };
+    shape(mesh, &rule, p, 0.001);
 }
 
 fn status_symbol(mesh: &mut Vec<Vertex>, state: State, p: f32, color: [f32; 4]) {
@@ -922,6 +940,7 @@ fn status_symbol(mesh: &mut Vec<Vertex>, state: State, p: f32, color: [f32; 4]) 
             [x + a[0] * size, y + a[1] * size],
             [x + b[0] * size, y + b[1] * size],
             1.5 * p,
+            p,
             color,
         );
     };
@@ -1024,6 +1043,16 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
         for vertex in &mut mesh[symbol_start..] {
             vertex.position[1] -= panel.lines.len().saturating_sub(2) as f32 * 11.0 * p;
         }
+    }
+    if let Some(row) = panel.rule.filter(|&row| row < ROWS.min(panel.lines.len())) {
+        let middle = (row * 11) as f32 + 5.5;
+        let rule = Shape::Rule {
+            from: [0.0, middle],
+            to: [(panel.columns * 9) as f32, middle],
+            width: 1.0,
+            color: color(MUTED),
+        };
+        shape(mesh, &rule, p, z);
     }
     for (row, line) in panel.lines.iter().take(ROWS).enumerate() {
         let color = color(if row == 0 {
@@ -1147,11 +1176,28 @@ mod tests {
         )
     }
 
-    /// The glyphs `panel`'s mesh draws, as its quads that sample a glyph rather than the solid block.
+    /// The glyphs `panel`'s mesh draws, as its quads that sample a glyph rather than the solid block or a shape.
     fn glyph_quads(panel: &Panel) -> usize {
         let mut mesh = Vec::new();
         panel_mesh(panel, &mut mesh);
-        mesh.iter().filter(|vertex| vertex.uv != SOLID).count() / 6
+        mesh.iter()
+            .filter(|vertex| vertex.uv != SOLID && !shaped(vertex.uv))
+            .count()
+            / 6
+    }
+
+    /// Whether `uv` is in one of the atlas's shapes' tiles, as a shape's pieces are, rather than a glyph's.
+    fn shaped([u, v]: [f32; 2]) -> bool {
+        use tomori_text::atlas::{DISC, FRAME, RING, SPREAD, SQUARE, WEDGE};
+        let margin = 3.0 * SPREAD;
+        let figure = [SQUARE, DISC, RING, FRAME].iter().any(|figure| {
+            let reach = figure.reach + margin;
+            (u - figure.middle[0]).abs() <= reach && (v - figure.middle[1]).abs() <= reach
+        });
+        let wedge = u >= WEDGE.start[0] - margin
+            && u <= WEDGE.start[0] + WEDGE.length + margin
+            && (v - WEDGE.start[1]).abs() <= WEDGE.widest / 2.0 + margin;
+        figure || wedge
     }
 
     /// The glyphs `lines` should draw on a panel `columns` wide: every cell but spaces and the second halves of wide characters, once each line is cut to fit.
@@ -1852,6 +1898,7 @@ mod tests {
             accent: MUTED,
             opacity: 1.0,
             sign: None,
+            rule: None,
         };
         for yaw in [-0.3_f32, 0.3] {
             rear.origin[0] = if yaw < 0.0 { -0.2 } else { -1.84 };
@@ -2247,6 +2294,7 @@ mod tests {
                         accent: MUTED,
                         opacity: 1.0,
                         sign: None,
+                        rule: None,
                     };
                     graphics.cache.update(vec![sign, rear]);
                     queue.write_buffer(
@@ -2342,6 +2390,7 @@ mod tests {
                             accent: MUTED,
                             opacity: 1.0,
                             sign: None,
+                            rule: None,
                         };
                         for yaw in [-0.18_f32, 0.18] {
                             for eye_x in [-0.032, 0.032] {
@@ -2443,6 +2492,7 @@ mod tests {
                         accent: MUTED,
                         opacity: 1.0,
                         sign: None,
+                        rule: None,
                     };
                     for eye_x in [-0.032, 0.032] {
                         let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
@@ -2499,6 +2549,7 @@ mod tests {
                     accent: MUTED,
                     opacity: 1.0,
                     sign: None,
+                    rule: None,
                 };
                 for eye_x in [-0.032, 0.032] {
                     let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
@@ -2637,7 +2688,7 @@ mod tests {
     #[test]
     fn shapes_stop_at_the_vertex_limit_and_a_stroke_needs_a_length() {
         let mut mesh = Vec::new();
-        stroke(&mut mesh, [0.0, 0.0], [0.0, 0.0], 0.01, [1.0; 4]);
+        stroke(&mut mesh, [0.0, 0.0], [0.0, 0.0], 0.01, 0.001, [1.0; 4]);
         assert!(mesh.is_empty());
         mesh.resize(
             MAX_VERTICES - 5,
@@ -2649,7 +2700,7 @@ mod tests {
             },
         );
         quad(&mut mesh, 0.0, 0.0, 0.0, 1.0, 1.0, [1.0; 4]);
-        stroke(&mut mesh, [0.0, 0.0], [1.0, 0.0], 0.01, [1.0; 4]);
+        stroke(&mut mesh, [0.0, 0.0], [1.0, 0.0], 0.01, 0.001, [1.0; 4]);
         assert_eq!(mesh.len(), MAX_VERTICES - 5);
     }
 
@@ -2663,6 +2714,7 @@ mod tests {
             accent: WHITE,
             opacity: 1.0,
             sign: None,
+            rule: None,
         };
         let mesh = |panel: Panel| {
             let mut mesh = Vec::new();
@@ -2693,6 +2745,7 @@ mod tests {
             accent: WHITE,
             opacity: 1.0,
             sign: None,
+            rule: None,
         };
         let mut cache = PageCache::default();
         let budget = crate::test_support::Budgeted::spent();
@@ -2727,6 +2780,7 @@ mod tests {
                 accent: WHITE,
                 opacity: 1.0,
                 sign: None,
+                rule: None,
             })
             .collect();
         let mut cache = PageCache::default();
