@@ -69,6 +69,30 @@ The server runs it on a thread of its own, once each time a space is bound to th
 
 `Builder::option` adds a command-line option of your own, a `CommandOption`, such as an environment's configuration: `--help` lists it after Tomori's own, the command line reads its value, calling its `parse` once each time it is given, and it changes the configured server before the hooks run, its `apply` given the value `parse` made for the last. The GitHub environment prototype's `--github-repository` is one, which `tomori_environment_github_server::register` adds.
 
+An option changes one environment with `Server::with_environment`, which offers it in place of the one with the same identifier, keeping its place in the order, or else after the others, as `Builder::environment` does, and reads those offered with `Server::environments`, so it need not know the others. This one gives the registered Observe environment a live server side, where `Live::from_config` is your own:
+
+```rust
+use tomori_server::CommandOption;
+
+CommandOption::new(
+    "--observe-config",
+    "PATH",
+    "Run Observe against this configuration.",
+    |value| Ok(std::path::PathBuf::from(value)),
+    |server, path| {
+        let observe = server
+            .environments()
+            .into_iter()
+            .find(|environment| environment.id() == "observe")
+            .ok_or_else(|| "Observe is not registered.".to_owned())?;
+        let live = Live::from_config(path)?;
+        Ok(server.with_environment(observe.with_server_side(live)))
+    },
+)
+```
+
+A changed environment takes effect as one offered with `Server::with_environments`, which replaces them all: for every space when it is next shown or given to the agent.
+
 An environment whose spaces show cards that participants lay out, such as the GitHub prototype's issues and pull requests, implements `CardSource` and is offered with `Server::with_cards`, which reads the cards while someone watches them, within the source's rate limit.
 
 ## Without the command line

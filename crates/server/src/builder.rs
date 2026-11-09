@@ -611,6 +611,99 @@ mod tests {
     }
 
     #[test]
+    fn an_option_replaces_one_registered_environment_and_keeps_the_others() {
+        struct Live;
+        impl tomori_environment::ServerSide for Live {
+            fn run(&self, _: &tomori_environment::Space) -> tomori_environment::Result<()> {
+                Ok(())
+            }
+        }
+        // `--observe-config PATH` swaps the registered Observe environment's server side for a live one, keeping the rest of it, without naming the others.
+        let observe_config = || {
+            CommandOption::new(
+                "--observe-config",
+                "PATH",
+                "Run Observe against this configuration.",
+                |value| Ok(value.to_owned()),
+                |server, _path| {
+                    let registered = server
+                        .environments()
+                        .into_iter()
+                        .find(|environment| environment.id() == "observe")
+                        .ok_or_else(|| "Observe is not registered.".to_owned())?;
+                    Ok(server.with_environment(registered.with_server_side(Live)))
+                },
+            )
+        };
+        let directory = directory("environment-option");
+        let root = directory.to_str().unwrap();
+        let local = [
+            "--auth",
+            "open",
+            "--state-directory",
+            root,
+            "--workspace-root",
+            root,
+        ];
+        let configure = |builder: Builder, extra: &[&str]| {
+            let builder = builder.option(observe_config());
+            let list: Vec<&str> = local.iter().chain(extra).copied().collect();
+            let parsed = arguments(&builder, &list);
+            let mut engines = Engines::default();
+            let configured = command::configure(builder, &parsed, None, &mut engines)
+                .map(|(server, _)| server.environments());
+            assert!(engines.stop(Instant::now()));
+            configured
+        };
+        let sky = Environment::new("sky", "Sky");
+        let observe = Environment::new("observe", "Observe")
+            .with_version(2)
+            .with_instructions("Mind the topology.");
+        let grid = Environment::new(tomori_protocol::GRID, "Grid");
+        let registered = || {
+            Server::builder()
+                .environment(sky.clone())
+                .environment(observe.clone())
+                .environment(grid.clone())
+        };
+        // Without the option, the environments are those registered.
+        assert_eq!(
+            configure(registered(), &[]),
+            Ok(vec![sky.clone(), observe.clone(), grid.clone()])
+        );
+        let offered = configure(registered(), &["--observe-config", "observe.toml"]).unwrap();
+        // Sky stays first, the default, and the grid last; Observe keeps its place, label, version and instructions, now with its live server side.
+        assert_eq!(offered[0], sky);
+        assert_eq!(offered[2], grid);
+        assert_eq!(offered.len(), 3);
+        assert_eq!(
+            (
+                offered[1].id(),
+                offered[1].label(),
+                offered[1].version(),
+                offered[1].instructions()
+            ),
+            ("observe", "Observe", 2, "Mind the topology.")
+        );
+        let space = tomori_environment::Space::new("space-1", "Fleet", "/");
+        assert_eq!(
+            offered[1].server_side().expect("it is live").run(&space),
+            Ok(())
+        );
+        // Without Observe registered, the option stops the server.
+        assert_eq!(
+            configure(
+                Server::builder().environment(sky),
+                &["--observe-config", "observe.toml"]
+            )
+            .err()
+            .as_deref(),
+            Some("Observe is not registered.")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn hooks_change_the_configured_server_in_order() {
         let directory = directory("hooks");
         let root = directory.to_str().unwrap();

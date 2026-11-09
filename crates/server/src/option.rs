@@ -60,7 +60,7 @@ where
 ///         "" => Err("--fleet needs a name".to_owned()),
 ///         name => Ok(name.to_owned()),
 ///     },
-///     |server, _fleet| Ok(server.with_environments([Environment::new("observe", "Observe")])),
+///     |server, _fleet| Ok(server.with_environment(Environment::new("observe", "Observe"))),
 /// );
 /// let builder = Server::builder().option(fleet);
 /// ```
