@@ -73,6 +73,7 @@ fn projecting(server: &TestServer, participant: &str) -> TestClient {
         environment_state: false,
         projection: true,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));

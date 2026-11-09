@@ -281,6 +281,10 @@ pub enum ClientMessage {
         /// sent it. See `design/security.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pairing_window: bool,
+        /// Whether this client reads [`ServerMessage::SpeechHeld`]. Absent from older clients, which would refuse it and
+        /// are never sent it. See `design/speech.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        speech_held: bool,
         /// Whether this client shows image panels: it fetches their images with [`ClientMessage::FetchImage`] and reads
         /// [`crate::FrameKind::Image`] frames. Absent from older clients, which would refuse such a frame and are never
         /// sent one, and are sent an image panel as a text panel of its caption instead. See `design/projection.md`.
@@ -348,6 +352,13 @@ pub enum ClientMessage {
             deserialize_with = "readable_attention"
         )]
         attention: Vec<Resource>,
+        /// The newest of the agent's messages the participant had seen or heard as they began speaking, by its
+        /// [`crate::Message::id`], so that the server can tell the agent which message their words answer if it says
+        /// more before they arrive. Only an identity: the server describes the message from its own conversation, and
+        /// takes the newest it had itself for one it does not have, as for older clients, which send none. Ignored by
+        /// older servers. See `design/interaction.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen: Option<String>,
     },
     /// Finalize the utterance; the server finishes recognition and queues the transcript.
     UtteranceEnd {
@@ -732,6 +743,13 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         closes_in: Option<u32>,
     },
+    /// Whether agent speech is held for this participant: a reply that started while they recorded push-to-talk, which
+    /// plays once they stop, after a brief pause if they let go of X; `held` is false once it starts playing, or the
+    /// hold ends otherwise. Sent only to a connection whose Hello set `speech_held`, whenever that changes, so that its
+    /// pill can say a reply is waiting. See `design/speech.md`.
+    SpeechHeld {
+        held: bool,
+    },
     /// The knocks waiting on the space, sent to its participants whenever they change.
     Knocks {
         knocks: Vec<KnockRequest>,
@@ -933,6 +951,7 @@ mod tests {
             naming: false,
             titling: false,
             attention,
+            seen: None,
         };
         assert_eq!(bare, begin(Vec::new()));
         assert!(
@@ -971,6 +990,7 @@ mod tests {
             naming: false,
             titling: false,
             attention,
+            seen: None,
         };
         // A known kind in the wrong shape, an entry that is not an object, one without a kind and one of an unknown
         // kind are each skipped, and the readable entries among them are kept, in order, as the words are.
@@ -1059,6 +1079,28 @@ mod tests {
     }
 
     #[test]
+    fn a_begin_names_the_message_seen_only_when_it_has_one() {
+        // An older client names none, and a begin without one says nothing of it, so that an older server reads it.
+        let bare: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "utterance_begin", "utterance": "u"}),
+        )
+        .unwrap();
+        let ClientMessage::UtteranceBegin { seen, .. } = &bare else {
+            unreachable!("read as a begin");
+        };
+        assert_eq!(*seen, None);
+        assert!(serde_json::to_value(&bare).unwrap().get("seen").is_none());
+        let seeing =
+            serde_json::json!({"type": "utterance_begin", "utterance": "u", "seen": "msg_1"});
+        let read: ClientMessage = serde_json::from_value(seeing.clone()).unwrap();
+        let ClientMessage::UtteranceBegin { seen, .. } = &read else {
+            unreachable!("read as a begin");
+        };
+        assert_eq!(seen.as_deref(), Some("msg_1"));
+        assert_eq!(serde_json::to_value(&read).unwrap(), seeing);
+    }
+
+    #[test]
     fn transcript_progress_is_asked_for_and_tolerates_new_stages() {
         // An older client does not ask for progress, and a begin without it says nothing of it.
         let bare: ClientMessage = serde_json::from_value(
@@ -1074,6 +1116,7 @@ mod tests {
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
             }
         );
         assert_eq!(
@@ -1087,6 +1130,7 @@ mod tests {
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         };
         assert_eq!(serde_json::to_value(&asking).unwrap()["progress"], true);
 
@@ -1167,6 +1211,7 @@ mod tests {
             naming: false,
             titling: false,
             attention: vec![Resource::card("github://o/r/pull/2")],
+            seen: None,
         };
         let json = serde_json::json!({
             "type": "utterance_begin", "utterance": "u", "attention": [{"kind": "card", "card": "github://o/r/pull/2"}]
@@ -1189,6 +1234,7 @@ mod tests {
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
             }
         );
         let cards = ServerMessage::Cards {
@@ -1386,6 +1432,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         };
         // A newer client lists what it presents, at each version.
@@ -1499,6 +1546,7 @@ mod tests {
             environment_state: true,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -1570,11 +1618,31 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
             serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"})
+        );
+    }
+
+    #[test]
+    fn held_speech_is_an_addition_older_peers_never_see() {
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
+        )
+        .unwrap();
+        let ClientMessage::Hello { speech_held, .. } = older else {
+            unreachable!("a hello");
+        };
+        assert!(!speech_held);
+        let message = ServerMessage::SpeechHeld { held: true };
+        let json = serde_json::json!({"type": "speech_held", "held": true});
+        assert_eq!(serde_json::to_value(&message).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            message
         );
     }
 
@@ -1589,6 +1657,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: true,
+            speech_held: false,
             images: false,
         };
         assert_eq!(
@@ -1645,6 +1714,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -1668,6 +1738,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             }
         );
@@ -1698,6 +1769,7 @@ mod tests {
             naming: true,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         };
         let json = serde_json::to_value(&begin).unwrap();
         assert_eq!(
@@ -1720,6 +1792,7 @@ mod tests {
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
             }
         );
     }
@@ -1741,6 +1814,7 @@ mod tests {
             naming: false,
             titling: true,
             attention: Vec::new(),
+            seen: None,
         };
         let json = serde_json::to_value(&begin).unwrap();
         assert_eq!(

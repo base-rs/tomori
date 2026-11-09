@@ -238,6 +238,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         };
         let audio = AudioFrame {

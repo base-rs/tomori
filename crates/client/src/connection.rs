@@ -83,6 +83,10 @@ pub struct Utterance {
     /// What the participant attends to as they begin speaking, such as the worker they point at, by identity only,
     /// which the server describes to the agent with the words. See `design/spaces.md`.
     pub attention: Vec<tomori_protocol::Resource>,
+    /// The newest of the agent's messages shown or played to the participant as they begin speaking, by identity
+    /// only, so that the server can tell the agent which message the words answer should it say more before they
+    /// arrive. See `design/interaction.md`.
+    pub seen: Option<String>,
 }
 
 impl Utterance {
@@ -95,6 +99,7 @@ impl Utterance {
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         }
     }
 
@@ -120,6 +125,12 @@ impl Utterance {
     /// The utterance attending to `attention` as it begins, such as the worker the participant points at.
     pub fn attending(mut self, attention: Vec<tomori_protocol::Resource>) -> Self {
         self.attention = attention;
+        self
+    }
+
+    /// The utterance begun having seen the agent's message `seen`, the newest shown or played to the participant.
+    pub fn seeing(mut self, seen: Option<String>) -> Self {
+        self.seen = seen;
         self
     }
 }
@@ -669,6 +680,7 @@ impl Voice {
             naming,
             titling,
             attention,
+            seen,
         } = utterance;
         let resume_live = self.live && self.recording.is_some();
         if resume_live {
@@ -686,7 +698,7 @@ impl Voice {
         }
         let mut voice = self.lock();
         let microphone = voice.microphone.as_mut().unwrap();
-        let result = microphone.start(utterance, answer, (naming, titling), attention);
+        let result = microphone.start(utterance, answer, (naming, titling), attention, seen);
         drop(voice);
         if let Err(error) = result {
             self.recording = None;

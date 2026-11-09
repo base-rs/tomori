@@ -296,10 +296,26 @@ impl Hub {
         let state = self.lock();
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
-        let participants: Vec<Value> = state
-            .participants(&record.model)
-            .into_iter()
-            .map(|participant| json!({ "name": participant.name, "engagement": participant.engagement }))
+        let participants: Vec<Value> = record
+            .model
+            .participants
+            .iter()
+            .filter_map(|key| state.participants.get(key))
+            .map(|participant| {
+                // Recording words in this space now, so that the agent may keep what it says meanwhile brief. See
+                // `design/mcp.md`.
+                let recording = participant
+                    .connection
+                    .and_then(|connection| state.connections.get(&connection))
+                    .and_then(|connection| connection.utterance.as_ref())
+                    .and_then(|open| state.utterances.get(&open.id))
+                    .is_some_and(|utterance| utterance.space == space);
+                json!({
+                    "name": participant.name,
+                    "engagement": participant.engagement,
+                    "recording": recording,
+                })
+            })
             .collect();
         let environments = self.environments();
         let label = environments

@@ -75,6 +75,7 @@ impl Participant {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         });
         client.wait_for(|message| match message {

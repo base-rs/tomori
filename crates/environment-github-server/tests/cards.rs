@@ -325,6 +325,18 @@ what's this one about?"
         ),
         "{prompt}"
     );
+    // Each next question waits for the agent's answer, so that it follows the conversation and carries no note of
+    // which message it answers (see `design/interaction.md`).
+    let answered = |ada: &TestClient, words: &str| {
+        let echo = format!("You said: Ada: {words}");
+        ada.space(|state| {
+            state
+                .messages
+                .iter()
+                .any(|message| message.text.starts_with(&echo))
+        });
+    };
+    answered(&ada, "[Pointing at issue #97");
     // A card the board does not have, and an oversized one, add nothing, and the words are kept; nor does one named
     // as the words end, as clients from before attention did.
     ada.say_attending(
@@ -333,6 +345,7 @@ what's this one about?"
         vec![Resource::card("github://o/r/issues/1")],
         None,
     );
+    answered(&ada, "and this?");
     ada.say_attending(
         "u3",
         "or this?",

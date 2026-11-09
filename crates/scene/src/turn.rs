@@ -36,6 +36,10 @@ pub struct Turn {
     announced: Option<String>,
     /// While the agent's speech is skipped, the message it was saying when the participant spoke over it, if one was announced.
     skipped: Option<Option<String>>,
+    /// Whether the server holds a reply for the participant, while they record or in the pause after they let go of X.
+    held: bool,
+    /// When the server last said it no longer holds it, until it plays, so that it is still waiting until it is heard.
+    unheld: Option<Instant>,
 }
 
 impl Turn {
@@ -54,6 +58,7 @@ impl Turn {
         if playing {
             self.played = Some(self.now.unwrap_or_else(Instant::now));
             self.heard |= audible;
+            self.unheld = None;
         }
     }
 
@@ -74,6 +79,26 @@ impl Turn {
             self.skipped = None;
         }
         ends
+    }
+
+    /// The server said whether it holds a reply for the participant, at the frame's time. See `design/speech.md`.
+    pub fn held(&mut self, held: bool) {
+        if held {
+            self.unheld = None;
+        } else if self.held {
+            self.unheld = Some(self.now.unwrap_or_else(Instant::now));
+        }
+        self.held = held;
+    }
+
+    /// Whether a reply is waiting for the participant at `now`: held by the server, or no longer held but not yet
+    /// playing, for up to [`HOLD`], the time it takes to reach this device, so that the pill goes straight from waiting
+    /// to speaking.
+    pub fn waiting(&self, now: Instant) -> bool {
+        self.held
+            || self
+                .unheld
+                .is_some_and(|unheld| now.saturating_duration_since(unheld) < HOLD)
     }
 
     /// The participant started speaking at `now`: it is no longer a turn to cue, and speech that has not been heard since is not one either. Returns whether the agent was speaking, in which case the rest of what it is saying is skipped.
@@ -106,7 +131,7 @@ impl Turn {
 
     /// At `now`, the agent finished speaking a reply heard here, if it is no longer speaking and `free`: idle, with nothing waiting for the participant or on its way from them. Then it is their turn, once.
     pub fn settle(&mut self, now: Instant, free: bool) {
-        if self.heard && free && !self.speaking(now) {
+        if self.heard && free && !self.speaking(now) && !self.waiting(now) {
             self.heard = false;
             self.turn = Some(now);
         }
@@ -259,6 +284,72 @@ mod tests {
         // Speaking long after speech ended skips nothing.
         assert!(!turn.speak(start + ms(5_000)));
         assert!(!turn.is_skipped());
+    }
+
+    #[test]
+    fn held_speech_waiting_out_the_pause_after_x_is_let_go_shows_neither_speaking_nor_a_turn() {
+        // The server holds a reply that starts while the participant records, and starts it 600 ms after they let go
+        // of X, its `RELEASE_PAUSE`, sending nothing meanwhile; the pill follows what plays here.
+        let pause = ms(600);
+        let start = Instant::now();
+        let mut turn = Turn::default();
+        assert!(!turn.announced("m1"));
+        frame(&mut turn, start, true, true);
+        // They speak over the end of the first message, and the next reply is held for them while they record.
+        let pressed = start + ms(100);
+        assert!(turn.speak(pressed));
+        frame(&mut turn, pressed, true, false);
+        let released = pressed + ms(5_000);
+        // The server says it holds the next reply for them.
+        assert!(!turn.waiting(pressed));
+        turn.held(true);
+        for at in [pressed + ms(1_000), released] {
+            frame(&mut turn, at, false, false);
+            assert!(turn.waiting(at));
+        }
+        // Through the pause: nothing plays, so the agent is not speaking, and, though it is free, it is not their turn,
+        // since they spoke last; a reply is waiting.
+        for at in [released, released + pause / 2, released + pause - ms(1)] {
+            frame(&mut turn, at, false, false);
+            assert_eq!(turn.speaking_as(at, false), None);
+            assert!(turn.waiting(at));
+            turn.settle(at, true);
+            assert_eq!(turn.turn(), None);
+        }
+        // Once the pause has passed, the server no longer holds it, and it is still waiting until it reaches here.
+        let starts = released + pause;
+        frame(&mut turn, starts, false, false);
+        turn.held(false);
+        assert!(turn.waiting(starts + ms(50)));
+        // Then the held reply is announced and plays, heard from its start, no longer waiting but speaking.
+        let starts = starts + ms(100);
+        assert!(turn.announced("m2"));
+        frame(&mut turn, starts, true, true);
+        assert!(!turn.waiting(starts));
+        assert_eq!(turn.speaking_as(starts, false), Some(Speaking::Heard));
+        // And once it has ended, it is their turn.
+        let ended = starts + ms(1_000);
+        frame(&mut turn, ended, false, false);
+        turn.settle(ended, true);
+        assert_eq!(turn.turn(), Some(ended));
+    }
+
+    #[test]
+    fn a_hold_that_ends_without_playing_stops_waiting_after_the_hold() {
+        let start = Instant::now();
+        let mut turn = Turn::default();
+        // Told it is not held, without having been held, changes nothing.
+        turn.tick(start);
+        turn.held(false);
+        assert!(!turn.waiting(start));
+        turn.held(true);
+        turn.held(false);
+        assert!(turn.waiting(start + HOLD - ms(1)));
+        assert!(!turn.waiting(start + HOLD));
+        // Nor is anything waiting after a reset.
+        turn.held(true);
+        turn.reset();
+        assert!(!turn.waiting(start));
     }
 
     #[test]

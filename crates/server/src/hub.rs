@@ -533,6 +533,8 @@ struct ConnectionRecord {
     projection: bool,
     /// Whether the client said in Hello that it reads [`ServerMessage::PairingWindow`]. See `design/security.md`.
     pairing_window: bool,
+    /// Whether the client said in Hello that it reads [`ServerMessage::SpeechHeld`]. See `design/speech.md`.
+    speech_held: bool,
     /// Whether the client said in Hello that it shows image panels, fetching their images. See `design/projection.md`.
     images: bool,
 }
@@ -779,6 +781,9 @@ struct UtteranceRecord {
     /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
     /// identities. See `design/spaces.md`.
     attention: Vec<crate::space::Attended>,
+    /// What the participant had seen of the agent's messages as the utterance began, as the space knew it then, for
+    /// words for the agent. Their client names only the message. See `design/interaction.md`.
+    seen: Option<crate::space::Seen>,
     /// Where the participant's head was, and the way it faced, as the utterance began, so that what the agent projects
     /// in answer goes where they were looking, or onto the wall nearest them. See `design/projection.md`.
     origin: Option<tomori_protocol::Pose>,
@@ -792,6 +797,11 @@ struct UtteranceRecord {
 }
 
 impl UtteranceRecord {
+    /// Who recorded it, and in which space: what [`HubState::recorded`] needs once it is no longer recorded.
+    fn recorder(self) -> (String, String) {
+        (self.participant, self.space)
+    }
+
     /// Log how long the utterance took to transcribe after its end arrived, and how much of that it waited, once it has `outcome`, so that the time can be seen per utterance. Nothing is logged for one that failed while it was spoken.
     fn log_outcome(&self, id: UtteranceId, outcome: &str) {
         if let Some(ended) = self.ended {
@@ -1287,6 +1297,10 @@ impl HubState {
         record.model.participants.retain(|id| id != participant);
         record.model.visitors.retain(|id| id != participant);
         record.speech.left(participant);
+        // Told that nothing is held for them any more, so that a hold on joining again is news.
+        if record.speech.held_changed() {
+            record.wake();
+        }
         // Watching the cards ends with leaving their space.
         if let Some(connection) = participants
             .get(participant)
@@ -1328,7 +1342,9 @@ impl HubState {
             record.model.visitors.push(participant.to_owned());
         }
         // A participant who missed part of the latest reply hears it from its start. Visitors follow live speech; see `design/speech.md`.
-        if participates && record.speech.joined(participant, engagement) {
+        if participates
+            && (record.speech.joined(participant, engagement) || record.speech.held_changed())
+        {
             record.wake();
         }
         let Some(record) = self.participants.get_mut(participant) else {
@@ -1764,8 +1780,33 @@ impl HubState {
             .get_mut(&connection)
             .and_then(|record| record.utterance.take())
         {
-            self.utterances.remove(&open.id);
+            let ended = self.utterances.remove(&open.id);
+            self.recorded(ended.map(UtteranceRecord::recorder));
             deferred.push(Deferred::Cancel(open.id));
+        }
+    }
+
+    /// The participant and space of an utterance that stopped being recorded other than by its end, if there was one,
+    /// as by cancelling or failing: the speech held for them while they recorded plays now. See `design/speech.md`.
+    fn recorded(&mut self, ended: Option<(String, String)>) {
+        self.stopped_recording(ended, None);
+    }
+
+    /// The participant and space of an utterance whose end arrived, as its participant let go of X, if there was one:
+    /// the speech held for them while they recorded plays after [`crate::retention::RELEASE_PAUSE`], from `now`.
+    fn released(&mut self, ended: Option<(String, String)>, now: Instant) {
+        self.stopped_recording(ended, Some(now));
+    }
+
+    fn stopped_recording(&mut self, ended: Option<(String, String)>, released: Option<Instant>) {
+        if let Some((participant, space)) = ended
+            && let Some(record) = self.space_mut(&space)
+            && match released {
+                Some(now) => record.speech.released(&participant, now),
+                None => record.speech.recorded(&participant),
+            } | record.speech.held_changed()
+        {
+            record.wake();
         }
     }
 }
@@ -2441,6 +2482,7 @@ impl Hub {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             },
         );
@@ -2669,6 +2711,7 @@ impl Hub {
                 environment_state,
                 projection,
                 pairing_window,
+                speech_held,
                 images,
             } = message
             {
@@ -2677,6 +2720,7 @@ impl Hub {
                     record.environment_state = environment_state;
                     record.projection = projection;
                     record.pairing_window = pairing_window;
+                    record.speech_held = speech_held;
                     record.images = images;
                 }
                 self.hello(
@@ -3059,6 +3103,7 @@ impl Hub {
                 naming,
                 titling,
                 attention,
+                seen,
             } => {
                 if naming && titling {
                     state.error(
@@ -3078,6 +3123,12 @@ impl Hub {
                             .and_then(|()| {
                                 limits::check(&target.field, limits::IDENTIFIER_BYTES, "field")
                             }),
+                            None => Ok(()),
+                        })
+                        .and_then(|()| match &seen {
+                            Some(message) => {
+                                limits::check(message, limits::IDENTIFIER_BYTES, "message")
+                            }
                             None => Ok(()),
                         });
                 if let Err(error) = checked {
@@ -3117,6 +3168,12 @@ impl Hub {
                     }
                     _ => Vec::new(),
                 };
+                // So is what they had seen of the agent's messages, which words for the agent follow, unless it says
+                // more before they arrive.
+                let seen = state
+                    .space(&space)
+                    .filter(|_| answer.is_none() && !naming && !titling)
+                    .map(|record| record.model.seen(seen.as_deref()));
                 let origin = state.participants[participant]
                     .seen
                     .as_ref()
@@ -3129,12 +3186,13 @@ impl Hub {
                         participant: participant.to_owned(),
                         source: state.participants[participant].source,
                         client: utterance.clone(),
-                        space,
+                        space: space.clone(),
                         // Words that name the participant answer nothing, since they are never queued.
                         answer,
                         naming,
                         titling,
                         attention,
+                        seen,
                         origin,
                         progress: progress.then_some(connection),
                         ended: None,
@@ -3153,6 +3211,12 @@ impl Hub {
                     id,
                     expected: None,
                 });
+                // A reply that starts while they speak is held for them until they stop, rather than talking over them.
+                state
+                    .space_mut(&space)
+                    .expect("checked above")
+                    .speech
+                    .recording(participant);
                 deferred.push(Deferred::Begin(id));
             }
             ClientMessage::UtteranceEnd { utterance, .. }
@@ -3208,6 +3272,12 @@ impl Hub {
                             })
                         })
                 });
+                // They have let go of X, so what was held for them while they spoke plays after a short pause.
+                let ended = state
+                    .utterances
+                    .get(&open.id)
+                    .map(|record| (record.participant.clone(), record.space.clone()));
+                state.released(ended, Instant::now());
                 // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {
                     if let Some(attention) = pointed {
@@ -3689,7 +3759,9 @@ impl Hub {
                 if let Some(space) = space
                     && let Some(record) = state.space_mut(space)
                 {
-                    if record.speech.engagement(participant, engagement) {
+                    if record.speech.engagement(participant, engagement)
+                        || record.speech.held_changed()
+                    {
                         record.wake();
                     }
                     state.touch_space(space);
@@ -4202,7 +4274,8 @@ impl Hub {
                 if gap {
                     let open = record.utterance.take().expect("matched above");
                     record.failed = Some(open.client.clone());
-                    state.utterances.remove(&open.id);
+                    let ended = state.utterances.remove(&open.id);
+                    state.recorded(ended.map(UtteranceRecord::recorder));
                     deferred.push(Deferred::Cancel(open.id));
                     state.send(
                         &participant,
@@ -4486,6 +4559,7 @@ impl Hub {
         if let Some(origin) = record.origin {
             space.model.originate(&key, origin);
         }
+        space.model.saw(&key, record.seen);
         // Input queued in it makes the space active.
         let active = space.stamp_active(crate::cards::unix_now());
         state.send(
@@ -4513,12 +4587,15 @@ impl Hub {
             };
             record.log_outcome(utterance, "failed to transcribe");
             // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again. The transcriber is still told, as every utterance it began ends with an end or a cancel.
+            let mut open = false;
             for connection in state.connections.values_mut() {
-                if let Some(open) = connection.utterance.take_if(|open| open.id == utterance) {
-                    connection.failed = Some(open.client);
+                if let Some(closed) = connection.utterance.take_if(|open| open.id == utterance) {
+                    connection.failed = Some(closed.client);
                     deferred.push(Deferred::Cancel(utterance));
+                    open = true;
                 }
             }
+            state.recorded(open.then(|| (record.participant.clone(), record.space.clone())));
             state.send(
                 &record.participant,
                 ServerMessage::TranscriptFailed {
@@ -5282,6 +5359,10 @@ impl Hub {
             return;
         };
         record.speech.record(reply, item);
+        // A reply that starts while someone records is held for them, which the pacer tells them.
+        if record.speech.held_changed() {
+            record.wake();
+        }
         let state = &*state;
         let record = state.space(space).expect("found above");
         // Visitors have no place in the kept speech, so they always hear it live.
@@ -5336,6 +5417,20 @@ impl Hub {
         let record = state.space_mut(space)?;
         let mut deliveries = Vec::new();
         let next = record.speech.pace(now, &mut deliveries);
+        // Told whether speech is held for them, by connections that read it, before what plays once it is not.
+        for (participant, held) in record.speech.held_changes() {
+            if let Some(connection) = state
+                .participants
+                .get(&participant)
+                .and_then(|record| record.connection)
+                .and_then(|connection| state.connections.get(&connection))
+                .filter(|connection| connection.speech_held)
+            {
+                connection
+                    .outbox
+                    .message(ServerMessage::SpeechHeld { held });
+            }
+        }
         // Speech is paced only for members, who are connected, since disconnecting leaves the space.
         for (outbox, delivery) in deliveries
             .into_iter()
@@ -5575,6 +5670,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             });
             // The welcome is the first reply to hello.
@@ -5675,6 +5771,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             },
         );
@@ -5745,6 +5842,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             },
         );
@@ -5782,6 +5880,7 @@ mod tests {
                     environment_state: false,
                     projection: false,
                     pairing_window: false,
+                    speech_held: false,
                     images: false,
                 },
             );
@@ -5982,6 +6081,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             },
         );

@@ -338,7 +338,7 @@ fn tools() -> Value {
         },
         {
             "name": "space",
-            "description": "Your space's state: its title, environment, the environments it could be in, activity, speech setting, mode, participants, how many visitors are watching and how many entries of input are queued, not yet given to you.",
+            "description": "Your space's state: its title, environment, the environments it could be in, activity, speech setting, mode, participants, with whether each is recording words to you now, how many visitors are watching and how many entries of input are queued, not yet given to you.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },

@@ -49,6 +49,7 @@ fn say_title(client: &mut TestClient, utterance: &str, text: &str) {
         naming: false,
         titling: true,
         attention: Vec::new(),
+        seen: None,
     });
     client.send_audio(Gate::Agent, speech(text));
     client.send(&ClientMessage::UtteranceEnd {

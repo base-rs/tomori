@@ -151,6 +151,7 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     let (backends, environments) = client.wait_for(|message| match message {

@@ -277,6 +277,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run", "the"]);
     let partial = ada.wait_for(|message| match message {
@@ -494,6 +495,7 @@ fn a_recognizer_failure_fails_the_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["please", "fail"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -533,6 +535,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["please", "fail", "please", "please"]);
     // Still recording: the failure arrives before any end.
@@ -553,6 +556,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -586,6 +590,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["crash"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -612,6 +617,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -637,6 +643,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -660,6 +667,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     bob.send(&ClientMessage::UtteranceBegin {
         utterance: "b1".into(),
@@ -668,6 +676,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut bob, &["run", "the"]);
     speak(&mut ada, &["please", "fail"]);
@@ -697,6 +706,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["please", "please"]);
     // Recognition is under way: a partial has arrived.
@@ -719,6 +729,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -757,6 +768,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run"]);
     ada.skip_sequence(2);
@@ -775,6 +787,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -871,6 +884,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     ada.send_audio(Gate::Agent, vec![0; 320]);
     ada.send(&ClientMessage::UtteranceCancel {
@@ -1137,6 +1151,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     speak_steadily(&mut ada, 65);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -1306,6 +1321,7 @@ fn begin(client: &mut TestClient, id: &str, progress: bool) {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
 }
 
@@ -1545,6 +1561,7 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     // One second more than the limit; the failure arrives before the utterance ends.
     speak_steadily(
@@ -1988,6 +2005,7 @@ fn without_recognition_an_ended_utterance_fails_and_a_cancelled_one_is_silent() 
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         });
         speak(&mut ada, &["run", "the", "tests"]);
         ada.send(&if ended {

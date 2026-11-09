@@ -128,6 +128,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         })
         .unwrap();
     let mut agent = audio(5);
@@ -368,6 +369,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
@@ -497,6 +499,7 @@ fn begin(utterance: &str) -> ClientMessage {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     }
 }
 

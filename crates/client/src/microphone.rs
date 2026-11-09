@@ -117,7 +117,7 @@ impl Microphone {
         utterance: impl Into<String>,
         answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), SendError> {
-        self.start(utterance.into(), answer, (false, false), Vec::new())
+        self.start(utterance.into(), answer, (false, false), Vec::new(), None)
     }
 
     /// Start push-to-talk as [`Self::begin`] does, attending to `attention` as it begins, such as the worker the
@@ -127,28 +127,30 @@ impl Microphone {
         utterance: impl Into<String>,
         attention: Vec<tomori_protocol::Resource>,
     ) -> Result<(), SendError> {
-        self.start(utterance.into(), None, (false, false), attention)
+        self.start(utterance.into(), None, (false, false), attention, None)
     }
 
     /// Start push-to-talk as [`Self::begin`] does, for words that say the participant's new display name, which the server renames them with instead of queueing. Only for a server that renames; see `design/security.md`.
     pub fn begin_naming(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
-        self.start(utterance.into(), None, (true, false), Vec::new())
+        self.start(utterance.into(), None, (true, false), Vec::new(), None)
     }
 
     /// Start push-to-talk as [`Self::begin`] does, for words that say the space's new title, which the server renames
     /// the space with instead of queueing. Only for an owner, on a server that renames spaces; see `design/hand-menu.md`.
     pub fn begin_titling(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
-        self.start(utterance.into(), None, (false, true), Vec::new())
+        self.start(utterance.into(), None, (false, true), Vec::new(), None)
     }
 
     /// Start push-to-talk as the utterance `utterance`, answering `answer`, saying a new name or the space's new title
-    /// as `(naming, titling)` says, and attending to `attention`, as the other ways to begin do.
+    /// as `(naming, titling)` says, attending to `attention`, and having seen the agent's message `seen`, as the other
+    /// ways to begin do.
     pub(crate) fn start(
         &mut self,
         utterance: String,
         answer: Option<tomori_protocol::AnswerTarget>,
         (naming, titling): (bool, bool),
         attention: Vec<tomori_protocol::Resource>,
+        seen: Option<String>,
     ) -> Result<(), SendError> {
         if self.utterance.is_some() {
             self.cancel()?;
@@ -165,6 +167,7 @@ impl Microphone {
                     naming,
                     titling,
                     attention,
+                    seen,
                 })
             })?;
         self.utterance = Some(utterance);
@@ -389,6 +392,7 @@ mod tests {
                     naming: false,
                     titling: false,
                     attention: vec![worker],
+                    seen: None,
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into(),
@@ -424,6 +428,7 @@ mod tests {
                     naming: false,
                     titling: false,
                     attention: Vec::new(),
+                    seen: None,
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into(),
@@ -506,6 +511,7 @@ mod tests {
                     naming: false,
                     titling: false,
                     attention: Vec::new(),
+                    seen: None,
                 },
                 ClientMessage::UtteranceCancel {
                     utterance: "u1".into()
@@ -536,6 +542,7 @@ mod tests {
                     naming: false,
                     titling: false,
                     attention: Vec::new(),
+                    seen: None,
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
@@ -563,6 +570,7 @@ mod tests {
                 naming: true,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
             })
         );
     }
@@ -580,6 +588,7 @@ mod tests {
                 naming: false,
                 titling: true,
                 attention: Vec::new(),
+                seen: None,
             })
         );
     }
@@ -603,6 +612,33 @@ mod tests {
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
+            })
+        );
+    }
+
+    #[test]
+    fn words_begun_having_seen_a_message_name_it_as_they_begin() {
+        let (mut microphone, sender) = microphone();
+        microphone
+            .start(
+                "u1".into(),
+                None,
+                (false, false),
+                Vec::new(),
+                Some("m1".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            controls(&sent(sender.outbox())).last(),
+            Some(&ClientMessage::UtteranceBegin {
+                utterance: "u1".into(),
+                answer: None,
+                progress: true,
+                naming: false,
+                titling: false,
+                attention: Vec::new(),
+                seen: Some("m1".into()),
             })
         );
     }
