@@ -243,10 +243,12 @@ impl Rectangle {
 /// wall's in its plane, its columns and rows numbered from its top left; a curved wall's along its arc, each facing the
 /// line the arc curves about.
 fn slots(wall: &Wall) -> Vec<Rectangle> {
+    // In its frame, tilted as it tilts.
+    let standing = wall.frame();
     wall.slot_frames()
         .iter()
         .map(|frame| {
-            let pose = frame.pose(&wall.pose);
+            let pose = frame.pose(&standing);
             Rectangle::at(&pose, [0.0; 3], (frame.size[0], frame.size[1]))
         })
         .collect()
@@ -288,7 +290,7 @@ pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
 fn surfaces(wall: &Wall) -> (Vec<Rectangle>, Option<Rectangle>) {
     let board = wall
         .board()
-        .map(|size| Rectangle::at(&wall.pose, [0.0; 3], size));
+        .map(|size| Rectangle::at(&wall.frame(), [0.0; 3], size));
     (slots(wall), board)
 }
 
@@ -582,7 +584,7 @@ pub(crate) fn report(
 }
 
 /// `projection`'s walls, and the panels floating in it, as the `presence` tool describes them, so that the agent can
-/// reason about where to put what it shows: each wall's identity, name, kind, where it stands and faces, its size, and
+/// reason about where to put what it shows: each wall's identity, name, kind, where it stands, faces and tilts, its size, and
 /// which of its slots hold which panels and which are free.
 pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
     let walls = projection
@@ -618,6 +620,7 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 .collect();
             // A wall's face looks along its +Z.
             let (yaw, _) = angles(rotate(wall.pose.orientation, [0.0, 0.0, 1.0]));
+            let tilt = wall.tilt();
             // Its size along its face, curved or not, and its grid and slots' size, which the agent may change.
             let shape = wall
                 .radius()
@@ -645,6 +648,7 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 "shape": shape,
                 "position": position(wall.pose.position),
                 "facing_yaw": round(yaw, 0),
+                "tilt": round(tilt, 0),
                 "size": [round(size.0, 2), round(size.1, 2)],
                 "columns": grid.columns,
                 "rows": grid.rows,
@@ -696,6 +700,14 @@ pub(crate) fn by_default(asker: Option<&Pose>, projection: &Projection) -> Desti
 /// a wall 7 m away, a slot's text is too small to read without pulling the panel off. See `design/projection.md`.
 pub(crate) const READING: f32 = 4.0;
 
+/// How far from someone's eyes `wall` may be for the agent's panel to be put on it for them by where they look:
+/// [`READING`], or as many times further as its slots' text is larger than a standard slot's, since its text is as
+/// legible from that far, so that a wall five times as large is read from 20 m. A smaller wall keeps [`READING`],
+/// since walls stand nearer than it from home. See `design/projection.md`.
+pub(crate) fn reading(wall: &Wall) -> f32 {
+    READING * wall.scale().max(1.0)
+}
+
 /// How far off the ray from someone's eyes a wall's slot may be, in degrees, for them to be looking at the wall: a head
 /// faces a little above what its eyes look at, and passes above a low wall, such as the Tomori wall below the swarm,
 /// that they plainly look towards.
@@ -730,7 +742,7 @@ fn looking_at(head: &Pose, projection: &Projection) -> Destination {
         .walls
         .iter()
         .map(|wall| (wall, wall_distance(wall, eyes)))
-        .filter(|(_, distance)| *distance <= READING)
+        .filter(|(wall, distance)| *distance <= reading(wall))
         .collect();
     let nearest = |walls: &mut dyn Iterator<Item = &(&Wall, f32)>| {
         walls
@@ -771,11 +783,27 @@ fn in_front(head: &Pose) -> Destination {
 /// middle is: as a wall a participant adds from the hand menu stands.
 const WALL_FRONT: (f32, f32) = (1.8, 0.1);
 
-/// Where a wall the agent adds for someone whose head is at `head` stands: [`WALL_FRONT`] ahead of them, level, a little
-/// below their eyes, upright and facing them.
-pub(crate) fn wall_in_front(head: &Pose) -> Pose {
-    ahead_of(head, WALL_FRONT)
+/// Where a wall the agent adds for someone whose head is at `head` stands, its slots `scale` times a standard slot's and
+/// `height` metres tall: [`WALL_FRONT`] ahead of them, level, a little below their eyes, upright and facing them. A wall
+/// larger than [`BIG_SCALE`] stands as many times further as it is larger, so that its text looks as large as that
+/// one's does there, rather than a big wall towering over them; and a wall so tall that it would reach below the floor
+/// where people arrive, for someone standing above it, stands raised until its bottom is [`WALL_CLEARANCE`] above it.
+pub(crate) fn wall_in_front(head: &Pose, scale: f32, height: f32) -> Pose {
+    let (distance, drop) = WALL_FRONT;
+    let mut pose = ahead_of(head, (distance * (scale / BIG_SCALE).max(1.0), drop));
+    let least = height / 2.0 + WALL_CLEARANCE;
+    if head.position[1] > 0.0 && pose.position[1] < least {
+        pose.position[1] = least;
+    }
+    pose
 }
+
+/// How far above the floor where people arrive, in metres, a wall the agent adds stands at least.
+const WALL_CLEARANCE: f32 = 0.1;
+
+/// The largest a wall's slots are, against a standard slot's, that stands at [`WALL_FRONT`] when added: twice, the
+/// largest walls were before they could be big.
+const BIG_SCALE: f32 = 2.0;
 
 /// The pose `distance` ahead of someone whose head is at `head`, level with where they face, `drop` below their eyes,
 /// upright and facing them; looking straight down or up, ahead is the way the top of their head faces, or its back.

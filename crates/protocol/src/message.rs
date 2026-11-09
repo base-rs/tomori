@@ -565,7 +565,7 @@ pub enum ClientMessage {
         wall: String,
     },
     /// Change the wall `wall` for everyone in the space: its `grid` of slots, how large its slots are, `scale` times a
-    /// flat wall's, its `shape`, flat or curved, and, for a wall an owner added, its `pose`. Each left out stays as it
+    /// flat wall's, its `shape`, flat or curved, its `tilt`, and, for a wall an owner added, its `pose`. Each left out stays as it
     /// is. Panels in slots it no longer has go into its nearest free slots, or else float where they were. Participants
     /// only, and only to a server whose [`crate::SpaceState::walls`] is set. See `design/projection.md`.
     SetWall {
@@ -582,6 +582,10 @@ pub enum ClientMessage {
         shape: Option<crate::WallShape>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pose: Option<Pose>,
+        /// How far it tilts from upright about its horizontal middle line, in degrees, within [`crate::wall::TILTS`],
+        /// positive with its top towards the front: `0` for upright. An older server ignores it, leaving it upright.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tilt: Option<f32>,
     },
     /// Snap the wall `wall`, one someone added, to another for everyone in the space, or take it out of its group. With
     /// `attach`, it stands across `attach.edge` of the wall `attach.to`, aligned along it, their slots a gutter apart, and

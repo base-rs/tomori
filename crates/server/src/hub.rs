@@ -3901,18 +3901,20 @@ impl Hub {
                 aspect,
                 shape,
                 pose,
+                tilt,
             } => {
                 if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
                     state.error(participant, error);
                     return;
                 }
-                let change = match crate::stage::WallChange::new(grid, scale, aspect, shape, pose) {
-                    Ok(change) => change,
-                    Err(error) => {
-                        state.error(participant, error);
-                        return;
-                    }
-                };
+                let change =
+                    match crate::stage::WallChange::new(grid, scale, aspect, shape, pose, tilt) {
+                        Ok(change) => change,
+                        Err(error) => {
+                            state.error(participant, error);
+                            return;
+                        }
+                    };
                 let Some(space) = in_space(state) else {
                     return;
                 };

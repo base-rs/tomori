@@ -1422,7 +1422,7 @@ impl Projector {
         let shown_walls = self.editor.walls(projection);
         let walls: Vec<(&Wall, Mat4)> = shown_walls
             .iter()
-            .filter_map(|wall| model(&wall.pose).map(|frame| (wall, frame)))
+            .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
             .collect();
         let mut output = Output::default();
         // The panel carried follows the ray, facing the viewer, as far along it and as turned as the right stick puts it.
@@ -1549,7 +1549,7 @@ impl Projector {
         let redrawn = self.editor.walls(projection);
         let walls: Vec<(&Wall, Mat4)> = redrawn
             .iter()
-            .filter_map(|wall| model(&wall.pose).map(|frame| (wall, frame)))
+            .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
             .collect();
         let standing: Vec<Standing> = projection
             .panels

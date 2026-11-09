@@ -587,3 +587,46 @@ fn the_trigger_held_keeps_a_wall_carried_from_snapping_and_let_go_it_stays_where
         "{keys}"
     );
 }
+
+#[test]
+fn a_tilted_wall_snaps_upright_none_snaps_to_one_tilted_and_a_wall_of_a_group_has_no_hinge() {
+    let (two, big) = pair();
+    let snapped = big.pose;
+    // Tilted, carried by its board where it is drawn, from half a metre away to within a few centimetres of where it
+    // snaps: its slots are outlined there upright, as the group's walls stand, and let go, it is drawn so.
+    let mut apart = big.clone().with_tilt(Some(20.0));
+    apart.pose = swung(snapped, -0.2);
+    let projection = shown(vec![two.clone(), apart.clone()]);
+    let mut projector = Projector::default();
+    let start = at(grip_point(&apart, &apart.frame()));
+    projector.update(frame(&projection, start, 1.0, SNAPS));
+    assert_eq!(projector.carried_wall(), Some("wall-2"));
+    let near = at(grip_point(&big, &snapped) + Vec3::new(0.03, 0.02, 0.0));
+    let output = projector.update(frame(&projection, near, 1.0, SNAPS));
+    assert!(projector.editor.snapping());
+    assert!(same(&ghosts(&output), &outlined(&big)));
+    let output = projector.update(frame(&projection, near, 0.0, SNAPS));
+    assert!(output.wall.unwrap().join.is_some());
+    let drawn = projector.editor.walls(&projection);
+    let shown_now = drawn.iter().find(|wall| wall.id == "wall-2").unwrap();
+    assert_eq!(shown_now.tilt, None);
+    // A wall carried near a tilted one snaps to nothing.
+    let projection = shown(vec![
+        two.clone().with_tilt(Some(20.0)),
+        apart.with_tilt(None),
+    ]);
+    let mut projector = Projector::default();
+    let start = at(grip_point(&big, &swung(snapped, -0.2)));
+    projector.update(frame(&projection, start, 1.0, SNAPS));
+    assert_eq!(projector.carried_wall(), Some("wall-2"));
+    projector.update(frame(&projection, near, 1.0, SNAPS));
+    assert!(!projector.editor.snapping());
+    // A wall of a group stands upright, and so has no hinge; alone, it has one.
+    let (two, big) = grouped();
+    assert!(!handles(&two).contains(&Handle::Tilt));
+    let all = [&two, &big];
+    let (points, _) = handle_points_among(&two, model(&two.pose).unwrap(), HOME, &all, None);
+    assert!(points.iter().all(|(handle, _)| *handle != Handle::Tilt));
+    let (alone, _) = pair();
+    assert!(handles(&alone).contains(&Handle::Tilt));
+}

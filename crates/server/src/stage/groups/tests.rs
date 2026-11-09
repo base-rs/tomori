@@ -35,6 +35,7 @@ fn added(grids: &[((u32, u32), f32)]) -> (Stage, Vec<String>) {
                 scale: *scale,
                 aspect: None,
                 radius: None,
+                tilt: None,
             };
             stage
                 .add_wall(&SKY, &ahead(index as f32 * 3.0 - 3.0), Some(layout))
@@ -563,4 +564,77 @@ fn a_panel_on_a_wall_of_a_group_stays_in_its_slot_as_the_group_moves() {
             slot: 0
         }
     );
+}
+
+#[test]
+fn a_group_s_walls_stand_upright_a_tilted_wall_snapped_standing_upright_and_none_snapped_to_a_tilted_one()
+ {
+    let (mut stage, ids) = added(&[((2, 1), 1.0), ((1, 1), 1.0), ((1, 1), 1.0)]);
+    let tilted = |tilt: f32| WallChange {
+        tilt: Some(Some(tilt)),
+        ..WallChange::default()
+    };
+    // A wall tilted has none snapped to it, saying why, and nothing changes.
+    assert_eq!(stage.set_wall(&SKY, &ids[0], tilted(20.0)), Ok(true));
+    assert_eq!(
+        stage.attach_wall(&SKY, &ids[1], right(&ids[0]), false, None),
+        Err(
+            "A group's walls stand upright, so a tilted wall has none snapped to it: stand it upright first."
+        )
+    );
+    assert!(shown(&view(&stage), &ids[1]).group.is_none());
+    // A tilted wall snapped to an upright one stands upright, kept so, as the group reads as one board.
+    assert_eq!(stage.set_wall(&SKY, &ids[0], tilted(0.0)), Ok(true));
+    assert_eq!(stage.set_wall(&SKY, &ids[1], tilted(-30.0)), Ok(true));
+    assert!(
+        stage
+            .attach_wall(&SKY, &ids[1], right(&ids[0]), false, None)
+            .unwrap()
+    );
+    let projection = view(&stage);
+    assert_eq!(shown(&projection, &ids[1]).tilt, None);
+    assert_eq!(
+        stage.rooms["sky"].walls[1]
+            .layout
+            .and_then(|layout| layout.tilt),
+        None
+    );
+    let (gap, top) = beside(shown(&projection, &ids[0]), shown(&projection, &ids[1]));
+    assert!(near(gap, layout::GUTTER) && near(top, 0.0), "{gap} {top}");
+    // A wall of a group is not tilted, saying why, and nothing changes; taken out of it, it tilts.
+    for wall in &ids[..2] {
+        assert_eq!(
+            stage.set_wall(&SKY, wall, tilted(10.0)),
+            Err(
+                "A group's walls stand upright, so that it reads as one board: take this wall out of its group to tilt it."
+            )
+        );
+    }
+    assert_eq!(view(&stage), projection);
+    assert!(stage.attach_wall(&SKY, &ids[1], None, false, None).unwrap());
+    assert_eq!(stage.set_wall(&SKY, &ids[1], tilted(10.0)), Ok(true));
+    assert_eq!(shown(&view(&stage), &ids[1]).tilt(), 10.0);
+    // The wall alone it snaps to may be tilted and is then made upright with it, as its layout says.
+    assert_eq!(stage.set_wall(&SKY, &ids[2], tilted(15.0)), Ok(true));
+    let mut room = stage.rooms["sky"].clone();
+    room.walls[2].attach = Some(Attach::new(ids[1].clone(), Edge::Right, Align::Start));
+    room.walls[1].attach = None;
+    let before = stage.rooms["sky"].clone();
+    room.settle(&before).unwrap();
+    assert!(
+        room.walls[1..]
+            .iter()
+            .all(|wall| wall.layout.is_none_or(|layout| layout.tilt.is_none()))
+    );
+    // A wall laid out as every wall is unless changed, tilted and snapped, is kept as laid out so, upright.
+    let flat = stage.add_wall(&SKY, &ahead(9.0), None).unwrap();
+    assert_eq!(stage.set_wall(&SKY, &flat, tilted(25.0)), Ok(true));
+    assert_eq!(stage.set_wall(&SKY, &ids[2], tilted(0.0)), Ok(true));
+    assert!(
+        stage
+            .attach_wall(&SKY, &flat, right(&ids[2]), false, None)
+            .unwrap()
+    );
+    assert_eq!(stage.rooms["sky"].walls[3].layout, None);
+    assert_eq!(shown(&view(&stage), &flat).tilt, None);
 }

@@ -70,8 +70,8 @@ pub const SLOTS: usize = WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS
 /// environments it has been in.
 pub const PANELS: usize = 120;
 
-/// The widest and tallest a wall may be, in metres.
-pub const WALL_SIZE: (f32, f32) = (8.0, 4.0);
+/// The widest and tallest a wall may be, in metres: a cinema's screen, as every client bounds it.
+pub const WALL_SIZE: (f32, f32) = layout::MOST_SIZE;
 
 /// The longest radius a wall is curved at, in metres; a longer one is all but flat.
 pub const LONGEST_RADIUS: f32 = 50.0;
@@ -144,7 +144,8 @@ fn fit(projection: &mut Projection, placed: &[u64], budget: usize) {
 
 /// How a wall's slots are laid out, as the stage keeps it: its grid, how large its slots are, as a proportion of a flat
 /// wall's, the size of their text, their shape, as their width over their height, if it is not a standard slot's, and
-/// the radius of the arc it is curved along, if it is curved.
+/// the radius of the arc it is curved along, if it is curved, and how far it tilts from upright, in degrees, if it does.
+/// A stage kept before walls tilted reads as upright.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub grid: Grid,
@@ -153,6 +154,8 @@ pub struct Layout {
     pub aspect: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tilt: Option<f32>,
 }
 
 impl Layout {
@@ -162,6 +165,7 @@ impl Layout {
         scale: layout::ARC_SCALE,
         aspect: None,
         radius: Some(ARC_RADIUS),
+        tilt: None,
     };
 
     /// Every other wall's unless it is changed: three columns of two rows, flat.
@@ -170,15 +174,19 @@ impl Layout {
         scale: 1.0,
         aspect: None,
         radius: None,
+        tilt: None,
     };
 
     /// `wall`, laid out so, saying its grid and scale only where they are not its shape's, as an older client reads it,
-    /// and its slots' aspect only where it is not a standard slot's.
+    /// its slots' aspect only where it is not a standard slot's, and its tilt only where it tilts.
     pub(crate) fn apply(&self, wall: Wall) -> Wall {
         let shape = self
             .radius
             .map_or(WallShape::Grid, |radius| WallShape::Arc { radius });
-        let wall = wall.with_shape(shape).with_aspect(self.aspect);
+        let wall = wall
+            .with_shape(shape)
+            .with_aspect(self.aspect)
+            .with_tilt(self.tilt);
         if wall.grid() == self.grid && wall.scale() == self.scale {
             wall
         } else {
@@ -193,7 +201,7 @@ fn json_size(value: &impl Serialize) -> usize {
 }
 
 /// What a participant or the agent changes of a wall: each left out stays as it is. `radius` is `Some(None)` to flatten
-/// it, and `aspect` `Some(None)` to give it standard slots.
+/// it, `aspect` `Some(None)` to give it standard slots, and `tilt`, in degrees, `Some(None)` to stand it upright.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WallChange {
     pub grid: Option<Grid>,
@@ -201,17 +209,19 @@ pub struct WallChange {
     pub aspect: Option<Option<f32>>,
     pub radius: Option<Option<f32>>,
     pub pose: Option<Pose>,
+    pub tilt: Option<Option<f32>>,
 }
 
 impl WallChange {
-    /// The change `SetWall` asks for, or why it cannot be one: a shape a server does not know is refused, and an
-    /// `aspect` of 0 is a standard slot's.
+    /// The change `SetWall` asks for, or why it cannot be one: a shape a server does not know is refused, an `aspect`
+    /// of 0 is a standard slot's, and a `tilt` of 0 upright.
     pub fn new(
         grid: Option<Grid>,
         scale: Option<f32>,
         aspect: Option<f32>,
         shape: Option<WallShape>,
         pose: Option<Pose>,
+        tilt: Option<f32>,
     ) -> Result<Self, &'static str> {
         let radius = match shape {
             None => None,
@@ -225,6 +235,7 @@ impl WallChange {
             aspect: aspect.map(|aspect| (aspect != 0.0).then_some(aspect)),
             radius,
             pose,
+            tilt: tilt.map(|tilt| (tilt != 0.0).then_some(tilt)),
         })
     }
 }
@@ -1351,7 +1362,7 @@ impl Stage {
         if !(layout.scale.is_finite()
             && (layout::SCALES.0..=layout::SCALES.1).contains(&layout.scale))
         {
-            return Err("A wall's slots are from half to twice a standard slot's size.");
+            return Err("A wall's slots are from half to five times a standard slot's size.");
         }
         if let Some(aspect) = layout.aspect
             && !(aspect.is_finite() && (layout::ASPECTS.0..=layout::ASPECTS.1).contains(&aspect))
@@ -1370,17 +1381,22 @@ impl Stage {
                 );
             }
         }
+        if let Some(tilt) = layout.tilt
+            && !(tilt.is_finite() && (layout::TILTS.0..=layout::TILTS.1).contains(&tilt))
+        {
+            return Err("A wall tilts at most 45° from upright, either way.");
+        }
         let (width, height) = wall.size();
         if width > WALL_SIZE.0 + 1e-3 || height > WALL_SIZE.1 + 1e-3 {
             return Err(
-                "A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.",
+                "A wall is at most 16 m wide and 9 m tall: give it fewer slots, or smaller ones.",
             );
         }
         Ok(())
     }
 
     /// Change the wall `wall` in `walls`' environment as `change` says: its grid, how large its slots are, whether it is
-    /// curved, and, for a wall an owner added, where it stands. The Tomori wall stays one row of at most
+    /// curved, how far it tilts, and, for a wall an owner added, where it stands. The Tomori wall stays one row of at most
     /// [`TOMORI_COLUMNS`], its slots its own size, where the environment puts it; an environment's own walls stay where
     /// it puts them. A panel keeps its column and row, or, in one the wall no longer has, goes into its nearest free slot,
     /// or else floats where it was: none is taken away. Returns whether that changed anything, or why it was refused.
@@ -1399,6 +1415,7 @@ impl Stage {
             scale: before.scale(),
             aspect: before.aspect,
             radius: before.radius(),
+            tilt: before.tilt,
         };
         // A standard slot's shape, said, is none.
         let aspect = change
@@ -1409,6 +1426,12 @@ impl Stage {
             grid: change.grid.unwrap_or(old.grid),
             scale: change.scale.unwrap_or(old.scale),
             aspect,
+            // Upright, said, is none, and a tilt is kept to a tenth of a degree.
+            tilt: change
+                .tilt
+                .unwrap_or(old.tilt)
+                .map(|tilt| (tilt * 10.0).round() / 10.0)
+                .filter(|tilt| tilt.is_nan() || *tilt != 0.0),
             radius: change.radius.unwrap_or(old.radius),
         };
         let pose = match (change.pose, kind) {
@@ -1458,6 +1481,11 @@ impl Stage {
                 let room = self.room(walls.environment);
                 let unchanged = room.clone();
                 let members = room.group(wall);
+                if members.len() > 1 && new.tilt.is_some() {
+                    return Err(
+                        "A group's walls stand upright, so that it reads as one board: take this wall out of its group to tilt it.",
+                    );
+                }
                 let added = room
                     .walls
                     .iter_mut()
@@ -3851,6 +3879,7 @@ mod tests {
             aspect: None,
             radius: Some(Some(4.0)),
             pose: None,
+            tilt: None,
         };
         assert_eq!(stage.set_wall(&walls, "environment-0", curved), Ok(true));
         let view = stage.view("s", &walls, 0);
@@ -3893,9 +3922,114 @@ mod tests {
             aspect: None,
             radius: Some(None),
             pose: None,
+            tilt: None,
         };
         assert_eq!(stage.set_wall(&walls, "environment-0", back), Ok(true));
         assert!(stage.rooms["sky"].layouts.is_empty());
+    }
+
+    #[test]
+    fn a_wall_tilts_kept_with_the_space_its_panels_with_it_upright_as_none_and_within_bounds() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let id = stage.project(&SKY, content("on it"), Some([0.0, 1.5, 3.0]), 0);
+        let tilted = |tilt: Option<f32>| WallChange {
+            tilt: Some(tilt),
+            ..WallChange::default()
+        };
+        // Tilted down, its pose stays upright, its panels stay in their slots, and the slots tilt with it.
+        assert_eq!(stage.set_wall(&SKY, &wall, tilted(Some(20.0))), Ok(true));
+        let view = stage.view("s", &SKY, 0);
+        let shown = view.wall(&wall).unwrap();
+        assert_eq!(shown.tilt, Some(20.0));
+        let [x, _, z, _] = shown.pose.orientation;
+        assert!(x.abs() < 1e-6 && z.abs() < 1e-6);
+        assert_eq!(view.panel(&id).unwrap().place, on(&wall, 0));
+        let upright = Wall::new("w", WallKind::Added, shown.pose);
+        assert_ne!(shown.slot_pose(0), upright.slot_pose(0));
+        // Kept across a restart, and sent as it is kept.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept.view("s", &SKY, 0).walls, view.walls);
+        let json = serde_json::to_value(&view.walls).unwrap();
+        assert_eq!(json[1]["tilt"], 20.0);
+        assert!(json[0].get("tilt").is_none(), "{json}");
+        // The same again changes nothing; it is kept to a tenth of a degree, and upright, said, is none.
+        assert_eq!(stage.set_wall(&SKY, &wall, tilted(Some(20.0))), Ok(false));
+        assert_eq!(stage.set_wall(&SKY, &wall, tilted(Some(-12.34))), Ok(true));
+        assert_eq!(
+            stage.view("s", &SKY, 0).wall(&wall).unwrap().tilt,
+            Some(-12.3)
+        );
+        assert_eq!(
+            WallChange::new(None, None, None, None, None, Some(0.0)).unwrap(),
+            tilted(None)
+        );
+        assert_eq!(stage.set_wall(&SKY, &wall, tilted(None)), Ok(true));
+        assert_eq!(stage.view("s", &SKY, 0).wall(&wall).unwrap().tilt, None);
+        assert_eq!(stage.rooms["sky"].walls[0].layout, None);
+        // Beyond 45° either way, or nonsense, it is refused and nothing changes.
+        for tilt in [45.5, -60.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                stage.set_wall(&SKY, &wall, tilted(Some(tilt))),
+                Err("A wall tilts at most 45° from upright, either way.")
+            );
+        }
+        assert_eq!(stage.set_wall(&SKY, &wall, tilted(Some(45.0))), Ok(true));
+        // The Tomori wall tilts too, kept for the space, and upright again keeps nothing.
+        assert_eq!(
+            stage.set_wall(&SKY, TOMORI_WALL, tilted(Some(-15.0))),
+            Ok(true)
+        );
+        assert_eq!(
+            stage.view("s", &SKY, 0).wall(TOMORI_WALL).unwrap().tilt(),
+            -15.0
+        );
+        assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, tilted(None)), Ok(true));
+        assert_eq!(stage.tomori_layout, None);
+        // Removed tilted, its panel floats where its slot stood.
+        let slot = stage.view("s", &SKY, 0).wall(&wall).unwrap().slot_pose(0);
+        stage.remove_wall(&SKY, &wall).unwrap();
+        let Place::Free { pose } = stage.view("s", &SKY, 0).panel(&id).unwrap().place.clone()
+        else {
+            unreachable!("floating");
+        };
+        assert!(
+            (0..3).all(|axis| (pose.position[axis] - slot.unwrap().position[axis]).abs() < 1e-4),
+            "{pose:?} {slot:?}"
+        );
+        // A layout kept before walls tilted is upright.
+        let older: Layout =
+            serde_json::from_value(serde_json::json!({"grid": [4, 1], "scale": 1.0})).unwrap();
+        assert_eq!(older.tilt, None);
+    }
+
+    #[test]
+    fn a_big_wall_is_up_to_five_times_a_standard_slot_and_a_cinema_s_screen() {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 10.0), None).unwrap();
+        let big = WallChange {
+            grid: Some(Grid::new(4, 2).unwrap()),
+            scale: Some(layout::SCALES.1),
+            ..WallChange::default()
+        };
+        // Four columns of two rows of five times a standard slot, about 13 m by 4 m, are a dashboard across the yard.
+        assert_eq!(stage.set_wall(&SKY, &wall, big), Ok(true));
+        let shown = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
+        assert_eq!(shown.scale(), 5.0);
+        let (width, height) = shown.size();
+        assert!(
+            width > 12.0 && width <= WALL_SIZE.0 && height <= WALL_SIZE.1,
+            "{width} {height}"
+        );
+        // Wider than a cinema's screen is refused.
+        let wider = WallChange {
+            grid: Some(Grid::new(5, 2).unwrap()),
+            ..WallChange::default()
+        };
+        assert_eq!(
+            stage.set_wall(&SKY, &wall, wider),
+            Err("A wall is at most 16 m wide and 9 m tall: give it fewer slots, or smaller ones.")
+        );
     }
 
     #[test]
@@ -3956,11 +4090,11 @@ mod tests {
         };
         assert_eq!(
             stage.set_wall(&SKY, &wall, towering),
-            Err("A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.")
+            Err("A wall is at most 16 m wide and 9 m tall: give it fewer slots, or smaller ones.")
         );
         // A standard slot's shape, said or as 0, is kept as none.
         assert_eq!(
-            WallChange::new(None, None, Some(0.0), None, None).unwrap(),
+            WallChange::new(None, None, Some(0.0), None, None, None).unwrap(),
             shaped(Some(None))
         );
         assert_eq!(stage.set_wall(&SKY, &wall, shaped(Some(None))), Ok(true));
@@ -4020,6 +4154,7 @@ mod tests {
                 aspect: None,
                 radius,
                 pose: None,
+                tilt: None,
             }
         };
         for (change, error) in [
@@ -4036,12 +4171,12 @@ mod tests {
                 "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
             ),
             (
-                change(None, Some(2.5), None),
-                "A wall's slots are from half to twice a standard slot's size.",
+                change(None, Some(5.5), None),
+                "A wall's slots are from half to five times a standard slot's size.",
             ),
             (
                 change(None, Some(f32::NAN), None),
-                "A wall's slots are from half to twice a standard slot's size.",
+                "A wall's slots are from half to five times a standard slot's size.",
             ),
             (
                 change(None, None, Some(Some(0.5))),
@@ -4056,8 +4191,22 @@ mod tests {
                 "Curved that tightly, its slots would go around more than half a circle: curve it less, or give it fewer columns.",
             ),
             (
-                change(Some((8, 3)), Some(2.0), None),
-                "A wall is at most 8 m wide and 4 m tall: give it fewer slots, or smaller ones.",
+                change(Some((8, 3)), Some(4.0), None),
+                "A wall is at most 16 m wide and 9 m tall: give it fewer slots, or smaller ones.",
+            ),
+            (
+                WallChange {
+                    tilt: Some(Some(50.0)),
+                    ..WallChange::default()
+                },
+                "A wall tilts at most 45° from upright, either way.",
+            ),
+            (
+                WallChange {
+                    tilt: Some(Some(f32::NAN)),
+                    ..WallChange::default()
+                },
+                "A wall tilts at most 45° from upright, either way.",
             ),
         ] {
             assert_eq!(stage.set_wall(&SKY, &wall, change), Err(error));
@@ -4067,11 +4216,18 @@ mod tests {
             Err("That wall is not here.")
         );
         assert_eq!(
-            WallChange::new(None, None, None, Some(WallShape::Unknown), None),
+            WallChange::new(None, None, None, Some(WallShape::Unknown), None, None),
             Err("Tomori does not know that shape of wall.")
         );
         assert_eq!(
-            WallChange::new(None, Some(1.5), Some(0.0), Some(WallShape::Grid), None),
+            WallChange::new(
+                None,
+                Some(1.5),
+                Some(0.0),
+                Some(WallShape::Grid),
+                None,
+                None
+            ),
             Ok(WallChange {
                 scale: Some(1.5),
                 aspect: Some(None),
@@ -4129,6 +4285,7 @@ mod tests {
             scale: 1.2,
             aspect: None,
             radius: Some(3.0),
+            tilt: None,
         };
         let wall = laid.add_wall(&SKY, &pose(0.0, 3.0), Some(layout)).unwrap();
         let view = laid.view("s", &SKY, 0);

@@ -28,6 +28,7 @@ fn wall(id: &str, (columns, rows): (u32, u32), scale: f32) -> Planned {
             scale,
             aspect: None,
             radius: None,
+            tilt: None,
         },
         width: None,
         sized: true,

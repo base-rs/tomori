@@ -2,11 +2,11 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Editing walls with the grip: taking hold of a wall by pointing at its board or an empty slot, the handles that then
-//! appear on it, small and grabbed with the grip, to size its slots, give it columns and rows, step them one at a time
-//! and bend it, carrying a wall someone added as a panel is carried, and removing one, as an owner, with B. A wall carried
-//! carries its group, and snaps beside another it is brought within reach of, its place outlined; pulled firmly towards
-//! the participant, it comes out of its group alone. Each change is shown at once, as the wall would be, and sent to the
-//! server when it is let go, shown so until the server's projection agrees or [`super::PENDING`] passes. See
+//! appear on it, small and grabbed with the grip, to size its slots, give it columns and rows, step them one at a time,
+//! bend it and tilt it, carrying a wall someone added as a panel is carried, and removing one, as an owner, with B. A wall
+//! carried carries its group, and snaps beside another it is brought within reach of, its place outlined; pulled firmly
+//! towards the participant, it comes out of its group alone. Each change is shown at once, as the wall would be, and sent
+//! to the server when it is let go, shown so until the server's projection agrees or [`super::PENDING`] passes. See
 //! `design/projection.md`.
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,7 @@ use crate::{
     manipulation::Manipulation,
     pointing::Ray,
     recording::facing,
-    transcript::{BRIGHT, TEXT},
+    transcript::{BRIGHT, DIM, TEXT},
     ui_text::{Row, Style, cut},
 };
 
@@ -46,15 +46,27 @@ pub const ASPECT_SNAPS: [(f32, &str); 6] = [
 /// How near one of [`ASPECT_SNAPS`] a slot's shape snaps to it, as the logarithm of their ratio: within about 3.5%.
 const ASPECT_SNAP: f32 = 0.035;
 
-/// How far the hand moves towards the participant, from where it took hold of the knob, to bend a wall from flat to as
-/// tightly as it may curve, in metres; moving back flattens it as evenly.
-pub const BEND_TRAVEL: f32 = 0.4;
+/// How far a corner dragged sizes a wall's slots, as the power of how far from the wall's middle it is against where it
+/// was taken hold of: twice as far makes them four times as large, so that from a standard slot to the largest is one
+/// drag, to a little over twice as far.
+pub const CORNER_GAIN: f32 = 2.0;
+
+/// The least and most the hand moves up or down, in metres, from where it took hold of the knob or the hinge, to bend a
+/// wall from flat to as tightly as it may curve, or tilt it from one end of [`layout::TILTS`] to the other: the wall's
+/// own height, within these, so that one movement as tall as the wall takes it through the whole range, a small wall is
+/// not too touchy to set and a large one is still within an arm's reach. See [`travel`].
+pub const TRAVELS: (f32, f32) = (0.2, 1.0);
+
+/// How far the hand moves up or down, in metres, from where it took hold of the knob or the hinge, before it bends or
+/// tilts the wall at all: a hand held still drifts and shakes by less, so that taking hold changes nothing, and moving
+/// back to where it took hold is the wall as it was.
+pub const DEAD_ZONE: f32 = 0.01;
 
 /// How little a wall bends, as a proportion of the most it may, before it snaps flat.
 const FLAT_BEND: f32 = 0.06;
 
-/// How near where it took hold of the knob the hand is, in metres, for the wall to be bent as it was.
-const BEND_REST: f32 = 0.005;
+/// How near upright a wall tilts, in degrees, before it snaps upright.
+pub const UPRIGHT_SNAP: f32 = 3.0;
 
 /// How large a handle is drawn, as the angle it takes from the eyes at the far side of its wall, whatever its distance,
 /// so that it is as easy to hold with the ray near and far: about 1.7°.
@@ -114,9 +126,13 @@ pub enum Handle {
     Rows,
     /// A stepper: one column or row fewer (-1) or more (1).
     Step(Axis, i8),
-    /// The knob at its top middle: pulled towards the participant from where it was taken hold of, it bends the wall
-    /// around them, and pushed back, flattens it, flat near where it bends least.
+    /// The knob at its top middle: moved down from where it was taken hold of, it bends the wall around the
+    /// participant, and back up, flattens it, flat near where it bends least.
     Bend,
+    /// The hinge at the middle of its left edge, on the line it tilts about: moved down from where it was taken hold
+    /// of, it tilts the wall's top towards the participant, so that it faces down, and up, tilts it back, upright near
+    /// where it tilts least.
+    Tilt,
 }
 
 /// What a participant may do with walls in the joined space.
@@ -151,6 +167,8 @@ pub struct Change {
     pub pose: Option<Pose>,
     /// What it does to the wall's group, if anything.
     pub join: Option<Joining>,
+    /// How far it tilts from upright, in degrees, `0` for upright.
+    pub tilt: Option<f32>,
 }
 
 /// A handle being dragged, and the wall as it was when it was taken hold of.
@@ -162,10 +180,13 @@ struct Drag {
     /// measured against.
     grab: Vec2,
     /// Where the ray began, the hand, as it was taken hold of, how far along it the handle was and where that is, which
-    /// the knob's drag is measured from.
+    /// the knob's and the hinge's drags are measured from.
     origin: Vec3,
     along: f32,
     point: Vec3,
+    /// Whether the knob or the hinge is at one end of its range, or at flat or upright, where it stops, so that reaching
+    /// one ticks.
+    stopped: bool,
 }
 
 /// A wall someone added, carried along the ray, as a panel is: the point it was taken hold of stays on the ray, and it
@@ -309,12 +330,17 @@ fn corners(wall: &Wall) -> [Vec3; 4] {
 /// Which handles `wall` has, for a participant who may adjust it: the Tomori wall's grid only in its one row, and its
 /// slots their own size.
 fn handles(wall: &Wall) -> Vec<Handle> {
+    // A wall that is locked, once walls may be, has none, and so neither the hinge. A wall in a group stands upright,
+    // so that the group reads as one board, and has no hinge.
     let mut handles = vec![
         Handle::Columns,
         Handle::Step(Axis::Columns, -1),
         Handle::Step(Axis::Columns, 1),
         Handle::Bend,
     ];
+    if wall.group.is_none() {
+        handles.push(Handle::Tilt);
+    }
     if wall.kind != WallKind::Tomori {
         handles.extend([
             Handle::Corner(-1, 1),
@@ -333,8 +359,9 @@ fn handles(wall: &Wall) -> Vec<Handle> {
 /// a handle is drawn, the same for every one: [`HANDLE_ANGLE`] from the eyes at the wall's farthest corner, so that
 /// none is smaller. Its corners stand diagonally beyond its corners; the knob above its top edge, at its middle, and the
 /// steppers of its columns along that edge towards its right corner; the handle of its columns beside its right edge, at
-/// its middle, and the steppers of its rows along that edge towards its bottom corner; and the handle of its rows below
-/// its bottom edge, at its middle. Each handle's middle is at least [`SPACING`] handles from every other's, as seen from
+/// its middle, and the steppers of its rows along that edge towards its bottom corner; the handle of its rows below
+/// its bottom edge, at its middle; and the hinge beside its left edge, at its middle, on the line it tilts about, or
+/// beyond the edge where it has no room between the corners. Each handle's middle is at least [`SPACING`] handles from every other's, as seen from
 /// the viewer, however small the wall, whatever its shape and however obliquely it is seen: where an edge has no room
 /// for them, the knob and the steppers move along it, then to a row or column of their own beyond it. The knob and the
 /// steppers of its columns stand a row beyond its [`Bar`], which stays where it is whether the wall is held or not.
@@ -615,13 +642,22 @@ fn lay_out_handles(
     let (right_side, top_side, bottom_side) =
         (side(Edge::Right), side(Edge::Top), side(Edge::Bottom));
     let mirrored = |(x, y): (f32, f32)| (-x, y);
+    // Down the left, the hinge at the middle, on the line the wall tilts about, so that it stays under the ray as the
+    // wall tilts, or beyond the edge where there is no room between the corners. The Tomori wall has no corners; a wall
+    // in a group, which stands upright, has no hinge.
+    let tilts = handles(wall).contains(&Handle::Tilt);
+    let hinge = if tomori || span >= 2.0 * pv - 1e-6 {
+        at(xl, centre)
+    } else {
+        at(xl - pu, centre)
+    };
     // The grab bar, at the middle of its top edge, or, for the Tomori wall, whose top the status pill stands just above
     // from home, below its label: a third of the wall long, within bounds, as long as it may be and stand a handle's
     // spacing, as seen, from the handles beside it, or else a row further out, where it has room.
     let middle = frame.transform_point3(Vec3::ZERO);
     let ahead = (middle - viewer).normalize_or(Vec3::NEG_Z);
     let fixed: Vec<(f32, f32)> = if tomori {
-        vec![columns]
+        vec![columns, hinge]
     } else {
         let corners = [(-1, 1), (1, 1), (-1, -1), (1, -1)]
             .into_iter()
@@ -633,6 +669,7 @@ fn lay_out_handles(
         corners
             .chain(right)
             .chain((bottom_side == Some(false)).then_some(rows))
+            .chain(tilts.then_some(hinge))
             .collect()
     };
     let fixed: Vec<Vec3> = fixed.into_iter().map(put).collect();
@@ -719,6 +756,7 @@ fn lay_out_handles(
                 (if step < 0 { row_fewer } else { row_more }, right_side?)
             }
             Handle::Bend => (knob, top_side?),
+            Handle::Tilt => (hinge, false),
         };
         let point = match handle {
             _ if !opposite => point,
@@ -736,37 +774,41 @@ fn lay_out_handles(
     let outward = |handle: Handle, away: f32| match handle {
         Handle::Bend | Handle::Step(Axis::Columns, _) => up.normalize_or(Vec3::Y) * pv * away,
         Handle::Rows => -up.normalize_or(Vec3::Y) * pv * away,
+        Handle::Tilt => -tangent(left).normalize_or(Vec3::X) * pu,
         _ => tangent(right * away).normalize_or(Vec3::X) * pu * away,
     };
     let rank = |handle: Handle| match handle {
         Handle::Corner(..) => 0,
-        Handle::Columns | Handle::Rows => 1,
+        Handle::Columns | Handle::Rows | Handle::Tilt => 1,
         Handle::Bend => 2,
         Handle::Step(..) => 3,
     };
-    for _ in 0..8 {
-        let mut moved = false;
-        for first in 0..points.len() {
-            for second in first + 1..points.len() {
-                let (a, b) = (points[first], points[second]);
-                if apart(a.1, b.1, size, viewer, frame.transform_point3(Vec3::ZERO)) {
-                    continue;
+    let separate = |points: &mut Vec<(Handle, Vec3)>| {
+        for _ in 0..8 {
+            let mut moved = false;
+            for first in 0..points.len() {
+                for second in first + 1..points.len() {
+                    let (a, b) = (points[first], points[second]);
+                    if apart(a.1, b.1, size, viewer, frame.transform_point3(Vec3::ZERO)) {
+                        continue;
+                    }
+                    // Corners are always apart, standing beyond the wall's corners at least the spacing apart.
+                    let moving = if rank(a.0) >= rank(b.0) {
+                        first
+                    } else {
+                        second
+                    };
+                    let by = outward(points[moving].0, away[moving]);
+                    points[moving].1 += by;
+                    moved = true;
                 }
-                // Corners are always apart, standing beyond the wall's corners at least the spacing apart.
-                let moving = if rank(a.0) >= rank(b.0) {
-                    first
-                } else {
-                    second
-                };
-                let by = outward(points[moving].0, away[moving]);
-                points[moving].1 += by;
-                moved = true;
+            }
+            if !moved {
+                break;
             }
         }
-        if !moved {
-            break;
-        }
-    }
+    };
+    separate(&mut points);
     // Handles moved on may come in line with the bar, seen from the side of a wall so curved that it folds: it is then
     // chosen again clear of them where they stand, and the knob and the steppers of its columns, beyond it, move with it.
     let top: Vec<bool> = points
@@ -793,6 +835,34 @@ fn lay_out_handles(
         }
         (row, half)
     };
+    // Seen steeply, as a very tall wall's top is from below and to the side, a row is foreshortened more beyond the
+    // wall than at its corners, so that the knob and the steppers of its columns may still come near the bar: they move
+    // on, beyond it, until they stand clear of it as seen, with the handle of its rows where it stands beyond the knob.
+    let lifted: Vec<bool> = points
+        .iter()
+        .zip(&away)
+        .zip(&top)
+        .map(|(((handle, _), away), top)| *top || (*handle == Handle::Rows && *away < 0.0))
+        .collect();
+    for _ in (0..BAR_ROWS).filter(|_| !below) {
+        let beyond: Vec<Vec3> = points
+            .iter()
+            .zip(&lifted)
+            .filter(|(_, lifted)| **lifted)
+            .map(|((_, at), _)| *at)
+            .collect();
+        if clear(&beyond, bar_row, bar_half) {
+            break;
+        }
+        for ((_, at), lifted) in points.iter_mut().zip(&lifted) {
+            if *lifted {
+                *at += up * pv;
+            }
+        }
+    }
+    // Moved beyond the bar, they may come near a corner of a wall so curved that it folds as seen: they move on again,
+    // outward, which only takes them further from the bar.
+    separate(&mut points);
     // Last, in a group, none stands over another wall's slots, as large as it is seen, but the handle being dragged.
     if !around.slots.is_empty() {
         let base = pose(frame);
@@ -889,6 +959,8 @@ fn glyph(handle: Handle) -> &'static str {
         Handle::Step(_, -1) => "-",
         Handle::Step(..) => "+",
         Handle::Bend => "●",
+        // Drawn as shapes, a hinge and the face tilted about it.
+        Handle::Tilt => " ",
     }
 }
 
@@ -904,9 +976,38 @@ fn handle_face(handle: Handle, size: f32, highlighted: bool) -> Canvas {
     };
     canvas.border = Some(if highlighted { HIGHLIGHT } else { FRAME });
     canvas.rows = vec![Row::text(glyph(handle), Style::bold(BRIGHT), 1)];
+    if handle == Handle::Tilt {
+        canvas.shapes = hinge_shapes();
+    }
     let (width, _) = canvas.size_in_pixels();
     canvas.pixel = size / width as f32;
     canvas
+}
+
+/// The hinge's face, in font pixels of its canvas, a cell padded 4 across and 2 down: the line the wall tilts about, level
+/// through its middle, dim, and the wall's face tilted across it, bright, as a door is drawn on its hinge.
+fn hinge_shapes() -> Vec<crate::shapes::Shape> {
+    use crate::shapes::Shape;
+    let middle = [8.5, 8.0];
+    vec![
+        Shape::Rule {
+            from: [2.5, middle[1]],
+            to: [14.5, middle[1]],
+            width: 1.0,
+            color: DIM,
+        },
+        Shape::Rule {
+            from: [middle[0] - 3.0, middle[1] + 5.0],
+            to: [middle[0] + 3.0, middle[1] - 5.0],
+            width: 1.6,
+            color: BRIGHT,
+        },
+        Shape::Disc {
+            centre: middle,
+            radius: 1.6,
+            color: BRIGHT,
+        },
+    ]
 }
 
 /// `wall` with `grid`, `scale`, its slots' `aspect` and `radius`, its slots laid out so.
@@ -984,8 +1085,8 @@ fn allowed(wall: &Wall) -> bool {
     let grid = wall.grid;
     let (width, height) = wall.size();
     grid.is_none_or(|grid| grid.valid())
-        && width <= 8.0
-        && height <= 4.0
+        && width <= layout::MOST_SIZE.0
+        && height <= layout::MOST_SIZE.1
         && (wall.kind != WallKind::Tomori
             || (wall.grid().rows == 1 && wall.grid().columns <= TOMORI_COLUMNS))
         && match wall.shape {
@@ -994,20 +1095,37 @@ fn allowed(wall: &Wall) -> bool {
         }
 }
 
-/// The radius `wall`, as it was when its knob was taken hold of, bends to when the knob is drawn `travel` metres towards
-/// the participant from where it was taken hold of, or flat: its curvature, one over its radius, is as it was and grows
-/// evenly with the travel, from flat to [`most_bend`] over [`BEND_TRAVEL`], so that drawing it further bends it more and
-/// back towards where it was taken bends it less, never beyond either. Back within [`BEND_REST`] of where it was taken,
-/// it is as it was; bending less than [`FLAT_BEND`] of the most it may, unless it was bent less than twice that, it is
-/// flat. A radius is a whole number of centimetres, rounded so that the wall stays within half a circle.
-pub fn bent(wall: &Wall, travel: f32) -> Option<f32> {
+/// How far the hand moves up or down to take `wall` through the whole range of its knob or its hinge, in metres: its
+/// height, within [`TRAVELS`].
+pub fn travel(wall: &Wall) -> f32 {
+    wall.size().1.clamp(TRAVELS.0, TRAVELS.1)
+}
+
+/// How far `moved` metres down from where a handle was taken hold of counts, past [`DEAD_ZONE`] either way, as a
+/// proportion of `wall`'s [`travel`]: 0 within it, and continuous beyond it, so that leaving it does not jump.
+fn moved_by(wall: &Wall, moved: f32) -> f32 {
+    if !moved.is_finite() {
+        return 0.0;
+    }
+    moved.signum() * (moved.abs() - DEAD_ZONE).max(0.0) / travel(wall)
+}
+
+/// The radius `wall`, as it was when its knob was taken hold of, bends to when the hand has moved `moved` metres down
+/// from where it took hold of it, or flat: its curvature, one over its radius, is as it was and grows evenly with the
+/// movement, from flat to [`most_bend`] over the wall's [`travel`], its height, so that moving further down bends it
+/// more and back up towards where it was taken, and beyond, bends it less, never beyond either. Within [`DEAD_ZONE`] of
+/// where it was taken, it is as it was; bending less than [`FLAT_BEND`] of the most it may, unless it was bent less
+/// than twice that, it is flat. A radius is a whole number of centimetres, rounded so that the wall stays within half a
+/// circle.
+pub fn bent(wall: &Wall, moved: f32) -> Option<f32> {
     let start = wall.radius();
-    if !travel.is_finite() || travel.abs() < BEND_REST {
+    let moved = moved_by(wall, moved);
+    if moved == 0.0 {
         return start;
     }
     let most = most_bend(wall);
     let was = start.map_or(0.0, |radius| 1.0 / radius);
-    let curvature = (was + travel * most / BEND_TRAVEL).clamp(0.0, most);
+    let curvature = (was + moved * most).clamp(0.0, most);
     let flat = if was > 0.0 {
         (FLAT_BEND * most).min(was / 2.0)
     } else {
@@ -1022,6 +1140,26 @@ pub fn bent(wall: &Wall, travel: f32) -> Option<f32> {
 
 /// The longest radius a wall is curved at, in metres, as the server takes: beyond it, flat.
 const LONGEST_RADIUS: f32 = 50.0;
+
+/// How far `wall`, as it was when its hinge was taken hold of, tilts, in degrees, when the hand has moved `moved` metres
+/// down from where it took hold of it: as it was, more, its top towards the participant, as the hand moves down, and
+/// less, then back, as it moves up, evenly, from one end of [`layout::TILTS`] to the other over the wall's [`travel`],
+/// its height, never beyond either. Within [`DEAD_ZONE`] of where it was taken, it is as it was; within
+/// [`UPRIGHT_SNAP`] of upright, it is upright. A tilt is a whole number of degrees.
+pub fn tilted(wall: &Wall, moved: f32) -> f32 {
+    let start = wall.tilt();
+    let moved = moved_by(wall, moved);
+    if moved == 0.0 {
+        return start;
+    }
+    let range = layout::TILTS.1 - layout::TILTS.0;
+    let tilt = (start + moved * range).clamp(layout::TILTS.0, layout::TILTS.1);
+    if tilt.abs() < UPRIGHT_SNAP {
+        0.0
+    } else {
+        tilt.round()
+    }
+}
 
 /// The grid whose right edge, or bottom edge, of `wall` stands nearest `at`, in its own frame, along `axis`.
 fn nearest_grid(wall: &Wall, axis: Axis, at: Vec3) -> Grid {
@@ -1129,6 +1267,7 @@ impl Editor {
                     && (wall.aspect() - sent.aspect()).abs() < 1e-3
                     && wall.radius().map(|radius| (radius * 100.0).round())
                         == sent.radius().map(|radius| (radius * 100.0).round())
+                    && (wall.tilt() - sent.tilt()).abs() < 0.05
                     && Vec3::from_array(wall.pose.position)
                         .distance(Vec3::from_array(sent.pose.position))
                         < 0.01
@@ -1226,6 +1365,7 @@ impl Editor {
                                 shape: None,
                                 pose: None,
                                 join: None,
+                                tilt: None,
                             });
                             self.pending = Some((changed, input.now));
                         }
@@ -1240,6 +1380,8 @@ impl Editor {
                             origin: ray.origin,
                             along,
                             point: ray.at(along),
+                            // Taken hold of where it is, it ticks only once it reaches a stop again.
+                            stopped: true,
                         });
                     }
                 }
@@ -1305,17 +1447,25 @@ impl Editor {
             }
         }
         // A handle dragged changes the wall as it would be.
-        if let (Some(drag), Some(ray)) = (&self.drag, input.ray) {
+        if let (Some(drag), Some(ray)) = (&mut self.drag, input.ray) {
             // Where it stood as the handle was taken hold of, which is shown, as one no longer shown is let go of.
-            let frame = model(&drag.start.pose).unwrap_or_default();
+            let frame = model(&drag.start.frame()).unwrap_or_default();
             let start = &drag.start;
+            // How far the hand has moved down from where it took hold of the knob or the hinge, so that moving across
+            // or towards the wall does nothing; in the desktop window, whose ray begins at the eyes, how far the point
+            // it was taken at has moved down.
+            let down = match input.controls {
+                Controls::Keyboard => drag.point.y - ray.at(drag.along).y,
+                Controls::Controllers => drag.origin.y - ray.origin.y,
+            };
             let changed = match drag.handle {
                 // A corner sizes its slots' width and height apart, each as far across as the ray now meets the wall's
-                // plane against where it met it as it was taken hold of, the wall growing about its middle.
+                // plane against where it met it as it was taken hold of, to the power of [`CORNER_GAIN`], the wall
+                // growing about its middle, so that a standard slot grows to the largest in one drag.
                 Handle::Corner(..) => on_plane(frame, &ray).map(|at| {
                     let (width, height) = start.slot_size();
-                    let across = at.x.abs() / drag.grab.x.abs().max(0.05);
-                    let down = at.y.abs() / drag.grab.y.abs().max(0.05);
+                    let across = (at.x.abs() / drag.grab.x.abs().max(0.05)).powf(CORNER_GAIN);
+                    let down = (at.y.abs() / drag.grab.y.abs().max(0.05)).powf(CORNER_GAIN);
                     let (scale, aspect, _) = slot_shape(width * across, height * down);
                     laid_out(start, start.grid(), scale, aspect, start.radius())
                 }),
@@ -1325,29 +1475,35 @@ impl Editor {
                     let at = Vec3::new(at.x, -at.y.abs(), at.z);
                     with_grid(start, nearest_grid(start, Axis::Rows, at))
                 }),
-                // The knob, the last handle dragged: a stepper changes the wall at once, as it is squeezed. It bends as
-                // far as the hand has moved towards the participant, along the way the wall faces, level, from where it
-                // took hold of it, so that moving up, down or across does nothing; in the desktop window, whose ray
-                // begins at the eyes, as far as the point it was taken at has moved up.
-                _ => {
-                    let travel = match input.controls {
-                        Controls::Keyboard => (ray.at(drag.along) - drag.point).y,
-                        Controls::Controllers => {
-                            let facing = frame.transform_vector3(Vec3::Z);
-                            let level = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::Z);
-                            (ray.origin - drag.origin).dot(level)
-                        }
-                    };
-                    Some(laid_out(
-                        start,
-                        start.grid(),
-                        start.scale(),
-                        start.aspect,
-                        bent(start, travel),
-                    ))
+                // The hinge tilts it as far as the hand has moved down, its top towards the participant.
+                Handle::Tilt => {
+                    let tilt = tilted(start, down);
+                    Some(start.clone().with_tilt((tilt != 0.0).then_some(tilt)))
                 }
+                // The knob, the last handle dragged: a stepper changes the wall at once, as it is squeezed. It bends as
+                // far as the hand has moved down from where it took hold of it.
+                _ => Some(laid_out(
+                    start,
+                    start.grid(),
+                    start.scale(),
+                    start.aspect,
+                    bent(start, down),
+                )),
             };
             if let Some(changed) = changed.filter(allowed) {
+                // Reaching an end of the knob's or the hinge's range, or flat or upright, ticks, as a stop.
+                let stopped = match drag.handle {
+                    Handle::Bend => changed
+                        .radius()
+                        .is_none_or(|radius| bent(start, 1e3) == Some(radius)),
+                    Handle::Tilt => {
+                        let tilt = changed.tilt();
+                        tilt == 0.0 || tilt.abs() >= layout::MOST_TILT
+                    }
+                    _ => false,
+                };
+                output.ticked |= stopped && !drag.stopped;
+                drag.stopped = stopped;
                 self.preview = Some(changed);
             }
         }
@@ -1355,7 +1511,13 @@ impl Editor {
         if let (Some(carry), Some(ray)) = (&mut self.carry, input.ray.filter(|_| input.active)) {
             output.ticked |= carry.manipulation.update(input.stick, input.dt);
             let at = ray.at(carry.manipulation.distance());
-            // Squared up, it faces the participant, upright, from where it is carried.
+            // Its frame is tilted as it tilts, which carrying keeps, and its pose is upright.
+            let tilt = Mat4::from_rotation_x(
+                self.preview
+                    .as_ref()
+                    .map_or(0.0, |preview| preview.tilt().to_radians()),
+            );
+            // Squared up, it faces the participant, its tilt kept, from where it is carried.
             if input.straighten {
                 let middle = carry.model.transform_point3(Vec3::ZERO);
                 let (_, square, _) = facing(
@@ -1364,7 +1526,7 @@ impl Editor {
                     1.0,
                 )
                 .to_scale_rotation_translation();
-                carry.facing = square;
+                carry.facing = square * Quat::from_mat4(&tilt);
                 carry.manipulation.straighten();
                 output.ticked = true;
             }
@@ -1374,7 +1536,7 @@ impl Editor {
                 * Mat4::from_translation(-carry.grabbed);
             self.preview
                 .iter_mut()
-                .for_each(|preview| preview.pose = pose(carry.model));
+                .for_each(|preview| preview.pose = pose(carry.model * tilt.inverse()));
             // Pulled firmly towards the participant, it comes out of its group alone, and the rest stay.
             if !self.members.is_empty()
                 && !self.detached
@@ -1509,6 +1671,7 @@ impl Editor {
                     aspect: None,
                     shape: None,
                     pose: None,
+                    tilt: None,
                     join: Some(Joining::Attach {
                         attach: Attach::new(snapping.to, snapping.snap.edge, snapping.snap.align),
                         alone: detached,
@@ -1530,6 +1693,7 @@ impl Editor {
                             .radius()
                             .map_or(WallShape::Grid, |radius| WallShape::Arc { radius })
                     }),
+                    tilt: ((after.tilt() - before.tilt()).abs() > 0.05).then(|| after.tilt()),
                     pose: (carried
                         && (Vec3::from_array(after.pose.position)
                             .distance(Vec3::from_array(before.pose.position))
@@ -1555,6 +1719,7 @@ impl Editor {
                     || change.aspect.is_some()
                     || change.shape.is_some()
                     || change.pose.is_some()
+                    || change.tilt.is_some()
                 {
                     output.change = Some(change);
                     self.pending = Some((after, input.now));
@@ -1573,7 +1738,7 @@ impl Editor {
                 self.carry
                     .as_ref()
                     .map(|carry| carry.model)
-                    .or_else(|| model(&wall.pose))
+                    .or_else(|| model(&wall.frame()))
                     .map(|frame| (wall.clone(), frame))
             });
         if self.carry.is_none()
@@ -1668,7 +1833,7 @@ impl Editor {
         let wall = preview.unwrap_or(wall);
         let frame = match &self.carry {
             Some(carry) => carry.model,
-            None => model(&wall.pose).unwrap_or(frame),
+            None => model(&wall.frame()).unwrap_or(frame),
         };
         // Where the walls carried would snap: each slot of the one that snaps outlined where it would stand.
         let snapped: Vec<Wall> = self
@@ -1753,13 +1918,13 @@ impl Editor {
     }
 }
 
-/// `wall`, curved at `radius` where both are curved, as a wall snapped to a curved one is, continuing its arc.
+/// `wall`, curved at `radius` where both are curved, as a wall snapped to a curved one is, continuing its arc, and
+/// upright, as every wall of a group stands.
 fn curved_at(wall: &Wall, radius: Option<f32>) -> Wall {
+    let upright = wall.clone().with_tilt(None);
     match radius {
-        Some(radius) if wall.radius().is_some() => {
-            wall.clone().with_shape(WallShape::Arc { radius })
-        }
-        _ => wall.clone(),
+        Some(radius) if wall.radius().is_some() => upright.with_shape(WallShape::Arc { radius }),
+        _ => upright,
     }
 }
 
@@ -1813,8 +1978,8 @@ pub fn bar_label(controls: Controls, wall: &Wall) -> Canvas {
 }
 
 /// What a handle dragged makes of `wall`, as it would be let go now: for a corner, its slots' size and shape, such as
-/// `60 × 107 cm · 9:16`; for the knob, its curve, such as `◠ radius 2.4 m`, or `flat`; for an edge, its grid, such as
-/// `4 × 2 slots`.
+/// `60 × 107 cm · 9:16`; for the knob, its curve, such as `◠ radius 2.4 m`, or `flat`; for the hinge, its tilt, such
+/// as `tilted 12° down`, or `upright`; for an edge, its grid, such as `4 × 2 slots`.
 pub fn readout(handle: Handle, wall: &Wall) -> Canvas {
     let text = match handle {
         Handle::Corner(..) => {
@@ -1829,6 +1994,11 @@ pub fn readout(handle: Handle, wall: &Wall) -> Canvas {
         Handle::Bend => wall.radius().map_or("flat".to_owned(), |radius| {
             format!("◠ radius {radius:.1} m")
         }),
+        Handle::Tilt => match wall.tilt() {
+            tilt if tilt > 0.0 => format!("tilted {tilt:.0}° down"),
+            tilt if tilt < 0.0 => format!("tilted {:.0}° up", -tilt),
+            _ => "upright".to_owned(),
+        },
         _ => {
             let grid = wall.grid();
             format!("{} × {} slots", grid.columns, grid.rows)
@@ -1965,14 +2135,11 @@ pub fn hint_with(
             rows.push((format!("{grip} corner"), "size and shape".to_owned(), false));
         }
         rows.push((format!("{grip} - +"), "one fewer / more".to_owned(), false));
+        let moving = if keyboard { "drag" } else { "move" };
+        rows.push((format!("{grip} ●"), format!("{moving} down to bend"), false));
         rows.push((
-            format!("{grip} ●"),
-            (if keyboard {
-                "drag up to bend"
-            } else {
-                "pull to bend"
-            })
-            .to_owned(),
+            format!("{grip} hinge"),
+            format!("{moving} down to tilt"),
             false,
         ));
         if wall.kind == WallKind::Added {
