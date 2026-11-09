@@ -5077,3 +5077,70 @@ fn images_are_kept_in_memory_when_their_folder_cannot_be_made() {
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+/// A side that describes one thing with a reference, and answers its inspection.
+struct Inspected;
+
+impl tomori_environment::ServerSide for Inspected {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        space.inspect_with(|_: &str| -> tomori_environment::Result<Option<String>> {
+            Ok(Some("{}".to_owned()))
+        });
+        space.describe(vec![
+            tomori_environment::Object::new("thing-1", "a thing").with_reference("thing/1"),
+        ])?;
+        while !space.cancellation().is_cancelled() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
+    let (hub, _jobs) = hub_waiting();
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("garden", "Garden").with_server_side(Inspected),
+    ]));
+    hub.serving();
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let mut bound = request("ada");
+    bound.environment = "garden".to_owned();
+    let (_space, _commands) = running(&hub, &bound, Snapshot::default());
+    let inspect = || {
+        futures_lite::future::block_on(crate::mcp::handle(
+            &hub,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "inspect",
+                    "arguments": {"id": "garden:thing/1"},
+                    "_meta": {crate::mcp::SESSION_META: "session"},
+                },
+            }),
+        ))
+        .unwrap()["result"]
+            .clone()
+    };
+    eventually_in("the side describes its thing", || {
+        inspect().get("structuredContent").is_some()
+    });
+    for thread in ["tomori-inspector", "tomori-inspect"] {
+        crate::system::refuse(thread);
+        let refused = inspect();
+        assert_eq!(refused["isError"], true, "{thread}");
+        assert_eq!(
+            refused["content"][0]["text"], "The Garden environment could not answer.",
+            "{thread}"
+        );
+    }
+    // Neither held a place among those the side may be asked at once.
+    for _ in 0..crate::server_sides::INSPECTIONS + 1 {
+        assert!(inspect().get("structuredContent").is_some());
+    }
+    hub.shutdown();
+}

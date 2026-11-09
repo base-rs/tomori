@@ -52,6 +52,42 @@ impl Timestamp {
         Self(self.0.div_euclid(step) * step)
     }
 
+    /// This moment in UTC as RFC 3339 writes it, to the millisecond, such as `2023-11-14T22:13:20.250Z`, as people and
+    /// agents read a time more easily than seconds since the epoch.
+    ///
+    /// ```
+    /// use tomori_prometheus::Timestamp;
+    ///
+    /// assert_eq!(Timestamp::from_millis(1_700_000_000_250).rfc3339(), "2023-11-14T22:13:20.250Z");
+    /// assert_eq!(Timestamp::from_millis(-1).rfc3339(), "1969-12-31T23:59:59.999Z");
+    /// ```
+    pub fn rfc3339(self) -> String {
+        let millis = self.0.rem_euclid(1000);
+        let seconds = self.0.div_euclid(1000);
+        let (days, second) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+        // Howard Hinnant's days-to-civil, in the proleptic Gregorian calendar.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let day_of_era = z.rem_euclid(146_097);
+        let year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let month_index = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+        let month = if month_index < 10 {
+            month_index + 3
+        } else {
+            month_index - 9
+        };
+        let year = year_of_era + era * 400 + i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+            second / 3600,
+            second % 3600 / 60,
+            second % 60
+        )
+    }
+
     /// A timestamp from Prometheus's seconds, rounded to the millisecond, or `None` if they are not finite.
     pub(crate) fn from_seconds(seconds: f64) -> Option<Self> {
         seconds
@@ -150,6 +186,19 @@ mod tests {
         );
         assert_eq!(Timestamp::from_seconds(f64::NAN), None);
         assert_eq!(seconds(Duration::from_millis(15_250)), "15.250");
+    }
+
+    #[test]
+    fn timestamps_are_written_as_rfc_3339_in_utc() {
+        for (millis, written) in [
+            (0, "1970-01-01T00:00:00.000Z"),
+            (951_782_400_000, "2000-02-29T00:00:00.000Z"),
+            (1_762_682_400_000, "2025-11-09T10:00:00.000Z"),
+            (4_107_542_399_999, "2100-02-28T23:59:59.999Z"),
+            (-62_135_596_800_000, "0001-01-01T00:00:00.000Z"),
+        ] {
+            assert_eq!(Timestamp::from_millis(millis).rfc3339(), written);
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! The farmyard's server side: it owns the flock of each space bound to the farmyard, moves it on by the farmyard's
 //! clock, the time since it started, takes participants' notices, and shares every change with the clients in the
 //! space, with the clock, through the environment state channel. See `design/farmyard.md`.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tomori_environment::{Error, Object, Result, ServerSide, Space};
@@ -37,13 +37,23 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     let Some(chicken) = chicken else {
         return Err(Error::new("The farmyard's chickens could not be loaded."));
     };
-    let clock = || start.elapsed().as_millis() as u64;
-    let mut flock = Flock::new(seed(space.id()), chicken, clock());
+    let clock = move || start.elapsed().as_millis() as u64;
+    // Shared with the inspector, which the server asks on a thread of its own; held only briefly on either side.
+    let shared = Arc::new(Mutex::new(Flock::new(seed(space.id()), chicken, clock())));
+    let inspected = shared.clone();
+    space.inspect_with(move |reference: &str| -> Result<Option<String>> {
+        let flock = inspected.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(flock.inspect(reference, clock()).map(json))
+    });
+    let flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
     space.share(json(flock.state(clock())))?;
+    drop(flock);
     let mut described: Option<Instant> = None;
     while !space.cancellation().is_cancelled() {
         let mut changes = Vec::new();
-        if let Some(intent) = space.next_intent(TICK) {
+        let intent = space.next_intent(TICK);
+        let mut flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(intent) = intent {
             match serde_json::from_str::<Intent>(intent.payload()) {
                 Ok(asked) => changes.extend(flock.ask(intent.participant(), asked, clock())),
                 Err(_) => log::debug!("A farmyard intent could not be read."),
@@ -67,7 +77,9 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                 flock
                     .describe(clock())
                     .into_iter()
-                    .map(|(id, description)| Object::new(id, description))
+                    .map(|(id, reference, description)| {
+                        Object::new(id, description).with_reference(reference)
+                    })
                     .collect(),
             )?;
         }

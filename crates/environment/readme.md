@@ -52,6 +52,22 @@ impl ServerSide for Counter {
 }
 ```
 
+An object a side describes may carry a reference, `Object::with_reference("lamp/3")`, a short, stable name that the space's agent is told after its description, as `(id garden:lamp/3)`, and can inspect: the side answers through the `Inspector` it gives its space, called on a thread of the server's own, with JSON of its choosing. The agent reads the answer as data, and may repeat it, so it must hold no endpoint, credential or token:
+
+```rust
+use std::sync::{Arc, Mutex};
+use tomori_environment::{Object, Result, Space};
+
+fn lamps(space: &Space) -> Result<()> {
+    let lit = Arc::new(Mutex::new(true));
+    let shared = lit.clone();
+    space.inspect_with(move |reference: &str| -> Result<Option<String>> {
+        Ok((reference == "lamp/3").then(|| format!(r#"{{"lit":{}}}"#, shared.lock().unwrap())))
+    });
+    space.describe(vec![Object::new("lamp-3", "a lamp by the gate").with_reference("lamp/3")])
+}
+```
+
 [Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
 
 ## See Also

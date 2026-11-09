@@ -185,6 +185,11 @@ fn a_chicken_pointed_at_long_enough_or_by_two_is_startled_rarely() {
     assert!(changes.iter().any(
         |(chicken, behaviour)| *chicken == 1 && matches!(behaviour.doing, Doing::Sprint { .. })
     ));
+    // Inspected, she says she was startled, and how long ago, and that nobody points at her now.
+    let details = flock.inspect(&flock.reference(1), 32_000 + LEAD).unwrap();
+    assert_eq!(details["startled_seconds_ago"], 2);
+    assert_eq!(details["pointed_at_by"], 0);
+    assert_eq!(details["doing"], "running off, startled");
     let mut flock = run_until_standing(flock, 0, 60_000);
     let now = 60_000;
     flock.ask(3, notice(0), now).unwrap();
@@ -255,9 +260,13 @@ fn what_a_chicken_is_doing_is_described_with_its_name_and_where() {
     let described = flock.describe(0);
     assert_eq!(described.len(), flock.hens().len());
     assert_eq!(described[0].0, "chicken-0");
+    assert_eq!(
+        described[0].1,
+        format!("hen/{}", flock.hens()[0].name.to_lowercase())
+    );
     let coned = flock.hens().iter().position(|hen| hen.cone).unwrap();
-    assert!(described[coned].1.contains("wearing a traffic cone"));
-    assert!(described[0].1.starts_with(&flock.hens()[0].name));
+    assert!(described[coned].2.contains("wearing a traffic cone"));
+    assert!(described[0].2.starts_with(&flock.hens()[0].name));
     flock
         .ask(
             1,
@@ -268,11 +277,11 @@ fn what_a_chicken_is_doing_is_described_with_its_name_and_where() {
             1_000,
         )
         .unwrap();
-    assert!(flock.describe(2_000)[0].1.contains("puzzled"));
+    assert!(flock.describe(2_000)[0].2.contains("puzzled"));
     // Each kind of doing has words, and so has each place.
     let mut seen = std::collections::BTreeSet::new();
     run(&mut flock, (2_000, 30 * 60_000), |flock, now| {
-        for (_, description) in flock.describe(now) {
+        for (_, _, description) in flock.describe(now) {
             seen.insert(
                 description
                     .split(" a hen in the farmyard, ")
@@ -321,4 +330,57 @@ fn the_flock_is_sent_as_state_events_and_intents_its_clients_read() {
         Intent::Away { away: 2 }
     );
     assert!(serde_json::from_str::<Intent>(r#"{"peck": 2}"#).is_err());
+}
+
+#[test]
+fn each_hen_has_her_own_reference_and_is_inspected_by_it() {
+    for space in ["space-1", "space-2", "space-3", "space-4"] {
+        let flock = flock(space);
+        let references: std::collections::BTreeSet<_> = (0..flock.hens().len())
+            .map(|index| flock.reference(index))
+            .collect();
+        assert_eq!(references.len(), flock.hens().len(), "{space}");
+        for reference in &references {
+            assert!(
+                tomori_environment::valid_reference(reference),
+                "{reference}"
+            );
+        }
+    }
+    let mut flock = flock("space-1");
+    let coned = flock.hens().iter().position(|hen| hen.cone).unwrap();
+    let reference = flock.reference(coned);
+    let details = flock.inspect(&reference, 0).unwrap();
+    let hen = &flock.hens()[coned];
+    assert_eq!(details["kind"], "hen");
+    assert_eq!(details["name"], hen.name.as_str());
+    assert_eq!(details["wearing"], "a traffic cone");
+    assert_eq!(details["doing"], "standing");
+    assert_eq!(details["position"].as_array().unwrap().len(), 3);
+    assert_eq!(details["pointed_at_by"], 0);
+    assert_eq!(details["startled_seconds_ago"], serde_json::Value::Null);
+    assert!(details["roosts_on"].as_str().unwrap().starts_with("the "));
+    assert!(!details["near"].as_str().unwrap().starts_with("by "));
+    // Pointed at, she says so.
+    flock
+        .ask(
+            1,
+            Intent::Notice {
+                notice: coned,
+                toward: [0.0, 0.0],
+            },
+            1_000,
+        )
+        .unwrap();
+    let details = flock.inspect(&reference, 2_000).unwrap();
+    assert_eq!(details["pointed_at_by"], 1);
+    assert!(details["doing"].as_str().unwrap().contains("puzzled"));
+    // One without a cone wears nothing, and a name the flock does not have is nobody.
+    let plain = (coned + 1) % flock.hens().len();
+    assert_eq!(
+        flock.inspect(&flock.reference(plain), 0).unwrap()["wearing"],
+        serde_json::Value::Null
+    );
+    assert_eq!(flock.inspect("hen/nobody", 0), None);
+    assert_eq!(flock.inspect("chicken-0", 0), None);
 }

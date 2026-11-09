@@ -66,6 +66,14 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
             .description()
             .starts_with(&first.chickens[0].name)
     );
+    // Each with a reference, which the side's inspector answers while it runs.
+    let reference = format!("hen/{}", first.chickens[0].name.to_lowercase());
+    assert_eq!(objects[0].reference(), Some(reference.as_str()));
+    let inspector = inbox.inspector().expect("the side gives an inspector");
+    let details: serde_json::Value =
+        serde_json::from_str(&inspector.inspect(&reference).unwrap().unwrap()).unwrap();
+    assert_eq!(details["name"], first.chickens[0].name.as_str());
+    assert_eq!(inspector.inspect("hen/nobody"), Ok(None));
     // Something it cannot read is passed over; a notice confuses the chicken, announced with the state it leaves.
     assert!(inbox.push(Asked::new(7, "not json")));
     assert!(inbox.push(Asked::new(7, r#"{"notice": 0, "toward": [0.0, 0.0]}"#)));
