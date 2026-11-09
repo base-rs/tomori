@@ -510,6 +510,15 @@ fn admission(
         .iter()
         .filter(|entry| entry.grant == tomori_security::Grant::Owner)
         .count();
+    // Its files are readable only by the server's user whatever the directory allows, but others should not list them either; the operator may have chosen the directory, so it is told rather than changed. See `design/security.md`.
+    if tomori_security::shared_directory(&state).unwrap_or(false) {
+        let warning = format!(
+            "The state directory {} can be read by other users; its files are readable only by this user, but run `chmod 700` on it to keep others from listing them.",
+            state.display()
+        );
+        eprintln!("Warning: {warning}");
+        log::warn!("{warning}");
+    }
     eprintln!(
         "Admitting holders of this server's tokens ({owners} owner tokens, in {}){}.",
         state.display(),
@@ -1923,6 +1932,14 @@ mod tests {
     #[test]
     fn a_server_started_with_open_pairing_opens_it_once_it_listens() {
         let directory = directory("open-pairing");
+        // A state directory only its user can read is not warned about.
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &directory,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(!tomori_security::shared_directory(&directory).unwrap());
         let arguments = local(&directory, &["--open-pairing"]);
         let (server, fingerprint) = configured(&arguments).unwrap();
         let pairing = server.pairing();

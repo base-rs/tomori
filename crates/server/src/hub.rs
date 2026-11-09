@@ -35,12 +35,14 @@ mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
 mod pairing_window;
+mod provenance;
 pub(crate) mod tools;
 
 pub(crate) use agent_pairing::Decision;
 pub use pairing_window::{
     Closing, Opener, PAIRING_OPEN_FOR, PairingState, REFUSALS_TOLD_EVERY, spoken,
 };
+pub use provenance::REQUEST_RECENT;
 
 pub type ConnectionId = u64;
 

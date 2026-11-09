@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tomori_backend::{Backend, ErrorKind};
 use tomori_protocol::{Worker, WorkerState};
 
+use super::provenance::{Needs, Requester};
 use super::{Hub, HubState};
 use crate::space::worker_finished;
 
@@ -23,12 +24,13 @@ const NOTICE_NAMES: usize = 5;
 /// The most characters of a worker's title the `workers` tool gives, on one line.
 const TITLE_CHARS: usize = 120;
 
-/// What the agent asked `remove_workers` to remove: the workers it names in `sessions`, every finished worker of the space with `finished`, and, with `force`, those still running, stopped first.
+/// What the agent asked `remove_workers` to remove: the workers it names in `sessions`, every finished worker of the space with `finished`, and, with `force`, those still running, stopped first, which needs `requested_by`, the participant who asked, whom the server checks whenever they are named. See `design/security.md`.
 #[derive(Debug, Default)]
 pub(crate) struct Removal {
     pub sessions: Vec<String>,
     pub finished: bool,
     pub force: bool,
+    pub requested_by: Option<String>,
 }
 
 /// A worker that left the space when it was removed.
@@ -51,6 +53,8 @@ pub(crate) struct Outcome {
     pub removed: Vec<Gone>,
     pub refused: Vec<(String, String)>,
     pub failed: Vec<(String, String)>,
+    /// Who asked, as the server checked it, when the agent named them.
+    pub requester: Option<Requester>,
 }
 
 /// One worker to remove, and its own workers, which go with it, the worker first.
@@ -66,6 +70,15 @@ struct Plan {
     targets: Vec<Target>,
     outcome: Outcome,
     force: bool,
+}
+
+/// What a refusal to stop workers says, for the log.
+fn asked(removal: &Removal) -> &'static str {
+    if removal.force {
+        "asked to remove workers with force"
+    } else {
+        "asked to remove workers"
+    }
 }
 
 /// Whether a worker in `state` is still at work, so that removing it would stop it.
@@ -112,12 +125,12 @@ fn workers(count: usize) -> String {
     }
 }
 
-/// The notice of `removed` put on the space's Tomori wall, such as "Tomori removed 5 finished workers.", naming the first few.
-fn notice(removed: &[Gone]) -> String {
+/// The notice of `removed` put on the space's Tomori wall, such as "Tomori removed 5 finished workers.", naming the first few, and who asked, `by`, when the server checked who did.
+fn notice(removed: &[Gone], by: Option<&str>) -> String {
     let stopped = removed.iter().filter(|gone| gone.stopped).count();
-    let mut said = if removed.iter().all(|gone| gone.finished) {
+    let what = if removed.iter().all(|gone| gone.finished) {
         format!(
-            "Tomori removed {} finished {}.",
+            "{} finished {}",
             removed.len(),
             if removed.len() == 1 {
                 "worker"
@@ -126,7 +139,11 @@ fn notice(removed: &[Gone]) -> String {
             }
         )
     } else {
-        format!("Tomori removed {}.", workers(removed.len()))
+        workers(removed.len())
+    };
+    let mut said = match by {
+        Some(by) => format!("Tomori removed {what}, as {by} asked."),
+        None => format!("Tomori removed {what}."),
     };
     let stopped = match (stopped, removed.len()) {
         (0, _) => None,
@@ -232,6 +249,28 @@ impl Hub {
                     .to_owned(),
             );
         }
+        // Stopping work in progress is on a participant's word, which the server checks rather than the agent; so is anyone the agent names. Removing finished workers is the agent's own tidying. See `design/security.md`.
+        let requester = if removal.force || removal.requested_by.is_some() {
+            let checked = self.requester(
+                state,
+                &space,
+                removal.requested_by.as_deref(),
+                Needs::Participant,
+            );
+            match checked {
+                Ok(requester) => Some(requester),
+                Err(reason) => {
+                    let line = format!(
+                        "The agent of space {space}, session {session}, {} and was refused: {reason}",
+                        asked(&removal)
+                    );
+                    log::info!("{line}");
+                    return Err(reason);
+                }
+            }
+        } else {
+            None
+        };
         let shown = record.model.workers();
         let root = record.model.session.clone();
         // Every session any space is bound to, open or closed, whichever space.
@@ -253,6 +292,7 @@ impl Hub {
         asked.retain(|id| seen.insert(id.clone()));
         let mut outcome = Outcome {
             space: space.clone(),
+            requester,
             ..Outcome::default()
         };
         let mut targets: Vec<Target> = Vec::new();
@@ -383,12 +423,12 @@ impl Hub {
                 )),
             }
         }
-        self.removed_workers(&plan.space, &outcome.removed);
+        self.removed_workers(&plan.space, &outcome.removed, outcome.requester.as_ref());
         Ok(outcome)
     }
 
-    /// The workers `removed` left the space `space`: everyone in it sees them go, and a notice on its Tomori wall says so, replacing the last one. Kept and logged.
-    fn removed_workers(&self, space: &str, removed: &[Gone]) {
+    /// The workers `removed` left the space `space`, as `by` asked, if the agent named who did: everyone in it sees them go, and a notice on its Tomori wall says so, and who asked, replacing the last one. Kept and logged.
+    fn removed_workers(&self, space: &str, removed: &[Gone], by: Option<&Requester>) {
         if removed.is_empty() {
             return;
         }
@@ -403,7 +443,7 @@ impl Hub {
         let walls = environments.walls(&record.model.environment);
         let content = crate::stage::Content {
             title: "Workers".to_owned(),
-            body: notice(removed),
+            body: notice(removed, by.map(|by| by.name.as_str())),
             meta: vec![("source".to_owned(), "Tomori".to_owned())],
             code: None,
             slug: None,
@@ -414,7 +454,10 @@ impl Hub {
         drop(environments);
         let names: Vec<&str> = removed.iter().map(|gone| gone.session.as_str()).collect();
         let (count, names) = (workers(removed.len()), names.join(", "));
-        log::info!("The agent of space {space} removed {count}: {names}; projected {panel}.");
+        let asked = by.map_or_else(String::new, |by| format!(", as {} asked", by.logged()));
+        log::info!(
+            "The agent of space {space} removed {count}{asked}: {names}; projected {panel}."
+        );
         state.touch_space(space);
         state.touch_projection(space);
         drop(state);
@@ -439,37 +482,45 @@ mod tests {
     #[test]
     fn a_notice_counts_what_was_removed_and_names_the_first_few() {
         assert_eq!(
-            notice(&[gone("Tests", true, false)]),
+            notice(&[gone("Tests", true, false)], None),
             "Tomori removed 1 finished worker.\n\n- Tests"
         );
         let many: Vec<Gone> = (1..=7)
             .map(|number| gone(&format!("Task {number}"), true, false))
             .collect();
-        let said = notice(&many);
+        let said = notice(&many, None);
         assert!(said.starts_with("Tomori removed 7 finished workers.\n\n- Task 1\n"));
         assert!(said.ends_with("- Task 5\n- and 2 more"), "{said}");
         assert_eq!(
-            notice(&[gone("Build", false, true)]),
+            notice(&[gone("Build", false, true)], None),
             "Tomori removed 1 worker. It was still running, and was stopped first.\n\n- Build"
         );
+        // Who asked, when the server checked who did.
         assert_eq!(
-            notice(&[
-                gone("A", false, true),
-                gone("B", false, true),
-                gone("C", true, false)
-            ]),
+            notice(&[gone("Build", false, true)], Some("Ada")),
+            "Tomori removed 1 worker, as Ada asked. It was still running, and was stopped first.\n\n- Build"
+        );
+        assert_eq!(
+            notice(
+                &[
+                    gone("A", false, true),
+                    gone("B", false, true),
+                    gone("C", true, false)
+                ],
+                None
+            ),
             "Tomori removed 3 workers. 2 were still running, and were stopped first.\n\n- A\n- B\n- C"
         );
         assert_eq!(
-            notice(&[gone("A", false, true), gone("B", false, true)]),
+            notice(&[gone("A", false, true), gone("B", false, true)], None),
             "Tomori removed 2 workers. They were still running, and were stopped first.\n\n- A\n- B"
         );
         assert_eq!(
-            notice(&[gone("Idle", false, false)]),
+            notice(&[gone("Idle", false, false)], None),
             "Tomori removed 1 worker.\n\n- Idle"
         );
         assert_eq!(
-            notice(&[gone("A", false, true), gone("B", true, false)]),
+            notice(&[gone("A", false, true), gone("B", true, false)], None),
             "Tomori removed 2 workers. One was still running, and was stopped first.\n\n- A\n- B"
         );
     }

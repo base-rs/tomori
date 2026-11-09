@@ -268,13 +268,33 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     fs::rename(&temporary, path)
 }
 
-/// Create (or truncate) a file readable and writable only by its user.
+/// Create (or truncate) a file readable and writable only by its user. A file left from before, such as a temporary file of a write that was interrupted, keeps the mode it was created with, which opening does not change, so its mode is set too.
 fn private(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    let file = file
+        .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map(|()| file);
+    #[cfg(not(unix))]
+    let file = Ok(file);
+    file
+}
+
+/// Whether `directory` can be read or entered by anyone but its user, as a state directory made by something else, or before, may be. The files Tomori keeps there are readable only by their user whatever the directory allows, so this is told, not changed, since the operator may have chosen the directory. See `design/security.md`.
+pub fn shared_directory(directory: &Path) -> io::Result<bool> {
+    let metadata = fs::metadata(directory)?;
+    #[cfg(unix)]
+    let shared = std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o077 != 0;
+    #[cfg(not(unix))]
+    let shared = {
+        drop(metadata);
+        false
+    };
+    Ok(shared)
 }
 
 /// Create a directory, and its parents, readable only by its user.
@@ -301,6 +321,32 @@ mod tests {
         Credentials {
             token: Some(token.to_owned()),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_left_readable_by_others_is_written_readable_only_by_its_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = directory("left");
+        create_private_directory(&directory).unwrap();
+        assert!(!shared_directory(&directory).unwrap());
+        let path = directory.join("kept.json");
+        // A temporary file an interrupted write left, readable by everyone.
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, "old").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"new").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        // A directory others may enter is told, and left as it is.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_directory(&directory).unwrap();
+        assert!(shared_directory(&directory).unwrap());
+        assert!(shared_directory(&directory.join("missing")).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
