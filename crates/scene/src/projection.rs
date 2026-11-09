@@ -294,6 +294,9 @@ pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3)
 /// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
 /// [`CodeLayout`]'s.
 pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
+    if panel.chart.is_some() {
+        return chart::fit(fit);
+    }
     if let Some(image) = &panel.image {
         return image::fit(panel, image, fit);
     }
@@ -491,6 +494,9 @@ fn scrolled_face(
         let mut canvas = code_face(panel, layout, fit, scroll);
         canvas.border = border;
         return canvas;
+    }
+    if let Some(chart) = &panel.chart {
+        return chart::face(panel, chart, fit, border);
     }
     if let Some(image) = &panel.image {
         return image::face(panel, image, fit, border);
@@ -1994,6 +2000,7 @@ impl Projector {
 }
 
 mod boards;
+mod chart;
 pub mod editing;
 mod image;
 pub mod travel;

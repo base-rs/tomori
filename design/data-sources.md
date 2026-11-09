@@ -40,6 +40,7 @@ In November 2026 a downstream environment that sends the same gateway's identity
 
 ## Open questions
 
+- How a chart an environment publishes (see `projection.md`) binds to a series a data source keeps, so that the server, rather than the side, updates it as new points arrive (#83), and whether `tomori-prometheus` gives a range query's result as a chart's series, a gap for each step with no sample.
 - How data sources are configured in the server and its builder, and shared among environments (#83, #73).
 - Live chart bindings, which keep a chart's query current only while someone is interested, sharing one poll among charts (#83, #76, #82); and any caching or polling scheduler in Tomori rather than in each server side.
 - Whether, and how, environments offer their data sources to the agent as tools (#158), with the same bounds and label filtering.

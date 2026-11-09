@@ -146,6 +146,9 @@ pub struct Panel {
     canvas: Option<Canvas>,
     /// Whether the mesh has every glyph, rather than lacking some that waited for a later frame's budget.
     complete: bool,
+    /// Whether the mesh last shown was cut to the buffer, so that a face too large is warned of once, not every time
+    /// it changes.
+    cut: bool,
     /// Whether the mesh's first quad is a backing opaque enough to hide what is behind it.
     occludes: bool,
     /// The image the canvas shows, by hash, which is drawn over it from [`Self::image_quad`] once its texture is ready.
@@ -195,6 +198,7 @@ impl Panel {
             bindings,
             canvas: None,
             complete: false,
+            cut: false,
             occludes: false,
             image: None,
             image_quad,
@@ -209,12 +213,17 @@ impl Panel {
         let waited = tomori_text::atlas::waited();
         let mut mesh = canvas.mesh();
         self.complete = tomori_text::atlas::waited() == waited;
-        if mesh.len() > self.capacity {
-            log::debug!(
-                "A panel's mesh of {} vertices was cut to {}",
+        // A mesh too large is cut, losing what is drawn last, its text; said once each time a panel's face first is.
+        let cut = mesh.len() > self.capacity;
+        if cut && !self.cut {
+            log::warn!(
+                "A panel's mesh of {} vertices was cut to the {} its buffer holds, losing its text.",
                 mesh.len(),
                 self.capacity
             );
+        }
+        self.cut = cut;
+        if cut {
             mesh.truncate(self.capacity - self.capacity % 6);
         }
         self.count = mesh.len() as u32;
@@ -460,8 +469,20 @@ mod tests {
         gpu: &crate::test_gpu::Gpu,
         canvas: &Canvas,
         transforms: &[Mat4],
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> image::RgbaImage {
+        drawn_within(gpu, canvas, transforms, size, format, 100_000)
+    }
+
+    /// As [`drawn_by`], each panel's buffer holding `capacity` vertices, as the renderer's do.
+    fn drawn_within(
+        gpu: &crate::test_gpu::Gpu,
+        canvas: &Canvas,
+        transforms: &[Mat4],
         (width, height): (u32, u32),
         format: wgpu::TextureFormat,
+        capacity: usize,
     ) -> image::RgbaImage {
         let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
         let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
@@ -495,7 +516,7 @@ mod tests {
         let panels: Vec<Panel> = transforms
             .iter()
             .map(|&transform| {
-                let mut panel = Panel::new(&gpu.device, &pipeline, 100_000);
+                let mut panel = Panel::new(&gpu.device, &pipeline, capacity);
                 panel.set(&gpu.queue, canvas);
                 panel.prepare(&gpu.queue, 0, transform);
                 panel
@@ -641,6 +662,7 @@ mod tests {
         });
     }
 
+    mod chart;
     mod handles;
     mod shapes;
 }

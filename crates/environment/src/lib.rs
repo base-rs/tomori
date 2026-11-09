@@ -9,7 +9,9 @@
 //!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
 //!
-//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
+//! A side may also publish panels onto its environment's own walls, text or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`].
+//!
+//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], and what it publishes by [`PANEL_ID_BYTES`] and [`PANEL_LIMIT`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -17,7 +19,12 @@ use std::time::Duration;
 
 use base_scheduler::Cancellation;
 
+mod panel;
 pub mod sightlines;
+
+pub use panel::{PANEL_ID_BYTES, PANEL_LIMIT, Panel, valid_panel_id};
+/// A chart panel's native chart, as [`Panel::chart`] takes it.
+pub use tomori_protocol::chart;
 
 /// Why a server side stopped before its space was done with it, as the space shows it.
 ///
@@ -276,6 +283,17 @@ pub trait Outlet: Send + Sync {
     fn announce(&self, event: String, state: String) -> Result<()>;
     /// Describe the objects a participant can point at in the space, replacing those described before.
     fn describe(&self, objects: Vec<Object>) -> Result<()>;
+    /// Publish `panel` onto one of the environment's own walls, or update the panel the side published with its id in
+    /// place. An outlet that takes no panels, as one made before panels were, keeps nothing.
+    fn publish(&self, panel: Panel) -> Result<()> {
+        let _ = panel;
+        Ok(())
+    }
+    /// Take away the panel the side published as `id`, if it is there.
+    fn retract(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Ok(())
+    }
 }
 
 /// An outlet that keeps nothing and sends nothing, for a space made without one.
@@ -467,6 +485,43 @@ impl Space {
         self.outlet.describe(objects)
     }
 
+    /// Publish `panel` onto the environment's own wall it names, for everyone in the space, as the agent's panels are
+    /// shown: or, where the side published a panel with its id before, update that panel in place, replacing what it
+    /// shows and keeping where it is, wherever a participant or the agent moved it. Participants and the agent move,
+    /// point at and dismiss it as any panel; one dismissed stays away, its updates ignored, until the side
+    /// [retracts](Space::retract) it and publishes it again, the space comes back to the environment or the server restarts.
+    ///
+    /// The server refuses, saying why: an id [`valid_panel_id`] refuses; a wall the environment does not declare, or a
+    /// slot it does not have, or a full wall; a chart [`chart::Chart::cleaned`] refuses; more than [`PANEL_LIMIT`], 8,
+    /// panels in the space;
+    /// and more than 20 calls a second, after a burst of 40. It makes a panel's changes at most about once a second, and
+    /// 4 changes, or 32 KiB of panels, a second in the space, after a burst of 8 or 128 KiB, counting only what changes:
+    /// a side may publish more often, and an update that comes too soon waits, the newest replacing the one before, and
+    /// is made as soon as it may be, so that the latest always arrives. One that waits is refused at once for what can
+    /// be known then, its wall, its slot and the 8, counting those waiting; one refused once it may be made, as its wall
+    /// filled meanwhile, is dropped, which the server logs. When more than 12 panels float in the space, the one floating
+    /// longest goes, whoever's it is, so that the agent's panels can push away one of the side's a participant left
+    /// floating, which then stays away as a dismissed one does. Once this side's `run` has returned, or it has
+    /// failed, the server refuses every call, from any thread it left, and what it published rests until it runs again. It cleans and bounds what it keeps, as it does the agent's panels:
+    /// a title of 80 characters on one line, a body of 30 lines and 1,200 characters.
+    ///
+    /// ```
+    /// use tomori_environment::{Panel, Space};
+    ///
+    /// let space = Space::new("space-1-1", "Fleet", "/");
+    /// space.publish(Panel::text("rota", "Rota", "- [ ] Feed the hens")).unwrap();
+    /// space.retract("rota").unwrap();
+    /// ```
+    pub fn publish(&self, panel: Panel) -> Result<()> {
+        self.outlet.publish(panel)
+    }
+
+    /// Take away the panel the side published as `id`, wherever it is now, for everyone in the space; a panel not there
+    /// changes nothing.
+    pub fn retract(&self, id: &str) -> Result<()> {
+        self.outlet.retract(id)
+    }
+
     /// Answer the space's agent with `inspector` when it inspects what this side described with a reference, replacing
     /// any inspector given before. A side that gives none has nothing more to say of what it describes. It answers for
     /// as long as the side's binding lasts, and the server forgets it with the binding.
@@ -568,6 +623,30 @@ mod tests {
         assert_eq!(space.share("{}"), Ok(()));
         assert_eq!(space.announce("{}", "{}"), Ok(()));
         assert_eq!(space.describe(vec![Object::new("a", "b")]), Ok(()));
+        assert_eq!(space.publish(Panel::text("a", "b", "c")), Ok(()));
+        assert_eq!(space.retract("a"), Ok(()));
+    }
+
+    #[test]
+    fn an_outlet_made_before_panels_keeps_none() {
+        struct Older;
+        impl Outlet for Older {
+            fn share(&self, _state: String) -> Result<()> {
+                Ok(())
+            }
+            fn announce(&self, _event: String, _state: String) -> Result<()> {
+                Ok(())
+            }
+            fn describe(&self, _objects: Vec<Object>) -> Result<()> {
+                Ok(())
+            }
+        }
+        let space = Space::new("space-1-2", "Fleet", "/").with_outlet(Arc::new(Older));
+        assert_eq!(space.share("{}"), Ok(()));
+        assert_eq!(space.announce("{}", "{}"), Ok(()));
+        assert_eq!(space.describe(Vec::new()), Ok(()));
+        assert_eq!(space.publish(Panel::text("a", "b", "c")), Ok(()));
+        assert_eq!(space.retract("a"), Ok(()));
     }
 
     #[test]

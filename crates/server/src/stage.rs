@@ -31,6 +31,7 @@ mod groups;
 mod image;
 mod layouts;
 mod placement;
+mod published;
 pub(crate) use beside::spot as beside_spot;
 pub(crate) mod travel;
 
@@ -39,6 +40,10 @@ pub use code::Source;
 pub use image::without_image;
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
+pub(crate) use published::Change;
+#[cfg(test)]
+pub(crate) use published::PUBLISHED;
+pub use published::Publishing;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -118,7 +123,8 @@ fn most_bytes(panel: &Panel) -> usize {
             .sum::<usize>()
         + panel.code.as_ref().map_or(0, |code| code.language.len());
     let spans = panel.code.as_ref().map_or(0, |code| code.spans.len());
-    6 * text + 32 * spans + 512
+    let chart = panel.chart.as_ref().map_or(0, json_size);
+    6 * text + 32 * spans + 6 * chart + 512
 }
 
 /// `projection`, with its code panels whole where it fits in `budget` bytes of JSON, and otherwise as many as need be
@@ -475,6 +481,9 @@ struct Kept {
     /// A participant put it on its wall, so that it leaves a full wall only after those the agent put there.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     arranged: bool,
+    /// What makes it one its environment published, if it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published: Option<published::Published>,
 }
 
 /// The revision of a panel as it is projected.
@@ -519,6 +528,11 @@ impl Kept {
         .with_revision(self.revision);
         panel.code = self.content.code.clone();
         panel.image = self.content.image.clone();
+        panel.chart = self
+            .published
+            .as_ref()
+            .and_then(|published| published.chart.clone())
+            .map(Box::new);
         panel
     }
 
@@ -547,8 +561,8 @@ struct AddedWall {
 }
 
 /// What a space keeps for one environment: the walls owners added and the panels on the environment's walls or
-/// floating in it.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// floating in it. Written as [`RoomRecord`] is, what the environment published as where it rests.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct Room {
     /// When the space was last in it, in the stage's own order, so that the room left longest ago is forgotten first.
     #[serde(default)]
@@ -568,6 +582,73 @@ struct Room {
     unlocked: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     panels: Vec<Kept>,
+    /// The panels its environment published that its side's current run has not published again, kept only where they
+    /// are.
+    #[serde(default)]
+    resting: Vec<published::Resting>,
+    /// The ids of the panels its environment published that a participant dismissed, which stay away until the
+    /// environment retracts them, the space comes back to the environment or the server restarts.
+    #[serde(skip)]
+    dismissed: BTreeSet<String>,
+}
+
+/// A room as the space writes it: its panels but those its environment published, which are written where they are,
+/// as they rest, without what they show, which no longer holds once their run has ended.
+#[derive(Serialize)]
+struct RoomRecord<'a> {
+    #[serde(default)]
+    used: u64,
+    #[serde(skip_serializing_if = "<[AddedWall]>::is_empty")]
+    walls: &'a [AddedWall],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    layouts: &'a BTreeMap<String, Layout>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    moved: &'a BTreeMap<String, Pose>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    unlocked: &'a BTreeSet<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    panels: Vec<&'a Kept>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    resting: Vec<published::Resting>,
+}
+
+impl Serialize for Room {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // As they would rest were the run to end now, held to as many as may rest.
+        // Every field named, so that one added to a room is a choice to write or not, never left out unawares.
+        let Room {
+            used,
+            walls,
+            layouts,
+            moved,
+            unlocked,
+            panels,
+            resting,
+            dismissed: _,
+        } = self;
+        let live: Vec<published::Resting> = panels
+            .iter()
+            .filter_map(|kept| {
+                kept.published
+                    .as_ref()
+                    .map(|published| published::Resting::of(kept, &published.id))
+            })
+            .collect();
+        let resting = published::rested(live, resting);
+        RoomRecord {
+            used: *used,
+            walls,
+            layouts,
+            moved,
+            unlocked,
+            panels: panels
+                .iter()
+                .filter(|kept| kept.published.is_none())
+                .collect(),
+            resting,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// One space's walls and panels, kept with the space across restarts.
@@ -803,6 +884,11 @@ impl Stage {
     /// The space leaves `environment` for another: what it keeps for it, if anything, is the room left most recently, and
     /// so the last forgotten.
     pub(crate) fn leave(&mut self, environment: &str) {
+        // Its environment's run ends: what it published rests, and what a participant dismissed may come back.
+        self.rest(environment);
+        if let Some(room) = self.rooms.get_mut(environment) {
+            room.dismissed.clear();
+        }
         let used = self.next + 1;
         if let Some(room) = self.rooms.get_mut(environment) {
             room.used = used;
@@ -930,7 +1016,11 @@ impl Stage {
                     .min_by_key(|(_, order, _)| *order)
                     .map(|(index, _, slot)| (index, slot))
                     .expect("a full wall holds panels");
-                list.remove(index);
+                // One its environment published stays away, as one dismissed does, rather than coming back in the
+                // newcomer's place as its environment next updates it.
+                if let Some(published) = list.remove(index).published {
+                    self.room(environment).dismissed.insert(published.id);
+                }
                 slot
             }
         };
@@ -938,7 +1028,7 @@ impl Stage {
             wall: wall.to_owned(),
             slot,
         };
-        list.push(kept);
+        self.list(environment, Some(wall)).push(kept);
     }
 
     /// Put `kept`, which came from `from`, in the slot `slot` of the wall `wall` in `environment`, arranged. A panel
@@ -1083,6 +1173,7 @@ impl Stage {
             },
             pinned: false,
             arranged: false,
+            published: None,
         };
         self.put(walls, kept, to);
         self.bound(walls.environment);
@@ -1160,8 +1251,10 @@ impl Stage {
                 .filter(|(_, kept)| matches!(kept.place, Placed::Free { .. }))
                 .min_by_key(|(_, kept)| kept.placed)
                 .map(|(index, _)| index)
+            && let Some(published) = list.remove(index).published
         {
-            list.remove(index);
+            // One its environment published stays away, as one a full wall gives up does.
+            self.room(walls.environment).dismissed.insert(published.id);
         }
     }
 
@@ -1251,6 +1344,7 @@ impl Stage {
     /// What the text panel `panel` in `walls`' environment shows, if it is shown there and is not a code panel.
     pub(crate) fn content(&self, walls: &Walls<'_>, panel: &str) -> Option<&Content> {
         self.kept(walls.environment, panel)
+            .filter(|kept| kept.published.is_none())
             .map(|kept| &kept.content)
             .filter(|content| content.code.is_none())
     }
@@ -1271,6 +1365,9 @@ impl Stage {
         let kept = self
             .here_mut(walls.environment, panel)
             .ok_or("That panel is not here.")?;
+        if kept.published.is_some() {
+            return Err(ENVIRONMENT_S);
+        }
         if kept.content.code.is_some() || content.code.is_some() {
             return Err("A code panel cannot be updated in place.");
         }
@@ -1308,6 +1405,9 @@ impl Stage {
         let kept = self
             .here_mut(walls.environment, panel)
             .ok_or("That panel is not here.")?;
+        if kept.published.is_some() {
+            return Err(ENVIRONMENT_S);
+        }
         if kept.content.code.is_some() || kept.content.image.is_some() {
             return Err("That panel has no checklist.");
         }
@@ -1367,6 +1467,13 @@ impl Stage {
         };
         if unchanged {
             return Ok(false);
+        }
+        if self.leaves_environment(
+            walls,
+            panel,
+            matches!(self.resolve(walls, to), Spot::Wall(wall, _) if wall == TOMORI_WALL),
+        ) {
+            return Err(STAYS);
         }
         let kept = self
             .take(walls.environment, panel)
@@ -1909,6 +2016,11 @@ impl Stage {
                 valid(&pose).ok_or("A panel must float within 20 m of the space's middle.")?,
             ),
         };
+        let onto_tomori =
+            matches!(&target, Target::Wall(wall) | Target::Slot(wall, _) if wall == TOMORI_WALL);
+        if self.leaves_environment(walls, panel, onto_tomori) {
+            return Err(STAYS);
+        }
         let mut kept = self
             .take(walls.environment, panel)
             .ok_or("That panel is not here.")?;
@@ -1947,10 +2059,25 @@ impl Stage {
     }
 
     /// Dismiss the panel `panel` in `environment`, or say why not.
+    /// One its environment published stays away until the environment retracts it, or the space comes back to the
+    /// environment.
     pub(crate) fn dismiss(&mut self, environment: &str, panel: &str) -> Result<(), &'static str> {
-        self.take(environment, panel)
-            .map(drop)
-            .ok_or("That panel is not here.")
+        let kept = self
+            .take(environment, panel)
+            .ok_or("That panel is not here.")?;
+        if let Some(published) = kept.published {
+            self.room(environment).dismissed.insert(published.id);
+        }
+        Ok(())
+    }
+
+    /// Whether the panel `panel` in `walls`' environment is one its environment published, which `onto_tomori` would
+    /// take onto the Tomori wall, and so out of the environment, as nothing of an environment's may go.
+    fn leaves_environment(&self, walls: &Walls<'_>, panel: &str, onto_tomori: bool) -> bool {
+        onto_tomori
+            && self
+                .kept(walls.environment, panel)
+                .is_some_and(|kept| kept.published.is_some())
     }
 
     /// The panel `panel`, as the agent is told about one a participant points at in `walls`' environment at `now`, such
@@ -1975,6 +2102,8 @@ impl Stage {
             "code panel"
         } else if panel.image.is_some() {
             "image panel"
+        } else if panel.chart.is_some() {
+            "chart panel"
         } else {
             "panel"
         };
@@ -2000,9 +2129,35 @@ impl Stage {
             // A slug holds nothing to clean, but its letters, digits, `-` and `_`.
             details.push_str(&format!("id {slug}, "));
         }
-        details.push_str(&format!("{place}, projected {}", ago(panel.age)));
+        let published = self.published(walls.environment, &panel.id);
+        let verb = if published.is_some() {
+            "published"
+        } else {
+            "projected"
+        };
+        details.push_str(&format!("{place}, {verb} {}", ago(panel.age)));
         if let Some(updated) = updated {
             details.push_str(&format!(", updated {}", ago(now.saturating_sub(updated))));
+        }
+        // An environment's panel says whose it is, and, where it has one, the id the agent may inspect it by; a chart
+        // what it shows now, in quotes, as it is the environment's text.
+        if let Some((_, reference)) = published {
+            details.push_str(&format!(
+                "; the {} environment's",
+                crate::space::one_line(walls.environment, 64)
+            ));
+            if let Some(reference) = reference {
+                details.push_str(&format!(
+                    ", id {}",
+                    crate::space::inspectable(walls.environment, reference)
+                ));
+            }
+        }
+        if panel.chart.is_some() {
+            details.push_str(&format!(
+                "; shows: \"{}\"",
+                crate::space::one_line(&panel.body.replace('\n', ", "), blocks::BODY_CHARS)
+            ));
         }
         // An image panel's size, and its caption in quotes, as it is the agent's text.
         if let Some(image) = &panel.image {
@@ -2065,6 +2220,12 @@ impl Stage {
 /// Why a participant's tick is refused when the panel changed since the revision they saw: the client cues it, and the
 /// projection sent again shows the panel as it is, so that they look and tick again.
 pub(crate) const STALE_TICK: &str = "That panel changed as you ticked it; look again.";
+
+/// Why the agent and participants cannot change what an environment's panel shows.
+const ENVIRONMENT_S: &str = "That panel is its environment's: only the environment updates it.";
+
+/// Why an environment's panel cannot go onto the Tomori wall.
+const STAYS: &str = "That panel is its environment's, and stays on its walls or floating in it.";
 
 /// A checklist item a participant ticked or unticked, as [`Stage::tick_item`] found it.
 #[derive(Clone, Debug, PartialEq)]
@@ -2157,6 +2318,53 @@ mod tests {
     /// The walls of `environment`, with the Tomori wall as in Sky and none of its own.
     fn room(environment: &str) -> Walls<'_> {
         Walls { environment, ..SKY }
+    }
+
+    /// A space's stage as the server wrote it before environments published panels (2be1755): a wall an owner added,
+    /// locked; the environment's own wall unlocked, moved and given four columns of two rows; a panel a participant put
+    /// in its slot and one floating.
+    const BEFORE_PUBLISHING: &str = r#"{"version":1,"next":15,"rooms":{"sky":{"used":15,"walls":[{"id":"wall-10","pose":{"position":[0.0,1.5,5.0],"orientation":[0.0,0.0,0.0,1.0]},"locked":true}],"layouts":{"environment-0":{"grid":[4,2],"scale":1.0}},"moved":{"environment-0":{"position":[2.0,1.5,-4.0],"orientation":[0.0,0.0,0.0,1.0]}},"unlocked":["environment-0"],"panels":[{"id":"panel-1","title":"On the board","body":"About On the board.","meta":[["source","CI"]],"created":100,"revision":1,"placed":3,"place":{"kind":"wall","wall":"environment-0","slot":2},"pinned":true,"arranged":true},{"id":"panel-6","title":"Floating","body":"About Floating.","meta":[["source","CI"]],"created":110,"revision":1,"placed":8,"place":{"kind":"free","pose":{"position":[1.0,1.5,-1.0],"orientation":[0.0,0.0,0.0,1.0]}},"pinned":true}]}}}"#;
+
+    #[test]
+    fn a_stage_written_before_environments_published_is_read_whole() {
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let stage: Stage = serde_json::from_str(BEFORE_PUBLISHING).unwrap();
+        let view = stage.view("s", &walls, 200);
+        let wall = |id: &str| view.walls.iter().find(|wall| wall.id == id).unwrap();
+        let board = wall("environment-0");
+        assert_eq!(
+            (board.pose.position, board.grid(), board.is_locked()),
+            ([2.0, 1.5, -4.0], Grid::from((4, 2)), false)
+        );
+        assert!(wall("wall-10").is_locked());
+        let panel = |id: &str| view.panel(id).unwrap();
+        assert_eq!(
+            panel("panel-1").place,
+            Place::Wall {
+                wall: "environment-0".into(),
+                slot: 2
+            }
+        );
+        assert!(panel("panel-1").pinned);
+        assert_eq!(
+            panel("panel-6").place,
+            Place::Free {
+                pose: pose(1.0, -1.0)
+            }
+        );
+        assert_eq!(view.panels.len(), 2);
+        // What is new defaults: nothing published, nothing resting, nothing dismissed; and it is written as it was.
+        let room = &stage.rooms["sky"];
+        assert!(room.resting.is_empty() && room.dismissed.is_empty());
+        assert!(room.panels.iter().all(|kept| kept.published.is_none()));
+        assert_eq!(
+            serde_json::to_value(&stage).unwrap(),
+            serde_json::from_str::<serde_json::Value>(BEFORE_PUBLISHING).unwrap()
+        );
     }
 
     const SKY: Walls<'static> = Walls {
@@ -2971,6 +3179,7 @@ mod tests {
             },
             pinned: false,
             arranged: false,
+            published: None,
         };
         // More hidden in other environments than the limit allows, the earliest placed in the second.
         for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {

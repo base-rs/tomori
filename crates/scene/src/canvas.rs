@@ -31,8 +31,32 @@ pub struct CanvasImage {
     pub height: f32,
 }
 
-/// What a panel shows.
+/// A run of text a canvas shows wherever it is placed, rather than in a row's cells, such as a chart's axis labels: its
+/// cells, their top-left corner at `x`, `y`, in font pixels from the canvas's top-left corner inside its padding, as a
+/// shape is.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Label {
+    pub x: f32,
+    pub y: f32,
+    pub cells: Vec<Cell>,
+}
+
+impl Label {
+    pub fn new(x: f32, y: f32, cells: Vec<Cell>) -> Self {
+        Self { x, y, cells }
+    }
+
+    /// How wide it is, in font pixels.
+    pub fn width(&self) -> f32 {
+        (self.cells.len() * CELL_WIDTH) as f32
+    }
+}
+
+/// What a panel shows. Non-exhaustive, so that it can gain a field without breaking its makers: make one with
+/// [`Canvas::new`].
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Canvas {
     /// The width of the text, in cells; rows longer than this are cut.
     pub columns: usize,
@@ -50,6 +74,8 @@ pub struct Canvas {
     pub shapes: Vec<Shape>,
     /// An image drawn over everything else, as an image panel shows.
     pub image: Option<CanvasImage>,
+    /// Text placed anywhere, drawn with the rows' text, over the shapes.
+    pub labels: Vec<Label>,
 }
 
 impl Canvas {
@@ -63,6 +89,7 @@ impl Canvas {
             border: None,
             shapes: Vec::new(),
             image: None,
+            labels: Vec::new(),
         }
     }
 
@@ -232,6 +259,12 @@ impl Canvas {
                 .map(|(&cell, &lined)| (if lined || marked(cell) { ' ' } else { cell.0 }, cell.1))
                 .collect();
             for (quad, style) in quads(&cells, left, row_top(index), height, |style| style.bold) {
+                mesh.glyph(quad, style.color);
+            }
+        }
+        for label in &self.labels {
+            let at = (left + label.x, top + label.y);
+            for (quad, style) in quads(&label.cells, at.0, at.1, height, |style| style.bold) {
                 mesh.glyph(quad, style.color);
             }
         }
@@ -471,6 +504,28 @@ impl Mesh {
 mod tests {
     use super::*;
     use crate::ui_text::{Span, Style, Wrap, wrap};
+
+    #[test]
+    fn a_label_is_drawn_where_it_is_placed_over_the_rows() {
+        let mut canvas = Canvas::new(10, 0.001);
+        canvas.rows = vec![Row::default(); 3];
+        let empty = canvas.mesh().len();
+        let cells = crate::ui_text::cut(&[Span::new("1.0 x", Style::plain([1.0; 4]))], 10);
+        let label = Label::new(3.5, 7.0, cells);
+        assert_eq!(label.width(), (5 * CELL_WIDTH) as f32);
+        canvas.labels.push(label);
+        let mesh = canvas.mesh();
+        // A quad for each of its four glyphs, as its rows' would be, placed from the padding.
+        assert_eq!(mesh.len(), empty + 4 * 6);
+        let (width, height) = canvas.size_in_pixels();
+        let left = (canvas.padding.0 as f32 + 3.5 - width as f32 / 2.0) * canvas.pixel;
+        let top = (height as f32 / 2.0 - canvas.padding.1 as f32 - 7.0) * canvas.pixel;
+        // Within the margin a glyph's tile has about its cell.
+        let margin = 3.0 * canvas.pixel;
+        assert!(mesh[empty..].iter().all(
+            |vertex| vertex.position[0] >= left - margin && vertex.position[1] <= top + margin
+        ));
+    }
 
     #[test]
     fn the_mesh_stays_within_the_panel_and_is_centred() {

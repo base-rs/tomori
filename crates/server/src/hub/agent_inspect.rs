@@ -137,11 +137,14 @@ impl Hub {
             .get(current)
             .map_or(current.as_str(), |environment| environment.label())
             .to_owned();
+        // An object the side describes now, or else a panel it publishes now.
         let described = record
             .channel
             .as_ref()
             .filter(|channel| &channel.environment == current)
             .and_then(|channel| channel.referenced(reference))
+            .map(|described| described.description.clone())
+            .or_else(|| record.stage.referenced(current, reference))
             .ok_or_else(|| {
                 format!(
                     "Nothing in this space has the id {} now: what it named may have gone, or moved on. Ask whoever pointed at it to point at it again.",
@@ -163,7 +166,7 @@ impl Hub {
             reference: reference.to_owned(),
             environment: current.clone(),
             label,
-            description: described.description.clone(),
+            description: described,
             inspector,
         })
     }
