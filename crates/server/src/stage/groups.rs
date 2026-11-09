@@ -358,6 +358,15 @@ impl Stage {
         }
         Ok(room.walls != before.walls)
     }
+
+    /// The walls of the group of the added wall `wall` in `walls`' environment, by identity, itself first: one alone is a
+    /// group of one, and a wall not added, none.
+    pub(crate) fn group_of(&self, walls: &Walls<'_>, wall: &str) -> Vec<String> {
+        self.rooms
+            .get(walls.environment)
+            .filter(|room| room.added(wall).is_some())
+            .map_or_else(Vec::new, |room| room.group(wall))
+    }
 }
 
 #[cfg(test)]

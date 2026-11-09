@@ -437,6 +437,8 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "set_wall",
             "add_wall",
             "remove_wall",
+            "create_layout",
+            "remove_layout",
             "move_agent",
             "set_speech",
             "set_environment",
@@ -2097,6 +2099,244 @@ fn the_agent_snaps_a_wall_beside_another_into_a_group_and_takes_it_out_again() {
 }
 
 #[test]
+fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_down() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_showing_images("ada", "Ada");
+    create(&mut ada, "Dashboard");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    ada.send(&ClientMessage::Presence {
+        head: looking([0.0, 1.6, 0.0], [0.0, 1.6, -3.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    // A two by two and a big one beside it, as tall, where Ada is looking, in one step.
+    let built = tool(
+        "create_layout",
+        json!({"place": "looking Ada", "walls": [
+            {"id": "Summary", "columns": 2, "rows": 2, "scale": 0.9},
+            {"id": "chart", "columns": 1, "rows": 1, "attach": {"to": "summary", "edge": "right"}},
+        ]}),
+    );
+    assert_ne!(built["isError"], true, "{built}");
+    let content = &built["structuredContent"];
+    let layout = content["walls"].as_array().unwrap();
+    assert_eq!(layout.len(), 2);
+    assert_eq!(
+        (
+            layout[0]["id"].clone(),
+            layout[0]["name"].clone(),
+            layout[0]["slots"].clone()
+        ),
+        (json!("summary"), json!("added wall 1"), json!([0, 1, 2, 3]))
+    );
+    assert_eq!(
+        (layout[1]["name"].clone(), layout[1]["slots"].clone()),
+        (json!("added wall 2"), json!([0]))
+    );
+    assert_eq!(content["group"], layout[0]["wall"]);
+    assert!(
+        content["next"]
+            .as_str()
+            .unwrap()
+            .contains("place: wall NAME slot N")
+    );
+    let listed = eventually(|| {
+        let walls = walls();
+        walls[2].get("group").is_some().then_some(walls)
+    });
+    assert_eq!(listed[1]["joined"][0]["name"], "added wall 2");
+    // A notice on the Tomori wall says what it built.
+    assert_eq!(listed[0]["used"][0]["title"], "Walls");
+
+    // Filled precisely: a text panel, a code panel and an image, each in the slot it names.
+    agent_replies(
+        &sessions[0],
+        "m1",
+        "```panel\ntitle: Open issues\nplace: wall added wall 1 slot 3\n---\n- one\n- two\n```\n\n```rust place=\"wall added wall 2 slot 0\"\nfn main() {\n    println!(\"hi\");\n}\n```\n",
+    );
+    let folder = std::env::temp_dir().join(format!("tomori-mcp-layouts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let picture = folder.join("chart.png");
+    image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([x as u8, y as u8, 200]))
+        .save(&picture)
+        .unwrap();
+    let shown = tool(
+        "show_image",
+        json!({"path": picture.display().to_string(), "place": "wall added wall 1 slot 1"}),
+    );
+    assert_ne!(shown["isError"], true, "{shown}");
+    let listed = eventually(|| {
+        let walls = walls();
+        (walls[1]["used"].as_array()?.len() == 2 && walls[2]["used"].as_array()?.len() == 1)
+            .then_some(walls)
+    });
+    let used = |wall: usize| -> Vec<(Value, Value)> {
+        listed[wall]["used"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|used| (used["slot"].clone(), used["title"].clone()))
+            .collect()
+    };
+    assert_eq!(
+        used(1),
+        [
+            (json!(1), json!("chart.png")),
+            (json!(3), json!("Open issues"))
+        ]
+    );
+    assert_eq!(used(2), [(json!(0), json!("rust"))]);
+    // A slot it does not have is refused, saying how its slots are numbered.
+    assert_eq!(
+        failure(&tool(
+            "move_panel",
+            json!({"panel": "Open issues", "place": "wall added wall 2 slot 1"})
+        )),
+        "The added wall 2 has no slot 1: its slots are numbered from 0 to 0."
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+
+    // What it cannot build, it says, and builds nothing.
+    for (arguments, error) in [
+        (
+            json!({"walls": []}),
+            "This tool needs walls, a list of from 1 to 6 walls.",
+        ),
+        (
+            json!({"place": 5, "walls": [{"id": "a"}]}),
+            "place is text.",
+        ),
+        (
+            json!({"walls": [{"id": "a", "width": "wide"}]}),
+            "width is a number.",
+        ),
+        (
+            json!({"walls": [{"id": "a b"}]}),
+            "A wall's id is from 1 to 32 letters, digits, - and _, not \"a b\".",
+        ),
+        (
+            json!({"walls": [{"columns": 2}]}),
+            "This tool needs id, as text.",
+        ),
+        (
+            json!({"walls": [{"id": "a"}, {"id": "b", "attach": {"to": "a", "edge": "behind"}}]}),
+            "attach's edge is left, right, top or bottom.",
+        ),
+        (
+            json!({"walls": [{"id": "a", "scale": 1.0, "width": 2.0}]}),
+            "Say either scale or width, not both.",
+        ),
+        (
+            json!({"place": "wall Tomori wall", "walls": [{"id": "a"}]}),
+            "A layout stands in front of someone or where they are looking: say front, near or looking, with a name or for whoever asked.",
+        ),
+        (
+            json!({"place": "behind", "walls": [{"id": "a"}]}),
+            "Tomori does not know where \"behind\" is: say near NAME, looking NAME, front NAME, wall WALL or wall WALL slot N, or near, looking or front for whoever asked.",
+        ),
+        (
+            json!({"walls": [{"id": "a"}]}),
+            "Nobody asked for this as they spoke, so name whom it is for.",
+        ),
+        (
+            json!({"place": "front Ada", "walls": [{"id": "a"}, {"id": "b", "radius": 3, "attach": {"to": "a", "edge": "top"}}]}),
+            "A layout's walls are all flat, or all curved at the same radius.",
+        ),
+    ] {
+        assert_eq!(failure(&tool("create_layout", arguments)), error);
+    }
+    // A curved layout, its later walls curved as its first.
+    let curved = tool(
+        "create_layout",
+        json!({"place": "front Ada", "walls": [
+            {"id": "a", "columns": 2, "rows": 1, "radius": 2.4},
+            {"id": "b", "columns": 2, "rows": 1, "scale": 0.8, "attach": {"to": "a", "edge": "left", "align": "middle"}},
+        ]}),
+    );
+    assert_ne!(curved["isError"], true, "{curved}");
+    let names: Vec<Value> = curved["structuredContent"]["walls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|wall| wall["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("added wall 3"), json!("added wall 4")]);
+    eventually(|| (walls().as_array()?.len() == 5).then_some(()));
+    assert!(walls()[3]["shape"]["arc"].is_number() && walls()[4]["shape"]["arc"].is_number());
+
+    // In front of someone near it, and taken down with nothing on it.
+    let near = tool(
+        "create_layout",
+        json!({"place": "near Ada", "walls": [{"id": "lone", "columns": 1, "rows": 1}]}),
+    );
+    assert_ne!(near["isError"], true, "{near}");
+    let lone = near["structuredContent"]["walls"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually(|| (walls().as_array()?.len() == 6).then_some(()));
+    let removed = tool("remove_layout", json!({"group": lone}));
+    assert_eq!(removed["structuredContent"]["floating"], 0, "{removed}");
+    assert!(
+        removed["structuredContent"]["next"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("you removed {lone}."))
+    );
+    eventually(|| (walls().as_array()?.len() == 5).then_some(()));
+    // Taken down by any of its walls, its panels float; the Tomori wall is not a layout.
+    assert_eq!(
+        failure(&tool("remove_layout", json!({"group": "Tomori wall"}))),
+        "Only walls someone added can be removed: the Tomori wall and an environment's walls stay."
+    );
+    assert_eq!(
+        failure(&tool("remove_layout", json!({}))),
+        "This tool needs group, as text."
+    );
+    let removed = tool("remove_layout", json!({"group": "added wall 2"}));
+    assert_ne!(removed["isError"], true, "{removed}");
+    assert_eq!(removed["structuredContent"]["floating"], 3);
+    assert_eq!(
+        removed["structuredContent"]["next"],
+        "Tell everyone in the space that you removed added wall 1, added wall 2; the 3 panels on them float where they were."
+    );
+    eventually(|| (walls().as_array()?.len() == 3).then_some(()));
+    agent_replies(
+        &sessions[0],
+        "m2",
+        "```panel\ntitle: Left\nplace: wall added wall 1 slot 0\n---\nOne panel.\n```\n",
+    );
+    eventually(|| (walls()[1]["used"].as_array()?.len() == 1).then_some(()));
+    let removed = tool("remove_layout", json!({"group": "added wall 1"}));
+    assert_eq!(removed["structuredContent"]["floating"], 1, "{removed}");
+    assert!(
+        removed["structuredContent"]["next"]
+            .as_str()
+            .unwrap()
+            .ends_with("the panel on them floats where it was.")
+    );
+    assert!(
+        logged()
+            .iter()
+            .any(|line| line.contains("built a layout of"))
+    );
+}
+
+#[test]
 fn the_agent_gives_a_wall_slots_of_any_shape_by_their_aspect_or_their_size_in_metres() {
     let backend = FakeBackend::new();
     let server = start(&backend);
@@ -2332,13 +2572,19 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
             .then_some(())
     });
     // A session bound to no space changes no wall.
-    for name in ["set_wall", "add_wall", "remove_wall"] {
+    for name in [
+        "set_wall",
+        "add_wall",
+        "remove_wall",
+        "create_layout",
+        "remove_layout",
+    ] {
         let result = call(
             &server,
             &token,
             Some("ses_nobody"),
             name,
-            json!({"wall": "Tomori wall"}),
+            json!({"wall": "Tomori wall", "group": "Tomori wall", "walls": [{"id": "a"}]}),
         );
         assert_eq!(result["isError"], true, "{name}: {result}");
     }
@@ -2402,6 +2648,16 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
             "Nobody called \"Zed\" in this space has reported where they are.",
         ),
         ("remove_wall", json!({}), "This tool needs wall, as text."),
+        (
+            "remove_layout",
+            json!({"group": long}),
+            "The group is too long; the limit is 1024 bytes.",
+        ),
+        (
+            "remove_layout",
+            json!({"group": "attic"}),
+            "There is no wall called \"attic\" here: name one as presence does, or say looking or near, with a name or for whoever asked.",
+        ),
         (
             "remove_wall",
             json!({"wall": long}),

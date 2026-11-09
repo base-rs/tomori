@@ -795,6 +795,60 @@ fn ahead_of(head: &Pose, (distance, drop): (f32, f32)) -> Pose {
     Pose::upright_facing(at, [px, py - drop, pz])
 }
 
+/// The farthest a layout of walls the agent composes stands from whoever it is for, in metres, and the nearer distances
+/// it is tried at when its slots would be too far to read, nearest last.
+const LAYOUT_DISTANCES: (f32, [f32; 4]) = (3.5, [2.4, 2.0, 1.6, 1.2]);
+
+/// How wide a layout is to be seen, as the tangent of half the angle it takes from the eyes: about 60°, so that it is
+/// seen whole by moving the eyes, rather than the head.
+const LAYOUT_VIEW: f32 = 0.577;
+
+/// The lowest a layout's middle stands, in metres, and how far above someone's eyes it may stand.
+const LAYOUT_HEIGHTS: (f32, f32) = (0.8, 0.6);
+
+/// Where the middle of a layout of walls the agent composes for someone whose head is at `head` stands, facing them,
+/// upright, at each distance it is tried at: level with where they face, a little below their eyes, or, `looking`, as
+/// high as they look, within [`LAYOUT_HEIGHTS`]. A flat layout `width` metres wide stands first as far as it takes to be
+/// seen whole, within [`LAYOUT_VIEW`], at least 1.5 m; a curved one at its `radius`, so that its arc curves about them;
+/// either no further than [`LAYOUT_DISTANCES`]'s farthest, and then nearer, at each of its nearer distances.
+pub(crate) fn layout_middles(
+    head: &Pose,
+    looking: bool,
+    width: f32,
+    radius: Option<f32>,
+) -> Vec<Pose> {
+    let ahead = forward(head);
+    let level = ahead_of(head, (1.0, 0.0));
+    let [px, py, pz] = head.position;
+    let (x, z) = (level.position[0] - px, level.position[2] - pz);
+    let slope = if looking {
+        ahead[1] / ahead[0].hypot(ahead[2]).max(1e-3)
+    } else {
+        0.0
+    };
+    let first = radius
+        .unwrap_or((width / 2.0 / LAYOUT_VIEW).max(1.5))
+        .min(LAYOUT_DISTANCES.0);
+    std::iter::once(first)
+        .chain(
+            LAYOUT_DISTANCES
+                .1
+                .into_iter()
+                .filter(|distance| *distance < first),
+        )
+        .map(|distance| {
+            let height = if looking {
+                py + slope * distance
+            } else {
+                py - WALL_FRONT.1
+            };
+            let height = height.min(py + LAYOUT_HEIGHTS.1).max(LAYOUT_HEIGHTS.0);
+            let at = [px + x * distance, height, pz + z * distance];
+            Pose::upright_facing(at, [px, height, pz])
+        })
+        .collect()
+}
+
 /// The wall `named` means in `projection`, by its identity: a wall by its identity or name, such as `Tomori wall` or
 /// `added wall 2`, with or without `wall` or `the` before it; or the wall someone is looking at or is nearest, in the
 /// forms `looking [NAME]` and `near [NAME]`, of whoever asked, whose head was at `asker`, or of one of `people`. Or why
@@ -805,7 +859,7 @@ pub(crate) fn which_wall(
     people: &[(String, Pose)],
     projection: &Projection,
 ) -> Result<String, String> {
-    let by_name = Placement::Wall(named.to_owned());
+    let by_name = Placement::Wall(named.to_owned(), None);
     if let Ok(Destination::Wall { wall, .. }) = destination(&by_name, asker, people, projection) {
         return Ok(wall);
     }
@@ -824,7 +878,7 @@ pub(crate) fn which_wall(
             );
         }
         // Named after `wall`, it is a wall by its identity or name, which no wall here has.
-        Placement::Wall(named) => {
+        Placement::Wall(named, _) => {
             return Err(format!("There is no wall called {named:?} here."));
         }
     };
@@ -876,7 +930,7 @@ pub(crate) fn destination(
         Placement::Near(name) => Destination::Nearest(whose(name)?.position),
         Placement::Looking(name) => looking_at(&whose(name)?, projection),
         Placement::Front(name) => in_front(&whose(name)?),
-        Placement::Wall(named) => {
+        Placement::Wall(named, slot) => {
             let named = named.trim();
             let named = named
                 .get(..4)
@@ -890,9 +944,17 @@ pub(crate) fn destination(
                         || wall_name(projection, wall).eq_ignore_ascii_case(named)
                 })
                 .ok_or_else(|| format!("There is no wall called {named:?} here."))?;
+            // A slot it does not have is refused, rather than taken as its most prominent free one.
+            if let Some(slot) = slot.filter(|slot| *slot >= wall.slots()) {
+                return Err(format!(
+                    "The {} has no slot {slot}: its slots are numbered from 0 to {}.",
+                    wall_name(projection, wall),
+                    wall.slots() - 1
+                ));
+            }
             Destination::Wall {
                 wall: wall.id.clone(),
-                slot: None,
+                slot: *slot,
             }
         }
     })

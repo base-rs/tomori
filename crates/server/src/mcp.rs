@@ -323,6 +323,7 @@ fn tools() -> Value {
         "idempotentHint": true,
         "openWorldHint": false,
     });
+    let layouts = layout_tools(&change);
     json!([
         {
             "name": "server",
@@ -396,7 +397,7 @@ fn tools() -> Value {
         },
         {
             "name": "move_panel",
-            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
+            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall, or wall WALL slot N, into its slot N, numbered from 0 as presence lists them. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -460,6 +461,8 @@ fn tools() -> Value {
             },
             "annotations": change,
         },
+        layouts[0],
+        layouts[1],
         {
             "name": "move_agent",
             "description": "Move yourself, the agent, in your space, for everyone in it, as a participant summons you with their controller's trigger: place is home, back to the home the space's environment gives you, or near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked. Your voice comes from where you stand. Go only when someone asks, such as \"come here\" or \"go back to your home spot\", and stay where you are summoned until someone sends you home; your workers stay at home. presence says where you are.",
@@ -588,7 +591,7 @@ fn tools() -> Value {
                     "path": { "type": "string", "maxLength": crate::images::PATH_BYTES, "description": "The image file, absolute or relative to your working directory." },
                     "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line; the file's name if none." },
                     "caption": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "What it shows, in a sentence, drawn below it." },
-                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for move_panel: near NAME, looking NAME, front NAME or wall WALL, or near, looking or front for whoever asked. Where they were looking as they asked, if not given." },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for move_panel: near NAME, looking NAME, front NAME, wall WALL or wall WALL slot N, or near, looking or front for whoever asked. Where they were looking as they asked, if not given." },
                 },
                 "required": ["path"],
             },
@@ -622,6 +625,79 @@ fn caller(params: &Value) -> Result<&str, String> {
         return Err("This call's session identifier is too long.".to_owned());
     }
     Ok(session)
+}
+
+/// The `create_layout` and `remove_layout` tools, described apart from the rest, which would take `json!` past its
+/// recursion limit, with `change`, the annotations of a tool that changes the space.
+fn layout_tools(change: &Value) -> [Value; 2] {
+    [
+        json!({
+            "name": "create_layout",
+            "description": "Build a layout of walls in one step, for everyone in your space, when someone asks you to visualise or lay out information: walls, from 1 to 6, each with your own id for it, a short name of letters, digits, - and _, and columns, rows, scale or width, aspect or slot_width and slot_height, and radius, as add_wall takes them; every wall after the first has attach, { to, edge, align }, to an earlier wall by your id, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, and without a size of its own fills that edge, so that a 1 by 1 beside a 2 by 2 is as tall as it. They snap together as one group, reading as one board, curved as the first unless they say otherwise. place, looking, near or front, with a name or for whoever asked, by default looking, stands it where that person is looking or in front of them, as near as it takes to read every slot. Refused whole if any of it cannot be built, such as beyond the walls or slots an environment takes. It returns each wall's name and slots: fill each slot it should hold with a panel block's place: wall NAME slot N, a code block's place=\"wall NAME slot N\" or show_image's place, then tell everyone what you built. Use as few walls as the information needs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "walls": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": crate::stage::LAYOUT_WALLS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "maxLength": 32 },
+                                "columns": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_COLUMNS },
+                                "rows": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_ROWS },
+                                "scale": { "type": "number", "minimum": tomori_protocol::wall::SCALES.0, "maximum": tomori_protocol::wall::SCALES.1 },
+                                "width": { "type": "number", "exclusiveMinimum": 0 },
+                                "aspect": { "type": ["number", "string"], "maxLength": crate::limits::IDENTIFIER_BYTES },
+                                "slot_width": { "type": "number", "exclusiveMinimum": 0 },
+                                "slot_height": { "type": "number", "exclusiveMinimum": 0 },
+                                "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                                "attach": attach_schema(),
+                            },
+                            "required": ["id"],
+                        },
+                    },
+                },
+                "required": ["walls"],
+            },
+            "annotations": change,
+        }),
+        json!({
+            "name": "remove_layout",
+            "description": "Remove a layout of walls from your space, for everyone in it: every wall of the group of the wall group names, by identity or name as presence lists it, or looking or near, with a name or for whoever asked. The panels on them float where they were. Only when someone in the space asks, or to replace a layout you built; then tell them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["group"],
+            },
+            "annotations": change,
+        }),
+    ]
+}
+
+/// The wall `attach`, `{ to, edge, align }`, names, the edge of it, `left`, `right`, `top` or `bottom`, and the
+/// alignment along it, `start`, `middle` or `end`, by default `start`.
+fn attachment(
+    attach: &Value,
+) -> Result<(String, tomori_protocol::Edge, tomori_protocol::Align), String> {
+    let to = text(attach, "to")?;
+    crate::limits::check(to, crate::limits::IDENTIFIER_BYTES, "to")?;
+    let edge = text(attach, "edge")
+        .ok()
+        .and_then(tomori_protocol::Edge::parse)
+        .ok_or("attach's edge is left, right, top or bottom.")?;
+    let align = match attach.get("align") {
+        None | Some(Value::Null) => tomori_protocol::Align::Start,
+        Some(_) => text(attach, "align")
+            .ok()
+            .and_then(tomori_protocol::Align::parse)
+            .ok_or("attach's align is start, middle or end.")?,
+    };
+    Ok((to.to_owned(), edge, align))
 }
 
 /// The schema of a wall's attachment to another: the wall it is attached to, by identity or name, the edge of that wall
@@ -663,6 +739,8 @@ async fn call(
         "panels" => session.and_then(|session| hub.tool_panels(session).map(structured)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
+        "create_layout" => session.and_then(|session| create_layout(hub, session, arguments)),
+        "remove_layout" => session.and_then(|session| remove_layout(hub, session, arguments)),
         "add_wall" => session.and_then(|session| add_wall(hub, session, arguments)),
         "remove_wall" => session.and_then(|session| remove_wall(hub, session, arguments)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
@@ -902,24 +980,8 @@ fn joining(arguments: &Value) -> Result<Option<crate::hub::tools::Joining>, Stri
     let attach = match arguments.get("attach") {
         None | Some(Value::Null) => None,
         Some(attach) => {
-            let to = text(attach, "to")?;
-            crate::limits::check(to, crate::limits::IDENTIFIER_BYTES, "to")?;
-            let edge = text(attach, "edge")
-                .ok()
-                .and_then(tomori_protocol::Edge::parse)
-                .ok_or("attach's edge is left, right, top or bottom.")?;
-            let align = match attach.get("align") {
-                None | Some(Value::Null) => tomori_protocol::Align::Start,
-                Some(_) => text(attach, "align")
-                    .ok()
-                    .and_then(tomori_protocol::Align::parse)
-                    .ok_or("attach's align is start, middle or end.")?,
-            };
-            Some(crate::hub::tools::Joining::Attach {
-                to: to.to_owned(),
-                edge,
-                align,
-            })
+            let (to, edge, align) = attachment(attach)?;
+            Some(crate::hub::tools::Joining::Attach { to, edge, align })
         }
     };
     match (attach, detach) {
@@ -933,13 +995,25 @@ fn joining(arguments: &Value) -> Result<Option<crate::hub::tools::Joining>, Stri
 /// The `add_wall` tool.
 fn add_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
     let place = optional_identifier(arguments, "place")?;
+    if metres(arguments)?.width.is_some() {
+        return Err("Give a new wall its slots' size, not its width.".to_owned());
+    }
+    let (layout, ..) = new_layout(arguments)?;
+    hub.agent_add_wall(session, place, layout).map(structured)
+}
+
+/// The layout a new wall's `arguments` ask for, as `add_wall` and each wall of `create_layout` take them, by default three
+/// columns of two rows of standard slots, flat; with the width in metres they ask it to be, and whether they say its
+/// slots' size, by scale, width or slot_width and slot_height.
+fn new_layout(arguments: &Value) -> Result<(crate::stage::Layout, Option<f32>, bool), String> {
     let flat = crate::stage::Layout::FLAT;
     let ((columns, rows), scale, radius) = wall_layout(arguments)?;
     let mut aspect = optional_aspect(arguments)?.flatten();
+    let sized = scale.is_some();
     let mut scale = scale.unwrap_or(flat.scale);
     let metres = metres(arguments)?;
-    if metres.width.is_some() {
-        return Err("Give a new wall its slots' size, not its width.".to_owned());
+    if metres.width.is_some() && sized {
+        return Err("Say either scale or width, not both.".to_owned());
     }
     if metres.slot_width.is_some() || metres.slot_height.is_some() {
         if arguments.get("scale").is_some_and(|value| !value.is_null()) || aspect.is_some() {
@@ -959,7 +1033,70 @@ fn add_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         aspect,
         radius: radius.unwrap_or(flat.radius),
     };
-    hub.agent_add_wall(session, place, layout).map(structured)
+    let sized = sized
+        || metres.width.is_some()
+        || metres.slot_width.is_some()
+        || metres.slot_height.is_some();
+    Ok((layout, metres.width, sized))
+}
+
+/// The `create_layout` tool: its walls, each with the agent's own id for it, laid out as `add_wall`'s are, and each
+/// after the first attached to an earlier one by that id, curved as the first is unless it says otherwise.
+fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let place = optional_identifier(arguments, "place")?;
+    let walls = arguments
+        .get("walls")
+        .and_then(Value::as_array)
+        .filter(|walls| (1..=crate::stage::LAYOUT_WALLS).contains(&walls.len()))
+        .ok_or_else(|| {
+            format!(
+                "This tool needs walls, a list of from 1 to {} walls.",
+                crate::stage::LAYOUT_WALLS
+            )
+        })?;
+    let mut planned = Vec::with_capacity(walls.len());
+    for wall in walls {
+        let id = text(wall, "id")?;
+        let id = crate::stage::slug(id).ok_or_else(|| {
+            format!(
+                "A wall's id is from 1 to 32 letters, digits, - and _, not {:?}.",
+                crate::space::one_line(id, 40)
+            )
+        })?;
+        let (mut layout, width, sized) = new_layout(wall)?;
+        // Curved as the first is, unless it says otherwise.
+        if let Some(first) = planned
+            .first()
+            .map(|first: &crate::stage::Planned| first.layout)
+            && wall.get("radius").is_none_or(Value::is_null)
+        {
+            layout.radius = first.radius;
+        }
+        let attach = match wall.get("attach") {
+            None | Some(Value::Null) => None,
+            Some(attach) => {
+                let (to, edge, align) = attachment(attach)?;
+                let to = crate::stage::slug(&to).unwrap_or(to);
+                Some((to, edge, align))
+            }
+        };
+        planned.push(crate::stage::Planned {
+            id,
+            layout,
+            width,
+            sized,
+            attach,
+        });
+    }
+    hub.agent_create_layout(session, place, planned)
+        .map(structured)
+}
+
+/// The `remove_layout` tool.
+fn remove_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let group = text(arguments, "group")?;
+    crate::limits::check(group, crate::limits::IDENTIFIER_BYTES, "group")?;
+    hub.agent_remove_layout(session, group).map(structured)
 }
 
 /// The `remove_wall` tool.

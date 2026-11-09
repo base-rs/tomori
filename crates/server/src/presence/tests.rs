@@ -768,12 +768,26 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
     // Named, it is still that wall, however far.
     assert_eq!(
         destination(
-            &Placement::Wall("environment wall 1".into()),
+            &Placement::Wall("environment wall 1".into(), None),
             Some(&looking(home, far_slot)),
             &[],
             &projection,
         ),
         Ok(onto("environment-0", None))
+    );
+    // Named with a slot, into that slot; a slot past its last is refused.
+    let named = |slot: u32| {
+        destination(
+            &Placement::Wall("environment wall 1".into(), Some(slot)),
+            None,
+            &[],
+            &projection,
+        )
+    };
+    assert_eq!(named(5), Ok(onto("environment-0", Some(5))));
+    assert_eq!(
+        named(6),
+        Err("The environment wall 1 has no slot 6: its slots are numbered from 0 to 5.".to_owned())
     );
     // A wall near enough to read, looked at, is still chosen, in the empty slot looked at.
     let readable = wall_at("environment-0", [0.0, 1.6, -3.8]);
@@ -908,4 +922,54 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let away = agent(&tomori_protocol::Anchors::new(), Some(ahead));
     assert_eq!(away["at_home"], false);
     assert_eq!(away["position"], json!([1.0, 1.4, -1.5]));
+}
+
+#[test]
+fn a_layout_stands_in_front_of_whoever_it_is_for_as_far_as_it_takes_to_be_seen_whole_then_nearer() {
+    let eyes = [1.0, 1.6, 2.0];
+    let ahead = |target: [f32; 3]| looking(eyes, target);
+    let distance = |pose: &Pose| {
+        let [x, _, z] = pose.position;
+        (x - eyes[0]).hypot(z - eyes[2])
+    };
+    // A narrow flat layout, in front, a little below the eyes, at 1.5 m and then nearer.
+    let front = layout_middles(&ahead([1.0, 1.6, -5.0]), false, 1.0, None);
+    let distances: Vec<f32> = front.iter().map(distance).collect();
+    assert!((distances[0] - 1.5).abs() < 1e-4 && (distances[1] - 1.2).abs() < 1e-4);
+    assert_eq!(distances.len(), 2);
+    assert!(
+        front
+            .iter()
+            .all(|pose| (pose.position[1] - 1.5).abs() < 1e-4 && pose.position[0] == 1.0)
+    );
+    // A wide one, as far as it takes to be seen within about 60°, never beyond 3.5 m, then each nearer distance.
+    let wide = layout_middles(&ahead([1.0, 1.6, -5.0]), false, 3.0, None);
+    assert!((distance(&wide[0]) - 1.5 / 0.577).abs() < 1e-3);
+    assert_eq!(wide.len(), 5);
+    assert!(
+        (distance(&layout_middles(&ahead([1.0, 1.6, -5.0]), false, 9.0, None)[0]) - 3.5).abs()
+            < 1e-4
+    );
+    // Curved, at its radius, its arc about them.
+    let curved = layout_middles(&ahead([1.0, 1.6, -5.0]), false, 9.0, Some(2.2));
+    let distances: Vec<f32> = curved.iter().map(distance).collect();
+    assert!(
+        (distances[0] - 2.2).abs() < 1e-4 && distances.len() == 4,
+        "{distances:?}"
+    );
+    // Looking up or down, as high as they look, within bounds; facing them, upright.
+    let up = layout_middles(&ahead([1.0, 4.0, 0.0]), true, 1.0, None);
+    assert!((up[0].position[1] - 2.2).abs() < 1e-4);
+    let down = layout_middles(&ahead([1.0, 0.0, 0.5]), true, 1.0, None);
+    assert!((down[0].position[1] - 0.8).abs() < 1e-4);
+    let level = layout_middles(&ahead([1.0, 1.3, 0.0]), true, 1.0, None);
+    assert!(
+        (level[0].position[1] - (1.6 - 0.3 * 1.5 / 2.0)).abs() < 1e-3,
+        "{:?}",
+        level[0]
+    );
+    assert!(
+        up.iter()
+            .all(|pose| pose.orientation[0] == 0.0 && pose.orientation[2] == 0.0)
+    );
 }

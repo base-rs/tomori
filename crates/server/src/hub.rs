@@ -35,6 +35,7 @@ pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
+mod layouts;
 mod pairing_window;
 mod provenance;
 pub(crate) mod tools;
