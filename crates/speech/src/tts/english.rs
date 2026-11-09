@@ -103,10 +103,12 @@ fn replace_all(text: String, regex: &Regex, replace: impl Fn(&Captures) -> Strin
 
 /// `text` as misaki reads it best.
 pub(crate) fn normalize(text: &str) -> String {
+    // Dates and times are read from ASCII digits only, as `\d` is any script's digit, which `parse` refuses.
     static ADDRESS: LazyLock<Regex> = LazyLock::new(|| pattern(r"\bhttps?://"));
-    static DATE: LazyLock<Regex> = LazyLock::new(|| pattern(r"\b(\d{4})-(\d{2})-(\d{2})\b"));
+    static DATE: LazyLock<Regex> =
+        LazyLock::new(|| pattern(r"\b([0-9]{4})-([0-9]{2})-([0-9]{2})\b"));
     static TIME: LazyLock<Regex> =
-        LazyLock::new(|| pattern(r"\b(\d+(?::\d+)+)\b(\s*(?i:[ap]\.?m)\b)?"));
+        LazyLock::new(|| pattern(r"\b([0-9]+(?::[0-9]+)+)\b(\s*(?i:[ap]\.?m)\b)?"));
     static GENERIC: LazyLock<Regex> = LazyLock::new(|| pattern(r"(\w)<([\w ,&']+)>"));
     static UNIT: LazyLock<Regex> = LazyLock::new(|| {
         pattern(r"\b(\d+(?:\.\d+)?) ?(ms|µs|μs|ns|Hz|kHz|MHz|GHz|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)\b")
@@ -327,6 +329,11 @@ mod tests {
                 "Use e.g. a.m. and/or 50/50 or 1/2.",
                 "Use e.g. a.m. and or 50/50 or 1/2.",
             ),
+            // Digits of other scripts are not read as dates or times.
+            (
+                "At ٣:٤٥, 3:٤ and １２:３４ on ٢٠٢٦-١١-١٠ or 2026-١١-10.",
+                "At ٣:٤٥, 3:٤ and １２:３４ on ٢٠٢٦-١١-١٠ or 2026-١١-10.",
+            ),
             // Whitespace.
             ("  Hello\n   there.  ", "Hello there."),
         ] {
@@ -501,6 +508,31 @@ mod tests {
             english.sentences("The README, by Hinoki."),
             ["ðə ɹˈid ɪt, bI hˈinˌOki."]
         );
+    }
+
+    #[test]
+    fn phonemizes_any_text_without_failing() {
+        // A panic would stop synthesis until the server restarts, so text the agent might write, however odd, is phonemized, in a bounded time and to bounded phonemes.
+        let long = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0123456789+/".repeat(40);
+        for text in [
+            "",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            "日本語のテキストです。 Привет, мир! مرحبا",
+            "٢٠٢٦-١١-١٠ ١٢:٣٤ 3:٤ 2026-١١-10 １２:３４",
+            "99:99:99:99 12:30pm 1234567890123456789012345678901234567890",
+            "fn main() { let x: Vec<Vec<u8>> = vec![1_000, 0x1F]; }",
+            "[foo](/bar/) [x](/) [](/a/) ](/ \u{E000}\u{200B}a\u{0301}",
+            "https://example.com/a/b/c?x=1&y=2#frag",
+            &long,
+        ] {
+            let started = std::time::Instant::now();
+            let spoken: usize = sentences(text).iter().map(|s| s.chars().count()).sum();
+            assert!(spoken <= 4 * text.chars().count() + 64, "{text}: {spoken}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "{text}"
+            );
+        }
     }
 
     #[test]
