@@ -15,8 +15,7 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tomori_protocol::{
-    CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, WALL_SLOTS, Wall, WallKind,
-    WallShape,
+    CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, Wall, WallKind, wall as layout,
 };
 
 use crate::{
@@ -34,21 +33,19 @@ use crate::{
 /// A panel's face in a wall's slot, in cells: a title, a row of metadata, a rule, and its body.
 pub const COLUMNS: usize = 34;
 pub const BODY_ROWS: usize = 12;
+#[cfg(test)]
 const ROWS: usize = BODY_ROWS + 3;
 /// A floating panel's face fits its text, within these bounds, in cells: never narrower or wider, so that it reads at a
 /// comfortable width, nor shorter or taller.
 pub const FIT_COLUMNS: (usize, usize) = (24, 48);
 pub const FIT_ROWS: (usize, usize) = (3, 30);
-/// How a curved wall's slots are sized, against a flat wall's: smaller, as they stand nearer, and a gap between them, in
-/// metres.
-pub const ARC_SCALE: f32 = 0.7;
-const ARC_GAP: f32 = 0.03;
 /// The furthest along the ray a slot is aimed at to put a panel carried in it, in metres.
 const AIM_REACH: f32 = 8.0;
 /// How far beyond a slot's edges the ray still aims at it, so that the gaps between slots aim at one, in metres.
 const AIM_MARGIN: f32 = 0.03;
-/// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m.
-pub const PIXEL: f32 = 0.0019;
+/// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m. Walls
+/// are laid out in it, as `tomori_protocol::wall` lays them out for the server and every client alike.
+pub const PIXEL: f32 = layout::PIXEL;
 const PADDING: (usize, usize) = (6, 5);
 
 /// A code panel's face, in cells: a title, a row of its language, length and age, a rule, its rows of code, each line
@@ -72,18 +69,12 @@ const _: () = assert!(SLOT_CODE_ROWS * (CODE_COLUMNS - GUTTER) <= 720);
 pub const CODE_PIXEL: f32 = PIXEL * (COLUMNS * CELL_WIDTH + 2 * PADDING.0) as f32
     / (CODE_COLUMNS * CELL_WIDTH + 2 * CODE_PADDING.0) as f32;
 
-/// A wall's slots: [`WALL_SLOTS`] in columns of this many, the first at the top left as seen from in front.
-const SLOT_COLUMNS: u32 = 3;
-/// A wall's face, in cells, and its padding, which make it three panels wide and two high, with [`GAP`] between and
-/// around them and its label above them.
-const WALL_COLUMNS: usize = 116;
-const WALL_ROWS: usize = 38;
+/// A flat wall's padding, in font pixels, inside which its board is cells of text, as `tomori_protocol::wall` measures
+/// it; its label is indented by a gutter.
 const WALL_PADDING: (usize, usize) = (3, 3);
-/// Font pixels between slots and around them, and between a wall's label and its first row of slots.
-const GAP: usize = 24;
-const LABEL_GAP: usize = 12;
+const LABEL_INDENT: usize = 24;
 /// How far in front of its wall a panel stands, so that it is drawn over it.
-const LIFT: f32 = 0.01;
+const LIFT: f32 = layout::LIFT;
 
 /// How far from a wall's plane, and beyond its edges, a panel let go snaps back into its layout, in metres.
 const SNAP_DEPTH: f32 = 0.4;
@@ -157,11 +148,74 @@ pub enum Target {
     Free(Pose),
 }
 
-/// How a panel's face is sized: to its wall's slot, or, floating, to fit its text.
+/// How a panel's face is sized: to its wall's slot, of the cells a slot of its shape holds, or, floating, to fit its
+/// text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fit {
-    Slot,
+    Slot(Cells),
     Text,
+}
+
+impl Fit {
+    /// A standard slot's.
+    pub const SLOT: Fit = Fit::Slot(Cells::STANDARD);
+}
+
+/// The cells a panel's face has in a wall's slot, at the size of the wall's text: a text panel's columns and rows of
+/// body, and a code panel's columns and rows of code. A slot taller or wider than a standard one, of a wall's own
+/// [`Wall::aspect`], holds more rows or more columns, so that its text wraps to its width and fills its height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Cells {
+    pub columns: usize,
+    pub body: usize,
+    pub code_columns: usize,
+    pub code_rows: usize,
+}
+
+impl Cells {
+    /// A standard slot's: 34 columns of 12 rows of body, and 48 columns of 16 rows of code.
+    pub const STANDARD: Cells = Cells {
+        columns: COLUMNS,
+        body: BODY_ROWS,
+        code_columns: CODE_COLUMNS,
+        code_rows: SLOT_CODE_ROWS,
+    };
+
+    /// A slot of `wall`'s: as many cells as fit in it at its text's size, and never fewer than a standard slot's.
+    pub fn of(wall: &Wall) -> Cells {
+        let (width, height) = slot_unit(wall);
+        let (width, height) = (width / PIXEL, height / PIXEL);
+        let columns =
+            ((width - 2.0 * PADDING.0 as f32) / CELL_WIDTH as f32 + 1e-3).floor() as usize;
+        let rows = ((height - 2.0 * PADDING.1 as f32) / CELL_HEIGHT as f32 + 1e-3).floor() as usize;
+        // A code panel's cells are smaller, in its own font pixels.
+        let code = PIXEL / CODE_PIXEL;
+        let code_columns = ((width * code - 2.0 * CODE_PADDING.0 as f32) / CELL_WIDTH as f32 + 1e-3)
+            .floor() as usize;
+        let code_rows = ((height * code - 2.0 * CODE_PADDING.1 as f32) / CELL_HEIGHT as f32 + 1e-3)
+            .floor() as usize;
+        Cells {
+            columns: columns.max(COLUMNS),
+            body: rows.saturating_sub(3).max(BODY_ROWS),
+            code_columns: code_columns.max(CODE_COLUMNS),
+            code_rows: code_rows.saturating_sub(4).max(SLOT_CODE_ROWS),
+        }
+    }
+}
+
+/// A slot of `wall`'s, in metres at its text's size, scale 1: as a slot's frame, scaled by it, measures it.
+fn slot_unit(wall: &Wall) -> (f32, f32) {
+    let (width, height) = wall.slot_size();
+    let scale = wall.scale();
+    (width / scale, height / scale)
+}
+
+/// How many columns of code a code panel's face has, sized as `fit` says.
+fn code_columns(fit: Fit) -> usize {
+    match fit {
+        Fit::Slot(cells) => cells.code_columns,
+        Fit::Text => CODE_COLUMNS,
+    }
 }
 
 /// The size of a panel's face of `columns` and `body` rows, in metres.
@@ -215,7 +269,7 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
         return image::fit(panel, image, fit);
     }
     match fit {
-        Fit::Slot => (COLUMNS, BODY_ROWS),
+        Fit::Slot(cells) => (cells.columns, cells.body),
         Fit::Text => {
             let widest = body_rows(panel, FIT_COLUMNS.1)
                 .iter()
@@ -253,7 +307,10 @@ fn heading_width(panel: &Panel) -> usize {
 /// The size of `panel`, in metres, sized as `fit` says: a code panel floating is as tall as its code, as its
 /// [`CodeLayout`] says.
 pub fn fitted_size(panel: &Panel, fit: Fit) -> (f32, f32) {
-    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    let layout = panel
+        .code
+        .as_ref()
+        .map(|code| CodeLayout::new(panel, code, code_columns(fit)));
     size_of(panel, fit, layout.as_ref())
 }
 
@@ -261,7 +318,7 @@ pub fn fitted_size(panel: &Panel, fit: Fit) -> (f32, f32) {
 fn size_of(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> (f32, f32) {
     match (layout, fit) {
         (Some(layout), Fit::Text) => {
-            let width = CODE_COLUMNS * CELL_WIDTH + 2 * CODE_PADDING.0;
+            let width = layout.columns * CELL_WIDTH + 2 * CODE_PADDING.0;
             let height = layout.face_rows(fit) * CELL_HEIGHT + 2 * CODE_PADDING.1;
             (width as f32 * CODE_PIXEL, height as f32 * CODE_PIXEL)
         }
@@ -284,39 +341,9 @@ fn most_scroll(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> usize {
     }
 }
 
-/// The size of a wall, in metres.
-pub fn wall_size() -> (f32, f32) {
-    let width = WALL_COLUMNS * CELL_WIDTH + 2 * WALL_PADDING.0;
-    let height = WALL_ROWS * CELL_HEIGHT + 2 * WALL_PADDING.1;
-    (width as f32 * PIXEL, height as f32 * PIXEL)
-}
-
-/// Where `slot` is on its wall, in font pixels from the wall's top left corner: its left and top edges.
-fn slot_pixels(slot: u32) -> (usize, usize) {
-    let (width, height) = (
-        COLUMNS * CELL_WIDTH + 2 * PADDING.0,
-        ROWS * CELL_HEIGHT + 2 * PADDING.1,
-    );
-    let (column, row) = (
-        (slot % SLOT_COLUMNS) as usize,
-        (slot / SLOT_COLUMNS) as usize,
-    );
-    (
-        GAP + column * (width + GAP),
-        WALL_PADDING.1 + CELL_HEIGHT + LABEL_GAP + row * (height + GAP),
-    )
-}
-
-/// The middle of `slot`, in its wall's frame, just in front of it.
-pub fn slot_offset(slot: u32) -> Vec3 {
-    let (left, top) = slot_pixels(slot);
-    let (wall_width, wall_height) = wall_size();
-    let (width, height) = panel_size();
-    Vec3::new(
-        left as f32 * PIXEL + width / 2.0 - wall_width / 2.0,
-        wall_height / 2.0 - top as f32 * PIXEL - height / 2.0,
-        LIFT,
-    )
+/// The size of `wall`, in metres: a flat wall's board, or the span of a curved wall's slots.
+pub fn wall_size(wall: &Wall) -> (f32, f32) {
+    wall.size()
 }
 
 /// What a panel is called, as the recording indicator and status line name it: its title, or else the start of its
@@ -398,7 +425,10 @@ pub fn palette(kind: TokenKind) -> crate::ui_text::Rgba {
 /// where it is longer; a code panel's, its code face. A `highlighted` panel, pointed at or carried, is framed brightly,
 /// and the `newest` on its wall in blue.
 pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas {
-    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    let layout = panel
+        .code
+        .as_ref()
+        .map(|code| CodeLayout::new(panel, code, code_columns(fit)));
     scrolled_face(panel, highlighted, newest, fit, 0, layout.as_ref())
 }
 
@@ -504,11 +534,13 @@ pub struct CodeLayout {
     rows: Vec<CodeRow>,
     lines: usize,
     unsent: usize,
+    /// The columns of its face, its gutter and its code.
+    columns: usize,
 }
 
 impl CodeLayout {
-    /// The layout of `panel`'s code, `code`.
-    pub fn new(panel: &Panel, code: &Code) -> Self {
+    /// The layout of `panel`'s code, `code`, on a face `columns` wide, its gutter and its code.
+    pub fn new(panel: &Panel, code: &Code, columns: usize) -> Self {
         // The kind of each character of the body, in order.
         let mut kinds = vec![TokenKind::Plain; panel.body.chars().count()];
         if tomori_protocol::valid_spans(&panel.body, &code.spans) {
@@ -519,7 +551,7 @@ impl CodeLayout {
         let mut at = 0;
         let lines: Vec<&str> = panel.body.split('\n').take(CODE_LINES).collect();
         let step = indent_step(&lines);
-        let room = CODE_COLUMNS - GUTTER;
+        let room = columns - GUTTER;
         let mut rows = Vec::new();
         for (number, line) in lines.iter().enumerate() {
             let mut spans: Vec<crate::ui_text::Span> = Vec::new();
@@ -557,6 +589,7 @@ impl CodeLayout {
             rows,
             lines: lines.len(),
             unsent: (code.lines as usize).saturating_sub(lines.len()),
+            columns,
         }
     }
 
@@ -564,7 +597,7 @@ impl CodeLayout {
     /// [`FIT_CODE_ROWS`].
     fn height(&self, fit: Fit) -> usize {
         match fit {
-            Fit::Slot => SLOT_CODE_ROWS,
+            Fit::Slot(cells) => cells.code_rows,
             Fit::Text => self.rows.len().clamp(FIT_CODE_ROWS.0, FIT_CODE_ROWS.1),
         }
     }
@@ -572,7 +605,7 @@ impl CodeLayout {
     /// Whether its face, sized as `fit` says, has a row below its code saying what there is above and below it: always
     /// in a slot, and floating, only where it does not show all of its block.
     fn footed(&self, fit: Fit) -> bool {
-        fit == Fit::Slot || self.rows.len() > self.height(fit) || self.unsent > 0
+        matches!(fit, Fit::Slot(_)) || self.rows.len() > self.height(fit) || self.unsent > 0
     }
 
     /// How many rows its face has, sized as `fit` says: its title, metadata and rule, its rows of code, and the row
@@ -595,14 +628,15 @@ impl CodeLayout {
 fn code_face(panel: &Panel, layout: &CodeLayout, fit: Fit, scroll: usize) -> Canvas {
     let height = layout.height(fit);
     let scroll = scroll.min(layout.most_scroll(fit));
-    let room = CODE_COLUMNS - GUTTER;
-    let mut canvas = Canvas::new(CODE_COLUMNS, CODE_PIXEL);
+    let columns = layout.columns;
+    let room = columns - GUTTER;
+    let mut canvas = Canvas::new(columns, CODE_PIXEL);
     canvas.padding = CODE_PADDING;
     canvas.background = [0.015, 0.025, 0.045, 0.95];
     let mut rows = vec![
-        Row::text(&panel.title, Style::bold(BRIGHT), CODE_COLUMNS),
-        Row::text(&about(panel), Style::plain(DIM), CODE_COLUMNS),
-        Row::text(&"─".repeat(CODE_COLUMNS), Style::plain(DIM), CODE_COLUMNS),
+        Row::text(&panel.title, Style::bold(BRIGHT), columns),
+        Row::text(&about(panel), Style::plain(DIM), columns),
+        Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
     ];
     let first = layout.rows.get(scroll).map(|row| row.line);
     let mut at = scroll;
@@ -655,11 +689,11 @@ fn code_face(panel: &Panel, layout: &CodeLayout, fit: Fit, scroll: usize) -> Can
         rows.push(Row::text(
             &around(layout, scroll, at),
             Style::plain(DIM),
-            CODE_COLUMNS,
+            columns,
         ));
     }
     canvas.rows = rows;
-    canvas.shapes = scroll_bar(CODE_COLUMNS, height, layout.rows.len(), scroll);
+    canvas.shapes = scroll_bar(columns, height, layout.rows.len(), scroll);
     canvas
 }
 
@@ -768,33 +802,33 @@ fn wall_border(wall: &Wall) -> [f32; 4] {
     }
 }
 
-/// A wall's own face: a translucent board labelled with whose it is, its slots faintly marked.
+/// A flat wall's own face, at scale 1: a translucent board labelled with whose it is, its slots, of its grid, faintly
+/// marked, laid out as `tomori_protocol::wall` lays them out.
 fn wall_face(wall: &Wall) -> Canvas {
-    let mut canvas = Canvas::new(WALL_COLUMNS, PIXEL);
+    let grid = wall.grid();
+    let (columns, rows) = wall.board_cells();
+    let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = WALL_PADDING;
     canvas.background = [0.01, 0.02, 0.04, 0.5];
     let (label, color) = wall_label(wall);
     let border = wall_border(wall);
     canvas.border = Some(border);
-    let label = Row::text(label, Style::bold(color), WALL_COLUMNS);
+    let label = Row::text(label, Style::bold(color), columns);
     canvas.rows = vec![Row::new(
-        std::iter::repeat_n((' ', Style::plain(color)), GAP / CELL_WIDTH)
+        std::iter::repeat_n((' ', Style::plain(color)), LABEL_INDENT / CELL_WIDTH)
             .chain(label.cells)
+            .take(columns)
             .collect(),
     )];
-    canvas.rows.resize(WALL_ROWS, Row::default());
-    let (width, height) = (
-        COLUMNS * CELL_WIDTH + 2 * PADDING.0,
-        ROWS * CELL_HEIGHT + 2 * PADDING.1,
-    );
-    canvas.shapes = (0..WALL_SLOTS)
+    canvas.rows.resize(rows, Row::default());
+    canvas.shapes = (0..grid.slots())
         .map(|slot| {
-            let (left, top) = slot_pixels(slot);
+            let (left, top, width, height) = wall.slot_rect(slot);
             Rect {
-                x: (left - WALL_PADDING.0) as f32,
-                y: (top - WALL_PADDING.1) as f32,
-                width: width as f32,
-                height: height as f32,
+                x: left - WALL_PADDING.0 as f32,
+                y: top - WALL_PADDING.1 as f32,
+                width,
+                height,
                 color: SLOT,
             }
         })
@@ -802,20 +836,20 @@ fn wall_face(wall: &Wall) -> Canvas {
     canvas
 }
 
-/// A slot's own board on a curved wall: as large as a panel in it, faintly marked.
-fn slot_board(border: [f32; 4]) -> Canvas {
-    let mut canvas = Canvas::new(COLUMNS, PIXEL);
+/// A slot's own board on a curved wall: as large as a panel in a slot of `cells`, faintly marked.
+fn slot_board(border: [f32; 4], cells: Cells) -> Canvas {
+    let mut canvas = Canvas::new(cells.columns, PIXEL);
     canvas.padding = PADDING;
     canvas.background = [0.01, 0.02, 0.04, 0.45];
     canvas.border = Some(border);
-    canvas.rows = vec![Row::default(); ROWS];
+    canvas.rows = vec![Row::default(); cells.body + 3];
     canvas
 }
 
-/// The outline a panel carried shows in the slot it would take if let go: as large as a panel in it, framed brightly
-/// and faintly filled.
-fn ghost() -> Canvas {
-    let mut canvas = slot_board(HIGHLIGHT);
+/// The outline a panel carried shows in the slot of `cells` it would take if let go: as large as a panel in it, framed
+/// brightly and faintly filled.
+fn ghost(cells: Cells) -> Canvas {
+    let mut canvas = slot_board(HIGHLIGHT, cells);
     canvas.background = GHOST;
     canvas
 }
@@ -839,33 +873,23 @@ fn wall_label(wall: &Wall) -> (&'static str, [f32; 4]) {
 }
 
 /// The radius of a curved wall's arc, if `wall` is one this client can draw curved: one whose radius is long enough
-/// for its slots to stand side by side. Any other shape is drawn flat.
+/// for its slots to stand side by side, around no more than half a circle. Any other shape is drawn flat.
 fn arc(wall: &Wall) -> Option<f32> {
-    match wall.shape {
-        WallShape::Arc { radius } if radius.is_finite() && radius >= 1.0 => Some(radius),
-        _ => None,
-    }
+    wall.radius()
 }
 
 /// Where each of a wall's slots stands, given its `frame`: the middle of a panel in it, facing out, scaled as the
-/// panel in it is drawn. A flat wall's are in its plane, just in front of it; a curved wall's stand along its arc,
-/// left to right as seen from in front, each turned to face the point the arc curves about.
+/// panel in it is drawn, as `tomori_protocol::wall` lays them out. A flat wall's are in its plane, just in front of it;
+/// a curved wall's stand along its arc, left to right as seen from in front, each turned to face the line the arc
+/// curves about, its rows one above another.
 pub fn slot_frames(wall: &Wall, frame: Mat4) -> Vec<Mat4> {
-    let Some(radius) = arc(wall) else {
-        return (0..WALL_SLOTS)
-            .map(|slot| frame * Mat4::from_translation(slot_offset(slot)))
-            .collect();
-    };
-    let pitch = (panel_size().0 * ARC_SCALE + ARC_GAP) / radius;
-    (0..WALL_SLOTS)
+    wall.slot_frames()
+        .into_iter()
         .map(|slot| {
-            let angle = (slot as f32 - (WALL_SLOTS as f32 - 1.0) / 2.0) * pitch;
-            let at = Vec3::new(radius * angle.sin(), 0.0, radius * (1.0 - angle.cos()));
             frame
-                * Mat4::from_translation(at)
-                * Mat4::from_rotation_y(-angle)
-                * Mat4::from_translation(Vec3::Z * LIFT)
-                * Mat4::from_scale(Vec3::splat(ARC_SCALE))
+                * Mat4::from_translation(Vec3::from_array(slot.position))
+                * Mat4::from_rotation_y(slot.yaw)
+                * Mat4::from_scale(Vec3::splat(slot.scale))
         })
         .collect()
 }
@@ -1086,7 +1110,7 @@ fn aim(walls: &[(&Wall, Mat4)], ray: &Ray) -> Option<Aim> {
                 .enumerate()
                 .filter_map(move |(slot, model)| {
                     let scale = model.x_axis.truncate().length();
-                    hit_within(model, panel_size(), margin / scale, ray)
+                    hit_within(model, slot_unit(wall), margin / scale, ray)
                         .filter(|distance| *distance <= AIM_REACH)
                         .map(|distance| {
                             (
@@ -1108,10 +1132,10 @@ fn aim(walls: &[(&Wall, Mat4)], ray: &Ray) -> Option<Aim> {
 /// The slot a panel carried at `centre` snaps into, if it is near enough to one: within [`SNAP_DEPTH`] of its plane and
 /// [`SNAP_MARGIN`] of its edges, the nearest such slot.
 fn snap(walls: &[(&Wall, Mat4)], centre: Vec3) -> Option<Aim> {
-    let (width, height) = panel_size();
     walls
         .iter()
         .flat_map(|(wall, frame)| {
+            let (width, height) = slot_unit(wall);
             slot_frames(wall, *frame)
                 .into_iter()
                 .enumerate()
@@ -1261,12 +1285,12 @@ pub struct Projector {
     limits: HashMap<String, usize>,
 }
 
-/// A code panel's code laid out, and the body and code it was laid out from.
+/// A code panel's code laid out, at each width its faces have had, and the body and code it was laid out from.
 #[derive(Clone, Debug)]
 struct Laid {
     body: String,
     code: Code,
-    layout: Arc<CodeLayout>,
+    layouts: Vec<Arc<CodeLayout>>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -1365,13 +1389,14 @@ impl Projector {
                     .map(|(model, fit)| (panel, model, fit))
             })
             .collect();
+        self.lay_out_standing(&standing);
         // How far each panel shown scrolls, as it is sized now, and the one scrolled, within that.
         self.limits = standing
             .iter()
             .map(|(panel, _, fit)| {
                 (
                     panel.id.clone(),
-                    most_scroll(panel, *fit, self.layout(&panel.id)),
+                    most_scroll(panel, *fit, self.layout(&panel.id, *fit)),
                 )
             })
             .collect();
@@ -1513,7 +1538,7 @@ impl Projector {
                 newest(panel),
                 fit,
                 self.scroll(&panel.id),
-                self.layout(&panel.id),
+                self.layout(&panel.id, fit),
             )),
             model: Some(model),
         };
@@ -1534,25 +1559,22 @@ impl Projector {
                 let mut sheets = match arc(wall) {
                     None => vec![Sheet {
                         canvas: Some(wall_face(wall)),
-                        model: Some(*frame),
+                        model: Some(*frame * Mat4::from_scale(Vec3::splat(wall.scale()))),
                     }],
                     Some(_) => {
-                        let (_, height) = panel_size();
+                        let (_, height) = wall.size();
                         let mut boards: Vec<Sheet> = slot_frames(wall, *frame)
                             .into_iter()
                             .map(|model| Sheet {
-                                canvas: Some(slot_board(wall_border(wall))),
+                                canvas: Some(slot_board(wall_border(wall), Cells::of(wall))),
                                 model: Some(model),
                             })
                             .collect();
-                        // Below the row, since the status pill stands just above it from home.
+                        // Below its rows, since the status pill stands just above the Tomori wall from home.
                         boards.push(Sheet {
                             canvas: Some(arc_label(wall)),
                             model: Some(
-                                *frame
-                                    * Mat4::from_translation(
-                                        -Vec3::Y * (height * ARC_SCALE / 2.0 + 0.04),
-                                    ),
+                                *frame * Mat4::from_translation(-Vec3::Y * (height / 2.0 + 0.04)),
                             ),
                         });
                         boards
@@ -1567,7 +1589,7 @@ impl Projector {
                 // The outline of the slot a panel carried would take, over any panel in it.
                 if let Some(aim) = self.aim.as_ref().filter(|aim| aim.wall == wall.id) {
                     sheets.push(Sheet {
-                        canvas: Some(ghost()),
+                        canvas: Some(ghost(Cells::of(wall))),
                         model: Some(aim.model * Mat4::from_translation(Vec3::Z * LIFT)),
                     });
                 }
@@ -1604,8 +1626,11 @@ impl Projector {
         match (&self.held, &self.pending) {
             (Some(held), _) if held.panel == panel.id => return Some((held.model, Fit::Text)),
             (_, Some(pending)) if pending.panel == panel.id => {
-                let fit = match pending.target {
-                    Target::Wall(..) => Fit::Slot,
+                let fit = match &pending.target {
+                    Target::Wall(on, _) => walls
+                        .iter()
+                        .find(|(shown, _)| shown.id == *on)
+                        .map_or(Fit::SLOT, |(wall, _)| Fit::Slot(Cells::of(wall))),
                     Target::Free(_) => Fit::Text,
                 };
                 return Some((pending.model, fit));
@@ -1613,10 +1638,14 @@ impl Projector {
             _ => {}
         }
         match &panel.place {
-            Place::Wall { wall, slot } if *slot < WALL_SLOTS => walls
+            Place::Wall { wall, slot } => walls
                 .iter()
                 .find(|(shown, _)| shown.id == *wall)
-                .map(|(wall, frame)| (slot_frames(wall, *frame)[*slot as usize], Fit::Slot)),
+                .and_then(|(wall, frame)| {
+                    slot_frames(wall, *frame)
+                        .get(*slot as usize)
+                        .map(|model| (*model, Fit::Slot(Cells::of(wall))))
+                }),
             Place::Free { pose } => model(pose).map(|model| (model, Fit::Text)),
             _ => None,
         }
@@ -1637,6 +1666,19 @@ impl Projector {
         let limit = self.limits.get(panel).copied().unwrap_or_default();
         let scroll = self.scrolls.get(panel).copied().unwrap_or_default();
         (scroll.round() as usize).min(limit)
+    }
+
+    /// Lay out the code of each of `standing`'s code panels at the width its face has, where it is not already.
+    fn lay_out_standing(&mut self, standing: &[Standing]) {
+        for (panel, _, fit) in standing {
+            let columns = code_columns(*fit);
+            if let (Some(code), Some(laid)) = (&panel.code, self.layouts.get_mut(&panel.id))
+                && !laid.layouts.iter().any(|layout| layout.columns == columns)
+            {
+                laid.layouts
+                    .push(Arc::new(CodeLayout::new(panel, code, columns)));
+            }
+        }
     }
 
     /// Lay out the code of each of `projection`'s code panels whose code has changed, or is new, and forget those of
@@ -1660,21 +1702,27 @@ impl Projector {
                 let laid = Laid {
                     body: panel.body.clone(),
                     code: code.clone(),
-                    layout: Arc::new(CodeLayout::new(panel, code)),
+                    layouts: vec![Arc::new(CodeLayout::new(panel, code, CODE_COLUMNS))],
                 };
                 self.layouts.insert(panel.id.clone(), laid);
             }
         }
     }
 
-    /// The layout of `panel`'s code, if it is a code panel.
-    fn layout(&self, panel: &str) -> Option<&CodeLayout> {
-        self.layouts.get(panel).map(|laid| laid.layout.as_ref())
+    /// The layout of `panel`'s code, if it is a code panel, as its face sized as `fit` says lays it out.
+    fn layout(&self, panel: &str, fit: Fit) -> Option<&CodeLayout> {
+        let columns = code_columns(fit);
+        let laid = self.layouts.get(panel)?;
+        laid.layouts
+            .iter()
+            .find(|layout| layout.columns == columns)
+            .or(laid.layouts.first())
+            .map(Arc::as_ref)
     }
 
     /// The size of `panel`, in metres, sized as `fit` says, as it is drawn.
     fn size(&self, panel: &Panel, fit: Fit) -> (f32, f32) {
-        size_of(panel, fit, self.layout(&panel.id))
+        size_of(panel, fit, self.layout(&panel.id, fit))
     }
 }
 

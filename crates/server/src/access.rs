@@ -129,9 +129,11 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::PlaceCard { .. }
         // Visitors watch an environment, but ask nothing of it. See `design/environments.md`.
         | ClientMessage::EnvironmentIntent { .. }
-        // Visitors see what is projected, but move and dismiss nothing.
+        // Visitors see what is projected, but move and dismiss nothing, and change no wall: participants rearrange walls as
+        // they rearrange panels, while only owners add and remove them. See `design/projection.md`.
         | ClientMessage::PlacePanel { .. }
-        | ClientMessage::DismissPanel { .. } => participant,
+        | ClientMessage::DismissPanel { .. }
+        | ClientMessage::SetWall { .. } => participant,
     };
     if permitted {
         None
@@ -269,6 +271,14 @@ mod tests {
             ClientMessage::ClosePairing,
             ClientMessage::FetchImage {
                 image: "0".repeat(64),
+            },
+            ClientMessage::SetWall {
+                wall: "wall-1".into(),
+                grid: None,
+                scale: None,
+                aspect: None,
+                shape: None,
+                pose: None,
             },
         ]
     }

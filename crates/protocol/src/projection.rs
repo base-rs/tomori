@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::Pose;
 
-/// How many panels one wall holds, in slots numbered from 0, the most prominent first: three columns of two rows, read
-/// left to right and then down, as seen from in front of the wall.
+pub mod layout;
+
+pub use layout::{Grid, SlotFrame};
+
+/// How many panels a wall holds unless it says otherwise, in slots numbered from 0, the most prominent first: a flat
+/// wall's three columns of two rows, read left to right and then down, as seen from in front of the wall, or a curved
+/// wall's six in a row. A wall's [`Wall::grid`] says how many it has.
 pub const WALL_SLOTS: u32 = 6;
 
 /// The identity of the Tomori wall, the one wall every space has, which belongs to the space rather than to its
@@ -85,17 +90,18 @@ pub enum WallKind {
     Unknown,
 }
 
-/// How a wall's [`WALL_SLOTS`] slots are laid out about its pose. `Unknown` stands for a shape a newer server sends,
+/// How a wall's slots are laid out about its pose: flat or curved. `Unknown` stands for a shape a newer server sends,
 /// which a client draws as a [`WallShape::Grid`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum WallShape {
-    /// A flat board, three columns of two rows, its middle at the pose.
+    /// A flat board, its middle at the pose: three columns of two rows unless its [`Wall::grid`] says otherwise.
     #[default]
     Grid,
-    /// One row, curved along an arc about a point `radius` metres ahead of the wall, along its pose's +Z, so that each
-    /// slot faces that point: the pose is the middle of the row, between its third and fourth slots.
+    /// Curved along an arc about a vertical line `radius` metres ahead of the wall, along its pose's +Z, so that each
+    /// slot faces that line: the pose is the middle of its slots, six in one row unless its [`Wall::grid`] says
+    /// otherwise, its rows one above another.
     Arc { radius: f32 },
     #[serde(other)]
     Unknown,
@@ -107,7 +113,8 @@ impl WallShape {
     }
 }
 
-/// A wall panels are projected onto, upright, facing along its pose's +Z, in the space's coordinates.
+/// A wall panels are projected onto, upright, facing along its pose's +Z, in the space's coordinates. Where its slots
+/// stand is [`Wall::slot_frames`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Wall {
@@ -120,6 +127,20 @@ pub struct Wall {
     /// How its slots are laid out: a flat grid, unless it says otherwise, as an older server's walls do not.
     #[serde(default, skip_serializing_if = "WallShape::is_grid")]
     pub shape: WallShape,
+    /// How many columns and rows of slots it has, as `[columns, rows]`: its shape's, unless it says otherwise, as an
+    /// older server's walls do not. An older client draws its shape's, and none past them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+    /// How large its slots are, as a proportion of a flat wall's, [`layout::SLOT_SIZE`]: its shape's, unless it says
+    /// otherwise, 1 when flat and [`layout::ARC_SCALE`] when curved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    /// The shape of its slots, as their width over their height: a standard slot's, [`layout::STANDARD_ASPECT`], unless
+    /// it says otherwise, within [`layout::ASPECTS`]. Its `scale` is the size of the text in its slots, and the slots
+    /// are as large as that and taller or wider, so that a panel in one shows more rows or more columns. An older client
+    /// draws standard slots at that scale, and so each panel at its text's size, smaller than its slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<f32>,
 }
 
 impl Wall {
@@ -130,12 +151,33 @@ impl Wall {
             kind,
             pose,
             shape: WallShape::Grid,
+            grid: None,
+            scale: None,
+            aspect: None,
         }
     }
 
     /// The wall, its slots laid out as `shape` says.
     pub fn with_shape(mut self, shape: WallShape) -> Self {
         self.shape = shape;
+        self
+    }
+
+    /// The wall, with `grid` of slots.
+    pub fn with_grid(mut self, grid: Grid) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+
+    /// The wall, its slots `scale` times a flat wall's.
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+
+    /// The wall, its slots `aspect` times as wide as they are tall, or a standard slot's shape with `None`.
+    pub fn with_aspect(mut self, aspect: Option<f32>) -> Self {
+        self.aspect = aspect;
         self
     }
 }
@@ -145,7 +187,7 @@ impl Wall {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Place {
-    /// In `slot`, from 0 to [`WALL_SLOTS`], of the wall `wall`.
+    /// In `slot`, from 0 to the last of its [`Wall::grid`], of the wall `wall`.
     Wall { wall: String, slot: u32 },
     /// Floating free where a participant left it, upright, facing along its pose's +Z.
     Free { pose: Pose },
@@ -636,6 +678,35 @@ mod tests {
             "shape": {"kind": "dome", "rings": 3}}))
         .unwrap();
         assert_eq!(newest.shape, WallShape::Unknown);
+        // A wall of its own grid and size says so; an older server's says neither.
+        let sized = Wall::new("wall-2", WallKind::Added, pose)
+            .with_grid(Grid::from((4, 1)))
+            .with_scale(1.25);
+        let json = serde_json::json!({"id": "wall-2", "kind": "added",
+            "pose": {"position": [1.0, 1.5, -2.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+            "grid": [4, 1], "scale": 1.25});
+        assert_eq!(serde_json::to_value(&sized).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), sized);
+        assert_eq!((sized.slots(), sized.scale()), (4, 1.25));
+        assert_eq!(
+            (curved.grid, curved.scale, curved.aspect),
+            (None, None, None)
+        );
+        // Slots of their own shape say so, and a reader that knows no aspect reads the rest, its slots its scale.
+        let tall = sized.clone().with_aspect(Some(0.5625));
+        let mut json = serde_json::to_value(&tall).unwrap();
+        assert_eq!(json["aspect"], 0.5625);
+        assert_eq!(serde_json::from_value::<Wall>(json.clone()).unwrap(), tall);
+        json.as_object_mut().unwrap().remove("aspect");
+        let older = serde_json::from_value::<Wall>(json).unwrap();
+        assert_eq!(
+            (older.scale(), older.slot_size()),
+            (
+                1.25,
+                (layout::SLOT_SIZE.0 * 1.25, layout::SLOT_SIZE.1 * 1.25)
+            )
+        );
+        assert_eq!((curved.slots(), curved.scale()), (6, layout::ARC_SCALE));
         assert_eq!(newer.panels[0].place, Place::Unknown);
         assert_eq!((newer.panels[0].age, newer.panels[0].meta.len()), (0, 0));
     }
@@ -832,6 +903,30 @@ mod tests {
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "pose": pose_json}),
             ),
             (
+                ClientMessage::SetWall {
+                    wall: "wall-2".into(),
+                    grid: Some(Grid::from((4, 1))),
+                    scale: None,
+                    aspect: None,
+                    shape: Some(WallShape::Arc { radius: 3.0 }),
+                    pose: None,
+                },
+                serde_json::json!({"type": "set_wall", "wall": "wall-2", "grid": [4, 1],
+                    "shape": {"kind": "arc", "radius": 3.0}}),
+            ),
+            (
+                ClientMessage::SetWall {
+                    wall: "wall-2".into(),
+                    grid: None,
+                    scale: Some(1.5),
+                    aspect: Some(0.5625),
+                    shape: Some(WallShape::Grid),
+                    pose: Some(pose),
+                },
+                serde_json::json!({"type": "set_wall", "wall": "wall-2", "scale": 1.5,
+                    "aspect": 0.5625, "shape": {"kind": "grid"}, "pose": pose_json}),
+            ),
+            (
                 ClientMessage::DismissPanel {
                     panel: "panel-1".into(),
                 },
@@ -916,5 +1011,6 @@ mod tests {
         }))
         .unwrap();
         assert!(!state.projection);
+        assert!(!state.walls);
     }
 }
