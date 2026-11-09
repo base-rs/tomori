@@ -17,6 +17,101 @@ pub struct Pose {
 }
 
 impl Pose {
+    /// Home, where participants arrive in a space: the origin of the space's coordinates, facing −Z, so its +Z, the way
+    /// every anchor faces, looks along −Z. See `design/environments.md`.
+    pub const HOME: Self = Self {
+        position: [0.0; 3],
+        orientation: [0.0, 1.0, 0.0, 0.0],
+    };
+
+    /// An upright pose at `position`, facing along +Z, to be turned with [`Self::facing_towards`].
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    ///
+    /// assert_eq!(Pose::at([1.0, 2.0, 3.0]).orientation, [0.0, 0.0, 0.0, 1.0]);
+    /// ```
+    pub const fn at(position: [f32; 3]) -> Self {
+        Self {
+            position,
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    /// This pose, where it is, turned about the vertical so that it faces `target`: its +Z, the way every anchor an
+    /// environment gives faces, towards it, levelled. The one convention for every anchor, the participants' arrival,
+    /// the agent, its workers and the walls, so that an environment never turns one backwards: each faces what it
+    /// looks at, as `Pose::at(spot).facing_towards(arrival)` faces the arrival. Facing straight up or down, or itself,
+    /// it is not turned. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    ///
+    /// // A wall 2 m ahead of home faces home, unturned.
+    /// let wall = Pose::at([0.0, 1.5, -2.0]).facing_towards([0.0, 1.6, 0.0]);
+    /// assert_eq!(wall.orientation, [0.0, 0.0, 0.0, 1.0]);
+    /// // Home faces −Z, towards that wall.
+    /// let home = Pose::at([0.0; 3]).facing_towards([0.0, 0.0, -1.0]);
+    /// assert!((home.orientation[1] - Pose::HOME.orientation[1]).abs() < 1e-6);
+    /// ```
+    pub fn facing_towards(self, target: [f32; 3]) -> Self {
+        Self::upright_facing(self.position, target)
+    }
+
+    /// The way this pose faces, its +Z, as an angle about the vertical: 0 along +Z, π/2 along +X.
+    pub fn yaw(&self) -> f32 {
+        let [x, y, z, w] = self.orientation;
+        // +Z turned by the quaternion, levelled.
+        let ahead_x = 2.0 * (x * z + w * y);
+        let ahead_z = 1.0 - 2.0 * (x * x + y * y);
+        ahead_x.atan2(ahead_z)
+    }
+
+    /// An upright pose at `position`, facing `yaw` about the vertical, as [`Self::yaw`] measures it.
+    pub fn upright(position: [f32; 3], yaw: f32) -> Self {
+        let (sin, cos) = (yaw / 2.0).sin_cos();
+        Self {
+            position,
+            orientation: [0.0, sin, 0.0, cos],
+        }
+    }
+
+    /// `pose`, given in this upright pose's own frame, in the frame this pose is given in: moved to it and turned with
+    /// it about the vertical. Both are taken as upright.
+    pub fn carry(&self, pose: &Self) -> Self {
+        let yaw = self.yaw();
+        let (sin, cos) = yaw.sin_cos();
+        let [x, y, z] = pose.position;
+        let [px, py, pz] = self.position;
+        Self::upright(
+            [px + x * cos + z * sin, py + y, pz - x * sin + z * cos],
+            yaw + pose.yaw(),
+        )
+    }
+
+    /// The carriage from an environment's own coordinates into a space's, for an environment whose participants arrive
+    /// at `arrival`, in its own coordinates, facing along its +Z: the upright pose that carries `arrival` to
+    /// [`Self::HOME`], so that home is always at the space's origin, facing −Z, wherever the environment has
+    /// participants arrive. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    ///
+    /// // Arriving at the environment's origin, facing −Z, as by default, nothing moves.
+    /// let carriage = Pose::carriage(&Pose::HOME);
+    /// assert!(carriage.carry(&Pose::at([1.0, 0.0, -2.0])).position.iter().zip([1.0, 0.0, -2.0]).all(|(a, b)| (a - b).abs() < 1e-5));
+    /// // Arriving 8 m along +Z, facing −Z: what stands at the environment's origin stands 8 m ahead of home.
+    /// let street = Pose::at([0.0, 0.0, 8.0]).facing_towards([0.0, 0.0, 0.0]);
+    /// let origin = Pose::carriage(&street).carry(&Pose::at([0.0; 3])).position;
+    /// assert!((origin[2] + 8.0).abs() < 1e-5);
+    /// ```
+    pub fn carriage(arrival: &Self) -> Self {
+        let yaw = Self::HOME.yaw() - arrival.yaw();
+        let (sin, cos) = yaw.sin_cos();
+        let [x, y, z] = arrival.position;
+        Self::upright([-(x * cos + z * sin), -y, -(-x * sin + z * cos)], yaw)
+    }
+
     /// An upright pose at `position`, turned about the vertical so that its +Z faces `towards`, as a wall or panel
     /// stands facing someone. Facing straight up or down, or itself, it is not turned.
     ///
@@ -511,6 +606,13 @@ pub enum ClientMessage {
     /// have; the server refuses one no panel shown in the client's space has.
     FetchImage {
         image: String,
+    },
+    /// Summon the current space's agent to `at`, in the space's coordinates, facing along its +Z, for everyone in the
+    /// space, or, without it, send it home. Participants only, and only to a server whose
+    /// [`crate::SpaceState::summons`] is set. See `design/environments.md`.
+    PlaceAgent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Pose>,
     },
     /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
     PairBegin {

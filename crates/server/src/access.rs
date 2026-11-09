@@ -133,7 +133,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         // they rearrange panels, while only owners add and remove them. See `design/projection.md`.
         | ClientMessage::PlacePanel { .. }
         | ClientMessage::DismissPanel { .. }
-        | ClientMessage::SetWall { .. } => participant,
+        | ClientMessage::SetWall { .. }
+        // Visitors watch the agent, but summon it nowhere. See `design/environments.md`.
+        | ClientMessage::PlaceAgent { .. } => participant,
     };
     if permitted {
         None

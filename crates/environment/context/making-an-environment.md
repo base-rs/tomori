@@ -46,9 +46,20 @@ let server = tomori_server::Server::builder().environment(
 let headset = tomori::Builder::default().register(observe_client::register);
 ```
 
-## Where the agent and its workers stand
+## Where participants arrive, the agent lives and the Tomori wall stands
 
-An environment's registration may say where Tomori's coordinator stands in it, with `Environment::with_agent`, and where the arrangement of its delegated workers stands, with `Environment::with_workers`, each a pose in the space's coordinates, as `with_stage` says where the Tomori wall stands; the Tomori wall stands below the agent unless `with_stage` places it. Its client crate may place the workers about that anchor by an algorithm of its own, an implementation of [`tomori-scene`](https://crates.io/crates/tomori-scene)'s `anchors::WorkerPlacement`, registered beside its scenery:
+An environment's registration gives three fixed homes, each a pose in the environment's own coordinates, as its scenery is drawn, facing along its +Z, the way it looks, which `tomori_protocol::Pose::at(spot).facing_towards(target)` makes: where participants arrive, with `Environment::with_arrival`, the agent's home, with `Environment::with_agent`, and the Tomori wall's, with `Environment::with_stage`; and, if it likes, the middle of its delegated workers' arrangement, with `Environment::with_workers`, otherwise the agent's home. A space's coordinates always have home, where participants arrive, at their origin facing −Z, so Tomori carries the environment's scenery, walkable surfaces, client side, anchors and walls into them; the environment's crates never see the space's coordinates. The Tomori wall stays at its home, and the agent appears at its home and stays there until a participant summons it. Check, in the environment's tests, that the wall can be read and the agent seen from the arrival with `tomori_environment::sightlines`:
+
+```rust
+use tomori_environment::sightlines::{Spot, readable, seen};
+
+let arrival = Spot::facing([0.0, 0.0, 8.0], [0.0, 3.0, 0.0]);
+let eyes = arrival.eyes();
+assert_eq!(readable(&arrival, &Spot::facing([1.5, 1.0, 6.0], eyes), &[]), Ok(()));
+assert_eq!(seen(&arrival, &Spot::facing([0.0, 3.0, 5.0], eyes), &[]), Ok(()));
+```
+
+Its client crate may place the workers about the workers anchor by an algorithm of its own, an implementation of [`tomori-scene`](https://crates.io/crates/tomori-scene)'s `anchors::WorkerPlacement`, registered beside its scenery:
 
 ```rust
 // NAME-client: ring the workers about the workers anchor, one per slot.
@@ -67,7 +78,7 @@ pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
 }
 ```
 
-A placement is asked only as a worker arrives, or when the arrangement changes, told of the workers already standing in the order of their slots, so live workers never move as others come and go; without one, the workers stand on Tomori's default arc about the anchor. It runs on the frame step's thread, so keep it quick; one that panics, or answers a place that is not finite or beyond 90 m, leaves its worker on the arc. It may stand workers together: their signs then stand beside or above one another. See [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md).
+A placement is asked only as a worker arrives, or when the arrangement changes, told of the workers already standing in the order of their slots, so live workers never move as others come and go; without one, the workers stand on Tomori's default arc about the anchor, which faces whoever watches it as the agent does. It runs on the frame step's thread, so keep it quick; one that panics, or answers a place that is not finite or beyond 90 m, leaves its worker on the arc. It may stand workers together: their signs then stack above one another, and beside within 30°. See [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md).
 
 The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 

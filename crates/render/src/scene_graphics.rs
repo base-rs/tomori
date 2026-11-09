@@ -114,6 +114,7 @@ pub fn draw(
     panels: &mut Panels,
     frame: &Frame,
 ) {
+    renderer.set_carriage(frame.carriage);
     renderer.set_scenery(frame.scenery);
     if let Some(drawn) = &frame.environment {
         renderer.animate(device, queue, drawn.as_ref());

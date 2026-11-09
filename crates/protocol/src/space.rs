@@ -260,11 +260,21 @@ pub struct SpaceState {
     /// titling the space. False from older servers; a client offers renaming the space only when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub renames: bool,
-    /// Where the space's environment puts the coordinator and the workers' arrangement, each only when its
-    /// registration says. None from older servers, and when the server no longer offers the environment, which a
-    /// client reads as the default layout. See `design/environments.md`.
+    /// Where the space's environment has participants arrive, and puts the agent's home and the workers' arrangement,
+    /// each only when its registration says. None from older servers, and when the server no longer offers the
+    /// environment, which a client reads as the default layout. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Anchors::is_empty")]
     pub anchors: Anchors,
+    /// Where a participant summoned the agent to, in the space's coordinates, facing along its +Z, while it stands
+    /// there rather than at its home: absent while it is at home, as it is when the space opens and after the agent
+    /// or a participant sends it home. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summoned: Option<crate::Pose>,
+    /// Whether the server keeps where the agent is summoned to, taking [`crate::ClientMessage::PlaceAgent`] from a
+    /// participant. False from older servers; a client sends it only when this is set, and otherwise lets the swarm
+    /// go back as the trigger is let go.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub summons: bool,
 }
 
 /// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
@@ -280,14 +290,18 @@ pub enum Renamer {
     Unknown,
 }
 
-/// Where a space's environment puts Tomori's coordinator and its delegated workers, in the space's coordinates, each
-/// upright, turned only about the vertical. A client uses the default layout for each that is absent. See
+/// Where a space's environment has participants arrive, and where it puts Tomori's agent and its delegated workers.
+/// Every anchor faces along its pose's +Z, the way it looks: the participants arriving, the agent's eye, and the
+/// workers' arrangement, as walls do (see [`crate::Pose::facing_towards`]). `agent` and `workers` are in the space's
+/// coordinates, where home, the arrival, is the origin, facing −Z, each upright, turned only about the vertical;
+/// `arrival` is in the environment's own coordinates, which a client that draws the environment carries into the
+/// space's with [`crate::Pose::carriage`]. A client uses the default layout for each that is absent. See
 /// `design/environments.md`.
 ///
 /// ```
 /// use tomori_protocol::{Anchors, Pose};
 ///
-/// let pod = Pose { position: [2.0, 1.2, -4.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+/// let pod = Pose::at([2.0, 1.2, -4.0]).facing_towards([0.0, 1.6, 0.0]);
 /// let anchors = Anchors::new().with_agent(pod);
 /// assert_eq!(anchors.agent, Some(pod));
 /// assert!(anchors.workers.is_none());
@@ -296,12 +310,18 @@ pub enum Renamer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Anchors {
-    /// Where the swarm's middle stands, its eye facing along the pose's +Z.
+    /// The agent's home: where the swarm's middle stands, its eye facing along the pose's +Z, until a participant
+    /// summons it elsewhere, and again once it is sent home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::Pose>,
-    /// The origin of the workers' arrangement: where home is in it, its front along the pose's −Z.
+    /// The middle of the workers' arrangement, which faces along the pose's +Z, towards whoever watches it, as the
+    /// agent does; by default, the agent's home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<crate::Pose>,
+    /// Where participants arrive, in the environment's own coordinates, facing along its +Z: home. Sent only for an
+    /// environment that arrives elsewhere than its own origin facing −Z.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<crate::Pose>,
 }
 
 impl Anchors {
@@ -310,21 +330,27 @@ impl Anchors {
         Self::default()
     }
 
-    /// These anchors, with the coordinator at `agent`.
+    /// These anchors, with the agent's home at `agent`.
     pub fn with_agent(mut self, agent: crate::Pose) -> Self {
         self.agent = Some(agent);
         self
     }
 
-    /// These anchors, with the workers' arrangement at `workers`.
+    /// These anchors, with the middle of the workers' arrangement at `workers`.
     pub fn with_workers(mut self, workers: crate::Pose) -> Self {
         self.workers = Some(workers);
         self
     }
 
+    /// These anchors, with participants arriving at `arrival`, in the environment's own coordinates.
+    pub fn with_arrival(mut self, arrival: crate::Pose) -> Self {
+        self.arrival = Some(arrival);
+        self
+    }
+
     /// Whether it says nothing, so that the default layout stands.
     pub fn is_empty(&self) -> bool {
-        self.agent.is_none() && self.workers.is_none()
+        self.agent.is_none() && self.workers.is_none() && self.arrival.is_none()
     }
 }
 
@@ -908,11 +934,20 @@ mod tests {
             orientation: [0.0, 0.0, 0.0, 1.0],
         };
         let state = SpaceState {
-            anchors: Anchors::new().with_agent(pose).with_workers(pose),
+            anchors: Anchors::new()
+                .with_agent(pose)
+                .with_workers(pose)
+                .with_arrival(pose),
+            summoned: Some(pose),
+            summons: true,
             ..SpaceState::default()
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["anchors"]["agent"]["position"][0], 1.0);
+        assert_eq!(json["anchors"]["arrival"]["position"][1], 1.5);
+        assert_eq!(json["summoned"]["position"][2], -3.0);
+        assert_eq!(json["summons"], true);
+        assert!(!Anchors::new().with_arrival(pose).is_empty());
         assert_eq!(json["anchors"]["workers"]["position"][2], -3.0);
         assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
         // Only those given are sent.
@@ -921,6 +956,7 @@ mod tests {
         // None at all sends no field, and an older server's state, without it, reads as none.
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
         assert!(plain.get("anchors").is_none());
+        assert!(plain.get("summoned").is_none() && plain.get("summons").is_none());
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());

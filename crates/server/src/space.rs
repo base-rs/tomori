@@ -2038,6 +2038,8 @@ impl SpaceModel {
             renames: true,
             // Set by the hub, which knows the environments.
             anchors: tomori_protocol::Anchors::default(),
+            summoned: None,
+            summons: false,
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]

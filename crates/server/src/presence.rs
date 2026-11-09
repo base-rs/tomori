@@ -880,8 +880,42 @@ pub(crate) fn destination(
     })
 }
 
+/// How far in front of someone the agent stands when it goes to them, in metres, and how far below their eyes: near
+/// enough to look at something together, and far enough not to crowd them.
+const BEFORE: (f32, f32) = (1.5, 0.2);
+
+/// Where the agent stands when it goes to someone whose head is at `head`: [`BEFORE`] in front of them, level, the way
+/// they face about the vertical, facing them. See `design/environments.md`.
+pub(crate) fn before(head: &Pose) -> Pose {
+    let ahead = forward(head);
+    let (x, z) = match ahead[0].hypot(ahead[2]) {
+        level if level > 1e-3 => (ahead[0] / level, ahead[2] / level),
+        _ => (0.0, -1.0),
+    };
+    let [px, py, pz] = head.position;
+    let at = [px + x * BEFORE.0, py - BEFORE.1, pz + z * BEFORE.0];
+    Pose::at(at).facing_towards([px, at[1], pz])
+}
+
+/// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, which way it faces, whether it is
+/// at its home, and where that is. See `design/environments.md`.
+pub(crate) fn agent(anchors: &tomori_protocol::Anchors, summoned: Option<Pose>) -> Value {
+    let home = anchors.agent.unwrap_or_else(|| {
+        Pose::at(crate::stage::AGENT).facing_towards([0.0, crate::stage::AGENT[1], 0.0])
+    });
+    let at = summoned.unwrap_or(home);
+    // The way it faces, its +Z, clockwise from −Z.
+    let facing = rotate(at.orientation, [0.0, 0.0, 1.0]);
+    json!({
+        "position": position(at.position),
+        "facing_yaw": round(angles(facing).0, 0),
+        "at_home": summoned.is_none(),
+        "home": position(home.position),
+    })
+}
+
 /// How the `presence` tool's numbers are to be read.
-pub(crate) const COORDINATES: &str = "Positions are in the space's scene coordinates, in metres: y is up, and home, where everyone starts, is at the origin, facing -z, towards the Tomori wall by default. Yaw is in degrees clockwise from -z as seen from above, so 90 faces +x; pitch is in degrees above the horizontal. A wall's facing_yaw is the way its face looks. Panels hold their wall's slots, numbered from its top left as seen from in front, left to right then down.";
+pub(crate) const COORDINATES: &str = "Positions are in the space's scene coordinates, in metres: y is up, and home, where everyone arrives, wherever the environment has them arrive, is at the origin, facing -z. The agent stands at its own home, which the environment chooses, unless someone summoned it elsewhere. Yaw is in degrees clockwise from -z as seen from above, so 90 faces +x; pitch is in degrees above the horizontal. A wall's facing_yaw is the way its face looks. Panels hold their wall's slots, numbered from its top left as seen from in front, left to right then down.";
 
 #[cfg(test)]
 mod tests;

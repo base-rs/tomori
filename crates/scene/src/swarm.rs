@@ -63,8 +63,24 @@ impl Swarm {
         self.visual = visual;
     }
 
-    /// Stand at `anchor` from now on: the agents glide there, as they move between shapes.
+    /// Stand at `anchor` from now on: the agents glide there, as they move between shapes, as when a participant
+    /// summons the agent or sends it home.
     pub fn set_anchor(&mut self, anchor: Anchor) {
+        self.anchor = anchor;
+    }
+
+    /// Appear at `anchor` from now on: the agents are carried there at once, in the shape they have, turned with it,
+    /// rather than gliding, as when a space opens with the agent at its home. See `design/environments.md`.
+    pub fn appear_at(&mut self, anchor: Anchor) {
+        if anchor == self.anchor {
+            return;
+        }
+        let back = self.anchor.orientation.inverse();
+        let turn = anchor.orientation * back;
+        for agent in self.agents.iter_mut().chain(self.next.iter_mut()) {
+            agent.position = anchor.position + turn * (agent.position - self.anchor.position);
+            agent.velocity = turn * agent.velocity;
+        }
         self.anchor = anchor;
     }
 
@@ -291,5 +307,37 @@ mod tests {
         assert_eq!(start, swarm.agents[0].position);
         swarm.step(100.0, None);
         assert!(start.distance(swarm.agents[0].position) < 0.03);
+    }
+
+    #[test]
+    fn the_swarm_appears_at_its_home_at_once_in_the_shape_it_has() {
+        let mut swarm = Swarm::default();
+        for _ in 0..200 {
+            swarm.step(1.0 / 72.0, None);
+        }
+        let before: Vec<Vec3> = swarm
+            .agents
+            .iter()
+            .map(|agent| agent.position - CENTER)
+            .collect();
+        let home = Anchor {
+            position: Vec3::new(-1.0, 1.6, -5.0),
+            orientation: glam::Quat::IDENTITY,
+        };
+        swarm.appear_at(home);
+        assert_eq!(swarm.anchor(), home);
+        for (agent, offset) in swarm.agents.iter().zip(&before) {
+            assert!(agent.position.distance(home.position + *offset) < 1e-4);
+        }
+        // Already there, nothing moves.
+        let there: Vec<Vec3> = swarm.agents.iter().map(|agent| agent.position).collect();
+        swarm.appear_at(home);
+        assert!(
+            swarm
+                .agents
+                .iter()
+                .zip(&there)
+                .all(|(agent, at)| agent.position == *at)
+        );
     }
 }

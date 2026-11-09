@@ -365,6 +365,6 @@ mod tests {
         );
         let (conversation, _connection) = builder.participant(crate::Overrides::default());
         // Outside a space, there is no travel.
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
     }
 }

@@ -107,6 +107,8 @@ pub struct Feed {
     workers: Workers,
     scene: Scene,
     swarm: SwarmAnimation,
+    /// The agent's home as the swarm last stood at it, so that it appears at a new one, as the headset's does.
+    agent_home: tomori_scene::anchors::Anchor,
     sequence: u64,
     /// The scenery shown outside a space, or in one from a server that names no environment, from `TOMORI_ENVIRONMENT`.
     environment: Environment,
@@ -198,6 +200,7 @@ impl Feed {
             workers: Workers::default(),
             scene: Scene::new(),
             swarm: SwarmAnimation::new(),
+            agent_home: tomori_scene::anchors::Anchor::AGENT,
             sequence: 0,
             environment: Environment::initial(&[]),
             sceneries: Sceneries::empty(),
@@ -220,6 +223,12 @@ impl Feed {
     /// Where its swarm stands and faces, as the joined space's environment puts it, for the renderer's rings about it.
     pub fn swarm_anchor(&self) -> tomori_scene::anchors::Anchor {
         self.swarm.swarm.anchor()
+    }
+
+    /// The carriage from the joined space's environment's own coordinates, in which its scenery draws, into the
+    /// space's, for the renderer. See `design/environments.md`.
+    pub fn carriage(&self) -> tomori_scene::anchors::Anchor {
+        self.conversation.arrangement().carriage
     }
 
     /// The sceneries the spectator draws, for its renderer.
@@ -357,7 +366,12 @@ impl Feed {
 
         // The swarm and the workers stand where the space's environment puts them, by the same rule as the headset. See `design/spectator.md`.
         let arrangement = self.conversation.arrangement();
-        self.swarm.swarm.set_anchor(arrangement.agent);
+        if arrangement.home != self.agent_home {
+            self.agent_home = arrangement.home;
+            self.swarm.swarm.appear_at(arrangement.agent);
+        } else {
+            self.swarm.swarm.set_anchor(arrangement.agent);
+        }
         // Use the same activity-driven swarm simulation as the headset.
         self.swarm
             .update(self.conversation.activity(), self.conversation.speech(), dt);

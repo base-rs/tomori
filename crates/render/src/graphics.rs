@@ -117,6 +117,9 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
+    /// The transform from the environment's own coordinates, in which its scenery draws, into the space's, where home
+    /// is the origin facing −Z. See `design/environments.md`.
+    carriage: Mat4,
     /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
     landing: Option<glam::Vec3>,
     /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -320,6 +323,7 @@ impl Renderer {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
             reveal: None,
+            carriage: Mat4::IDENTITY,
             landing: None,
             blink: 0.0,
             blink_pipeline,
@@ -491,11 +495,22 @@ impl Renderer {
         }
     }
 
+    /// Draw the environment's scenery, in its own coordinates, carried into the space's by `carriage`, as for an
+    /// environment whose participants arrive elsewhere than its origin, from the next [`Self::set_scenery`]. See
+    /// `design/environments.md`.
+    pub fn set_carriage(&mut self, carriage: tomori_scene::anchors::Anchor) {
+        self.carriage = Mat4::from_rotation_translation(carriage.orientation, carriage.position);
+    }
+
     /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
     pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
         self.environment = scenery.environment;
         self.reveal = scenery.reveal;
-        let reveal = scenery.reveal.map(|sphere| (sphere.centre, sphere.radius));
+        // The scenery reveals its own coordinates: the sphere's centre, in the space's, carried back into them.
+        let back = self.carriage.inverse();
+        let reveal = scenery
+            .reveal
+            .map(|sphere| (back.transform_point3(sphere.centre), sphere.radius));
         for (_, scenery) in &mut self.sceneries {
             scenery.set_reveal(reveal);
         }
@@ -680,8 +695,11 @@ impl Renderer {
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
-                let position = crate::scenery::eye(scene_to_clip);
-                scenery.prepare_eye(queue, eye, scene_to_clip, position);
+                // The scenery draws in the environment's own coordinates, carried into the space's, and is told where
+                // each eye is in them.
+                let scenery_to_clip = scene_to_clip * self.carriage;
+                let position = crate::scenery::eye(scenery_to_clip);
+                scenery.prepare_eye(queue, eye, scenery_to_clip, position);
                 scenery.encode(&mut encoder, eye);
             }
             // Separate buffers are important: two writes to one buffer before

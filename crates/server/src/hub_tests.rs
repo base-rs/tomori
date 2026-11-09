@@ -4207,8 +4207,7 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
 }
 
 #[test]
-fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_stands_below_the_agent()
- {
+fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_stays_at_its_home() {
     let (hub, _jobs) = hub_waiting();
     let agent = upright([4.0, 1.6, -5.0]);
     let workers = upright([0.0, 0.0, -6.0]);
@@ -4249,11 +4248,54 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         .projections()
         .pop()
         .expect("sent as the environment changes");
-    assert_eq!(moved.walls[0].pose, crate::stage::stage_below(agent));
+    // The Tomori wall does not follow the agent: the environment gives it no home, so it stands at the default.
+    assert_eq!(moved.walls[0].pose, crate::stage::default_stage());
     ada.send(ClientMessage::SetEnvironment {
         environment: "sky".to_owned(),
     });
     assert_eq!(anchors(&vic), Some(tomori_protocol::Anchors::new()));
+}
+
+#[test]
+fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_cannot() {
+    let (hub, _jobs) = hub();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    // Outside a space, nowhere to summon it to.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(ada.errors(), ["Join a space first."]);
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.send(ClientMessage::Join { space });
+    let summoned = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Space { state } => Some(state.summoned),
+                _ => None,
+            })
+            .next_back()
+    };
+    summoned(&ada);
+    summoned(&vic);
+    // Summoned, everyone sees it there; the same again changes nothing and tells nobody.
+    let beside = upright([1.0, 1.4, -1.5]);
+    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
+    assert_eq!(summoned(&vic), Some(Some(beside)));
+    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
+    assert_eq!(summoned(&vic), None);
+    // A visitor watches, but summons nothing.
+    vic.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // Sent home, everyone sees it at home again.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(summoned(&vic), Some(None));
 }
 
 #[test]

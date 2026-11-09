@@ -1,11 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Where Tomori's coordinator and its delegated workers stand in a space: the anchors the space's environment gives,
-//! `agent` and `workers`, which the server sends in the space's state, and the placement of workers about the workers
-//! anchor, which an environment's client crate may register beside its scenery. Without them, the layout is exactly the
-//! default: the swarm at [`crate::swarm::CENTER`], facing home, and the workers on [`slot_position`]'s arc about home.
-//! See `design/environments.md`.
+//! Where participants arrive, and where Tomori's agent and its delegated workers stand in a space: the anchors the
+//! space's environment gives, `arrival`, `agent` and `workers`, which the server sends in the space's state, where a
+//! participant summoned the agent, and the placement of workers about the workers anchor, which an environment's
+//! client crate may register beside its scenery. Every anchor faces along its +Z, the way it looks. Without them, the
+//! layout is exactly the default: home at the origin facing −Z, the swarm at [`crate::swarm::CENTER`], facing home, and
+//! the workers on [`slot_position`]'s arc about home. See `design/environments.md`.
 use std::sync::Arc;
 
 use glam::{Quat, Vec3};
@@ -34,11 +35,69 @@ impl Anchor {
         orientation: Quat::IDENTITY,
     };
 
-    /// Home, the default origin of the workers' arrangement.
+    /// Nowhere and unturned: the carriage of an environment whose participants arrive at its own origin, facing −Z,
+    /// which leaves everything where it is.
     pub const HOME: Self = Self {
         position: Vec3::ZERO,
         orientation: Quat::IDENTITY,
     };
+
+    /// The carriage from an environment's own coordinates into a space's, for an environment whose participants
+    /// arrive at `arrival`, in its own coordinates, facing along its +Z, as the server sends it, if it is finite, within
+    /// 1 km and has an orientation: the anchor whose [`Self::place`] carries a point there into the space, where home is
+    /// the origin, facing −Z. See [`tomori_protocol::Pose::carriage`].
+    pub fn carriage(arrival: &Pose) -> Option<Self> {
+        let arrival = Self::within(arrival, 1000.0)?;
+        let carriage = Pose::carriage(&Pose {
+            position: arrival.position.to_array(),
+            orientation: arrival.orientation.to_array(),
+        });
+        Some(Self {
+            position: Vec3::from_array(carriage.position),
+            orientation: Quat::from_array(carriage.orientation),
+        })
+    }
+
+    /// The way it faces, its +Z, as an angle about the vertical: 0 along +Z, a quarter turn along +X.
+    pub fn yaw(&self) -> f32 {
+        let ahead = self.orientation * Vec3::Z;
+        ahead.x.atan2(ahead.z)
+    }
+
+    /// The point `point`, in the space, in the anchor's own frame: where [`Self::place`] would take it from.
+    pub fn unplace(&self, point: Vec3) -> Vec3 {
+        if *self == Self::HOME {
+            point
+        } else {
+            self.orientation.inverse() * (point - self.position)
+        }
+    }
+
+    /// The ray `ray`, in the space, in the anchor's own frame, as an environment's client side picks in its own
+    /// coordinates.
+    pub fn unplace_ray(&self, ray: &crate::pointing::Ray) -> crate::pointing::Ray {
+        if *self == Self::HOME {
+            *ray
+        } else {
+            crate::pointing::Ray {
+                origin: self.unplace(ray.origin),
+                direction: self.orientation.inverse() * ray.direction,
+            }
+        }
+    }
+
+    /// The anchor `pose` gives, as [`Self::from_pose`] makes it, but within `reach`.
+    fn within(pose: &Pose, reach: f32) -> Option<Self> {
+        let position = Vec3::from_array(pose.position);
+        if !(position.is_finite() && position.abs().max_element() <= reach) {
+            return None;
+        }
+        Self::from_pose(&Pose {
+            position: [0.0; 3],
+            ..*pose
+        })
+        .map(|anchor| Self { position, ..anchor })
+    }
 
     /// The anchor `pose` gives, upright, if it is finite, within [`REACH`] and has an orientation, as the server
     /// bounds it. One tilted is turned to face the way its +Z faces, levelled, or, where that is straight up or down,
@@ -74,8 +133,9 @@ impl Anchor {
         })
     }
 
-    /// The point `local`, in the anchor's own frame, in the space: moved to it and turned with it. At home, it is
-    /// `local` itself, and unturned, `local` moved, so that the default layout is exactly as it was.
+    /// The point `local`, in the anchor's own frame, in the space: moved to it and turned with it. At
+    /// [`Self::HOME`], it is `local` itself, and unturned, `local` moved, so that the default layout is exactly as it
+    /// was.
     pub fn place(&self, local: Vec3) -> Vec3 {
         if *self == Self::HOME {
             local
@@ -136,7 +196,9 @@ impl<'a> Placing<'a> {
     }
 }
 
-/// Where an environment's workers stand, about the workers anchor, `origin`: registered by the environment's client
+/// Where an environment's workers stand, about the workers anchor, `origin`, the middle of their arrangement, facing
+/// along its +Z towards whoever watches it, as the agent does, by default the agent's home: registered by the
+/// environment's client
 /// crate beside its scenery, with `tomori-render`'s `Sceneries::set_worker_placement`. It is asked only as a worker
 /// arrives, and again for every live worker, in the order of their slots, when the arrangement changes, so a live
 /// worker never moves when the workers' titles, states, order or membership change, whatever it answers. It is the
@@ -152,13 +214,26 @@ pub trait WorkerPlacement: Send + Sync {
 /// A worker placement, shared between the frame step and the spectator.
 pub type Placement = Arc<dyn WorkerPlacement>;
 
-/// The default placement: [`slot_position`]'s arc about home, carried to the workers anchor and turned with it.
+/// The default placement: [`slot_position`]'s arc about home, which passes through the agent's default home, carried
+/// with it to the workers anchor, the arrangement's middle, and turned with it, so that by default workers stand about
+/// the agent's home as they stand about its default home, and at [`Anchor::AGENT`] exactly where they always have.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HomeArc;
 
+impl HomeArc {
+    /// Where the default arc stands `slot` about `origin`.
+    pub fn at(origin: Anchor, slot: usize) -> Vec3 {
+        if origin == Anchor::AGENT {
+            slot_position(slot)
+        } else {
+            origin.place(slot_position(slot) - crate::swarm::CENTER)
+        }
+    }
+}
+
 impl WorkerPlacement for HomeArc {
     fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
-        origin.place(slot_position(worker.slot))
+        Self::at(origin, worker.slot)
     }
 }
 
@@ -179,13 +254,24 @@ pub fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>
     (position, panicked)
 }
 
-/// Where the coordinator and the workers stand in the joined space: the swarm at `agent`, and the workers about
-/// `workers` by `placement`, or by [`HomeArc`] without one.
+/// Where the agent and the workers stand in the joined space: the swarm at `agent`, where a participant summoned it or
+/// else at its `home`; the workers about `workers`, by default its home, by `placement`, or by [`HomeArc`] without one;
+/// and the `carriage` that takes the environment's own coordinates, its scenery's, walkable surfaces' and client
+/// side's, into the space's.
 #[derive(Clone)]
 pub struct Arrangement {
     pub agent: Anchor,
+    pub home: Anchor,
     pub workers: Anchor,
     pub placement: Option<Placement>,
+    pub carriage: Anchor,
+}
+
+impl Arrangement {
+    /// Whether a participant summoned the agent away from its home.
+    pub fn summoned(&self) -> bool {
+        self.agent != self.home
+    }
 }
 
 impl Default for Arrangement {
@@ -193,8 +279,10 @@ impl Default for Arrangement {
     fn default() -> Self {
         Self {
             agent: Anchor::AGENT,
-            workers: Anchor::HOME,
+            home: Anchor::AGENT,
+            workers: Anchor::AGENT,
             placement: None,
+            carriage: Anchor::HOME,
         }
     }
 }
@@ -204,8 +292,10 @@ impl std::fmt::Debug for Arrangement {
         formatter
             .debug_struct("Arrangement")
             .field("agent", &self.agent)
+            .field("home", &self.home)
             .field("workers", &self.workers)
             .field("placement", &self.placement.is_some())
+            .field("carriage", &self.carriage)
             .finish()
     }
 }
@@ -287,17 +377,20 @@ mod tests {
         assert_eq!(worker.parent, None);
         assert_eq!(worker.state, State::Unknown);
         assert_eq!(
-            place(Anchor::HOME, None, &worker),
+            place(Anchor::AGENT, None, &worker),
             (slot_position(3), false)
         );
         let origin = Anchor {
             position: Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
         };
-        assert_eq!(
-            place(origin, None, &worker),
-            (slot_position(3) + Vec3::new(0.0, 0.0, -6.0), false)
-        );
+        // Carried with the arrangement's middle, 6 m further on.
+        let further = Anchor {
+            position: crate::swarm::CENTER + Vec3::new(0.0, 0.0, -6.0),
+            orientation: Quat::IDENTITY,
+        };
+        let (moved, panicked) = place(further, None, &worker);
+        assert!(close(moved, slot_position(3) + Vec3::new(0.0, 0.0, -6.0)) && !panicked);
         let fixed: Placement = Arc::new(Fixed(Vec3::new(1.0, 1.0, 1.0)));
         let others = [Placed::new("ses_0", 0, State::Running, Vec3::ZERO)];
         let mut placing = Placing::new("ses_1", 3);
@@ -310,7 +403,7 @@ mod tests {
         for wild in [Vec3::new(0.0, 0.0, 95.0), Vec3::NAN] {
             let wild: Placement = Arc::new(Fixed(wild));
             assert_eq!(
-                place(Anchor::HOME, Some(&wild), &worker),
+                place(Anchor::AGENT, Some(&wild), &worker),
                 (slot_position(3), false)
             );
         }
@@ -323,14 +416,59 @@ mod tests {
         }
         let panics: Placement = Arc::new(Panics);
         assert_eq!(
-            place(Anchor::HOME, Some(&panics), &worker),
+            place(Anchor::AGENT, Some(&panics), &worker),
             (slot_position(3), true)
         );
         let arrangement = Arrangement::default();
         assert_eq!(
-            (arrangement.agent, arrangement.workers),
-            (Anchor::AGENT, Anchor::HOME)
+            (arrangement.agent, arrangement.home, arrangement.workers),
+            (Anchor::AGENT, Anchor::AGENT, Anchor::AGENT)
         );
         assert!(format!("{arrangement:?}").contains("placement: false"));
+        assert!(!arrangement.summoned());
+        assert_eq!(arrangement.carriage, Anchor::HOME);
+    }
+
+    #[test]
+    fn every_anchor_faces_along_its_z_and_facing_towards_turns_it_the_right_way() {
+        // An agent made to face home with the protocol's helper faces home, as the default does, unturned.
+        let agent = Pose::at(crate::swarm::CENTER.to_array()).facing_towards([0.0, 1.6, 0.0]);
+        assert_eq!(Anchor::from_pose(&agent), Some(Anchor::AGENT));
+        // The workers' arrangement made the same way stands exactly where the default does: the arc about home.
+        let workers = Anchor::from_pose(&agent).unwrap();
+        assert_eq!(HomeArc::at(workers, 2), slot_position(2));
+        // To one side, facing home, its arc still curves about home: its middle slot stands nearer home than the
+        // arrangement's middle, on the way to home, as the default's does.
+        let side = Pose::at([2.3, 1.4, 0.0]).facing_towards([0.0, 1.4, 0.0]);
+        let side = Anchor::from_pose(&side).unwrap();
+        let yaw = side.yaw();
+        assert!((yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{yaw}");
+        let ahead = side.place(Vec3::Z);
+        assert!(close(ahead, Vec3::new(1.3, 1.4, 0.0)), "{ahead}");
+        for slot in 0..8 {
+            let at = HomeArc::at(side, slot);
+            // On a circle of 3.2 m about home, as the default arc is about home.
+            assert!(
+                (Vec3::new(at.x, 0.0, at.z).length() - 3.2).abs() < 1e-3,
+                "{slot}: {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_arrival_carries_the_environment_so_that_home_is_the_origin_facing_minus_z() {
+        // By default, it leaves everything where it is.
+        assert_eq!(Anchor::carriage(&Pose::HOME), Some(Anchor::HOME));
+        // Arriving 8 m along +X, facing −X: the environment's origin is 8 m ahead of home.
+        let street = Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        let carriage = Anchor::carriage(&street).unwrap();
+        assert!(close(carriage.place(Vec3::ZERO), Vec3::new(0.0, 0.0, -8.0)));
+        assert!(close(
+            carriage.place(Vec3::new(8.0, 1.6, 0.0)),
+            Vec3::new(0.0, 1.6, 0.0)
+        ));
+        // Not finite, or beyond a kilometre, none.
+        assert_eq!(Anchor::carriage(&Pose::at([f32::NAN, 0.0, 0.0])), None);
+        assert_eq!(Anchor::carriage(&Pose::at([1500.0, 0.0, 0.0])), None);
     }
 }

@@ -659,6 +659,10 @@ struct SpaceRecord {
     channel: Option<crate::channel::Channel>,
     /// The space's projection walls and the panels on them. See `design/projection.md`.
     stage: crate::stage::Stage,
+    /// Where a participant or the agent summoned the agent to, in the space's coordinates, while it is not at its home:
+    /// for this run and this environment only, so the agent is at home whenever the space opens. See
+    /// `design/environments.md`.
+    summoned: Option<tomori_protocol::Pose>,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -1073,6 +1077,20 @@ impl HubState {
                 );
             }
             self.touch_space(space);
+        }
+        changed
+    }
+
+    /// Summon the agent of the space `id` to `at`, or send it home without it, for everyone in the space; whether that
+    /// changed where it stands. See `design/environments.md`.
+    fn summon(&mut self, id: &str, at: Option<tomori_protocol::Pose>) -> bool {
+        let changed = self.space_mut(id).is_some_and(|record| {
+            let changed = record.summoned != at;
+            record.summoned = at;
+            changed
+        });
+        if changed {
+            self.touch_space(id);
         }
         changed
     }
@@ -1981,6 +1999,8 @@ impl Hub {
         }
         // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
         record.stage.leave(&left);
+        // The agent appears at the new environment's home for it, wherever it was summoned to in the last.
+        record.summoned = None;
         // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
         record.instruct(true);
         // Its server side, if it has one, runs for the space, and the previous environment's stops.
@@ -4097,6 +4117,30 @@ impl Hub {
                 );
                 deferred.push(Deferred::Keep);
             }
+            ClientMessage::PlaceAgent { at } => {
+                let at = match at.map(|at| crate::stage::valid(&at)) {
+                    Some(None) => {
+                        state.error(participant, "That is too far away for the agent to go.");
+                        return;
+                    }
+                    Some(Some(at)) => Some(at),
+                    None => None,
+                };
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if state.summon(&space, at) {
+                    let name = state
+                        .participants
+                        .get(participant)
+                        .map(|record| record.name.clone())
+                        .unwrap_or_default();
+                    match at {
+                        Some(_) => log::info!("{name} summoned the agent of space {space}."),
+                        None => log::info!("{name} sent the agent of space {space} home."),
+                    }
+                }
+            }
             ClientMessage::SetSpeech { speech } => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -4660,6 +4704,7 @@ impl Hub {
             restoring: false,
             channel: None,
             stage: crate::stage::Stage::default(),
+            summoned: None,
             active: None,
         });
         // Created now, it is active from now.
@@ -4788,6 +4833,7 @@ impl Hub {
                     restoring: true,
                     channel: None,
                     stage: kept.stage,
+                    summoned: None,
                     active: kept.active,
                 });
             }
@@ -5504,8 +5550,11 @@ impl Hub {
                 );
                 // Named before the state is fitted to its budget, which counts them.
                 state.environment_version = environments.version(&space.model.environment);
-                // Where the environment puts the coordinator and the workers, for everyone in it. See `design/environments.md`.
+                // Where the environment has participants arrive and puts the agent's home and the workers, and where the
+                // agent was summoned to, for everyone in it. See `design/environments.md`.
                 state.anchors = environments.anchors(&space.model.environment);
+                state.summoned = space.summoned;
+                state.summons = true;
                 // Every space projects. See `design/projection.md`.
                 state.projection = true;
                 // Participants adjust walls, and an owner's removal leaves a wall's panels floating.

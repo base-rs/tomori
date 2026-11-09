@@ -226,34 +226,13 @@ impl WallChange {
     }
 }
 
-/// Where the swarm's middle stands in an environment that declares no `agent` anchor, facing home: `tomori-scene`'s
+/// Where the swarm's middle stands in an environment that gives no `agent` anchor, facing home: `tomori-scene`'s
 /// `swarm::CENTER`. See `design/environments.md`.
 pub const AGENT: [f32; 3] = [0.0, 1.4, -ARC_RADIUS];
 
-/// How high above the room's floor the middle of the Tomori wall stands at least, in metres, however low the swarm.
-pub const STAGE_FLOOR: f32 = 0.3;
-
-/// Where the Tomori wall stands in an environment that declares an `agent` anchor, `agent`, upright, and no `stage`:
-/// below the swarm there, as [`default_stage`] stands below the swarm's default place at [`AGENT`], moved and turned
-/// as the swarm is; but never lower than [`STAGE_FLOOR`], nor beyond [`REACH`], as walls are bounded.
-pub fn stage_below(agent: Pose) -> Pose {
-    let default = default_stage();
-    let [_, s, _, c] = agent.orientation;
-    // A turn about the vertical: the agent's is upright, as is the default stage's.
-    let (cos, sin) = (c * c - s * s, 2.0 * s * c);
-    let offset: [f32; 3] = std::array::from_fn(|axis| default.position[axis] - AGENT[axis]);
-    let [x, y, z] = offset;
-    let [px, py, pz] = agent.position;
-    let [_, ds, _, dc] = default.orientation;
-    Pose {
-        position: [
-            (px + x * cos + z * sin).clamp(-REACH, REACH),
-            (py + y).clamp(STAGE_FLOOR, REACH),
-            (pz - x * sin + z * cos).clamp(-REACH, REACH),
-        ],
-        orientation: [0.0, s * dc + c * ds, 0.0, c * dc - s * ds],
-    }
-}
+/// How far from an environment's origin, on each axis, its arrival and the anchors and walls it gives in its own
+/// coordinates may stand, in metres, before they are carried into a space's, where they are bounded by [`REACH`].
+pub const ARRIVAL_REACH: f32 = 1000.0;
 
 /// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; for a code
 /// panel, its language, length and spans, its body the first lines of its code; and for an image panel, its image, its
@@ -568,13 +547,23 @@ impl Default for Stage {
 /// stand, if it is finite, within [`REACH`] and has an orientation. One tilted is turned to face the way its +Z faces,
 /// levelled, or, where that is straight up or down, the way its +X faces turned a quarter towards it.
 pub(crate) fn valid(pose: &Pose) -> Option<Pose> {
+    valid_within(pose, REACH)
+}
+
+/// `pose`, as [`valid`] makes it, but within [`ARRIVAL_REACH`]: an environment's arrival, or an anchor or wall in its
+/// own coordinates before it is carried into a space's.
+pub(crate) fn valid_arrival(pose: &Pose) -> Option<Pose> {
+    valid_within(pose, ARRIVAL_REACH)
+}
+
+fn valid_within(pose: &Pose, reach: f32) -> Option<Pose> {
     let length = pose
         .orientation
         .iter()
         .map(|value| value * value)
         .sum::<f32>()
         .sqrt();
-    if !(pose.position.iter().all(|value| value.abs() <= REACH)
+    if !(pose.position.iter().all(|value| value.abs() <= reach)
         && length > 0.5
         && length.is_finite())
     {
@@ -1784,52 +1773,6 @@ mod tests {
         // Notices are kept with the stage.
         let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
         assert_eq!(kept, stage);
-    }
-
-    #[test]
-    fn the_stage_below_an_agent_anchor_moves_and_turns_with_it() {
-        let close = |a: Pose, b: Pose| {
-            a.position
-                .iter()
-                .chain(&a.orientation)
-                .zip(b.position.iter().chain(&b.orientation))
-                .all(|(a, b)| (a - b).abs() < 1e-5)
-        };
-        // At the swarm's default place, it is the default stage.
-        let home = Pose {
-            position: AGENT,
-            orientation: [0.0, 0.0, 0.0, 1.0],
-        };
-        assert!(close(stage_below(home), default_stage()));
-        // Moved, it moves the same way, still 0.88 m below the swarm's middle.
-        let moved = Pose {
-            position: [3.0, 2.0, -5.0],
-            ..home
-        };
-        assert!(close(
-            stage_below(moved),
-            Pose {
-                position: [3.0, 1.12, -5.0],
-                orientation: [0.0, 0.0, 0.0, 1.0],
-            }
-        ));
-        // However low the swarm, the wall stands above the floor, within reach.
-        let sunk = stage_below(Pose {
-            position: [0.0, -20.0, -20.0],
-            ..home
-        });
-        assert_eq!(sunk.position, [0.0, STAGE_FLOOR, -20.0]);
-        assert!(valid(&sunk).is_some());
-        // Turned to face +X, it faces +X too, below the swarm.
-        let turned = Pose::upright_facing([3.0, 2.0, -5.0], [4.0, 2.0, -5.0]);
-        let stage = stage_below(turned);
-        assert!(close(
-            stage,
-            Pose {
-                position: [3.0, 1.12, -5.0],
-                orientation: turned.orientation,
-            }
-        ));
     }
 
     #[test]
@@ -3459,8 +3402,10 @@ mod tests {
     #[test]
     fn the_tomori_wall_changes_within_its_limits_for_the_space_in_every_environment() {
         let mut stage = Stage::default();
+        // Each environment sets the wall's home, as the farmyard's stands ahead and to the right.
         let farmyard = Walls {
             environment: "farmyard",
+            tomori: Pose::upright_facing([1.2, 1.1, -2.4], [0.0, 1.6, 0.0]),
             ..SKY
         };
         assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, grid(4, 1)), Ok(true));
@@ -3469,11 +3414,14 @@ mod tests {
             ..WallChange::default()
         };
         assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, flat), Ok(true));
+        // The space's edits stand over each environment's home, which nothing moves: the wall stands at the home of
+        // the environment the space is in, with the edits made in another.
         for walls in [&SKY, &farmyard] {
             let view = stage.view("s", walls, 0);
             let tomori = &view.walls[0];
             assert_eq!((tomori.slots(), tomori.radius()), (4, None));
             assert_eq!(tomori.scale(), layout::ARC_SCALE);
+            assert_eq!(tomori.pose, walls.tomori);
         }
         for (change, error) in [
             (

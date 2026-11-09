@@ -76,6 +76,9 @@ pub use recognition::RecognitionTranscriber;
 pub use server::{
     COUNTS_INTERVAL, DEFAULT_MAX_VISITORS, DEFAULT_PARTICIPANT_RETENTION, Pairing, Server, bind,
 };
+/// Where the Tomori wall's home and the agent's are in an environment that gives none, about home: the default layout.
+/// See `design/environments.md`.
+pub use stage::{AGENT as DEFAULT_AGENT, default_stage};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
 pub use voice::SpeechMode;
 pub use workspace::{

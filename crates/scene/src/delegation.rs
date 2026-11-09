@@ -41,6 +41,16 @@ const SPLIT_SECONDS: f32 = 0.35;
 /// How near a worker's anchor the ray must pass to point at it: a little beyond its flock or completed cube, so that a
 /// worker 3 m away is easy to hold. See `design/interaction.md`.
 pub const POINTING_RADIUS: f32 = 0.3;
+/// How far from the ray's origin a worker's pointing sphere stays [`POINTING_RADIUS`], in metres: beyond it, the sphere
+/// grows in proportion, so that a worker the environment stands further off, as about an agent's home across a yard or
+/// on a balcony, is as easy to hold as one 3 m away. See `design/interaction.md`.
+pub const POINTING_REACH: f32 = 3.0;
+
+/// How near a worker's anchor at `center` a ray from `origin` must pass to point at it: [`POINTING_RADIUS`], or, beyond
+/// [`POINTING_REACH`], as much more as keeps the same angle.
+pub fn pointing_radius(origin: Vec3, center: Vec3) -> f32 {
+    POINTING_RADIUS * (origin.distance(center) / POINTING_REACH).max(1.0)
+}
 /// How much paler the worker pointed at is drawn, towards white.
 const HIGHLIGHT_WHITENING: f32 = 0.45;
 /// How much larger the worker pointed at is drawn.
@@ -422,7 +432,7 @@ impl Scene {
             coordinator_sample_count: 0,
             highlighted: None,
             hit_point: None,
-            origin: Anchor::HOME,
+            origin: Anchor::AGENT,
             placement: None,
             poisoned: Vec::new(),
         }
@@ -504,13 +514,14 @@ impl Scene {
     /// puts its slot about the origin, as for a parent that is not shown.
     fn standing(&self, id: &str, slot: usize) -> Vec3 {
         self.workers.get(id).map_or_else(
-            || self.origin.place(slot_position(slot)),
+            || crate::anchors::HomeArc::at(self.origin, slot),
             |worker| worker.anchor,
         )
     }
 
     /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
-    /// sphere a little larger than its flock. Workers leaving cannot be pointed at. [`Self::point`] tests the same.
+    /// sphere a little larger than its flock, as from within [`POINTING_REACH`]. Workers leaving cannot be pointed at.
+    /// [`Self::point`] tests the same, its sphere growing with the distance beyond that.
     #[cfg(test)]
     pub fn targets(&self) -> Vec<Target<String>> {
         self.workers
@@ -535,7 +546,7 @@ impl Scene {
             for (id, worker) in &self.workers {
                 let shape = Shape::Sphere {
                     center: worker.anchor,
-                    radius: POINTING_RADIUS,
+                    radius: pointing_radius(ray.origin, worker.anchor),
                 };
                 if worker.retired.is_none()
                     && let Some(distance) = shape.intersect(&ray)
@@ -3272,7 +3283,7 @@ mod tests {
         let origin = turned(Vec3::new(1.0, 0.0, -6.0));
         let mut scene = Scene::new();
         // Arranged the same way as by default, nothing changes.
-        scene.arrange(Anchor::HOME, None);
+        scene.arrange(Anchor::AGENT, None);
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         for (id, position) in anchors(&scene) {
@@ -3282,7 +3293,7 @@ mod tests {
         scene.arrange(origin, None);
         scene.update(Some("root"), &w, 0.0);
         for (id, position) in anchors(&scene) {
-            let expected = origin.place(slot_position(scene.slots[&id]));
+            let expected = crate::anchors::HomeArc::at(origin, scene.slots[&id]);
             assert_eq!(Vec3::from_array(position), expected);
             assert!(scene.targets().iter().any(|target| target.key == id
                 && target.shape
@@ -3300,7 +3311,7 @@ mod tests {
         scene.update(Some("root"), &more, 0.0);
         assert_eq!(
             scene.workers["c"].anchor,
-            origin.place(slot_position(scene.slots["c"]))
+            crate::anchors::HomeArc::at(origin, scene.slots["c"])
         );
     }
 
@@ -3373,7 +3384,7 @@ mod tests {
             Vec3::new(scene.slots["c"] as f32, 1.5, -3.0)
         );
         // Back to the default, the arc again.
-        scene.arrange(Anchor::HOME, None);
+        scene.arrange(Anchor::AGENT, None);
         assert_eq!(scene.workers["a"].anchor, slot_position(scene.slots["a"]));
     }
 
@@ -3381,7 +3392,7 @@ mod tests {
     fn a_child_arriving_with_its_parent_launches_from_where_the_parent_is_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::HOME, Some(placement));
+        scene.arrange(Anchor::AGENT, Some(placement));
         // Trusted twice, so that the next arrivals launch.
         let empty = workspace(Vec::new());
         scene.update(Some("root"), &empty, 0.0);
@@ -3418,7 +3429,7 @@ mod tests {
         let slots = std::sync::Arc::new(Slots::default());
         let placement: Placement = slots.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::HOME, Some(placement.clone()));
+        scene.arrange(Anchor::AGENT, Some(placement.clone()));
         // Identities that sort against their slots: "z" takes slot 0, "a" slot 1, "m" slot 2.
         let first = workspace(vec![node("z", "root"), node("a", "z")]);
         scene.update(Some("root"), &first, 0.0);
@@ -3458,7 +3469,7 @@ mod tests {
         let panics = std::sync::Arc::new(Panics::default());
         let placement: Placement = panics.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::HOME, Some(placement.clone()));
+        scene.arrange(Anchor::AGENT, Some(placement.clone()));
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
@@ -3468,7 +3479,7 @@ mod tests {
             node("c", "root"),
         ]);
         for _ in 0..3 {
-            scene.arrange(Anchor::HOME, Some(placement.clone()));
+            scene.arrange(Anchor::AGENT, Some(placement.clone()));
             scene.update(Some("root"), &more, 0.0);
         }
         // Moved elsewhere with it, still not called.
@@ -3478,13 +3489,13 @@ mod tests {
         for id in ["a", "b", "c"] {
             assert_eq!(
                 scene.workers[id].anchor,
-                away.place(slot_position(scene.slots[id]))
+                crate::anchors::HomeArc::at(away, scene.slots[id])
             );
         }
         // Placing again: the first call panics, and the rest stand on the arc.
         let again = std::sync::Arc::new(Panics::default());
         let fresh: Placement = again.clone();
-        scene.arrange(Anchor::HOME, Some(fresh));
+        scene.arrange(Anchor::AGENT, Some(fresh));
         assert_eq!(again.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(scene.workers[id].anchor, slot_position(scene.slots[id]));
@@ -3499,7 +3510,7 @@ mod tests {
     fn a_child_arriving_later_launches_from_where_its_parent_was_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::HOME, Some(placement));
+        scene.arrange(Anchor::AGENT, Some(placement));
         let parent = workspace(vec![node("lead", "root")]);
         scene.update(Some("root"), &parent, 0.0);
         scene.update(Some("root"), &parent, 0.0);
@@ -3546,7 +3557,7 @@ mod tests {
             let worker = &scene.workers[id];
             let centre = worker.particles.iter().copied().sum::<Vec3>() / PARTICLES as f32;
             assert!(
-                centre.distance(away.place(slot_position(worker.slot))) < 0.3,
+                centre.distance(crate::anchors::HomeArc::at(away, worker.slot)) < 0.3,
                 "{id}"
             );
         }
@@ -3562,7 +3573,7 @@ mod tests {
         }
         let mut scene = Scene::new();
         scene.arrange(
-            Anchor::HOME,
+            Anchor::AGENT,
             Some(std::sync::Arc::new(At(Vec3::splat(f32::NAN)))),
         );
         let w = workspace(vec![node("a", "root")]);
@@ -3571,7 +3582,7 @@ mod tests {
         // Straight above home, its terminal forms still face somewhere.
         let mut above = Scene::new();
         above.arrange(
-            Anchor::HOME,
+            Anchor::AGENT,
             Some(std::sync::Arc::new(At(Vec3::new(0.0, 2.0, 0.0)))),
         );
         let mut done = node("a", "root");
@@ -4032,6 +4043,36 @@ mod tests {
             assert!(a.distance(b) <= 0.301);
         }
         assert!(scene.cubes().iter().all(Cube::valid));
+    }
+
+    #[test]
+    fn a_worker_further_off_is_as_easy_to_point_at_as_one_3_m_away() {
+        // Within 3 m, the sphere is as it was; beyond, it keeps its angle.
+        assert_eq!(
+            pointing_radius(Vec3::ZERO, Vec3::new(0.0, 0.0, -2.0)),
+            POINTING_RADIUS
+        );
+        assert!((pointing_radius(Vec3::ZERO, Vec3::new(0.0, 0.0, -9.0)) - 0.9).abs() < 1e-5);
+        let origin = Anchor {
+            position: crate::swarm::CENTER + Vec3::new(0.0, 0.0, -6.0),
+            orientation: Quat::IDENTITY,
+        };
+        let mut scene = Scene::new();
+        scene.arrange(origin, None);
+        let w = workspace(vec![node("a", "root")]);
+        scene.update(Some("root"), &w, 0.0);
+        let anchor = scene.workers["a"].anchor;
+        let eyes = Vec3::new(0.0, 1.6, 0.0);
+        let distance = eyes.distance(anchor);
+        assert!(distance > 7.0, "{distance}");
+        // A ray passing 0.5 m beside it, 4° off at that distance, points at it, as 0.25 m does at 3.6 m.
+        let aside = (anchor - eyes).cross(Vec3::Y).normalize();
+        let at = |offset: f32| Ray {
+            origin: eyes,
+            direction: (anchor + aside * offset - eyes).normalize(),
+        };
+        assert_eq!(scene.point(Some(at(0.5))), Some("a"));
+        assert_eq!(scene.point(Some(at(1.2))), None);
     }
 }
 

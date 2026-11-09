@@ -446,6 +446,18 @@ fn tools() -> Value {
             "annotations": change,
         },
         {
+            "name": "move_agent",
+            "description": "Move yourself, the agent, in your space, for everyone in it, as a participant summons you with their controller's trigger: place is home, back to the home the space's environment gives you, or near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked. Your voice comes from where you stand. Go only when someone asks, such as \"come here\" or \"go back to your home spot\", and stay where you are summoned until someone sends you home; your workers stay at home. presence says where you are.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["place"],
+            },
+            "annotations": change,
+        },
+        {
             "name": "set_speech",
             "description": "Set how much of each of your replies is spoken in your space, from the next reply on, for everyone in it: full, or brief, which speaks the start of each message and leaves the rest on the panel. Only when someone in the space asks; then tell them.",
             "inputSchema": {
@@ -618,6 +630,7 @@ async fn call(
         "space" => session.and_then(|session| hub.tool_space(session).map(structured)),
         "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
+        "move_agent" => session.and_then(|session| move_agent(hub, session, arguments)),
         "panels" => session.and_then(|session| hub.tool_panels(session).map(structured)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
@@ -667,6 +680,13 @@ fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
     crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
     hub.agent_move_panel(session, panel, place).map(structured)
+}
+
+/// The `move_agent` tool.
+fn move_agent(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let place = text(arguments, "place")?;
+    crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
+    hub.agent_move_agent(session, place).map(structured)
 }
 
 /// The optional text argument `name` of `arguments`, of at most `limit` bytes.

@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 1, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 2, "Farmyard"));
 //! ```
 pub mod behaviour;
 pub mod chicken;
@@ -32,7 +32,7 @@ pub const ID: &str = "farmyard";
 
 /// The farmyard's protocol version, which a server offers it at and a client presents it at. Raise it, in this crate
 /// alone, when a client of the earlier version could not present the farmyard as the server now offers it.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";
