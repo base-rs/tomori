@@ -46,7 +46,7 @@ pub(crate) fn usage(backends: &str, options: &[CommandOption]) -> String {
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
                                           [--auth MODE] [--no-visitors]
                      [--max-visitors COUNT] [--state-directory PATH] [--mcp-bind ADDRESS]
-                     [--no-mcp]{synopsis}
+                     [--no-mcp] [--open-pairing]{synopsis}
        tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
@@ -106,6 +106,10 @@ Options:
                        (default 127.0.0.1:0, a free loopback port). It serves plain HTTP to holders
                        of a token made for each run, so keep it on a loopback address.
   --no-mcp             Serve no MCP endpoint, so agents have no Tomori tools.
+  --open-pairing       Open pairing for 2 minutes once the server starts, so that a new device can
+                       pair, as typing \"pair\" on its console does: how the first device pairs
+                       where there is no console, and the way back in for an owner who has lost
+                       every paired device. Pairing is otherwise closed, also with no owner.
 {described}  --help               Show this help."
     )
 }
@@ -140,6 +144,8 @@ pub(crate) struct Arguments {
     state_directory: Option<PathBuf>,
     /// Where Tomori's MCP endpoint listens, or `None` for none. See `design/mcp.md`.
     mcp: Option<SocketAddr>,
+    /// Whether pairing opens once the server starts, as `pair` typed on the console opens it. See `design/security.md`.
+    open_pairing: bool,
     /// The application's own options that were given, each by its place among the builder's options, with its value, the last given of each.
     options: Vec<(usize, String)>,
 }
@@ -191,6 +197,7 @@ pub(crate) fn parse(
         max_visitors: crate::DEFAULT_MAX_VISITORS,
         state_directory: None,
         mcp: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        open_pairing: false,
         options: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
@@ -284,6 +291,7 @@ pub(crate) fn parse(
                 );
             }
             "--no-mcp" => parsed.mcp = None,
+            "--open-pairing" => parsed.open_pairing = true,
             "--no-advertise-attention" => parsed.advertise_attention = false,
             "--keepalive-interval" => {
                 parsed.keepalive.interval = seconds(&argument, arguments.next())?
@@ -349,6 +357,12 @@ pub(crate) fn parse(
     if parsed.open && !parsed.visitors {
         return Err(
             "--auth open admits everyone, so it cannot be combined with --no-visitors".to_owned(),
+        );
+    }
+    if parsed.open && parsed.open_pairing {
+        return Err(
+            "--auth open admits everyone as an owner, so there is no pairing to open with --open-pairing"
+                .to_owned(),
         );
     }
     if parsed.keepalive.timeout <= parsed.keepalive.interval {
@@ -450,9 +464,15 @@ fn admission(
             String::new()
         }
     );
+    // Closed by default, also with no owner yet, so that first-time setup is the operator's deliberate choice. See `design/security.md`.
+    let length = crate::hub::spoken(crate::PAIRING_OPEN_FOR);
     if owners == 0 {
         eprintln!(
-            "No owner token is issued yet: run `tomori-server auth mint --owner --name NAME`."
+            "No owner token is issued yet, and pairing is closed. To pair this server's first device, type \"pair\" here, which opens pairing for {length}, or start the server with --open-pairing; then choose the pairing object on the device and type the code it shows. Or run `tomori-server auth mint --owner --name NAME`."
+        );
+    } else {
+        eprintln!(
+            "Pairing is closed: type \"pair\" here to open it for {length}, or ask an owner to open it."
         );
     }
     let certificate =
@@ -482,7 +502,7 @@ fn tell(event: &crate::PairingEvent) {
     eprintln!("{event}");
 }
 
-/// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches, and otherwise declines the pairing. See `design/security.md`.
+/// Read the console for pairing codes to confirm, "decline", "pair" to open pairing for a new device and "close" to close it, while the server runs. The operator types the code the device shows, which confirms only if it matches, and otherwise declines the pairing. See `design/security.md`.
 fn confirm_pairings_on_console(pairing: crate::Pairing) {
     use std::io::BufRead;
     crate::process::console(move || {
@@ -502,6 +522,20 @@ fn console_reply(pairing: &crate::Pairing, line: &str) -> Option<String> {
     let line = line.trim();
     Some(if line.is_empty() {
         return None;
+    } else if line.eq_ignore_ascii_case("pair") {
+        // The way back in for an owner who has lost every paired device; the console says when it opened and closes.
+        match pairing.open() {
+            Ok(length) => format!(
+                "Pairing is open for {}: choose the pairing object on the device you are pairing.",
+                crate::hub::spoken(length)
+            ),
+            Err(error) => error.to_owned(),
+        }
+    } else if line.eq_ignore_ascii_case("close") {
+        if pairing.close() {
+            return None;
+        }
+        "Pairing is not open.".to_owned()
     } else if line.eq_ignore_ascii_case("allow") {
         pairing.allow();
         "Pairing is allowed again.".to_owned()
@@ -989,6 +1023,10 @@ pub(crate) async fn serve(
         .lock()
         .expect("the advertisement is never left poisoned") =
         advertise(arguments, address, server.counts(), fingerprint, start);
+    // Once listening, so that the window's time is not spent starting; see `design/security.md`. The server admits by tokens, since --open-pairing is refused with --auth open, so it pairs, and the console says that pairing opened.
+    if arguments.open_pairing {
+        let _ = server.pairing().open_by(crate::hub::Opener::startup());
+    }
     let served = match tools {
         Some(tools) => {
             server
@@ -1237,6 +1275,17 @@ mod tests {
         assert_eq!(
             console_reply(&console, "decline").as_deref(),
             Some("No pairing is waiting.")
+        );
+        assert_eq!(console.open(), Err("The server has stopped."));
+        assert_eq!(
+            console_reply(&console, "pair").as_deref(),
+            Some("The server has stopped.")
+        );
+        assert!(!console.close());
+        assert_eq!(console.state(), None);
+        assert_eq!(
+            console_reply(&console, "close").as_deref(),
+            Some("Pairing is not open.")
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1735,6 +1784,32 @@ mod tests {
     }
 
     #[test]
+    fn a_server_started_with_open_pairing_opens_it_once_it_listens() {
+        let directory = directory("open-pairing");
+        let arguments = local(&directory, &["--open-pairing"]);
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let pairing = server.pairing();
+        // Closed, though the server has no owner, until the operator opens it.
+        assert_eq!(
+            pairing.state(),
+            Some(crate::PairingState::Closed {
+                opens_for: crate::PAIRING_OPEN_FOR
+            })
+        );
+        let (_, cancellation, serving) = serving(server, arguments, fingerprint);
+        crate::test_support::eventually(|| {
+            matches!(
+                pairing.state(),
+                Some(crate::PairingState::Open { by, .. }) if by == crate::Opener::startup()
+            )
+            .then_some(())
+        });
+        cancellation.cancel();
+        assert_eq!(serving.join().unwrap(), Ok(()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn an_address_the_server_cannot_listen_for_tools_on_is_reported() {
         let directory = directory("tools-unbound");
         // An address of the documentation range, which is on no interface here.
@@ -1856,8 +1931,17 @@ mod tests {
         assert_eq!(reply("Allow").as_deref(), Some("Pairing is allowed again."));
         assert_eq!(reply("decline").as_deref(), Some("No pairing is waiting."));
         assert_eq!(reply("123456").as_deref(), Some("No pairing is waiting."));
+        assert_eq!(reply("close").as_deref(), Some("Pairing is not open."));
 
+        // Closed by default, though the server has no owner yet, until the operator opens it for its first device.
         let mut quest = server.connect("quest", "Quest 3");
+        assert_eq!(refused(&mut quest), tomori_protocol::PAIRING_CLOSED);
+        assert_eq!(
+            reply("pair").as_deref(),
+            Some(
+                "Pairing is open for 2 minutes: choose the pairing object on the device you are pairing."
+            )
+        );
         let code = pair(&mut quest, fingerprint);
         assert_eq!(
             reply("the code").as_deref(),
@@ -1878,10 +1962,57 @@ mod tests {
             Some("Paired a device calling itself \"Quest\" as an owner.")
         );
 
+        // The pairing closed the window, so pairing is closed until the operator opens it again: the way back in for an owner who has lost every paired device.
         let mut tablet = server.connect("tablet", "Tablet");
+        assert_eq!(
+            pairing.state(),
+            Some(crate::PairingState::Closed {
+                opens_for: crate::PAIRING_OPEN_FOR
+            })
+        );
+        assert_eq!(refused(&mut tablet), tomori_protocol::PAIRING_CLOSED);
+        assert_eq!(reply("close").as_deref(), Some("Pairing is not open."));
+        assert_eq!(
+            reply("PAIR").as_deref(),
+            Some(
+                "Pairing is open for 2 minutes: choose the pairing object on the device you are pairing."
+            )
+        );
+        assert!(matches!(
+            pairing.state(),
+            Some(crate::PairingState::Open { by, .. }) if by == crate::Opener::console()
+        ));
         pair(&mut tablet, fingerprint);
         assert_eq!(reply("DECLINE").as_deref(), Some("Declined the pairing."));
         assert_eq!(pairing.pending(), None);
+        // Only a pairing that succeeds uses the window, so the device may try again within it, within the attempts allowed; closing it withdraws the pairing waiting.
+        assert_eq!(reply("allow").as_deref(), Some("Pairing is allowed again."));
+        pair(&mut tablet, fingerprint);
+        assert_eq!(reply("close"), None);
+        assert_eq!(
+            failed(&tablet),
+            "Pairing was closed, so the pairing was withdrawn."
+        );
+        assert_eq!(pairing.pending(), None);
+        assert_eq!(refused(&mut tablet), tomori_protocol::PAIRING_CLOSED);
+        assert_eq!(reply("close").as_deref(), Some("Pairing is not open."));
+    }
+
+    /// Ask to pair as a device does, expecting a refusal or a pairing that ends, and return why.
+    fn refused(client: &mut crate::test_support::TestClient) -> String {
+        let device = tomori_security::pairing::Nonce::generate();
+        client.send(&tomori_protocol::ClientMessage::PairBegin {
+            commitment: device.commitment(),
+        });
+        failed(client)
+    }
+
+    /// Wait for a pairing to fail, returning why.
+    fn failed(client: &crate::test_support::TestClient) -> String {
+        client.wait_for(|message| match message {
+            tomori_protocol::ServerMessage::PairFailed { error } => Some(error.clone()),
+            _ => None,
+        })
     }
 
     #[test]
@@ -2017,10 +2148,13 @@ mod tests {
             Some(PathBuf::from("/var/lib/tomori"))
         );
         assert!(arguments(&["--auth", "open"]).unwrap().open);
+        assert!(!parsed.open_pairing);
+        assert!(arguments(&["--open-pairing"]).unwrap().open_pairing);
         for list in [
             &["--auth"][..],
             &["--auth", "none"],
             &["--auth", "open", "--no-visitors"],
+            &["--auth", "open", "--open-pairing"],
             &["--max-visitors"],
             &["--max-visitors", "-1"],
             &["--state-directory"],

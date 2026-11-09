@@ -19,7 +19,7 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
 
 /// `delete` says what deleting the joined space does, as the hand menu asks before deleting it; `delete space` deletes it for everyone in it, keeping its agent session, and `delete space and session` deletes its session too, the words themselves asking explicitly, as the menu's second question does. See `design/hand-menu.md`.
 fn delete(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -275,6 +275,13 @@ fn serve(
                             conversation.talk(!recording);
                         }
                         "p" => conversation.pair(),
+                        // As the hand menu's Pair a new device does; see `design/hand-menu.md`.
+                        "o" => {
+                            conversation.toggle_pairing_window();
+                            poll(conversation);
+                            let notice = conversation.menu_model().notice.unwrap_or_default();
+                            say!(out, "({notice})");
+                        }
                         "k" => conversation.knock(),
                         // The hand menu's People & security section, for a terminal without hands; see `design/hand-menu.md`.
                         "m" => {
@@ -674,6 +681,29 @@ mod tests {
         conversation.apply(space(|state| state.environment_version = Some(2)));
         let (out, _) = session(&mut conversation, &["nonsense"]);
         assert!(out.contains("Sky needs version 2; this app has 1"), "{out}");
+    }
+
+    #[test]
+    fn o_opens_pairing_as_the_hand_menu_does() {
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["o"]);
+        assert!(
+            out.contains("(This server does not open pairing for new devices.)"),
+            "{out}"
+        );
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::PairingWindow { closes_in: None },
+        ));
+        let (out, _) = session(&mut conversation, &["o", "m"]);
+        assert!(
+            out.contains("(Opening pairing for a new device...)"),
+            "{out}"
+        );
+        assert!(out.contains("  Pair a new device"), "{out}");
+        assert!(conversation.take_actions().iter().any(|action| matches!(
+            action,
+            tomori_client::connection::Action::Send(tomori_protocol::ClientMessage::OpenPairing)
+        )),);
     }
 
     #[test]

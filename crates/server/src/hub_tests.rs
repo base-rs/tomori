@@ -82,6 +82,7 @@ impl Client {
             environments: None,
             environment_state: false,
             projection: false,
+            pairing_window: false,
         });
     }
 
@@ -226,6 +227,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         environments: None,
         environment_state: false,
         projection: false,
+        pairing_window: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -728,7 +730,7 @@ fn a_declined_visitor_waits_out_the_cooldown_kept_until_it_ends() {
     assert!(hub.lock().knock_cooldowns.is_empty());
 }
 
-/// A hub that pairs with `store`'s tokens over TLS, with a device connected only to pair.
+/// A hub that pairs with `store`'s tokens over TLS, with pairing opened as the operator opens it, since it is closed by default, and a device connected only to pair.
 fn pairing(store: &Store) -> (Arc<Hub>, Client) {
     let (hub, _jobs) = hub();
     hub.set_pairing(PairingSetup {
@@ -736,6 +738,7 @@ fn pairing(store: &Store) -> (Arc<Hub>, Client) {
         tokens: store.tokens.clone(),
     });
     hub.set_encrypted(true);
+    hub.open_pairing(crate::hub::Opener::console()).unwrap();
     let device = Client::greeted(&hub, Access::pairing(), "quest");
     (hub, device)
 }
@@ -1583,6 +1586,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         environments: None,
         environment_state: false,
         projection: false,
+        pairing_window: false,
     });
     client.read()
 }
@@ -2811,6 +2815,7 @@ fn presenting(
         environments: presents,
         environment_state: reads,
         projection: false,
+        pairing_window: false,
     });
     client.read();
     client
@@ -3237,6 +3242,7 @@ impl Client {
             environments: None,
             environment_state: false,
             projection: true,
+            pairing_window: false,
         });
         client.read();
         client

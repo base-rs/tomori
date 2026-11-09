@@ -199,6 +199,8 @@ pub enum MenuKey {
     Admit(String),
     Decline(String),
     Pair,
+    /// Open pairing on the server for a new device, or close it, as an owner.
+    PairingWindow,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
     /// Say the space's new title with the next press of X, or not after all, as an owner.
@@ -286,6 +288,8 @@ pub struct Model {
     pub knock: Option<KnockState>,
     /// The pairing object's label while pairing is offered: "Pair", or the code while pairing.
     pub pairing: Option<String>,
+    /// For an owner whose server says, whether pairing is open on it: `Some(None)` while closed, which offers opening it for a new device, and `Some(Some(seconds))` left while open, which offers closing it. `None` for anyone else. See `design/security.md`.
+    pub pairing_window: Option<Option<u32>>,
     pub notice: Option<String>,
     /// The instructions the joined space's agent is given, or `None` when it takes none or the server does not say.
     pub instructions: Option<AgentInstructions>,
@@ -360,6 +364,8 @@ pub enum Choice {
     Admit(String),
     Decline(String),
     Pair,
+    /// Open pairing on the server for a new device, or close it while it is open.
+    PairingWindow,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
     /// Say the space's new title with the next press of X, or not after all.
@@ -899,6 +905,20 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 button(&mut items, MenuKey::Pair, row(&[Part::Cut(pairing)]));
                 requests = true;
             }
+            // An owner opens pairing for a new device here, which closes again by itself; see `design/security.md`.
+            if let Some(window) = model.pairing_window {
+                let label = match window {
+                    None => "Pair a new device".to_owned(),
+                    Some(0) => "Pairing open: close it".to_owned(),
+                    Some(seconds) => format!(
+                        "Pairing open, {}:{:02} left: close it",
+                        seconds / 60,
+                        seconds % 60
+                    ),
+                };
+                button(&mut items, MenuKey::PairingWindow, label);
+                requests = true;
+            }
             if !requests {
                 text(&mut items, MenuKind::Text, "Nothing waiting".into());
             }
@@ -1106,6 +1126,7 @@ impl HandMenu {
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
             MenuKey::Pair => Some(Choice::Pair),
+            MenuKey::PairingWindow => Some(Choice::PairingWindow),
             MenuKey::Rename => Some(Choice::Rename),
             MenuKey::RenameSpace => Some(Choice::RenameSpace),
             MenuKey::FollowSession => Some(Choice::FollowSession),
@@ -2206,6 +2227,47 @@ mod tests {
         assert!(shown.contains(&"[Leave space]".to_owned()));
         assert!(shown.contains(&"MODE".to_owned()));
         assert!(text(Some(Section::PeopleAndSecurity), &model).contains(&"  Bob, away".to_owned()));
+    }
+
+    #[test]
+    fn an_owner_opens_pairing_for_a_new_device_and_sees_it_count_down() {
+        let mut owner = Model {
+            name: "Ada".into(),
+            role: ConnectionRole::Owner,
+            pairing_window: Some(None),
+            ..Default::default()
+        };
+        let rows = |model: &Model| items(Some(Section::PeopleAndSecurity), model);
+        let closed = rows(&owner);
+        assert_eq!(
+            texts(&closed)[..3],
+            ["< Back", "Requests", "Pair a new device"]
+        );
+        assert_eq!(closed[2].key, MenuKey::PairingWindow);
+        assert_eq!(closed[2].kind, MenuKind::Button);
+        owner.pairing_window = Some(Some(102));
+        let open = rows(&owner);
+        assert_eq!(texts(&open)[2], "Pairing open, 1:42 left: close it");
+        // Counting down changes what the row says, never how many rows there are.
+        assert_eq!(open.len(), closed.len());
+        owner.pairing_window = Some(Some(0));
+        assert_eq!(texts(&rows(&owner))[2], "Pairing open: close it");
+        assert!(
+            text(Some(Section::PeopleAndSecurity), &owner)
+                .contains(&"[Pairing open: close it]".to_owned())
+        );
+        // Offered to nobody whose server does not say, nor to anyone but an owner, whose model has none.
+        owner.pairing_window = None;
+        assert!(
+            rows(&owner)
+                .iter()
+                .all(|row| row.key != MenuKey::PairingWindow)
+        );
+        let mut menu = HandMenu::default();
+        assert_eq!(
+            menu.choose(&MenuKey::PairingWindow),
+            Some(Choice::PairingWindow)
+        );
     }
 
     #[test]

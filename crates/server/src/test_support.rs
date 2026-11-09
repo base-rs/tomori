@@ -479,7 +479,12 @@ impl TestClient {
 
     /// Say hello as [`Self::hello`] does, as a client that reads what is projected in its space. See `design/projection.md`.
     pub fn hello_projected(&mut self, participant: &str, name: &str) {
-        self.greet(participant, name, None, true);
+        self.greet(participant, name, None, (true, false));
+    }
+
+    /// Say hello as [`Self::hello`] does, as a client that reads whether pairing is open, as an owner's is told. See `design/security.md`.
+    pub fn hello_reading_pairing(&mut self, participant: &str, name: &str) {
+        self.greet(participant, name, None, (false, true));
     }
 
     /// Say hello as [`Self::hello`] does, listing the environments this client `presents`, and return those the welcome offers it. See `design/environments.md`.
@@ -489,7 +494,7 @@ impl TestClient {
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
-        self.greet(participant, name, presents, false)
+        self.greet(participant, name, presents, (false, false))
     }
 
     fn greet(
@@ -497,7 +502,7 @@ impl TestClient {
         participant: &str,
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
-        projection: bool,
+        (projection, pairing_window): (bool, bool),
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.send(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
@@ -507,6 +512,7 @@ impl TestClient {
             environments: presents,
             environment_state: false,
             projection,
+            pairing_window,
         });
         // The welcome is the first reply to hello.
         let environments;

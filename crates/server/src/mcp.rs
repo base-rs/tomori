@@ -426,7 +426,7 @@ fn tools() -> Value {
         },
         {
             "name": "pairing",
-            "description": "The device pairing waiting on this Tomori server, if any: how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. It never gives the code, since only the device shows it, nor the device's name, which the device chose itself.",
+            "description": "The device pairing waiting on this Tomori server, if any: how long ago it began, how long until it is withdrawn and whether the device shows its code yet, whether pairing is open, which only an owner or the server's operator opens, and whether it is paused. It never gives the code, since only the device shows it, nor the device's name, which the device chose itself.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },

@@ -7,7 +7,7 @@ use std::fmt::Write;
 use tomori_protocol::{Activity, ConnectionRole};
 use tomori_security::{Entry, Grant};
 
-use crate::hub::{PairingView, Status};
+use crate::hub::{PairingState, PairingView, Status, spoken};
 
 /// The paths of the pages and their actions.
 pub const STATUS_PATH: &str = "/";
@@ -17,6 +17,8 @@ pub const REVOKE_PATH: &str = "/tokens/revoke";
 pub const CONFIRM_PAIRING_PATH: &str = "/pairing/confirm";
 pub const DECLINE_PAIRING_PATH: &str = "/pairing/decline";
 pub const ALLOW_PAIRING_PATH: &str = "/pairing/allow";
+pub const OPEN_PAIRING_PATH: &str = "/pairing/open";
+pub const CLOSE_PAIRING_PATH: &str = "/pairing/close";
 
 /// The most bytes of a form body read.
 pub const FORM_LIMIT: usize = 4096;
@@ -136,9 +138,34 @@ fn people(people: &[(String, ConnectionRole)]) -> String {
         .join(", ")
 }
 
-/// The status page: the spaces and who is in them, the pairing waiting, the issued tokens, which an owner can revoke, and whether `signed_in` with a cookie, so that signing out is offered.
+/// Whether pairing is open, with a form to open it or close it. See `design/security.md`.
+fn window(state: &PairingState) -> String {
+    match state {
+        PairingState::Closed { opens_for } => format!(
+            "<p>Pairing is closed: a device that asks to pair is refused.</p>\n<form method=\"post\" action=\"{OPEN_PAIRING_PATH}\"><button>Open pairing for {}</button></form>\n",
+            spoken(*opens_for)
+        ),
+        PairingState::Open { remaining, by } => {
+            let seconds = remaining.as_secs();
+            // Past its time, a pairing begun within it holds it until that pairing ends.
+            let until = if seconds == 0 {
+                "until the pairing waiting ends".to_owned()
+            } else {
+                format!("for {}:{:02} more", seconds / 60, seconds % 60)
+            };
+            format!(
+                "<p>Pairing is open, {until}, as {} opened it {}: a device may ask to pair, and the first to pair closes it.</p>\n<form method=\"post\" action=\"{CLOSE_PAIRING_PATH}\"><button>Close pairing</button></form>\n",
+                escape(&by.who),
+                escape(by.place)
+            )
+        }
+    }
+}
+
+/// The status page: the spaces and who is in them, whether pairing is open, the pairing waiting, the issued tokens, which an owner can revoke, and whether `signed_in` with a cookie, so that signing out is offered.
 pub fn status(
     status: &Status,
+    opening: Option<&PairingState>,
     pairing: Option<&PairingView>,
     paused: bool,
     tokens: Option<&[Entry]>,
@@ -168,6 +195,9 @@ pub fn status(
     }
     let _ = writeln!(body, "<h2>Lobby</h2>\n<p>{}</p>", people(&status.lobby));
     body.push_str("<h2>Pairing</h2>\n");
+    if let Some(opening) = opening {
+        body.push_str(&window(opening));
+    }
     match pairing {
         Some(pairing) => {
             // Each form names the pairing shown, so that it acts on no other.
@@ -305,9 +335,9 @@ mod tests {
         assert!(page.contains("No tokens are issued"));
         assert!(page.contains("Sign out"));
 
-        let empty = super::status(&Status::default(), None, false, None, false);
+        let empty = super::status(&Status::default(), None, None, false, None, false);
         assert!(!empty.contains("paused"));
-        let paused = super::status(&Status::default(), None, true, None, false);
+        let paused = super::status(&Status::default(), None, None, true, None, false);
         assert!(paused.contains("Pairing is paused"));
         assert!(paused.contains("action=\"/pairing/allow\""));
         assert!(empty.contains("No pairing is pending"));
@@ -316,7 +346,7 @@ mod tests {
             device: tomori_security::pairing::ChosenName::new("<Ada's & Quest> 4 eight"),
             code: Some("042 917".into()),
         };
-        let pairing = super::status(&Status::default(), Some(&view), false, None, false);
+        let pairing = super::status(&Status::default(), None, Some(&view), false, None, false);
         assert!(pairing.contains(
             "Pairing request from a device calling itself &quot;Ada&#39;s &amp; Quest&quot;, with code <strong>042 917</strong>. Confirm only if the device you are pairing shows the same code."
         ));
@@ -324,11 +354,11 @@ mod tests {
         assert!(pairing.contains("action=\"/pairing/decline\""));
         assert!(pairing.contains("name=\"pairing\" value=\"7\""));
         view.code = None;
-        let unrevealed = super::status(&Status::default(), Some(&view), false, None, false);
+        let unrevealed = super::status(&Status::default(), None, Some(&view), false, None, false);
         assert!(unrevealed.contains("&amp; Quest&quot;; its code is not shown yet"));
         // A device whose name is left with nothing is shown as a device.
         view.device = tomori_security::pairing::ChosenName::new("482 913");
-        let nameless = super::status(&Status::default(), Some(&view), false, None, false);
+        let nameless = super::status(&Status::default(), None, Some(&view), false, None, false);
         assert!(nameless.contains("Pairing request from a device; its code is not shown yet"));
         assert!(!unrevealed.contains("/pairing/confirm"));
         assert!(unrevealed.contains("/pairing/decline"));
@@ -352,8 +382,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_status_page_says_whether_pairing_is_open() {
+        let page = |state: &PairingState| {
+            super::status(&Status::default(), Some(state), None, false, None, false)
+        };
+        let closed = page(&PairingState::Closed {
+            opens_for: std::time::Duration::from_secs(120),
+        });
+        assert!(
+            closed.contains("<button>Open pairing for 2 minutes</button>"),
+            "{closed}"
+        );
+        let by = crate::hub::Opener::status_page(Some("<Ada>"));
+        let open = page(&PairingState::Open {
+            remaining: std::time::Duration::from_secs(102),
+            by: by.clone(),
+        });
+        assert!(
+            open.contains(
+                "Pairing is open, for 1:42 more, as &lt;Ada&gt; opened it on the status page"
+            ),
+            "{open}"
+        );
+        assert!(open.contains("action=\"/pairing/close\""));
+        let held = page(&PairingState::Open {
+            remaining: std::time::Duration::ZERO,
+            by,
+        });
+        assert!(
+            held.contains("Pairing is open, until the pairing waiting ends, as"),
+            "{held}"
+        );
+    }
+
     fn status_page(status: &Status) -> String {
-        super::status(status, None, false, Some(&[]), true)
+        super::status(status, None, None, false, Some(&[]), true)
     }
 
     #[test]

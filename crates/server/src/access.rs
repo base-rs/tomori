@@ -104,7 +104,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::RemoveWall { .. }
         // A space's title is how everyone, in it and in the lobby, tells it apart, typed or said. See `design/spaces.md`.
         | ClientMessage::RenameSpace { .. }
-        | ClientMessage::UtteranceBegin { titling: true, .. } => owner,
+        | ClientMessage::UtteranceBegin { titling: true, .. }
+        // Opening pairing lets a new device ask to become an owner. See `design/security.md`.
+        | ClientMessage::OpenPairing
+        | ClientMessage::ClosePairing => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
         | ClientMessage::UtteranceEnd { .. }
@@ -154,6 +157,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },
@@ -258,6 +262,8 @@ mod tests {
             ClientMessage::DismissPanel {
                 panel: "panel-1".into(),
             },
+            ClientMessage::OpenPairing,
+            ClientMessage::ClosePairing,
         ]
     }
 
@@ -343,6 +349,8 @@ mod tests {
                     && kind != "rename_space"
                     && kind != "add_wall"
                     && kind != "remove_wall"
+                    && kind != "open_pairing"
+                    && kind != "close_pairing"
             })
             .collect();
         assert_eq!(permitted(ConnectionRole::Collaborator), collaborating);

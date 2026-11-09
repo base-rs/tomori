@@ -276,6 +276,11 @@ pub enum ClientMessage {
         /// are never sent it. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         projection: bool,
+        /// Whether this client reads [`ServerMessage::PairingWindow`], which the server then sends an owner's connection on
+        /// connecting and whenever pairing opens or closes. Absent from older clients, which would refuse it and are never
+        /// sent it. See `design/security.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pairing_window: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
@@ -475,6 +480,13 @@ pub enum ClientMessage {
     },
     /// Stop pairing.
     PairCancel,
+    /// Open pairing on the server for a short window, so that a new device may ask to pair, or open it afresh for the
+    /// whole window. Owners only. Sent only to a server that has sent this connection a
+    /// [`ServerMessage::PairingWindow`]. See `design/security.md`.
+    OpenPairing,
+    /// Close pairing on the server, withdrawing a pairing waiting. Owners only, and only to a server that has sent this
+    /// connection a [`ServerMessage::PairingWindow`].
+    ClosePairing,
     /// Ask to collaborate in the space this visitor is watching. See `design/security.md`.
     Knock,
     /// Admit or decline a knock on the space this participant is in.
@@ -527,6 +539,11 @@ pub enum ClientMessage {
 
 /// The error of a [`ServerMessage::TranscriptFailed`] for a recording with no speech in it, as when X was pressed by accident: nothing the participant said was lost, so a client shows it only briefly, where the words were spoken, and not as a problem. See `design/speech.md`.
 pub const NO_SPEECH: &str = "no speech heard";
+
+/// The error of a [`ServerMessage::PairFailed`] for a device that asks to pair while pairing is closed, as it is by
+/// default, also on a server with no owner yet, except during a window an owner or the operator opened. A client shows that pairing is
+/// closed rather than trying again by itself. See `design/security.md`.
+pub const PAIRING_CLOSED: &str = "Pairing is closed on this server; ask an owner to open it.";
 
 /// Who deleted the space a client was in, as [`ServerMessage::Left`] says. See `design/spaces.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,9 +689,17 @@ pub enum ServerMessage {
     Paired {
         token: String,
     },
-    /// The pairing ended without a token: declined, withdrawn, or refused.
+    /// The pairing ended without a token: declined, withdrawn, or refused, such as with [`PAIRING_CLOSED`] while pairing
+    /// is closed, as it is outside a window.
     PairFailed {
         error: String,
+    },
+    /// Whether pairing is open on the server, so that a new device may ask to pair: for `closes_in` more seconds, or
+    /// closed when absent. Sent only to an owner's connection whose Hello set `pairing_window`, on connecting and whenever
+    /// pairing opens or closes, by any owner or the operator. See `design/security.md`.
+    PairingWindow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closes_in: Option<u32>,
     },
     /// The knocks waiting on the space, sent to its participants whenever they change.
     Knocks {
@@ -1329,6 +1354,7 @@ mod tests {
             environments,
             environment_state: false,
             projection: false,
+            pairing_window: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -1440,6 +1466,7 @@ mod tests {
             environments: None,
             environment_state: true,
             projection: false,
+            pairing_window: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -1509,11 +1536,66 @@ mod tests {
             environments: None,
             environment_state: false,
             projection: false,
+            pairing_window: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
             serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"})
         );
+    }
+
+    #[test]
+    fn whether_pairing_is_open_is_an_addition_older_peers_never_see() {
+        let hello = ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Ada".into(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: false,
+            pairing_window: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&hello).unwrap()["pairing_window"],
+            true
+        );
+        // An older client says nothing, and is read as not reading it.
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
+        )
+        .unwrap();
+        let ClientMessage::Hello { pairing_window, .. } = older else {
+            unreachable!("a hello");
+        };
+        assert!(!pairing_window);
+        for (message, json) in [
+            (
+                ServerMessage::PairingWindow {
+                    closes_in: Some(120),
+                },
+                serde_json::json!({"type": "pairing_window", "closes_in": 120}),
+            ),
+            (
+                ServerMessage::PairingWindow { closes_in: None },
+                serde_json::json!({"type": "pairing_window"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&message).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<ServerMessage>(json).unwrap(),
+                message
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(ClientMessage::OpenPairing).unwrap(),
+            serde_json::json!({"type": "open_pairing"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::ClosePairing).unwrap(),
+            serde_json::json!({"type": "close_pairing"})
+        );
+        assert!(PAIRING_CLOSED.contains("ask an owner to open it"));
     }
 
     #[test]
@@ -1527,6 +1609,7 @@ mod tests {
             environments: None,
             environment_state: false,
             projection: false,
+            pairing_window: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1548,6 +1631,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             }
         );
 

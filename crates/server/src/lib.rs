@@ -63,8 +63,9 @@ pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
 pub use environments::Environment;
 pub use hub::CLOSED_SPACES;
 pub use hub::{
-    KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, PAIRING_ATTEMPTS, PAIRING_TIMEOUT,
-    PAIRING_WINDOW, PairingEvent, PairingView, RESTORING, REVEAL_TIMEOUT,
+    Closing, KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, Opener, PAIRING_ATTEMPTS,
+    PAIRING_OPEN_FOR, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingEvent, PairingState, PairingView,
+    REFUSALS_TOLD_EVERY, RESTORING, REVEAL_TIMEOUT,
 };
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;

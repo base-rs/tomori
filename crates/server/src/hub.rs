@@ -34,9 +34,13 @@ use crate::workspace::SpaceSlots;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
+mod pairing_window;
 pub(crate) mod tools;
 
 pub(crate) use agent_pairing::Decision;
+pub use pairing_window::{
+    Closing, Opener, PAIRING_OPEN_FOR, PairingState, REFUSALS_TOLD_EVERY, spoken,
+};
 
 pub type ConnectionId = u64;
 
@@ -201,6 +205,16 @@ pub enum PairingEvent {
     Paused,
     /// A space's agent confirmed or declined a pairing through Tomori's tools, or was refused, as `notice` says, naming the space and the calling session.
     Agent { notice: String },
+    /// `by` opened pairing for `length`, until `closes`.
+    Opened {
+        by: Opener,
+        length: Duration,
+        closes: SystemTime,
+    },
+    /// Pairing closed, as `closing` says why.
+    Closed { closing: Closing },
+    /// `count` requests to pair were refused since pairing is closed, since this was last told.
+    Refused { count: u32 },
 }
 
 /// What the console tells the operator.
@@ -222,6 +236,22 @@ impl std::fmt::Display for PairingEvent {
                 "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again.",
             ),
             Self::Agent { notice } => formatter.write_str(notice),
+            Self::Opened { by, length, closes } => write!(
+                formatter,
+                "{} opened pairing {} for {}, until {}: a device may ask to pair until then, and the first to pair closes it. Type \"close\" here to close it sooner.",
+                by.who,
+                by.place,
+                pairing_window::spoken(*length),
+                clock(*closes)
+            ),
+            Self::Closed { closing } => write!(formatter, "Pairing is closed{closing}"),
+            Self::Refused { count: 1 } => {
+                formatter.write_str("Refused a request to pair, since pairing is closed.")
+            }
+            Self::Refused { count } => write!(
+                formatter,
+                "Refused {count} requests to pair, since pairing is closed."
+            ),
         }
     }
 }
@@ -413,6 +443,8 @@ pub struct Hub {
     pairing: RwLock<Option<PairingSetup>>,
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
+    /// How long pairing stays open once opened; see [`PAIRING_OPEN_FOR`].
+    pairing_open_for: RwLock<Duration>,
     knock_timeout: RwLock<Duration>,
     /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
     tools: tools::Tools,
@@ -454,6 +486,10 @@ struct HubState {
     pairing_attempts: std::collections::VecDeque<Instant>,
     /// What spaces' agents recently did with pairings, newest last, for the status page; at most [`PAIRING_DECISIONS`].
     pairing_decisions: std::collections::VecDeque<String>,
+    /// The window in which a device may ask to pair, while one is open; pairing is closed otherwise, also on a server with no owner yet. See `design/security.md`.
+    window: Option<pairing_window::Window>,
+    /// Requests to pair refused while pairing was closed, not yet told.
+    refusals: pairing_window::Refusals,
     /// Knocks waiting for an answer, oldest first.
     knocks: Vec<KnockRecord>,
     next_knock: u64,
@@ -490,6 +526,8 @@ struct ConnectionRecord {
     environment_state: bool,
     /// Whether the client said in Hello that it reads what is projected in its space. See `design/projection.md`.
     projection: bool,
+    /// Whether the client said in Hello that it reads [`ServerMessage::PairingWindow`]. See `design/security.md`.
+    pairing_window: bool,
 }
 
 impl ConnectionRecord {
@@ -1749,6 +1787,7 @@ impl Hub {
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
+            pairing_open_for: RwLock::new(PAIRING_OPEN_FOR),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             tools: tools::Tools::default(),
             highlighter: RwLock::new(crate::highlighting::highlighter()),
@@ -2089,6 +2128,8 @@ impl Hub {
             Ok((entry, token)) => {
                 log::info!("Paired {} as owner token {}.", pairing.device, entry.id);
                 outbox.message(ServerMessage::Paired { token });
+                // One pairing for each window, so that an opening is used once. See `design/security.md`.
+                self.paired_closes_pairing();
                 Ok(pairing.device)
             }
             Err(error) => {
@@ -2384,6 +2425,7 @@ impl Hub {
                 cards: false,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
         );
         Some((id, outbox, received, output))
@@ -2414,6 +2456,7 @@ impl Hub {
     /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
     pub fn sweep(&self, now: Instant, keepalive: &Keepalive, hello_timeout: Duration) {
         let mut expired = Vec::new();
+        let mut window_events = Vec::new();
         {
             let mut state = self.lock();
             let HubState {
@@ -2476,6 +2519,7 @@ impl Hub {
                 log::info!("A pairing was withdrawn: {error}");
                 state.end_pairing(None, error);
             }
+            self.expire_window(&mut state, now, &mut window_events);
             let (expired, waiting): (Vec<KnockRecord>, Vec<KnockRecord>) =
                 std::mem::take(&mut state.knocks)
                     .into_iter()
@@ -2495,6 +2539,7 @@ impl Hub {
                 state.announce_knocks(&knock.space);
             }
         }
+        self.run(window_events);
         for (id, cancellation) in expired {
             // Release the participant now; cancelling also ends the exchange, even one blocked writing to a peer that is gone.
             self.disconnect(id);
@@ -2605,12 +2650,14 @@ impl Hub {
                 environments,
                 environment_state,
                 projection,
+                pairing_window,
             } = message
             {
                 // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
                 if let Some(record) = state.connections.get_mut(&connection) {
                     record.environment_state = environment_state;
                     record.projection = projection;
+                    record.pairing_window = pairing_window;
                 }
                 self.hello(
                     &mut state,
@@ -2800,6 +2847,7 @@ impl Hub {
                 .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
             name: Some(state.participants[&participant].name.clone()),
         });
+        self.tell_window_on_hello(state, connection);
         // The space they were in, unless it was forgotten meanwhile.
         let rejoined = rejoin.is_some_and(|space| state.join(&participant, &space));
         if !rejoined && role != ConnectionRole::Pairing {
@@ -3318,6 +3366,13 @@ impl Hub {
                     outbox.message(failed("Pairing needs a connection over TLS."));
                     return;
                 }
+                let now = Instant::now();
+                // Closed, also on a server with no owner yet, except during a window an owner or the operator opened; refused at once, and not counted against the attempts, so that requests while closed cannot pause pairing for the owner who opens it. See `design/security.md`.
+                if !self.pairing_open(state, now) {
+                    outbox.message(failed(tomori_protocol::PAIRING_CLOSED));
+                    self.refuse_closed(state, now, deferred);
+                    return;
+                }
                 // Refused even to the same connection, which must not get a fresh value from the server once it has seen one; see `design/security.md`.
                 if state.pairing.is_some() {
                     outbox.message(failed(
@@ -3325,7 +3380,6 @@ impl Hub {
                     ));
                     return;
                 }
-                let now = Instant::now();
                 while state
                     .pairing_attempts
                     .front()
@@ -3515,6 +3569,19 @@ impl Hub {
             }
             ClientMessage::PairCancel => {
                 state.end_pairing(Some(connection), "The pairing was cancelled.");
+            }
+            // Owners only: visitors, collaborators and agents never open pairing. See `design/security.md`.
+            ClientMessage::OpenPairing => {
+                let name = state.participants[participant].name.clone();
+                if let Err(error) = self.open_window(state, Opener::owner(&name), deferred) {
+                    state.error(participant, error);
+                }
+            }
+            ClientMessage::ClosePairing => {
+                let name = state.participants[participant].name.clone();
+                if !self.close_window(state, format!("{name} closed it."), deferred) {
+                    state.error(participant, "Pairing is not open.");
+                }
             }
             ClientMessage::SetMode { mode } => {
                 if let Err(error) = limits::check(&mode, limits::IDENTIFIER_BYTES, "mode") {
@@ -5368,6 +5435,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -5466,6 +5534,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
         );
         connection
@@ -5534,6 +5603,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -5569,6 +5639,7 @@ mod tests {
                     environments: None,
                     environment_state: false,
                     projection: false,
+                    pairing_window: false,
                 },
             );
             connection
@@ -5767,6 +5838,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
         );
         hub.handle(

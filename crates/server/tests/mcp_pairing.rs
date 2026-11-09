@@ -87,6 +87,8 @@ impl Studio {
         let space = ada.create_space("Studio").id;
         let token = eventually(|| server.tools_token());
         let session = tomori_backend::Session::id(&server.backend.started()[0]);
+        // The server has an owner, so a device may ask to pair only in a window, which the agent cannot open: the operator opens it here.
+        pairing.open().unwrap();
         Self {
             server,
             pairing,
@@ -216,8 +218,20 @@ fn the_agent_lists_the_pairing_waiting_but_never_its_code() {
     let listed = studio.call("pairing", json!({}));
     assert_eq!(
         listed["structuredContent"],
-        json!({"pending": null, "paused": false})
+        json!({"pending": null, "open": true, "paused": false})
     );
+    // Closed, a device asking to pair is refused, which the agent can see but not change.
+    assert!(studio.pairing.close());
+    assert_eq!(
+        studio.call("pairing", json!({}))["structuredContent"],
+        json!({"pending": null, "open": false, "paused": false})
+    );
+    let mut early = studio.server.connect("early", "Early");
+    early.send(&ClientMessage::PairBegin {
+        commitment: Nonce::generate().commitment(),
+    });
+    assert_eq!(failed(&early), tomori_protocol::PAIRING_CLOSED);
+    studio.pairing.open().unwrap();
     // With nothing waiting, there is nothing to confirm or decline.
     assert!(
         failure(&studio.call("confirm_pairing", json!({"code": "123 456"})))
@@ -576,7 +590,7 @@ fn the_rate_limit_holds_and_the_agent_cannot_lift_it() {
     );
     assert_eq!(
         studio.call("pairing", json!({}))["structuredContent"],
-        json!({"pending": null, "paused": true})
+        json!({"pending": null, "open": true, "paused": true})
     );
     // There is no tool to allow pairing again: only the operator or an owner on the status page can.
     assert!(studio.call("allow_pairing", json!({})).is_null());

@@ -110,6 +110,31 @@ impl Pairing {
             hub.allow_pairing();
         }
     }
+
+    /// Open pairing, as the operator on the server's console, so that a new device may ask to pair for [`crate::PAIRING_OPEN_FOR`]; this is how an owner who has lost every paired device pairs again. Returns how long it is open for. See `design/security.md`.
+    pub fn open(&self) -> Result<Duration, &'static str> {
+        self.open_by(crate::hub::Opener::console())
+    }
+
+    /// Open pairing, as `by`.
+    pub(crate) fn open_by(&self, by: crate::hub::Opener) -> Result<Duration, &'static str> {
+        self.0
+            .upgrade()
+            .ok_or("The server has stopped.")?
+            .open_pairing(by)
+    }
+
+    /// Close pairing, as the operator, withdrawing a pairing waiting. Returns whether it was open.
+    pub fn close(&self) -> bool {
+        self.0.upgrade().is_some_and(|hub| {
+            hub.close_pairing("the operator closed it on the server's console.".to_owned())
+        })
+    }
+
+    /// Whether a device may ask to pair; `None` once the server has stopped, or on one that does not pair.
+    pub fn state(&self) -> Option<crate::PairingState> {
+        self.0.upgrade()?.pairing_state()
+    }
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
@@ -358,6 +383,12 @@ impl Server {
     /// Change how long a pairing waits to be confirmed; see [`crate::PAIRING_TIMEOUT`].
     pub fn with_pairing_timeout(self, timeout: Duration) -> Self {
         self.hub.set_pairing_timeout(timeout);
+        self
+    }
+
+    /// Change how long pairing stays open once an owner or the operator opens it; see [`crate::PAIRING_OPEN_FOR`].
+    pub fn with_pairing_open_for(self, length: Duration) -> Self {
+        self.hub.set_pairing_open_for(length);
         self
     }
 
@@ -2318,6 +2349,7 @@ mod tests {
                 environments: None,
                 environment_state: false,
                 projection: false,
+                pairing_window: false,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,
