@@ -440,6 +440,9 @@ pub struct Hub {
     tokens: RwLock<Option<Arc<tomori_security::TokenStore>>>,
     /// Where the spaces are kept across restarts; see [`Hub::restore`].
     kept: RwLock<Option<Arc<crate::kept::SpaceStore>>>,
+    /// The images of image panels, by their SHA-256, in the state directory once spaces are kept there. See
+    /// `design/projection.md`.
+    pub(crate) images: Arc<crate::images::ImageStore>,
     /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
     encrypted: AtomicBool,
     pairing: RwLock<Option<PairingSetup>>,
@@ -530,6 +533,8 @@ struct ConnectionRecord {
     projection: bool,
     /// Whether the client said in Hello that it reads [`ServerMessage::PairingWindow`]. See `design/security.md`.
     pairing_window: bool,
+    /// Whether the client said in Hello that it shows image panels, fetching their images. See `design/projection.md`.
+    images: bool,
 }
 
 impl ConnectionRecord {
@@ -820,6 +825,9 @@ enum Deferred {
     Admit(KnockRecord),
     /// Keep a principal's new name with their token, outside the lock, and then call everyone holding it by it.
     Rename(Rename),
+    /// Send the image with this SHA-256 to a connection that asked for it, read outside the lock, as it may be read from
+    /// the state directory.
+    Image(ConnectionId, [u8; 32]),
 }
 
 /// A token holder's new name, to keep with their token. See [`Hub::keep_name`].
@@ -862,6 +870,9 @@ fn participant_key(principal: Option<&str>, identity: &str) -> String {
 }
 
 /// An error reply, cut to [`limits::ERROR_BYTES`].
+/// The folder of the state directory that image panels' images are kept in. See `design/projection.md`.
+pub(crate) const IMAGES_FOLDER: &str = "images";
+
 fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         error: limits::truncate(&error.into(), limits::ERROR_BYTES),
@@ -1785,6 +1796,7 @@ impl Hub {
             max_visitors: AtomicUsize::new(usize::MAX),
             tokens: RwLock::new(None),
             kept: RwLock::new(None),
+            images: Arc::new(crate::images::ImageStore::new()),
             encrypted: AtomicBool::new(false),
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
@@ -2295,6 +2307,7 @@ impl Hub {
                 Deferred::Keep => {
                     self.keep();
                 }
+                Deferred::Image(connection, hash) => self.send_image(connection, hash),
                 Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
                     {
@@ -2428,6 +2441,7 @@ impl Hub {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
         );
         Some((id, outbox, received, output))
@@ -2620,6 +2634,8 @@ impl Hub {
                 Ok(audio) => self.audio(connection, audio),
                 Err(error) => self.reply_error(connection, format!("Invalid audio: {error}")),
             },
+            // Images go only from the server to clients.
+            FrameKind::Image => self.reply_error(connection, "Clients send no images.".to_owned()),
         }
     }
 
@@ -2653,6 +2669,7 @@ impl Hub {
                 environment_state,
                 projection,
                 pairing_window,
+                images,
             } = message
             {
                 // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
@@ -2660,6 +2677,7 @@ impl Hub {
                     record.environment_state = environment_state;
                     record.projection = projection;
                     record.pairing_window = pairing_window;
+                    record.images = images;
                 }
                 self.hello(
                     &mut state,
@@ -3829,6 +3847,26 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            // Only an image a panel shown in the client's space has: what a client may see is what its space shows. A
+            // refusal is not said, since it happens innocently, as when the panel is dismissed while its image is asked
+            // for, and the participant can do nothing about it; the client gives up after a few tries.
+            ClientMessage::FetchImage { image } => {
+                let environments = self.environments();
+                let shown = tomori_protocol::hash_bytes(&image).filter(|_| {
+                    space
+                        .and_then(|space| state.space(space))
+                        .is_some_and(|record| {
+                            let walls = environments.walls(&record.model.environment);
+                            record.stage.shows_image(&walls, &image)
+                        })
+                });
+                match shown {
+                    Some(hash) => deferred.push(Deferred::Image(connection, hash)),
+                    None => {
+                        log::debug!("Refused an image that no panel the client's space shows has.")
+                    }
+                }
+            }
             ClientMessage::DismissPanel { panel } => {
                 if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
                     state.error(participant, error);
@@ -4640,7 +4678,15 @@ impl Hub {
             state.touch_lobby();
             self.recount(&mut state);
         }
+        // Image panels' images are kept beside the spaces, and those no kept panel shows any more removed.
+        let images = store.path().with_file_name(IMAGES_FOLDER);
         *self.kept.write().expect("never left poisoned") = Some(store);
+        match self.images.keep_in(images) {
+            Ok(()) => self.sweep_images(),
+            Err(error) => {
+                log::warn!("Image panels' images are kept only until the server stops: {error}.")
+            }
+        }
         restores
     }
 
@@ -4694,6 +4740,7 @@ impl Hub {
     /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`. Returns whether what is kept is as the spaces are now.
     pub(crate) fn keep(&self) -> bool {
         let Some(store) = self.kept.read().expect("never left poisoned").clone() else {
+            self.sweep_images();
             return true;
         };
         let written = store.keep(|| Some(self.lock().kept()));
@@ -4703,7 +4750,40 @@ impl Hub {
                 store.path().display()
             );
         }
+        self.sweep_images();
         written.is_ok()
+    }
+
+    /// Remove the images that no panel any space keeps shows, if those it shows changed. See `design/projection.md`.
+    fn sweep_images(&self) {
+        let shown = self
+            .lock()
+            .spaces
+            .iter()
+            .flat_map(|record| record.stage.images())
+            .map(str::to_owned)
+            .collect();
+        self.images.sweep(shown);
+    }
+
+    /// Send the image `hash` to `connection`, which asked for it, if it is kept. A request for one already on its way, or
+    /// beyond what may wait to be sent, is dropped: a client asks for a few at a time, and again after a while.
+    fn send_image(&self, connection: ConnectionId, hash: [u8; 32]) {
+        let png = self.images.get(&tomori_protocol::hash_text(&hash));
+        let state = self.lock();
+        let Some(record) = state.connections.get(&connection) else {
+            return;
+        };
+        match png {
+            Some(png) => {
+                if !record.outbox.image(hash, png) {
+                    log::debug!(
+                        "An image asked for again, or beyond those waiting, was not queued."
+                    );
+                }
+            }
+            None => log::warn!("An image a panel shows is no longer kept, so it was not sent."),
+        }
     }
 
     pub(crate) fn create_failed(&self, creator: &str, error: String) {
@@ -5332,10 +5412,22 @@ impl Hub {
                     .and_then(|space| state.space(&space))?;
                 let environments = self.environments();
                 let walls = environments.walls(&space.model.environment);
-                let projection =
+                let mut projection =
                     space
                         .stage
                         .view(&space.model.id, &walls, crate::cards::unix_now());
+                // A client that shows no images is sent each image panel as a text panel saying what it is.
+                let images = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.images);
+                if !images {
+                    projection.panels = projection
+                        .panels
+                        .into_iter()
+                        .map(crate::stage::without_image)
+                        .collect();
+                }
                 Some(ServerMessage::Projection {
                     projection: Box::new(projection),
                 })
@@ -5438,6 +5530,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -5537,6 +5630,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
         );
         connection
@@ -5606,6 +5700,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -5642,6 +5737,7 @@ mod tests {
                     environment_state: false,
                     projection: false,
                     pairing_window: false,
+                    images: false,
                 },
             );
             connection
@@ -5841,6 +5937,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
         );
         hub.handle(

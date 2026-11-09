@@ -387,6 +387,7 @@ pub struct TestClient {
     stream: TcpStream,
     messages: Receiver<ServerMessage>,
     audio: Receiver<AudioFrame>,
+    images: Receiver<tomori_protocol::ImageChunk>,
     /// The audio source number assigned in the welcome.
     pub source: u32,
     /// The role named in the welcome.
@@ -419,6 +420,7 @@ impl TestClient {
         .unwrap();
         let (message_sender, messages) = channel();
         let (audio_sender, audio) = channel();
+        let (image_sender, images) = channel();
         let reader = stream.try_clone().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let record = received.clone();
@@ -450,6 +452,7 @@ impl TestClient {
                             message_sender.send(message).is_ok()
                         }
                         FrameKind::Audio => audio_sender.send(frame.to_audio().unwrap()).is_ok(),
+                        FrameKind::Image => image_sender.send(frame.to_image().unwrap()).is_ok(),
                     };
                     if !delivered {
                         return;
@@ -461,6 +464,7 @@ impl TestClient {
             stream,
             messages,
             audio,
+            images,
             source: 0,
             role: tomori_protocol::ConnectionRole::Unknown,
             sequence: 0,
@@ -479,12 +483,17 @@ impl TestClient {
 
     /// Say hello as [`Self::hello`] does, as a client that reads what is projected in its space. See `design/projection.md`.
     pub fn hello_projected(&mut self, participant: &str, name: &str) {
-        self.greet(participant, name, None, (true, false));
+        self.greet(participant, name, None, (true, false, false));
     }
 
     /// Say hello as [`Self::hello`] does, as a client that reads whether pairing is open, as an owner's is told. See `design/security.md`.
     pub fn hello_reading_pairing(&mut self, participant: &str, name: &str) {
-        self.greet(participant, name, None, (false, true));
+        self.greet(participant, name, None, (false, true, false));
+    }
+
+    /// Say hello as [`Self::hello_projected`] does, as a client that also shows image panels, fetching their images.
+    pub fn hello_showing_images(&mut self, participant: &str, name: &str) {
+        self.greet(participant, name, None, (true, false, true));
     }
 
     /// Say hello as [`Self::hello`] does, listing the environments this client `presents`, and return those the welcome offers it. See `design/environments.md`.
@@ -494,7 +503,7 @@ impl TestClient {
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
-        self.greet(participant, name, presents, (false, false))
+        self.greet(participant, name, presents, (false, false, false))
     }
 
     fn greet(
@@ -502,7 +511,7 @@ impl TestClient {
         participant: &str,
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
-        (projection, pairing_window): (bool, bool),
+        (projection, pairing_window, images): (bool, bool, bool),
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.send(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
@@ -513,6 +522,7 @@ impl TestClient {
             environment_state: false,
             projection,
             pairing_window,
+            images,
         });
         // The welcome is the first reply to hello.
         let environments;
@@ -656,6 +666,11 @@ impl TestClient {
 
     pub fn next_audio(&self, timeout: Duration) -> Option<AudioFrame> {
         self.audio.recv_timeout(timeout).ok()
+    }
+
+    /// The next part of an image the server sends, within `timeout`.
+    pub fn next_image_chunk(&self, timeout: Duration) -> Option<tomori_protocol::ImageChunk> {
+        self.images.recv_timeout(timeout).ok()
     }
 
     /// Whether the server has ended the response.

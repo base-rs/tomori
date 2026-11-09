@@ -282,6 +282,7 @@ mod tests {
             items.push(match frame.kind {
                 FrameKind::Control => Item::Control(frame.to_client_message().unwrap()),
                 FrameKind::Audio => Item::Audio(frame.to_audio().unwrap()),
+                FrameKind::Image => unreachable!("a client sends no images"),
             });
         }
         items

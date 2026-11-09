@@ -263,6 +263,38 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
+fn an_image_this_client_never_asked_for_is_ignored_and_the_connection_kept() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let client = Client::connect(options(server.address)).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    // It shows no image panels, so its Hello says so.
+    assert!(matches!(
+        server.received(1).first(),
+        Some(Received::Message(ClientMessage::Hello {
+            images: false,
+            ..
+        }))
+    ));
+    client
+        .send(ClientMessage::Answer {
+            question: "q".into(),
+            field: "f".into(),
+            text: "image".into(),
+        })
+        .unwrap();
+    let event = wait_for(&client, |event| {
+        matches!(
+            event,
+            Event::Message(ServerMessage::Name { .. })
+                | Event::State(ConnectionState::Disconnected { .. })
+        )
+    });
+    assert!(
+        matches!(event, Event::Message(ServerMessage::Name { name }) if name == "After the image")
+    );
+}
+
+#[test]
 fn hello_lists_the_environments_the_client_presents_and_reads_their_state_on_every_connection() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let mut options = options(server.address);

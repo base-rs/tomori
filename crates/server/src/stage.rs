@@ -22,10 +22,12 @@
 mod blocks;
 pub(crate) mod checklist;
 mod code;
+mod image;
 mod placement;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
 pub use code::Source;
+pub use image::without_image;
 pub use placement::Placement;
 
 use std::collections::BTreeMap;
@@ -123,9 +125,10 @@ fn json_size(value: &impl Serialize) -> usize {
     serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
-/// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; and, for a
-/// code panel, its language, length and spans, its body the first lines of its code. Made only by [`Content::parse`],
-/// for a text panel, and `code::Lines::content`, for a code panel, which bound and clean it.
+/// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; for a code
+/// panel, its language, length and spans, its body the first lines of its code; and for an image panel, its image, its
+/// body the image's caption. Made only by [`Content::parse`], for a text panel, `code::Lines::content`, for a code
+/// panel, and [`Content::image`], for an image panel, which bound and clean it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Content {
     pub title: String,
@@ -138,6 +141,8 @@ pub struct Content {
     /// the `update_panel` tool, updates it in place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<tomori_protocol::Image>,
 }
 
 /// A panel found in a reply, as its block is read: its content, and, for a code panel, the code to highlight, which is
@@ -353,6 +358,7 @@ impl Kept {
         .with_pinned(self.pinned)
         .with_slug(self.content.slug.clone());
         panel.code = self.content.code.clone();
+        panel.image = self.content.image.clone();
         panel
     }
 
@@ -1134,6 +1140,8 @@ impl Stage {
             .and_then(|kept| kept.updated);
         let kind = if panel.code.is_some() {
             "code panel"
+        } else if panel.image.is_some() {
+            "image panel"
         } else {
             "panel"
         };
@@ -1162,6 +1170,16 @@ impl Stage {
         details.push_str(&format!("{place}, projected {}", ago(panel.age)));
         if let Some(updated) = updated {
             details.push_str(&format!(", updated {}", ago(now.saturating_sub(updated))));
+        }
+        // An image panel's size, and its caption in quotes, as it is the agent's text.
+        if let Some(image) = &panel.image {
+            details.push_str(&format!("; {} × {} pixels", image.width, image.height));
+            if !panel.body.is_empty() {
+                details.push_str(&format!(
+                    "; caption: \"{}\"",
+                    crate::space::one_line(&panel.body, blocks::META_VALUE_CHARS)
+                ));
+            }
         }
         // A code panel's language, in quotes, as it is from the agent's text, and the lines it shows, of how many.
         if let Some(code) = &panel.code {
@@ -1229,6 +1247,7 @@ mod tests {
             meta: vec![("source".into(), "CI".into())],
             code: None,
             slug: None,
+            image: None,
         }
     }
 
@@ -2101,6 +2120,7 @@ mod tests {
             meta: Vec::new(),
             code: Some(Code::new(language, lines)),
             slug: None,
+            image: None,
         }
     }
 
@@ -2240,6 +2260,7 @@ mod tests {
             ),
             // The longest id, though only text panels are given one, so that the bound holds for either.
             slug: Some("a".repeat(blocks::ID_CHARS)),
+            image: None,
         };
         let declared: Vec<Pose> = (0..DECLARED_WALLS)
             .map(|index| pose(index as f32 - 3.0, -5.0))
@@ -2339,6 +2360,7 @@ mod tests {
             meta: Vec::new(),
             code: Some(Code::new("javascript", 240).with_spans(spans)),
             slug: None,
+            image: None,
         };
         let mut stage = Stage::default();
         for _ in 0..WALL_SLOTS {
@@ -2403,6 +2425,7 @@ mod tests {
                 meta: vec![("note]".into(), "say \"hi\"".into())],
                 code: None,
                 slug: None,
+                image: None,
             },
             None,
             0,
@@ -2420,6 +2443,7 @@ mod tests {
                 meta: Vec::new(),
                 code: None,
                 slug: None,
+                image: None,
             },
             None,
             0,
@@ -2475,6 +2499,7 @@ mod tests {
             meta: Vec::new(),
             code: None,
             slug: Some(slug.into()),
+            image: None,
         }
     }
 

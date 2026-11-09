@@ -440,7 +440,8 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "confirm_pairing",
             "decline_pairing",
             "workers",
-            "remove_workers"
+            "remove_workers",
+            "show_image"
         ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
@@ -1136,7 +1137,6 @@ fn tomori_slots() -> Vec<[f32; 3]> {
 
 #[test]
 fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_agent_alone() {
-    use tomori_protocol::ServerMessage;
     use tomori_security::Grant;
     let server = TestServer::with_tokens_and_tools(true, |server| server);
     let (_, owner) = server.issue("Ada", Grant::Owner);
@@ -1567,4 +1567,179 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
     eventually(|| {
         (move_panel(&build, "front Ada")["structuredContent"]["moved"] == true).then_some(())
     });
+}
+
+#[test]
+fn the_agent_shows_an_image_file_as_a_panel_whose_image_everyone_who_shows_images_fetches() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_showing_images("ada", "Ada");
+    let space = create(&mut ada, "Images");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let caller = id(&backend.started()[0]);
+    let caller = Some(caller.as_str());
+    let folder = std::env::temp_dir().join(format!("tomori-mcp-images-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let picture = folder.join("render.png");
+    image::RgbImage::from_fn(300, 200, |x, y| image::Rgb([x as u8, y as u8, 128]))
+        .save(&picture)
+        .unwrap();
+    let path = picture.display().to_string();
+
+    // Only a space's own session may show one, and a file that is missing or not an image is refused, saying why.
+    let refused = call(&server, &token, None, "show_image", json!({"path": path}));
+    assert!(failure(&refused).contains("names no session"));
+    let stranger = call(
+        &server,
+        &token,
+        Some("ses_stranger"),
+        "show_image",
+        json!({"path": path}),
+    );
+    assert!(failure(&stranger).contains("not bound to a Tomori space"));
+    let missing = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": folder.join("missing.png").display().to_string()}),
+    );
+    assert_eq!(failure(&missing), "There is no file at that path.");
+    std::fs::write(folder.join("notes.txt"), "Not a picture.").unwrap();
+    let text = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": folder.join("notes.txt").display().to_string()}),
+    );
+    assert_eq!(
+        failure(&text),
+        "That file is not a PNG, JPEG, WebP or GIF image."
+    );
+    let untitled = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "title": 7}),
+    );
+    assert_eq!(failure(&untitled), "The title is text.");
+    let uncaptioned = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "caption": []}),
+    );
+    assert_eq!(failure(&uncaptioned), "The caption is text.");
+    let unplaced = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "place": 1}),
+    );
+    assert_eq!(failure(&unplaced), "The place is text.");
+    let long = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "title": "t".repeat(5_000)}),
+    );
+    assert_eq!(failure(&long), "The title is too long.");
+    let pathless = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"title": "Render"}),
+    );
+    assert_eq!(failure(&pathless), "This tool needs path, as text.");
+    let nowhere = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "place": "behind Ada"}),
+    );
+    assert!(failure(&nowhere).starts_with("Tomori does not know where \"behind Ada\" is"));
+    let nobody = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "place": "front Zed"}),
+    );
+    assert_eq!(
+        failure(&nobody),
+        "Nobody called \"Zed\" in this space has reported where they are."
+    );
+
+    // Shown, it is a panel titled with the file's name, unless given a title, for everyone in the space.
+    let shown = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": path, "title": "Render", "caption": "A gradient, red across and green down.", "place": "wall tomori"}),
+    );
+    let result = &shown["structuredContent"];
+    assert_eq!(result["space"], space);
+    assert_eq!(
+        (result["width"].as_u64(), result["height"].as_u64()),
+        (Some(300), Some(200))
+    );
+    assert!(
+        result["next"]
+            .as_str()
+            .unwrap()
+            .contains("Say in a sentence what it shows")
+    );
+    let panel = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.image.is_some())
+            .cloned(),
+        _ => None,
+    });
+    assert_eq!(panel.id, result["panel"]);
+    assert_eq!(panel.title, "Render");
+    assert_eq!(panel.body, "A gradient, red across and green down.");
+    assert!(matches!(&panel.place, tomori_protocol::Place::Wall { wall, .. } if wall == "tomori"));
+    let image = panel.image.unwrap();
+
+    // Its image arrives in chunks, in order, and is what its hash says.
+    ada.send(&ClientMessage::FetchImage {
+        image: image.hash.clone(),
+    });
+    let mut png = Vec::new();
+    while png.len() < image.bytes as usize {
+        let chunk = ada.next_image_chunk(TIMEOUT).expect("the image arrives");
+        assert_eq!(tomori_protocol::hash_text(&chunk.hash), image.hash);
+        assert_eq!(chunk.offset as usize, png.len());
+        png.extend(chunk.data);
+    }
+    let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&png).into();
+    assert_eq!(tomori_protocol::hash_text(&hash), image.hash);
+    let decoded = image::load_from_memory(&png).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (300, 200));
+    // Without a title, it is titled with the file's name.
+    let untitled = call(&server, &token, caller, "show_image", json!({"path": path}));
+    let panel = untitled["structuredContent"]["panel"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let titled = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => {
+            projection.panel(&panel).map(|panel| panel.title.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(titled, "render.png");
+    let _ = std::fs::remove_dir_all(folder);
 }

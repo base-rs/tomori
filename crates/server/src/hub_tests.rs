@@ -83,6 +83,7 @@ impl Client {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         });
     }
 
@@ -96,7 +97,7 @@ impl Client {
         loop {
             match self.outbox.pop() {
                 Popped::Control(item) => messages.extend(self.hub.render(self.connection, item)),
-                Popped::Audio(_) => {}
+                Popped::Audio(_) | Popped::Image(_) => {}
                 Popped::Empty | Popped::Closed => return messages,
             }
         }
@@ -228,6 +229,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        images: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -1732,6 +1734,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         environment_state: false,
         projection: false,
         pairing_window: false,
+        images: false,
     });
     client.read()
 }
@@ -2961,6 +2964,7 @@ fn presenting(
         environment_state: reads,
         projection: false,
         pairing_window: false,
+        images: false,
     });
     client.read();
     client
@@ -3388,6 +3392,7 @@ impl Client {
             environment_state: false,
             projection: true,
             pairing_window: false,
+            images: false,
         });
         client.read();
         client
@@ -4194,4 +4199,313 @@ fn the_item_of_a_checklist_pointed_at_is_named_with_its_panel_s_id_before_the_wo
         prompt.text,
         "ada: [Pointing at panel \"Agenda\" (id agenda, on the Tomori wall, projected just now; item 2 of 2, not ticked: \"Decide the pairing window\")] what's this?"
     );
+}
+
+impl Client {
+    /// Connected and greeted as `participant`, by a client that shows image panels, with what that sent read.
+    fn showing_images(hub: &Arc<Hub>, access: Access, participant: &str) -> Self {
+        let client = Self::connect(hub, access);
+        client.send(ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            participant: participant.to_owned(),
+            name: participant.to_owned(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: true,
+            pairing_window: false,
+            images: true,
+        });
+        client.read();
+        client
+    }
+
+    /// The images sent since, each joined from its chunks, by its hash: every chunk of one is in order, from its start.
+    fn images(&self) -> Vec<(String, Vec<u8>)> {
+        let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+        loop {
+            match self.outbox.pop() {
+                Popped::Image(bytes) => {
+                    let mut decoder = tomori_protocol::FrameDecoder::new();
+                    decoder.push(&bytes);
+                    let chunk = decoder.next_frame().unwrap().unwrap().to_image().unwrap();
+                    let hash = tomori_protocol::hash_text(&chunk.hash);
+                    if chunk.offset == 0 {
+                        images.push((hash.clone(), Vec::new()));
+                    }
+                    let (last, joined) = images.last_mut().expect("an image begins at its start");
+                    assert_eq!((&*last, chunk.offset as usize), (&hash, joined.len()));
+                    joined.extend(chunk.data);
+                    assert!(joined.len() <= chunk.total as usize);
+                }
+                Popped::Empty | Popped::Closed => return images,
+                Popped::Control(_) | Popped::Audio(_) => {}
+            }
+        }
+    }
+}
+
+/// A folder of synthetic images for a test, beneath the system's temporary folder: `wide.png`, larger than fits one
+/// chunk, and `small.png`.
+fn pictures(name: &str) -> std::path::PathBuf {
+    let folder =
+        std::env::temp_dir().join(format!("tomori-hub-images-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    // Noise, which does not compress, so that it takes several chunks.
+    let mut state = 0x9e37_79b9_u32;
+    let wide = image::RgbImage::from_fn(256, 144, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let [red, green, blue, _] = state.to_le_bytes();
+        image::Rgb([red, green, blue])
+    });
+    wide.save(folder.join("wide.png")).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([20, 200, 90]))
+        .save(folder.join("small.png"))
+        .unwrap();
+    folder
+}
+
+/// Show `file` of `folder` as the agent of the space bound to `session` would, as the `show_image` tool does: prepared,
+/// kept, and projected.
+fn show(
+    hub: &Hub,
+    folder: &std::path::Path,
+    file: &str,
+    caption: &str,
+) -> Result<tomori_protocol::Image, String> {
+    let prepared = crate::images::prepare(folder, file)?;
+    hub.images.put(&prepared).unwrap();
+    hub.agent_show_image("session", "Layout", caption, None, prepared.image.clone())?;
+    Ok(prepared.image)
+}
+
+#[test]
+fn an_image_the_agent_shows_is_fetched_in_chunks_by_everyone_who_shows_images_and_described_to_others()
+ {
+    let folder = pictures("shown");
+    let (hub, _jobs) = hub_waiting();
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let (space, commands) = idle(&hub);
+    let ada = Client::showing_images(&hub, Access::open(), "ada");
+    let vic = Client::showing_images(&hub, Access::visitor(), "vic");
+    let old = Client::projecting(&hub, Access::open(), "old");
+    for client in [&ada, &vic, &old] {
+        client.join(&space);
+    }
+    // Asked by Ada, standing by a wall she added, the image goes onto that wall.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([3.0, 1.5, 0.0]),
+    });
+    ada.send(standing([3.0, 1.6, 1.0]));
+    ada.read();
+    said(&hub, &ada, &commands, Vec::new(), None);
+    let image = show(&hub, &folder, "wide.png", "The session browser").unwrap();
+    assert!(image.bytes as usize > tomori_protocol::IMAGE_CHUNK_BYTES);
+    let projection = ada.projection();
+    let panel = projection
+        .panels
+        .iter()
+        .find(|panel| panel.image.is_some())
+        .unwrap();
+    assert_eq!(panel.image.as_ref(), Some(&image));
+    assert_eq!(
+        (panel.title.as_str(), panel.body.as_str()),
+        ("Layout", "The session browser")
+    );
+    assert!(
+        matches!(&panel.place, tomori_protocol::Place::Wall { wall, .. } if wall != tomori_protocol::TOMORI_WALL)
+    );
+    // An older client is sent a text panel saying what it is, and could not fetch it were it to ask.
+    let described = &old.projection().panels[0];
+    assert_eq!(described.image, None);
+    assert!(
+        described
+            .body
+            .ends_with("this headset needs an update to show it.*")
+    );
+    // Fetched, it arrives in chunks after everything else, and is the image the panel names.
+    for client in [&ada, &vic] {
+        client.read();
+        // Asked for twice before it is sent, it is sent once.
+        for _ in 0..2 {
+            client.send(ClientMessage::FetchImage {
+                image: image.hash.clone(),
+            });
+        }
+        let fetched = client.images();
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].0, image.hash);
+        assert_eq!(fetched[0].1.len(), image.bytes as usize);
+        let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&fetched[0].1).into();
+        assert_eq!(tomori_protocol::hash_text(&hash), image.hash);
+        assert!(client.errors().is_empty());
+    }
+    // An image no panel here shows, or what is not a hash, is refused: nothing is sent, not even an error.
+    ada.send(ClientMessage::FetchImage {
+        image: "0".repeat(64),
+    });
+    ada.send(ClientMessage::FetchImage {
+        image: "../../etc/passwd".into(),
+    });
+    assert!(ada.images().is_empty());
+    assert!(ada.read().is_empty());
+    // Someone in another space, or in none, cannot fetch it either.
+    let (other, _other_commands) = idle(&hub);
+    let bob = Client::showing_images(&hub, Access::open(), "bob");
+    bob.send(ClientMessage::FetchImage {
+        image: image.hash.clone(),
+    });
+    assert!(bob.images().is_empty());
+    bob.join(&other);
+    bob.read();
+    bob.send(ClientMessage::FetchImage {
+        image: image.hash.clone(),
+    });
+    assert!(bob.images().is_empty());
+    assert!(bob.read().is_empty());
+    // Dismissed, it can no longer be fetched.
+    ada.send(ClientMessage::DismissPanel {
+        panel: panel.id.clone(),
+    });
+    ada.read();
+    ada.send(ClientMessage::FetchImage {
+        image: image.hash.clone(),
+    });
+    assert!(ada.images().is_empty());
+    // A client sends no images.
+    hub.receive(
+        ada.connection,
+        tomori_protocol::Frame::image(&tomori_protocol::ImageChunk::new([0; 32], 0, 1, vec![0])),
+    );
+    assert_eq!(ada.errors(), ["Clients send no images."]);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn an_image_is_shown_only_for_a_space_s_own_session_and_one_no_longer_kept_is_not_sent() {
+    let folder = pictures("refused");
+    let (hub, _jobs) = hub_waiting();
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let prepared = crate::images::prepare(&folder, "small.png").unwrap();
+    // No space is bound to the session.
+    assert!(
+        hub.agent_show_image("session", "", "", None, prepared.image.clone())
+            .unwrap_err()
+            .contains("not bound to a Tomori space")
+    );
+    assert!(hub.calling_directory("session").is_err());
+    let (space, _commands) = idle(&hub);
+    assert_eq!(
+        hub.calling_directory("session").unwrap(),
+        std::path::PathBuf::from("/tmp")
+    );
+    // When no thread can be started to read it, the agent is told, and nothing is shown.
+    crate::system::refuse("tomori-image");
+    let path = folder.join("small.png").display().to_string();
+    let answer = futures_lite::future::block_on(crate::mcp::handle(
+        &hub,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "show_image",
+                "arguments": {"path": path},
+                "_meta": {crate::mcp::SESSION_META: "session"},
+            },
+        }),
+    ))
+    .unwrap();
+    assert_eq!(answer["result"]["isError"], true);
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Tomori could not read the image."
+    );
+    // Shown without anyone asking, it goes onto the Tomori wall; its image, never kept, cannot be sent.
+    hub.agent_show_image("session", "", "", None, prepared.image.clone())
+        .unwrap();
+    let ada = Client::showing_images(&hub, Access::open(), "ada");
+    ada.join(&space);
+    assert!(matches!(
+        &ada.projection().panels[0].place,
+        tomori_protocol::Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL
+    ));
+    ada.read();
+    ada.send(ClientMessage::FetchImage {
+        image: prepared.image.hash.clone(),
+    });
+    assert!(ada.images().is_empty());
+    assert!(ada.read().is_empty());
+    // A client gone before its image is read is sent nothing.
+    hub.send_image(u64::MAX, [0; 32]);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn image_panels_and_their_images_are_kept_across_a_restart_and_removed_once_no_panel_shows_them() {
+    let folder = pictures("kept");
+    let directory =
+        std::env::temp_dir().join(format!("tomori-hub-images-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let tools = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:1/mcp");
+    let (space, image) = {
+        let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+        let (hub, _jobs) = hub();
+        hub.serve_tools(tools.clone());
+        assert!(hub.restore(store).is_empty());
+        let (space, _commands) = idle(&hub);
+        let image = show(&hub, &folder, "small.png", "Green").unwrap();
+        (space, image)
+    };
+    let file = directory
+        .join(crate::hub::IMAGES_FOLDER)
+        .join(format!("{}.png", image.hash));
+    assert!(file.exists());
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let (hub, _jobs) = hub();
+    hub.serve_tools(tools);
+    assert_eq!(hub.restore(store).len(), 1);
+    // Restored, the panel names its image, which is read again from the state directory.
+    let ada = Client::showing_images(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let panel = ada.projection().panels[0].clone();
+    assert_eq!(panel.image.as_ref(), Some(&image));
+    ada.read();
+    ada.send(ClientMessage::FetchImage {
+        image: image.hash.clone(),
+    });
+    assert_eq!(ada.images()[0].1, std::fs::read(&file).unwrap());
+    // Dismissed, no panel shows it, and once it is old enough it is removed.
+    let modified = std::fs::File::options().write(true).open(&file).unwrap();
+    modified
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3_600))
+        .unwrap();
+    ada.send(ClientMessage::DismissPanel { panel: panel.id });
+    assert!(!file.exists());
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn images_are_kept_in_memory_when_their_folder_cannot_be_made() {
+    let directory =
+        std::env::temp_dir().join(format!("tomori-hub-images-unmade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    std::fs::write(directory.join(crate::hub::IMAGES_FOLDER), b"not a folder").unwrap();
+    let (hub, _jobs) = hub();
+    assert!(hub.restore(store).is_empty());
+    let folder = pictures("unmade");
+    let prepared = crate::images::prepare(&folder, "small.png").unwrap();
+    hub.images.put(&prepared).unwrap();
+    assert_eq!(hub.images.get(&prepared.image.hash).unwrap(), prepared.png);
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(folder);
 }

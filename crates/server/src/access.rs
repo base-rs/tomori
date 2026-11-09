@@ -92,7 +92,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Join { .. }
         | ClientMessage::Leave
         | ClientMessage::Knock
-        | ClientMessage::SetName { .. } => watcher,
+        | ClientMessage::SetName { .. }
+        // Visitors see image panels as they see every panel. See `design/projection.md`.
+        | ClientMessage::FetchImage { .. } => watcher,
         ClientMessage::CreateSpace { .. }
         | ClientMessage::ListSessions { .. }
         | ClientMessage::SetInstructions { .. }
@@ -158,6 +160,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },
@@ -264,6 +267,9 @@ mod tests {
             },
             ClientMessage::OpenPairing,
             ClientMessage::ClosePairing,
+            ClientMessage::FetchImage {
+                image: "0".repeat(64),
+            },
         ]
     }
 
@@ -314,6 +320,7 @@ mod tests {
             "pair_cancel",
             "knock",
             "set_name",
+            "fetch_image",
         ];
         assert_eq!(permitted(ConnectionRole::Visitor), watching);
         assert_eq!(permitted(ConnectionRole::Unknown), watching);

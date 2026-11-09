@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::{AudioError, AudioFrame, ClientMessage, ServerMessage};
+use crate::{AudioError, AudioFrame, ClientMessage, ImageChunk, ImageChunkError, ServerMessage};
 
 /// The largest payload accepted in one frame.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -18,6 +18,9 @@ pub enum FrameKind {
     Control = 0,
     /// A binary [`AudioFrame`].
     Audio = 1,
+    /// A binary [`ImageChunk`], part of an image panel's image, sent only to a client whose `Hello` sets `images`, as it
+    /// asked for it with [`ClientMessage::FetchImage`]. See `design/projection.md`.
+    Image = 2,
 }
 
 /// One unit of a connection body: a kind byte, a little-endian `u32` payload length, then the payload.
@@ -37,6 +40,8 @@ pub enum FrameError {
     Json(serde_json::Error),
     /// An audio payload is malformed.
     Audio(AudioError),
+    /// An image payload is malformed.
+    Image(ImageChunkError),
     /// The frame has a different kind than the caller expected.
     UnexpectedKind(FrameKind),
     /// The stream ended part way through a frame.
@@ -52,6 +57,7 @@ impl fmt::Display for FrameError {
             }
             Self::Json(error) => write!(formatter, "invalid control message: {error}"),
             Self::Audio(error) => write!(formatter, "invalid audio frame: {error}"),
+            Self::Image(error) => write!(formatter, "invalid image frame: {error}"),
             Self::UnexpectedKind(kind) => write!(formatter, "unexpected {kind:?} frame"),
             Self::Truncated => write!(formatter, "connection ended inside a frame"),
         }
@@ -81,6 +87,13 @@ impl Frame {
         Self {
             kind: FrameKind::Audio,
             payload: frame.encode(),
+        }
+    }
+
+    pub fn image(chunk: &ImageChunk) -> Self {
+        Self {
+            kind: FrameKind::Image,
+            payload: chunk.encode(),
         }
     }
 
@@ -136,6 +149,13 @@ impl Frame {
         AudioFrame::decode(&self.payload).map_err(FrameError::Audio)
     }
 
+    pub fn to_image(&self) -> Result<ImageChunk, FrameError> {
+        if self.kind != FrameKind::Image {
+            return Err(FrameError::UnexpectedKind(self.kind));
+        }
+        ImageChunk::decode(&self.payload).map_err(FrameError::Image)
+    }
+
     fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, FrameError> {
         if self.kind != FrameKind::Control {
             return Err(FrameError::UnexpectedKind(self.kind));
@@ -177,6 +197,7 @@ impl FrameDecoder {
         let kind = match available[0] {
             0 => FrameKind::Control,
             1 => FrameKind::Audio,
+            2 => FrameKind::Image,
             kind => return Err(FrameError::UnknownKind(kind)),
         };
         let length = u32::from_le_bytes(available[1..HEADER_BYTES].try_into().unwrap()) as usize;
@@ -217,6 +238,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,
@@ -343,6 +365,64 @@ mod tests {
             audio.to_audio().unwrap_err().to_string(),
             "invalid audio frame: header is truncated"
         );
+        assert_eq!(
+            audio.to_image().unwrap_err().to_string(),
+            "unexpected Audio frame"
+        );
+        let image = Frame {
+            kind: FrameKind::Image,
+            payload: vec![0; 39],
+        };
+        assert_eq!(
+            image.to_image().unwrap_err().to_string(),
+            "invalid image frame: header is truncated"
+        );
+    }
+
+    #[test]
+    fn image_chunks_round_trip_in_frames_and_stay_within_their_image() {
+        let hash = [7; 32];
+        let image: Vec<u8> = (0..crate::IMAGE_CHUNK_BYTES * 2 + 5)
+            .map(|index| index as u8)
+            .collect();
+        let chunks: Vec<ImageChunk> = ImageChunk::split(hash, &image).collect();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.offset).collect::<Vec<_>>(),
+            [
+                0,
+                crate::IMAGE_CHUNK_BYTES as u32,
+                2 * crate::IMAGE_CHUNK_BYTES as u32
+            ]
+        );
+        let mut bytes = Vec::new();
+        for chunk in &chunks {
+            assert!(chunk.data.len() <= crate::IMAGE_CHUNK_BYTES);
+            Frame::image(chunk).encode_into(&mut bytes);
+        }
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&bytes);
+        let mut joined = Vec::new();
+        while let Some(frame) = decoder.next_frame().unwrap() {
+            assert_eq!(frame.kind, FrameKind::Image);
+            let chunk = frame.to_image().unwrap();
+            assert_eq!((chunk.hash, chunk.total), (hash, image.len() as u32));
+            assert_eq!(chunk.offset as usize, joined.len());
+            joined.extend(chunk.data);
+        }
+        assert_eq!(joined, image);
+        // A chunk reaching past its image, or of an image larger than any sent, is refused.
+        let past = ImageChunk::new(hash, 4, 6, vec![1, 2, 3]).encode();
+        assert_eq!(ImageChunk::decode(&past), Err(ImageChunkError::OutOfBounds));
+        let huge = ImageChunk::new(hash, 0, crate::IMAGE_BYTES + 1, vec![1]).encode();
+        assert_eq!(ImageChunk::decode(&huge), Err(ImageChunkError::OutOfBounds));
+        let overflow = ImageChunk::new(hash, u32::MAX, u32::MAX, vec![1]).encode();
+        assert_eq!(
+            ImageChunk::decode(&overflow).unwrap_err().to_string(),
+            "chunk is outside its image"
+        );
+        let last = ImageChunk::new(hash, 4, 6, vec![1, 2]);
+        assert_eq!(ImageChunk::decode(&last.encode()), Ok(last));
     }
 
     #[test]

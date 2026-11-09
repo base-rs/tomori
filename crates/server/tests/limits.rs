@@ -119,6 +119,7 @@ fn an_oversized_hello_is_refused() {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         });
         let error = client.error();
         assert!(

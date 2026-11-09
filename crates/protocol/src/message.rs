@@ -281,6 +281,11 @@ pub enum ClientMessage {
         /// sent it. See `design/security.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pairing_window: bool,
+        /// Whether this client shows image panels: it fetches their images with [`ClientMessage::FetchImage`] and reads
+        /// [`crate::FrameKind::Image`] frames. Absent from older clients, which would refuse such a frame and are never
+        /// sent one, and are sent an image panel as a text panel of its caption instead. See `design/projection.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        images: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
@@ -469,6 +474,12 @@ pub enum ClientMessage {
     /// [`crate::SpaceState::projection`] is set.
     DismissPanel {
         panel: String,
+    },
+    /// Send the image `image`, by the [`crate::Image::hash`] of an image panel in the client's space, as
+    /// [`crate::FrameKind::Image`] frames. Only a client whose `Hello` sets `images` sends it, for an image it does not
+    /// have; the server refuses one no panel shown in the client's space has.
+    FetchImage {
+        image: String,
     },
     /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
     PairBegin {
@@ -1355,6 +1366,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -1467,6 +1479,7 @@ mod tests {
             environment_state: true,
             projection: false,
             pairing_window: false,
+            images: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -1537,6 +1550,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -1555,6 +1569,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: true,
+            images: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap()["pairing_window"],
@@ -1610,6 +1625,7 @@ mod tests {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1632,6 +1648,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                images: false,
             }
         );
 

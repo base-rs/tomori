@@ -75,6 +75,7 @@ impl Participant {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            images: false,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),
