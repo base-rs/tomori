@@ -25,6 +25,7 @@ pub mod environment;
 pub mod hand_menu;
 pub mod hands;
 pub mod haptics;
+pub mod images;
 pub mod interaction;
 pub mod locomotion;
 pub mod log_cadence;

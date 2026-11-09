@@ -97,6 +97,12 @@ pub enum Event {
     Message(ServerMessage),
     /// An utterance failed in the client and will produce no transcript. See [`crate::Sender::send`].
     UtteranceFailed(FailedUtterance),
+    /// An image panel's image arrived, whole and checked against `hash`, its SHA-256 as [`tomori_protocol::Image::hash`]
+    /// names it: a PNG, which only the renderer decodes. See `design/projection.md`.
+    Image {
+        hash: String,
+        png: std::sync::Arc<[u8]>,
+    },
 }
 
 #[cfg(test)]

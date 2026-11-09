@@ -28,6 +28,18 @@ pub struct Rect {
     pub color: Rgba,
 }
 
+/// An image a canvas shows, by the SHA-256 that names it (see [`tomori_protocol::Image`]), in a rectangle in font pixels
+/// from the canvas's top-left corner, inside its padding, as a shape's is. The renderer draws it over the canvas once it
+/// has the image, and the canvas alone until then. See `design/projection.md`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanvasImage {
+    pub hash: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// What a panel shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Canvas {
@@ -44,6 +56,8 @@ pub struct Canvas {
     pub border: Option<Rgba>,
     /// Shapes drawn over the rows' backgrounds and under the text.
     pub shapes: Vec<Rect>,
+    /// An image drawn over everything else, as an image panel shows.
+    pub image: Option<CanvasImage>,
 }
 
 impl Canvas {
@@ -56,7 +70,28 @@ impl Canvas {
             padding: (6, 4),
             border: None,
             shapes: Vec::new(),
+            image: None,
         }
+    }
+
+    /// Its image, by hash, and where it is drawn, in metres from the canvas's middle, +X right and +Y up, as its mesh is:
+    /// its left, bottom, right and top edges.
+    pub fn image_rect(&self) -> Option<(&str, [f32; 4])> {
+        let image = self.image.as_ref()?;
+        let (width, height) = self.size_in_pixels();
+        let (left, top) = (
+            self.padding.0 as f32 + image.x - width as f32 / 2.0,
+            height as f32 / 2.0 - self.padding.1 as f32 - image.y,
+        );
+        Some((
+            &image.hash,
+            [
+                left * self.pixel,
+                (top - image.height) * self.pixel,
+                (left + image.width) * self.pixel,
+                top * self.pixel,
+            ],
+        ))
     }
 
     /// The panel's size in font pixels.
@@ -290,6 +325,25 @@ mod tests {
         canvas.background = [0.1, 0.1, 0.1, 1.0];
         let mesh = canvas.mesh();
         assert!(mesh[..6].iter().all(|vertex| vertex.uv == SOLID));
+    }
+
+    #[test]
+    fn an_image_is_placed_as_a_shape_is_in_metres_from_the_middle() {
+        let mut canvas = Canvas::new(10, 0.5);
+        canvas.padding = (6, 4);
+        canvas.rows = vec![Row::new(Vec::new()); 2];
+        assert!(canvas.image_rect().is_none());
+        canvas.image = Some(CanvasImage {
+            hash: "h".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 90.0,
+            height: 24.0,
+        });
+        // The whole text area, which is 102 by 32 font pixels with its padding.
+        let (hash, [left, bottom, right, top]) = canvas.image_rect().unwrap();
+        assert_eq!(hash, "h");
+        assert_eq!([left, bottom, right, top], [-22.5, -6.0, 22.5, 6.0]);
     }
 
     #[test]
