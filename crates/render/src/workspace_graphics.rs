@@ -1317,16 +1317,15 @@ fn leader_mesh(panel: &Panel, sign: &Sign, opacity: f32, mesh: &mut Vec<Vertex>)
             alpha * opacity,
         ]
     };
+    // A sign's bottom edge stands above its worker, so its leader always has a length.
     let mut pieces = Vec::new();
-    if length.is_finite() && length > 0.0 {
-        Shape::Rule {
-            from: [0.0, 0.0],
-            to: [0.0, -length / p],
-            width: LEADER_WIDTH,
-            color: accent(0.55),
-        }
-        .pieces(&mut pieces);
+    Shape::Rule {
+        from: [0.0, 0.0],
+        to: [0.0, -length / p],
+        width: LEADER_WIDTH,
+        color: accent(0.55),
     }
+    .pieces(&mut pieces);
     Shape::Disc {
         centre: [0.0, 0.0],
         radius: LEADER_DOT,
