@@ -380,7 +380,7 @@ fn the_agent_confirms_a_pairing_with_the_code_read_from_the_device() {
         format!("The agent, as Ada asked, {did}.")
     );
     let line = studio.told(did);
-    assert!(line.contains(", as Ada (entry 1, given "), "{line}");
+    assert!(line.contains(", as Ada#10 (entry 1, given "), "{line}");
     let page = studio.status_page();
     assert!(page.contains("<h3>By agents</h3>"), "{page}");
     let escaped = line.replace('"', "&quot;");

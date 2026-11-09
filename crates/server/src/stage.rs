@@ -25,11 +25,13 @@
 //! else ever moves, so that nobody's reading is disturbed.
 mod blocks;
 pub(crate) use tomori_protocol::checklist;
+mod beside;
 mod code;
 mod groups;
 mod image;
 mod layouts;
 mod placement;
+pub(crate) use beside::spot as beside_spot;
 pub(crate) mod travel;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
@@ -323,6 +325,12 @@ pub enum Destination {
     Wall { wall: String, slot: Option<u32> },
     /// Floating at this pose.
     Free(Pose),
+    /// Floating beside someone whose head is at `head`, clear of the environment's `solids`, its walls and what floats
+    /// there already, as [`beside::spot`] places it, or else in front of them.
+    Beside {
+        head: Pose,
+        solids: Vec<tomori_environment::sightlines::Solid>,
+    },
     /// Onto the Tomori wall, as when nobody asked.
     Tomori,
 }
@@ -1035,6 +1043,21 @@ impl Stage {
                 Spot::Wall(wall.clone(), slot.filter(|slot| *slot < slots))
             }
             Destination::Free(pose) => valid(pose).map_or(tomori, Spot::Free),
+            Destination::Beside { head, solids } => {
+                let floating: Vec<Pose> = self
+                    .rooms
+                    .get(walls.environment)
+                    .into_iter()
+                    .flat_map(|room| &room.panels)
+                    .filter_map(|kept| match &kept.place {
+                        Placed::Free { pose } => Some(*pose),
+                        Placed::Wall { .. } => None,
+                    })
+                    .collect();
+                let pose = beside::spot(head, &shown, &floating, solids)
+                    .unwrap_or_else(|| crate::presence::front_of(head));
+                valid(&pose).map_or(tomori, Spot::Free)
+            }
             Destination::Wall { .. } | Destination::Tomori => tomori,
         }
     }
@@ -2322,6 +2345,71 @@ mod tests {
         let view = floats.view("s", &walls, 0);
         assert_eq!(view.panels.len(), FLOATING);
         assert!(view.panel(&oldest).is_none());
+    }
+
+    #[test]
+    fn the_agent_s_panels_beside_someone_fan_out_about_them_and_one_moved_beside_them_moves_aside()
+    {
+        let mut stage = Stage::default();
+        // A panel on the environment's wall, far away, is no floating panel in the way.
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
+        let farm = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let on_wall = Destination::Wall {
+            wall: "environment-0".into(),
+            slot: None,
+        };
+        stage.project_to(&farm, content("on the wall"), &on_wall, 0);
+        // Someone across the space from every wall, looking along −Z, a head looking along its −Z.
+        let eyes = [5.0, 1.6, 6.0];
+        let head = Pose::at(eyes).facing_towards([5.0, 1.6, 7.0]);
+        let beside = |solids: Vec<tomori_environment::sightlines::Solid>| Destination::Beside {
+            head,
+            solids,
+        };
+        let bearing = |pose: &Pose| {
+            (pose.position[0] - eyes[0])
+                .atan2(-(pose.position[2] - eyes[2]))
+                .to_degrees()
+                .round()
+        };
+        let floating = |stage: &Stage, id: &str| {
+            let view = stage.view("s", &SKY, 0);
+            let Some(Place::Free { pose }) = view.panel(id).map(|panel| &panel.place) else {
+                unreachable!("{id} floats");
+            };
+            *pose
+        };
+        // Three in one reply: to their right, to their left, then further right, each facing them.
+        let ids: Vec<(String, bool)> = stage.project_placed(
+            &farm,
+            ["one", "two", "three"]
+                .map(|title| (content(title), beside(Vec::new()), false))
+                .into(),
+            0,
+        );
+        let bearings: Vec<f32> = ids
+            .iter()
+            .map(|(id, _)| bearing(&floating(&stage, id)))
+            .collect();
+        assert_eq!(bearings, [30.0, -30.0, 70.0]);
+        // Moved beside them again, a panel is not in its own way: it stays where it was.
+        let first = ids[0].0.clone();
+        assert_eq!(stage.relocate(&SKY, &first, &beside(Vec::new())), Ok(true));
+        assert_eq!(bearing(&floating(&stage, &first)), 30.0);
+        // With scenery to their left, the next goes further out on their left, past it.
+        let shed = tomori_environment::sightlines::Solid::new([3.0, 0.0, 3.0], [4.6, 2.5, 5.0]);
+        let next = stage.project_to(&SKY, content("four"), &beside(vec![shed]), 0);
+        assert_eq!(bearing(&floating(&stage, &next)), -70.0);
+        // They are floating panels, within the bound of those that float.
+        assert_eq!(stage.floating("sky"), 4);
+        // Walled in, it floats in front of them instead.
+        let around =
+            tomori_environment::sightlines::Solid::new([0.0, -1.0, 0.0], [10.0, 3.0, 12.0]);
+        let walled = stage.project_to(&SKY, content("five"), &beside(vec![around]), 0);
+        assert_eq!(bearing(&floating(&stage, &walled)), 0.0);
     }
 
     #[test]

@@ -32,18 +32,21 @@ pub enum Placement {
     Looking(Option<String>),
     /// `front [NAME]`: floating in front of them, facing them.
     Front(Option<String>),
+    /// `beside [NAME]`: floating beside them, to their right or left, facing them, clear of what floats there already.
+    Beside(Option<String>),
     /// `wall WALL`: onto the wall with that identity, or that name, such as `Tomori wall` or `added wall 1`; and, with
     /// `slot N` after it, into that slot, numbered from 0 as `presence` numbers them, if it is free.
     Wall(String, Option<u32>),
 }
 
 impl Placement {
-    /// The placement `value` names, such as `near Ada`, `near:Ada`, `nearest`, `looking`, `front Bob` or `wall tomori`,
+    /// The placement `value` names, such as `near Ada`, `near:Ada`, `nearest`, `looking`, `front Bob`, `beside` or `wall tomori`,
     /// its form in any case and separated from what it names by spaces or a colon; or `None` for one it does not know,
     /// or `wall` naming none.
     ///
     /// ```text
     /// near Ada        -> Near(Some("Ada"))
+    /// beside Ada#23   -> Beside(Some("Ada#23"))
     /// nearest         -> Near(None)
     /// looking:Bob     -> Looking(Some("Bob"))
     /// wall added wall 1 -> Wall("added wall 1", None)
@@ -61,6 +64,7 @@ impl Placement {
             "near" | "nearest" => Some(Self::Near(named)),
             "looking" | "look" => Some(Self::Looking(named)),
             "front" => Some(Self::Front(named)),
+            "beside" => Some(Self::Beside(named)),
             "wall" => named.map(|named| {
                 let (wall, slot) = slotted(&named);
                 Self::Wall(wall.to_owned(), slot)
@@ -168,6 +172,11 @@ mod tests {
             Some(Placement::Front(named("Bob")))
         );
         assert_eq!(Placement::parse("front"), Some(Placement::Front(None)));
+        assert_eq!(Placement::parse("beside"), Some(Placement::Beside(None)));
+        assert_eq!(
+            Placement::parse("Beside: Samuel#23"),
+            Some(Placement::Beside(named("Samuel#23")))
+        );
         assert_eq!(
             Placement::parse("wall tomori"),
             Some(Placement::Wall("tomori".into(), None))
@@ -231,6 +240,13 @@ mod tests {
             (
                 "python title=area.py".to_owned(),
                 Some(Placement::Looking(named("Ada Lovelace")))
+            )
+        );
+        assert_eq!(
+            Placement::from_info("rust place=beside:Ada title=a.rs"),
+            (
+                "rust title=a.rs".to_owned(),
+                Some(Placement::Beside(named("Ada")))
             )
         );
         assert_eq!(

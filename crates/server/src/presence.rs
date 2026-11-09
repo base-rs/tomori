@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tomori_protocol::{Panel, Place, Pose, Projection, Wall, WallKind, wall as layout};
 
+use tomori_environment::sightlines::Solid;
+
 use crate::stage::{Destination, Placement};
 
 /// How long a report stays current: a client in a space reports with every frame, so one not heard from for this long
@@ -95,6 +97,70 @@ impl Seen {
     /// Whether it says anything only a headset reports: a controller or a hand.
     pub(crate) fn tracks_hands(&self) -> bool {
         self.controllers.iter().any(Option::is_some) || self.hands.iter().any(Option::is_some)
+    }
+}
+
+/// Someone taking part in a space, as the agent names them: their display name, which others may share, their tag,
+/// the number that tells them apart, and their head, as they last reported it, if they have. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Someone {
+    pub name: String,
+    pub tag: Option<u32>,
+    pub head: Option<Pose>,
+}
+
+impl Someone {
+    /// Their handle, as the agent names them where their name is not enough: `Ada#23`.
+    pub(crate) fn handle(&self) -> String {
+        handle(&self.name, self.tag)
+    }
+}
+
+/// The handle of someone called `name` with `tag`: `Ada#23`, or their name alone without one.
+pub(crate) fn handle(name: &str, tag: Option<u32>) -> String {
+    match tag {
+        Some(tag) => format!("{name}#{tag}"),
+        None => name.to_owned(),
+    }
+}
+
+/// Which of `people` `named` means: the one whose handle it is, `Ada#23`, its name in any case; or else the one whose
+/// display name it is, in any case, when only one has it. Or why none is meant: nobody here has it, or several do, when
+/// it says which handles name them.
+pub(crate) fn whom<'a>(named: &str, people: &'a [Someone]) -> Result<&'a Someone, String> {
+    let named = named.trim();
+    let key = tomori_protocol::text::name_key;
+    if let Some((name, tag)) = named.rsplit_once('#')
+        && !tag.is_empty()
+        && tag.bytes().all(|byte| byte.is_ascii_digit())
+        && let Ok(tag) = tag.parse::<u32>()
+        && let Some(person) = people
+            .iter()
+            .find(|person| person.tag == Some(tag) && key(&person.name) == key(name))
+    {
+        return Ok(person);
+    }
+    let called: Vec<&Someone> = people
+        .iter()
+        .filter(|person| key(&person.name) == key(named))
+        .collect();
+    // One identity on several devices, sharing a tag, is one person, the first of whose devices joined is meant.
+    let mut handles: Vec<String> = Vec::new();
+    for person in &called {
+        let handle = person.handle();
+        if !handles.contains(&handle) {
+            handles.push(handle);
+        }
+    }
+    match (called.first(), handles.len()) {
+        (None, _) => Err(format!(
+            "Nobody called {named:?} in this space has reported where they are."
+        )),
+        (Some(person), 1) => Ok(person),
+        _ => Err(format!(
+            "More than one person in this space is called {named:?}: say which, as {}.",
+            handles.join(" or ")
+        )),
     }
 }
 
@@ -304,17 +370,17 @@ pub(crate) enum Met {
     },
     /// A wall, by its identity, and the empty slot it met, if any.
     Wall { wall: String, slot: Option<u32> },
-    /// Another person, by their name.
-    Person { name: String },
+    /// Another person, by their name and their handle.
+    Person { name: String, handle: String },
 }
 
 /// What the ray from `origin` in the unit `direction` meets first of `projection`'s walls and panels and `people`'s
-/// heads, with how far along it, if anything.
+/// heads, each with their name and handle, with how far along it, if anything.
 pub(crate) fn meet(
     origin: Vec3,
     direction: Vec3,
     projection: &Projection,
-    people: &[(&str, Vec3)],
+    people: &[(&str, &str, Vec3)],
 ) -> Option<(Met, f32)> {
     let mut met: Option<(Met, f32)> = None;
     let mut consider = |what: Met, along: f32| {
@@ -370,7 +436,7 @@ pub(crate) fn meet(
             );
         }
     }
-    for (name, head) in people {
+    for (name, handle, head) in people {
         let offset = sub(*head, origin);
         let along = dot(offset, direction);
         if along > 0.0
@@ -380,6 +446,7 @@ pub(crate) fn meet(
             consider(
                 Met::Person {
                     name: (*name).to_owned(),
+                    handle: (*handle).to_owned(),
                 },
                 along,
             );
@@ -468,7 +535,7 @@ pub(crate) fn described(met: &Met, along: f32, projection: &Projection) -> Value
         Met::Wall { wall, slot } => {
             json!({ "kind": "wall", "wall": wall, "wall_name": wall_named(wall), "slot": slot })
         }
-        Met::Person { name } => json!({ "kind": "person", "name": name }),
+        Met::Person { name, handle } => json!({ "kind": "person", "name": name, "id": handle }),
     };
     described["distance"] = json!(round(along, 2));
     described
@@ -505,6 +572,8 @@ fn facing(pose: &Pose) -> Value {
 /// What one person in a space is, as the agent's `presence` tool reports them.
 pub(crate) struct Person<'a> {
     pub name: &'a str,
+    /// The number that tells them apart from others of the same name.
+    pub tag: Option<u32>,
     pub role: tomori_protocol::ConnectionRole,
     pub engagement: Option<tomori_protocol::Engagement>,
     pub seen: Option<&'a Seen>,
@@ -516,12 +585,14 @@ pub(crate) struct Person<'a> {
 pub(crate) fn report(
     person: &Person<'_>,
     projection: &Projection,
-    people: &[(&str, Vec3)],
+    people: &[(&str, &str, Vec3)],
     now: Instant,
 ) -> Value {
     let role = serde_json::to_value(person.role).unwrap_or(Value::Null);
+    let handle = handle(person.name, person.tag);
     let mut report = json!({
         "name": person.name,
+        "id": handle,
         "role": role,
         "engagement": person.engagement,
     });
@@ -541,9 +612,9 @@ pub(crate) fn report(
     report["stale"] = json!(ago >= STALE);
     report["head"] = facing(&seen.head);
     // The others, but not themselves, whom they may look or point at.
-    let others: Vec<(&str, Vec3)> = people
+    let others: Vec<(&str, &str, Vec3)> = people
         .iter()
-        .filter(|(name, _)| *name != person.name)
+        .filter(|(_, other, _)| *other != handle)
         .copied()
         .collect();
     let looking = meet(seen.head.position, forward(&seen.head), projection, &others);
@@ -688,9 +759,24 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
 const FRONT: (f32, f32) = (1.2, 0.15);
 
 /// Where the agent's panel goes when it asks for none, for whoever asked, whose head was at `asker` as they began
-/// speaking: where they were looking, or onto the Tomori wall when nobody asked.
-pub(crate) fn by_default(asker: Option<&Pose>, projection: &Projection) -> Destination {
-    asker.map_or(Destination::Tomori, |head| looking_at(head, projection))
+/// speaking: onto the wall they were looking at, if they could read it from there; or else floating beside them, clear
+/// of the environment's `solids`; or onto the Tomori wall when nobody asked. See `design/projection.md`.
+pub(crate) fn by_default(
+    asker: Option<&Pose>,
+    projection: &Projection,
+    solids: &[Solid],
+) -> Destination {
+    asker.map_or(Destination::Tomori, |head| {
+        looked_at(head, projection).unwrap_or_else(|| beside(head, solids))
+    })
+}
+
+/// Floating beside someone whose head is at `head`, clear of `solids`, as [`Destination::Beside`] places it.
+fn beside(head: &Pose, solids: &[Solid]) -> Destination {
+    Destination::Beside {
+        head: *head,
+        solids: solids.to_vec(),
+    }
 }
 
 /// How far from someone's eyes a wall may be, in metres, for the agent's panel to be put on it for them by where they
@@ -722,11 +808,27 @@ fn angle(ahead: Vec3, toward: Vec3) -> f32 {
         .to_degrees()
 }
 
-/// Where someone whose head is at `head` is looking, for a panel, of the walls within [`READING`] of their eyes: the
+/// The walls of `projection` within reading of `eyes`, each with how far its nearest slot, or board, is.
+fn readable(projection: &Projection, eyes: Vec3) -> Vec<(&Wall, f32)> {
+    projection
+        .walls
+        .iter()
+        .map(|wall| (wall, wall_distance(wall, eyes)))
+        .filter(|(wall, distance)| *distance <= reading(wall))
+        .collect()
+}
+
+/// The nearest of `walls`, by its identity.
+fn nearest_of<'a>(walls: impl Iterator<Item = &'a (&'a Wall, f32)>) -> Option<String> {
+    walls
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(wall, _)| wall.id.clone())
+}
+
+/// Where someone whose head is at `head` is looking, for a panel, if at a wall within [`READING`] of their eyes: the
 /// nearest of those they look at, which are the wall the ray from their eyes meets, in the slot it meets if that is
-/// empty, and those with a slot within [`GAZE`] of the ray; else the nearest wall in their view; else the nearest wall;
-/// else, with no wall within reading, floating in front of them. A person in the way is looked past.
-fn looking_at(head: &Pose, projection: &Projection) -> Destination {
+/// empty, and those with a slot within [`GAZE`] of the ray. A person in the way is looked past.
+fn looked_at(head: &Pose, projection: &Projection) -> Option<Destination> {
     let (eyes, ahead) = (head.position, forward(head));
     let met = match meet(eyes, ahead, projection, &[]) {
         Some((Met::Wall { wall, slot }, _)) => Some((wall, slot)),
@@ -739,45 +841,83 @@ fn looking_at(head: &Pose, projection: &Projection) -> Destination {
         )) => Some((wall, None)),
         _ => None,
     };
-    let readable: Vec<(&Wall, f32)> = projection
-        .walls
-        .iter()
-        .map(|wall| (wall, wall_distance(wall, eyes)))
-        .filter(|(wall, distance)| *distance <= reading(wall))
-        .collect();
-    let nearest = |walls: &mut dyn Iterator<Item = &(&Wall, f32)>| {
-        walls
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(wall, _)| wall.id.clone())
-    };
+    let readable = readable(projection, eyes);
     // The walls looked at: the one met, and those with a slot near the ray.
-    let looked = nearest(&mut readable.iter().filter(|(wall, _)| {
+    let wall = nearest_of(readable.iter().filter(|(wall, _)| {
         met.as_ref().is_some_and(|(id, _)| *id == wall.id)
             || slots(wall)
                 .iter()
                 .any(|slot| angle(ahead, sub(slot.middle, eyes)) <= GAZE)
-    }));
-    if let Some(wall) = looked {
-        let slot = met.and_then(|(id, slot)| slot.filter(|_| id == wall));
-        return Destination::Wall { wall, slot };
+    }))?;
+    let slot = met.and_then(|(id, slot)| slot.filter(|_| id == wall));
+    Some(Destination::Wall { wall, slot })
+}
+
+/// Where `looking` puts a panel for someone whose head is at `head`: onto the wall they look at, as [`looked_at`]
+/// finds it; else the nearest wall within [`READING`] in their view; else the nearest wall within it; else, with no
+/// wall within reading, floating beside them, clear of `solids`.
+fn looking_at(head: &Pose, projection: &Projection, solids: &[Solid]) -> Destination {
+    if let Some(looked) = looked_at(head, projection) {
+        return looked;
     }
+    let eyes = head.position;
+    let readable = readable(projection, eyes);
     let in_view = walls_in_view(&projection.walls, head);
-    let shown = nearest(
-        &mut readable
+    let shown = nearest_of(
+        readable
             .iter()
             .filter(|(wall, _)| in_view.iter().any(|(seen, _)| seen.id == wall.id)),
     );
     match shown {
         Some(wall) => Destination::Wall { wall, slot: None },
         None if !readable.is_empty() => Destination::Nearest(eyes),
-        None => in_front(head),
+        None => beside(head, solids),
     }
 }
 
 /// Floating in front of someone whose head is at `head`, facing them, level, the way they face about the vertical, or,
 /// looking straight up or down, the way the top of their head faces.
 fn in_front(head: &Pose) -> Destination {
-    Destination::Free(ahead_of(head, FRONT))
+    Destination::Free(front_of(head))
+}
+
+/// The pose floating in front of someone whose head is at `head`, as [`in_front`] places a panel.
+pub(crate) fn front_of(head: &Pose) -> Pose {
+    ahead_of(head, FRONT)
+}
+
+/// Where `count` panels the agent floats beside someone whose head is at `head` stand, placed one after another as the
+/// server places a reply's, among `walls`, clear of them and of `solids`, the environment's scenery as boxes from least
+/// to greatest corner in the space's coordinates, or, with no spot clear, in front of them. Clients draw a panel where
+/// the server sends it; this says where that is, for previews of how it looks. See `design/projection.md`.
+///
+/// ```
+/// use tomori_protocol::Pose;
+///
+/// // Looking along −Z, as a head looks along its −Z.
+/// let head = Pose::at([0.0, 1.6, 0.0]).facing_towards([0.0, 1.6, 1.0]);
+/// let fanned = tomori_server::presence::fanned_beside(&head, &[], &[], 3);
+/// // To their right, to their left, then further out to their right.
+/// assert!(fanned[0].position[0] > 0.5 && fanned[1].position[0] < -0.5);
+/// assert!(fanned[2].position[0] > fanned[0].position[0]);
+/// ```
+pub fn fanned_beside(
+    head: &Pose,
+    walls: &[Wall],
+    solids: &[([f32; 3], [f32; 3])],
+    count: usize,
+) -> Vec<Pose> {
+    let solids: Vec<Solid> = solids
+        .iter()
+        .map(|(low, high)| Solid::new(*low, *high))
+        .collect();
+    let mut placed = Vec::new();
+    for _ in 0..count {
+        let pose = crate::stage::beside_spot(head, walls, &placed, &solids)
+            .unwrap_or_else(|| front_of(head));
+        placed.push(pose);
+    }
+    placed
 }
 
 /// How far in front of someone a wall the agent adds for them stands, in metres, and how far below their eyes its
@@ -885,11 +1025,13 @@ pub(crate) fn layout_middles(
 pub(crate) fn which_wall(
     named: &str,
     asker: Option<&Pose>,
-    people: &[(String, Pose)],
+    people: &[Someone],
     projection: &Projection,
 ) -> Result<String, String> {
     let by_name = Placement::Wall(named.to_owned(), None);
-    if let Ok(Destination::Wall { wall, .. }) = destination(&by_name, asker, people, projection) {
+    if let Ok(Destination::Wall { wall, .. }) =
+        destination(&by_name, asker, people, projection, &[])
+    {
         return Ok(wall);
     }
     let place = Placement::parse(named).ok_or_else(|| {
@@ -906,6 +1048,11 @@ pub(crate) fn which_wall(
                 "front names no wall: say which wall, or looking or near someone.".to_owned(),
             );
         }
+        Placement::Beside(_) => {
+            return Err(
+                "beside names no wall: say which wall, or looking or near someone.".to_owned(),
+            );
+        }
         // Named after `wall`, it is a wall by its identity or name, which no wall here has.
         Placement::Wall(named, _) => {
             return Err(format!("There is no wall called {named:?} here."));
@@ -913,7 +1060,7 @@ pub(crate) fn which_wall(
     };
     let head = head_of(name.as_deref(), asker, people)?;
     // The wall they are looking at, if they are, or else the one nearest them; there is always the Tomori wall.
-    let seen = looking.then(|| looking_at(&head, projection));
+    let seen = looking.then(|| looking_at(&head, projection, &[]));
     Ok(match seen {
         Some(Destination::Wall { wall, .. }) => wall,
         _ => nearest_wall(&projection.walls, head.position)
@@ -928,37 +1075,38 @@ pub(crate) fn which_wall(
 pub(crate) fn head_of(
     name: Option<&str>,
     asker: Option<&Pose>,
-    people: &[(String, Pose)],
+    people: &[Someone],
 ) -> Result<Pose, String> {
     match name {
-        Some(name) => people
-            .iter()
-            .find(|(person, _)| person.to_lowercase() == name.to_lowercase())
-            .map(|(_, head)| *head)
-            .ok_or_else(|| {
-                format!("Nobody called {name:?} in this space has reported where they are.")
-            }),
+        Some(name) => whom(name, people)?.head.ok_or_else(|| {
+            format!(
+                "Nobody called {:?} in this space has reported where they are.",
+                name.trim()
+            )
+        }),
         None => asker.copied().ok_or_else(|| {
             "Nobody asked for this as they spoke, so name whom it is for.".to_owned()
         }),
     }
 }
 
-/// Where `place` puts the agent's panel, in `projection`, for whoever asked, whose head was at `asker` as they began
-/// speaking, among `people`, the names and heads of the participants in the space as they last reported; or why it
-/// cannot, as when it names someone who has not reported or a wall that is not here. A form that names nobody is about
-/// whoever asked.
+/// Where `place` puts the agent's panel, in `projection`, clear of the environment's `solids`, for whoever asked, whose
+/// head was at `asker` as they began speaking, among `people`, the participants in the space, by name or handle, and
+/// their heads as they last reported; or why it cannot, as when it names someone who has not reported, a name several
+/// have, or a wall that is not here. A form that names nobody is about whoever asked.
 pub(crate) fn destination(
     place: &Placement,
     asker: Option<&Pose>,
-    people: &[(String, Pose)],
+    people: &[Someone],
     projection: &Projection,
+    solids: &[Solid],
 ) -> Result<Destination, String> {
     let whose = |name: &Option<String>| head_of(name.as_deref(), asker, people);
     Ok(match place {
         Placement::Near(name) => Destination::Nearest(whose(name)?.position),
-        Placement::Looking(name) => looking_at(&whose(name)?, projection),
+        Placement::Looking(name) => looking_at(&whose(name)?, projection, solids),
         Placement::Front(name) => in_front(&whose(name)?),
+        Placement::Beside(name) => beside(&whose(name)?, solids),
         Placement::Wall(named, slot) => {
             let named = named.trim();
             let named = named

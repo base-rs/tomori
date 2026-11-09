@@ -208,7 +208,7 @@ impl Hub {
         let placement = match &update.place {
             Some(place) => Some(crate::stage::Placement::parse(place).ok_or_else(|| {
                 format!(
-                    "Tomori does not know where {:?} is: say near NAME, looking NAME, front NAME or wall WALL, or near, looking or front for whoever asked.",
+                    "Tomori does not know where {:?} is: say near NAME, looking NAME, front NAME, beside NAME or wall WALL, or near, looking, front or beside for whoever asked.",
                     crate::space::one_line(place, 80)
                 )
             })?),
@@ -285,6 +285,7 @@ impl Hub {
                 record.model.origin().as_ref(),
                 &people,
                 &projection,
+                &environments.solids(&record.model.environment),
             )?),
             None => None,
         };
