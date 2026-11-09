@@ -515,8 +515,10 @@ impl Client {
             return Err(Error::Transport("the client's thread has stopped".into()));
         }
         let answer = answer.recv_timeout(timeout);
-        // The thread stops working on a request nobody waits for any longer.
-        cancellation.cancel();
+        // The thread stops working on a request nobody waits for any longer. One answered needs nothing stopped, and cancelling it could retire the kept connection before the HTTP client has returned it to its pool.
+        if answer.is_err() {
+            cancellation.cancel();
+        }
         match answer {
             Ok(answer) => answer,
             Err(RecvTimeoutError::Timeout) => Err(Error::Timeout(timeout)),
