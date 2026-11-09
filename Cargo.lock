@@ -3837,6 +3837,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-prometheus"
+version = "0.2.0"
+dependencies = [
+ "async-channel",
+ "base-http",
+ "base-http-client",
+ "base-scheduler",
+ "base-scheduler-native",
+ "form_urlencoded",
+ "futures-lite",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "webpki-roots 1.0.11",
+]
+
+[[package]]
 name = "tomori-protocol"
 version = "0.2.0"
 dependencies = [
