@@ -193,7 +193,7 @@ impl Hub {
 
     /// Update the text panel `update.panel` names, in the space bound to `session`, in place, as its agent asked: its
     /// title and body replaced where given, then the items named ticked and unticked, and then, where `place` says, moved,
-    /// unless a participant put it where it is. Everyone in the space sees the change. See `design/projection.md`.
+    /// unless a participant put it where it is or is carrying it. Everyone in the space sees the change. See `design/projection.md`.
     pub(crate) fn agent_update_panel(
         &self,
         session: &str,
@@ -219,6 +219,7 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
@@ -271,6 +272,10 @@ impl Hub {
             None => None,
         };
         let pinned = projection.panel(&id).is_some_and(|panel| panel.pinned);
+        // A panel someone is carrying stays in their hand, as `move_panel` leaves it: its text changes, and it does not
+        // move.
+        let carried = carried.contains(&id);
+        let to = to.filter(|_| !carried);
         let changed = record
             .stage
             .revise(&walls, &id, content, to.as_ref(), now)
@@ -287,7 +292,11 @@ impl Hub {
         if let Some(slug) = &panel.slug {
             result["id"] = json!(slug);
         }
-        if to.is_some() && pinned {
+        if carried && placement.is_some() {
+            result["stayed"] = json!(
+                "Someone is carrying that panel now, so it stays in their hand; its text changed."
+            );
+        } else if to.is_some() && pinned {
             result["stayed"] = json!(
                 "A participant put that panel where it is, so it stays there; its text changed."
             );

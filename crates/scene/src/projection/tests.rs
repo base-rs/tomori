@@ -208,7 +208,7 @@ fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
             assert_eq!(output.pointed.as_ref().unwrap().0, "agenda");
             assert_eq!(
                 output.item,
-                item_at(&panel, model, fit, output.pointed.unwrap().2)
+                item_at(&panel, model, fit, 0, output.pointed.unwrap().2)
             );
             output.item
         };
@@ -221,15 +221,34 @@ fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
         );
         assert_eq!(item_on(8), None, "{fit:?}");
     }
+    // Scrolled, the row under the ray is the one scrolled to: the first body row, scrolled 10 rows down, is the 11th item.
+    let items: Vec<String> = (0..30).map(|item| format!("- [ ] Item {item}")).collect();
+    let long = Panel::new("long", "Long", items.join("\n"), on(TOMORI_WALL, 0));
+    let (columns, body) = self::fit(&long, Fit::Slot);
+    let (_, height) = sized(columns, body);
+    let first = Vec3::new(
+        -0.05,
+        height / 2.0 - (PADDING.1 as f32 + 3.5 * CELL_HEIGHT as f32) * PIXEL,
+        0.0,
+    );
+    assert_eq!(item_at(&long, Mat4::IDENTITY, Fit::Slot, 0, first), Some(0));
+    assert_eq!(
+        item_at(&long, Mat4::IDENTITY, Fit::Slot, 10, first),
+        Some(10)
+    );
     // A code panel names no item.
     let code = code_panel("c", 4);
-    assert_eq!(item_at(&code, Mat4::IDENTITY, Fit::Slot, Vec3::ZERO), None);
+    assert_eq!(
+        item_at(&code, Mat4::IDENTITY, Fit::Slot, 0, Vec3::ZERO),
+        None
+    );
     // Off the panel, above it, none either.
     assert_eq!(
         item_at(
             &checklist("1", Place::Unknown),
             Mat4::IDENTITY,
             Fit::Slot,
+            0,
             Vec3::new(0.0, 1.0, 0.0)
         ),
         None

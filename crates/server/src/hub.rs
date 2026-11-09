@@ -4751,6 +4751,7 @@ impl Hub {
     pub(crate) fn project(&self, space: &str, replies: crate::stage::Replies) {
         let mut state = self.lock();
         let people = state.heads(space);
+        let carried = state.carried(space, Instant::now());
         let Some(record) = state.space_mut(space) else {
             return;
         };
@@ -4767,7 +4768,13 @@ impl Hub {
                         crate::presence::destination(&place, origin.as_ref(), &people, &projection)
                             .ok()
                     });
-                    let placed = said.is_some();
+                    // A block with the id of a panel someone is carrying updates it in their hand, where it stays.
+                    let held = content
+                        .slug
+                        .as_deref()
+                        .and_then(|slug| record.stage.named(walls.environment, slug))
+                        .is_some_and(|id| carried.contains(&id));
+                    let placed = said.is_some() && !held;
                     let to = said.unwrap_or_else(|| {
                         crate::presence::by_default(origin.as_ref(), &projection)
                     });

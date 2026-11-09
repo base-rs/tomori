@@ -358,6 +358,40 @@ fn an_update_by_the_tool_moves_a_panel_only_where_place_says_and_never_one_put_b
     let other = content(&update(json!({"panel": "Other", "body": "- [ ] New"}))).clone();
     assert_eq!(other["changed"], true);
     assert!(other.get("id").is_none());
+    // Carried by a participant, it stays in their hand, by the tool and by a block with its id, while its text changes.
+    let carrying = |panel: Option<&str>| ClientMessage::Presence {
+        head: tomori_protocol::Pose::upright_facing([0.0, 1.6, 0.0], [0.0, 1.6, -1.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: panel.map(str::to_owned),
+    };
+    ada.send(&carrying(Some(&todo.id)));
+    let held = eventually(|| {
+        let result = update(json!({"panel": "todo", "body": "- [ ] One", "place": "front Ada"}));
+        result["structuredContent"]
+            .get("stayed")
+            .is_some()
+            .then(|| result["structuredContent"].clone())
+    });
+    assert_eq!(
+        held["stayed"],
+        "Someone is carrying that panel now, so it stays in their hand; its text changed."
+    );
+    assert_eq!(held["place"]["kind"], "wall");
+    agent_replies(
+        &session,
+        "m1-carried",
+        "```panel\nid: todo\nplace: front Ada\n---\n- [x] One, carried\n```\n",
+    );
+    let shown = panels(&ada, |panels| {
+        panels
+            .iter()
+            .any(|panel| panel.id == todo.id && panel.body == "- [x] One, carried")
+    });
+    let carried = shown.iter().find(|panel| panel.id == todo.id).unwrap();
+    assert!(matches!(carried.place, Place::Wall { .. }));
+    ada.send(&carrying(None));
     // Put somewhere by a participant, it stays there, and says so, while its text changes.
     ada.send(&ClientMessage::PlacePanel {
         panel: todo.id.clone(),
