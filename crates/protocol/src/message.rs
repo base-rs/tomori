@@ -601,6 +601,16 @@ pub enum ClientMessage {
     DismissPanel {
         panel: String,
     },
+    /// Tick the checklist item that begins on `line` of the text panel `panel`'s body, from 0, as
+    /// [`crate::checklist::items`] finds it, or untick it, as `checked` says, for everyone in the space: pressing A while
+    /// pointing at it. Participants only, and only to a server whose [`crate::SpaceState::checks`] is set. The server
+    /// ticks it in its own copy of the body, refusing a panel not here and a line that begins no item with a box, and
+    /// tells the agent before the next words spoken in the space. See `design/projection.md`.
+    CheckPanelItem {
+        panel: String,
+        line: u32,
+        checked: bool,
+    },
     /// Send the image `image`, by the [`crate::Image::hash`] of an image panel in the client's space, as
     /// [`crate::FrameKind::Image`] frames. Only a client whose `Hello` sets `images` sends it, for an image it does not
     /// have; the server refuses one no panel shown in the client's space has.

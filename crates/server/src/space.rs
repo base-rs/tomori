@@ -149,7 +149,15 @@ pub struct SpaceModel {
     projected: Vec<(Vec<crate::stage::Found>, Option<tomori_protocol::Pose>)>,
     /// The latest replies whose panels were taken, so that none is projected twice.
     projected_replies: VecDeque<String>,
+    /// What participants did that the agent is told before the next words spoken in the space, oldest first: each
+    /// checklist item ticked or unticked, by its panel and line, as [`SpaceModel::note_tick`] keeps it. See
+    /// `design/projection.md`.
+    notes: VecDeque<(String, u32, String)>,
 }
+
+/// The most notes of what participants did that the space keeps for the agent until the next words, the oldest left
+/// out first.
+const NOTES: usize = 8;
 
 /// How many replies the space remembers having projected the panels of; more than the conversation keeps.
 const PROJECTED_REPLIES: usize = 2 * MESSAGE_LIMIT;
@@ -653,17 +661,41 @@ pub fn attributed(speaker: &str, text: &str, attribution: bool) -> String {
     }
 }
 
-/// The prompt text for `text` said by `speaker`, as [`attributed`] makes it, with `context`, Tomori's notes of which
-/// message they answer and what they attended to, before the words and after the speaker's name:
-/// `Ada: [In reply to …] [Pointing at …] how is this one doing?`. Square brackets in the words, such as a note of
-/// noise Whisper writes among them, as in "[Music] deploy it", are made parentheses, as its other notes are, so that
-/// Tomori's notes are the only bracketed text in a prompt, with or without them.
-fn contextual(speaker: &str, context: Option<String>, text: &str, attribution: bool) -> String {
-    let text = &text.replace('[', "(").replace(']', ")");
-    match context {
-        Some(context) => attributed(speaker, &format!("{context} {text}"), attribution),
-        None => attributed(speaker, text, attribution),
+/// The prompt text for `text` said by `speaker`, as [`attributed`] makes it, with `notes`, what participants did since
+/// the words before, and `context`, Tomori's notes of which message they answer and what they attended to, before the
+/// words and after the speaker's name: `Bob: [Ada ticked …] [In reply to …] [Pointing at …] how is this one doing?`.
+/// Square brackets in the words, such as a note of noise Whisper writes among them, as in "[Music] deploy it", are made
+/// parentheses, as its other notes are, so that Tomori's notes are the only bracketed text in a prompt, with or without
+/// them.
+fn contextual(
+    speaker: &str,
+    notes: Option<String>,
+    context: Option<String>,
+    text: &str,
+    attribution: bool,
+) -> String {
+    let text = text.replace('[', "(").replace(']', ")");
+    let said: Vec<String> = notes.into_iter().chain(context).chain([text]).collect();
+    attributed(speaker, &said.join(" "), attribution)
+}
+
+/// The block of `notes`, what participants did since the words before, told to the agent before the next words, such
+/// as `[Ada ticked item 2 of 5 of panel "Agenda" (id agenda): "Panel ids"]`, separated by `; `, or `None` for none. The
+/// latest are kept where they would make the block longer than [`CONTEXT_CHARS`], the oldest left out.
+fn noted<'a>(notes: impl DoubleEndedIterator<Item = &'a str>) -> Option<String> {
+    let mut kept: Vec<&str> = Vec::new();
+    // The brackets.
+    let mut length = 2;
+    for note in notes.rev() {
+        let added = note.chars().count() + if kept.is_empty() { 0 } else { 2 };
+        if length + added > CONTEXT_CHARS {
+            break;
+        }
+        length += added;
+        kept.push(note);
     }
+    kept.reverse();
+    (!kept.is_empty()).then(|| format!("[{}]", kept.join("; ")))
 }
 
 impl SpaceModel {
@@ -731,6 +763,7 @@ impl SpaceModel {
             origin: None,
             projected: Vec::new(),
             projected_replies: VecDeque::new(),
+            notes: VecDeque::new(),
         };
         model.load_messages(snapshot.messages);
         for permission in snapshot.permissions {
@@ -1770,6 +1803,28 @@ impl SpaceModel {
         }
     }
 
+    /// A participant ticked or unticked the checklist item on `line` of the panel `panel`, which the agent is told, as
+    /// `note` says, before the next words spoken in the space, rather than in a turn of its own, so that it follows
+    /// along without replying to every tick; `panels` shows it at once. A later change to the same item replaces it, and
+    /// only the latest [`NOTES`] are kept. See `design/projection.md`.
+    pub fn note_tick(&mut self, panel: &str, line: u32, note: String) {
+        self.notes
+            .retain(|(noted, at, _)| !(noted == panel && *at == line));
+        if self.notes.len() == NOTES {
+            self.notes.pop_front();
+        }
+        self.notes.push_back((panel.to_owned(), line, note));
+    }
+
+    /// The notes waiting for the next words, for tests.
+    #[cfg(test)]
+    pub fn notes(&self) -> Vec<&str> {
+        self.notes
+            .iter()
+            .map(|(_, _, note)| note.as_str())
+            .collect()
+    }
+
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
     pub fn next_prompt(&mut self) -> Option<Prompt> {
         if self.closed
@@ -1797,7 +1852,10 @@ impl SpaceModel {
             (Some(reply), Some(context)) => Some(format!("{reply} {context}")),
             (reply, context) => reply.or(context),
         };
-        let text = contextual(&entry.speaker, context, &entry.text, attribution);
+        // What participants did since the words before, such as ticking a checklist's item, comes before both.
+        let notes = noted(self.notes.iter().map(|(_, _, note)| note.as_str()));
+        self.notes.clear();
+        let text = contextual(&entry.speaker, notes, context, &entry.text, attribution);
         // What the agent projects in its turn goes onto the wall nearest where they stood, or the Tomori wall.
         self.origin = self.origins.remove(&key);
         // Entries that failed or were dropped without being delivered take their attention with them.
@@ -2057,6 +2115,7 @@ impl SpaceModel {
             // Set by the hub.
             projection: false,
             walls: false,
+            checks: false,
             // Set by the hub, which knows the board.
             cards: false,
             // Set by the hub, which knows the backends.
@@ -3663,6 +3722,50 @@ mod tests {
         space.set_attribution(false);
         space.enqueue("c".into(), 1, "Ada".into(), "[Music] hello".into());
         assert_eq!(space.next_prompt().unwrap().text, "(Music) hello");
+    }
+
+    #[test]
+    fn notes_of_items_ticked_are_kept_for_the_next_words_the_latest_of_each_and_bounded() {
+        let mut space = model();
+        space.note_tick("panel-1", 2, "Ada ticked item 1".into());
+        space.note_tick("panel-1", 3, "Ada ticked item 2".into());
+        // A later change to the same item replaces it, after the rest.
+        space.note_tick("panel-1", 2, "Bob unticked item 1".into());
+        assert_eq!(space.notes(), ["Ada ticked item 2", "Bob unticked item 1"]);
+        // Only the latest are kept.
+        for line in 10..20 {
+            space.note_tick("panel-2", line, format!("Ada ticked line {line}"));
+        }
+        assert_eq!(space.notes().len(), NOTES);
+        assert_eq!(space.notes()[0], "Ada ticked line 12");
+        // Told in one block, before what was pointed at and the words, with attribution or without.
+        let notes = noted(space.notes().into_iter());
+        assert!(
+            notes
+                .as_deref()
+                .unwrap()
+                .starts_with("[Ada ticked line 12; ")
+        );
+        assert_eq!(
+            contextual(
+                "Cy",
+                Some("[Ada ticked x]".into()),
+                Some("[Pointing at y]".into()),
+                "[Music] and this?",
+                true
+            ),
+            "Cy: [Ada ticked x] [Pointing at y] (Music) and this?"
+        );
+        assert_eq!(
+            contextual("Cy", Some("[Ada ticked x]".into()), None, "go", false),
+            "[Ada ticked x] go"
+        );
+        assert_eq!(noted(std::iter::empty()), None);
+        // The block keeps the latest notes within its bound, the oldest left out.
+        let long = "x".repeat(600);
+        let block = noted([long.as_str(), "older", long.as_str()].into_iter()).unwrap();
+        assert_eq!(block, format!("[older; {long}]"));
+        assert!(block.chars().count() <= CONTEXT_CHARS);
     }
 
     #[test]

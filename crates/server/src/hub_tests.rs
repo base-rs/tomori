@@ -4768,6 +4768,141 @@ fn a_reply_started_while_someone_records_reaches_them_once_they_stop() {
     assert_eq!(speaks(&bob), [true]);
 }
 
+#[test]
+fn a_participant_ticks_a_checklist_item_for_everyone_and_the_agent_is_told_before_the_next_words() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let cy = Client::projecting(
+        &hub,
+        Access {
+            principal: Some("token:cy".to_owned()),
+            name: None,
+            grant: Grant::Collaborator {
+                space: space.clone(),
+            },
+        },
+        "cy",
+    );
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    // The space says it takes ticking.
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    assert!(ada.read().iter().any(|message| matches!(
+        message,
+        ServerMessage::Space { state } if state.checks
+    )));
+    for client in [&cy, &vic] {
+        client.join(&space);
+    }
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\nTo cover:\n\n- [x] Panel ids\n- [ ] Decide the pairing window\n- Notes\n```\n",
+    );
+    let panel = ada.projection().panels[0].id.clone();
+    for client in [&ada, &cy, &vic] {
+        client.read();
+    }
+    let tick = |line: u32, checked: bool| ClientMessage::CheckPanelItem {
+        panel: panel.clone(),
+        line,
+        checked,
+    };
+    let body = |client: &Client| {
+        client
+            .projections()
+            .last()
+            .expect("the projection is sent")
+            .panels[0]
+            .body
+            .clone()
+    };
+    // An owner ticks the item on line 3 for everyone, visitors included, in the same panel.
+    ada.send(tick(3, true));
+    for client in [&cy, &vic] {
+        assert_eq!(
+            body(client),
+            "To cover:\n\n- [x] Panel ids\n- [x] Decide the pairing window\n- Notes"
+        );
+    }
+    assert_eq!(ada.projections().last().unwrap().panels[0].id, panel);
+    // It starts no turn of its own: nothing is handed to the agent.
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .all(|command| !matches!(command, SpaceCommand::Send(_)))
+    );
+    // A collaborator unticks another; ticked again as it is, nothing changes, and it is sent again as it is.
+    cy.send(tick(2, false));
+    assert!(body(&ada).contains("- [ ] Panel ids"));
+    cy.send(tick(2, false));
+    assert!(body(&cy).contains("- [ ] Panel ids"));
+    // A visitor ticks nothing.
+    for client in [&ada, &vic] {
+        client.read();
+    }
+    vic.send(tick(2, true));
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    assert!(ada.projections().is_empty());
+    // A line that begins no item with a box, one past the body, a panel not here and an oversized one are refused, and
+    // the projection is sent again, so that a client that showed the change at once shows it as it is.
+    for (message, error) in [
+        (
+            tick(0, true),
+            "That is not an item of the panel's checklist.",
+        ),
+        (
+            tick(4, true),
+            "That is not an item of the panel's checklist.",
+        ),
+        (
+            tick(99, true),
+            "That is not an item of the panel's checklist.",
+        ),
+        (
+            ClientMessage::CheckPanelItem {
+                panel: "panel-99".into(),
+                line: 2,
+                checked: true,
+            },
+            "That panel is not here.",
+        ),
+    ] {
+        ada.send(message);
+        let messages = ada.read();
+        assert!(messages.iter().any(
+            |message| matches!(message, ServerMessage::Error { error: said, .. } if said == error)
+        ));
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Projection { .. }))
+        );
+    }
+    ada.send(ClientMessage::CheckPanelItem {
+        panel: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+        line: 2,
+        checked: true,
+    });
+    assert_eq!(ada.errors().len(), 1);
+    // Outside a space, there is nothing to tick.
+    let outside = Client::projecting(&hub, Access::open(), "out");
+    outside.send(tick(2, true));
+    assert_eq!(outside.errors(), ["Join a space first."]);
+    // The agent is told of each, by whom, before the next words spoken, whoever speaks them, and then not again.
+    let prompt = said(&hub, &cy, &commands, Vec::new(), None);
+    assert_eq!(
+        prompt.text,
+        "cy: [ada ticked item 2 of 3 of panel \"Agenda\" (id agenda): \"Decide the pairing window\"; cy unticked item 1 of 3 of panel \"Agenda\" (id agenda): \"Panel ids\"] what's this?"
+    );
+    assert!(hub.lock().space(&space).unwrap().model.notes().is_empty());
+}
+
 impl Client {
     /// Connected and greeted as `participant`, by a client that shows image panels, with what that sent read.
     fn showing_images(hub: &Arc<Hub>, access: Access, participant: &str) -> Self {

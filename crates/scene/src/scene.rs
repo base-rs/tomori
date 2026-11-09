@@ -1286,7 +1286,15 @@ impl Step {
                 .map(|point| crate::pointing::End::new(point.distance(ray.origin), point));
             crate::pointing::end([card_end, projected.hit, object_end, worker_end])
         });
-        // The label on the ray names the panel pointed at, not one carried.
+        // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next.
+        let item = match (&panel, &projected.pointed, self.projector.held()) {
+            (Some(panel), Some((pointed, ..)), None) if pointed == panel => {
+                projected.item.map(|line| (panel.clone(), line))
+            }
+            _ => None,
+        };
+        conversation.point_item(item.clone());
+        // The label on the ray names the panel pointed at, not one carried, and says how to tick the item it meets.
         let mut projection = projected.sheets;
         if let (Some(panel), Some((_, _, point)), None) =
             (&panel, &projected.pointed, self.projector.held())
@@ -1294,11 +1302,17 @@ impl Step {
                 .projection()
                 .and_then(|projection| projection.panel(panel))
         {
+            let tick = item
+                .as_ref()
+                .filter(|_| conversation.ticks())
+                .and_then(|(panel, line)| conversation.item_checked(panel, *line))
+                .map(|checked| (self.controls, checked));
             projection.push(crate::projection::label(
                 shown,
                 *point,
                 senses.viewer.unwrap_or(arrival::HOME),
                 self.projector.scrollable(panel).then_some(self.controls),
+                tick,
             ));
         }
         // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
@@ -1604,6 +1618,49 @@ pub mod fixtures {
             state.walls = true;
         }));
         conversation.take_actions();
+    }
+
+    /// Show an agenda, its first item ticked and its second not, floating at `at` facing `viewer`, in [`SPACE`], whose
+    /// server projects and takes ticking, as the server sends it.
+    pub fn show_checklist(conversation: &mut Conversation, at: glam::Vec3, viewer: glam::Vec3) {
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.checks = true;
+        }));
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![tomori_protocol::Panel::new(
+                        "panel-1",
+                        "Agenda",
+                        "To cover:\n\n- [x] Panel ids\n- [ ] Pairing window",
+                        tomori_protocol::Place::Free {
+                            pose: tomori_protocol::Pose::upright_facing(
+                                at.to_array(),
+                                viewer.to_array(),
+                            ),
+                        },
+                    )]),
+            ),
+        }));
+        conversation.take_actions();
+    }
+
+    /// The last row of the label on the ray in `projection`, if there is one: the one with the panel's name.
+    #[cfg(test)]
+    pub fn label_hint(projection: &[crate::controller_ui::Sheet]) -> Option<String> {
+        projection
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_ref())
+            .find(|canvas| canvas.plain().starts_with("Agenda") && canvas.rows.len() <= 4)
+            .and_then(|canvas| {
+                canvas
+                    .plain()
+                    .lines()
+                    .last()
+                    .map(|line| line.trim_end().to_owned())
+            })
     }
 
     /// Joined to [`SPACE`] with an approval waiting.
@@ -3770,6 +3827,161 @@ mod tests {
                 Resource::panel("panel-1"),
             ]
         );
+    }
+
+    /// Where, scanning down the agenda [`show_checklist`] floats at `ahead`, the ray first meets a row whose label says
+    /// `hint`, and the label there.
+    fn ray_on_item(
+        step: &mut Step,
+        conversation: &mut Conversation,
+        ahead: Vec3,
+        hint: &str,
+    ) -> Option<Senses> {
+        (0..60).find_map(|step_down| {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            let output = step.update(&senses, conversation, &mut felt(), Instant::now(), FRAME);
+            (label_hint(&output.projection).as_deref() == Some(hint)).then_some(senses)
+        })
+    }
+
+    #[test]
+    fn a_pointing_at_a_checklist_item_ticks_or_unticks_it_for_everyone_with_a_hint_on_the_label() {
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        show_checklist(&mut conversation, ahead, arrival::HOME);
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let tick = |line: u32, checked: bool| {
+            Action::Send(tomori_protocol::ClientMessage::CheckPanelItem {
+                panel: "panel-1".into(),
+                line,
+                checked,
+            })
+        };
+        // Above the list, on the panel's title, the label says nothing of ticking.
+        let hint = (0..60).find_map(|step_down| {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            label_hint(&output.projection)
+        });
+        assert!(!hint.expect("the label").contains("tick"));
+        // A elsewhere on the panel does nothing new.
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        assert!(conversation.take_actions().is_empty());
+        // On the ticked item, the label says A unticks it, and A does, for everyone, with the choosing cue.
+        ray_on_item(&mut step, &mut conversation, ahead, "A  untick").expect("the ticked item");
+        earcons(&mut feedback);
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        assert_eq!(conversation.take_actions(), [tick(2, false)]);
+        assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
+        // Shown at once, so the label on it now says A ticks it, and A does.
+        let senses = ray_on_item(&mut step, &mut conversation, ahead, "A  tick").expect("unticked");
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        assert_eq!(conversation.take_actions(), [tick(2, true)]);
+        // On the item below, not ticked, A ticks it.
+        ray_on_item(&mut step, &mut conversation, ahead, "A  tick").expect("the second item");
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        assert_eq!(conversation.take_actions(), [tick(3, true)]);
+        // The right wrist's transcript comes first: while it shows, A is its, and ticks nothing.
+        let wrist = Senses {
+            right_palm: Some(palm_up(0.0)),
+            ..senses
+        };
+        step.update(&wrist, &mut conversation, &mut feedback, now, FRAME);
+        step.update(&wrist, &mut conversation, &mut feedback, now + HOLD, FRAME);
+        assert!(step.wrist.state().active());
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now + HOLD,
+        );
+        assert!(conversation.take_actions().is_empty());
+        // Carrying the panel, A ticks nothing on it.
+        let mut step = Step::default();
+        let mut carrying =
+            ray_on_item(&mut step, &mut conversation, ahead, "A  untick").expect("the item ticked");
+        carrying.grip = Some(0.0);
+        step.update(&carrying, &mut conversation, &mut feedback, now, FRAME);
+        carrying.grip = Some(1.0);
+        step.update(&carrying, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_visitor_s_label_offers_no_ticking_and_a_ticks_nothing() {
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Visitor);
+        show_checklist(&mut conversation, ahead, arrival::HOME);
+        let mut step = Step::default();
+        let mut feedback = felt();
+        assert!(ray_on_item(&mut step, &mut conversation, ahead, "A  tick").is_none());
+        assert!(ray_on_item(&mut step, &mut conversation, ahead, "A  untick").is_none());
+        // Pointing down the list, A is refused, without the choosing cue.
+        for step_down in 0..60 {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            let now = Instant::now();
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            earcons(&mut feedback);
+            step.buttons(
+                &press(|buttons| buttons.a = true),
+                true,
+                &mut conversation,
+                &mut feedback,
+                now,
+            );
+            assert!(conversation.take_actions().is_empty());
+            assert!(!earcons(&mut feedback).contains(&Earcon::Choose));
+        }
     }
 
     #[test]

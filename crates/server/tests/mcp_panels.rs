@@ -458,3 +458,52 @@ fn an_update_by_the_tool_moves_a_panel_only_where_place_says_and_never_one_put_b
         .unwrap();
     assert_ne!(again.id, todo.id);
 }
+
+#[test]
+fn a_participant_s_tick_reaches_the_agent_through_panels_and_before_the_next_words_without_a_turn()
+{
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = projected(&server, "ada", "Ada");
+    create(&mut ada, "Planning");
+    let token = eventually(|| server.tools_token());
+    let session = backend.started()[0].clone();
+    let agent = tomori_backend::Session::id(&session);
+    agent_replies(
+        &session,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\n- [ ] Pairing window\n- [ ] Panel ids\n```\n",
+    );
+    let agenda = panels(&ada, |panels| panels.len() == 1)[0].clone();
+
+    // Ada points at the second item and presses A: it is ticked for everyone, in place.
+    ada.send(&ClientMessage::CheckPanelItem {
+        panel: agenda.id.clone(),
+        line: 1,
+        checked: true,
+    });
+    let shown = panels(&ada, |panels| {
+        panels.len() == 1 && panels[0].body.ends_with("- [x] Panel ids")
+    });
+    assert_eq!((&shown[0].id, &shown[0].place), (&agenda.id, &agenda.place));
+
+    // The agent sees it at once through `panels`, without a turn of its own.
+    let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
+    assert_eq!(
+        items(&listed["panels"][0]),
+        [
+            (1, json!(false), "Pairing window".to_owned()),
+            (2, json!(true), "Panel ids".to_owned()),
+        ]
+    );
+    assert!(listed["panels"][0].get("updated_seconds_ago").is_none());
+    assert!(session.log().prompts.is_empty());
+
+    // And is told before the next words spoken in the space.
+    ada.say("u1", "next topic");
+    let prompt = eventually(|| session.log().prompts.first().cloned());
+    assert_eq!(
+        prompt.text,
+        "Ada: [Ada ticked item 2 of 2 of panel \"Agenda\" (id agenda): \"Panel ids\"] next topic"
+    );
+}
