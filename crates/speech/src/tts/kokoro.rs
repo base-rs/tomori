@@ -55,6 +55,8 @@ pub struct KokoroConfig {
     pub speed: f32,
     /// The ONNX Runtime threads used for synthesis.
     pub threads: u32,
+    /// A file of pronunciations that add to and replace Tomori's own, in the form of `assets/pronunciations.toml`, if it exists; the server's is `pronunciations.toml` in its state directory.
+    pub pronunciations: Option<PathBuf>,
 }
 
 impl KokoroConfig {
@@ -66,6 +68,7 @@ impl KokoroConfig {
             voice: 3,
             speed: 1.0,
             threads: 2,
+            pronunciations: None,
         }
     }
 
@@ -204,9 +207,10 @@ impl KokoroSynthesizer {
     pub fn new(config: &KokoroConfig) -> Result<Self, Error> {
         let symbols = config.check()?;
         let sherpa = config.sherpa();
+        let pronunciations = config.pronunciations.clone();
         Self::start(
             move || {
-                let phonemizer = English::new();
+                let phonemizer = English::with_pronunciations(pronunciations.as_deref());
                 OfflineTts::create(&sherpa).map(|tts| {
                     (
                         tts,

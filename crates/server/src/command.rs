@@ -906,12 +906,13 @@ fn transcriber(
     Arc::new(NullTranscriber::new())
 }
 
-/// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
+/// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken, with the pronunciations in `pronunciations.toml` in the `state` directory, if there is one, added to Tomori's own.
 #[cfg(feature = "speech")]
 fn synthesis(
     server: Server,
     root: Option<&Path>,
     segmentation: &str,
+    state: Option<&Path>,
     engines: &mut Engines,
 ) -> Server {
     use tomori_speech::tts::{KokoroConfig, KokoroSynthesizer};
@@ -920,7 +921,11 @@ fn synthesis(
         eprintln!("Speech synthesis: off (no --speech-root); replies are not spoken.");
         return server;
     };
-    match KokoroSynthesizer::new(&KokoroConfig::from_root(root)) {
+    let config = KokoroConfig {
+        pronunciations: state.map(|state| state.join("pronunciations.toml")),
+        ..KokoroConfig::from_root(root)
+    };
+    match KokoroSynthesizer::new(&config) {
         Ok(synthesizer) => {
             eprintln!(
                 "Speech synthesis: Kokoro from {} ({} segmentation).",
@@ -947,6 +952,7 @@ fn synthesis(
     server: Server,
     _root: Option<&Path>,
     _segmentation: &str,
+    _state: Option<&Path>,
     _engines: &mut Engines,
 ) -> Server {
     eprintln!("Speech synthesis: off (built without speech); replies are not spoken.");
@@ -1029,7 +1035,14 @@ pub(crate) fn configure(
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
-    let server = synthesis(server, root, &arguments.speech_segmentation, engines);
+    let state = state_directory(arguments, default_state).ok();
+    let server = synthesis(
+        server,
+        root,
+        &arguments.speech_segmentation,
+        state.as_deref(),
+        engines,
+    );
     // The application's own options that were given, in the order it added them, such as an environment's.
     let server = options
         .iter()
@@ -1830,16 +1843,21 @@ mod tests {
             let kokoro = KokoroConfig::from_root(&root).model;
             test_models::with("Kokoro", "scripts/fetch-tts-model.sh", &[&kokoro], || {
                 let mut engines = Engines::default();
-                for segmentation in ["sentence", "block"] {
+                // With a state directory, whose pronunciations are added if it has them, and without.
+                let state = directory("pronunciations");
+                for (segmentation, given) in [("sentence", Some(state.as_path())), ("block", None)]
+                {
                     synthesis(
                         Server::new(Backends::new(), Arc::new(NullTranscriber::new())),
                         Some(&root),
                         segmentation,
+                        given,
                         &mut engines,
                     );
                 }
                 assert_eq!(engines.stoppers.len(), 2);
                 assert!(engines.stop(Instant::now() + ENGINE_STOP));
+                std::fs::remove_dir_all(state).unwrap();
             });
         }
     }

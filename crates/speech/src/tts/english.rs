@@ -3,35 +3,68 @@
 
 //! English phonemes for Kokoro's American voices, from misaki's rules and lexicons, which Kokoro was trained on, as `loqui-g2p` ports them to Rust, with its neural model for words they lack.
 //!
-//! Text is first normalized for what the agent writes and misaki reads poorly: times, ISO dates, units, Rust paths and generics, identifiers in snake or camel case, file names and paths, and web addresses.
-use std::sync::LazyLock;
+//! Text is first normalized for what the agent writes and misaki reads poorly: times, ISO dates, units, Rust paths and generics, identifiers in snake or camel case, file names and paths, and web addresses. Words misaki gets wrong are given their phonemes: those in a dictionary of pronunciations, such as "README", and heteronyms that its tagger misreads, such as "live" in "go live".
+use std::{path::Path, sync::LazyLock};
 
 use loqui_g2p::{Dialect, G2p, OovFallback};
 use regex::{Captures, Regex};
 
-use super::phonemes::Phonemizer;
+use super::{
+    heteronyms,
+    phonemes::Phonemizer,
+    pronunciation::{self, Pronunciations},
+};
 
 /// American English, for `af_heart` and Kokoro's other `a` voices.
 pub(crate) struct English {
     g2p: G2p,
+    pronunciations: Pronunciations,
 }
 
 impl English {
-    /// Parse the lexicons and load the model for unknown words, embedded in `loqui-g2p`, which takes about a tenth of a second.
+    /// Parse the lexicons and load the model for unknown words, embedded in `loqui-g2p`, which takes about a tenth of a second, with Tomori's own pronunciations.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_pronunciations(None)
+    }
+
+    /// As [`new`](Self::new), adding and preferring the pronunciations in `file`, if it is given and exists.
+    pub(crate) fn with_pronunciations(file: Option<&Path>) -> Self {
+        // The data is part of the crate, so it fails only if the crate itself is broken.
+        let g2p = G2p::new(Dialect::American, OovFallback::Neural)
+            .expect("loqui-g2p's embedded lexicons and model load");
+        let pronunciations = Pronunciations::load(file, |respelling| phonemes(&g2p, respelling));
         Self {
-            // The data is part of the crate, so it fails only if the crate itself is broken.
-            g2p: G2p::new(Dialect::American, OovFallback::Neural)
-                .expect("loqui-g2p's embedded lexicons and model load"),
+            g2p,
+            pronunciations,
         }
     }
+
+    /// `text` as it is given to misaki: normalized, with markup giving the phonemes of each word that misaki would get wrong.
+    fn marked(&self, text: &str) -> String {
+        let (text, marks) = self.pronunciations.protect(text);
+        let text = heteronyms::mark(&normalize(&text));
+        pronunciation::restore(&text, &marks)
+    }
+}
+
+/// The phonemes of `text`, a few words, as `g2p` reads them, with a space between words.
+fn phonemes(g2p: &G2p, text: &str) -> String {
+    let mut phonemes = String::new();
+    for token in g2p.tokens(text) {
+        phonemes.push_str(&token.phonemes);
+        if token.whitespace {
+            phonemes.push(' ');
+        }
+    }
+    phonemes.trim().to_owned()
 }
 
 impl Phonemizer for English {
     fn sentences(&self, text: &str) -> Vec<String> {
         let mut sentences = Vec::new();
         let mut sentence = String::new();
-        for token in self.g2p.tokens(&normalize(text)) {
+        for token in self.g2p.tokens(&self.marked(text)) {
             sentence.push_str(&token.phonemes);
             // A silent token, such as an emoji, leaves one space rather than two.
             if token.whitespace && !sentence.is_empty() && !sentence.ends_with(' ') {
@@ -80,8 +113,12 @@ pub(crate) fn normalize(text: &str) -> String {
     });
     static NUMBER: LazyLock<Regex> = LazyLock::new(|| pattern(r"\b\d+(?:[.,]\d+)*\b"));
     static CAMEL: LazyLock<Regex> = LazyLock::new(|| pattern(r"([a-z])([A-Z][a-z])"));
-    static DOT: LazyLock<Regex> = LazyLock::new(|| pattern(r"([[:alpha:]]{2})\.([[:alpha:]]{2})"));
-    static SLASH: LazyLock<Regex> = LazyLock::new(|| pattern(r"([[:alnum:]])/([[:alnum:]])"));
+    // A placeholder for a word with a pronunciation, `\x{E000}` to `\x{F8FF}`, counts as a word here.
+    static DOT: LazyLock<Regex> = LazyLock::new(|| {
+        pattern(r"([[:alpha:]]{2}|[\x{E000}-\x{F8FF}])\.([[:alpha:]]{2}|[\x{E000}-\x{F8FF}])")
+    });
+    static SLASH: LazyLock<Regex> =
+        LazyLock::new(|| pattern(r"([[:alnum:]\x{E000}-\x{F8FF}])/([[:alnum:]\x{E000}-\x{F8FF}])"));
 
     let text = ADDRESS.replace_all(text, "").into_owned();
     let text = replace_all(text, &DATE, date);
@@ -329,6 +366,141 @@ mod tests {
         let spoken = sentences("The build finished at 3:45 pm.").join(" ");
         assert!(!spoken.contains(':'), "{spoken}");
         assert_eq!(spoken, "ðə bˈɪld fˈɪnəʃt æt θɹˈi fˈɔɹTi fˈIv pˌiˈɛm.");
+    }
+
+    /// The phonemes of each word of `text` that is `word`, in any case, in order.
+    fn pronounced(text: &str, word: &str) -> Vec<String> {
+        static ENGLISH: LazyLock<English> = LazyLock::new(English::new);
+        ENGLISH
+            .g2p
+            .tokens(&ENGLISH.marked(text))
+            .into_iter()
+            .filter(|token| token.text.eq_ignore_ascii_case(word))
+            .map(|token| token.phonemes)
+            .collect()
+    }
+
+    #[test]
+    fn pronounces_the_listening_tests_words() {
+        // The sentences of the maintainer's listening test of the phonemizer, in November 2026.
+        let text = "The live preview lives in this folder.";
+        assert_eq!(pronounced(text, "live"), ["lˈIv"]);
+        assert_eq!(pronounced(text, "lives"), ["lˈɪvz"]);
+        assert_eq!(
+            sentences("Publish the crate to crates.io when you're ready."),
+            ["pˈʌblɪʃ ðə kɹˈAt tə kɹˈAts dˈɑt ˈIˌO wˌɛn jʊɹ ɹˈɛdi."]
+        );
+        assert_eq!(
+            pronounced("We'll go live with it tomorrow, and I live nearby.", "live"),
+            ["lˈIv", "lˈɪv"]
+        );
+        let text = "Check the live log on crates.io before it goes live.";
+        assert_eq!(pronounced(text, "live"), ["lˈIv", "lˈIv"]);
+        assert!(sentences(text)[0].contains("kɹˈAts dˈɑt ˈIˌO"));
+        let text = "Read the README, then read it again: I read it yesterday.";
+        assert_eq!(pronounced(text, "read"), ["ɹˈid", "ɹˈid", "ɹˈɛd"]);
+        assert_eq!(pronounced(text, "README"), ["ɹˈidmi"]);
+        assert_eq!(
+            sentences(text),
+            ["ɹˈid ðə ɹˈidmi, ðˈɛn ɹˈid ɪt əɡˈɛn: ˌI ɹˈɛd ɪt jˈɛstəɹdˌA."]
+        );
+    }
+
+    #[test]
+    fn pronounces_live_by_the_words_around_it() {
+        for (text, expected) in [
+            ("It goes live!", &["lˈIv"][..]),
+            ("We're live, and it is live.", &["lˈIv", "lˈIv"]),
+            ("Make it live; is it live?", &["lˈIv", "lˈIv"]),
+            (
+                "Start the live stream, live audio and live-reload.",
+                &["lˈIv", "lˈIv", "lˈIv"],
+            ),
+            ("I want to live here, where we live.", &["lˈɪv", "lˈɪv"]),
+            // Left to the tagger.
+            ("Long live the king. Let's live.", &["lˈɪv", "lˈɪv"]),
+        ] {
+            assert_eq!(pronounced(text, "live"), expected, "{text}");
+        }
+        assert_eq!(
+            pronounced("She lives nearby. He lived there.", "lives"),
+            ["lˈɪvz"]
+        );
+        assert_eq!(
+            pronounced("She lives nearby. He lived there.", "lived"),
+            ["lˈɪvd"]
+        );
+    }
+
+    #[test]
+    fn pronounces_imperatives_that_start_a_sentence_as_verbs() {
+        assert_eq!(sentences("Use JSON."), ["jˈuz ʤˈAsᵊn."]);
+        assert_eq!(
+            pronounced("Record the audio. Press record.", "record"),
+            ["ɹəkˈɔɹd", "ɹˈɛkəɹd"]
+        );
+        assert_eq!(
+            pronounced("Present your findings.", "present"),
+            ["pɹizˈɛnt"]
+        );
+    }
+
+    #[test]
+    fn pronounces_words_with_a_pronunciation_in_any_case_and_in_code() {
+        for word in ["README", "Readme", "readme"] {
+            assert_eq!(
+                pronounced(&format!("The {word} is here."), word),
+                ["ɹˈidmi"]
+            );
+        }
+        assert_eq!(
+            sentences("Open `README.md` (README)."),
+            ["ˈOpᵊn ɹˈidmi dˈɑt ˌɛmdˈi (ɹˈidmi)."]
+        );
+        assert_eq!(
+            sentences("See GitHub and github."),
+            ["sˈi ɡˈɪt hˈʌb ænd ɡˈɪt hˈʌb."]
+        );
+        assert_eq!(
+            sentences("It uses sherpa-onnx and Kokoro."),
+            ["ˌɪt jˈuzᵻz ʃˈɜɹpə ˈɑnɪks ænd kˈOkəɹO."]
+        );
+    }
+
+    #[test]
+    fn the_built_in_pronunciations_are_needed_and_right() {
+        let without = G2p::new(Dialect::American, OovFallback::Neural).unwrap();
+        let english = English::new();
+        let document: toml_edit::DocumentMut = pronunciation::BUILT_IN.parse().unwrap();
+        // None is left out.
+        assert_eq!(english.pronunciations.len(), document.len());
+        for (word, _) in document.iter() {
+            let given = phonemes(&english.g2p, &english.marked(word));
+            assert!(!given.is_empty(), "{word}");
+            // `loqui-g2p` reads it differently without it, as it is written in some case.
+            let capitalized = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+            assert!(
+                [word.to_owned(), word.to_uppercase(), capitalized]
+                    .iter()
+                    .any(|written| phonemes(&without, written) != given),
+                "{word} is pronounced {given} without it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_servers_own_pronunciations_are_preferred() {
+        let file = std::env::temp_dir().join(format!(
+            "tomori-english-pronunciations-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&file, "readme = \"read it\"\nhinoki = \"/hˈinˌOki/\"\n").unwrap();
+        let english = English::with_pronunciations(Some(&file));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            english.sentences("The README, by Hinoki."),
+            ["ðə ɹˈid ɪt, bI hˈinˌOki."]
+        );
     }
 
     #[test]

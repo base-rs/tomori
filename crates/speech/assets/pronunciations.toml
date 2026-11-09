@@ -1,0 +1,56 @@
+# Pronunciations of whole words that `loqui-g2p` gets wrong, for Kokoro's American voices. See `design/speech.md`.
+#
+# Each key is a word, matched whole and in any case: `readme` is also "README" and "Readme", and in "README.md", "`README`" and "(README)". A key may join words with `-`, `.` or `_`, such as "sherpa-onnx", which is quoted, as TOML needs for keys with dots; a word inside such a run, such as "onnx" in "sherpa_onnx", is matched when the whole run is not.
+#
+# Each value is either a respelling, written as words that `loqui-g2p` already pronounces correctly, such as "git hub", or Kokoro's phonemes between slashes, in misaki's notation, such as "/ɹˈidmi/", where stress must be exact. Prefer a respelling: it is easier to read and to check.
+#
+# Add a word only after checking that `loqui-g2p` gets it wrong, and that the entry fixes it; the test `the_built_in_pronunciations_are_needed_and_right` in `crates/speech/src/tts/english.rs` checks each one. Words it gets right, such as "GitHub", "OpenCode", "macOS", "iOS", "OAuth", "CLI", "API", "URL", "tokio", "clippy" and "crates.io", are left out.
+#
+# A server's operator can add words, or change these, in `pronunciations.toml` in the server's state directory, in the same form.
+
+# Spelled letter by letter.
+readme = "/ɹˈidmi/"
+json = "Jason"
+yaml = "yammel"
+toml = "tommel"
+onnx = "/ˈɑnɪks/"
+"sherpa-onnx" = "/ʃˈɜɹpə ˈɑnɪks/"
+todo = "to do"
+fixme = "fix me"
+cuda = "/kˈudə/"
+quic = "quick"
+wasm = "/wˈɑzəm/"
+
+# Read as a word where it is spelled, or the other way round.
+adb = "A D B"
+ai = "/ˌAˈI/"
+ios = "/ˌIˌOˈɛs/"
+uv = "U V"
+wgpu = "W G P U"
+github = "git hub"
+xcode = "X code"
+rustc = "rust C"
+systemd = "system D"
+chmod = "C H mod"
+
+# Names.
+kokoro = "/kˈOkəɹO/"
+tomori = "/tOmˈɔɹi/"
+silero = "/sɪlˈɛɹO/"
+serde = "serdy"
+nginx = "engine X"
+emacs = "/ˈimæks/"
+sqlite = "sequel lite"
+postgres = "post gress"
+postgresql = "post gress Q L"
+thiserror = "this error"
+
+# Words of code.
+stdout = "standard out"
+stdin = "standard in"
+stderr = "standard error"
+rustfmt = "rust format"
+dotenv = "dot env"
+journalctl = "journal control"
+enum = "/ˈinəm/"
+impl = "/ˈɪmpᵊl/"

@@ -23,6 +23,8 @@ log = "0.4"
 loqui-g2p = "=0.4.0"
 regex = "1"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
+# The pronunciations in assets/pronunciations.toml, and a server's own; already in the lock file for proc-macro-crate, so it adds nothing.
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 # Pinned to the version whose libraries scripts/fetch-sherpa-onnx.sh verifies. 2.x links no espeak-ng; see readme.md.
 sherpa-onnx = { version = "=2.0.1", default-features = false }
 
