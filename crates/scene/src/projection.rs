@@ -1301,6 +1301,8 @@ pub struct Input<'a> {
     pub stick: Vec2,
     /// The right stick was clicked while a panel was carried: it turns back to face the participant square.
     pub straighten: bool,
+    /// The trigger is held: a wall carried snaps to no other, so that let go it stays where it is.
+    pub free: bool,
     /// The controls the hint beside a panel carried names.
     pub controls: Controls,
     /// A panel to scroll, this participant's own view of it, which nobody else sees: the one pointed at as the right
@@ -1532,6 +1534,7 @@ impl Projector {
                     Vec2::ZERO
                 },
                 straighten: input.straighten && self.held.is_none(),
+                free: input.free,
                 viewer,
                 rights: input.rights,
                 controls: input.controls,
@@ -1709,11 +1712,14 @@ impl Projector {
                 _ => None,
             }
         }
+        let drawn: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
         let mut groups: Vec<(f32, Vec<Sheet>)> = walls
             .iter()
             .map(|(wall, frame)| {
-                // A flat wall is one board; a curved one, a board for each slot, and its label below their middle.
+                // A flat wall is one board, drawn edge by edge in a group; a curved one, a board for each slot, and its
+                // label below their middle, once for a group.
                 let mut sheets = match arc(wall) {
+                    None if wall.group.is_some() => boards::sheets(wall, *frame, &drawn),
                     None => vec![Sheet {
                         canvas: Some(wall_face(wall)),
                         model: Some(*frame * Mat4::from_scale(Vec3::splat(wall.scale()))),
@@ -1728,15 +1734,17 @@ impl Projector {
                             })
                             .collect();
                         // Below its rows, since the status pill stands just above the Tomori wall from home.
-                        boards.push(Sheet {
-                            canvas: Some(arc_label(wall)),
-                            model: Some(
-                                *frame
-                                    * Mat4::from_translation(
-                                        -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
-                                    ),
-                            ),
-                        });
+                        if boards::labelled(wall, &drawn) {
+                            boards.push(Sheet {
+                                canvas: Some(arc_label(wall)),
+                                model: Some(
+                                    *frame
+                                        * Mat4::from_translation(
+                                            -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
+                                        ),
+                                ),
+                            });
+                        }
                         boards
                     }
                 };
@@ -1918,6 +1926,7 @@ impl Projector {
     }
 }
 
+mod boards;
 pub mod editing;
 mod image;
 

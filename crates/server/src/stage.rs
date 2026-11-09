@@ -25,6 +25,7 @@
 mod blocks;
 pub(crate) use tomori_protocol::checklist;
 mod code;
+mod groups;
 mod image;
 mod placement;
 
@@ -486,6 +487,10 @@ struct AddedWall {
     /// How it is laid out, when changed from a flat wall's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<Layout>,
+    /// Where it is attached in its group, if it is in one and not the group's first: its pose then follows from the
+    /// wall it is attached to, and is kept as it stands, so that a server that knows no groups reads it where it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attach: Option<tomori_protocol::Attach>,
 }
 
 /// What a space keeps for one environment: the walls owners added and the panels on the environment's walls or
@@ -633,12 +638,13 @@ impl Stage {
             },
         ));
         if let Some(room) = room {
+            let mut joins = room.joins();
             shown.extend(room.walls.iter().map(|wall| {
-                wall.layout.unwrap_or(Layout::FLAT).apply(Wall::new(
-                    wall.id.clone(),
-                    WallKind::Added,
-                    wall.pose,
-                ))
+                let (group, joined) = joins.remove(&wall.id).unzip();
+                wall.layout
+                    .unwrap_or(Layout::FLAT)
+                    .apply(Wall::new(wall.id.clone(), WallKind::Added, wall.pose))
+                    .with_group(group, joined.unwrap_or_default())
             }));
         }
         shown
@@ -1283,6 +1289,7 @@ impl Stage {
             id: id.clone(),
             pose,
             layout: (layout != Layout::FLAT).then_some(layout),
+            attach: None,
         });
         Ok(id)
     }
@@ -1421,13 +1428,43 @@ impl Stage {
             }
             _ => {
                 let room = self.room(walls.environment);
+                let unchanged = room.clone();
+                let members = room.group(wall);
                 let added = room
                     .walls
                     .iter_mut()
                     .find(|added| added.id == wall)
                     .expect("an added wall shown is kept");
                 added.layout = (new != Layout::FLAT).then_some(new);
-                added.pose = pose;
+                if members.len() > 1 {
+                    // A group's walls are curved alike, so that one bent bends them all; carried, it carries them all.
+                    if change.radius.is_some() {
+                        for member in &members[1..] {
+                            let added = room
+                                .walls
+                                .iter_mut()
+                                .find(|added| added.id == *member)
+                                .expect("a wall of the group is kept");
+                            let mut layout = added.layout.unwrap_or(Layout::FLAT);
+                            layout.radius = new.radius;
+                            let bent = layout.apply(Wall::new(member.clone(), kind, added.pose));
+                            if let Err(error) = Self::fits(&bent, layout) {
+                                *room = unchanged;
+                                return Err(error);
+                            }
+                            added.layout = (layout != Layout::FLAT).then_some(layout);
+                        }
+                    }
+                    if pose != before.pose {
+                        room.carry(wall, pose);
+                    }
+                    if let Err(error) = room.settle(&unchanged) {
+                        *room = unchanged;
+                        return Err(error);
+                    }
+                } else {
+                    added.pose = pose;
+                }
             }
         }
         self.rearrange(walls, &before, &after);
@@ -1525,6 +1562,8 @@ impl Stage {
         };
         let tick = self.tick();
         let room = self.room(walls.environment);
+        // Taken out of its group first, the rest stay together where they still touch.
+        room.detach(wall);
         room.walls.retain(|added| added.id != wall);
         for panel in &mut room.panels {
             if let Some(slot) = panel.slot_on(wall) {

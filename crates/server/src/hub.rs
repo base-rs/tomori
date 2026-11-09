@@ -3929,6 +3929,41 @@ impl Hub {
                     }
                 }
             }
+            ClientMessage::AttachWall {
+                wall,
+                attach,
+                alone,
+                pose,
+            } => {
+                let checked =
+                    limits::check(&wall, limits::IDENTIFIER_BYTES, "wall").and_then(|()| {
+                        attach.as_ref().map_or(Ok(()), |attach| {
+                            limits::check(&attach.to, limits::IDENTIFIER_BYTES, "wall")
+                        })
+                    });
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.attach_wall(&walls, &wall, attach, alone, pose) {
+                    Ok(true) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    // Sent again either way, so that a client that showed the snap at once shows the walls as they are.
+                    Ok(false) => state.touch_projection(&space),
+                    Err(error) => {
+                        state.error(participant, error);
+                        state.touch_projection(&space);
+                    }
+                }
+            }
             ClientMessage::RemoveWall { wall } => {
                 if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
                     state.error(participant, error);
@@ -5606,6 +5641,8 @@ impl Hub {
                 state.walls = true;
                 // Participants tick and untick checklist items pointed at.
                 state.checks = true;
+                // Walls someone added snap together into groups, which move together. See `design/projection.md`.
+                state.groups = true;
                 // An owner may delete any space, and its session too where its backend deletes sessions. See `design/spaces.md`.
                 state.deletes = true;
                 state.deletes_session = self

@@ -276,6 +276,12 @@ pub struct SpaceState {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checks: bool,
+    /// Whether the server snaps walls into groups, taking [`crate::ClientMessage::AttachWall`] from participants, moving
+    /// a group together as one of its walls is moved and sending each wall's [`crate::Wall::group`] and
+    /// [`crate::Wall::joined`]. False from older servers, which a client sends no `AttachWall` and offers no snapping. See
+    /// `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub groups: bool,
     /// Whether the server accepts [`crate::ClientMessage::DeleteSpace`] from an owner in the space. False from older
     /// servers; a client offers deleting the space only when this is set. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -140,6 +140,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         nearer: f32::INFINITY,
         stick: Vec2::ZERO,
         straighten: false,
+        free: false,
         controls: Controls::Controllers,
         scroll: None,
         rights: editing::Rights::default(),

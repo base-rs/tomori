@@ -3605,12 +3605,12 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
             space: space.clone(),
         });
     }
-    // Every space projects, and says so in its state, with that participants change its walls; the Tomori wall stands
-    // beside the swarm, empty.
+    // Every space projects, and says so in its state, with that participants change its walls and snap them together;
+    // the Tomori wall stands beside the swarm, empty.
     let messages = ada.read();
     assert!(messages.iter().any(|message| matches!(
         message,
-        ServerMessage::Space { state } if state.projection && state.walls
+        ServerMessage::Space { state } if state.projection && state.walls && state.groups
     )));
     let projection = messages
         .into_iter()
@@ -4036,6 +4036,104 @@ fn only_owners_add_and_remove_walls() {
     );
     ada.send(ClientMessage::RemoveWall { wall: wall.id });
     assert_eq!(cy.projections()[0].walls.len(), 1);
+}
+
+#[test]
+fn participants_snap_walls_together_for_everyone_while_visitors_snap_none() {
+    use tomori_protocol::{Align, Attach, Edge};
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let cy = Client::projecting(
+        &hub,
+        Access {
+            principal: Some("token:cy".to_owned()),
+            name: None,
+            grant: Grant::Collaborator {
+                space: space.clone(),
+            },
+        },
+        "cy",
+    );
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    for client in [&ada, &cy, &vic] {
+        client.join(&space);
+    }
+    ada.send(ClientMessage::AddWall {
+        pose: upright([-1.0, 1.5, -2.0]),
+    });
+    ada.send(ClientMessage::AddWall {
+        pose: upright([1.5, 1.5, -2.0]),
+    });
+    let projection = ada.projection();
+    let (first, second) = (
+        projection.walls[1].id.clone(),
+        projection.walls[2].id.clone(),
+    );
+    let attach = |alone: bool| ClientMessage::AttachWall {
+        wall: second.clone(),
+        attach: Some(Attach::new(first.clone(), Edge::Right, Align::Start)),
+        alone,
+        pose: None,
+    };
+    // A visitor snaps nothing.
+    vic.send(attach(false));
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // A collaborator snaps the second beside the first, for everyone, the visitor included.
+    cy.send(attach(true));
+    for client in [&ada, &cy, &vic] {
+        let projection = client.projection();
+        let (a, b) = (
+            projection.wall(&first).unwrap(),
+            projection.wall(&second).unwrap(),
+        );
+        assert_eq!(
+            (a.group.as_deref(), b.group.as_deref()),
+            (Some(first.as_str()), Some(first.as_str()))
+        );
+        assert_eq!(a.joined.len(), 1);
+    }
+    // What cannot be snapped is refused, saying why, and the projection is sent again as it is.
+    cy.send(ClientMessage::AttachWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+        attach: Some(Attach::new(first.clone(), Edge::Left, Align::Start)),
+        alone: false,
+        pose: None,
+    });
+    cy.send(ClientMessage::AttachWall {
+        wall: second.clone(),
+        attach: Some(Attach::new(
+            "x".repeat(limits::IDENTIFIER_BYTES + 1),
+            Edge::Left,
+            Align::Start,
+        )),
+        alone: false,
+        pose: None,
+    });
+    assert_eq!(
+        cy.errors(),
+        [
+            "Only walls someone added snap together: the Tomori wall and an environment's walls stand where they are put.".to_owned(),
+            format!("The wall is too long; the limit is {} bytes.", limits::IDENTIFIER_BYTES),
+        ]
+    );
+    // Snapped again where it is, nothing changes; taken out, it stands alone where it is.
+    cy.send(attach(false));
+    assert!(cy.errors().is_empty());
+    cy.send(ClientMessage::AttachWall {
+        wall: second.clone(),
+        attach: None,
+        alone: true,
+        pose: None,
+    });
+    let projection = vic.projection();
+    assert!(projection.walls.iter().all(|wall| wall.group.is_none()));
+    let lobby = Client::projecting(&hub, Access::open(), "lee");
+    lobby.send(attach(false));
+    assert_eq!(lobby.errors(), ["Join a space first."]);
 }
 
 #[test]

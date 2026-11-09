@@ -3,15 +3,21 @@
 
 //! Editing walls with the grip: taking hold of a wall by pointing at its board or an empty slot, the handles that then
 //! appear on it, small and grabbed with the grip, to size its slots, give it columns and rows, step them one at a time
-//! and bend it, carrying a wall someone added as a panel is carried, and removing one, as an owner, with B. Each change
-//! is shown at once, as the wall would be, and sent to the server when it is let go, shown so until the server's
-//! projection agrees or [`super::PENDING`] passes. See `design/projection.md`.
+//! and bend it, carrying a wall someone added as a panel is carried, and removing one, as an owner, with B. A wall carried
+//! carries its group, and snaps beside another it is brought within reach of, its place outlined; pulled firmly towards
+//! the participant, it comes out of its group alone. Each change is shown at once, as the wall would be, and sent to the
+//! server when it is let go, shown so until the server's projection agrees or [`super::PENDING`] passes. See
+//! `design/projection.md`.
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
-use tomori_protocol::{Grid, Pose, Projection, Wall, WallKind, WallShape, wall as layout};
+use tomori_protocol::{
+    Attach, Grid, Pose, Projection, Wall, WallKind, WallShape, group, wall as layout,
+};
 
-use super::{Controls, FRAME, HIGHLIGHT, HINT_ANGLE, PENDING, THROW, slot_unit};
+use super::{
+    Cells, Controls, FRAME, HIGHLIGHT, HINT_ANGLE, LIFT, PENDING, THROW, ghost, slot_unit,
+};
 use crate::{
     board::{model, pose},
     canvas::Canvas,
@@ -75,6 +81,20 @@ const OUTSET: f32 = 0.9;
 /// The most columns of the Tomori wall, in its one row, as the server allows.
 const TOMORI_COLUMNS: u32 = 6;
 
+/// How far a wall carried in a group is pulled towards the participant, from where it was taken hold of, to come out of
+/// its group alone, in metres: firmly, further than a nudge to bring it nearer.
+pub const DETACH: f32 = 0.3;
+
+/// How near the surface a wall pulled out of its group must be pushed back, in metres, to snap back where it was.
+const PULLED_DEPTH: f32 = 0.1;
+
+/// How near where a wall pulled out of its group stood a snap puts it, in metres, to put it back where it was.
+const RETURN: f32 = 0.1;
+
+/// How much nearer the snap already shown ranks against another, as a proportion, so that the preview does not flicker
+/// between two neighbours.
+const STAY: f32 = 0.8;
+
 /// Which of a wall's grids a stepper steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
@@ -106,6 +126,17 @@ pub struct Rights {
     pub adjust: bool,
     /// Remove walls: an owner, as well.
     pub remove: bool,
+    /// Snap walls together, carrying a group as one and taking a wall out of one: in a space whose server snaps them.
+    pub snap: bool,
+}
+
+/// What a change does to a wall's group.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Joining {
+    /// Snap it beside another, as `attach` says, its group coming with it, or, `alone`, out of its group first.
+    Attach { attach: Attach, alone: bool },
+    /// Take it out of its group, standing where it was let go.
+    Leave,
 }
 
 /// A change to a wall a participant made, to send: each left out stays as it is.
@@ -118,6 +149,8 @@ pub struct Change {
     pub aspect: Option<f32>,
     pub shape: Option<WallShape>,
     pub pose: Option<Pose>,
+    /// What it does to the wall's group, if anything.
+    pub join: Option<Joining>,
 }
 
 /// A handle being dragged, and the wall as it was when it was taken hold of.
@@ -145,6 +178,17 @@ struct Carry {
     /// Where it was taken hold of, in its own frame.
     grabbed: Vec3,
     model: Mat4,
+    /// How far along the ray it was taken hold of, which pulling it [`DETACH`] nearer than takes it out of its group.
+    start: f32,
+}
+
+/// Where a wall carried would snap if let go now: the wall of those carried that snaps, the wall it snaps beside, and
+/// how.
+#[derive(Clone, Debug, PartialEq)]
+struct Snapping {
+    wall: String,
+    to: String,
+    snap: group::Snap,
 }
 
 /// The walls being edited across frames.
@@ -164,6 +208,16 @@ pub struct Editor {
     bar: Option<String>,
     /// When B asked to remove the wall carried, which holds panels, so that another press confirms it.
     confirm: Option<Instant>,
+    /// The other walls of the group of the wall carried, each as it stood and where it stood from the wall carried.
+    members: Vec<(Wall, Mat4)>,
+    /// The wall carried was pulled out of its group, so that it comes alone.
+    detached: bool,
+    /// The walls carried with the one carried, as they are drawn moved with it.
+    moved: Vec<Wall>,
+    /// Those walls as they were let go, drawn until the server agrees with the wall carried or [`PENDING`] passes.
+    moved_pending: Vec<Wall>,
+    /// Where the walls carried would snap if let go now.
+    snap: Option<Snapping>,
 }
 
 /// What the editor needs this frame.
@@ -183,6 +237,8 @@ pub struct Input<'a> {
     pub panel: f32,
     pub stick: Vec2,
     pub straighten: bool,
+    /// The trigger is held: a wall carried snaps to no other, so that let go it stays where it is.
+    pub free: bool,
     pub viewer: Vec3,
     pub rights: Rights,
     pub controls: Controls,
@@ -892,6 +948,10 @@ impl Editor {
         self.drag = None;
         self.carry = None;
         self.preview = None;
+        self.members.clear();
+        self.moved.clear();
+        self.detached = false;
+        self.snap = None;
         self.confirm = None;
         self.hovered = None;
         self.bar = None;
@@ -923,12 +983,19 @@ impl Editor {
             .map(|wall| {
                 let shown = self
                     .preview
-                    .as_ref()
-                    .or(self.pending.as_ref().map(|(pending, _)| pending))
-                    .filter(|shown| shown.id == wall.id);
+                    .iter()
+                    .chain(&self.moved)
+                    .chain(self.pending.as_ref().map(|(pending, _)| pending))
+                    .chain(&self.moved_pending)
+                    .find(|shown| shown.id == wall.id);
                 shown.cloned().unwrap_or_else(|| wall.clone())
             })
             .collect()
+    }
+
+    /// Whether the wall carried would snap beside another if let go now.
+    pub fn snapping(&self) -> bool {
+        self.snap.is_some()
     }
 
     /// Follow `input`, given `walls` as drawn this frame, and say what to draw and send.
@@ -948,6 +1015,7 @@ impl Editor {
             });
             if agreed || input.now.saturating_duration_since(*since) >= PENDING {
                 self.pending = None;
+                self.moved_pending.clear();
             }
         }
         if self
@@ -1036,6 +1104,7 @@ impl Editor {
                                 aspect: None,
                                 shape: None,
                                 pose: None,
+                                join: None,
                             });
                             self.pending = Some((changed, input.now));
                         }
@@ -1084,8 +1153,27 @@ impl Editor {
                                 facing,
                                 grabbed: frame.inverse().transform_point3(ray.at(along)),
                                 model: frame,
+                                start: along,
                             });
                             self.preview = Some(wall.clone());
+                            // Its group comes with it, each wall standing where it stood from it.
+                            let group = wall.group.as_ref().filter(|_| input.rights.snap);
+                            self.members = walls
+                                .iter()
+                                .filter(|(other, _)| {
+                                    other.id != wall.id
+                                        && group.is_some()
+                                        && other.group.as_ref() == group
+                                })
+                                .map(|(other, at)| ((*other).clone(), frame.inverse() * *at))
+                                .collect();
+                            self.moved = self
+                                .members
+                                .iter()
+                                .map(|(other, _)| other.clone())
+                                .collect();
+                            self.detached = false;
+                            self.snap = None;
                         }
                     }
                     // Squeezed at nothing, it lets go of the wall it held.
@@ -1166,6 +1254,103 @@ impl Editor {
             self.preview
                 .iter_mut()
                 .for_each(|preview| preview.pose = pose(carry.model));
+            // Pulled firmly towards the participant, it comes out of its group alone, and the rest stay.
+            if !self.members.is_empty()
+                && !self.detached
+                && carry.start - carry.manipulation.distance() > DETACH
+            {
+                self.detached = true;
+                output.ticked = true;
+                // What is carried has changed, so a snap shown for the group is not held.
+                self.snap = None;
+                // Drawn alone from then on.
+                self.preview.iter_mut().for_each(|preview| {
+                    preview.group = None;
+                    preview.joined.clear();
+                });
+            }
+            let model = carry.model;
+            self.moved = if self.detached {
+                Vec::new()
+            } else {
+                self.members
+                    .iter()
+                    .map(|(wall, from)| {
+                        let mut moved = wall.clone();
+                        moved.pose = pose(model * *from);
+                        moved
+                    })
+                    .collect()
+            };
+            // Brought near enough another wall, of those not carried, the snap of any wall carried that ranks first,
+            // unless the trigger is held. The snap already shown is held a little wider, and ranks a little nearer, so
+            // that it neither flickers at the edge of reach nor between two neighbours.
+            let shown = self.snap.take();
+            if input.rights.snap && !input.free {
+                let carried: Vec<&Wall> = self.preview.iter().chain(&self.moved).collect();
+                let detached = self.detached;
+                let members = &self.members;
+                // The wall pulled out of its group, as it stood in it.
+                let origin = self
+                    .preview
+                    .as_ref()
+                    .filter(|_| detached)
+                    .and_then(|preview| input.projection.wall(&preview.id));
+                self.snap = carried
+                    .iter()
+                    .flat_map(|wall| {
+                        let away = Vec3::from_array(wall.pose.position).distance(input.viewer);
+                        let shown = shown.as_ref();
+                        walls
+                            .iter()
+                            .filter(|(other, _)| {
+                                group::snaps_to(other)
+                                    && !carried.iter().any(|carried| carried.id == other.id)
+                            })
+                            .filter_map(move |(other, _)| {
+                                let held = shown
+                                    .filter(|shown| shown.wall == wall.id && shown.to == other.id);
+                                let mut leeway = group::Leeway::at(away);
+                                if held.is_some() {
+                                    leeway = leeway.held();
+                                }
+                                // Pulled out of its group, the walls it left stand where they stood.
+                                let other = members
+                                    .iter()
+                                    .find(|(member, _)| detached && member.id == other.id)
+                                    .map_or(*other, |(member, _)| member);
+                                let snap = group::snap_within(wall, other, leeway)?;
+                                // A snap that would put it back where it was pulled out from is offered only once it is
+                                // pushed back nearly into the surface, so that the pull is not undone at once.
+                                let back = origin.is_some_and(|origin: &Wall| {
+                                    origin.id == wall.id
+                                        && Vec3::from_array(origin.pose.position)
+                                            .distance(Vec3::from_array(snap.pose.position))
+                                            < RETURN
+                                });
+                                let mut snap = if back {
+                                    group::snap_within(wall, other, leeway.within(PULLED_DEPTH))?
+                                } else {
+                                    snap
+                                };
+                                if held.is_some_and(|held| held.snap.edge == snap.edge) {
+                                    snap.rank *= STAY;
+                                }
+                                Some(Snapping {
+                                    wall: wall.id.clone(),
+                                    to: other.id.clone(),
+                                    snap,
+                                })
+                            })
+                    })
+                    .min_by(|a, b| a.snap.rank.total_cmp(&b.snap.rank));
+            }
+            output.ticked |= self.snap.as_ref().is_some_and(|snap| {
+                shown.as_ref().is_none_or(|shown| {
+                    (&shown.wall, &shown.to, shown.snap.edge)
+                        != (&snap.wall, &snap.to, snap.snap.edge)
+                })
+            });
             output.end = Some(at);
             output.hit = Some(crate::pointing::End::held(ray.origin, at));
         }
@@ -1178,7 +1363,39 @@ impl Editor {
                 .cloned();
             let carried = self.carry.take().is_some();
             let dragged = self.drag.take().is_some();
-            if let (Some(after), Some(before), true) =
+            let moved = std::mem::take(&mut self.moved);
+            let detached = std::mem::take(&mut self.detached);
+            self.members.clear();
+            let snapped = self.snap.take().filter(|_| carried);
+            if let Some(snapping) = snapped
+                && let Some(after) = self.preview.take()
+            {
+                // Snapped, it is sent beside the other wall, and shown there with the walls carried with it.
+                let from = std::iter::once(&after)
+                    .chain(&moved)
+                    .find(|wall| wall.id == snapping.wall)
+                    .map_or(after.pose, |wall| wall.pose);
+                let to = snapping.snap.pose;
+                let placed = |wall: &Wall| {
+                    let mut placed = curved_at(wall, snapping.snap.radius);
+                    placed.pose = group::carried_with(&from, &to, &wall.pose);
+                    placed
+                };
+                output.change = Some(Change {
+                    wall: snapping.wall.clone(),
+                    grid: None,
+                    scale: None,
+                    aspect: None,
+                    shape: None,
+                    pose: None,
+                    join: Some(Joining::Attach {
+                        attach: Attach::new(snapping.to, snapping.snap.edge, snapping.snap.align),
+                        alone: detached,
+                    }),
+                });
+                self.pending = Some((placed(&after), input.now));
+                self.moved_pending = moved.iter().map(placed).collect();
+            } else if let (Some(after), Some(before), true) =
                 (self.preview.take(), before, carried || dragged)
             {
                 let change = Change {
@@ -1200,6 +1417,17 @@ impl Editor {
                                 .angle_between(Quat::from_array(before.pose.orientation))
                                 > 1e-3))
                         .then_some(after.pose),
+                    join: None,
+                };
+                // Pulled out of its group, it leaves it where it was let go; otherwise its group moves with it.
+                let change = if detached {
+                    Change {
+                        pose: Some(after.pose),
+                        join: Some(Joining::Leave),
+                        ..change
+                    }
+                } else {
+                    change
                 };
                 if change.grid.is_some()
                     || change.scale.is_some()
@@ -1209,6 +1437,7 @@ impl Editor {
                 {
                     output.change = Some(change);
                     self.pending = Some((after, input.now));
+                    self.moved_pending = moved;
                 }
             }
         }
@@ -1314,6 +1543,32 @@ impl Editor {
             Some(carry) => carry.model,
             None => model(&wall.pose).unwrap_or(frame),
         };
+        // Where the walls carried would snap: each slot of the one that snaps outlined where it would stand.
+        let snapped: Vec<Wall> = self
+            .snap
+            .iter()
+            .flat_map(|snapping| {
+                self.preview
+                    .iter()
+                    .chain(&self.moved)
+                    .filter(move |shown| shown.id == snapping.wall)
+                    .map(move |shown| {
+                        let mut snapped = curved_at(shown, snapping.snap.radius);
+                        snapped.pose = snapping.snap.pose;
+                        snapped
+                    })
+            })
+            .collect();
+        for snapped in &snapped {
+            let cells = Cells::of(snapped);
+            let slots = model(&snapped.pose)
+                .into_iter()
+                .flat_map(|at| super::slot_frames(snapped, at));
+            sheets.extend(slots.map(|slot| Sheet {
+                canvas: Some(ghost(cells)),
+                model: Some(slot * Mat4::from_translation(Vec3::Z * LIFT)),
+            }));
+        }
         let (points, size) = handle_points(wall, frame, input.viewer);
         if self.carry.is_none() {
             for (handle, at) in &points {
@@ -1332,12 +1587,16 @@ impl Editor {
         // While a handle is dragged, what it makes of the wall, in place of what each control does.
         let hint = match &self.drag {
             Some(drag) => readout(drag.handle, wall),
-            None => hint(
+            None => hint_with(
                 input.controls,
                 wall,
                 self.carry.is_some(),
                 input.rights.remove,
                 self.confirm.map(|_| held),
+                Grouping {
+                    grouped: !self.members.is_empty() && !self.detached,
+                    snapping: self.snap.is_some(),
+                },
             ),
         };
         // Above the wall and its handles, clear of the status pill, which stands low in the view, facing the viewer at the
@@ -1352,6 +1611,16 @@ impl Editor {
         let above = knob + up * ((top - knob).dot(up) + size);
         sheets.push(hint_above(hint, above, input.viewer));
         sheets
+    }
+}
+
+/// `wall`, curved at `radius` where both are curved, as a wall snapped to a curved one is, continuing its arc.
+fn curved_at(wall: &Wall, radius: Option<f32>) -> Wall {
+    match radius {
+        Some(radius) if wall.radius().is_some() => {
+            wall.clone().with_shape(WallShape::Arc { radius })
+        }
+        _ => wall.clone(),
     }
 }
 
@@ -1446,15 +1715,42 @@ fn hint_above(mut canvas: Canvas, above: Vec3, viewer: Vec3) -> Sheet {
     }
 }
 
-/// The hint beside a wall taken hold of: what each control does to it, as `controls` name them, for `wall`, `carried`
-/// or not, saying B removes it where the participant `removes` walls, and, once asked to with panels on it, `confirm`,
-/// how many of them would float.
+/// Where a wall carried stands with others: in a group, which it carries, and snapping beside another wall.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Grouping {
+    pub grouped: bool,
+    pub snapping: bool,
+}
+
+/// The hint beside a wall taken hold of, as [`hint_with`] says for a wall alone that would not snap.
 pub fn hint(
     controls: Controls,
     wall: &Wall,
     carried: bool,
     removes: bool,
     confirm: Option<usize>,
+) -> Canvas {
+    hint_with(
+        controls,
+        wall,
+        carried,
+        removes,
+        confirm,
+        Grouping::default(),
+    )
+}
+
+/// The hint beside a wall taken hold of: what each control does to it, as `controls` name them, for `wall`, `carried`
+/// or not, saying B removes it where the participant `removes` walls, and, once asked to with panels on it, `confirm`,
+/// how many of them would float; and, carried, how to pull it out of its group, `grouped`, and that letting go snaps it
+/// beside another, `snapping`.
+pub fn hint_with(
+    controls: Controls,
+    wall: &Wall,
+    carried: bool,
+    removes: bool,
+    confirm: Option<usize>,
+    grouping: Grouping,
 ) -> Canvas {
     let keyboard = controls == Controls::Keyboard;
     let grip = if keyboard { "G" } else { "Grip" };
@@ -1470,6 +1766,18 @@ pub fn hint(
             "turn".to_owned(),
             false,
         ));
+        if grouping.grouped {
+            rows.push((
+                (if keyboard {
+                    "PgDn far"
+                } else {
+                    "Stick ↓ far"
+                })
+                .to_owned(),
+                "take it out alone".to_owned(),
+                false,
+            ));
+        }
         let back = if keyboard { "Backspace" } else { "B" };
         if removes {
             rows.push(match confirm {
@@ -1484,11 +1792,28 @@ pub fn hint(
                 None => (back.to_owned(), "remove, for all".to_owned(), true),
             });
         }
+        if grouping.snapping {
+            rows.push((
+                (if keyboard {
+                    "Hold click"
+                } else {
+                    "Hold trigger"
+                })
+                .to_owned(),
+                "don't snap".to_owned(),
+                false,
+            ));
+        }
         rows.push((
             format!("Let go {}", if keyboard { "G" } else { "" })
                 .trim()
                 .to_owned(),
-            "leave it here".to_owned(),
+            (if grouping.snapping {
+                "snap it there"
+            } else {
+                "leave it here"
+            })
+            .to_owned(),
             false,
         ));
     } else {
@@ -1551,5 +1876,7 @@ pub fn hint(
     canvas
 }
 
+#[cfg(test)]
+mod snapping_tests;
 #[cfg(test)]
 mod tests;

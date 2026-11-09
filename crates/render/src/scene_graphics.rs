@@ -1849,6 +1849,225 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_WALL_GROUP_PREVIEW` to a PNG path to save what this renders: a wall two by two and a big one by one
+    /// snapped to its right, a panel in every slot, drawn as one board, with the same walls drawn apart below for
+    /// comparison; `TOMORI_WALL_CURVED_GROUP_PREVIEW`, a curved group of three about home, labelled once; and
+    /// `TOMORI_WALL_SNAP_PREVIEW`, the big wall carried mid-way to the other's edge, where it would snap outlined.
+    #[test]
+    fn walls_snapped_together_read_as_one_board_and_a_wall_carried_near_one_shows_where_it_snaps() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{
+            Align, Edge, Grid, Join, Panel, Place, Wall, WallKind, WallShape, group,
+        };
+        let added =
+            |id: &str, pose: tomori_protocol::Pose, (columns, rows): (u32, u32), scale: f32| {
+                Wall::new(id, WallKind::Added, pose)
+                    .with_grid(Grid::new(columns, rows).unwrap())
+                    .with_scale(scale)
+            };
+        let two = added(
+            "wall-1",
+            tomori_protocol::Pose::upright_facing([-0.75, 1.45, -2.6], [-0.75, 1.45, 0.0]),
+            (2, 2),
+            0.95,
+        );
+        let mut big = added("wall-2", two.pose, (1, 1), 1.9);
+        big.pose = group::attached_pose(&two, &big, Edge::Right, Align::Start).unwrap();
+        let grouped = vec![
+            two.clone().with_group(
+                Some("wall-1".into()),
+                vec![Join::new(Edge::Right, "wall-2")],
+            ),
+            big.clone()
+                .with_group(Some("wall-1".into()), vec![Join::new(Edge::Left, "wall-1")]),
+        ];
+        let filling = |wall: &str, slots: u32, offset: usize| -> Vec<Panel> {
+            (0..slots)
+                .map(|slot| {
+                    let titles = ["Build", "Tests", "Coverage", "Release", "Overview"];
+                    let title = titles[(slot as usize + offset) % titles.len()];
+                    Panel::new(
+                        format!("{wall}-{slot}"),
+                        title,
+                        format!("**{title}** is green.\n\n- one\n- two"),
+                        Place::Wall {
+                            wall: wall.into(),
+                            slot,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let mut panels = filling("wall-1", 4, 0);
+        panels.extend(filling("wall-2", 1, 4));
+        // A curved group about home: two of two columns side by side, and one above the first.
+        let radius = 2.4;
+        let first = added(
+            "wall-3",
+            tomori_protocol::Pose::upright_facing([0.0, 1.2, -radius], [0.0, 1.2, 0.0]),
+            (2, 1),
+            0.8,
+        )
+        .with_shape(WallShape::Arc { radius });
+        let mut beside =
+            added("wall-4", first.pose, (2, 1), 0.8).with_shape(WallShape::Arc { radius });
+        beside.pose = group::attached_pose(&first, &beside, Edge::Right, Align::Start).unwrap();
+        let mut above =
+            added("wall-5", first.pose, (3, 1), 0.8).with_shape(WallShape::Arc { radius });
+        above.pose = group::attached_pose(&first, &above, Edge::Top, Align::Start).unwrap();
+        let curved: Vec<Wall> = [first, beside, above]
+            .into_iter()
+            .map(|wall| {
+                let joined = Vec::new();
+                wall.with_group(Some("wall-3".into()), joined)
+            })
+            .collect();
+        let mut curved_panels = filling("wall-3", 2, 0);
+        curved_panels.extend(filling("wall-4", 2, 2));
+        curved_panels.extend(filling("wall-5", 3, 1));
+        let frame_of = |wall: &Wall| {
+            Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            )
+        };
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall group test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let middle = Vec3::new(0.05, 1.45, -2.6);
+            let at_group = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
+            let at_curved =
+                lens * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.3, 1.45, -2.4), Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let away = senses(arrival::HOME - Vec3::Y, 0.0);
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses,
+                               matrix: Mat4| {
+                let frame = step.update(senses, conversation, &mut felt(), Instant::now(), 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let mut shown = |walls: Vec<Wall>, panels: Vec<Panel>, matrix: Mat4| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, walls, panels);
+                capture(&mut Step::default(), &mut conversation, &away, matrix)
+            };
+            let one = shown(grouped.clone(), panels.clone(), at_group);
+            let apart = shown(vec![two.clone(), big.clone()], panels.clone(), at_group);
+            // Where the two meet, halfway up the shorter, in pixels.
+            let pixel = |at: Vec3| {
+                let clip = at_group * at.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                (
+                    ((x + 1.0) / 2.0 * WIDTH as f32) as u32,
+                    ((1.0 - y) / 2.0 * HEIGHT as f32) as u32,
+                )
+            };
+            let slots = big.extent();
+            let (_, y, _, _) = group::on_surface(&two.pose, None, &big.pose);
+            let seam = frame_of(&two).transform_point3(Vec3::new(
+                two.extent().right + big.gap() / 2.0,
+                (slots.bottom + slots.top) / 2.0 + y,
+                0.0,
+            ));
+            let (x, y) = pixel(seam);
+            // Across the seam, the group's board is as dark as it is either side, with no border; apart, each wall's
+            // own border and margin show between them.
+            let brightest = |image: &image::RgbaImage| {
+                (x - 10..x + 10)
+                    .map(|x| {
+                        let [r, g, b, _] = image.get_pixel(x, y).0;
+                        u32::from(r) + u32::from(g) + u32::from(b)
+                    })
+                    .max()
+                    .unwrap()
+            };
+            let side = |image: &image::RgbaImage| {
+                let [r, g, b, _] = image.get_pixel(x - 40, y).0;
+                u32::from(r) + u32::from(g) + u32::from(b)
+            };
+            assert!(brightest(&one) <= side(&one) + 30);
+            assert!(brightest(&apart) > brightest(&one) + 30);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            image::imageops::replace(&mut sheet, &one, 0, 0);
+            image::imageops::replace(&mut sheet, &apart, 0, HEIGHT.into());
+            crate::test_support::preview("TOMORI_WALL_GROUP_PREVIEW", &sheet);
+            let curved_group = shown(curved.clone(), curved_panels.clone(), at_curved);
+            assert_ne!(curved_group, shown(Vec::new(), Vec::new(), at_curved));
+            crate::test_support::preview("TOMORI_WALL_CURVED_GROUP_PREVIEW", &curved_group);
+            // The big wall carried from a little to its right towards the other's edge: where it would snap is outlined.
+            let mut apart_big = big.clone();
+            let swing = glam::Quat::from_rotation_y(-0.07);
+            apart_big.pose.position =
+                (swing * (Vec3::from_array(big.pose.position) - arrival::HOME) + arrival::HOME)
+                    .to_array();
+            let grip_at = |pose: &tomori_protocol::Pose| {
+                let (_, height) = big.board().unwrap();
+                Mat4::from_rotation_translation(
+                    glam::Quat::from_array(pose.orientation),
+                    Vec3::from_array(pose.position),
+                )
+                .transform_point3(Vec3::new(0.0, height / 2.0 - 0.005, 0.0))
+            };
+            let mut conversation = joined();
+            show_editable_walls(
+                &mut conversation,
+                vec![two.clone(), apart_big.clone()],
+                panels.clone(),
+            );
+            let mut step = Step::default();
+            let start = grip_at(&apart_big.pose);
+            capture(&mut step, &mut conversation, &senses(start, 1.0), at_group);
+            let swing = glam::Quat::from_rotation_y(-0.03);
+            let midway = swing * (grip_at(&big.pose) - arrival::HOME) + arrival::HOME;
+            let carried = capture(&mut step, &mut conversation, &senses(midway, 1.0), at_group);
+            assert_ne!(carried, apart);
+            crate::test_support::preview("TOMORI_WALL_SNAP_PREVIEW", &carried);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// Set `TOMORI_WALL_BAR_PREVIEW` to a PNG path to save what this renders: a curved wall someone added, four columns
     /// of two rows, a panel in every slot, its bar above it, subtle; the ray on the bar, highlighted, saying what the grip
     /// does; the wall taken hold of by its bar and let go, its handles around it and the bar still there, the knob a row

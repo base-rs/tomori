@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Pose;
 
+pub mod group;
 pub mod layout;
 
+pub use group::{Align, Attach, Edge, Join};
 pub use layout::{Grid, SlotFrame};
 
 /// How many panels a wall holds unless it says otherwise, in slots numbered from 0, the most prominent first: a flat
@@ -141,6 +143,15 @@ pub struct Wall {
     /// draws standard slots at that scale, and so each panel at its text's size, smaller than its slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect: Option<f32>,
+    /// The group it is snapped into, if it is in one, named by the identity of the group's first wall: carrying any of
+    /// its walls carries them all. An older client draws each wall alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Its edges joined to another wall of its group, which stands across each, its slots a gutter from this wall's, as
+    /// the server finds them: a client leaves the border and outer margin off where they meet, so that the group reads
+    /// as one board. See [`group`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joined: Vec<Join>,
 }
 
 impl Wall {
@@ -154,7 +165,16 @@ impl Wall {
             grid: None,
             scale: None,
             aspect: None,
+            group: None,
+            joined: Vec::new(),
         }
+    }
+
+    /// The wall, in the group `group`, joined to others across `joined`.
+    pub fn with_group(mut self, group: Option<String>, joined: Vec<Join>) -> Self {
+        self.group = group;
+        self.joined = joined;
+        self
     }
 
     /// The wall, its slots laid out as `shape` says.
