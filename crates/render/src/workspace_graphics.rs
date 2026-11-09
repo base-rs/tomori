@@ -3181,7 +3181,18 @@ mod tests {
                         // The title's white at about half coverage or more: from two to five metres, and as much as 50° above the eyes, strokes are under a pixel wide and antialiased rather than aliased, so few pixels are wholly covered.
                         .filter(|&p| image[p] > 110 && image[p + 1] > 110 && image[p + 2] > 110)
                         .count();
-                    assert!(glyphs > 4, "source {i} has no readable center glyphs");
+                    // Signs higher than 56° above the eyes, as the top rows of more workers than a space shows at once
+                    // stand when the agent is nearer than 3.2 m, are seen too obliquely for this check until they turn
+                    // to face the viewer; every one of the first 64 slots stands lower.
+                    let centre = panel.center();
+                    let elevation = (centre.y - 1.6).atan2(centre.x.hypot(centre.z));
+                    assert!(
+                        glyphs > 4 || elevation > 56f32.to_radians(),
+                        "source {i} has no readable center glyphs"
+                    );
+                    if i < 64 {
+                        assert!(elevation < 56f32.to_radians(), "source {i}");
+                    }
                     {
                         let sheet = &mut sheet;
                         let tile = image::RgbaImage::from_raw(512, 512, image).unwrap();

@@ -7,7 +7,7 @@ use tomori_server::{Builder, Environment, Server};
 /// The label clients show for the Minimal grid.
 pub const GRID_LABEL: &str = "Grid";
 
-/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock, its noticeboard, a projection wall of its own, and where participants arrive in it and where the agent's home and the Tomori wall's are, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
+/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock, its noticeboard, a projection wall of its own, and where participants arrive in it and where the agent's home is, the Tomori wall's home beneath it, as by default, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
 ///
 /// ```
 /// let builder = tomori_server_app::builder();
@@ -38,7 +38,6 @@ pub fn builder() -> Builder {
             .with_walls([farmyard_noticeboard()])
             .with_arrival(farmyard_arrival())
             .with_agent(farmyard_agent())
-            .with_stage(farmyard_tomori_wall())
             .with_solids(tomori_environment_farmyard::layout::solids()),
         );
     tomori_environment_github_server::register(builder)
@@ -63,12 +62,6 @@ fn farmyard_eyes() -> [f32; 3] {
 /// The agent's home in the farmyard: beside the coop, facing where participants arrive.
 pub fn farmyard_agent() -> tomori_protocol::Pose {
     tomori_protocol::Pose::at(tomori_environment_farmyard::layout::AGENT_HOME.to_array())
-        .facing_towards(farmyard_eyes())
-}
-
-/// The Tomori wall's home in the farmyard: ahead and right of where participants arrive, facing them.
-pub fn farmyard_tomori_wall() -> tomori_protocol::Pose {
-    tomori_protocol::Pose::at(tomori_environment_farmyard::layout::TOMORI_WALL.to_array())
         .facing_towards(farmyard_eyes())
 }
 
@@ -110,7 +103,7 @@ mod tests {
             .collect();
         assert_eq!(sides, [false, false, true]);
         // The farmyard alone has a projection wall of its own, and says where participants arrive and where the agent's
-        // home and the Tomori wall's are; Sky and the grid keep the default layout.
+        // home is, its Tomori wall's home beneath it by default; Sky and the grid keep the default layout.
         let walls: Vec<usize> = builder
             .environments()
             .iter()
@@ -141,33 +134,37 @@ mod tests {
             [
                 (false, false, false, false),
                 (false, false, false, false),
-                (true, true, true, false)
+                (true, true, false, false)
             ]
         );
     }
 
     #[test]
-    fn every_environment_s_tomori_wall_reads_and_agent_is_seen_from_where_participants_arrive() {
+    fn every_environment_s_tomori_wall_stands_beneath_its_agent_read_from_where_participants_arrive()
+     {
         use tomori_environment::sightlines::{Solid, Spot, readable, seen};
-        let spot = |pose: tomori_protocol::Pose| Spot::new(pose.position, pose.yaw());
+        use tomori_protocol::{Pose, TOMORI_WALL, Wall, WallKind, WallShape, entourage, wall};
+        let spot = |pose: Pose| Spot::new(pose.position, pose.yaw());
         let solids: Vec<Solid> = tomori_environment_farmyard::layout::solids()
             .into_iter()
             .map(|(low, high)| Solid::new(low, high))
             .collect();
-        for environment in super::builder().environments() {
+        let builder = super::builder();
+        // The GitHub prototype, offered only with a repository, gives no homes, and stands as Sky and the grid do.
+        let default_agent = Pose::at(tomori_server::DEFAULT_AGENT).facing_towards([
+            0.0,
+            tomori_server::DEFAULT_AGENT[1],
+            0.0,
+        ]);
+        for environment in builder.environments() {
+            let id = environment.id();
             // In its own coordinates; Sky's and the grid's are Tomori's default layout, about home.
-            let arrival = environment.arrival().unwrap_or(tomori_protocol::Pose::HOME);
+            let arrival = environment.arrival().unwrap_or(Pose::HOME);
+            let agent = environment.agent().unwrap_or(default_agent);
+            // Its wall's home is beneath its agent's, on the floor where participants arrive, unless it says otherwise.
             let wall = environment
                 .stage()
-                .unwrap_or_else(tomori_server::default_stage);
-            let agent = environment.agent().unwrap_or_else(|| {
-                tomori_protocol::Pose::at(tomori_server::DEFAULT_AGENT).facing_towards([
-                    0.0,
-                    tomori_server::DEFAULT_AGENT[1],
-                    0.0,
-                ])
-            });
-            let id = environment.id();
+                .unwrap_or_else(|| entourage::wall_beneath(&agent, arrival.position[1]));
             let solids = if id == tomori_environment_farmyard::ID {
                 &solids[..]
             } else {
@@ -179,6 +176,33 @@ mod tests {
                 "{id}"
             );
             assert_eq!(seen(&spot(arrival), &spot(agent), solids), Ok(()), "{id}");
+            // In the space's coordinates, as the server stands it: beneath the agent, with the gap between them, clear of
+            // the floor, and seen beneath the swarm from where participants arrive, never behind it.
+            let home = environment
+                .tomori_wall_home()
+                .unwrap_or_else(tomori_server::default_stage);
+            let agent = Pose::carriage(&arrival).carry(&agent);
+            assert!(
+                (agent.position[0] - home.position[0]).hypot(agent.position[2] - home.position[2])
+                    < 1e-4,
+                "{id}"
+            );
+            assert!(
+                agent.position[1] - entourage::SWARM[1] - (home.position[1] + entourage::ROW_HALF)
+                    >= entourage::GAP - 1e-5,
+                "{id}"
+            );
+            assert!(
+                home.position[1] - entourage::ROW_HALF >= entourage::FLOOR + entourage::CLEARANCE,
+                "{id}"
+            );
+            assert!((home.yaw() - agent.yaw()).sin().abs() < 1e-4, "{id}");
+            let tomori = Wall::new(TOMORI_WALL, WallKind::Tomori, home)
+                .with_shape(WallShape::Arc { radius: 2.3 })
+                .with_grid(wall::ARC_GRID)
+                .with_scale(wall::ARC_SCALE);
+            let eyes = [0.0, tomori_environment::sightlines::EYES, 0.0];
+            assert!(entourage::seen_beneath(eyes, &agent, &tomori), "{id}");
         }
     }
 }

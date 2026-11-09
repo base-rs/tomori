@@ -145,11 +145,12 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
     assert_eq!(content(&to_ada)["moved"], true);
     let state = ada.space(|state: &SpaceState| state.summoned.is_some());
     let at = state.summoned.unwrap();
-    assert!(close(at.position, [1.0, 1.4, -1.5]), "{at:?}");
+    // 2.3 m in front of her, a little above her eyes, with room for its wall beneath it.
+    assert!(close(at.position, [1.0, 1.9, -2.3]), "{at:?}");
     // It faces her.
     assert!(at.yaw().abs() < 1e-3, "{}", at.yaw());
-    // Its entourage gathers about her: its Tomori wall goes before her, 2.3 m ahead of her eyes and below them, as its
-    // home stands before home, for everyone.
+    // Its entourage gathers about her: its Tomori wall goes beneath it, before her, as its home stands beneath the
+    // agent's home, for everyone.
     assert_eq!(state.summoner, Some([1.0, 1.6, 0.0]));
     let wall = ada.wait_for(|message| match message {
         tomori_protocol::ServerMessage::Projection { projection }
@@ -159,7 +160,7 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
         }
         _ => None,
     });
-    assert!(close(wall.position, [1.0, 0.52, -2.3]), "{wall:?}");
+    assert!(close(wall.position, [1.0, 1.9 - 0.88, -2.3]), "{wall:?}");
 
     // Somewhere it cannot go, or someone not here, is refused, saying why.
     assert!(
@@ -192,7 +193,7 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
     ))
     .clone();
     assert_eq!(looking["moved"], false);
-    assert_eq!(looking["agent"]["position"], json!([1.0, 1.4, -1.5]));
+    assert_eq!(looking["agent"]["position"], json!([1.0, 1.9, -2.3]));
     // Nobody asked as they spoke, so a form that names nobody is refused; and a place too long, or none.
     assert!(
         failure(&call(

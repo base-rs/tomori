@@ -6,8 +6,9 @@
 //! the space's, not its environment's, and holds no I/O: the hub keeps one per space, sends what it shows, and keeps it
 //! with the space across restarts. See `design/projection.md`.
 //!
-//! **Two kinds of wall.** Every space has one Tomori wall, which belongs to the space and stands beside Tomori in every
-//! environment, at the environment's `stage` anchor or, without one, at [`default_stage`]; what is on it stays as the
+//! **Two kinds of wall.** Every space has one Tomori wall, which belongs to the space and stands beneath Tomori in every
+//! environment, beneath the agent's home (`tomori_protocol::entourage::wall_beneath`), at the environment's `stage`
+//! anchor, which overrides it, or, with neither, at [`default_stage`]; what is on it stays as the
 //! space changes environment. Each environment also has walls of its own: those it declares, and those its owners add.
 //! They and the panels left floating in it are kept for the space and that environment together, since positions mean
 //! something only in that environment's geometry: they are hidden while the space is in another environment, and shown
@@ -91,9 +92,10 @@ pub const SCHEMA: u32 = 1;
 /// default, home, so that every slot faces a participant standing there.
 pub const ARC_RADIUS: f32 = 2.3;
 
-/// Where the Tomori wall stands in an environment that declares no `stage` anchor: below the swarm, the middle of its
-/// curved row of slots straight ahead of home, beneath the swarm's middle, low enough that the swarm and every worker
-/// station are seen over it, upright and facing home.
+/// Where the Tomori wall stands in an environment that declares neither a `stage` nor an `agent` anchor: beneath the
+/// swarm at its default home, as `tomori_protocol::entourage::wall_beneath` stands it, the middle of its curved row of
+/// slots straight ahead of home, beneath the swarm's middle, low enough that the swarm and every worker station are seen
+/// over it, upright and facing home.
 pub fn default_stage() -> Pose {
     Pose::upright_facing([0.0, 0.52, -ARC_RADIUS], [0.0, 0.52, 0.0])
 }

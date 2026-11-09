@@ -1,13 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The agent's entourage in the farmyard, drawn on lavapipe: its workers on their arc and its Tomori wall, at home and
-//! summoned, the wall folding, travelling and unfolding before whoever summoned it, the workers gliding after it.
-//! `TOMORI_ENTOURAGE_PREVIEW`, set to a directory, saves the renders there to look at: `travel.png`, the wall at home,
-//! mid-fold, mid-journey and unfolded at its travel spot; for each arrangement compared, `arc-*.png`, three, six and
-//! ten workers, down the sheet, at home and summoned, across it; and `signs.png`, the first four workers' signs close
-//! up, summoned. See `design/projection.md` and
-//! `design/environments.md`.
+//! The agent's entourage in the farmyard, drawn on lavapipe: its workers on their arc and its Tomori wall beneath it, at
+//! home and summoned, the wall folding, travelling and unfolding beneath the agent before whoever summoned it, the
+//! workers gliding after it. `TOMORI_ENTOURAGE_PREVIEW`, set to a directory, saves the renders there to look at:
+//! `travel.png`, the wall at home, mid-fold, mid-journey and unfolded at its travel spot; for each arrangement compared,
+//! `arc-*.png`, three, six and ten workers, down the sheet, at home and summoned, across it; `signs.png`, the first four
+//! workers' signs close up, summoned; `home.png`, the agent at home with its wall beneath it, from the arrival; and
+//! `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by someone standing, 1.6 m and 1.8 m,
+//! down the sheet. See `design/projection.md` and `design/environments.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use tomori_environment_farmyard_client::layout;
 use tomori_protocol::{
     Anchors, ConnectionRole, EnvironmentInfo, Panel, Participant, Place, Pose, Projection,
     ServerMessage, SpaceState, TOMORI_WALL, Wall, WallKind, WallShape, Worker, WorkerState,
+    entourage,
 };
 use tomori_render::{
     graphics::Renderer,
@@ -78,6 +80,19 @@ fn carriage() -> Pose {
 fn carried(at: Vec3) -> Pose {
     let eyes = layout::ARRIVAL + Vec3::Y * 1.6;
     carriage().carry(&Pose::at(at.to_array()).facing_towards(eyes.to_array()))
+}
+
+/// The Tomori wall's home in the farmyard, as the server stands it: beneath the agent's home.
+fn home_wall() -> Pose {
+    entourage::wall_beneath(&carried(layout::AGENT_HOME), entourage::FLOOR)
+}
+
+/// The Tomori wall at `pose`, as the server sends it: six slots curved along an arc of 2.3 m.
+fn tomori_wall(pose: Pose) -> Wall {
+    Wall::new(TOMORI_WALL, WallKind::Tomori, pose)
+        .with_shape(WallShape::Arc { radius: 2.3 })
+        .with_grid(tomori_protocol::wall::ARC_GRID)
+        .with_scale(tomori_protocol::wall::ARC_SCALE)
 }
 
 /// The farmyard's walls, as the server sends them: the Tomori wall at `tomori` and the noticeboard.
@@ -189,7 +204,7 @@ fn joined(workers: usize, placement: Option<Placement>) -> Conversation {
     conversation.apply(Event::Message(ServerMessage::Projection {
         projection: Box::new(
             Projection::new(SPACE, farmyard().id())
-                .with_walls(walls(carried(layout::TOMORI_WALL)))
+                .with_walls(walls(home_wall()))
                 .with_panels(panels()),
         ),
     }));
@@ -206,24 +221,35 @@ fn summoning() -> Vec3 {
     Vec3::new(-yaw.sin(), 0.0, -yaw.cos())
 }
 
-/// Where the agent stands, summoned 1.6 m before her, a little below her eyes, facing her; and where the server stands
-/// its Tomori wall meanwhile, in the open yard: 2.3 m before her eyes, towards the agent, 1.08 m below them, facing her,
-/// as `tomori-server`'s `stage::travel` stands it, which its own tests check.
-fn summons() -> (Pose, Pose) {
-    let eyes = Vec3::from_array(SUMMONER);
-    let agent = eyes + summoning() * 1.6 - Vec3::Y * 0.15;
-    let wall = eyes + summoning() * 2.3 - Vec3::Y * 1.08;
+/// Where the agent stands, summoned by someone whose eyes are at `eyes`, drawn 1.6 m before them, low by their knees,
+/// as `entourage::summoned` stands it, 2.3 m before them, a little above their eyes, facing them; and where the server
+/// stands its Tomori wall meanwhile, in the open yard: beneath it, facing them, as `tomori-server`'s `stage::travel`
+/// stands it, which its own tests check.
+fn summons_by(eyes: [f32; 3]) -> (Pose, Pose) {
+    let at = Vec3::from_array(eyes) + summoning() * 1.6 - Vec3::Y * 0.9;
+    let agent = entourage::summoned(at.to_array(), eyes, entourage::FLOOR);
+    let beneath = entourage::wall_beneath(&agent, entourage::FLOOR).position;
     (
-        Pose::at(agent.to_array()).facing_towards(SUMMONER),
-        Pose::at(wall.to_array()).facing_towards([eyes.x, wall.y, eyes.z]),
+        agent,
+        Pose::upright_facing(beneath, [eyes[0], beneath[1], eyes[2]]),
     )
+}
+
+/// The agent and its wall, summoned by Ada, standing at home.
+fn summons() -> (Pose, Pose) {
+    summons_by(SUMMONER)
 }
 
 /// Summon the agent, for everyone, as the server tells of it.
 fn summon(conversation: &mut Conversation, workers: usize) {
-    let (agent, wall) = summons();
+    summon_by(conversation, workers, SUMMONER);
+}
+
+/// Summon the agent by someone whose eyes are at `eyes`, for everyone, as the server tells of it.
+fn summon_by(conversation: &mut Conversation, workers: usize, eyes: [f32; 3]) {
+    let (agent, wall) = summons_by(eyes);
     conversation.apply(Event::Message(ServerMessage::Space {
-        state: Box::new(state(workers, Some((agent, SUMMONER)))),
+        state: Box::new(state(workers, Some((agent, eyes)))),
     }));
     conversation.apply(Event::Message(ServerMessage::Projection {
         projection: Box::new(
@@ -390,7 +416,7 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
         let mut now = start;
         // Seen between its home and where it goes, so that its whole journey is in view.
         let between = (summoning()
-            + Vec3::from_array(carried(layout::TOMORI_WALL).position)
+            + Vec3::from_array(home_wall().position)
                 .with_y(0.0)
                 .normalize())
         .normalize();
@@ -436,18 +462,12 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
         assert_ne!(folding, travelling);
         assert_ne!(travelling, arrived);
         assert!(frame.projection.len() > 6, "its slots and panels are drawn");
-        // The workers stand about her and the agent: each on the arc about her eyes, within 60° of the agent's bearing
-        // for the first eight, none above 2.6 m nor below 1 m.
+        // The workers stand about her, on the arc through the agent, as far from her eyes as it is, to either side of
+        // it, about its height, none above 2.6 m nor below 1 m.
         let agent = Vec3::from_array(summons().0.position);
-        let bearing = |at: Vec3| (at.x - eyes.x).atan2(-(at.z - eyes.z));
+        check_arc(&frame, agent, eyes, "summoned");
         for station in frame.stations {
             let at = Vec3::from_array(station.position);
-            assert!(
-                (Vec3::new(at.x - eyes.x, 0.0, at.z - eyes.z).length() - 3.2).abs() < 0.05,
-                "{at}"
-            );
-            let off = (bearing(at) - bearing(agent)).abs();
-            assert!(off < 61f32.to_radians(), "{}", off.to_degrees());
             assert!((1.0..=2.6).contains(&at.y), "{at}");
             assert_eq!(station.facing, SUMMONER);
         }
@@ -472,7 +492,7 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
         conversation.apply(Event::Message(ServerMessage::Projection {
             projection: Box::new(
                 Projection::new(SPACE, farmyard().id())
-                    .with_walls(walls(carried(layout::TOMORI_WALL)))
+                    .with_walls(walls(home_wall()))
                     .with_panels(panels()),
             ),
         }));
@@ -550,6 +570,364 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                     .save(directory.join(format!("{name}.png")))
                     .expect("the preview is saved");
             }
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// Draw `frame` on lavapipe, from `eyes`, looking along `towards`, `fov` radians high.
+fn render(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    sceneries: &Sceneries,
+    frame: &Frame,
+    eyes: Vec3,
+    towards: Vec3,
+    fov: f32,
+) -> image::RgbaImage {
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("entourage stack eye"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut renderer = Renderer::with_sceneries(device, queue, format, WIDTH, HEIGHT, 1, sceneries);
+    let mut panels = Panels::new(device, &renderer);
+    draw(&mut renderer, device, queue, &mut panels, frame);
+    let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
+        * Mat4::look_to_rh(eyes, towards, Vec3::Y);
+    renderer.render(
+        device,
+        queue,
+        std::slice::from_ref(&view),
+        &[matrix],
+        Mat4::IDENTITY,
+        &panels.list(Mat4::IDENTITY),
+    );
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("entourage stack readback"),
+        size: (WIDTH * HEIGHT * 4) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 4),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    receiver.recv().unwrap().unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+    buffer.unmap();
+    image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+}
+
+/// The four corners of each slot of `wall`, where it stands, as its clients draw them: bottom left, bottom right, top
+/// left and top right.
+fn slot_quads(wall: &Wall) -> Vec<[Vec3; 4]> {
+    let frame = wall.frame();
+    wall.slot_frames()
+        .iter()
+        .map(|slot| {
+            let at = slot.pose(&frame);
+            let rotation = glam::Quat::from_array(at.orientation);
+            let middle = Vec3::from_array(at.position);
+            let [width, height] = slot.size;
+            let corner = |across: f32, rise: f32| {
+                middle + rotation * Vec3::new(across * width / 2.0, rise * height / 2.0, 0.0)
+            };
+            [
+                corner(-1.0, -1.0),
+                corner(1.0, -1.0),
+                corner(-1.0, 1.0),
+                corner(1.0, 1.0),
+            ]
+        })
+        .collect()
+}
+
+/// Where the segment from `from` to `to` passes through the quad `quad`, as a fraction of the way, if it does.
+fn through(from: Vec3, to: Vec3, quad: &[Vec3; 4]) -> Option<f32> {
+    let [a, b, c, _] = *quad;
+    let (right, up) = (b - a, c - a);
+    let normal = right.cross(up);
+    let along = to - from;
+    // Along the quad's plane, it is never through it: the fraction is not finite.
+    let t = normal.dot(a - from) / normal.dot(along);
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    let hit = from + along * t - a;
+    let (u, v) = (
+        hit.dot(right) / right.length_squared(),
+        hit.dot(up) / up.length_squared(),
+    );
+    ((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then_some(t)
+}
+
+/// Check that the workers `frame` draws stand on one band through the agent at `agent`, about `eyes`: each as far from
+/// the eyes, horizontally, as the agent is, so that the arc passes through it; in pairs either side of it, mirrored
+/// about its bearing; none behind it, nor within 40° of it, as seen from the eyes; and about its height, the first rows
+/// a little below and above it.
+fn check_arc(frame: &Frame, agent: Vec3, eyes: Vec3, label: &str) {
+    let level = |at: Vec3| Vec3::new(at.x - eyes.x, 0.0, at.z - eyes.z);
+    let bearing = |at: Vec3| {
+        let along = level(at);
+        along.x.atan2(-along.z)
+    };
+    let off = |at: Vec3| {
+        let turn = bearing(at) - bearing(agent);
+        turn.sin().atan2(turn.cos())
+    };
+    let radius = level(agent).length();
+    let mut sides = Vec::new();
+    for station in frame.stations {
+        let at = Vec3::from_array(station.position);
+        assert!(
+            (level(at).length() - radius).abs() < 0.05,
+            "{label}: {} at {at} is not on the arc of {radius} m through the agent",
+            station.id
+        );
+        let turn = off(at);
+        assert!(
+            turn.abs() > 39.9f32.to_radians(),
+            "{label}: {} stands {}° from the agent",
+            station.id,
+            turn.to_degrees()
+        );
+        sides.push((station.id.clone(), turn, at.y));
+    }
+    // Mirrored about the agent: the first two workers, either side of it, at the same height and angle.
+    sides.sort_by(|a, b| a.0.cmp(&b.0));
+    if sides.len() >= 2 {
+        let (left, right) = (&sides[0], &sides[1]);
+        assert!((left.1 + right.1).abs() < 1e-3, "{label}: {sides:?}");
+        assert!((left.2 - right.2).abs() < 1e-4, "{label}: {sides:?}");
+        // About the agent's height: the first row a little below its middle.
+        assert!(
+            (left.2 - agent.y).abs() <= 0.3,
+            "{label}: the first row at {} m, the agent at {} m",
+            left.2,
+            agent.y
+        );
+    }
+}
+
+/// Check that the Tomori wall `wall` stands beneath the swarm and clear of the workers as `frame` draws them, seen from
+/// `eyes`, looking along `towards`: every slot clear of the floor; nothing of the swarm, where its agents are drawn, seen
+/// on the screen over or beside any slot, the swarm's lowest point drawn above the top of every slot; and no worker,
+/// nor the sphere it is pointed at by, hidden behind a slot, nor near one.
+fn check_stack(frame: &Frame, wall: &Wall, eyes: Vec3, towards: Vec3, label: &str) {
+    let quads = slot_quads(wall);
+    for quad in &quads {
+        for corner in quad {
+            assert!(
+                corner.y >= entourage::CLEARANCE,
+                "{label}: a slot reaches {corner} into the floor"
+            );
+        }
+    }
+    // On the screen, from the eyes, the camera level, looking towards the agent.
+    let view = Mat4::look_to_rh(eyes, towards.with_y(0.0).normalize(), Vec3::Y);
+    let screen = |point: Vec3| {
+        let at = view.transform_point3(point);
+        assert!(at.z < -0.05, "{label}: {point} is behind the eyes");
+        glam::Vec2::new(at.x / -at.z, at.y / -at.z)
+    };
+    let swarm_lowest = frame
+        .swarm
+        .agents
+        .iter()
+        .map(|agent| screen(agent.position).y)
+        .fold(f32::MAX, f32::min);
+    let wall_highest = quads
+        .iter()
+        .flatten()
+        .map(|corner| screen(*corner).y)
+        .fold(f32::MIN, f32::max);
+    assert!(
+        swarm_lowest > wall_highest,
+        "{label}: the swarm, drawn down to {swarm_lowest}, overlaps the wall, drawn up to {wall_highest}"
+    );
+    // Its lowest agent is above the wall's top, with the gap between them.
+    let swarm_bottom = frame
+        .swarm
+        .agents
+        .iter()
+        .map(|agent| agent.position.y)
+        .fold(f32::MAX, f32::min);
+    let wall_top = quads
+        .iter()
+        .flatten()
+        .map(|corner| corner.y)
+        .fold(f32::MIN, f32::max);
+    assert!(
+        swarm_bottom - wall_top >= entourage::GAP - 0.05,
+        "{label}: {swarm_bottom} above {wall_top}"
+    );
+    // No worker is hidden behind a slot, nor stands near one, at the edge of where it is pointed at either.
+    let reach = 0.3;
+    for station in frame.stations {
+        let at = Vec3::from_array(station.position);
+        for offset in [
+            Vec3::ZERO,
+            Vec3::X * reach,
+            -Vec3::X * reach,
+            Vec3::Y * reach,
+            -Vec3::Y * reach,
+        ] {
+            for quad in &quads {
+                assert_eq!(
+                    through(eyes, at + offset, quad),
+                    None,
+                    "{label}: worker {} at {at} is behind a slot",
+                    station.id
+                );
+            }
+        }
+        for quad in &quads {
+            let middle = (quad[0] + quad[3]) / 2.0;
+            assert!(
+                middle.distance(at) > 0.6,
+                "{label}: worker {} at {at} is by a slot",
+                station.id
+            );
+        }
+    }
+}
+
+#[test]
+fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seated_or_standing() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut sceneries = Sceneries::empty();
+        tomori_environment_farmyard_client::register(&mut sceneries);
+        let preview = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW").map(std::path::PathBuf::from);
+        let mut feedback = Feedback::new(Settings::default());
+
+        // At home: from where participants arrive, the agent by the coop and its wall beneath it, its workers about it.
+        let eyes = Vec3::from_array(SUMMONER);
+        let agent_home = Vec3::from_array(carried(layout::AGENT_HOME).position);
+        let towards = (agent_home - eyes).with_y(0.0).normalize();
+        let mut conversation = joined(6, None);
+        let mut step = Step::default();
+        let mut now = Instant::now();
+        let frame = run(
+            &mut step,
+            &mut conversation,
+            &mut feedback,
+            &senses(eyes, towards),
+            8.0,
+            &mut now,
+        );
+        let home = tomori_wall(home_wall());
+        check_stack(&frame, &home, eyes, towards, "at home");
+        check_arc(&frame, agent_home, eyes, "at home");
+        assert!(entourage::seen_beneath(
+            SUMMONER,
+            &carried(layout::AGENT_HOME),
+            &home
+        ));
+        let at_home = render(
+            &device,
+            &queue,
+            &sceneries,
+            &frame,
+            eyes,
+            towards - Vec3::Y * 0.12,
+            1.3,
+        );
+        if let Some(directory) = &preview {
+            std::fs::create_dir_all(directory).unwrap();
+            at_home
+                .save(directory.join("home.png"))
+                .expect("the preview is saved");
+        }
+
+        // Summoned by someone seated, their eyes 1 m up, and by someone standing, 1.6 m and 1.8 m: the agent a little
+        // above their eyes, or high enough for its wall, and the wall beneath it, read below their eyes.
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+        for (row, height) in [1.0f32, 1.6, 1.8].into_iter().enumerate() {
+            let eyes = Vec3::new(0.0, height, 0.0);
+            let mut conversation = joined(6, None);
+            let mut step = Step::default();
+            let mut now = Instant::now();
+            let turned = senses(eyes, summoning());
+            run(
+                &mut step,
+                &mut conversation,
+                &mut feedback,
+                &turned,
+                8.0,
+                &mut now,
+            );
+            summon_by(&mut conversation, 6, eyes.to_array());
+            let frame = run(
+                &mut step,
+                &mut conversation,
+                &mut feedback,
+                &turned,
+                10.0,
+                &mut now,
+            );
+            let (agent, wall) = summons_by(eyes.to_array());
+            let label = format!("summoned, eyes {height} m up");
+            assert!(
+                (agent.position[1] - entourage::summoned_height(height, entourage::FLOOR)).abs()
+                    < 1e-5
+            );
+            assert!(agent.position[1] >= entourage::LOWEST_AGENT - 1e-5);
+            assert!(wall.position[1] < height, "{label}");
+            // The swarm has glided there.
+            assert!(Vec3::from_array(frame.agent).distance(Vec3::from_array(agent.position)) < 0.6);
+            let wall = tomori_wall(wall);
+            assert!(
+                entourage::seen_beneath(eyes.to_array(), &agent, &wall),
+                "{label}"
+            );
+            check_stack(&frame, &wall, eyes, summoning(), &label);
+            check_arc(&frame, Vec3::from_array(agent.position), eyes, &label);
+            let drawn = render(
+                &device,
+                &queue,
+                &sceneries,
+                &frame,
+                eyes,
+                summoning() - Vec3::Y * 0.2,
+                1.6,
+            );
+            image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
+        }
+        if let Some(directory) = &preview {
+            std::fs::create_dir_all(directory).unwrap();
+            sheet
+                .save(directory.join("summoned.png"))
+                .expect("the preview is saved");
         }
         assert!(pollster::block_on(scope.pop()).is_none());
     });

@@ -94,7 +94,11 @@ fn joined() -> Conversation {
     let tomori = Wall::new(
         TOMORI_WALL,
         WallKind::Tomori,
-        carried(tomori_server_app::farmyard_tomori_wall()),
+        // Beneath the agent's home, as the server stands it.
+        tomori_protocol::entourage::wall_beneath(
+            &carried(tomori_server_app::farmyard_agent()),
+            tomori_protocol::entourage::FLOOR,
+        ),
     )
     .with_shape(WallShape::Arc { radius: 2.3 });
     let panels = vec![

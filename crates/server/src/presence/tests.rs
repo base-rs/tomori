@@ -958,13 +958,13 @@ fn a_panel_s_id_is_named_where_it_is_met_on_its_wall_and_floating() {
 
 #[test]
 fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
-    // Looking ahead, 1.5 m in front, a little below their eyes, facing them.
+    // Looking ahead, 2.3 m in front, a little above their eyes, with room for its wall beneath it, facing them.
     let ahead = before(&Pose::at([1.0, 1.6, 0.0]));
     assert!(
         ahead
             .position
             .iter()
-            .zip([1.0, 1.4, -1.5])
+            .zip([1.0, 1.9, -2.3])
             .all(|(a, b)| (a - b).abs() < 1e-5)
     );
     assert!(ahead.yaw().abs() < 1e-5);
@@ -974,7 +974,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
         orientation: [-FRAC_1_SQRT_2, 0.0, 0.0, FRAC_1_SQRT_2],
     };
     let below = before(&down);
-    assert!((below.position[2] + 1.5).abs() < 1e-5, "{below:?}");
+    assert!((below.position[2] + 2.3).abs() < 1e-5, "{below:?}");
     // At home by default, or where it was summoned.
     let home = agent(&tomori_protocol::Anchors::new(), None);
     assert_eq!(home["at_home"], true);
@@ -982,7 +982,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     assert_eq!(home["facing_yaw"], 180.0);
     let away = agent(&tomori_protocol::Anchors::new(), Some(ahead));
     assert_eq!(away["at_home"], false);
-    assert_eq!(away["position"], json!([1.0, 1.4, -1.5]));
+    assert_eq!(away["position"], json!([1.0, 1.9, -2.3]));
 }
 
 #[test]

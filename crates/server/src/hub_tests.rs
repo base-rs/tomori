@@ -4489,8 +4489,26 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         .projections()
         .pop()
         .expect("sent as the environment changes");
-    // The Tomori wall does not follow the agent: the environment gives it no home, so it stands at the default.
-    assert_eq!(moved.walls[0].pose, crate::stage::default_stage());
+    // The environment gives the Tomori wall no home of its own, so it stands beneath the agent's.
+    let beneath =
+        tomori_protocol::entourage::wall_beneath(&agent, tomori_protocol::entourage::FLOOR);
+    assert_eq!(moved.walls[0].pose, beneath);
+    // The space's own edits to it, its grid and tilt, stand over that home.
+    ada.send(ClientMessage::SetWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+        grid: Some(tomori_protocol::Grid::from((3, 1))),
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(-10.0),
+    });
+    let edited = ada.projection();
+    assert_eq!(edited.walls[0].pose, beneath);
+    assert_eq!(
+        (edited.walls[0].slots(), edited.walls[0].tilt()),
+        (3, -10.0)
+    );
     ada.send(ClientMessage::SetEnvironment {
         environment: "sky".to_owned(),
     });
@@ -4566,13 +4584,21 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
     let home = ada.projection();
     assert_eq!(home.walls[0].pose, crate::stage::default_stage());
     vic.read();
-    // Ada stands 3 m to the right of home, facing +X, and summons the agent 1.5 m ahead of her.
+    // Ada stands 3 m to the right of home, facing +X, and summons the agent 1.5 m ahead of her, level with her eyes, as
+    // a client from before the agent stood further and higher leaves it: it stands 2.3 m ahead of her, a little above
+    // her eyes, with room for its wall beneath it and its workers on the arc through it.
     let eyes = [3.0, 1.6, 0.0];
     ada.send(looking(eyes, [5.0, 1.6, 0.0]));
-    let at = tomori_protocol::Pose::at([4.5, 1.6, 0.0]).facing_towards(eyes);
-    ada.send(ClientMessage::PlaceAgent { at: Some(at) });
-    // Everyone, the visitor too, is told whom its entourage gathers about, and sees its wall go before her, 2.3 m ahead
-    // of her eyes and 1.08 m below them, facing her, as its home stands before home, its panels in their slots.
+    let drawn = tomori_protocol::Pose::at([4.5, 1.6, 0.0]).facing_towards(eyes);
+    ada.send(ClientMessage::PlaceAgent { at: Some(drawn) });
+    let at = tomori_protocol::entourage::summoned(
+        drawn.position,
+        eyes,
+        tomori_protocol::entourage::FLOOR,
+    );
+    assert!((at.position[1] - (eyes[1] + tomori_protocol::entourage::RISE)).abs() < 1e-5);
+    // Everyone, the visitor too, is told whom its entourage gathers about, and sees its wall go beneath the agent,
+    // before her, facing her, as its home stands beneath the agent's home, its panels in their slots.
     let messages = vic.read();
     let state = messages
         .iter()
@@ -4595,9 +4621,11 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         .next_back()
         .expect("sent as the wall moves");
     let wall = &away.walls[0];
-    assert!((across(wall.pose.position, eyes) - crate::stage::travel::DISTANCE).abs() < 1e-3);
-    assert!(wall.pose.position[0] > eyes[0] + 2.0);
-    assert!((wall.pose.position[1] - (eyes[1] - crate::stage::travel::DROP)).abs() < 1e-4);
+    assert!(across(wall.pose.position, at.position) < 1e-3, "{wall:?}");
+    assert!(
+        (at.position[1] - wall.pose.position[1] - tomori_protocol::entourage::BENEATH).abs() < 1e-4
+    );
+    assert!(tomori_protocol::entourage::seen_beneath(eyes, &at, wall));
     assert_eq!((wall.slots(), wall.tilt()), (3, -15.0));
     assert_eq!(away.panels, home.panels);
     // A reply meanwhile goes onto it where it is.
@@ -4690,7 +4718,10 @@ fn the_tomori_wall_stays_home_where_no_travel_spot_is_clear_and_goes_home_as_the
     ada.send(ClientMessage::PlaceAgent {
         at: Some(tomori_protocol::Pose::at([0.0, 1.6, 1.5]).facing_towards([0.0, 1.6, 0.0])),
     });
-    assert!(ada.projection().walls[0].pose.position[2] > 2.0);
+    // Beneath the agent, a little above her eyes, 2.3 m behind home, as far as its home stands from home.
+    let travelled = ada.projection().walls[0].pose;
+    assert!((travelled.position[2] - 2.3).abs() < 1e-4, "{travelled:?}");
+    assert!((travelled.position[1] - (1.6 + tomori_protocol::entourage::RISE - 0.88)).abs() < 1e-4);
     ada.send(ClientMessage::SetEnvironment {
         environment: "field".to_owned(),
     });
