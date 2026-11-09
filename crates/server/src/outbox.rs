@@ -627,6 +627,7 @@ mod tests {
             outbox.message(ServerMessage::Error {
                 error: format!("error {index}"),
                 space: None,
+                panel: None,
             });
         }
         outbox.message(ServerMessage::LEFT);
@@ -637,6 +638,7 @@ mod tests {
         outbox.message(ServerMessage::Error {
             error: "again".into(),
             space: None,
+            panel: None,
         });
         assert_eq!(drain(&outbox).len(), 1);
     }

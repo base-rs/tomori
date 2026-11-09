@@ -941,6 +941,7 @@ mod tests {
                 panel: "panel-1".into(),
                 line: 2,
                 checked: false,
+                revision: Some(4),
             })]
         );
         let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);

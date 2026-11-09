@@ -291,6 +291,7 @@ mod tests {
                 panel: "panel-1".into(),
                 line: 0,
                 checked: true,
+                revision: None,
             },
             ClientMessage::AttachWall {
                 wall: "wall-2".into(),

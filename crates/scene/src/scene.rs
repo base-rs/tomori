@@ -1632,8 +1632,8 @@ pub mod fixtures {
         conversation.take_actions();
     }
 
-    /// Show an agenda, its first item ticked and its second not, floating at `at` facing `viewer`, in [`SPACE`], whose
-    /// server projects and takes ticking, as the server sends it.
+    /// Show an agenda, its first item ticked and its second not, at revision 4, floating at `at` facing `viewer`, in
+    /// [`SPACE`], whose server projects and takes ticking, as the server sends it.
     pub fn show_checklist(conversation: &mut Conversation, at: glam::Vec3, viewer: glam::Vec3) {
         conversation.apply(space(|state| {
             state.projection = true;
@@ -1643,17 +1643,20 @@ pub mod fixtures {
             projection: Box::new(
                 tomori_protocol::Projection::new(SPACE, "sky")
                     .with_walls(vec![tomori_wall()])
-                    .with_panels(vec![tomori_protocol::Panel::new(
-                        "panel-1",
-                        "Agenda",
-                        "To cover:\n\n- [x] Panel ids\n- [ ] Pairing window",
-                        tomori_protocol::Place::Free {
-                            pose: tomori_protocol::Pose::upright_facing(
-                                at.to_array(),
-                                viewer.to_array(),
-                            ),
-                        },
-                    )]),
+                    .with_panels(vec![
+                        tomori_protocol::Panel::new(
+                            "panel-1",
+                            "Agenda",
+                            "To cover:\n\n- [x] Panel ids\n- [ ] Pairing window",
+                            tomori_protocol::Place::Free {
+                                pose: tomori_protocol::Pose::upright_facing(
+                                    at.to_array(),
+                                    viewer.to_array(),
+                                ),
+                            },
+                        )
+                        .with_revision(4),
+                    ]),
             ),
         }));
         conversation.take_actions();
@@ -3969,11 +3972,12 @@ mod tests {
         let mut step = Step::default();
         let mut feedback = felt();
         let now = Instant::now();
-        let tick = |line: u32, checked: bool| {
+        let tick = |line: u32, checked: bool, revision: u64| {
             Action::Send(tomori_protocol::ClientMessage::CheckPanelItem {
                 panel: "panel-1".into(),
                 line,
                 checked,
+                revision: Some(revision),
             })
         };
         // Above the list, on the panel's title, the label says nothing of ticking.
@@ -4007,7 +4011,8 @@ mod tests {
             &mut feedback,
             now,
         );
-        assert_eq!(conversation.take_actions(), [tick(2, false)]);
+        // It says the revision the server sent, which its own ticks shown at once do not change.
+        assert_eq!(conversation.take_actions(), [tick(2, false, 4)]);
         assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
         // Shown at once, so the label on it now says A ticks it, and A does.
         let senses = ray_on_item(&mut step, &mut conversation, ahead, "A  tick").expect("unticked");
@@ -4018,7 +4023,7 @@ mod tests {
             &mut feedback,
             now,
         );
-        assert_eq!(conversation.take_actions(), [tick(2, true)]);
+        assert_eq!(conversation.take_actions(), [tick(2, true, 4)]);
         // On the item below, not ticked, A ticks it.
         ray_on_item(&mut step, &mut conversation, ahead, "A  tick").expect("the second item");
         step.buttons(
@@ -4028,7 +4033,7 @@ mod tests {
             &mut feedback,
             now,
         );
-        assert_eq!(conversation.take_actions(), [tick(3, true)]);
+        assert_eq!(conversation.take_actions(), [tick(3, true, 4)]);
         // The right wrist's transcript comes first: while it shows, A is its, and ticks nothing.
         let wrist = Senses {
             right_palm: Some(palm_up(0.0)),

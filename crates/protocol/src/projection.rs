@@ -585,6 +585,15 @@ pub struct Panel {
     /// the panel as a text panel saying that it is an image, with its caption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
+    /// How many times its content has changed, from 1 as it was projected: its title, body or items, by the agent's
+    /// block with the same id, its `update_panel` or a participant's tick. A client says the revision it saw when it ticks
+    /// an item, so that a tick never lands on another item of a body changed since. 0, and absent, from older servers.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Panel {
@@ -606,7 +615,14 @@ impl Panel {
             pinned: false,
             slug: None,
             image: None,
+            revision: 0,
         }
+    }
+
+    /// The panel at `revision` of its content.
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
     }
 
     /// The panel, which the agent calls `slug`.
@@ -976,11 +992,67 @@ mod tests {
                     panel: "panel-1".into(),
                     line: 3,
                     checked: true,
+                    revision: Some(4),
                 },
                 serde_json::json!({"type": "check_panel_item", "panel": "panel-1", "line": 3,
-                    "checked": true}),
+                    "checked": true, "revision": 4}),
+            ),
+            // An older client says no revision, and its tick goes by its line alone.
+            (
+                ClientMessage::CheckPanelItem {
+                    panel: "panel-1".into(),
+                    line: 3,
+                    checked: false,
+                    revision: None,
+                },
+                serde_json::json!({"type": "check_panel_item", "panel": "panel-1", "line": 3,
+                    "checked": false}),
             ),
         ];
+        // A panel's revision is sent from a server that keeps one, and read as 0 from an older one.
+        let panel = Panel::new(
+            "panel-1",
+            "Agenda",
+            "- [ ] One",
+            Place::Wall {
+                wall: "tomori".into(),
+                slot: 0,
+            },
+        )
+        .with_revision(3);
+        let json = serde_json::to_value(&panel).unwrap();
+        assert_eq!(json["revision"], 3);
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("revision");
+        assert_eq!(serde_json::from_value::<Panel>(older).unwrap().revision, 0);
+        assert!(
+            serde_json::to_value(panel.with_revision(0))
+                .unwrap()
+                .get("revision")
+                .is_none()
+        );
+        // A refused tick names its panel, which an older client ignores; other errors name none.
+        let refused = ServerMessage::Error {
+            error: "That panel has changed.".into(),
+            space: None,
+            panel: Some("panel-1".into()),
+        };
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(json["panel"], "panel-1");
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            refused
+        );
+        assert!(
+            serde_json::to_value(ServerMessage::Error {
+                error: "x".into(),
+                space: None,
+                panel: None,
+            })
+            .unwrap()
+            .get("panel")
+            .is_none()
+        );
         for (message, json) in cases {
             assert_eq!(serde_json::to_value(&message).unwrap(), json);
             assert_eq!(

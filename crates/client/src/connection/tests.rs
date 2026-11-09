@@ -2100,6 +2100,21 @@ fn this_participants_words_are_cued_when_the_server_transcribes_them_or_cannot()
 }
 
 #[test]
+fn a_tick_the_server_refuses_is_cued_as_not_done_and_other_errors_are_not() {
+    let peer = Peer::start();
+    let mut session = Script::listening();
+    let mut connection = with_peer(&peer, &mut session, Scripted::default(), Nowhere);
+    let mut heard = |message| heard(&peer, message, &mut connection, &mut session);
+    let error = |panel: Option<&str>| ServerMessage::Error {
+        error: "That panel changed as you ticked it; look again.".into(),
+        space: None,
+        panel: panel.map(Into::into),
+    };
+    assert_eq!(heard(error(Some("panel-1"))), [Earcon::Failed]);
+    assert!(heard(error(None)).is_empty());
+}
+
+#[test]
 fn words_on_their_way_are_lost_when_the_connection_drops() {
     let peer = Peer::start();
     let mut session = Script::listening();

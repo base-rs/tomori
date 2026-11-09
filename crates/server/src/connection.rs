@@ -132,6 +132,7 @@ fn encode(message: &ServerMessage, output: &mut Vec<u8>) {
         Frame::server(&ServerMessage::Error {
             error: "A message from the server was too large to send.".to_owned(),
             space: None,
+            panel: None,
         })
         .encode_into(output);
     }
@@ -431,6 +432,7 @@ mod tests {
             &ServerMessage::Error {
                 error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
                 space: None,
+                panel: None,
             },
             &mut output,
         );

@@ -1005,7 +1005,16 @@ impl Conversation {
                     });
                 }
             }
-            ServerMessage::Error { error, space } => {
+            // A tick refused, as when the panel changed since the participant saw it, is cued by the connection, and the
+            // projection sent again shows the item as it is, so that they look and tick again; it is no problem to show.
+            ServerMessage::Error {
+                error,
+                panel: Some(panel),
+                ..
+            } => {
+                log::info!("The server refused a tick on {panel}: {error}");
+            }
+            ServerMessage::Error { error, space, .. } => {
                 log::warn!("Server error: {error}");
                 if let Some(gone) = space.filter(|space| Some(space) == self.joining.as_ref()) {
                     // Our join was refused because the space does not exist, as after the server restarts. The client
@@ -3484,12 +3493,24 @@ impl Conversation {
 
     /// Tick, or untick, as `checked` says, the checklist item that begins on `line` of the panel `panel`, which
     /// [`Self::item_checked`] found shown, for everyone in the space, showing it so at once, until the server's projection
-    /// says how it is. Says whether it asked, as only a participant does; a visitor is told they only watch.
+    /// says how it is. It says the panel's revision the server last sent, so that the server refuses the tick where the
+    /// panel has changed since, rather than tick another item. It never counts its own tick in that revision: a guess at
+    /// the revision the tick makes could equal the revision of another change, such as the agent's rewrite the tick
+    /// raced, and so let a second tick land on another item; a second tick before the projection comes back is refused
+    /// instead, and ticked again. Says whether it asked, as only a participant does; a visitor is told they only watch.
+    /// See `design/projection.md`.
     fn check_item(&mut self, panel: &str, line: u32, checked: bool) -> bool {
+        let revision = self
+            .projection()
+            .and_then(|projection| projection.panel(panel))
+            .map(|shown| shown.revision)
+            // An older server keeps no revisions, and its ticks go by their line alone.
+            .filter(|revision| *revision > 0);
         if !self.send(ClientMessage::CheckPanelItem {
             panel: panel.to_owned(),
             line,
             checked,
+            revision,
         }) {
             return false;
         }
@@ -5527,6 +5548,7 @@ mod tests {
         Event::Message(ServerMessage::Error {
             error: "That space does not exist.".into(),
             space: Some(space.into()),
+            panel: None,
         })
     }
 
@@ -7803,6 +7825,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That request is no longer pending.".into(),
             space: None,
+            panel: None,
         }));
         assert!(conversation.is_choosing());
         assert!(conversation.text().contains("That request"));
@@ -7846,6 +7869,7 @@ mod tests {
                 "The mode was not changed: the agent refused it, for a reason long enough to wrap."
                     .into(),
             space: None,
+            panel: None,
         }));
         let text = conversation.text();
         let shown = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -8666,6 +8690,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "Something went wrong.".into(),
             space: None,
+            panel: None,
         }));
         // Following the newest message lands on its last page, as drawn.
         conversation.apply(space(|state| {
@@ -8707,6 +8732,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "A problem long enough to take both of its rows on the panel, so the list has less room.".into(),
             space: None,
+            panel: None,
         }));
         conversation.refresh();
         for _ in 0..5 {
@@ -8733,6 +8759,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "The mode was not changed.".into(),
             space: None,
+            panel: None,
         }));
         conversation.apply(connected());
         conversation.refresh();
@@ -8749,6 +8776,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "Something went wrong.".into(),
             space: None,
+            panel: None,
         }));
         assert!(conversation.text().contains("line 29"));
         conversation.back();
@@ -8876,6 +8904,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That request is no longer pending.".into(),
             space: None,
+            panel: None,
         }));
         assert_eq!(conversation.mode(), Mode::Space);
         assert!(conversation.take_actions().is_empty());
@@ -8926,6 +8955,7 @@ mod tests {
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That approval was already decided.".into(),
             space: None,
+            panel: None,
         }));
         assert_eq!(conversation.mode(), Mode::Space);
     }
@@ -10702,6 +10732,7 @@ mod tests {
             error: "Its agent session is bound to another space too, so nothing was deleted."
                 .into(),
             space: None,
+            panel: None,
         }));
         assert!(conversation.joined_space().is_some());
         conversation.apply(deleted_by("Bob", false));
@@ -11642,6 +11673,7 @@ mod tests {
             conversation.apply(Event::Message(ServerMessage::Error {
                 error: "The server is busy.".into(),
                 space: None,
+                panel: None,
             }));
             assert_eq!(conversation.joining, None);
             assert_eq!(conversation.error.as_deref(), Some("The server is busy."));
@@ -11933,6 +11965,7 @@ mod tests {
             conversation.apply(Event::Message(ServerMessage::Error {
                 error: "No such space.".into(),
                 space: Some("vanished".into()),
+                panel: None,
             }));
             assert_eq!(conversation.ended.as_deref(), Some("The space has ended."));
         }
@@ -12912,10 +12945,12 @@ mod tests {
             })
         };
         let body = "To cover:\n\n- [ ] One\n- [x] Two\n- Three";
+        // These panels say no revision, as an older server's do, so ticks say none, and go by their line alone.
         let tick = |line: u32, checked: bool| ClientMessage::CheckPanelItem {
             panel: "panel-1".into(),
             line,
             checked,
+            revision: None,
         };
         let shown =
             |conversation: &Conversation| conversation.projection().unwrap().panels[0].body.clone();
@@ -13031,6 +13066,79 @@ mod tests {
         assert!(sent(&mut conversation).is_empty());
         assert_eq!(conversation.notice.as_deref(), Some(VISITING));
         assert_eq!(shown(&conversation), "- [ ] One");
+    }
+
+    #[test]
+    fn a_tick_says_the_revision_it_saw_and_one_refused_shows_the_panel_as_the_server_sends_it_again()
+     {
+        let agenda = |body: &str, revision: u64| {
+            Event::Message(ServerMessage::Projection {
+                projection: Box::new(tomori_protocol::Projection::new(SPACE, "sky").with_panels(
+                    vec![
+                        tomori_protocol::Panel::new(
+                            "panel-1",
+                            "Agenda",
+                            body,
+                            tomori_protocol::Place::Wall {
+                                wall: tomori_protocol::TOMORI_WALL.into(),
+                                slot: 0,
+                            },
+                        )
+                        .with_revision(revision),
+                    ],
+                )),
+            })
+        };
+        let tick = |line: u32, checked: bool, revision: u64| ClientMessage::CheckPanelItem {
+            panel: "panel-1".into(),
+            line,
+            checked,
+            revision: Some(revision),
+        };
+        let shown = |conversation: &Conversation| {
+            let panel = &conversation.projection().unwrap().panels[0];
+            (panel.body.clone(), panel.revision)
+        };
+        let mut conversation = joined(|space| {
+            space.projection = true;
+            space.checks = true;
+        });
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.apply(agenda("- [ ] One\n- [ ] Two", 3));
+        conversation.take_actions();
+        // It says the revision the server last sent, showing its tick at once but never counting it: had it guessed 4,
+        // the revision the agent's rewrite racing the tick made, a second tick would land on another item.
+        conversation.point_item(Some(("panel-1".to_owned(), 0)));
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [tick(0, true, 3)]);
+        assert_eq!(shown(&conversation), ("- [x] One\n- [ ] Two".into(), 3));
+        conversation.point_item(Some(("panel-1".to_owned(), 1)));
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [tick(1, true, 3)]);
+        // The agent rewrote the body meanwhile, so the server refused both ticks, naming the panel, and sends the
+        // projection again: the items show as they are, and the refusal is no problem to show, only a cue.
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "That panel changed as you ticked it; look again.".into(),
+            space: None,
+            panel: Some("panel-1".into()),
+        }));
+        conversation.apply(agenda("- [ ] Zero\n- [x] One\n- [ ] Two", 6));
+        assert_eq!(
+            shown(&conversation),
+            ("- [ ] Zero\n- [x] One\n- [ ] Two".into(), 6)
+        );
+        assert_eq!(conversation.problem(), None);
+        // Looking again, the participant ticks the item where it is now, at the revision shown.
+        conversation.point_item(Some(("panel-1".to_owned(), 2)));
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [tick(2, true, 6)]);
+        // Another error is still a problem to show.
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "Something went wrong.".into(),
+            space: None,
+            panel: None,
+        }));
+        assert!(conversation.problem().is_some());
     }
 
     #[test]

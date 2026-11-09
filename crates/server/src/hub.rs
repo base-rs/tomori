@@ -895,6 +895,7 @@ fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         error: limits::truncate(&error.into(), limits::ERROR_BYTES),
         space: None,
+        panel: None,
     }
 }
 
@@ -2135,6 +2136,7 @@ impl Hub {
                         error: "You were admitted, but the token could not be issued. Knock again."
                             .to_owned(),
                         space: None,
+                        panel: None,
                     });
                 }
                 return;
@@ -3090,6 +3092,7 @@ impl Hub {
                         ServerMessage::Error {
                             error: "That space does not exist.".to_owned(),
                             space: Some(target),
+                            panel: None,
                         },
                     );
                     return;
@@ -4068,6 +4071,7 @@ impl Hub {
                 panel,
                 line,
                 checked,
+                revision,
             } => {
                 if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
                     state.error(participant, error);
@@ -4080,7 +4084,10 @@ impl Hub {
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
                 let walls = environments.walls(&record.model.environment);
-                match record.stage.tick_item(&walls, &panel, line, checked) {
+                match record
+                    .stage
+                    .tick_item(&walls, &panel, line, checked, revision)
+                {
                     Ok(Some(ticked)) => {
                         record.model.note_tick(&panel, line, ticked.note(&who));
                         log::info!(
@@ -4093,8 +4100,17 @@ impl Hub {
                     }
                     // Already so, it is sent again, so that a client that showed the change at once shows it as it is.
                     Ok(None) => state.touch_projection(&space),
+                    // Refused, as when the panel changed since the revision they saw, it names the panel, so that their
+                    // client cues it, and the projection is sent again, so that they see the panel as it is and look again.
                     Err(error) => {
-                        state.error(participant, error);
+                        state.send(
+                            participant,
+                            ServerMessage::Error {
+                                error: error.to_owned(),
+                                space: None,
+                                panel: Some(panel),
+                            },
+                        );
                         state.touch_projection(&space);
                     }
                 }
@@ -5072,6 +5088,7 @@ impl Hub {
             Err(error) => ServerMessage::Error {
                 error: limits::truncate(&error, limits::ERROR_BYTES),
                 space: None,
+                panel: None,
             },
         };
         state.send(participant, message);

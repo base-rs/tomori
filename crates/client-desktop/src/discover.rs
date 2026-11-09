@@ -281,6 +281,7 @@ mod tests {
             Event::Message(ServerMessage::Error {
                 error: "pair to join".into(),
                 space: None,
+                panel: None,
             }),
             &mut connected,
             "host:1",
