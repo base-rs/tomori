@@ -20,7 +20,7 @@ const RESTART_LIMIT: u64 = 50;
 pub struct JitterOptions {
     /// Audio buffered before a source starts (or restarts after an underrun) playing.
     pub target_latency: Duration,
-    /// Buffered audio beyond this is discarded, oldest first, back down to the target.
+    /// Buffered audio beyond this is discarded, oldest first, back down to the target, except what accumulates while the source is held back (see [`JitterBuffer::wait`]).
     pub latency_limit: Duration,
 }
 
@@ -61,6 +61,8 @@ pub struct JitterBuffer {
     state: State,
     /// Device-rate samples produced since the last frame arrived.
     idle_samples: u64,
+    /// Source-rate samples of latency granted beyond [`JitterOptions::latency_limit`] while [`Self::wait`] held the source back, kept until it runs dry so that what was held is not discarded.
+    allowance: usize,
 }
 
 impl JitterBuffer {
@@ -76,6 +78,7 @@ impl JitterBuffer {
             frame_length: 0,
             state: State::Buffering,
             idle_samples: 0,
+            allowance: 0,
         }
     }
 
@@ -146,9 +149,17 @@ impl JitterBuffer {
         }
         self.frames.insert(sequence, frame.samples);
 
-        if self.buffered_samples() > self.samples(self.options.latency_limit) {
+        if self.buffered_samples() > self.samples(self.options.latency_limit) + self.allowance {
             self.trim(statistics);
         }
+    }
+
+    /// Hold the source back for `device_samples` at `device_rate` rather than play it, as the mixer does while other agent speech plays to its last sample first. What arrives meanwhile is kept, up to twice [`JitterOptions::latency_limit`], and played once it is no longer held, rather than discarded as late.
+    pub fn wait(&mut self, device_samples: usize, device_rate: u32) {
+        self.idle_samples += device_samples as u64;
+        let held = (device_samples as f64 * f64::from(self.sample_rate) / f64::from(device_rate))
+            .ceil() as usize;
+        self.allowance = (self.allowance + held).min(self.samples(self.options.latency_limit));
     }
 
     /// Forget the source's sequence and buffered audio, and buffer again from the next frame.
@@ -159,6 +170,7 @@ impl JitterBuffer {
         self.pending.clear();
         self.position = 0.0;
         self.state = State::Buffering;
+        self.allowance = 0;
     }
 
     /// Discard the oldest audio until the buffer is back at the target latency.
@@ -176,6 +188,7 @@ impl JitterBuffer {
             statistics.discarded_frames += 1;
             self.next = Some(sequence + 1);
         }
+        self.allowance = 0;
     }
 
     /// Make more source samples available. Returns false on underrun.
@@ -200,14 +213,14 @@ impl JitterBuffer {
         true
     }
 
-    /// Add this source's next `output.len()` samples at `device_rate`, scaled by `gain`, to `output`.
+    /// Add this source's next `output.len()` samples at `device_rate`, scaled by `gain`, to `output`. Returns how many it added before it ran dry, or none while it buffers.
     pub fn mix_into(
         &mut self,
         output: &mut [f32],
         device_rate: u32,
         gain: f32,
         statistics: &mut PlaybackStatistics,
-    ) {
+    ) -> usize {
         self.idle_samples += output.len() as u64;
         if self.state == State::Buffering {
             // Start once the target is buffered, or when the source has stopped sending so that the tail of an utterance is not held back.
@@ -216,7 +229,7 @@ impl JitterBuffer {
             if self.frames.is_empty()
                 || (self.buffered_samples() < self.samples(self.options.target_latency) && !stalled)
             {
-                return;
+                return 0;
             }
             self.state = State::Playing;
             // Resume from the oldest buffered frame rather than concealing a gap that preceded the silence.
@@ -224,7 +237,7 @@ impl JitterBuffer {
         }
 
         let step = self.sample_rate as f64 / device_rate as f64;
-        for sample in output.iter_mut() {
+        for (played, sample) in output.iter_mut().enumerate() {
             let index = self.position as usize;
             let fraction = (self.position - index as f64) as f32;
             let needed = if fraction == 0.0 {
@@ -236,7 +249,9 @@ impl JitterBuffer {
                 if !self.refill(statistics) {
                     statistics.underruns += 1;
                     self.state = State::Buffering;
-                    return;
+                    // Run dry, it buffers afresh to the target, so a hold's latency is over.
+                    self.allowance = 0;
+                    return played;
                 }
             }
             let current = f32::from(self.pending[index]);
@@ -253,6 +268,7 @@ impl JitterBuffer {
                 self.position -= consumed as f64;
             }
         }
+        output.len()
     }
 }
 

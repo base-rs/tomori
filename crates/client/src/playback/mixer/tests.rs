@@ -697,3 +697,316 @@ fn an_ambient_sound_is_heard_from_where_it_is() {
     let (left, right) = stereo(&mut mixer, 960);
     assert!(energy(&left) > 2.0 * energy(&right));
 }
+
+/// Agent speech as the server paces it (see `crates/server/src/retention.rs` and `voice.rs`): 20 ms frames at 24 kHz,
+/// each sent 100 ms before it is due to play, so that those due within 100 ms of the start are sent at once.
+#[derive(Clone, Copy, Debug)]
+struct Paced {
+    source: u32,
+    /// The sequence number of the first frame.
+    sequence: u32,
+    value: i16,
+    /// When the first frame is due to play, in milliseconds.
+    start: u64,
+    frames: u32,
+    /// Frames sent before this arrive only then, together, as after a stall of the network.
+    late: u64,
+}
+
+/// How far ahead of its playback time the server sends each frame.
+const LEAD_MS: u64 = 100;
+const FRAME_MS: u64 = 20;
+const SPEECH_RATE: u32 = 24_000;
+const DEVICE_RATE: u32 = 48_000;
+/// The headset's output callback, in milliseconds.
+const CALLBACK_MS: u64 = 10;
+
+impl Paced {
+    fn sent(&self, index: u32) -> u64 {
+        (self.start + FRAME_MS * u64::from(index))
+            .saturating_sub(LEAD_MS)
+            .max(self.start)
+    }
+
+    /// Output samples at the device rate this stream plays: a stream resampled at twice its rate keeps its last sample
+    /// to interpolate into what comes next, so it plays one fewer.
+    fn played(&self) -> usize {
+        self.frames as usize * (SPEECH_RATE as usize / 50) * 2 - 1
+    }
+}
+
+/// Play `streams` through a headset's mixer, at 48 kHz in 10 ms callbacks, for `length` milliseconds, each frame
+/// arriving as it is sent; `act` runs each millisecond before what arrives then.
+fn play_paced(
+    mixer: &mut Mixer,
+    streams: &[Paced],
+    length: u64,
+    mut act: impl FnMut(&mut Mixer, u64),
+) -> Vec<i16> {
+    let mut output = Vec::new();
+    for now in 0..length {
+        act(mixer, now);
+        for stream in streams {
+            for index in
+                (0..stream.frames).filter(|&index| stream.sent(index).max(stream.late) == now)
+            {
+                mixer.push(AudioFrame {
+                    gate: Gate::Live,
+                    source: stream.source,
+                    sequence: stream.sequence + index,
+                    timestamp: 0,
+                    sample_rate: SPEECH_RATE,
+                    samples: vec![stream.value; SPEECH_RATE as usize / 50],
+                });
+            }
+        }
+        if now % CALLBACK_MS == 0 {
+            output.extend(mix(
+                mixer,
+                (DEVICE_RATE as u64 * CALLBACK_MS / 1000) as usize,
+            ));
+        }
+    }
+    output
+}
+
+fn headset() -> Mixer {
+    Mixer::new(MixerOptions::default())
+}
+
+/// How many output samples hold only `a`, only `b`, and both together, and where the last holding `a` and the first
+/// holding `b` are.
+#[derive(Debug)]
+struct Heard {
+    a: usize,
+    b: usize,
+    both: usize,
+    last_a: Option<usize>,
+    first_b: Option<usize>,
+}
+
+fn heard(output: &[i16], a: i16, b: i16) -> Heard {
+    let position = |wanted: &[i16]| output.iter().position(|sample| wanted.contains(sample));
+    Heard {
+        a: output.iter().filter(|&&sample| sample == a).count(),
+        b: output.iter().filter(|&&sample| sample == b).count(),
+        both: output.iter().filter(|&&sample| sample == a + b).count(),
+        last_a: output
+            .iter()
+            .rposition(|&sample| sample == a || sample == a + b),
+        first_b: position(&[b, a + b]),
+    }
+}
+
+/// Output samples of `milliseconds` at the device rate.
+fn device(milliseconds: u64) -> usize {
+    (u64::from(DEVICE_RATE) * milliseconds / 1000) as usize
+}
+
+#[test]
+fn a_replay_plays_to_its_last_sample_before_live_speech_that_follows_it() {
+    const REPLAY: i16 = 1_000;
+    const LIVE: i16 = 3_000;
+    // A second played again; the server sends its last frame 880 ms in, and the participant hears live speech from
+    // then on. The next live segment or reply comes then, or a little later.
+    let replay = Paced {
+        source: REPLAY_SOURCE,
+        sequence: 0,
+        value: REPLAY,
+        start: 0,
+        frames: 50,
+        late: 0,
+    };
+    for after in [0, 20, 40, 80, 120] {
+        let live = Paced {
+            source: AGENT_SOURCE,
+            sequence: 0,
+            value: LIVE,
+            start: replay.sent(replay.frames - 1) + after,
+            frames: 25,
+            late: 0,
+        };
+        let output = play_paced(&mut headset(), &[replay, live], 2_000, |_, _| {});
+        let heard = heard(&output, REPLAY, LIVE);
+        // Before agent speech was one voice, live speech that came at once played over the last 120 ms of the replay.
+        assert_eq!(heard.both, 0, "{after} ms: {heard:?}");
+        assert_eq!(heard.a, replay.played(), "{heard:?}");
+        assert_eq!(heard.b, live.played(), "{heard:?}");
+        assert!(heard.last_a < heard.first_b, "{heard:?}");
+        // Live speech that came while the replay played follows its last sample at once, with nothing between them.
+        if after < 120 {
+            assert_eq!(
+                heard.first_b,
+                heard.last_a.map(|last| last + 1),
+                "{heard:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_replay_cut_short_by_a_later_reply_plays_what_was_sent_and_then_all_of_the_reply() {
+    const REPLAY: i16 = 1_000;
+    const LIVE: i16 = 3_000;
+    // A later reply starts live half way through a replay, which the server stops there; the reply is long enough to
+    // be held behind what was sent of the replay for as long as it plays, and played whole after it.
+    // Its start arrived 100 ms late, together with what followed, so that 220 ms of it are buffered here from then
+    // on, as after the network stalls: the reply is held back that long, and more than the buffer's limit of 250 ms of
+    // it waits for the replay's end, none of which is discarded.
+    let replay = Paced {
+        source: REPLAY_SOURCE,
+        sequence: 0,
+        value: REPLAY,
+        start: 0,
+        frames: 25,
+        late: 100,
+    };
+    let live = Paced {
+        source: AGENT_SOURCE,
+        sequence: 0,
+        value: LIVE,
+        start: replay.sent(replay.frames - 1),
+        frames: 100,
+        late: 0,
+    };
+    let mut mixer = headset();
+    let output = play_paced(&mut mixer, &[replay, live], 3_000, |_, _| {});
+    let heard = heard(&output, REPLAY, LIVE);
+    assert_eq!(heard.both, 0, "{heard:?}");
+    assert_eq!(heard.a, replay.played(), "{heard:?}");
+    assert_eq!(heard.b, live.played(), "{heard:?}");
+    assert!(heard.last_a < heard.first_b, "{heard:?}");
+    assert_eq!(mixer.statistics().discarded_frames, 0);
+}
+
+#[test]
+fn a_live_reply_and_the_next_queued_after_it_play_whole_and_in_order() {
+    const FIRST: i16 = 1_000;
+    const NEXT: i16 = 3_000;
+    // Live speech is one stream, whose sequence continues from one reply, or segment, to the next: straight after it,
+    // or after a breath.
+    for breath in [0, 400] {
+        let first = Paced {
+            source: AGENT_SOURCE,
+            sequence: 0,
+            value: FIRST,
+            start: 0,
+            frames: 50,
+            late: 0,
+        };
+        let next = Paced {
+            source: AGENT_SOURCE,
+            sequence: 50,
+            value: NEXT,
+            start: 1_000 + breath,
+            frames: 25,
+            late: 0,
+        };
+        let output = play_paced(&mut headset(), &[first, next], 2_500, |_, _| {});
+        let heard = heard(&output, FIRST, NEXT);
+        assert_eq!(heard.both, 0, "{breath} ms: {heard:?}");
+        assert_eq!(heard.a, first.played(), "{breath} ms: {heard:?}");
+        // Played straight on, the first reply's last sample leads into the next's first, which is heard whole.
+        assert!(heard.b >= next.played(), "{breath} ms: {heard:?}");
+        assert!(heard.last_a < heard.first_b, "{breath} ms: {heard:?}");
+    }
+}
+
+#[test]
+fn agent_speech_that_came_first_plays_first() {
+    // Live speech still to be heard when a replay starts plays before it, and agent speech is never heard twice at once.
+    let mut mixer = mixer();
+    mixer.push(frame(AGENT_SOURCE, 0, 10));
+    mixer.push(frame(AGENT_SOURCE, 1, 10));
+    mixer.push(frame(REPLAY_SOURCE, 0, 30));
+    mixer.push(frame(REPLAY_SOURCE, 1, 30));
+    // Another participant is not held back.
+    mixer.push(frame(1, 0, 100));
+    mixer.push(frame(1, 1, 100));
+    assert_eq!(mix(&mut mixer, 8), [110; 8]);
+    assert!(!mixer.is_source_playing(REPLAY_SOURCE));
+    assert_eq!(mix(&mut mixer, 8), [30; 8]);
+    assert!(!mixer.is_source_playing(AGENT_SOURCE));
+}
+
+#[test]
+fn stopping_a_replay_fades_it_out_at_once_and_holds_back_no_live_speech() {
+    const REPLAY: i16 = 1_000;
+    const LIVE: i16 = 3_000;
+    // Two seconds played again, stopped with the right stick a second in. The server stops sending it 20 ms later,
+    // when the participant hears live speech, which goes on from then.
+    let stop = 1_000;
+    let stopped = stop + 20;
+    let replay = Paced {
+        source: REPLAY_SOURCE,
+        sequence: 0,
+        value: REPLAY,
+        start: 0,
+        frames: ((stopped + LEAD_MS) / FRAME_MS) as u32,
+        late: 0,
+    };
+    let live = Paced {
+        source: AGENT_SOURCE,
+        sequence: 0,
+        value: LIVE,
+        start: stopped,
+        frames: 25,
+        late: 0,
+    };
+    let mut mixer = headset();
+    let output = play_paced(&mut mixer, &[replay, live], 2_500, |mixer, now| {
+        if now == stop {
+            mixer.stop_replay();
+        }
+    });
+    let (before, after) = output.split_at(device(stop));
+    assert!(
+        before
+            .iter()
+            .skip(device(LEAD_MS))
+            .all(|&sample| sample == REPLAY)
+    );
+    // It fades out over the next callback, 10 ms, without a step, and is not heard again.
+    let fade = &after[..device(CALLBACK_MS)];
+    assert!(fade.windows(2).all(|pair| pair[1] <= pair[0]), "{fade:?}");
+    assert!(
+        fade[0] > REPLAY * 9 / 10 && *fade.last().unwrap() < REPLAY / 10,
+        "{fade:?}"
+    );
+    let rest = &after[device(CALLBACK_MS)..];
+    assert!(rest.iter().all(|&sample| sample == 0 || sample == LIVE));
+    // Live speech is heard as soon as it arrives, not after the replay's silent end, and whole.
+    let first = rest.iter().position(|&sample| sample == LIVE).unwrap();
+    assert!(first <= device(stopped - stop), "{first}");
+    assert_eq!(
+        rest.iter().filter(|&&sample| sample == LIVE).count(),
+        live.played()
+    );
+    // Its silent end over, the next agent speech played again is heard.
+    let after = play_paced(
+        &mut mixer,
+        &[Paced {
+            source: REPLAY_SOURCE,
+            sequence: replay.frames,
+            value: REPLAY,
+            start: 0,
+            frames: 5,
+            late: 0,
+        }],
+        200,
+        |_, _| {},
+    );
+    assert!(after.contains(&REPLAY));
+}
+
+#[test]
+fn stopping_a_replay_with_nothing_of_it_to_play_changes_nothing() {
+    let mut mixer = mixer();
+    mixer.stop_replay();
+    // A replay that has run dry, as between its segments, is not stopped either: the server sends no more of it.
+    mixer.push(frame(REPLAY_SOURCE, 0, 30));
+    assert_eq!(mix(&mut mixer, 8), [30, 30, 30, 30, 0, 0, 0, 0]);
+    mixer.stop_replay();
+    mixer.push(frame(REPLAY_SOURCE, 1, 30));
+    assert_eq!(mix(&mut mixer, 4), [30; 4]);
+}

@@ -19,6 +19,7 @@ enum Command {
     Clear,
     AgentMuted(bool),
     AgentSkipped(bool),
+    StopReplay,
     Play(Earcon, Direction),
     Ambient(Sound, Position),
     Probe,
@@ -144,6 +145,7 @@ impl Player {
                     self.agent_skipped = skipped;
                     mixer.set_agent_skipped(skipped);
                 }
+                Command::StopReplay => mixer.stop_replay(),
                 Command::Play(earcon, direction) => mixer.play(earcon, direction),
                 Command::Ambient(sound, position) => mixer.ambient(sound, position),
                 Command::Probe => mixer.play_probe(),
@@ -218,6 +220,11 @@ impl PlayerControl {
     /// Skip the rest of what the agent is saying here, live or played again, or stop skipping it: the participant spoke over it. Skipped speech is silent, as muted speech is, and still consumed in real time and measured, so it still plays; the mute and the skip are kept apart, so that ending one leaves the other. See `design/speech.md`.
     pub fn set_agent_skipped(&self, skipped: bool) {
         let _ = self.commands.send(Command::AgentSkipped(skipped));
+    }
+
+    /// Stop agent speech played again here, as the participant asks the server to stop it: what is buffered of it fades out over a few milliseconds, rather than playing on until it runs dry, and holds back no live speech. See [`Mixer::stop_replay`].
+    pub fn stop_replay(&self) {
+        let _ = self.commands.send(Command::StopReplay);
     }
 
     /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render, including the breaths between its segments.

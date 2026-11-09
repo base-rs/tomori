@@ -1427,7 +1427,14 @@ impl Connection {
                 Action::Send(message) => {
                     match &message {
                         ClientMessage::Replay { .. } => self.replay.asked = Some(Instant::now()),
-                        ClientMessage::StopReplay => self.replay = Replay::default(),
+                        ClientMessage::StopReplay => {
+                            self.replay = Replay::default();
+                            // What is buffered of it stops here too, at once, rather than playing on.
+                            let _ = self
+                                .speaker
+                                .control()
+                                .inspect(|control| control.stop_replay());
+                        }
                         _ => {}
                     }
                     // The client is open while it is kept, and the session sends none of the messages the client reserves for itself.
