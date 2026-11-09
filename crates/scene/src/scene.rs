@@ -983,6 +983,11 @@ impl Step {
         if arrangement.home != self.agent_home {
             self.agent_home = arrangement.home;
             self.swarm.appear_at(arrangement.agent);
+            // A pull begun before the space opened or changed environment draws the swarm until it is let go, but
+            // summons it nowhere, so that the agent stays at the new home, as everyone else sees it.
+            if let Some((_, _, swarm)) = &mut self.summoning {
+                *swarm = false;
+            }
         } else {
             self.swarm.set_anchor(arrangement.agent);
         }
@@ -4837,6 +4842,46 @@ mod tests {
         grow(&mut step, &mut conversation, &away, now);
         assert_eq!(step.aim, precedence::Aim::Nothing);
         assert!(pull(&mut step, &mut conversation, &away));
+        assert_eq!(placed(&mut conversation).len(), 1);
+    }
+
+    #[test]
+    fn a_pull_held_as_the_environment_changes_summons_the_agent_nowhere() {
+        let now = Instant::now();
+        let pulling = Senses {
+            attractor: Some(Vec3::new(0.8, 1.2, -0.6)),
+            trigger: Some(1.0),
+            ..senses()
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.summons = true));
+        conversation.take_actions();
+        let mut step = Step::default();
+        for _ in 0..(SUMMON_HOLD / FRAME).ceil() as usize {
+            step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        }
+        // The space changes environment, whose agent's home is elsewhere, while the pull is held, and is held on.
+        let home = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
+        conversation.apply(space(|state| {
+            state.summons = true;
+            state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+        }));
+        for _ in 0..(SUMMON_HOLD / FRAME).ceil() as usize {
+            let frame = step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+            assert!(frame.attracting);
+        }
+        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        // Let go, the agent goes back to its new home, and nobody is told otherwise.
+        assert!(placed(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.arrangement().agent,
+            crate::anchors::Anchor::from_pose(&home).unwrap()
+        );
+        // The next pull summons it as ever.
+        for _ in 0..((SUMMON_HOLD + 0.1) / FRAME).ceil() as usize {
+            step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        }
+        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
         assert_eq!(placed(&mut conversation).len(), 1);
     }
 
