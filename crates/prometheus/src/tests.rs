@@ -934,12 +934,13 @@ fn stalling() -> std::net::SocketAddr {
     address
 }
 
-/// An HTTPS fake that answers each connection's request with an empty vector, closing it after; its first answer is cut short, failing the request after it connected.
+/// An HTTPS fake that answers each connection's request with an empty vector, closing it after; its first answer to a whole request is cut short, failing the request after it connected. A connection that sends no whole request, such as another test's that found this port free when it expected it closed, is not counted.
 fn answering(config: Arc<rustls::ServerConfig>) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     thread::spawn(move || {
-        for (index, stream) in listener.incoming().enumerate() {
+        let mut answered = 0;
+        for stream in listener.incoming() {
             let connection = rustls::ServerConnection::new(config.clone()).unwrap();
             let mut tls = rustls::StreamOwned::new(connection, stream.unwrap());
             let mut head = Vec::new();
@@ -947,6 +948,7 @@ fn answering(config: Arc<rustls::ServerConfig>) -> std::net::SocketAddr {
             while !head.ends_with(b"\r\n\r\n") && tls.read(&mut byte).unwrap_or(0) == 1 {
                 head.push(byte[0]);
             }
+            let complete = head.ends_with(b"\r\n\r\n");
             let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
             let length = head
                 .lines()
@@ -957,7 +959,12 @@ fn answering(config: Arc<rustls::ServerConfig>) -> std::net::SocketAddr {
             let answer =
                 json!({"status": "success", "data": {"resultType": "vector", "result": []}})
                     .to_string();
-            let promised = if index == 0 { 1000 } else { answer.len() };
+            let promised = if complete && answered == 0 {
+                1000
+            } else {
+                answer.len()
+            };
+            answered += usize::from(complete);
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {promised}\r\nconnection: close\r\n\r\n{answer}"
             );
