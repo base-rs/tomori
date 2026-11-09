@@ -190,8 +190,6 @@ pub(crate) struct Arguments {
     mcp: Option<SocketAddr>,
     /// Whether pairing opens once the server starts, as `pair` typed on the console opens it. See `design/security.md`.
     open_pairing: bool,
-    /// The application's own options that were given, each by its place among the builder's options, with its value, the last given of each.
-    options: Vec<(usize, String)>,
 }
 
 /// The state directory from the environment; see [`crate::auth_command::default_state_directory`].
@@ -242,8 +240,11 @@ pub(crate) fn parse(
         state_directory: None,
         mcp: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
         open_pairing: false,
-        options: Vec::new(),
     };
+    // The application's own options keep the values read from this command line only.
+    for option in options {
+        option.forget();
+    }
     while let Some(argument) = arguments.next() {
         // Hidden from the usage of a server built without speech, and refused, as `--speech-root` is, rather than ignored.
         #[cfg(not(feature = "speech"))]
@@ -397,17 +398,14 @@ pub(crate) fn parse(
             }
             "--help" | "-h" => return Err(usage.to_owned()),
             other => {
-                let Some(index) = options.iter().position(|option| option.flag() == other) else {
+                let Some(option) = options.iter().find(|option| option.flag() == other) else {
                     return Err(format!("unknown argument {other:?}\n\n{usage}"));
                 };
-                let option = &options[index];
                 let value = arguments
                     .next()
                     .ok_or_else(|| format!("{} needs {}", option.flag(), option.value()))?;
-                option.check(&value)?;
-                // The last given is the one used, as for Tomori's own options.
-                parsed.options.retain(|(given, _)| *given != index);
-                parsed.options.push((index, value));
+                // Parsed once, and kept for when the option is applied, in place of an earlier value: the last given is the one used, as for Tomori's own options.
+                option.read(&value)?;
             }
         }
     }
@@ -1052,16 +1050,10 @@ pub(crate) fn configure(
         state.as_deref(),
         engines,
     );
-    // The application's own options that were given, in the order it added them, such as an environment's.
+    // The application's own options that were given, with the values read from the command line, in the order it added them, such as an environment's.
     let server = options
         .iter()
-        .enumerate()
-        .try_fold(server, |server, (index, option)| {
-            match arguments.options.iter().find(|(given, _)| *given == index) {
-                Some((_, value)) => option.apply(server, value),
-                None => Ok(server),
-            }
-        })?;
+        .try_fold(server, |server, option| option.apply(server))?;
     Ok((
         hooks.into_iter().fold(server, |server, hook| hook(server)),
         fingerprint,
