@@ -181,9 +181,14 @@ enum Resolved {
     /// A card on the board of a space that shows cards, as [`crate::cards::Board::describe`] described it as the
     /// utterance began, since the board changes only when it is read again. See `design/github.md`.
     Card { id: String, description: String },
-    /// Something the space's environment presents, as its server side last described it as the utterance began. See
+    /// Something the space's environment presents, as its server side last described it as the utterance began, with
+    /// the id the agent may inspect it by, its reference after the environment's identifier, if it has one. See
     /// `design/environments.md`.
-    Object { id: String, description: String },
+    Object {
+        id: String,
+        description: String,
+        reference: Option<String>,
+    },
     /// A panel projected in the space, as the stage described it as the utterance began. See `design/projection.md`.
     Panel { id: String, description: String },
 }
@@ -208,6 +213,16 @@ pub(crate) fn one_line(text: &str, limit: usize) -> String {
         .collect()
 }
 
+/// The longest environment identifier told before an object's reference, in characters.
+const ENVIRONMENT_CHARS: usize = 64;
+
+/// The id the agent inspects an object of `environment` by, its `reference` after the environment's identifier, such as
+/// `farmyard:hen/marigold`, so that objects of different environments never share one. A reference has no `:`, so the
+/// last one ends the environment's identifier.
+pub(crate) fn inspectable(environment: &str, reference: &str) -> String {
+    format!("{}:{reference}", one_line(environment, ENVIRONMENT_CHARS))
+}
+
 /// One resource `attended` to: a worker described from `workers`, the space's workers when the words are delivered,
 /// or as the space last knew it and no longer present, such as `worker "Tests" (opencode session ses_1, running)`; a
 /// card as the board described it as the words began.
@@ -216,8 +231,18 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
     let (id, title) = match attended {
         Attended(Resolved::Worker { id, title }) => (id, title),
         Attended(Resolved::Card { description, .. }) => return description.clone(),
-        // Cleaned as the side described it; its identity, which a client gave, is not told.
-        Attended(Resolved::Object { description, .. }) => return description.clone(),
+        // Cleaned as the side described it; its identity, which a client gave, is not told, but the id the agent may
+        // inspect it by is, if the side gave one.
+        Attended(Resolved::Object {
+            description,
+            reference,
+            ..
+        }) => {
+            return match reference {
+                Some(reference) => format!("{description} (id {reference})"),
+                None => description.clone(),
+            };
+        }
         // As the stage described it, from its own store.
         Attended(Resolved::Panel { description, .. }) => return description.clone(),
     };
@@ -1555,12 +1580,15 @@ impl SpaceModel {
             tomori_protocol::Resource::Object { object, .. }
                 if object.len() <= crate::channel::OBJECT_BYTES =>
             {
-                let description = objects
-                    .filter(|channel| channel.environment == self.environment)?
-                    .describe(object)?;
+                let channel = objects.filter(|channel| channel.environment == self.environment)?;
+                let described = channel.describe(object)?;
                 Some(Attended(Resolved::Object {
                     id: object.clone(),
-                    description: description.to_owned(),
+                    description: described.description.clone(),
+                    reference: described
+                        .reference
+                        .as_ref()
+                        .map(|reference| inspectable(&channel.environment, reference)),
                 }))
             }
             // A panel's identity is only looked up: the stage describes the panel it has.
@@ -3701,6 +3729,60 @@ mod tests {
         let block = context("opencode", &short, &[]).unwrap();
         assert_eq!(block.matches("worker \"").count(), 4, "{block}");
         assert!(block.chars().count() <= CONTEXT_CHARS);
+    }
+
+    #[test]
+    fn an_object_s_id_follows_its_description_only_when_it_has_one_within_the_bounds() {
+        let mut space = model();
+        space.environment = "farmyard".to_owned();
+        let mut channel = crate::channel::Channel::new(1, "farmyard", 1);
+        channel.objects = crate::channel::objects(vec![
+            tomori_environment::Object::new("chicken-2", "Marigold, a hen")
+                .with_reference("hen/marigold"),
+            tomori_environment::Object::new("post-1", "a fence post"),
+            tomori_environment::Object::new(
+                "long-1",
+                "l".repeat(crate::channel::DESCRIPTION_CHARS * 2),
+            )
+            .with_reference("x".repeat(tomori_environment::REFERENCE_BYTES)),
+        ]);
+        let resolved = |objects: &[&str]| {
+            let named: Vec<_> = objects
+                .iter()
+                .map(|object| tomori_protocol::Resource::object(*object))
+                .collect();
+            space.resolve(&named, None, Some(&channel))
+        };
+        assert_eq!(
+            context("opencode", &resolved(&["chicken-2"]), &[]).unwrap(),
+            "[Pointing at Marigold, a hen (id farmyard:hen/marigold)]"
+        );
+        assert_eq!(
+            context("opencode", &resolved(&["post-1"]), &[]).unwrap(),
+            "[Pointing at a fence post]"
+        );
+        // The longest description and id still leave room for others, within the bound.
+        let block = context(
+            "opencode",
+            &resolved(&["long-1", "chicken-2", "post-1"]),
+            &[],
+        )
+        .unwrap();
+        assert!(block.chars().count() <= CONTEXT_CHARS, "{block}");
+        assert!(
+            block.contains(&format!(
+                "… (id farmyard:{});",
+                "x".repeat(tomori_environment::REFERENCE_BYTES)
+            )),
+            "{block}"
+        );
+        assert!(block.ends_with("; a fence post]"), "{block}");
+        // An environment's identifier is cleaned and cut before the reference, which keeps the two apart.
+        assert_eq!(inspectable("farm\nyard", "hen/pip"), "farm yard:hen/pip");
+        assert_eq!(
+            inspectable(&"e".repeat(100), "hen/pip"),
+            format!("{}…:hen/pip", "e".repeat(ENVIRONMENT_CHARS))
+        );
     }
 
     #[test]

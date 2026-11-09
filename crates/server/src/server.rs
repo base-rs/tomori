@@ -398,6 +398,13 @@ impl Server {
         self
     }
 
+    /// Change how long the agent waits for an environment's server side to answer an inspection; see
+    /// [`crate::INSPECT_TIMEOUT`].
+    pub fn with_inspect_timeout(self, timeout: Duration) -> Self {
+        self.hub.set_inspect_timeout(timeout);
+        self
+    }
+
     /// A handle to confirm or decline pairings, such as from the console, while the server runs.
     pub fn pairing(&self) -> Pairing {
         Pairing(Arc::downgrade(&self.hub))

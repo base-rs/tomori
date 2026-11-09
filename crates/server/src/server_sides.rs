@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use base_scheduler::Cancellation;
 use event_listener::{Event, EventListener};
-use tomori_environment::{Inbox, Intent, Outlet, ServerSide, Space};
+use tomori_environment::{Inbox, Inspector, Intent, Outlet, ServerSide, Space};
 
 use crate::environments::Environments;
 use crate::limits;
@@ -61,8 +61,33 @@ struct Running {
     side: Arc<dyn ServerSide>,
     binding: u64,
     cancellation: Cancellation,
-    /// Where intents for the side are handed on.
+    /// Where intents for the side are handed on, and its inspector found.
     inbox: Inbox,
+    /// How many of the side's inspections are under way, those whose waiting has ended but whose inspector has not
+    /// returned included.
+    inspecting: Arc<AtomicUsize>,
+}
+
+/// The most inspections of one binding's side under way at once, so that a side that never answers holds at most this
+/// many threads.
+pub(crate) const INSPECTIONS: usize = 4;
+
+/// One inspection under way, counted against [`INSPECTIONS`] until it is dropped.
+pub(crate) struct Inspecting(Arc<AtomicUsize>);
+
+impl Drop for Inspecting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Why a side cannot be asked to inspect something.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Uninspectable {
+    /// No side runs for the space, or it gave no inspector.
+    Silent,
+    /// [`INSPECTIONS`] are under way already.
+    Busy,
 }
 
 #[derive(Default)]
@@ -126,6 +151,23 @@ impl ServerSides {
             .expect("never left poisoned")
             .get(space)
             .is_some_and(|running| running.inbox.push(intent))
+    }
+
+    /// The inspector the side running for `space` gave, with the inspection counted until it is dropped, or why there is
+    /// none to ask.
+    pub(crate) fn inspector(
+        &self,
+        space: &str,
+    ) -> Result<(Arc<dyn Inspector>, Inspecting), Uninspectable> {
+        let running = self.running.lock().expect("never left poisoned");
+        let running = running.get(space).ok_or(Uninspectable::Silent)?;
+        let inspector = running.inbox.inspector().ok_or(Uninspectable::Silent)?;
+        // Counted first, so that it is uncounted as it is dropped, whether or not it is under way.
+        let inspecting = Inspecting(running.inspecting.clone());
+        if running.inspecting.fetch_add(1, Ordering::SeqCst) >= INSPECTIONS {
+            return Err(Uninspectable::Busy);
+        }
+        Ok((inspector, inspecting))
     }
 
     /// The binding the side of `space` runs for, if one does.
@@ -240,6 +282,7 @@ impl ServerSides {
                     binding,
                     cancellation,
                     inbox,
+                    inspecting: Arc::default(),
                 },
             );
         }
@@ -523,6 +566,49 @@ mod tests {
         // Not retried for the same binding.
         assert!(sides.reconcile(&environments, &open).is_empty());
         assert!(started.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn a_side_s_inspector_is_asked_at_most_a_few_times_at_once() {
+        let sides = ServerSides::default();
+        let (environments, started) = offered(|space| {
+            space.inspect_with(
+                |reference: &str| -> tomori_environment::Result<Option<String>> {
+                    Ok(Some(format!("\"{reference}\"")))
+                },
+            );
+            until_cancelled(space)
+        });
+        assert_eq!(
+            sides.inspector("space-1").err(),
+            Some(Uninspectable::Silent)
+        );
+        sides.reconcile(&environments, &[wanted("space-1", "observe")]);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        eventually("the side never gave its inspector", || {
+            sides.inspector("space-1").is_ok()
+        });
+        let (inspector, _) = sides.inspector("space-1").unwrap();
+        assert_eq!(
+            inspector.inspect("hen/pip"),
+            Ok(Some("\"hen/pip\"".to_owned()))
+        );
+        let under_way: Vec<_> = (0..INSPECTIONS)
+            .map(|_| sides.inspector("space-1").unwrap())
+            .collect();
+        assert_eq!(sides.inspector("space-1").err(), Some(Uninspectable::Busy));
+        drop(under_way);
+        assert!(sides.inspector("space-1").is_ok());
+        // A side that gives none has nothing to ask.
+        let (environments, started) = offered(until_cancelled);
+        sides.reconcile(&environments, &[wanted("space-2", "observe")]);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            sides.inspector("space-2").err(),
+            Some(Uninspectable::Silent)
+        );
+        sides.reconcile(&environments, &[]);
+        eventually("the sides never ended", || sides.alive() == 0);
     }
 
     #[test]

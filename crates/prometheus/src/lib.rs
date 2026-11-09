@@ -25,6 +25,8 @@
 //! # Ok::<(), tomori_prometheus::Error>(())
 //! ```
 //!
+//! A server side that lets the space's agent inspect a metric it presents describes it with a [`Metric`], which has no field for the endpoint or the token: the query, when it was evaluated, its labels, its latest value, its unit and a link.
+//!
 //! The crate logs nothing. The token is sent only in the `authorization` field of the client's own requests, and is in no error, `Debug` output or log; errors and warnings quote the source's own text only scrubbed of the token and the endpoint (see [`Error`]).
 use std::fmt;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
@@ -39,6 +41,7 @@ mod data;
 mod endpoint;
 mod error;
 mod labels;
+mod metric;
 pub mod promql;
 mod system;
 mod time;
@@ -51,6 +54,7 @@ mod tests;
 pub use data::{Data, Labels, Point, Response, Sample, Series};
 pub use error::{ENDPOINT, Error, QUOTED_BYTES, REDACTED};
 pub use labels::LabelFilter;
+pub use metric::{Metric, Window};
 pub use time::{Range, Timestamp};
 pub use token::{Token, TokenSource};
 

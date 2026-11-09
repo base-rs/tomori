@@ -63,6 +63,7 @@ pub use builder::Builder;
 pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
 pub use environments::Environment;
 pub use hub::CLOSED_SPACES;
+pub use hub::agent_inspect::{INSPECT_TIMEOUT, INSPECTION_BYTES};
 pub use hub::{
     Closing, KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, Opener, PAIRING_ATTEMPTS,
     PAIRING_OPEN_FOR, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingEvent, PairingState, PairingView,

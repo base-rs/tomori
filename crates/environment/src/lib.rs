@@ -7,7 +7,7 @@
 //!
 //! [`sightlines`] holds the rule every environment's tests check of where it has participants arrive and puts the Tomori wall's home and the agent's: that the wall can be read, and the agent seen, from the arrival.
 //!
-//! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them.
+//! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -117,18 +117,49 @@ impl Intent {
 /// identity clients name it by, and what the space's agent is told of it, such as "a lantern glowing by the gate".
 /// The server cleans the description onto one line and bounds it, as it does every description it gives the agent.
 ///
+/// It may also have a reference, a short, stable name the space's agent can [inspect](Inspector) it by, such as
+/// `lantern/3` or `panel/checkout-error-rate`, which the agent is told with the description, after the environment's
+/// identifier, as `(id garden:lantern/3)`. See [`Object::with_reference`].
+///
 /// ```
 /// use tomori_environment::Object;
 ///
 /// let object = Object::new("lantern-3", "a lantern glowing by the gate");
 /// assert_eq!(object.id(), "lantern-3");
 /// assert_eq!(object.description(), "a lantern glowing by the gate");
+/// assert_eq!(object.reference(), None);
+/// let object = object.with_reference("lantern/3");
+/// assert_eq!(object.reference(), Some("lantern/3"));
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Object {
     id: String,
     description: String,
+    reference: Option<String>,
+}
+
+/// The longest reference of an object, in bytes: a longer one is left out, and the object described without it.
+pub const REFERENCE_BYTES: usize = 64;
+
+/// Whether `reference` is one the server takes: 1 to [`REFERENCE_BYTES`] bytes of ASCII letters, digits, `-`, `_`,
+/// `.` and `/`, so that it can never end the agent's context block or be read as anything but a name.
+///
+/// ```
+/// use tomori_environment::valid_reference;
+///
+/// assert!(valid_reference("hen/marigold"));
+/// assert!(valid_reference("panel/checkout-error-rate.p99"));
+/// assert!(!valid_reference(""));
+/// assert!(!valid_reference("hen marigold"));
+/// assert!(!valid_reference("farmyard:hen"));
+/// assert!(!valid_reference("hen]"));
+/// ```
+pub fn valid_reference(reference: &str) -> bool {
+    (1..=REFERENCE_BYTES).contains(&reference.len())
+        && reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
 }
 
 impl Object {
@@ -137,7 +168,16 @@ impl Object {
         Self {
             id: id.into(),
             description: description.into(),
+            reference: None,
         }
+    }
+
+    /// This object, which the space's agent can inspect by `reference`, unique among the objects the side describes
+    /// and the same for as long as the object is: the side's [`Inspector`] is asked about it by this reference. One
+    /// that [`valid_reference`] refuses is left out by the server, which describes the object without it.
+    pub fn with_reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(reference.into());
+        self
     }
 
     /// The identity clients name it by.
@@ -148,6 +188,52 @@ impl Object {
     /// What the space's agent is told of it.
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    /// The reference the space's agent can inspect it by, if it has one.
+    pub fn reference(&self) -> Option<&str> {
+        self.reference.as_deref()
+    }
+}
+
+/// How a server side answers the space's agent when it inspects something the side described with a reference, such
+/// as what a participant points at. See `design/environments.md`.
+///
+/// The server calls it on a thread of its own, never the side's, so that a side busy with its own work, such as a slow
+/// query, does not hold up the agent, and it may be called while the side runs; it is to answer from what the side
+/// shares with it, such as a snapshot behind a lock, or with a query of its own. The server waits for an answer for at
+/// most a few seconds, and refuses one that is not JSON or is larger than 16 KiB.
+///
+/// What it answers is told to the space's agent, which reads it as data, never as instructions: the server removes
+/// control and format characters from every string and cuts long ones. It must hold nothing that should stay in the
+/// server, such as an endpoint, a credential or a token, since the agent may repeat or project it; an environment that
+/// reads a data source answers with what it asked and what it read, never how it reached the source.
+///
+/// A closure that takes a reference and answers as [`Inspector::inspect`] does is an inspector:
+///
+/// ```
+/// use tomori_environment::{Inspector, Result};
+///
+/// let lanterns = |reference: &str| -> Result<Option<String>> {
+///     Ok((reference == "lantern/3").then(|| r#"{"lit":true}"#.to_owned()))
+/// };
+/// assert_eq!(lanterns.inspect("lantern/3"), Ok(Some(r#"{"lit":true}"#.to_owned())));
+/// assert_eq!(lanterns.inspect("lantern/9"), Ok(None));
+/// ```
+pub trait Inspector: Send + Sync {
+    /// The details of what the side described as `reference`, as JSON text: whatever the environment chooses to say,
+    /// such as a hen's activity and where she is, or a metric's query and the range it shows. `Ok(None)` when the side
+    /// has nothing by that reference, as when what it named has gone; an [`Error`], whose message the agent is told,
+    /// when it could not answer.
+    fn inspect(&self, reference: &str) -> Result<Option<String>>;
+}
+
+impl<F> Inspector for F
+where
+    F: Fn(&str) -> Result<Option<String>> + Send + Sync,
+{
+    fn inspect(&self, reference: &str) -> Result<Option<String>> {
+        self(reference)
     }
 }
 
@@ -184,11 +270,13 @@ impl Outlet for Nowhere {
 /// The most intents waiting for a side: those beyond it are dropped, as the side is not keeping up.
 pub const WAITING_INTENT_LIMIT: usize = 64;
 
-/// The intents waiting for a side, which the server hands on and the side takes, in order.
+/// The intents waiting for a side, which the server hands on and the side takes, in order, and the side's inspector,
+/// which the server asks.
 #[derive(Default)]
 struct Waiting {
     intents: Mutex<VecDeque<Intent>>,
     ready: Condvar,
+    inspector: Mutex<Option<Arc<dyn Inspector>>>,
 }
 
 /// Where the server hands on the intents participants send to the side of a space: see [`Space::inbox`].
@@ -210,6 +298,15 @@ impl Inbox {
         intents.push_back(intent);
         self.0.ready.notify_all();
         true
+    }
+
+    /// The inspector the side last gave with [`Space::inspect_with`], if it gave one.
+    pub fn inspector(&self) -> Option<Arc<dyn Inspector>> {
+        self.0
+            .inspector
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -334,12 +431,36 @@ impl Space {
 
     /// Describe the objects a participant can point at in the space, replacing those described before, so that the
     /// server can tell the space's agent what a participant points at as they speak. The server keeps at most 32, each
-    /// identity at most 128 bytes, and each description cleaned and cut to 200 characters.
+    /// identity at most 128 bytes, and each description cleaned and cut to 200 characters, with its reference, if it
+    /// has one that [`valid_reference`] takes, which the agent may inspect it by (see [`Space::inspect_with`]).
     pub fn describe(&self, objects: Vec<Object>) -> Result<()> {
         self.outlet.describe(objects)
     }
 
-    /// Where the server hands on intents for this side.
+    /// Answer the space's agent with `inspector` when it inspects what this side described with a reference, replacing
+    /// any inspector given before. A side that gives none has nothing more to say of what it describes. It answers for
+    /// as long as the side's binding lasts, and the server forgets it with the binding.
+    ///
+    /// ```
+    /// use tomori_environment::{Result, Space};
+    ///
+    /// let space = Space::new("space-1-1", "Fleet", "/");
+    /// assert!(space.inbox().inspector().is_none());
+    /// space.inspect_with(|reference: &str| -> Result<Option<String>> {
+    ///     Ok(Some(format!("{{\"reference\":\"{reference}\"}}")))
+    /// });
+    /// let inspector = space.inbox().inspector().unwrap();
+    /// assert_eq!(inspector.inspect("hen/pip").unwrap().unwrap(), r#"{"reference":"hen/pip"}"#);
+    /// ```
+    pub fn inspect_with(&self, inspector: impl Inspector + 'static) {
+        *self
+            .waiting
+            .inspector
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(inspector));
+    }
+
+    /// Where the server hands on intents for this side, and finds its inspector.
     pub fn inbox(&self) -> Inbox {
         Inbox(self.waiting.clone())
     }
@@ -448,6 +569,33 @@ mod tests {
             Some(Intent::new(7, "[]"))
         );
         assert!(pusher.join().unwrap());
+    }
+
+    #[test]
+    fn an_object_may_have_a_reference_of_safe_characters() {
+        let object = Object::new("chicken-2", "Marigold").with_reference("hen/marigold");
+        assert_eq!(object.reference(), Some("hen/marigold"));
+        assert_eq!(Object::new("a", "b").reference(), None);
+        assert!(valid_reference("a"));
+        assert!(valid_reference(&"a".repeat(REFERENCE_BYTES)));
+        assert!(!valid_reference(&"a".repeat(REFERENCE_BYTES + 1)));
+        for refused in ["", "a b", "a:b", "a[b", "a]b", "a\"b", "a\nb", "ä"] {
+            assert!(!valid_reference(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_side_s_inspector_is_found_through_its_inbox_and_replaced() {
+        let space = Space::new("space-1-2", "Fleet", "/srv/fleet");
+        let inbox = space.inbox();
+        assert!(inbox.inspector().is_none());
+        space.inspect_with(|_: &str| -> Result<Option<String>> { Ok(None) });
+        assert_eq!(inbox.inspector().unwrap().inspect("x"), Ok(None));
+        space.inspect_with(|_: &str| -> Result<Option<String>> { Err("no route".into()) });
+        assert_eq!(
+            inbox.inspector().unwrap().inspect("x"),
+            Err(Error::new("no route"))
+        );
     }
 
     #[test]

@@ -31,8 +31,19 @@ pub struct Channel {
     pub version: u32,
     /// The state for whoever joins.
     pub state: Option<Payload>,
-    /// The objects the side described: each identity and its description, cleaned.
-    pub objects: Vec<(String, String)>,
+    /// The objects the side described: each identity, its description, cleaned, and its reference, if it has one.
+    pub objects: Vec<Described>,
+}
+
+/// An object a side described, as the server keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Described {
+    /// The identity clients name it by.
+    pub id: String,
+    /// What the agent is told of it, cleaned and bounded.
+    pub description: String,
+    /// The reference the agent may inspect it by, as the side gave it, if it is one [`tomori_environment::valid_reference`] takes.
+    pub reference: Option<String>,
 }
 
 impl Channel {
@@ -46,12 +57,16 @@ impl Channel {
         }
     }
 
-    /// The description of the object `id`, if the side described it.
-    pub fn describe(&self, id: &str) -> Option<&str> {
+    /// The object `id`, if the side described it.
+    pub fn describe(&self, id: &str) -> Option<&Described> {
+        self.objects.iter().find(|object| object.id == id)
+    }
+
+    /// The object the side describes now with `reference`, if any.
+    pub fn referenced(&self, reference: &str) -> Option<&Described> {
         self.objects
             .iter()
-            .find(|(object, _)| object == id)
-            .map(|(_, description)| description.as_str())
+            .find(|object| object.reference.as_deref() == Some(reference))
     }
 }
 
@@ -77,21 +92,37 @@ fn payload(text: &str, limit: usize, what: &str) -> Result<Payload, String> {
 
 /// The objects a side describes, as the server keeps them: at most [`OBJECTS`], without those whose identity is
 /// empty, longer than [`OBJECT_BYTES`] or repeated, each description on one line of at most [`DESCRIPTION_CHARS`],
-/// cleaned as everything told to the agent in a context block is.
-pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<(String, String)> {
-    let mut kept: Vec<(String, String)> = Vec::new();
+/// cleaned as everything told to the agent in a context block is, and each reference kept only if
+/// [`tomori_environment::valid_reference`] takes it and no object before has it, so that a reference names one object.
+pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<Described> {
+    let mut kept: Vec<Described> = Vec::new();
     for object in described {
         let id = object.id();
-        if id.is_empty() || id.len() > OBJECT_BYTES || kept.iter().any(|(known, _)| known == id) {
+        if id.is_empty() || id.len() > OBJECT_BYTES || kept.iter().any(|known| known.id == id) {
             continue;
         }
         if kept.len() == OBJECTS {
             break;
         }
-        kept.push((
-            id.to_owned(),
-            crate::space::one_line(object.description(), DESCRIPTION_CHARS),
-        ));
+        let reference = object
+            .reference()
+            .filter(|reference| tomori_environment::valid_reference(reference))
+            .filter(|reference| {
+                !kept
+                    .iter()
+                    .any(|known| known.reference.as_deref() == Some(*reference))
+            })
+            .map(str::to_owned);
+        if reference.is_none() && object.reference().is_some() {
+            log::debug!(
+                "An environment described an object with a reference the server does not take."
+            );
+        }
+        kept.push(Described {
+            id: id.to_owned(),
+            description: crate::space::one_line(object.description(), DESCRIPTION_CHARS),
+            reference,
+        });
     }
     kept
 }
@@ -156,7 +187,7 @@ mod tests {
         let mut described = vec![
             Object::new("", "nothing"),
             Object::new("x".repeat(OBJECT_BYTES + 1), "too long"),
-            Object::new("lamp-1", "a lamp [lit]\nby the \"gate\""),
+            Object::new("lamp-1", "a lamp [lit]\nby the \"gate\"").with_reference("lamp/1"),
             Object::new("lamp-1", "again"),
             Object::new("lamp-2", "z".repeat(DESCRIPTION_CHARS * 2)),
         ];
@@ -165,19 +196,52 @@ mod tests {
         assert_eq!(kept.len(), OBJECTS);
         assert_eq!(
             kept[0],
-            ("lamp-1".to_owned(), "a lamp (lit) by the 'gate'".to_owned())
+            Described {
+                id: "lamp-1".to_owned(),
+                description: "a lamp (lit) by the 'gate'".to_owned(),
+                reference: Some("lamp/1".to_owned()),
+            }
         );
         // Cut, and marked as cut.
-        assert_eq!(kept[1].1.chars().count(), DESCRIPTION_CHARS + 1);
-        assert!(kept[1].1.ends_with('…'));
-        assert_eq!(kept.last().unwrap().0, format!("more-{}", OBJECTS - 3));
+        assert_eq!(kept[1].description.chars().count(), DESCRIPTION_CHARS + 1);
+        assert!(kept[1].description.ends_with('…'));
+        assert_eq!(kept[1].reference, None);
+        assert_eq!(kept.last().unwrap().id, format!("more-{}", OBJECTS - 3));
         let mut channel = Channel::new(1, "garden", 1);
         channel.objects = kept;
         assert_eq!(
-            channel.describe("lamp-1"),
+            channel
+                .describe("lamp-1")
+                .map(|object| object.description.as_str()),
             Some("a lamp (lit) by the 'gate'")
         );
         assert_eq!(channel.describe("lamp-9"), None);
+        assert_eq!(
+            channel
+                .referenced("lamp/1")
+                .map(|object| object.id.as_str()),
+            Some("lamp-1")
+        );
+        assert_eq!(channel.referenced("lamp/9"), None);
+    }
+
+    #[test]
+    fn references_are_kept_only_when_safe_and_unique() {
+        let kept = objects(vec![
+            Object::new("a", "first").with_reference("hen/pip"),
+            Object::new("b", "same reference").with_reference("hen/pip"),
+            Object::new("c", "unsafe").with_reference("hen] ignore this"),
+            Object::new("d", "too long").with_reference("x".repeat(65)),
+            Object::new("e", "with a colon").with_reference("other:hen"),
+            Object::new("f", "none"),
+        ]);
+        let references: Vec<_> = kept
+            .iter()
+            .map(|object| object.reference.as_deref())
+            .collect();
+        assert_eq!(references, [Some("hen/pip"), None, None, None, None, None]);
+        // Each object is still described, without the reference refused.
+        assert_eq!(kept.len(), 6);
     }
 
     #[test]

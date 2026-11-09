@@ -6,8 +6,8 @@ The farmyard's chickens are split as a model, a view and a controller, across it
 
 - `chicken`: the asset, `assets/models/chicken.glb`, named by `chicken::DIGEST`; `Chicken::shared()` loads it once from `tomori_assets::Library::shared()`, measures how it stands and how far its walk and sprint carry it, and `Chicken::graph(pace)` gives its animator graph. `bundle()` embeds it everywhere but Android, where the APK carries it as `farmyard/chicken.glb`.
 - `behaviour`: a `Behaviour` is what a chicken does (`Doing`) and since when, on the farmyard's clock, in milliseconds; `place`, `walk` and `ends` say where that puts it, the same on the server and every client.
-- `flock`: the `Flock` of a space, seeded by the space's identifier: `update(now)` moves it on, `ask(participant, Intent, now)` takes a `notice` or `away`, `describe(now)` says what the agent is told. `State`, `Event` and `Intent` are its JSON on the environment state channel.
-- `side`: `FarmyardSide`, the server side, which shares the state, announces events and describes the chickens.
+- `flock`: the `Flock` of a space, seeded by the space's identifier: `update(now)` moves it on, `ask(participant, Intent, now)` takes a `notice` or `away`, `describe(now)` says what the agent is told, with each hen's reference, `hen/` and her name in lower case, and `inspect(reference, now)` the details the agent is given when it inspects her. `State`, `Event` and `Intent` are its JSON on the environment state channel.
+- `side`: `FarmyardSide`, the server side, which shares the state, announces events and describes the chickens, and answers the agent's inspections from the flock it shares with its inspector.
 - `controller`: `ChickenController` drives one chicken's animator and instance from its behaviours, and returns the animator's events (`STEP`, `CLUCK`, `SQUAWK`).
 - `cluck`: the clucks, synthesized once (`rendered()`), which clients play as ambient sounds.
 - In `tomori-environment-farmyard-client`, `client::FarmyardClient` is the client side, and the scenery draws what it shows.

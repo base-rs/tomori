@@ -31,6 +31,7 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
+pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
@@ -451,6 +452,8 @@ pub struct Hub {
     /// How long pairing stays open once opened; see [`PAIRING_OPEN_FOR`].
     pairing_open_for: RwLock<Duration>,
     knock_timeout: RwLock<Duration>,
+    /// How long the agent waits for an environment's server side to answer an inspection; see [`agent_inspect::INSPECT_TIMEOUT`].
+    inspect_timeout: RwLock<Duration>,
     /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
     tools: tools::Tools,
     /// What highlights the agent's code panels, outside the lock; see [`crate::highlighting`].
@@ -1862,6 +1865,7 @@ impl Hub {
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             pairing_open_for: RwLock::new(PAIRING_OPEN_FOR),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
+            inspect_timeout: RwLock::new(agent_inspect::INSPECT_TIMEOUT),
             tools: tools::Tools::default(),
             highlighter: RwLock::new(crate::highlighting::highlighter()),
             this: this.clone(),

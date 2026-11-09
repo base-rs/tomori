@@ -508,37 +508,78 @@ impl Flock {
         }
     }
 
-    /// What the agent is told of each chicken at `now`, as a participant points at it: its name, its cone, what it is
-    /// doing and where.
-    pub fn describe(&self, now: u64) -> Vec<(String, String)> {
+    /// What chicken `index` is doing at `now`, in words.
+    fn doing(&self, index: usize, now: u64) -> &'static str {
+        let here = self.position(index, now);
+        match self.hens[index].behaviour.doing {
+            Doing::Stand | Doing::Recover => "standing",
+            Doing::Peck { .. } => "pecking at the ground",
+            Doing::Look { .. } => "looking about",
+            Doing::Walk { .. } if here.y > 0.01 => "on the coop's ramp",
+            Doing::Walk { .. } => "wandering",
+            Doing::Confused { .. } => "looking up, puzzled, at whoever is pointing at her",
+            Doing::Sprint { .. } => "running off, startled",
+            Doing::Roost => "roosting in the coop",
+        }
+    }
+
+    /// The reference the space's agent inspects chicken `index` by, from her name, such as `hen/marigold`, which is the
+    /// same for as long as the flock is, since no two of a flock share a name.
+    pub fn reference(&self, index: usize) -> String {
+        format!("hen/{}", self.hens[index].name.to_lowercase())
+    }
+
+    /// What the agent is told of each chicken at `now`, as a participant points at it: the identity clients name her
+    /// by, the reference the agent may inspect her by, and her name, her cone, what she is doing and where.
+    pub fn describe(&self, now: u64) -> Vec<(String, String, String)> {
         (0..self.hens.len())
             .map(|index| {
                 let hen = &self.hens[index];
-                let here = self.position(index, now);
-                let doing = match hen.behaviour.doing {
-                    Doing::Stand | Doing::Recover => "standing",
-                    Doing::Peck { .. } => "pecking at the ground",
-                    Doing::Look { .. } => "looking about",
-                    Doing::Walk { .. } if here.y > 0.01 => "on the coop's ramp",
-                    Doing::Walk { .. } => "wandering",
-                    Doing::Confused { .. } => "looking up, puzzled, at whoever is pointing at her",
-                    Doing::Sprint { .. } => "running off, startled",
-                    Doing::Roost => "roosting in the coop",
-                };
                 let cone = if hen.cone {
                     ", wearing a traffic cone"
                 } else {
                     ""
                 };
-                format!(
-                    "{}{cone}, a hen in the farmyard, {doing} {}",
+                let description = format!(
+                    "{}{cone}, a hen in the farmyard, {} {}",
                     hen.name,
-                    near(here)
+                    self.doing(index, now),
+                    near(self.position(index, now))
+                );
+                (
+                    format!("chicken-{index}"),
+                    self.reference(index),
+                    description,
                 )
             })
-            .enumerate()
-            .map(|(index, description)| (format!("chicken-{index}"), description))
             .collect()
+    }
+
+    /// What the agent learns of the chicken the flock has by `reference` at `now`, when it inspects her: her name, what
+    /// she is doing, where she is, what she is wearing, where she roosts and lives, how many point at her and when she
+    /// was last startled; `None` for a reference the flock does not have.
+    pub fn inspect(&self, reference: &str, now: u64) -> Option<serde_json::Value> {
+        let index = (0..self.hens.len()).find(|index| self.reference(*index) == reference)?;
+        let hen = &self.hens[index];
+        let kept = &self.kept[index];
+        let placed = hen.behaviour.place(&self.chicken, hen.pace, now);
+        let round = |value: f32| (f64::from(value) * 100.0).round() / 100.0;
+        let roost = ["the first nest", "the second nest", "the perch"][index % ROOSTS.len()];
+        Some(serde_json::json!({
+            "kind": "hen",
+            "name": hen.name,
+            "doing": self.doing(index, now),
+            "near": near(placed.position).trim_start_matches("by ").trim_start_matches("near "),
+            "position": placed.position.to_array().map(round),
+            "heading_degrees": placed.heading.to_degrees().rem_euclid(360.0).round(),
+            "wearing": hen.cone.then_some("a traffic cone"),
+            "pace": round(hen.pace),
+            "roosts_on": roost,
+            "home": [round(kept.home.x), round(kept.home.y)],
+            "pointed_at_by": kept.pointers.len(),
+            "startled_seconds_ago": kept.startled.map(|startled| now.saturating_sub(startled) / 1_000),
+            "coordinates": "metres, in the farmyard's scene coordinates: x across, y up, z towards where participants arrive; home is [x, z]",
+        }))
     }
 }
 
