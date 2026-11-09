@@ -3737,8 +3737,11 @@ impl Hub {
             }
             ClientMessage::StopReplay => {
                 // Stopping is harmless when nothing plays, so a stop that crosses the end of a replay is not refused.
-                if let Some(record) = space.and_then(|space| state.space_mut(space)) {
-                    record.speech.stop(participant);
+                if let Some(record) = space.and_then(|space| state.space_mut(space))
+                    && record.speech.stop(participant)
+                {
+                    // A later reply waits for them, and is heard from its start now.
+                    record.wake();
                 }
             }
             ClientMessage::Engagement { state: engagement } => {
@@ -5398,6 +5401,8 @@ impl Hub {
         let item = Item::Frame {
             sample_rate: frame.sample_rate,
             samples: frame.samples.as_slice().into(),
+            sequence: frame.sequence,
+            timestamp: frame.timestamp,
         };
         self.live_speech(space, reply, item, |outbox| {
             outbox.agent_audio(encoded.clone())

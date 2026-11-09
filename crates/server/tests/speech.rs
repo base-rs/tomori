@@ -1883,8 +1883,17 @@ fn a_visitor_hears_replies_live_but_is_never_caught_up_and_cannot_replay() {
     assert_eq!(from(&heard, REPLAY_SOURCE), 0);
 }
 
-#[test]
-fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
+/// What Ada heard after asking for a replay, frames and announcements, what Bob heard, and how many frames each reply is.
+struct ReplyDuringReplay {
+    heard: Vec<AudioFrame>,
+    announcements: Vec<ServerMessage>,
+    bob: Vec<AudioFrame>,
+    first_frames: usize,
+    second_frames: usize,
+}
+
+/// Ada and Bob heard a first reply live, and Ada asks for it again; a second reply starts while it plays, and, if `stop`, Ada stops the replay then.
+fn a_reply_during_a_replay(stop: bool) -> ReplyDuringReplay {
     let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
     let (mut ada, mut bob) = pair(&server);
     report(&mut ada, Engagement::Engaged);
@@ -1910,11 +1919,75 @@ fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
     let second = "A short second reply.";
     session.stream(&[second]);
     let second_frames = words(&[second]) * FRAMES_PER_WORD;
+    let mut bob_heard = Vec::new();
+    if stop {
+        // Bob hears its start live before Ada stops, so that it has started when she does.
+        bob_heard.push(
+            bob.next_audio(Duration::from_secs(5))
+                .expect("the reply starts"),
+        );
+        ada.send(&ClientMessage::StopReplay);
+    }
 
-    let (heard, _) = listen(&ada, Duration::from_millis(400));
-    // The replay stopped part way, and the new reply played live, whole.
-    assert!(from(&heard, REPLAY_SOURCE) + 1 < first_frames);
+    // A breath of 400 ms comes between the replay and the reply that waited for it.
+    let (mut heard, announcements) = listen(&ada, Duration::from_millis(800));
+    heard.insert(0, replayed);
+    bob_heard.extend(listen(&bob, Duration::from_millis(200)).0);
+    ReplyDuringReplay {
+        heard,
+        announcements,
+        bob: bob_heard,
+        first_frames,
+        second_frames,
+    }
+}
+
+#[test]
+fn a_later_reply_waits_for_a_replay_to_end_and_is_heard_after_it_from_its_start() {
+    let ReplyDuringReplay {
+        heard,
+        announcements,
+        bob,
+        first_frames,
+        second_frames,
+    } = a_reply_during_a_replay(false);
+    // The replay played whole, and then the new reply, as the live speech it is, whole.
+    assert_eq!(from(&heard, REPLAY_SOURCE), first_frames);
     assert_eq!(from(&heard, AGENT_SOURCE), second_frames);
+    let live = heard
+        .iter()
+        .position(|frame| frame.source == AGENT_SOURCE)
+        .unwrap();
+    assert_eq!(live, first_frames);
+    assert_stream(&heard[..live]);
+    assert_stream(&heard[live..]);
+    // As Bob heard it live, in the same frames, and announced as live speech rather than played again.
+    assert_eq!(from(&bob, AGENT_SOURCE), second_frames);
+    assert_eq!(from(&bob, REPLAY_SOURCE), 0);
+    assert_eq!(heard.last().unwrap().sequence, bob.last().unwrap().sequence);
+    assert!(
+        announcements
+            .iter()
+            .any(|message| matches!(message, ServerMessage::Speech { replay: true, .. }))
+    );
+    assert!(matches!(
+        announcements.last(),
+        Some(ServerMessage::Speech { replay: false, .. })
+    ));
+}
+
+#[test]
+fn stopping_a_replay_while_a_later_reply_waits_hears_that_reply_from_its_start() {
+    let ReplyDuringReplay {
+        heard,
+        bob,
+        first_frames,
+        second_frames,
+        ..
+    } = a_reply_during_a_replay(true);
+    assert!(from(&heard, REPLAY_SOURCE) < first_frames);
+    assert_eq!(from(&heard, AGENT_SOURCE), second_frames);
+    assert_eq!(from(&bob, AGENT_SOURCE), second_frames);
     let live = heard
         .iter()
         .position(|frame| frame.source == AGENT_SOURCE)
@@ -1924,9 +1997,6 @@ fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
             .iter()
             .all(|frame| frame.source == AGENT_SOURCE)
     );
-    let (heard, _) = listen(&bob, Duration::from_millis(200));
-    assert_eq!(from(&heard, AGENT_SOURCE), second_frames);
-    assert_eq!(from(&heard, REPLAY_SOURCE), 0);
 }
 
 #[test]

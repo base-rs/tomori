@@ -9,16 +9,16 @@
 //! - **Unreported** listeners hear live speech too, but their client has not yet said whether it is listening. A client that never reports engagement, such as an older client or the spectator, stays at the live edge, as before.
 //! - **Away** listeners are in the space but not listening, and **absent** ones have left it. Each keeps the position up to which it heard.
 //! - **Streaming** listeners hear retained speech from their own cursor, at the rate it plays, from [`tomori_protocol::REPLAY_SOURCE`], and are not sent live speech meanwhile, so that nobody hears the same reply twice at once.
-//! - **Held** listeners are recording push-to-talk, and a reply started since they began, which they are not sent until they stop, when they hear it from its start, as a catch-up, after [`RELEASE_PAUSE`] if they stopped by letting go of X. A reply already playing as they began goes on live, silenced by their client while they record, as before.
+//! - **Held** listeners are recording push-to-talk, and a reply started since they began, which they are not sent until they stop, when they hear it from its start, as a catch-up, after [`RELEASE_PAUSE`] if they stopped by letting go of X. So is a reply that waited for a replay or catch-up to end and that they had not begun to hear, as when X stops the replay. A reply already playing as they began goes on live, silenced by their client while they record, as before.
 //!
-//! A participant who joins or returns while listening, having missed part of the latest reply, streams from that reply's start and then everything after it, until their cursor reaches the live edge, where they become live. A replay streams the same way, from the start of the reply asked for, but stops as soon as a later reply starts live: live speech wins.
+//! A participant who joins or returns while listening, having missed part of the latest reply, streams from that reply's start and then everything after it, until their cursor reaches the live edge, where they become live. A replay streams the same way, from the start of the reply asked for. A later reply that starts live meanwhile waits here, in what is kept, until what is played again has been sent to its end, and then follows it from its start, as live speech from [`tomori_protocol::AGENT_SOURCE`] heard late, with the sequence numbers and timestamps it was sent with live, so that the listener's client plays it after the replay's last sample, as live speech, and the live speech that follows it continues the same stream. Stopping a replay skips to that later reply, rather than past it.
 //!
 //! Nothing here touches the network or a clock; the hub records items, applies joins, departures and engagement, and asks [`Retention::pace`] what each streaming listener should be sent at a given time.
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tomori_protocol::{AudioFrame, Engagement, Gate, REPLAY_SOURCE, ServerMessage};
+use tomori_protocol::{AGENT_SOURCE, AudioFrame, Engagement, Gate, REPLAY_SOURCE, ServerMessage};
 
 /// The most audio retained per space, about 14 MB of 24 kHz mono speech. The oldest is dropped first.
 pub const RETAINED_AUDIO: Duration = Duration::from_secs(300);
@@ -41,9 +41,12 @@ pub const RELEASE_PAUSE: Duration = Duration::from_millis(600);
 pub enum Item {
     /// A [`ServerMessage::Speech`] announcing the frames that follow.
     Announce(ServerMessage),
+    /// A frame of audio, with the sequence number and timestamp it was sent with live from [`tomori_protocol::AGENT_SOURCE`], so that it can be sent late as the same frame.
     Frame {
         sample_rate: u32,
         samples: Arc<[i16]>,
+        sequence: u32,
+        timestamp: u64,
     },
     /// A breath of [`SEGMENT_GAP`] between two segments.
     Gap,
@@ -55,6 +58,7 @@ impl Item {
             Item::Frame {
                 sample_rate,
                 samples,
+                ..
             } if *sample_rate > 0 => {
                 Duration::from_secs_f64(samples.len() as f64 / f64::from(*sample_rate))
             }
@@ -104,8 +108,8 @@ struct Stream {
     cursor: u64,
     /// When the next frame should start playing, once one has been sent.
     clock: Option<Instant>,
-    /// For a replay, the newest reply when it started: live speech of a later reply stops it. A catch-up continues through later replies.
-    until: Option<u64>,
+    /// The first entry of the first reply that started live after this stream began, once one has: from there on, what is sent is live speech heard late, rather than speech played again. See the [module documentation](self).
+    later: Option<u64>,
     /// For speech held while its listener recorded, released by letting go of X, when it starts, after
     /// [`RELEASE_PAUSE`]: nothing is sent before then, and recording again meanwhile holds it again.
     after: Option<Instant>,
@@ -181,7 +185,7 @@ impl Retention {
         (self.audio, self.replies.len())
     }
 
-    /// Record one item of live speech, part of reply number `reply`. A replay of an earlier reply stops when a later one starts, and its listener hears the new reply live from its start.
+    /// Record one item of live speech, part of reply number `reply`. A later reply that starts while a listener streams waits for them, and is sent to them from its start once what they hear played again has been sent to its end.
     pub fn record(&mut self, reply: u64, item: Item) {
         if self.closed {
             return;
@@ -194,18 +198,15 @@ impl Retention {
             let start = self.end();
             self.replies.push_back((reply, start));
             for listener in self.listeners.values_mut() {
-                let hearing = match &listener.state {
-                    State::Live => true,
-                    State::Streaming(stream) => stream.until.is_some_and(|until| until != reply),
-                    _ => false,
-                };
-                if hearing {
-                    // Someone recording hears the new reply once they stop, from its start; anyone else live.
-                    listener.state = if listener.recording.is_some() {
-                        State::Held { heard: start }
-                    } else {
-                        State::Live
-                    };
+                match &mut listener.state {
+                    // Someone recording hears the new reply once they stop, from its start.
+                    State::Live if listener.recording.is_some() => {
+                        listener.state = State::Held { heard: start };
+                    }
+                    State::Streaming(stream) => {
+                        stream.later.get_or_insert(start);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -214,14 +215,24 @@ impl Retention {
         self.trim();
     }
 
-    /// Drop the oldest entries beyond the bounds, and forget absent listeners who missed everything still retained.
+    /// Drop the oldest entries beyond the bounds, and forget absent listeners who missed everything still retained. A reply beyond [`RETAINED_REPLIES`] is kept while a streaming or held listener has still to hear it, as when later replies wait behind a replay, within [`RETAINED_AUDIO`] still.
     fn trim(&mut self) {
+        let needed = self
+            .listeners
+            .values()
+            .filter_map(|listener| match &listener.state {
+                State::Streaming(stream) => Some(stream.cursor),
+                State::Held { heard } => Some(*heard),
+                _ => None,
+            })
+            .min();
         while let Some(front) = self.entries.front() {
             let excess_replies = self.replies.len() > RETAINED_REPLIES
                 && self
                     .replies
                     .front()
-                    .is_some_and(|(reply, _)| *reply == front.reply);
+                    .is_some_and(|(reply, _)| *reply == front.reply)
+                && needed.is_none_or(|cursor| self.first < cursor);
             if !excess_replies && self.audio <= RETAINED_AUDIO {
                 break;
             }
@@ -327,7 +338,7 @@ impl Retention {
         listener.state = State::Streaming(Stream {
             cursor: heard,
             clock: None,
-            until: None,
+            later: None,
             after,
         });
         true
@@ -357,7 +368,7 @@ impl Retention {
             Some(start) if heard < until && until > start => State::Streaming(Stream {
                 cursor: start,
                 clock: None,
-                until: None,
+                later: None,
                 after: None,
             }),
             _ => State::Live,
@@ -456,13 +467,12 @@ impl Retention {
                 .map(|index| self.first + index as u64)
                 .ok_or("That reply is no longer kept, so it cannot be played again.")?,
         };
-        let newest = self.replies.back().map(|(reply, _)| *reply);
         let state = self.holding(
             participant,
             State::Streaming(Stream {
                 cursor: start,
                 clock: None,
-                until: newest,
+                later: None,
                 after: None,
             }),
         );
@@ -470,14 +480,26 @@ impl Retention {
         Ok(())
     }
 
-    /// Stop `participant`'s replay or catch-up: they hear live speech from here on.
-    pub fn stop(&mut self, participant: &str) {
-        if self
-            .listeners
-            .get(participant)
-            .is_some_and(|listener| matches!(listener.state, State::Streaming(_)))
-        {
-            self.set(participant, State::Live);
+    /// Stop `participant`'s replay or catch-up: they hear live speech from here on, starting with a later reply that waits for them, if one does, from its start, at once. Returns whether they still stream, so that the pacer must be woken. If they are recording, as when X stops a replay, the later reply is held for them until they stop, rather than played while they speak.
+    pub fn stop(&mut self, participant: &str) -> bool {
+        let Some(listener) = self.listeners.get_mut(participant) else {
+            return false;
+        };
+        let State::Streaming(stream) = &mut listener.state else {
+            return false;
+        };
+        match stream.later {
+            // Already hearing the later reply, they are hearing live speech, which a stop does not skip.
+            Some(later) if stream.cursor >= later => false,
+            Some(later) => {
+                stream.cursor = later;
+                stream.clock = None;
+                true
+            }
+            None => {
+                listener.state = State::Live;
+                false
+            }
         }
     }
 
@@ -541,18 +563,24 @@ impl Retention {
                     break;
                 }
                 let entry = &self.entries[(stream.cursor - first) as usize];
-                // A catch-up that reaches a reply started since its listener began recording waits there for them.
-                if listener.recording.is_some_and(|since| entry.reply > since) {
+                // While they record, a reply they have not begun to hear waits for them there, as one started since they
+                // began, or one that waited for what was played again to end.
+                if listener
+                    .recording
+                    .is_some_and(|since| entry.reply > since || stream.later == Some(stream.cursor))
+                {
                     listener.state = State::Held {
                         heard: stream.cursor,
                     };
                     break;
                 }
+                // A later reply, waiting until what was played again had been sent, is live speech heard late.
+                let late = stream.later.is_some_and(|later| stream.cursor >= later);
                 match &entry.item {
                     Item::Announce(message) => {
                         let mut message = message.clone();
                         if let ServerMessage::Speech { replay, .. } = &mut message {
-                            *replay = true;
+                            *replay = !late;
                         }
                         deliveries.push((participant.clone(), Delivery::Message(message)));
                     }
@@ -563,6 +591,8 @@ impl Retention {
                     item @ Item::Frame {
                         sample_rate,
                         samples,
+                        sequence,
+                        timestamp,
                     } => {
                         let clock = stream.clock.filter(|clock| *clock >= now).unwrap_or(now);
                         let due = clock.checked_sub(LEAD).unwrap_or(clock);
@@ -570,20 +600,29 @@ impl Retention {
                             next = Some(next.map_or(due, |next| next.min(due)));
                             break;
                         }
+                        // Heard late, a frame is the one sent live, so that the live speech after it continues its stream.
+                        let (source, sequence, timestamp) = if late {
+                            (AGENT_SOURCE, *sequence, *timestamp)
+                        } else {
+                            let sent = listener.sequence;
+                            listener.sequence = listener.sequence.wrapping_add(1);
+                            (
+                                REPLAY_SOURCE,
+                                sent,
+                                clock.saturating_duration_since(listener.epoch).as_micros() as u64,
+                            )
+                        };
                         deliveries.push((
                             participant.clone(),
                             Delivery::Frame(AudioFrame {
                                 gate: Gate::Live,
-                                source: REPLAY_SOURCE,
-                                sequence: listener.sequence,
-                                timestamp: clock
-                                    .saturating_duration_since(listener.epoch)
-                                    .as_micros() as u64,
+                                source,
+                                sequence,
+                                timestamp,
                                 sample_rate: *sample_rate,
                                 samples: samples.to_vec(),
                             }),
                         ));
-                        listener.sequence = listener.sequence.wrapping_add(1);
                         stream.clock = Some(clock + item.duration());
                     }
                 }
@@ -613,9 +652,83 @@ mod tests {
     }
 
     fn frame(value: i16) -> Item {
+        live_frame(value, 0)
+    }
+
+    /// A frame sent live as number `sequence` of the space's agent speech.
+    fn live_frame(value: i16, sequence: u32) -> Item {
         Item::Frame {
             sample_rate: RATE,
             samples: vec![value; FRAME].into(),
+            sequence,
+            timestamp: u64::from(sequence) * 20_000,
+        }
+    }
+
+    /// Record a reply of one segment of `frames` frames whose samples are `value`, numbered as sent live from `sequence`.
+    fn speak_live(
+        retention: &mut Retention,
+        reply: u64,
+        message: &str,
+        value: i16,
+        frames: u32,
+        sequence: u32,
+    ) {
+        retention.record(reply, announce(reply as u32, message));
+        for index in 0..frames {
+            retention.record(reply, live_frame(value, sequence + index));
+        }
+        retention.record(reply, Item::Gap);
+    }
+
+    /// What one listener heard, in order: each announcement's text and whether it was marked as played again, and each frame's source, first sample and sequence number.
+    #[derive(Default)]
+    struct Heard {
+        texts: Vec<(String, bool)>,
+        frames: Vec<(u32, i16, u32)>,
+    }
+
+    impl Heard {
+        fn values(&self, source: u32) -> Vec<i16> {
+            self.frames
+                .iter()
+                .filter(|frame| frame.0 == source)
+                .map(|frame| frame.1)
+                .collect()
+        }
+    }
+
+    /// Pace from `now` until nothing is due or `until`, if given, collecting what `participant` is sent.
+    fn hear(
+        retention: &mut Retention,
+        participant: &str,
+        mut now: Instant,
+        until: Option<Instant>,
+        heard: &mut Heard,
+    ) -> Instant {
+        loop {
+            let mut deliveries = Vec::new();
+            let next = retention.pace(now, &mut deliveries);
+            for (to, delivery) in deliveries {
+                assert_eq!(to, participant);
+                match delivery {
+                    Delivery::Message(ServerMessage::Speech { text, replay, .. }) => {
+                        heard.texts.push((text, replay))
+                    }
+                    Delivery::Message(message) => {
+                        unreachable!("only speech is kept, not {message:?}")
+                    }
+                    Delivery::Frame(frame) => {
+                        heard
+                            .frames
+                            .push((frame.source, frame.samples[0], frame.sequence))
+                    }
+                }
+            }
+            match next {
+                Some(next) if until.is_none_or(|until| next <= until) => now = next.max(now),
+                _ => return until.unwrap_or(now).max(now),
+            }
         }
     }
 
@@ -836,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replay_plays_the_latest_reply_to_one_listener_and_live_speech_stops_it() {
+    fn a_replay_plays_the_latest_reply_to_one_listener_and_a_later_reply_waits_for_it() {
         let now = Instant::now();
         let mut retention = Retention::default();
         retention.joined("ada", Some(Engagement::Engaged));
@@ -856,9 +969,10 @@ mod tests {
         assert!(
             matches!(&deliveries[0].1, Delivery::Message(ServerMessage::Speech { message, .. }) if message == "m2")
         );
-        // A new reply starts live part way through: Ada hears it live, from its start.
+        // A new reply starts live part way through: Ada hears it after the replay, rather than live now.
         retention.record(3, announce(3, "m3"));
-        assert!(retention.hears_live("ada"));
+        assert!(!retention.hears_live("ada"));
+        assert!(retention.hears_live("bob"));
         // An earlier reply can be asked for by its message, while it is kept.
         retention.replay("bob", Some("m2")).unwrap();
         assert!(retention.is_streaming("bob"));
@@ -930,6 +1044,7 @@ mod tests {
         assert_eq!(retention.retained(), (Duration::from_millis(400), 2));
         assert!(retention.replay("ada", Some("m1")).is_err());
         assert!(retention.replay("ada", Some("m2")).is_ok());
+        retention.stop("ada");
 
         // A single reply longer than the bound keeps only its latest five minutes.
         let frames = (RETAINED_AUDIO.as_millis() / 20) as usize + 100;
@@ -950,12 +1065,19 @@ mod tests {
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 2);
         retention.joined("ada", Some(Engagement::Engaged));
-        // Two more replies start before she has heard any of the first.
-        speak(&mut retention, 2, "m2", 2, 2);
-        speak(&mut retention, 3, "m3", 3, 2);
-        let (texts, values, _) = drain(&mut retention, "ada", now);
-        assert_eq!(texts, ["Segment 2.", "Segment 3."]);
-        assert_eq!(values, [2, 2, 3, 3]);
+        // Two more replies start before she has heard any of the first, and its audio is more than is kept.
+        let long = (RETAINED_AUDIO.as_millis() / 20) as u32;
+        speak_live(&mut retention, 2, "m2", 2, long / 2 + 10, 0);
+        speak_live(&mut retention, 3, "m3", 3, long / 2, long / 2 + 10);
+        let mut heard = Heard::default();
+        hear(&mut retention, "ada", now, None, &mut heard);
+        // The first reply was dropped to keep within the bound, and with it the start of the second, so she hears the
+        // rest of the second and then the third, which waited for her, as live speech heard late.
+        assert_eq!(heard.texts, [("Segment 3.".to_owned(), false)]);
+        assert!(heard.values(REPLAY_SOURCE).is_empty());
+        let values = heard.values(AGENT_SOURCE);
+        assert_eq!(values.len(), long as usize);
+        assert!(values.ends_with(&vec![3; long as usize / 2]));
     }
 
     #[test]
@@ -1037,6 +1159,8 @@ mod tests {
             Item::Frame {
                 sample_rate: 1,
                 samples: vec![0; long].into(),
+                sequence: 0,
+                timestamp: 0,
             },
         );
         assert!(retention.entries.is_empty());
@@ -1067,6 +1191,295 @@ mod tests {
         let Some((_, Delivery::Message(ServerMessage::Left { .. }))) = deliveries.first() else {
             unreachable!("the announcement comes first");
         };
+    }
+
+    const REPLAY: i16 = 1;
+    const LATER: i16 = 2;
+    const NEXT: i16 = 3;
+
+    /// Ada heard reply 1, `frames` frames long, live as frames numbered from 0, and asks for it again.
+    fn replaying(frames: u32) -> (Retention, Instant) {
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        speak_live(&mut retention, 1, "m1", REPLAY, frames, 0);
+        retention.replay("ada", None).unwrap();
+        (retention, Instant::now())
+    }
+
+    #[test]
+    fn a_reply_that_starts_during_a_replay_waits_for_its_end_and_then_plays_from_its_start() {
+        let length = 60;
+        let (mut retention, start) = replaying(length);
+        let mut heard = Heard::default();
+        // A third of the way through the replay, a later reply starts live, and is spoken whole before the replay ends.
+        let third = start + Duration::from_millis(20 * u64::from(length) / 3);
+        let now = hear(&mut retention, "ada", start, Some(third), &mut heard);
+        let before = heard.frames.len();
+        assert!(before > 0 && before < length as usize, "{before}");
+        speak_live(&mut retention, 2, "m2", LATER, 10, length);
+        assert!(!retention.hears_live("ada"));
+        let now = hear(&mut retention, "ada", now, None, &mut heard);
+        assert!(retention.hears_live("ada"));
+        // The replay played whole, played again, and then the later reply, as the live speech it was, from its start.
+        assert_eq!(
+            heard.texts,
+            [
+                ("Segment 1.".to_owned(), true),
+                ("Segment 2.".to_owned(), false)
+            ]
+        );
+        let mut expected: Vec<(u32, i16, u32)> = (0..length)
+            .map(|index| (REPLAY_SOURCE, REPLAY, index))
+            .collect();
+        expected.extend((0..10).map(|index| (AGENT_SOURCE, LATER, length + index)));
+        assert_eq!(heard.frames, expected);
+        // At its playing rate, after a breath, so the reply begins only once the replay's last frame is due to end.
+        // Its last frame is sent a lead and a frame before it ends.
+        let elapsed = now - start;
+        let played = Duration::from_millis(20 * u64::from(length + 10)) + SEGMENT_GAP;
+        assert_eq!(elapsed + LEAD + Duration::from_millis(20), played);
+        // Caught up with live speech, she follows it again, and the next frame live continues the same stream.
+        retention.record(2, live_frame(LATER, length + 10));
+        let mut deliveries = Vec::new();
+        assert_eq!(retention.pace(now, &mut deliveries), None);
+        assert!(deliveries.is_empty());
+    }
+
+    #[test]
+    fn pressing_x_while_a_reply_waits_for_a_replay_holds_it_until_they_let_go() {
+        // Her client stops the replay and begins an utterance, in either order.
+        for stop_first in [true, false] {
+            let length = 30;
+            let (mut retention, start) = replaying(length);
+            let mut heard = Heard::default();
+            let now = hear(
+                &mut retention,
+                "ada",
+                start,
+                Some(start + Duration::from_millis(200)),
+                &mut heard,
+            );
+            speak_live(&mut retention, 2, "m2", LATER, 5, length);
+            if stop_first {
+                assert!(retention.stop("ada"));
+                retention.recording("ada");
+            } else {
+                retention.recording("ada");
+                assert!(retention.stop("ada"));
+            }
+            // Nothing of the reply that waited is sent while she speaks, and she is told that a reply waits.
+            let mut during = Heard::default();
+            let now = hear(
+                &mut retention,
+                "ada",
+                now,
+                Some(now + Duration::from_secs(2)),
+                &mut during,
+            );
+            assert!(during.frames.is_empty() && during.texts.is_empty());
+            assert!(!retention.hears_live("ada"));
+            assert_eq!(retention.held_changes(), [("ada".to_owned(), true)]);
+            // She lets go of X, and after the pause hears the reply from its start.
+            assert!(retention.released("ada", now));
+            let mut paused = Heard::default();
+            let now = hear(
+                &mut retention,
+                "ada",
+                now,
+                Some(now + RELEASE_PAUSE - LEAD - Duration::from_millis(1)),
+                &mut paused,
+            );
+            assert!(paused.frames.is_empty(), "{stop_first}");
+            let mut after = Heard::default();
+            hear(&mut retention, "ada", now, None, &mut after);
+            assert_eq!(after.texts, [("Segment 2.".to_owned(), true)]);
+            assert_eq!(after.values(REPLAY_SOURCE), [LATER; 5]);
+            assert!(retention.hears_live("ada"));
+        }
+    }
+
+    #[test]
+    fn a_reply_that_waits_for_a_replay_is_held_while_its_listener_records() {
+        // A client that goes on hearing the replay as its participant records, silenced.
+        let length = 10;
+        let (mut retention, start) = replaying(length);
+        speak_live(&mut retention, 2, "m2", LATER, 5, length);
+        retention.recording("ada");
+        let mut heard = Heard::default();
+        let now = hear(&mut retention, "ada", start, None, &mut heard);
+        assert_eq!(heard.texts, [("Segment 1.".to_owned(), true)]);
+        assert_eq!(heard.values(REPLAY_SOURCE), [REPLAY; 10]);
+        assert!(heard.values(AGENT_SOURCE).is_empty());
+        assert!(!retention.hears_live("ada"));
+        // Replies that start meanwhile are held too, and what she has still to hear is kept beyond the latest two.
+        speak_live(&mut retention, 3, "m3", NEXT, 2, length + 5);
+        speak_live(&mut retention, 4, "m4", NEXT, 2, length + 7);
+        assert_eq!(retention.retained().1, 3);
+        assert!(retention.recorded("ada"));
+        let mut after = Heard::default();
+        hear(&mut retention, "ada", now, None, &mut after);
+        let texts: Vec<&str> = after.texts.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(texts, ["Segment 2.", "Segment 3.", "Segment 4."]);
+        assert_eq!(after.frames.len(), 9);
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn a_listener_who_leaves_while_a_reply_waits_hears_it_from_its_start_on_returning() {
+        let length = 30;
+        let (mut retention, start) = replaying(length);
+        let mut heard = Heard::default();
+        hear(
+            &mut retention,
+            "ada",
+            start,
+            Some(start + Duration::from_millis(200)),
+            &mut heard,
+        );
+        speak_live(&mut retention, 2, "m2", LATER, 5, length);
+        // Her connection ends part way through the replay, with the reply still waiting for her.
+        retention.left("ada");
+        assert!(retention.joined("ada", Some(Engagement::Engaged)));
+        let mut again = Heard::default();
+        hear(&mut retention, "ada", start, None, &mut again);
+        assert_eq!(again.texts, [("Segment 2.".to_owned(), true)]);
+        assert_eq!(again.values(REPLAY_SOURCE), [LATER; 5]);
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn a_reply_that_starts_once_a_replay_has_been_sent_is_heard_live() {
+        let (mut retention, start) = replaying(10);
+        let mut heard = Heard::default();
+        // Everything of the replay has been sent, its last frame a lead before it ends, when the reply starts: she is
+        // live again, and her client plays the reply after the replay's last sample (see the client's mixer).
+        hear(
+            &mut retention,
+            "ada",
+            start,
+            Some(start + Duration::from_millis(150)),
+            &mut heard,
+        );
+        assert_eq!(heard.values(REPLAY_SOURCE), [REPLAY; 10]);
+        assert!(retention.hears_live("ada"));
+        speak_live(&mut retention, 2, "m2", LATER, 5, 10);
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn stopping_a_replay_while_a_reply_waits_plays_that_reply_from_its_start_at_once() {
+        let (mut retention, start) = replaying(50);
+        let mut heard = Heard::default();
+        let now = hear(
+            &mut retention,
+            "ada",
+            start,
+            Some(start + Duration::from_millis(200)),
+            &mut heard,
+        );
+        speak_live(&mut retention, 2, "m2", LATER, 20, 50);
+        // Stopped with the right stick, the rest of the replay is skipped, and the reply waiting for it is due now.
+        assert!(retention.stop("ada"));
+        let mut deliveries = Vec::new();
+        retention.pace(now, &mut deliveries);
+        assert!(matches!(
+            &deliveries[0].1,
+            Delivery::Message(ServerMessage::Speech { replay: false, message, .. }) if message == "m2"
+        ));
+        let Delivery::Frame(frame) = &deliveries[1].1 else {
+            unreachable!("the reply's first frame follows its announcement at once");
+        };
+        assert_eq!((frame.source, frame.sequence), (AGENT_SOURCE, 50));
+        // Hearing it is hearing live speech, which a stop that crosses it does not skip.
+        assert!(!retention.stop("ada"));
+        assert!(!retention.hears_live("ada"));
+        hear(&mut retention, "ada", now, None, &mut heard);
+        assert!(heard.values(REPLAY_SOURCE).len() < 50);
+        assert!(retention.hears_live("ada"));
+        // A stop with nothing waiting goes live, and one with nothing playing does nothing.
+        retention.replay("ada", None).unwrap();
+        assert!(!retention.stop("ada"));
+        assert!(retention.hears_live("ada"));
+        assert!(!retention.stop("ada"));
+        assert!(!retention.stop("nobody"));
+    }
+
+    #[test]
+    fn two_replies_that_start_during_a_replay_both_wait_and_play_in_order() {
+        let (mut retention, start) = replaying(50);
+        let mut heard = Heard::default();
+        let now = hear(
+            &mut retention,
+            "ada",
+            start,
+            Some(start + Duration::from_millis(100)),
+            &mut heard,
+        );
+        speak_live(&mut retention, 2, "m2", LATER, 10, 50);
+        speak_live(&mut retention, 3, "m3", NEXT, 10, 60);
+        // Three replies are kept while Ada still has to hear the first of them.
+        assert_eq!(retention.retained().1, 3);
+        hear(&mut retention, "ada", now, None, &mut heard);
+        assert_eq!(
+            heard.texts,
+            [
+                ("Segment 1.".to_owned(), true),
+                ("Segment 2.".to_owned(), false),
+                ("Segment 3.".to_owned(), false)
+            ]
+        );
+        assert_eq!(heard.values(REPLAY_SOURCE), [REPLAY; 50]);
+        let mut later = vec![LATER; 10];
+        later.extend([NEXT; 10]);
+        assert_eq!(heard.values(AGENT_SOURCE), later);
+        let sequences: Vec<u32> = heard
+            .frames
+            .iter()
+            .filter(|frame| frame.0 == AGENT_SOURCE)
+            .map(|frame| frame.2)
+            .collect();
+        assert_eq!(sequences, (50..70).collect::<Vec<_>>());
+        // Heard, the oldest goes with the next reply.
+        speak(&mut retention, 4, "m4", 4, 1);
+        assert_eq!(retention.retained().1, 2);
+    }
+
+    #[test]
+    fn what_waits_behind_a_replay_is_bounded_by_what_is_kept() {
+        let (mut retention, start) = replaying(50);
+        let mut heard = Heard::default();
+        let now = hear(
+            &mut retention,
+            "ada",
+            start,
+            Some(start + Duration::from_millis(100)),
+            &mut heard,
+        );
+        // A later reply longer than everything kept starts: the oldest audio is dropped to keep within the bound, the rest
+        // of the replay first, so that what waits never holds more than five minutes of audio.
+        let long = (RETAINED_AUDIO.as_millis() / 20) as u32 + 10;
+        speak_live(&mut retention, 2, "m2", LATER, long, 50);
+        assert_eq!(retention.retained().0, RETAINED_AUDIO);
+        hear(&mut retention, "ada", now, None, &mut heard);
+        assert!(heard.values(REPLAY_SOURCE).len() < 50);
+        let later = heard.values(AGENT_SOURCE);
+        assert_eq!(later.len(), long as usize - 10);
+        assert!(later.iter().all(|&value| value == LATER));
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn a_reply_that_starts_during_a_catch_up_waits_for_it_too() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        speak_live(&mut retention, 1, "m1", REPLAY, 20, 0);
+        assert!(retention.joined("ada", Some(Engagement::Engaged)));
+        speak_live(&mut retention, 2, "m2", LATER, 5, 20);
+        let mut heard = Heard::default();
+        hear(&mut retention, "ada", now, None, &mut heard);
+        assert_eq!(heard.values(REPLAY_SOURCE), [REPLAY; 20]);
+        assert_eq!(heard.values(AGENT_SOURCE), [LATER; 5]);
+        assert_eq!(heard.texts[1], ("Segment 2.".to_owned(), false));
     }
 
     #[test]

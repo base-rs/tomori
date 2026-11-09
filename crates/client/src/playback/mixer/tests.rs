@@ -848,8 +848,9 @@ fn a_replay_plays_to_its_last_sample_before_live_speech_that_follows_it() {
 fn a_replay_cut_short_by_a_later_reply_plays_what_was_sent_and_then_all_of_the_reply() {
     const REPLAY: i16 = 1_000;
     const LIVE: i16 = 3_000;
-    // A later reply starts live half way through a replay, which the server stops there; the reply is long enough to
-    // be held behind what was sent of the replay for as long as it plays, and played whole after it.
+    // A later reply arrives half way through a replay, as when an older server stopped the replay there, or a replay
+    // is stopped with the reply waiting; the reply is long enough to be held behind what was sent of the replay for as
+    // long as it plays, and played whole after it.
     // Its start arrived 100 ms late, together with what followed, so that 220 ms of it are buffered here from then
     // on, as after the network stalls: the reply is held back that long, and more than the buffer's limit of 250 ms of
     // it waits for the replay's end, none of which is discarded.
@@ -1009,4 +1010,58 @@ fn stopping_a_replay_with_nothing_of_it_to_play_changes_nothing() {
     mixer.stop_replay();
     mixer.push(frame(REPLAY_SOURCE, 1, 30));
     assert_eq!(mix(&mut mixer, 4), [30; 4]);
+}
+
+#[test]
+fn a_reply_that_waited_for_a_replay_follows_it_whole_after_the_live_speech_before_it() {
+    const BEFORE: i16 = 500;
+    const REPLAY: i16 = 1_000;
+    const LATER: i16 = 3_000;
+    // Live speech heard before the replay, then the replay, and then a later reply that started during it, which the
+    // server kept until the replay had been sent and then sent after a breath, as the live frames it was: their
+    // sequence numbers jump on by what was spoken live meanwhile, and, without a breath, it comes at once.
+    for breath in [0, 400] {
+        let before = Paced {
+            source: AGENT_SOURCE,
+            sequence: 0,
+            value: BEFORE,
+            start: 0,
+            frames: 25,
+            late: 0,
+        };
+        let replay = Paced {
+            source: REPLAY_SOURCE,
+            sequence: 0,
+            value: REPLAY,
+            start: 700,
+            frames: 50,
+            late: 0,
+        };
+        let later = Paced {
+            source: AGENT_SOURCE,
+            sequence: 1_000,
+            value: LATER,
+            start: 1_700 + breath,
+            frames: 25,
+            late: 0,
+        };
+        let mut mixer = headset();
+        let output = play_paced(&mut mixer, &[before, replay, later], 3_000, |_, _| {});
+        let count = |value: i16| output.iter().filter(|&&sample| sample == value).count();
+        assert_eq!(count(BEFORE), before.played(), "{breath} ms");
+        assert_eq!(count(REPLAY), replay.played(), "{breath} ms");
+        assert_eq!(count(LATER), later.played(), "{breath} ms");
+        let last = |value: i16| output.iter().rposition(|&sample| sample == value);
+        let first = |value: i16| output.iter().position(|&sample| sample == value);
+        assert!(last(BEFORE) < first(REPLAY), "{breath} ms");
+        assert!(last(REPLAY) < first(LATER), "{breath} ms");
+        // No two of them together: what else is heard is only the one sample the live stream interpolates half way from
+        // its last before the replay to its first after it.
+        let between = output
+            .iter()
+            .filter(|sample| ![0, BEFORE, REPLAY, LATER].contains(*sample))
+            .collect::<Vec<_>>();
+        assert_eq!(between, [&((BEFORE + LATER) / 2)], "{breath} ms");
+        assert_eq!(mixer.statistics().discarded_frames, 0);
+    }
 }
