@@ -228,7 +228,13 @@ mod tests {
         ] {
             let error = metric.clone().with_link(link).unwrap_err();
             assert!(!error.to_string().contains("secret"));
-            assert!(matches!(error, Error::Invalid(_)));
+            assert_eq!(
+                error,
+                Error::Invalid(
+                    "a metric's link must be an http:// or https:// URL without user information"
+                        .into()
+                )
+            );
         }
     }
 }
