@@ -1615,3 +1615,26 @@ fn bars_show_only_to_those_who_may_adjust_walls_highlighted_with_what_the_grip_d
     assert_eq!(bars(&output).len(), 2);
     assert!(label(&output).is_none());
 }
+
+#[test]
+fn of_two_bars_the_ray_meets_the_nearer_takes_hold_of_its_wall() {
+    let now = Instant::now();
+    // Two walls side by side, alike seen from home, so that a ray along their tops passes along both bars.
+    let wall = |id: &str, x: f32| {
+        Wall::new(
+            id,
+            WallKind::Added,
+            Pose::upright_facing([x, 1.5, -2.5], [x, 1.5, 0.0]),
+        )
+    };
+    let (left, right) = (wall("wall-1", -1.2), wall("wall-2", 1.2));
+    let (near, far) = (bar_of(&left), bar_of(&right));
+    assert!((near.middle.y - far.middle.y).abs() < 1e-4);
+    let ray = Ray::new(near.middle - Vec3::X * 3.0, Vec3::X);
+    assert!(near.hit(&ray.unwrap()).is_some() && far.hit(&ray.unwrap()).is_some());
+    let projection = shown(vec![right.clone(), left.clone()], Vec::new());
+    let mut projector = Projector::default();
+    let output = projector.update(frame_at(&projection, ray, 1.0, now));
+    assert!(output.wall_ticked);
+    assert_eq!(projector.carried_wall(), Some("wall-1"));
+}

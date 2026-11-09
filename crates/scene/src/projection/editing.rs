@@ -546,7 +546,8 @@ fn lay_out_handles(
     let (bar_row, bar_half) = choose(&fixed);
     // Along the top, a row beyond the bar where it stands there: the corners, the knob at the middle where it has room,
     // and the steppers towards the right corner.
-    let yk = if below { yt } else { bar_row + pv };
+    let beyond = |row: f32| if below { yt } else { row + pv };
+    let yk = beyond(bar_row);
     let (knob, fewer, more) = if room >= 4.0 * pu - 1e-6 {
         (
             at(between(0.0, xl + pu, xr - 3.0 * pu), yk),
@@ -638,11 +639,9 @@ fn lay_out_handles(
         (bar_row, bar_half)
     } else {
         let (row, half) = choose(&others);
-        if !below {
-            for (handle, at) in &mut points {
-                if top(*handle) {
-                    *at += up * (row - bar_row);
-                }
+        for (handle, at) in &mut points {
+            if top(*handle) {
+                *at += up * (beyond(row) - yk);
             }
         }
         (row, half)
