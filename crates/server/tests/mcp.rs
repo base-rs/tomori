@@ -1376,6 +1376,11 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
         hands: None,
         carrying: None,
     });
+    // Ada's report reaches the hub over her own connection, apart from the agent's calls, so wait until the agent is told where she looks before asking it to move anything there.
+    eventually(|| {
+        let seen = call(&server, &token, Some(&session), "presence", json!({}));
+        (seen["structuredContent"]["people"][0]["looking_at"]["slot"] == 4).then_some(())
+    });
     // Asked by nobody, two panels go onto the Tomori wall's first slots.
     agent_replies(
         &sessions[0],
@@ -1774,6 +1779,14 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
             .clone()
     };
     eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    // Ada's report reaches the hub over her own connection, so wait until the agent is told where she is before placing anything in front of her.
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
     // A wall four wide and one high, in front of Ada, facing her.
     let added = tool(
         "add_wall",
