@@ -227,7 +227,7 @@ mod tests {
             "grafana.example",
         ] {
             let error = metric.clone().with_link(link).unwrap_err();
-            assert!(!error.to_string().contains("secret"), "{link}");
+            assert!(!error.to_string().contains("secret"));
             assert!(matches!(error, Error::Invalid(_)));
         }
     }
