@@ -70,14 +70,20 @@ fn solids() -> Vec<([f32; 3], [f32; 3])> {
         .collect()
 }
 
-/// The walls of a farmyard space, as the server sends them: the Tomori wall at its home and the notice board.
+/// The walls of a farmyard space, as the server sends them: the Tomori wall at its home, beneath the agent, and the
+/// notice board.
 fn walls() -> Vec<Wall> {
     let board = tomori_server_app::farmyard_noticeboard();
     vec![
         Wall::new(
             TOMORI_WALL,
             WallKind::Tomori,
-            carried(tomori_server_app::farmyard_tomori_wall()),
+            tomori_server_app::builder()
+                .environments()
+                .iter()
+                .find(|environment| environment.id() == tomori_environment_farmyard::ID)
+                .and_then(|environment| environment.tomori_wall_home())
+                .unwrap(),
         )
         .with_shape(WallShape::Arc { radius: 2.3 }),
         Wall::new("environment-0", WallKind::Environment, carried(board.pose))
