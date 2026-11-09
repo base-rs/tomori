@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori` executable: its command line, and each mode as far as it gets without a display, an OpenXR runtime or PipeWire, as on a CI runner.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::RwLock;
 
@@ -44,7 +44,8 @@ fn stderr(output: &Output) -> String {
 }
 
 /// A new directory under the target directory, for this test alone.
-fn directory(name: &str) -> PathBuf {
+#[cfg(target_os = "linux")]
+fn directory(name: &str) -> std::path::PathBuf {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
@@ -84,6 +85,10 @@ fn a_mistaken_command_line_is_refused() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "only Linux runs a program without a display, by leaving out DISPLAY and WAYLAND_DISPLAY; elsewhere the window opens and waits to be closed"
+)]
 fn the_window_modes_need_a_display() {
     for arguments in [
         &[][..],

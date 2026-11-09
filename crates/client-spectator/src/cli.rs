@@ -142,25 +142,50 @@ mod tests {
 
     #[test]
     fn every_output_is_named_and_none_is_the_window() {
-        for (argument, mode) in [
-            ("--pipewire", Mode::Pipewire),
-            ("--pipewire-preview", Mode::PipewirePreview),
-            ("--help", Mode::Help),
-            ("-h", Mode::Help),
-        ] {
+        for (argument, mode) in [("--help", Mode::Help), ("-h", Mode::Help)] {
             assert_eq!(parse(&[argument]).unwrap().mode, mode);
         }
         assert_eq!(parse(&[]).unwrap().mode, Mode::Window);
+        // The PipeWire outputs are named everywhere, and refused where there is no PipeWire.
+        let pipewire = [
+            ("--pipewire", Mode::Pipewire),
+            ("--pipewire-preview", Mode::PipewirePreview),
+        ];
+        #[cfg(target_os = "linux")]
+        for (argument, mode) in pipewire {
+            assert_eq!(parse(&[argument]).unwrap().mode, mode);
+        }
+        #[cfg(not(target_os = "linux"))]
+        for (argument, _) in pipewire {
+            assert_eq!(
+                error(&[argument]),
+                "PipeWire video output requires Linux",
+                "{argument}"
+            );
+        }
     }
 
     #[test]
     fn options_take_values_and_the_environment_is_their_default() {
-        let command = Command::parse(
-            ["--space", "s1", "--follow", "Ada", "--audio-output", "sink"].map(String::from),
-            Some("10.0.0.2:8765".into()),
-            Some("tomori_t".into()),
-        )
-        .unwrap();
+        let with_environment = |arguments: &[&str]| {
+            Command::parse(
+                arguments.iter().map(|s| s.to_string()),
+                Some("10.0.0.2:8765".into()),
+                Some("tomori_t".into()),
+            )
+        };
+        let arguments = ["--space", "s1", "--follow", "Ada", "--audio-output", "sink"];
+        // An output is a PipeWire node, so it is refused where there is no PipeWire.
+        #[cfg(target_os = "linux")]
+        let command = with_environment(&arguments).unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let command = {
+            assert_eq!(
+                with_environment(&arguments).unwrap_err().to_string(),
+                "--audio-output needs PipeWire, on Linux"
+            );
+            with_environment(&arguments[..4]).unwrap()
+        };
         assert_eq!(
             command.options,
             SpectatorOptions {

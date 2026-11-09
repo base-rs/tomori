@@ -53,6 +53,14 @@ fn start(backend: &FakeBackend) -> TestServer {
     })
 }
 
+/// The canonical form of `/tmp`, which spaces run in, as the server names it: on macOS, `/tmp` is a link to `/private/tmp`.
+fn tmp() -> String {
+    std::fs::canonicalize("/tmp")
+        .expect("the temporary directory exists")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Create a space titled `title` in `/tmp`, and wait for it.
 fn create(client: &mut TestClient, title: &str) -> String {
     client.send(&ClientMessage::CreateSpace {
@@ -194,7 +202,7 @@ fn tools_are_registered_where_spaces_are_open_and_removed_when_none_are() {
     let (directory, Some(tools)) = &registered[0] else {
         unreachable!("the first space registers the tools");
     };
-    assert_eq!(directory, "/tmp");
+    assert_eq!(directory, &tmp());
     assert_eq!(tools.name, "tomori");
     assert_eq!(tools.url, format!("http://{}/mcp", server.tools.unwrap()));
     // The token is long, random and made for this run.
@@ -217,23 +225,27 @@ fn tools_are_registered_where_spaces_are_open_and_removed_when_none_are() {
     // While a space is open there, a closed one leaves them; once none is, they are removed. A failure is said, and changes nothing else.
     sessions[0].emit(Event::Closed { reason: None });
     let kept = registrations(&backend, 4);
-    assert_eq!(kept[3], ("/tmp".to_owned(), Some(tools.clone())));
+    assert_eq!(kept[3], (tmp(), Some(tools.clone())));
     backend.fail_tools(true);
     sessions[1].emit(Event::Closed { reason: None });
     let removed = registrations(&backend, 5);
-    assert_eq!(removed[4], ("/tmp".to_owned(), None));
+    assert_eq!(removed[4], (tmp(), None));
     eventually(|| {
         logged()
             .iter()
             .any(|line| {
-                line == "Tomori's tools could not be removed for fake in /tmp: the tools went away"
+                *line
+                    == format!(
+                        "Tomori's tools could not be removed for fake in {}: the tools went away",
+                        tmp()
+                    )
             })
             .then_some(())
     });
     assert!(
         logged()
             .iter()
-            .any(|line| line == "Tomori's tools are registered for fake in /tmp.")
+            .any(|line| *line == format!("Tomori's tools are registered for fake in {}.", tmp()))
     );
 
     // A refused registration is said without the token, even when the agent repeats it.
@@ -248,7 +260,10 @@ fn tools_are_registered_where_spaces_are_open_and_removed_when_none_are() {
     });
     assert_eq!(
         warning,
-        "Tomori's tools could not be registered for fake in /tmp: the tools went away, refusing Authorization: (secret)"
+        format!(
+            "Tomori's tools could not be registered for fake in {}: the tools went away, refusing Authorization: (secret)",
+            tmp()
+        )
     );
     assert!(logged().iter().all(|line| !line.contains(&secret)));
 }
@@ -286,8 +301,8 @@ fn tools_are_removed_once_the_last_space_open_in_a_directory_is_deleted() {
         registrations(&backend, count);
     }
     let tools_now = backend.tools();
-    assert_eq!(tools_now[2], ("/tmp".to_owned(), Some(tools)));
-    assert_eq!(tools_now[3], ("/tmp".to_owned(), None));
+    assert_eq!(tools_now[2], (tmp(), Some(tools)));
+    assert_eq!(tools_now[3], (tmp(), None));
 }
 
 #[test]
@@ -724,7 +739,7 @@ fn a_kept_space_s_session_reaches_it_again_once_bound_with_the_new_run_s_token()
     // Released however the test ends, before the server is dropped, so that a failure does not leave it waiting.
     let held = Held(backend.clone());
     let removed = registrations(&backend, earlier + 1);
-    assert_eq!(removed[earlier], ("/tmp".to_owned(), None));
+    assert_eq!(removed[earlier], (tmp(), None));
     let waiting = eventually(|| second.tools_token());
     assert!(
         failure(&call(&second, &waiting, Some(&session), "space", json!({})))
