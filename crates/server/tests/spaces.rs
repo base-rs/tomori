@@ -142,6 +142,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     let offered = ada.wait_for(|message| match message {
@@ -690,6 +691,15 @@ fn pointing_at_a_worker_as_speaking_begins_tells_the_agent_which_before_the_word
         vec![tomori_protocol::Resource::Unknown],
         None,
     );
+    // All are queued before the agent answers anything.
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .filter(|entry| entry.state == QueueState::Queued)
+            .count()
+            == 4
+    });
     for text in ["is it finished", "and this one", "or this one", "or that"] {
         session.reply("done");
         ada.space(|state| {
@@ -699,14 +709,16 @@ fn pointing_at_a_worker_as_speaking_begins_tells_the_agent_which_before_the_word
                 .any(|entry| entry.text == text && entry.state == QueueState::Delivered)
         });
     }
+    // Each was said while the agent worked, before it answered anything, which the agent is told before what was
+    // pointed at; see `design/interaction.md`.
     assert_eq!(
         prompts(&session),
         [
             "Ada: [Pointing at worker \"Review commit 2657a52\" (fake session ses_child, running)] how is this one doing",
-            "Ada: [Pointing at worker \"Review commit 2657a52\" (fake session ses_child, no longer present)] is it finished",
-            "Ada: and this one",
-            "Ada: or this one",
-            "Ada: or that",
+            "Ada: [Said before your message ending \"done\"] [Pointing at worker \"Review commit 2657a52\" (fake session ses_child, no longer present)] is it finished",
+            "Ada: [Said before your message ending \"done\"] and this one",
+            "Ada: [Said before your message ending \"done\"] or this one",
+            "Ada: [Said before your message ending \"done\"] or that",
         ]
     );
 }
@@ -754,6 +766,7 @@ fn attention_is_captured_as_the_utterance_begins_and_never_from_a_description_a_
         naming: false,
         titling: false,
         attention: vec![worker("ses_c")],
+        seen: None,
     });
     // Messages on a connection are handled in order, so once the listing asked for after it arrives, the utterance
     // has begun.
@@ -787,11 +800,12 @@ fn attention_is_captured_as_the_utterance_begins_and_never_from_a_description_a_
             .iter()
             .all(|entry| entry.state == QueueState::Delivered)
     });
+    // The second was said while the agent worked, before its answer, which the agent is told.
     assert_eq!(
         prompts(&session),
         [
             "Ada: [Pointing at worker \"Tests\" (fake session ses_a, running)] is this one done",
-            "Ada: and that one",
+            "Ada: [Said before your message ending \"done\"] and that one",
         ]
     );
 }
@@ -843,11 +857,12 @@ fn a_malformed_attention_entry_is_skipped_and_the_words_still_reach_the_agent() 
             .iter()
             .all(|entry| entry.state == QueueState::Delivered)
     });
+    // The second was said while the agent worked, before its answer, which the agent is told.
     assert_eq!(
         prompts(&session),
         [
             "Ada: [Pointing at worker \"Tests\" (fake session ses_a, running)] is this one done",
-            "Ada: and that one",
+            "Ada: [Said before your message ending \"done\"] and that one",
         ]
     );
 }
@@ -892,7 +907,7 @@ fn an_older_client_that_names_what_it_pointed_at_as_it_ends_still_tells_the_agen
         prompts(&session),
         [
             "Ada: [Pointing at worker \"Review\" (fake session ses_child, waiting)] what is it waiting for",
-            "Ada: and now",
+            "Ada: [Said before your message ending \"done\"] and now",
         ]
     );
 }
@@ -966,7 +981,14 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
         .into_iter()
         .map(|prompt| prompt.text)
         .collect();
-    assert_eq!(prompts, ["Ada: first", "Bob: third"]);
+    // Bob spoke while the agent worked, before its answer, which the agent is told.
+    assert_eq!(
+        prompts,
+        [
+            "Ada: first",
+            "Bob: [Said before your message ending \"done\"] third"
+        ]
+    );
 }
 
 #[test]
@@ -1632,6 +1654,7 @@ fn say_answer(
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     client.send_audio(tomori_protocol::Gate::Agent, speech(text));
     client.send(&ClientMessage::UtteranceEnd {
@@ -1781,11 +1804,13 @@ fn attribution_can_be_turned_off_per_space() {
     ada.send(&ClientMessage::SetAttribution { enabled: false });
     bob.space(|state| !state.attribution);
     ada.say("u1", "no names please");
+    // The next words wait for the agent's answer, so that they follow the conversation and carry no note of which
+    // message they answer (see `design/interaction.md`).
     ada.space(|state| {
         state
-            .queue
+            .messages
             .iter()
-            .any(|entry| entry.state == QueueState::Delivered)
+            .any(|message| message.text == "You said: no names please")
     });
 
     ada.send(&ClientMessage::SetAttribution { enabled: true });
@@ -1881,6 +1906,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     ada.send_audio(Gate::Agent, speech("he"));
     // The gate switches to live and back; some live frames were not sent.
@@ -1917,6 +1943,7 @@ fn a_lost_frame_fails_the_utterance() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     ada.send_audio(Gate::Agent, speech("ab"));
     ada.skip_sequence(2);

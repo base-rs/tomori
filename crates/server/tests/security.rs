@@ -56,6 +56,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     client.wait_for(|message| {
@@ -231,6 +232,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     assert!(ada.next_audio(Duration::from_millis(300)).is_none());
@@ -329,6 +331,7 @@ fn a_token_renamed_elsewhere_renames_its_holders_within_a_sweep() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     let welcomed = ada.wait_for(|message| match message {

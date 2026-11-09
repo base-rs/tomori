@@ -1107,6 +1107,8 @@ impl Conversation {
                     self.actions.push(Action::SetAgentSkipped(false));
                 }
             }
+            // A reply held for this participant while they record, and in the pause after they let go of X.
+            ServerMessage::SpeechHeld { held } => self.turn.held(held),
             // Presence comes with the presence work.
             ServerMessage::Welcome { .. }
             | ServerMessage::Presence { .. }
@@ -1339,7 +1341,11 @@ impl Conversation {
 
     /// Agent speech playing on this device, from the player, once per frame: live or played again, and even while muted here, since the others still hear it. The swarm speaks while it plays; see `design/speech.md`.
     pub fn speech(&self) -> SpeechActivity {
-        self.speech
+        // A reply held for the participant shows the swarm preparing to speak, rather than idle.
+        SpeechActivity {
+            pending: self.speech.pending || self.turn.waiting(self.turn_clock()),
+            ..self.speech
+        }
     }
 
     /// Agent speech played this frame, `playing` or not: heard if it is neither muted, skipped nor silenced while the participant records; and once it has ended, with the agent free, it is the participant's turn.
@@ -3016,6 +3022,8 @@ impl Conversation {
         Some(Status {
             activity: space.activity,
             speaking: self.turn.speaking_as(now, self.muted),
+            // A space that closes plays nothing more.
+            waiting: self.turn.waiting(now) && space.activity != tomori_protocol::Activity::Closed,
             pulse: (self.turn.pulse(now) * 255.0).round() as u8,
             mode: space
                 .current_mode()
@@ -3233,12 +3241,15 @@ impl Conversation {
             .clone()
             .filter(|target| naming.is_none() && self.knows(target));
         let attention = pointed.iter().filter(|_| !answering).cloned().collect();
+        // The words follow the newest of the agent's messages shown, which is what they answer unless it says more
+        // before they arrive; the server is told which, so that it can say so then. See `design/interaction.md`.
+        let seen = self.newest_said().filter(|_| !answering);
         let begun = Utterance::new(utterance.clone(), self.capture_generation);
         self.speak_over();
         self.actions.push(Action::BeginUtterance(match naming {
             Some(Naming::Name) => begun.naming(),
             Some(Naming::Title) => begun.titling(),
-            None => begun.answering(answer).attending(attention),
+            None => begun.answering(answer).attending(attention).seeing(seen),
         }));
         self.talk = Some(Talk::Recording {
             utterance,
@@ -3248,6 +3259,18 @@ impl Conversation {
             naming,
             pointed,
         });
+    }
+
+    /// The newest of the agent's messages in the space that says anything, as shown, by identifier: also the newest
+    /// whose speech played, since speech is of text already shown.
+    fn newest_said(&self) -> Option<String> {
+        self.space.as_ref().and_then(|space| {
+            space
+                .messages
+                .iter()
+                .rfind(|message| message.role == Role::Assistant && !message.text.trim().is_empty())
+                .map(|message| message.id.clone())
+        })
     }
 
     /// The worker the participant points at now, by identifier, or `None`: from the headset's ray each frame, or a
@@ -7662,6 +7685,47 @@ mod tests {
         assert!(!conversation.menu_model().naming);
     }
 
+    #[test]
+    fn words_begin_naming_the_newest_message_of_the_agent_shown_as_x_is_pressed() {
+        let message = |id: &str, role, text: &str| tomori_protocol::Message {
+            id: id.into(),
+            role,
+            text: text.into(),
+            completed: true,
+        };
+        let mut conversation = joined(|state| {
+            state.messages = vec![
+                message("m1", Role::Assistant, "Should I do A?"),
+                // Neither the participant's own words nor a step that says nothing are the agent's latest.
+                message("u1", Role::User, "Ada: Hmm."),
+                message("m2", Role::Assistant, "  "),
+            ];
+        });
+        let begun = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            let actions = conversation.take_actions();
+            let [Action::BeginUtterance(begun)] = &actions[..] else {
+                unreachable!("{actions:?}")
+            };
+            begun.seen.clone()
+        };
+        assert_eq!(begun(&mut conversation).as_deref(), Some("m1"));
+        // What arrives while X is held does not change it: it is captured as the words begin.
+        conversation.apply(space(|state| {
+            state.messages = vec![
+                message("m1", Role::Assistant, "Should I do A?"),
+                message("m3", Role::Assistant, "Should I do B?"),
+            ];
+        }));
+        conversation.take_actions();
+        conversation.talk(false);
+        conversation.take_actions();
+        assert_eq!(begun(&mut conversation).as_deref(), Some("m3"));
+        // Nothing the agent said yet names nothing, as an older client sends.
+        let mut quiet = joined(|_| {});
+        assert_eq!(begun(&mut quiet), None);
+    }
+
     /// Press X, which begins words that say the space's new title; returns the utterance.
     fn say_title(conversation: &mut Conversation) -> String {
         conversation.talk(true);
@@ -9793,6 +9857,52 @@ mod tests {
             .take_earcons()
             .filter(|(earcon, _)| *earcon == tomori_client::playback::Earcon::YourTurn)
             .count()
+    }
+
+    #[test]
+    fn the_pill_says_a_reply_is_waiting_while_it_is_held_and_through_the_pause_then_speaking() {
+        use crate::pill::Speaking;
+        let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let first = |conversation: &mut Conversation, at: Instant| {
+            crate::pill::rows(&conversation.pill_status(at).unwrap())[0].plain()
+        };
+        speech_frame(&mut conversation, start, false);
+        assert!(first(&mut conversation, start).starts_with("● idle"));
+        assert!(!conversation.speech().pending);
+        // While they record, the server holds a reply for them: the pill says so, and the swarm prepares to speak.
+        conversation.apply(Event::Message(ServerMessage::SpeechHeld { held: true }));
+        for at in [start + ms(20), start + ms(5_000)] {
+            speech_frame(&mut conversation, at, false);
+            let status = conversation.pill_status(at).unwrap();
+            assert!(status.waiting);
+            assert_eq!(status.speaking, None);
+            assert!(first(&mut conversation, at).starts_with("○ reply waiting"));
+            assert!(conversation.speech().pending);
+        }
+        // Through the pause after they let go of X it is still held; once it is not, it waits until it plays.
+        let released = start + ms(5_000) + crate::turn::HOLD * 4;
+        speech_frame(&mut conversation, released, false);
+        conversation.apply(Event::Message(ServerMessage::SpeechHeld { held: false }));
+        assert!(first(&mut conversation, released + ms(50)).starts_with("○ reply waiting"));
+        // Then it plays, and the pill says speaking.
+        announce(&mut conversation, "m1");
+        speech_frame(&mut conversation, released + ms(100), true);
+        let status = conversation.pill_status(released + ms(100)).unwrap();
+        assert!(!status.waiting);
+        assert_eq!(status.speaking, Some(Speaking::Heard));
+        assert!(first(&mut conversation, released + ms(100)).starts_with("◉ speaking"));
+        assert!(!conversation.speech().pending);
+        // A space that closes while a reply is held says it is closed, not that a reply waits.
+        conversation.apply(Event::Message(ServerMessage::SpeechHeld { held: true }));
+        conversation.apply(space(|space| space.activity = Activity::Closed));
+        assert!(
+            !conversation
+                .pill_status(released + ms(200))
+                .unwrap()
+                .waiting
+        );
     }
 
     #[test]

@@ -605,7 +605,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
     assert_eq!(state["speech"], "full");
     assert_eq!(
         state["participants"],
-        json!([{"name": "Ada", "engagement": null}])
+        json!([{"name": "Ada", "engagement": null, "recording": false}])
     );
     assert_eq!(state["visitors"], 0);
     assert_eq!(state["modes"], json!(["default", "plan"]));
@@ -613,7 +613,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
     assert_eq!(other["structuredContent"]["id"], second);
     assert_eq!(
         other["structuredContent"]["participants"],
-        json!([{"name": "Bob", "engagement": null}])
+        json!([{"name": "Bob", "engagement": null, "recording": false}])
     );
 
     // A session the agent names anew is followed; one bound to two open spaces is refused rather than guessed at.

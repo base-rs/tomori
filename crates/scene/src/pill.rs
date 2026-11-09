@@ -25,6 +25,8 @@ const VIOLET: [f32; 4] = [0.74, 0.56, 1.0, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The dot while the agent speaks, ringed, so that it is told from the others by its shape as well as its colour.
 const SPEAKING_DOT: &str = "◉ ";
+/// The dot while a reply waits for the participant: the ring alone, in speaking's violet, as it is about to be.
+const WAITING_DOT: &str = "○ ";
 
 /// What needs the participant, most pressing first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +48,9 @@ pub struct Status {
     pub activity: Activity,
     /// Agent speech playing on this device, which shows over the activity, as the swarm speaks over what the agent is doing, and how it is heard here.
     pub speaking: Option<Speaking>,
+    /// A reply the server holds for the participant while they record, or in the pause after they let go of X, which
+    /// shows over speaking and the activity until it plays. See `design/speech.md`.
+    pub waiting: bool,
     /// How brightly the dot pulses, from 0 to 255, as it settles once it is the participant's turn.
     pub pulse: u8,
     pub mode: Option<String>,
@@ -57,6 +62,7 @@ pub struct Status {
 /// The pill's rows: what the agent is doing, or that it is speaking, its mode and the space's title, cut to fit; then, only when something needs the participant, what it is and where to look.
 pub fn rows(status: &Status) -> Vec<Row> {
     let (label, color) = match (status.speaking, status.activity) {
+        _ if status.waiting => ("reply waiting", VIOLET),
         (Some(Speaking::Heard), _) => ("speaking", VIOLET),
         (Some(Speaking::Muted), _) => ("speaking, muted", VIOLET),
         (Some(Speaking::Skipped), _) => ("speaking, skipped", VIOLET),
@@ -66,7 +72,9 @@ pub fn rows(status: &Status) -> Vec<Row> {
         (None, Activity::Closed) => ("closed", DIM),
         (None, Activity::Unknown) => ("unknown", DIM),
     };
-    let dot = if status.speaking.is_some() {
+    let dot = if status.waiting {
+        WAITING_DOT
+    } else if status.speaking.is_some() {
         SPEAKING_DOT
     } else {
         "● "
@@ -124,6 +132,7 @@ mod tests {
         Status {
             activity: Activity::Running,
             speaking: None,
+            waiting: false,
             pulse: 0,
             mode: Some("build".into()),
             title: "Fix the parser".into(),
@@ -168,6 +177,25 @@ mod tests {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[1].plain(), said);
             assert!(rows.iter().all(|row| row.cells.len() <= COLUMNS));
+        }
+    }
+
+    #[test]
+    fn a_reply_waiting_shows_over_speaking_and_the_activity_with_its_own_dot() {
+        for (activity, speaking) in [
+            (Activity::Idle, None),
+            (Activity::Running, None),
+            (Activity::Idle, Some(Speaking::Skipped)),
+        ] {
+            let waiting = Status {
+                activity,
+                speaking,
+                waiting: true,
+                ..status(None)
+            };
+            let row = &rows(&waiting)[0];
+            assert_eq!(row.plain(), "○ reply waiting  build  Fix the p…");
+            assert_eq!(row.cells[0].1.color, VIOLET);
         }
     }
 

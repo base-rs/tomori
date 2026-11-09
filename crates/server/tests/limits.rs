@@ -59,6 +59,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     let error = ada.error();
     assert!(error.contains("utterance") && error.len() < 100, "{error}");
@@ -119,6 +120,7 @@ fn an_oversized_hello_is_refused() {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         });
         let error = client.error();

@@ -2092,6 +2092,7 @@ mod tests {
                 let pill = tomori_scene::pill::rows(&tomori_scene::pill::Status {
                     activity: tomori_protocol::Activity::Running,
                     speaking: None,
+                    waiting: false,
                     pulse: 0,
                     mode: Some("build".into()),
                     title: "Hello from the desktop window.".into(),

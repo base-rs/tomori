@@ -9,6 +9,7 @@
 //! - **Unreported** listeners hear live speech too, but their client has not yet said whether it is listening. A client that never reports engagement, such as an older client or the spectator, stays at the live edge, as before.
 //! - **Away** listeners are in the space but not listening, and **absent** ones have left it. Each keeps the position up to which it heard.
 //! - **Streaming** listeners hear retained speech from their own cursor, at the rate it plays, from [`tomori_protocol::REPLAY_SOURCE`], and are not sent live speech meanwhile, so that nobody hears the same reply twice at once.
+//! - **Held** listeners are recording push-to-talk, and a reply started since they began, which they are not sent until they stop, when they hear it from its start, as a catch-up, after [`RELEASE_PAUSE`] if they stopped by letting go of X. A reply already playing as they began goes on live, silenced by their client while they record, as before.
 //!
 //! A participant who joins or returns while listening, having missed part of the latest reply, streams from that reply's start and then everything after it, until their cursor reaches the live edge, where they become live. A replay streams the same way, from the start of the reply asked for, but stops as soon as a later reply starts live: live speech wins.
 //!
@@ -30,6 +31,10 @@ pub const LEAD: Duration = Duration::from_millis(100);
 
 /// A breath between spoken segments, so that a list or a series of paragraphs does not run together.
 pub const SEGMENT_GAP: Duration = Duration::from_millis(400);
+
+/// How long speech held while a participant recorded waits, once they let go of X, before it starts: a breath between
+/// their words and the agent's, so that it does not launch the moment they stop. See `design/speech.md`.
+pub const RELEASE_PAUSE: Duration = Duration::from_millis(600);
 
 /// One item of a space's agent speech stream.
 #[derive(Clone, Debug)]
@@ -86,6 +91,11 @@ enum State {
     Absent {
         heard: u64,
     },
+    /// Recording, having heard everything before `heard`, where a reply that started since they began recording
+    /// starts, which they hear from there once they stop.
+    Held {
+        heard: u64,
+    },
     Streaming(Stream),
 }
 
@@ -96,6 +106,9 @@ struct Stream {
     clock: Option<Instant>,
     /// For a replay, the newest reply when it started: live speech of a later reply stops it. A catch-up continues through later replies.
     until: Option<u64>,
+    /// For speech held while its listener recorded, released by letting go of X, when it starts, after
+    /// [`RELEASE_PAUSE`]: nothing is sent before then, and recording again meanwhile holds it again.
+    after: Option<Instant>,
 }
 
 struct Listener {
@@ -104,6 +117,21 @@ struct Listener {
     sequence: u32,
     /// What this listener's [`REPLAY_SOURCE`] frame timestamps count from, kept across streams like the sequence.
     epoch: Instant,
+    /// While they record push-to-talk, the newest reply number as they began, or 0 for none: a later reply is held
+    /// for them until they stop. See `design/speech.md`.
+    recording: Option<u64>,
+    /// Whether this listener was last told that speech is held for them. See [`Retention::held_changes`].
+    told: bool,
+}
+
+impl Listener {
+    /// Whether speech is held for this listener: while they record, or in the pause after they let go of X.
+    fn held(&self) -> bool {
+        matches!(
+            self.state,
+            State::Held { .. } | State::Streaming(Stream { after: Some(_), .. })
+        )
+    }
 }
 
 /// The retained speech of one space, and where each of its listeners is in it.
@@ -132,7 +160,7 @@ impl Retention {
         (self.end() > *start).then(|| (*start).max(self.first))
     }
 
-    /// Whether `participant` is sent live speech: everyone not streaming, away or absent, including anyone not known yet.
+    /// Whether `participant` is sent live speech: everyone not streaming, held, away or absent, including anyone not known yet.
     pub fn hears_live(&self, participant: &str) -> bool {
         self.listeners
             .get(participant)
@@ -166,10 +194,18 @@ impl Retention {
             let start = self.end();
             self.replies.push_back((reply, start));
             for listener in self.listeners.values_mut() {
-                if let State::Streaming(stream) = &listener.state
-                    && stream.until.is_some_and(|until| until != reply)
-                {
-                    listener.state = State::Live;
+                let hearing = match &listener.state {
+                    State::Live => true,
+                    State::Streaming(stream) => stream.until.is_some_and(|until| until != reply),
+                    _ => false,
+                };
+                if hearing {
+                    // Someone recording hears the new reply once they stop, from its start; anyone else live.
+                    listener.state = if listener.recording.is_some() {
+                        State::Held { heard: start }
+                    } else {
+                        State::Live
+                    };
                 }
             }
         }
@@ -219,7 +255,7 @@ impl Retention {
             .get(participant)
             .map(|listener| &listener.state)
         {
-            Some(State::Absent { heard } | State::Away { heard }) => *heard,
+            Some(State::Absent { heard } | State::Away { heard } | State::Held { heard }) => *heard,
             Some(State::Unreported { heard, .. }) => *heard,
             Some(State::Streaming(stream)) => stream.cursor,
             Some(State::Live) => self.end(),
@@ -227,15 +263,92 @@ impl Retention {
         }
     }
 
-    fn set(&mut self, participant: &str, state: State) {
-        self.listeners
+    /// Put `participant` in `state`, as a new listener if they are not one yet, and return them.
+    fn set(&mut self, participant: &str, state: State) -> &mut Listener {
+        let listener = self
+            .listeners
             .entry(participant.to_owned())
             .or_insert_with(|| Listener {
                 state: State::Live,
                 sequence: 0,
                 epoch: Instant::now(),
-            })
-            .state = state;
+                recording: None,
+                told: false,
+            });
+        listener.state = state;
+        listener
+    }
+
+    /// `participant`, who is in the space, began recording push-to-talk: a reply that starts from now until they stop
+    /// is held for them, rather than played while they speak. See `design/speech.md`.
+    pub fn recording(&mut self, participant: &str) {
+        if self.closed {
+            return;
+        }
+        let newest = self.replies.back().map_or(0, |(reply, _)| *reply);
+        let state = match self
+            .listeners
+            .get(participant)
+            .map(|listener| &listener.state)
+        {
+            // Recording again in the pause after letting go of X holds what had not started yet.
+            Some(State::Streaming(Stream {
+                cursor,
+                after: Some(_),
+                ..
+            })) => State::Held { heard: *cursor },
+            Some(state) => state.clone(),
+            None => State::Live,
+        };
+        self.set(participant, state).recording.get_or_insert(newest);
+    }
+
+    /// `participant` stopped recording push-to-talk other than by letting go of X, as by cancelling, losing focus or
+    /// failing: what was held for them plays now, from the start of the first reply held, as a catch-up. Returns
+    /// whether they now stream, so that the pacer must be woken.
+    pub fn recorded(&mut self, participant: &str) -> bool {
+        self.stopped_recording(participant, None)
+    }
+
+    /// `participant` let go of X, ending their words at `now`: what was held for them plays as [`Self::recorded`]
+    /// plays it, after [`RELEASE_PAUSE`], unless they record again meanwhile. Returns whether they now stream.
+    pub fn released(&mut self, participant: &str, now: Instant) -> bool {
+        self.stopped_recording(participant, Some(now + RELEASE_PAUSE))
+    }
+
+    fn stopped_recording(&mut self, participant: &str, after: Option<Instant>) -> bool {
+        let Some(listener) = self.listeners.get_mut(participant) else {
+            return false;
+        };
+        listener.recording = None;
+        let State::Held { heard } = listener.state else {
+            return false;
+        };
+        listener.state = State::Streaming(Stream {
+            cursor: heard,
+            clock: None,
+            until: None,
+            after,
+        });
+        true
+    }
+
+    /// The state `state` becomes for `participant`, who might be recording: a stream that starts while they record is
+    /// held where it starts, to play once they stop.
+    fn holding(&self, participant: &str, state: State) -> State {
+        match state {
+            State::Streaming(stream)
+                if self
+                    .listeners
+                    .get(participant)
+                    .is_some_and(|listener| listener.recording.is_some()) =>
+            {
+                State::Held {
+                    heard: stream.cursor,
+                }
+            }
+            state => state,
+        }
     }
 
     /// The state of a listener who missed what was recorded from `heard` up to `until`: streaming from the start of the latest reply if they missed any of it, and live otherwise.
@@ -245,6 +358,7 @@ impl Retention {
                 cursor: start,
                 clock: None,
                 until: None,
+                after: None,
             }),
             _ => State::Live,
         }
@@ -261,6 +375,7 @@ impl Retention {
             Some(engagement) if !engagement.is_listening() => State::Away { heard },
             Some(_) => self.resume(heard, self.end()),
         };
+        let state = self.holding(participant, state);
         let streaming = matches!(state, State::Streaming(_));
         self.set(participant, state);
         streaming
@@ -277,9 +392,9 @@ impl Retention {
             // Hearing live speech, they heard everything recorded so far.
             Some(State::Live | State::Unreported { .. }) => self.end(),
             Some(State::Streaming(stream)) => stream.cursor,
-            Some(State::Away { heard }) => *heard,
+            Some(State::Away { heard } | State::Held { heard }) => *heard,
         };
-        self.set(participant, State::Absent { heard });
+        self.set(participant, State::Absent { heard }).recording = None;
     }
 
     /// `participant`, who is in the space, reported `engagement`. Returns whether they now stream.
@@ -296,12 +411,12 @@ impl Retention {
                 }
                 // In the space without having joined it, as a visitor admitted where they watched, who heard everything live.
                 None => State::Live,
-                Some(State::Live | State::Streaming(_)) => return false,
+                Some(State::Live | State::Streaming(_) | State::Held { .. }) => return false,
             }
         } else {
             match current {
                 Some(State::Away { .. }) => return false,
-                Some(State::Absent { heard }) => State::Away { heard },
+                Some(State::Absent { heard } | State::Held { heard }) => State::Away { heard },
                 Some(State::Streaming(stream)) => State::Away {
                     heard: stream.cursor,
                 },
@@ -312,6 +427,7 @@ impl Retention {
                 Some(State::Live) | None => State::Away { heard: self.end() },
             }
         };
+        let state = self.holding(participant, state);
         let streaming = matches!(state, State::Streaming(_));
         self.set(participant, state);
         streaming
@@ -341,14 +457,16 @@ impl Retention {
                 .ok_or("That reply is no longer kept, so it cannot be played again.")?,
         };
         let newest = self.replies.back().map(|(reply, _)| *reply);
-        self.set(
+        let state = self.holding(
             participant,
             State::Streaming(Stream {
                 cursor: start,
                 clock: None,
                 until: newest,
+                after: None,
             }),
         );
+        self.set(participant, state);
         Ok(())
     }
 
@@ -361,6 +479,30 @@ impl Retention {
         {
             self.set(participant, State::Live);
         }
+    }
+
+    /// Whether speech has become held for any listener, or stopped being held, since they were last told, so that the
+    /// pacer must be woken to tell them.
+    pub fn held_changed(&self) -> bool {
+        self.listeners
+            .values()
+            .any(|listener| listener.held() != listener.told)
+    }
+
+    /// Each listener for whom speech has become held, or stopped being held, since they were last told, with whether it
+    /// now is; each is then counted as told. See `design/speech.md`.
+    pub fn held_changes(&mut self) -> Vec<(String, bool)> {
+        let mut changes: Vec<(String, bool)> = self
+            .listeners
+            .iter_mut()
+            .filter(|(_, listener)| listener.held() != listener.told)
+            .map(|(participant, listener)| {
+                listener.told = listener.held();
+                (participant.clone(), listener.told)
+            })
+            .collect();
+        changes.sort();
+        changes
     }
 
     /// Forget everything kept and every listener, and keep nothing more, as when the space closes. Everyone hears what is still spoken live.
@@ -383,6 +525,14 @@ impl Retention {
             let State::Streaming(stream) = &mut listener.state else {
                 continue;
             };
+            // Held speech released by letting go of X starts once the pause after it has passed.
+            if let Some(after) = stream.after {
+                if after > now {
+                    next = Some(next.unwrap_or(after).min(after));
+                    continue;
+                }
+                stream.after = None;
+            }
             loop {
                 // A listener so far behind that their next entry was dropped skips to the oldest retained one.
                 stream.cursor = stream.cursor.max(first);
@@ -391,6 +541,13 @@ impl Retention {
                     break;
                 }
                 let entry = &self.entries[(stream.cursor - first) as usize];
+                // A catch-up that reaches a reply started since its listener began recording waits there for them.
+                if listener.recording.is_some_and(|since| entry.reply > since) {
+                    listener.state = State::Held {
+                        heard: stream.cursor,
+                    };
+                    break;
+                }
                 match &entry.item {
                     Item::Announce(message) => {
                         let mut message = message.clone();
@@ -910,5 +1067,305 @@ mod tests {
         let Some((_, Delivery::Message(ServerMessage::Left { .. }))) = deliveries.first() else {
             unreachable!("the announcement comes first");
         };
+    }
+
+    #[test]
+    fn a_reply_that_starts_while_someone_records_is_held_for_them_and_played_from_its_start() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
+        speak(&mut retention, 1, "m1", 1, 2);
+        // Ada begins answering; a sub-agent's report makes the agent speak again meanwhile.
+        retention.recording("ada");
+        speak(&mut retention, 2, "m2", 2, 3);
+        // Bob hears it live; Ada is not talked over, and is not sent it.
+        assert!(retention.hears_live("bob"));
+        assert!(!retention.hears_live("ada"));
+        let mut deliveries = Vec::new();
+        assert_eq!(retention.pace(now, &mut deliveries), None);
+        assert!(deliveries.is_empty());
+        // Once she stops, she hears it from its start, then follows live speech.
+        assert!(retention.recorded("ada"));
+        let (texts, values, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 2."]);
+        assert_eq!(values, [2; 3]);
+        assert!(retention.hears_live("ada"));
+        // Stopping again holds nothing.
+        assert!(!retention.recorded("ada"));
+    }
+
+    #[test]
+    fn held_speech_released_by_letting_go_of_x_starts_after_a_short_pause() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
+        retention.recording("ada");
+        retention.recording("bob");
+        speak(&mut retention, 1, "m1", 1, 2);
+        // Ada lets go of X; Bob's recording is cancelled, which plays what was held for him at once.
+        assert!(retention.released("ada", now));
+        assert!(retention.recorded("bob"));
+        let mut deliveries = Vec::new();
+        let due = now + RELEASE_PAUSE;
+        assert_eq!(retention.pace(now, &mut deliveries), Some(due));
+        assert!(!deliveries.is_empty());
+        assert!(deliveries.iter().all(|(to, _)| to == "bob"));
+        // Nothing reaches Ada during the pause, not even the announcement, nor live speech.
+        assert!(retention.hears_live("bob"));
+        let mut deliveries = Vec::new();
+        assert_eq!(
+            retention.pace(due - Duration::from_millis(1), &mut deliveries),
+            Some(due)
+        );
+        assert!(deliveries.is_empty());
+        assert!(!retention.hears_live("ada"));
+        // Once it has passed, she hears the reply from its start, its first frame as the pause ends.
+        let mut deliveries = Vec::new();
+        retention.pace(due, &mut deliveries);
+        assert!(
+            matches!(
+                &deliveries[..],
+                [
+                    (
+                        _,
+                        Delivery::Message(ServerMessage::Speech { replay: true, .. })
+                    ),
+                    ..
+                ]
+            ),
+            "{deliveries:?}"
+        );
+        let Some((to, Delivery::Frame(frame))) = deliveries.get(1) else {
+            unreachable!("the reply starts as the pause ends: {deliveries:?}");
+        };
+        assert_eq!(to, "ada");
+        assert_eq!(
+            frame.timestamp,
+            due.saturating_duration_since(retention.listeners["ada"].epoch)
+                .as_micros() as u64
+        );
+        drain(&mut retention, "ada", due);
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn each_listener_is_told_when_speech_is_held_for_them_through_the_pause_until_it_plays() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
+        retention.recording("ada");
+        retention.recording("bob");
+        // Recording holds nothing until a reply starts.
+        assert!(!retention.held_changed());
+        speak(&mut retention, 1, "m1", 1, 2);
+        assert!(retention.held_changed());
+        assert_eq!(
+            retention.held_changes(),
+            [("ada".to_owned(), true), ("bob".to_owned(), true)]
+        );
+        assert!(!retention.held_changed());
+        // Letting go of X keeps it held through the pause; a cancelled recording plays it at once.
+        assert!(retention.released("ada", now));
+        assert!(retention.recorded("bob"));
+        assert_eq!(retention.held_changes(), [("bob".to_owned(), false)]);
+        let due = now + RELEASE_PAUSE;
+        retention.pace(due - Duration::from_millis(1), &mut Vec::new());
+        assert!(retention.held_changes().is_empty());
+        // Once the pause has passed it plays, and is no longer held.
+        retention.pace(due, &mut Vec::new());
+        assert_eq!(retention.held_changes(), [("ada".to_owned(), false)]);
+        // Held again, then leaving ends the hold too.
+        retention.recording("ada");
+        speak(&mut retention, 2, "m2", 2, 2);
+        assert_eq!(retention.held_changes(), [("ada".to_owned(), true)]);
+        retention.left("ada");
+        assert_eq!(retention.held_changes(), [("ada".to_owned(), false)]);
+    }
+
+    #[test]
+    fn recording_again_in_the_pause_after_letting_go_holds_the_speech_again() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.recording("ada");
+        speak(&mut retention, 1, "m1", 1, 2);
+        assert!(retention.released("ada", now));
+        // She presses X again before the pause has passed: nothing starts, then or later.
+        retention.recording("ada");
+        let mut deliveries = Vec::new();
+        assert_eq!(retention.pace(now + RELEASE_PAUSE, &mut deliveries), None);
+        assert!(deliveries.is_empty());
+        assert!(!retention.hears_live("ada"));
+        // A reply that starts meanwhile waits behind it, and both play once she lets go again.
+        speak(&mut retention, 2, "m2", 2, 1);
+        let later = now + Duration::from_secs(5);
+        assert!(retention.released("ada", later));
+        let mut deliveries = Vec::new();
+        assert_eq!(
+            retention.pace(later, &mut deliveries),
+            Some(later + RELEASE_PAUSE)
+        );
+        let (texts, values, _) = drain(&mut retention, "ada", later);
+        assert_eq!(texts, ["Segment 1.", "Segment 2."]);
+        assert_eq!(values, [1, 1, 2]);
+    }
+
+    #[test]
+    fn catching_up_and_replaying_start_without_the_pause() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 1);
+        // Joining having missed a reply, or asking for one again, plays it at once.
+        assert!(retention.joined("ada", Some(Engagement::Engaged)));
+        let mut deliveries = Vec::new();
+        retention.pace(now, &mut deliveries);
+        assert_eq!(deliveries.len(), 2, "{deliveries:?}");
+        drain(&mut retention, "ada", now);
+        retention.replay("ada", None).unwrap();
+        let mut deliveries = Vec::new();
+        retention.pace(now, &mut deliveries);
+        assert_eq!(deliveries.len(), 2, "{deliveries:?}");
+    }
+
+    #[test]
+    fn a_reply_playing_as_someone_begins_recording_goes_on_live() {
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.record(1, announce(1, "m1"));
+        retention.record(1, frame(1));
+        retention.recording("ada");
+        // More of the same reply is not a new one: it goes on live, silenced by her client while she records.
+        retention.record(1, frame(2));
+        assert!(retention.hears_live("ada"));
+        assert!(!retention.recorded("ada"));
+        assert!(retention.hears_live("ada"));
+        // Once she has stopped, a new reply is live again.
+        speak(&mut retention, 2, "m2", 2, 1);
+        assert!(retention.hears_live("ada"));
+    }
+
+    #[test]
+    fn every_reply_started_while_recording_plays_afterwards_in_order() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.recording("ada");
+        speak(&mut retention, 1, "m1", 1, 2);
+        speak(&mut retention, 2, "m2", 2, 2);
+        assert!(retention.recorded("ada"));
+        let (texts, values, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 1.", "Segment 2."]);
+        assert_eq!(values, [1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn someone_the_kept_speech_has_no_place_for_yet_is_held_too() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        // Admitted where they watched, they have no place yet; stopping before beginning holds nothing.
+        assert!(!retention.recorded("vic"));
+        retention.recording("vic");
+        speak(&mut retention, 1, "m1", 1, 1);
+        assert!(!retention.hears_live("vic"));
+        assert!(retention.recorded("vic"));
+        let (texts, _, _) = drain(&mut retention, "vic", now);
+        assert_eq!(texts, ["Segment 1."]);
+    }
+
+    #[test]
+    fn a_client_that_reports_nothing_is_not_held() {
+        // An older client may not play speech sent from the replay source, so it hears live speech as before.
+        let mut retention = Retention::default();
+        retention.joined("old", None);
+        retention.recording("old");
+        speak(&mut retention, 1, "m1", 1, 2);
+        assert!(retention.hears_live("old"));
+        assert!(!retention.recorded("old"));
+    }
+
+    #[test]
+    fn held_speech_keeps_its_place_through_going_away_and_leaving() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.recording("ada");
+        speak(&mut retention, 1, "m1", 1, 2);
+        // She takes the headset off and puts it back on while still recording: still held.
+        assert!(!retention.engagement("ada", Engagement::Away));
+        assert!(!retention.engagement("ada", Engagement::Engaged));
+        assert!(!retention.hears_live("ada"));
+        assert!(!retention.engagement("ada", Engagement::Engaged));
+        assert!(retention.recorded("ada"));
+        let (texts, _, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 1."]);
+
+        // Bob, having heard everything, leaves while held, which ends his recording: he catches up when he comes back.
+        retention.joined("bob", Some(Engagement::Engaged));
+        drain(&mut retention, "bob", now);
+        assert!(retention.hears_live("bob"));
+        retention.recording("bob");
+        speak(&mut retention, 2, "m2", 2, 2);
+        retention.left("bob");
+        assert!(!retention.recorded("bob"));
+        assert!(retention.joined("bob", Some(Engagement::Engaged)));
+        let (texts, _, _) = drain(&mut retention, "bob", now);
+        assert_eq!(texts, ["Segment 2."]);
+    }
+
+    #[test]
+    fn joining_again_while_held_stays_held() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.recording("ada");
+        speak(&mut retention, 1, "m1", 1, 2);
+        // She joins the space again while still recording, as a client restoring its membership does.
+        assert!(!retention.joined("ada", Some(Engagement::Engaged)));
+        assert!(!retention.hears_live("ada"));
+        assert!(retention.recorded("ada"));
+        let (texts, _, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 1."]);
+    }
+
+    #[test]
+    fn a_catch_up_waits_at_a_reply_started_while_its_listener_records() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 2);
+        // Ada joins having missed the first reply, and begins speaking while she catches up on it.
+        assert!(retention.joined("ada", Some(Engagement::Engaged)));
+        retention.recording("ada");
+        speak(&mut retention, 2, "m2", 2, 2);
+        let (texts, values, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 1."]);
+        assert_eq!(values, [1, 1]);
+        assert!(!retention.hears_live("ada"));
+        // The second reply waits until she stops.
+        assert!(retention.recorded("ada"));
+        let (texts, values, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 2."]);
+        assert_eq!(values, [2, 2]);
+    }
+
+    #[test]
+    fn a_replay_asked_for_while_recording_plays_once_recording_stops() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Engaged));
+        speak(&mut retention, 1, "m1", 1, 2);
+        retention.recording("ada");
+        retention.replay("ada", None).unwrap();
+        assert!(!retention.is_streaming("ada"));
+        assert!(retention.recorded("ada"));
+        let (texts, _, _) = drain(&mut retention, "ada", now);
+        assert_eq!(texts, ["Segment 1."]);
+        // A closed space holds nothing.
+        retention.close();
+        retention.recording("ada");
+        speak(&mut retention, 2, "m2", 2, 1);
+        assert!(retention.hears_live("ada"));
     }
 }

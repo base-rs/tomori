@@ -83,6 +83,7 @@ impl Client {
             environment_state: false,
             projection: false,
             pairing_window: false,
+            speech_held: false,
             images: false,
         });
     }
@@ -229,6 +230,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     let errors = client.errors();
@@ -302,6 +304,7 @@ fn a_new_utterance_fails_the_one_still_open() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     };
     client.send(begin("one"));
     client.send(begin("two"));
@@ -1137,6 +1140,7 @@ fn utterances_are_ended_or_cancelled_only_while_open() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     };
     client.send(begin.clone());
     assert_eq!(client.errors(), ["Join a space first."]);
@@ -1200,6 +1204,7 @@ fn progress_is_told_only_to_a_client_that_asks_from_the_end_until_the_outcome() 
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         });
     }
     let (new, old) = (utterance_of(&newer), utterance_of(&older));
@@ -1265,6 +1270,7 @@ fn input_queued_in_a_space_makes_it_active() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     ada.send(ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
@@ -1297,6 +1303,7 @@ fn progress_is_told_only_on_the_connection_that_asked_while_it_is_the_participan
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     newer.send(ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
@@ -1346,6 +1353,7 @@ fn an_utterance_transcribed_before_it_ended_is_still_ended() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_finished(utterance, "Deploy it.");
@@ -1451,6 +1459,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
             naming: false,
             titling: false,
             attention: Vec::new(),
+            seen: None,
         });
         client.send(ClientMessage::UtteranceEnd {
             utterance: "one".to_owned(),
@@ -1509,6 +1518,7 @@ fn only_the_latest_spoken_answers_are_remembered() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     client.send(ClientMessage::UtteranceEnd {
         utterance: "one".to_owned(),
@@ -1581,6 +1591,7 @@ fn words_for_a_driver_that_has_stopped_are_marked_unsent() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_partial(UtteranceId(99), "nobody");
@@ -1734,6 +1745,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         environment_state: false,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     client.read()
@@ -1856,6 +1868,7 @@ fn a_token_holder_is_known_by_the_name_kept_with_their_token_on_every_device() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     laptop.send(ClientMessage::UtteranceEnd {
         utterance: "u".to_owned(),
@@ -2042,6 +2055,7 @@ fn say_name(hub: &Arc<Hub>, client: &Client, text: &str) -> Vec<ServerMessage> {
         naming: true,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     client.send(ClientMessage::UtteranceEnd {
         utterance: "name".to_owned(),
@@ -2118,6 +2132,7 @@ fn words_say_a_name_or_a_title_but_not_both_and_a_title_for_a_space_gone_is_not_
         naming,
         titling: true,
         attention: Vec::new(),
+        seen: None,
     };
     owner.send(begin(true));
     assert_eq!(
@@ -2250,6 +2265,7 @@ fn hostile_names_are_cleaned_or_refused_before_anyone_reads_them() {
         naming: false,
         titling: false,
         attention: Vec::new(),
+        seen: None,
     });
     quest.send(ClientMessage::UtteranceEnd {
         utterance: "u".to_owned(),
@@ -2615,6 +2631,7 @@ fn a_card_attended_to_as_the_words_begin_is_described_from_the_board_before_them
             naming: false,
             titling: false,
             attention,
+            seen: None,
         });
         // What the board says after the words begin changes nothing they attend to.
         change();
@@ -2964,6 +2981,7 @@ fn presenting(
         environment_state: reads,
         projection: false,
         pairing_window: false,
+        speech_held: false,
         images: false,
     });
     client.read();
@@ -3209,6 +3227,7 @@ fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_pa
             tomori_protocol::Resource::object("thing-2"),
             tomori_protocol::Resource::object("x".repeat(crate::channel::OBJECT_BYTES + 1)),
         ],
+        seen: None,
     });
     ada.send(ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
@@ -3392,6 +3411,7 @@ impl Client {
             environment_state: false,
             projection: true,
             pairing_window: false,
+            speech_held: false,
             images: false,
         });
         client.read();
@@ -3513,6 +3533,7 @@ fn said(
         naming: false,
         titling: false,
         attention,
+        seen: None,
     });
     client.send(ClientMessage::UtteranceEnd { utterance, pointed });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
@@ -4321,6 +4342,234 @@ fn the_item_of_a_checklist_pointed_at_is_named_with_its_panel_s_id_before_the_wo
     );
 }
 
+/// `client` begins words for the agent, having seen the agent's message `seen` as their client says.
+fn begin_seeing(client: &Client, utterance: &str, seen: Option<&str>) {
+    client.send(ClientMessage::UtteranceBegin {
+        utterance: utterance.to_owned(),
+        answer: None,
+        progress: false,
+        naming: false,
+        titling: false,
+        attention: Vec::new(),
+        seen: seen.map(str::to_owned),
+    });
+}
+
+/// `client` ends the words `utterance` in `space`, heard as `text`, and the agent is handed them, and takes them,
+/// ending its turn at once: what it is told.
+fn end_saying(
+    hub: &Hub,
+    (space, commands): (&str, &async_channel::Receiver<SpaceCommand>),
+    client: &Client,
+    utterance: &str,
+    text: &str,
+) -> String {
+    client.send(ClientMessage::UtteranceEnd {
+        utterance: utterance.to_owned(),
+        pointed: None,
+    });
+    let id = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(id, text);
+    let prompt = std::iter::from_fn(|| commands.try_recv().ok())
+        .find_map(|command| match command {
+            SpaceCommand::Send(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("the words are handed to the agent");
+    hub.drive_event(space, Event::Delivered { key: prompt.key });
+    hub.drive_event(space, Event::Idle);
+    prompt.text
+}
+
+/// The agent speaks again, unasked, as when a sub-agent's report starts a turn: message `id`, saying `text`.
+fn moves_on(hub: &Hub, space: &str, id: &str, text: &str) {
+    hub.drive_event(space, Event::Busy);
+    reply(hub, space, id, text);
+    hub.drive_event(space, Event::Idle);
+}
+
+#[test]
+fn words_said_while_the_agent_moved_on_say_which_message_they_answer() {
+    let (hub, _jobs) = hub_waiting();
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let (space, commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&space);
+    reply(&hub, &space, "m1", "Should I do A?");
+    // Her answer follows the question: nothing is added.
+    begin_seeing(&ada, "u1", Some("m1"));
+    assert_eq!(
+        end_saying(&hub, (&space, &commands), &ada, "u1", "Yes, do it."),
+        "ada: Yes, do it."
+    );
+    // While she answers, a sub-agent's report makes the agent ask something else first.
+    begin_seeing(&ada, "u2", Some("m1"));
+    moves_on(&hub, &space, "m2", "Should I do B?");
+    let told = end_saying(&hub, (&space, &commands), &ada, "u2", "Yes, do it.");
+    assert!(
+        told.starts_with("ada: [In reply to your earlier message (")
+            && told.ends_with(
+                " ago) ending \"Should I do A?\", before \"Should I do B?\"] Yes, do it."
+            ),
+        "{told}"
+    );
+    // An older client names nothing; the server takes the newest message it had as the words began.
+    begin_seeing(&ada, "u3", None);
+    moves_on(&hub, &space, "m3", "Done.");
+    let told = end_saying(&hub, (&space, &commands), &ada, "u3", "And C.");
+    assert!(
+        told.contains("ending \"Should I do B?\", before \"Done.\"] And C."),
+        "{told}"
+    );
+    // While she speaks, the agent's space tool says so, so that it may keep what it says meanwhile brief.
+    begin_seeing(&ada, "u5", Some("m3"));
+    let session = hub.lock().space(&space).unwrap().model.session.clone();
+    let recording =
+        |hub: &Hub| hub.tool_space(&session).unwrap()["participants"][0]["recording"].clone();
+    assert_eq!(recording(&hub), serde_json::json!(true));
+    ada.send(ClientMessage::UtteranceCancel {
+        utterance: "u5".to_owned(),
+    });
+    assert_eq!(recording(&hub), serde_json::json!(false));
+    // A message identity too long to be one is refused, as other identities are.
+    begin_seeing(&ada, "u4", Some(&"m".repeat(limits::IDENTIFIER_BYTES + 1)));
+    assert!(!ada.errors().is_empty());
+}
+
+#[test]
+fn a_reply_held_while_someone_records_starts_a_short_pause_after_they_let_go_of_x() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    // Ada's client reads whether speech is held for her; Bob's, an older one, does not.
+    hub.lock()
+        .connections
+        .get_mut(&ada.connection)
+        .unwrap()
+        .speech_held = true;
+    for client in [&ada, &bob] {
+        client.join(&space);
+        client.send(ClientMessage::Engagement {
+            state: Engagement::Engaged,
+        });
+        client.read();
+    }
+    // The speech announced, and whether it is held, as each is told.
+    let heard = |client: &Client| {
+        let messages = client.read();
+        let speaks = messages
+            .iter()
+            .filter(|message| matches!(message, ServerMessage::Speech { .. }))
+            .count();
+        let held: Vec<bool> = messages
+            .iter()
+            .filter_map(|message| match message {
+                ServerMessage::SpeechHeld { held } => Some(*held),
+                _ => None,
+            })
+            .collect();
+        (speaks, held)
+    };
+    begin_seeing(&ada, "u1", None);
+    begin_seeing(&bob, "b1", None);
+    hub.agent_speech(&space, 1, speech(1));
+    hub.agent_audio(&space, 1, &frame(320));
+    // She is told it is held, as soon as the pacer runs.
+    hub.pace_speech(&space, Instant::now());
+    assert_eq!(heard(&ada), (0, vec![true]));
+    // She lets go of X: nothing reaches her until the pause has passed, and it is still held meanwhile.
+    let released = Instant::now();
+    ada.send(ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+        pointed: None,
+    });
+    let due = hub
+        .pace_speech(&space, released)
+        .flatten()
+        .expect("it is due");
+    assert!(due >= released + crate::retention::RELEASE_PAUSE);
+    assert_eq!(heard(&ada), (0, vec![]));
+    // She presses X again before it has: it stays held, however long she speaks.
+    begin_seeing(&ada, "u2", None);
+    hub.pace_speech(
+        &space,
+        Instant::now() + 10 * crate::retention::RELEASE_PAUSE,
+    );
+    assert_eq!(heard(&ada), (0, vec![]));
+    // Letting go again, it plays from its start once the pause has passed, and is no longer held.
+    let released = Instant::now();
+    ada.send(ClientMessage::UtteranceEnd {
+        utterance: "u2".to_owned(),
+        pointed: None,
+    });
+    hub.pace_speech(&space, released);
+    assert_eq!(heard(&ada), (0, vec![]));
+    hub.pace_speech(&space, Instant::now() + crate::retention::RELEASE_PAUSE);
+    assert_eq!(heard(&ada), (1, vec![false]));
+    // Bob's client is never told, though his speech was held too.
+    assert_eq!(heard(&bob).1, Vec::<bool>::new());
+    // Held again, leaving the space ends the hold, which she is told.
+    begin_seeing(&ada, "u3", None);
+    hub.agent_speech(&space, 2, speech(2));
+    hub.pace_speech(&space, Instant::now());
+    assert_eq!(heard(&ada).1, vec![true]);
+    ada.send(ClientMessage::Leave);
+    hub.pace_speech(&space, Instant::now());
+    assert_eq!(heard(&ada).1, vec![false]);
+}
+
+#[test]
+fn a_reply_started_while_someone_records_reaches_them_once_they_stop() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    for client in [&ada, &bob] {
+        client.join(&space);
+        client.send(ClientMessage::Engagement {
+            state: Engagement::Engaged,
+        });
+        client.read();
+    }
+    let speaks = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Speech { replay, .. } => Some(replay),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Ada begins speaking; the agent's next reply is held for her, and Bob hears it live.
+    begin_seeing(&ada, "u1", None);
+    hub.agent_speech(&space, 1, speech(1));
+    hub.agent_audio(&space, 1, &frame(320));
+    hub.agent_gap(&space, 1);
+    assert_eq!(speaks(&bob), [false]);
+    assert!(speaks(&ada).is_empty());
+    hub.pace_speech(&space, Instant::now());
+    assert!(speaks(&ada).is_empty());
+    // She cancels her words, or ends them: either way, she hears the reply from its start, played again for her.
+    ada.send(ClientMessage::UtteranceCancel {
+        utterance: "u1".to_owned(),
+    });
+    hub.pace_speech(&space, Instant::now());
+    assert_eq!(speaks(&ada), [true]);
+    // Bob ends his words, which fail as he speaks: what was held plays for him too.
+    begin_seeing(&bob, "u2", None);
+    hub.agent_speech(&space, 2, speech(1));
+    assert!(speaks(&bob).is_empty());
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_failed(utterance, "The recognizer failed.");
+    hub.pace_speech(&space, Instant::now());
+    assert_eq!(speaks(&bob), [true]);
+}
+
 impl Client {
     /// Connected and greeted as `participant`, by a client that shows image panels, with what that sent read.
     fn showing_images(hub: &Arc<Hub>, access: Access, participant: &str) -> Self {
@@ -4334,6 +4583,7 @@ impl Client {
             environment_state: false,
             projection: true,
             pairing_window: false,
+            speech_held: false,
             images: true,
         });
         client.read();

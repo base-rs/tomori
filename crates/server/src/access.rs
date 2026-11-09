@@ -162,6 +162,7 @@ mod tests {
                 environment_state: false,
                 projection: false,
                 pairing_window: false,
+                speech_held: false,
                 images: false,
             },
             ClientMessage::Ping { nonce: 1 },
@@ -189,6 +190,7 @@ mod tests {
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
+                seen: None,
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),
@@ -303,6 +305,7 @@ mod tests {
             naming: false,
             titling: true,
             attention: Vec::new(),
+            seen: None,
         };
         assert_eq!(refusal(ConnectionRole::Owner, &titling), None);
         assert_eq!(

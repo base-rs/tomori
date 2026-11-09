@@ -522,6 +522,7 @@ impl TestClient {
             environment_state: false,
             projection,
             pairing_window,
+            speech_held: false,
             images,
         });
         // The welcome is the first reply to hello.
@@ -602,6 +603,7 @@ impl TestClient {
             naming: false,
             titling: false,
             attention,
+            seen: None,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {

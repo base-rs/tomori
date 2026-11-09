@@ -319,6 +319,7 @@ async fn exchange(
             projection: true,
             // Every client built with this crate reads whether pairing is open, which it hands on as any other message. See `design/security.md`.
             pairing_window: true,
+            speech_held: true,
             // And receives image panels' images, which it checks and hands on as events, for its session to fetch and show.
             images: true,
         };
