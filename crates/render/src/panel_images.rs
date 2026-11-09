@@ -80,8 +80,27 @@ fn encode(value: f32) -> u8 {
     (encoded * 255.0 + 0.5) as u8
 }
 
-/// `level` and every level below it, each half the size of the one above, down to a pixel, each pixel the average in
-/// linear light of the two by two above it, so that an image does not darken as it shrinks.
+/// For each of `to` pixels across a level, the pixels of the `from` across the level above that it covers, each with its
+/// share: the two above it where `from` is even, and three, the middle one wholly and its neighbours in part, where it is
+/// odd, so that every pixel above counts alike and the last column or row of an odd level is never left out.
+fn spans(from: u32, to: u32) -> Vec<Vec<(u32, f32)>> {
+    let scale = f64::from(from) / f64::from(to);
+    (0..to)
+        .map(|index| {
+            let (start, end) = (f64::from(index) * scale, f64::from(index + 1) * scale);
+            (start.floor() as u32..(end.ceil() as u32).min(from))
+                .map(|pixel| {
+                    let covered = end.min(f64::from(pixel + 1)) - start.max(f64::from(pixel));
+                    (pixel, (covered / scale) as f32)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `level` and every level below it, each half the size of the one above, rounded down, down to a pixel, each pixel the
+/// average in linear light of the part of the level above it covers, so that an image does not darken as it shrinks,
+/// nor lose its right and bottom edges where a level's width or height is odd.
 pub fn mipmaps(level: Level) -> Vec<Level> {
     let table = linear_table();
     let mut levels = vec![level];
@@ -91,24 +110,26 @@ pub fn mipmaps(level: Level) -> Vec<Level> {
             return levels;
         }
         let (width, height) = ((above.width / 2).max(1), (above.height / 2).max(1));
+        let (across, down) = (spans(above.width, width), spans(above.height, height));
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            for x in 0..width {
+        for rows in &down {
+            for columns in &across {
                 let mut sum = [0.0f32; 4];
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let sx = (2 * x + dx).min(above.width - 1);
-                    let sy = (2 * y + dy).min(above.height - 1);
-                    let at = ((sy * above.width + sx) * 4) as usize;
-                    for channel in 0..3 {
-                        sum[channel] += table[above.pixels[at + channel] as usize];
+                for (sy, row_share) in rows {
+                    for (sx, column_share) in columns {
+                        let share = row_share * column_share;
+                        let at = ((sy * above.width + sx) * 4) as usize;
+                        for channel in 0..3 {
+                            sum[channel] += share * table[above.pixels[at + channel] as usize];
+                        }
+                        sum[3] += share * f32::from(above.pixels[at + 3]);
                     }
-                    sum[3] += f32::from(above.pixels[at + 3]);
                 }
                 pixels.extend([
-                    encode(sum[0] / 4.0),
-                    encode(sum[1] / 4.0),
-                    encode(sum[2] / 4.0),
-                    (sum[3] / 4.0 + 0.5) as u8,
+                    encode(sum[0]),
+                    encode(sum[1]),
+                    encode(sum[2]),
+                    (sum[3] + 0.5).min(255.0) as u8,
                 ]);
             }
         }

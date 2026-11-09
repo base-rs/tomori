@@ -912,6 +912,285 @@ mod tests {
         });
     }
 
+    /// The colours of an edged picture's top, bottom, left and right edges, and of its checks.
+    const EDGES: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+    const CHECKS: [[u8; 3]; 2] = [[40, 40, 40], [200, 200, 200]];
+
+    /// A PNG `width` by `height`, its own size, of dark and light checks `cell` pixels square, edged one pixel wide in
+    /// [`EDGES`]: red along its top, green along its bottom, blue down its left and yellow down its right.
+    fn edged_png(width: u32, height: u32, cell: u32) -> Vec<u8> {
+        let picture = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb(match (x, y) {
+                (_, 0) => EDGES[0],
+                (_, y) if y == height - 1 => EDGES[1],
+                (0, _) => EDGES[2],
+                (x, _) if x == width - 1 => EDGES[3],
+                (x, y) => CHECKS[((x / cell + y / cell) % 2) as usize],
+            })
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        picture.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        png.into_inner()
+    }
+
+    /// `png`, an image `width` by `height`, shown on one panel at `place`, drawn with `gpu` square on from in front of
+    /// it, so that its image fills most of an eye `size` pixels across, once its texture is ready; with where, in the
+    /// eye's pixels, the image's left, top, right and bottom edges are, from its canvas.
+    fn image_panel_square_on(
+        test_gpu::Gpu { device, queue, .. }: &test_gpu::Gpu,
+        png: Vec<u8>,
+        (width, height): (u32, u32),
+        place: tomori_protocol::Place,
+        (eye_width, eye_height): (u32, u32),
+    ) -> (image::RgbaImage, [f32; 4]) {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image panel square on"),
+            size: wgpu::Extent3d {
+                width: eye_width,
+                height: eye_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut renderer = Renderer::new(device, queue, format, eye_width, eye_height);
+        renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+        let mut panels = Panels::new(device, &renderer);
+        let hash = format!("{:064x}", u64::from(width) << 32 | u64::from(height));
+        let image = tomori_protocol::Image::new(hash.clone(), width, height, png.len() as u32);
+        let panel = tomori_protocol::Panel::new("panel-1", "Edges", "Its caption.", place)
+            .with_image(image);
+        let mut conversation = joined();
+        show_projection(&mut conversation, Vec::new(), vec![panel]);
+        conversation.apply(tomori_client::Event::Image {
+            hash: hash.clone(),
+            png: png.into(),
+        });
+        let head = Mat4::from_translation(arrival::HOME);
+        let senses = Senses {
+            focused: true,
+            head: Some(head),
+            head_pose: Pose::from_transform(head),
+            viewer: Some(arrival::HOME),
+            space_head: head,
+            ..Default::default()
+        };
+        let mut step = Step::default();
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let frame = loop {
+            let frame = step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                0.01,
+            );
+            draw(&mut renderer, device, queue, &mut panels, &frame);
+            if renderer.images().binding(&hash).is_some() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "the image was never uploaded");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        let sheet = frame
+            .projection
+            .iter()
+            .find(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|canvas| canvas.image.is_some())
+            })
+            .expect("the image panel is drawn");
+        let (canvas, model) = (sheet.canvas.as_ref().unwrap(), sheet.model.unwrap());
+        let (_, [left, bottom, right, top]) = canvas.image_rect().unwrap();
+        // Square on, from far enough in front of the image's middle that it fills three quarters of the eye.
+        let middle =
+            model.transform_point3(Vec3::new((left + right) / 2.0, (bottom + top) / 2.0, 0.0));
+        let (across, up) = (model.x_axis.truncate(), model.y_axis.truncate());
+        let (shown_width, shown_height) = (
+            (right - left) * across.length(),
+            (top - bottom) * up.length(),
+        );
+        let fov: f32 = 0.8;
+        let aspect = eye_width as f32 / eye_height as f32;
+        let distance = (shown_width / aspect).max(shown_height) / (2.0 * (fov / 2.0).tan()) / 0.75;
+        let facing = model.z_axis.truncate().normalize();
+        let matrix = Mat4::perspective_rh(fov, aspect, 0.05, 50.0)
+            * Mat4::look_at_rh(middle + facing * distance, middle, up.normalize());
+        renderer.render(
+            device,
+            queue,
+            std::slice::from_ref(&view),
+            &[matrix],
+            Mat4::IDENTITY,
+            &panels.list(Mat4::IDENTITY),
+        );
+        let picture = read_back(device, queue, &texture, (eye_width, eye_height));
+        let pixel = |x: f32, y: f32| {
+            let clip = matrix * model * glam::Vec4::new(x, y, 0.0, 1.0);
+            let ndc = clip.truncate() / clip.w;
+            (
+                (ndc.x + 1.0) / 2.0 * eye_width as f32,
+                (1.0 - ndc.y) / 2.0 * eye_height as f32,
+            )
+        };
+        let (x0, y0) = pixel(left, top);
+        let (x1, y1) = pixel(right, bottom);
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "{error:?}");
+        (picture, [x0, y0, x1, y1])
+    }
+
+    /// Set `TOMORI_IMAGE_EDGES_PREVIEW` to a PNG path to save what this renders: edged images of four shapes, floating
+    /// and on the Tomori wall, each close up and square on, its image several screen pixels to each of its own.
+    #[test]
+    fn an_image_panel_draws_every_edge_of_its_image_undistorted() {
+        const EYE: (u32, u32) = (960, 720);
+        // The colour nearest `pixel` of those an edged picture has, if it is near one.
+        let nearest = |pixel: &image::Rgba<u8>| {
+            EDGES.iter().chain(&CHECKS).copied().find(|colour| {
+                colour
+                    .iter()
+                    .zip(pixel.0)
+                    .all(|(want, have)| (i32::from(*want) - i32::from(have)).abs() <= 12)
+            })
+        };
+        let floating = tomori_protocol::Place::Free {
+            pose: tomori_protocol::Pose::upright_facing([1.6, 1.45, 0.0], [0.0, 1.45, 0.0]),
+        };
+        let wall = tomori_protocol::Place::Wall {
+            wall: tomori_protocol::TOMORI_WALL.into(),
+            slot: 1,
+        };
+        let mut sheet = image::RgbaImage::new(EYE.0 * 4, EYE.1 * 2);
+        test_gpu::with(|gpu| {
+            for (row, place) in [floating, wall].into_iter().enumerate() {
+                // 4:3, 3:4, 16:9 and square, in checks of 4 pixels.
+                for (column, (width, height)) in [(64, 48), (48, 64), (64, 36), (48, 48)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let (picture, [left, top, right, bottom]) = image_panel_square_on(
+                        &gpu,
+                        edged_png(width, height, 4),
+                        (width, height),
+                        place.clone(),
+                        EYE,
+                    );
+                    let at = |x: f32, y: f32| nearest(picture.get_pixel(x as u32, y as u32));
+                    let shape = format!("{place:?}, {width} × {height}");
+                    // Drawn its own shape: its edges are as far apart as its pixels say, a pixel of it as wide as it is tall.
+                    let (across, down) = (
+                        (right - left) / width as f32,
+                        (bottom - top) / height as f32,
+                    );
+                    assert!(
+                        across > 4.0,
+                        "{shape}: {across} screen pixels to each of its own"
+                    );
+                    assert!(
+                        (across / down - 1.0).abs() < 0.01,
+                        "{shape}: {across} by {down}"
+                    );
+                    // Every edge is drawn, a whole pixel of the image wide, at the middle of each side and near its ends.
+                    // A quarter of the image's pixel in, short of its middle, where the next pixel would begin to show.
+                    let inside = across / 4.0;
+                    for fraction in [0.1, 0.5, 0.9] {
+                        let x = left + (right - left) * fraction;
+                        let y = top + (bottom - top) * fraction;
+                        assert_eq!(
+                            at(x, top + inside),
+                            Some(EDGES[0]),
+                            "{shape}: top at {fraction}"
+                        );
+                        assert_eq!(
+                            at(x, bottom - inside),
+                            Some(EDGES[1]),
+                            "{shape}: bottom at {fraction}"
+                        );
+                        assert_eq!(
+                            at(left + inside, y),
+                            Some(EDGES[2]),
+                            "{shape}: left at {fraction}"
+                        );
+                        assert_eq!(
+                            at(right - inside, y),
+                            Some(EDGES[3]),
+                            "{shape}: right at {fraction}"
+                        );
+                        // And nothing of the image beyond them.
+                        for outside in [
+                            at(x, top - 3.0),
+                            at(x, bottom + 3.0),
+                            at(left - 3.0, y),
+                            at(right + 3.0, y),
+                        ] {
+                            assert!(
+                                outside.is_none(),
+                                "{shape}: {outside:?} beyond an edge at {fraction}"
+                            );
+                        }
+                    }
+                    // Its checks are square: each colour changes along the middle row and column every 4 of its pixels.
+                    let changes = |points: Vec<(f32, f32)>| {
+                        let mut last = None;
+                        let mut at_change = Vec::new();
+                        for (index, (x, y)) in points.iter().enumerate() {
+                            let colour = at(*x, *y).filter(|colour| CHECKS.contains(colour));
+                            if colour.is_some() && last.is_some() && colour != last {
+                                at_change.push(index as f32);
+                            }
+                            if colour.is_some() {
+                                last = colour;
+                            }
+                        }
+                        let spans: Vec<f32> =
+                            at_change.windows(2).map(|pair| pair[1] - pair[0]).collect();
+                        spans.iter().sum::<f32>() / spans.len() as f32
+                    };
+                    // Through the middle of a check near the image's middle.
+                    let (middle_x, middle_y) = (
+                        left + (4 * (width / 8) + 2) as f32 * across,
+                        top + (4 * (height / 8) + 2) as f32 * down,
+                    );
+                    let check_across = changes(
+                        (left.ceil() as u32..right as u32)
+                            .map(|x| (x as f32, middle_y))
+                            .collect(),
+                    );
+                    let check_down = changes(
+                        (top.ceil() as u32..bottom as u32)
+                            .map(|y| (middle_x, y as f32))
+                            .collect(),
+                    );
+                    assert!(
+                        (check_across / (4.0 * across) - 1.0).abs() < 0.02,
+                        "{shape}: {check_across}"
+                    );
+                    assert!(
+                        (check_down / (4.0 * down) - 1.0).abs() < 0.02,
+                        "{shape}: {check_down}"
+                    );
+                    image::imageops::replace(
+                        &mut sheet,
+                        &picture,
+                        i64::from(EYE.0) * column as i64,
+                        i64::from(EYE.1) * row as i64,
+                    );
+                }
+            }
+        });
+        crate::test_support::preview("TOMORI_IMAGE_EDGES_PREVIEW", &sheet);
+    }
+
     /// Set `TOMORI_PLACEMENT_PREVIEW` to a PNG path to save what this renders: a participant at home, who added a wall
     /// to their right and is looking at it as they ask, sees the agent's answer there, while the Tomori wall ahead of
     /// them stays empty, as a running fake server places it.

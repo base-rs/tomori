@@ -59,6 +59,56 @@ fn mipmaps_average_in_linear_light_down_to_a_pixel() {
 }
 
 #[test]
+fn an_odd_level_keeps_its_last_column_and_row_as_it_does_its_first() {
+    // Black, edged one pixel wide in white on every side, at sizes whose levels are odd, as 768's become below 6.
+    for (width, height) in [(7, 5), (125, 3), (1, 9), (24, 12)] {
+        let pixels = (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| {
+                    let edge = x == 0 || y == 0 || x == width - 1 || y == height - 1;
+                    let value = if edge { 255 } else { 0 };
+                    [value, value, value, 255]
+                })
+            })
+            .collect();
+        let levels = mipmaps(Level {
+            width,
+            height,
+            pixels,
+        });
+        for level in &levels {
+            let at = |x: u32, y: u32| level.pixels[((y * level.width + x) * 4) as usize];
+            let (right, bottom) = (level.width - 1, level.height - 1);
+            // The right edge as bright as the left, and the bottom as the top, at every level: nothing shifted or lost.
+            for y in 0..level.height {
+                assert!(
+                    at(0, y).abs_diff(at(right, y)) <= 1,
+                    "{width} × {height}, level {} × {}, row {y}",
+                    level.width,
+                    level.height
+                );
+            }
+            for x in 0..level.width {
+                assert!(at(x, 0).abs_diff(at(x, bottom)) <= 1);
+            }
+            assert!(at(right, bottom) > 0 && level.pixels[3] == 255);
+        }
+    }
+    // Five across, the last white, halve to two: the second covers the last two and a half, the white one 2/5 of it.
+    let levels = mipmaps(Level {
+        width: 5,
+        height: 1,
+        pixels: [[0, 0, 0, 255]; 4]
+            .into_iter()
+            .chain([[255; 4]])
+            .flatten()
+            .collect(),
+    });
+    assert_eq!(levels[1].pixels[..4], [0, 0, 0, 255]);
+    assert_eq!(levels[1].pixels[4], encode(0.4));
+}
+
+#[test]
 fn only_a_png_within_the_largest_side_is_decoded() {
     let levels = decode(&png(64, 3)).unwrap();
     assert_eq!(

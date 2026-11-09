@@ -178,6 +178,48 @@ mod tests {
     }
 
     #[test]
+    fn floating_the_frame_hugs_the_image_and_in_a_slot_it_is_letterboxed() {
+        for (width, height) in [(1024, 768), (768, 1024), (1600, 900), (800, 800)] {
+            let shape = format!("{width} × {height}");
+            let shown = panel(width, height, "Its caption.");
+            let ratio = width as f32 / height as f32;
+            // Floating, its image keeps its shape, as large as fits, and the frame is no larger than its image needs: at
+            // most a cell wider, unless its title is wider, and a row taller, besides its title, metadata, rule and
+            // caption.
+            let canvas = super::super::face(&shown, false, false, Fit::Text);
+            let (image, (area_width, area_height)) = placed(&canvas);
+            assert!(
+                (image.width / image.height - ratio).abs() < 0.01 * ratio,
+                "{shape}"
+            );
+            let wide = area_width - image.width;
+            let tall = area_height - image.height - (4 * CELL_HEIGHT) as f32 - 2.0;
+            assert!(wide < CELL_WIDTH as f32, "{shape}: {wide} wider");
+            assert!(tall < CELL_HEIGHT as f32, "{shape}: {tall} taller");
+            assert!(
+                canvas.columns == FIT_COLUMNS.1 || canvas.rows.len() == FIT_ROWS.1 + 3,
+                "{shape}: as large as a floating panel may be"
+            );
+            // In a slot, a slot's size, the image letterboxed in it, keeping its shape.
+            let slot = super::super::face(&shown, false, false, Fit::Slot);
+            assert_eq!(slot.size(), super::super::panel_size(), "{shape}");
+            let (image, _) = placed(&slot);
+            assert!(
+                (image.width / image.height - ratio).abs() < 0.01 * ratio,
+                "{shape}"
+            );
+        }
+        // The headset's test image, as the maintainer saw it: 48 columns by 27 rows of image, its caption below, drawn
+        // 429 by 322 font pixels, 4:3, in a face of 444 by 382.
+        let shown = panel(1024, 768, "Its caption.");
+        assert_eq!(super::super::fit(&shown, Fit::Text), (48, 28));
+        let canvas = super::super::face(&shown, false, false, Fit::Text);
+        let (image, _) = placed(&canvas);
+        assert_eq!((image.width.round(), image.height), (429.0, 322.0));
+        assert_eq!(canvas.size_in_pixels(), (444, 382));
+    }
+
+    #[test]
     fn floating_an_image_grows_to_its_own_shape_within_a_comfortable_size() {
         let wide = panel(1600, 900, "Wide.");
         let (columns, rows) = super::super::fit(&wide, Fit::Text);
