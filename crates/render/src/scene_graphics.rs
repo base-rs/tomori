@@ -151,6 +151,7 @@ pub fn draw(
 mod tests {
     use super::*;
     use crate::test_gpu;
+    use crate::test_support::read_back;
     use crate::{
         arrival,
         controller::Pose,
@@ -2015,46 +2016,6 @@ mod tests {
         });
     }
 
-    /// What `texture`, `width` by `height`, holds once drawn.
-    fn read_back(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture: &wgpu::Texture,
-        (width, height): (u32, u32),
-    ) -> image::RgbaImage {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test readback"),
-            size: (width * height * 4) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(width * 4),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        queue.submit([encoder.finish()]);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        receiver.recv().unwrap().unwrap();
-        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-        buffer.unmap();
-        image::RgbaImage::from_raw(width, height, data).unwrap()
-    }
-
     /// Set `TOMORI_CARRY_HINT_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: a
     /// panel carried 1.6 m ahead, with the hint below it saying what each control does, then carried over a wall's slot,
     /// the hint saying it would swap, and a Rust code panel on the Tomori wall whose long lines wrap under a hanging
@@ -2780,6 +2741,155 @@ mod tests {
                     .unwrap_or_default()
             };
             assert!(lowest(&grown) > highest(&grown) + HEIGHT / 3, "it grows");
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_TABLE_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: the table
+    /// the maintainer could not read on the Quest 3, every row cut with "…", on the Tomori wall from 0.6 m, at its top,
+    /// then scrolled into its rows with its header kept at the top; and then floating 1.2 m ahead, grown wider to show it
+    /// whole.
+    #[test]
+    fn a_table_is_a_grid_in_a_slot_and_floating_grows_to_show_it_whole() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 960;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("table test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let body = [
+                "| PR | What | Recommendation |",
+                "|---|---|---|",
+                "| 233 | Environments get trigger, B, sticks | **Your call:** clashes with scrolling, wall B, checklist ticking |",
+                "| 229 | Prometheus data source crate | **Your call:** own and publish it now? |",
+                "| 231 | Environment anchors for swarm, workers | Rebase, then try on headset |",
+                "| 234 | Backend names its avatar (on 231) | After 231, check the Space menu fits |",
+                "| 232 | Help text, licences, program names | Rebase after 236, then merge |",
+                "| 90 | Old environment framework proposal | Superseded: suggest closing |",
+            ]
+            .join("\n");
+            let panel = |place: tomori_protocol::Place| {
+                tomori_protocol::Panel::new("panel-1", "Open PRs", body.clone(), place).with_age(5)
+            };
+            let wall = tomori_wall();
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = slots[2].w_axis.truncate();
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |at: Vec3| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, at - arrival::HOME),
+                ..Default::default()
+            };
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
+            let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -1.2);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
+            // What the participant sees of the panel at `place`, pointed at, after the wheel scrolls it `rows` rows.
+            let mut capture = |place: tomori_protocol::Place, at: Vec3, rows: f32, matrix: Mat4| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, Vec::new(), vec![panel(place)]);
+                let mut step = Step::default();
+                let now = Instant::now();
+                step.update(&senses(at), &mut conversation, &mut felt(), now, 0.01);
+                step.buttons(
+                    &tomori_scene::scene::Buttons {
+                        scroll: rows,
+                        ..Default::default()
+                    },
+                    true,
+                    &mut conversation,
+                    &mut felt(),
+                    now,
+                );
+                // Drawn pointing past it, so that the label on the ray does not cover it.
+                let frame = step.update(
+                    &senses(arrival::HOME + Vec3::Y),
+                    &mut conversation,
+                    &mut felt(),
+                    now,
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let on_wall = tomori_protocol::Place::Wall {
+                wall: tomori_protocol::TOMORI_WALL.into(),
+                slot: 2,
+            };
+            let top = capture(on_wall.clone(), slot, 0.0, close);
+            let scrolled = capture(on_wall, slot, 8.0, close);
+            let floating = tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::upright_facing(
+                    ahead.to_array(),
+                    arrival::HOME.to_array(),
+                ),
+            };
+            let grown = capture(floating, ahead, 0.0, from_home);
+            let mut sheet = image::RgbaImage::new(WIDTH * 3, HEIGHT);
+            image::imageops::replace(&mut sheet, &top, 0, 0);
+            image::imageops::replace(&mut sheet, &scrolled, WIDTH.into(), 0);
+            image::imageops::replace(&mut sheet, &grown, (2 * WIDTH).into(), 0);
+            crate::test_support::preview("TOMORI_TABLE_PREVIEW", &sheet);
+            assert_ne!(top, scrolled, "scrolling shows other rows");
+            // The header's bar, a blue tint across the grid, is drawn at the top of the slot both times.
+            let tinted = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        b > r + 25 && b > g + 10 && b > 50
+                    })
+                    .count()
+            };
+            assert!(tinted(&top) > 1000);
+            assert!(tinted(&scrolled) > 1000);
+            // Floating, it is wider than a text panel goes: lit text spans most of the view.
+            let lit = |image: &image::RgbaImage| {
+                let columns: Vec<u32> = (0..image.width())
+                    .filter(|&x| {
+                        (0..image.height())
+                            .any(|y| image.get_pixel(x, y).0[..3].iter().all(|c| *c > 150))
+                    })
+                    .collect();
+                columns.last().copied().unwrap_or_default()
+                    - columns.first().copied().unwrap_or_default()
+            };
+            let wide = lit(&grown);
+            assert!(wide > WIDTH * 3 / 5, "{wide}");
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

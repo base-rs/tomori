@@ -2477,3 +2477,185 @@ fn the_ray_s_label_says_how_to_scroll_a_panel_that_scrolls() {
         "Wheel  scroll"
     );
 }
+
+/// The table the maintainer could not read on the Quest 3, as the agent projected it.
+fn maintainers_table(place: Place) -> Panel {
+    Panel::new(
+        "t",
+        "Open PRs",
+        format!("Where each stands:\n\n{}", crate::table::tests::MAINTAINERS),
+        place,
+    )
+    .with_age(5)
+}
+
+#[test]
+fn a_table_on_a_wall_is_a_grid_its_cells_wrapped_within_their_columns_never_cut() {
+    let panel = maintainers_table(on(TOMORI_WALL, 0));
+    let face = scrolled(&panel, Fit::SLOT, 0);
+    let rows: Vec<String> = face.rows.iter().map(row_text).collect();
+    assert_eq!(rows[3], "Where each stands:");
+    // At its 34 cells, every word fits its column, "Recommendation" too.
+    assert_eq!(rows[4].trim_end(), "PR  ▏What         ▏Recommendation");
+    assert_eq!(rows[5], "─".repeat(COLUMNS));
+    assert!(
+        rows[6].starts_with("233 ▏Environments ▏Your call:"),
+        "{rows:#?}"
+    );
+    // Every row is within the slot, and none, nor the last shown with more below it, ends with "…".
+    assert!(face.rows.iter().all(|row| row.cells.len() <= COLUMNS));
+    assert!(rows.iter().all(|row| !row.contains('…')), "{rows:#?}");
+    // It scrolls, with its bar.
+    assert!(most_scroll(&panel, Fit::SLOT, None) > 0);
+    assert_eq!(face.shapes.len(), 2);
+}
+
+#[test]
+fn scrolled_into_a_table_its_header_stays_at_the_top_until_its_last_row_passes() {
+    let panel = maintainers_table(on(TOMORI_WALL, 0));
+    let lines = crate::transcript::markdown_lines(&panel.body, COLUMNS);
+    let all: Vec<String> = lines
+        .iter()
+        .map(|line| crate::ui_text::plain(&line.cells))
+        .collect();
+    let body = |scroll| -> Vec<String> {
+        scrolled(&panel, Fit::SLOT, scroll).rows[3..]
+            .iter()
+            .map(row_text)
+            .map(|row| row.trim_end().to_owned())
+            .collect()
+    };
+    let trimmed = |range: std::ops::Range<usize>| -> Vec<String> {
+        all[range]
+            .iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
+    };
+    // At the top, the paragraph and the table's start as they are; one row down, the header is where it would be.
+    assert_eq!(body(0), trimmed(0..BODY_ROWS));
+    assert_eq!(body(1), trimmed(1..1 + BODY_ROWS));
+    // Scrolled into its body, its header and the rule below it stay at the top, over the rows they cover.
+    let header = trimmed(1..3);
+    for scroll in [2, 5, 9] {
+        let shown = body(scroll);
+        assert_eq!(shown[..2], header[..], "{scroll}");
+        assert_eq!(
+            shown[2..],
+            trimmed(scroll + 2..scroll + BODY_ROWS)[..],
+            "{scroll}"
+        );
+    }
+    // At the end, the header still names the columns and the last row shows whole.
+    let most = most_scroll(&panel, Fit::SLOT, None);
+    let end = body(most);
+    assert_eq!(end[..2], header[..]);
+    assert_eq!(
+        end.last(),
+        all.last().map(|row| row.trim_end().to_owned()).as_ref()
+    );
+    // Pointing under the pinned header names nothing, as the table has no items, and pointing is unchanged elsewhere.
+    let (_, height) = sized(COLUMNS, BODY_ROWS);
+    let row = |row: f32| {
+        Vec3::new(
+            0.0,
+            height / 2.0 - (PADDING.1 as f32 + (3.5 + row) * CELL_HEIGHT as f32) * PIXEL,
+            0.0,
+        )
+    };
+    assert_eq!(
+        item_at(&panel, Mat4::IDENTITY, Fit::SLOT, 5, row(0.0)),
+        None
+    );
+    assert_eq!(
+        item_at(&panel, Mat4::IDENTITY, Fit::SLOT, 5, row(6.0)),
+        None
+    );
+}
+
+#[test]
+fn a_pinned_header_is_pushed_away_by_what_follows_its_table_and_needs_room_below_it() {
+    let rows = (1..=8)
+        .map(|n| format!("| {n} | row {n} |"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let after = (1..=12)
+        .map(|n| format!("- after {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let panel = Panel::new(
+        "t",
+        "Table then list",
+        format!("| N | Name |\n|---|---|\n{rows}\n\n{after}"),
+        on(TOMORI_WALL, 0),
+    );
+    let lines = crate::transcript::markdown_lines(&panel.body, COLUMNS);
+    assert_eq!(
+        lines[0]
+            .table
+            .map(|table| (table.start, table.header, table.end)),
+        Some((0, 2, 10))
+    );
+    let top = |scroll| {
+        row_text(&scrolled(&panel, Fit::SLOT, scroll).rows[3])
+            .trim_end()
+            .to_owned()
+    };
+    let second = |scroll| {
+        row_text(&scrolled(&panel, Fit::SLOT, scroll).rows[5])
+            .trim_end()
+            .to_owned()
+    };
+    assert_eq!((top(7), second(7)), ("N ▏Name".into(), "8 ▏row 8".into()));
+    // As its last row passes under the header, what follows pushes the header up and away, a row at a time, and below
+    // the table nothing is pinned.
+    assert_eq!((top(8), second(8)), ("N ▏Name".into(), "• after 1".into()));
+    assert_eq!((top(9), second(9)), ("────────".into(), "• after 2".into()));
+    assert_eq!(top(10), "• after 1");
+    // A face too short for the header and two rows below it pins nothing.
+    assert_eq!(
+        super::shown(&lines, 4, 3)
+            .iter()
+            .map(|line| crate::ui_text::plain(&line.cells).trim_end().to_owned())
+            .collect::<Vec<_>>(),
+        ["3 ▏row 3", "4 ▏row 4", "5 ▏row 5"]
+    );
+    assert_eq!(super::shown(&lines, 4, 4).len(), 4);
+    assert_eq!(super::shown(&lines, lines.len(), 4), Vec::<Line>::new());
+}
+
+#[test]
+fn floating_a_table_grows_wider_to_show_its_columns_up_to_a_comfortable_width() {
+    let floating = Place::Free {
+        pose: Pose::default(),
+    };
+    let panel = maintainers_table(floating.clone());
+    let (columns, rows) = fit(&panel, Fit::Text);
+    assert_eq!(columns, TABLE_COLUMNS);
+    assert!(TABLE_COLUMNS > FIT_COLUMNS.1);
+    let face = face(&panel, false, false, Fit::Text);
+    let text: Vec<String> = face.rows.iter().map(row_text).collect();
+    assert_eq!(face.rows.len(), 3 + rows);
+    assert!(rows < FIT_ROWS.1, "it shows whole, {rows} rows");
+    assert!(text.iter().all(|row| !row.contains('…')), "{text:#?}");
+    assert!(text[4].starts_with("PR  ▏What"), "{text:#?}");
+    assert!(
+        text.iter()
+            .any(|row| row.starts_with("231 ▏Environment anchors")),
+        "{text:#?}"
+    );
+    assert_eq!(face.size(), fitted_size(&panel, Fit::Text));
+    assert!(face.size().0 > sized(FIT_COLUMNS.1, rows).0);
+    // A table that fits narrower keeps its own width, and text without a table grows no wider than before.
+    let small = Panel::new(
+        "s",
+        "Small",
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        floating.clone(),
+    );
+    assert_eq!(fit(&small, Fit::Text).0, FIT_COLUMNS.0);
+    let words: Vec<String> = (0..60).map(|n| format!("word{n}")).collect();
+    let prose = Panel::new("p", "Prose", words.join(" "), floating);
+    assert_eq!(fit(&prose, Fit::Text).0, FIT_COLUMNS.1);
+    // On a wall it is a slot's size.
+    assert_eq!(fit(&panel, Fit::SLOT), (COLUMNS, BODY_ROWS));
+}

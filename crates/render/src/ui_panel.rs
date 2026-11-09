@@ -402,4 +402,207 @@ mod tests {
             gpu.queue.submit([encoder.finish()]);
         });
     }
+
+    /// `canvas` drawn face on, `scale` screen pixels to its font pixel and shifted `shift` of a pixel right and down, as
+    /// a headset sees a panel at about a metre, its pixels nowhere on the screen's grid; with where its font pixel `(x,
+    /// y)`, from its top-left corner, falls on the image.
+    fn drawn_face_on(
+        gpu: &crate::test_gpu::Gpu,
+        canvas: &Canvas,
+        scale: f32,
+        shift: f32,
+    ) -> (image::RgbaImage, impl Fn(f32, f32) -> (f32, f32)) {
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+        let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+        let mut panel = Panel::new(&gpu.device, &pipeline, 100_000);
+        let (columns, rows) = canvas.size_in_pixels();
+        // Rows read back are a multiple of 256 bytes.
+        let (width, height) = (
+            ((columns as f32 * scale) as u32 + 16).next_multiple_of(64),
+            (rows as f32 * scale) as u32 + 16,
+        );
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let target = |format, usage, label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let texture = target(
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            "face on",
+        );
+        let depth = target(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+            "face on depth",
+        );
+        // From the panel's plane, in metres about its centre, to clip space: a font pixel `scale` screen pixels.
+        let per_metre = scale / canvas.pixel;
+        let shifted = 2.0 * shift / glam::Vec2::new(width as f32, -(height as f32));
+        let transform = Mat4::from_translation(shifted.extend(0.0))
+            * Mat4::from_scale(glam::Vec3::new(
+                2.0 * per_metre / width as f32,
+                2.0 * per_metre / height as f32,
+                1.0,
+            ));
+        panel.set(&gpu.queue, canvas);
+        panel.prepare(&gpu.queue, 0, transform);
+        glyphs.sync(&gpu.device, &gpu.queue);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("face on"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture.create_view(&Default::default()),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.create_view(&Default::default()),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pipeline.set(&mut pass, &glyphs.binding());
+            panel.draw(&mut pass, &pipeline, 0);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let image =
+            crate::test_support::read_back(&gpu.device, &gpu.queue, &texture, (width, height));
+        let place = move |x: f32, y: f32| {
+            (
+                width as f32 / 2.0 + (x - columns as f32 / 2.0) * scale + shift,
+                height as f32 / 2.0 + (y - rows as f32 / 2.0) * scale + shift,
+            )
+        };
+        (image, place)
+    }
+
+    /// How bright `image` is at `(x, y)`, the sum of its channels.
+    fn brightness(image: &image::RgbaImage, x: u32, y: u32) -> u32 {
+        image.get_pixel(x, y).0[..3]
+            .iter()
+            .map(|&c| u32::from(c))
+            .sum()
+    }
+
+    /// How much a line adds to `image` through each pixel of `along`, summed over the pixels `across` it, above the
+    /// darkest of them; and the most of those over the least, which a line as bright all along keeps near one.
+    fn evenness(
+        image: &image::RgbaImage,
+        along: std::ops::Range<u32>,
+        across: std::ops::Range<u32>,
+        at: impl Fn(u32, u32) -> (u32, u32),
+    ) -> (Vec<u32>, f32) {
+        let added: Vec<u32> = along
+            .map(|step| {
+                let values: Vec<u32> = across
+                    .clone()
+                    .map(|side| {
+                        let (x, y) = at(step, side);
+                        brightness(image, x, y)
+                    })
+                    .collect();
+                let least = values.iter().copied().min().unwrap_or_default();
+                values.iter().map(|value| value - least).sum()
+            })
+            .collect();
+        let most = added.iter().copied().max().unwrap_or_default();
+        let least = added.iter().copied().min().unwrap_or_default().max(1);
+        (added, most as f32 / least as f32)
+    }
+
+    /// Set `TOMORI_TABLE_RULE_PREVIEW` to a PNG path to save what this renders: a table on a panel in a wall's slot, face
+    /// on, at about the headset's resolution, its pixels off the screen's grid.
+    #[test]
+    fn a_table_s_rule_and_the_lines_between_its_columns_are_as_bright_all_along() {
+        crate::test_gpu::with(|gpu| {
+            let body = "| Step | What happens |\n|---|---|\n| 1 | The agent reads the table, lays out its columns, wraps each cell within its own column, and draws the rule below the header and the lines between the columns, each as one line rather than many short pieces |\n| 2 | Striped |\n";
+            let panel = tomori_protocol::Panel::new(
+                "panel-1",
+                "Steps",
+                body,
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: 0,
+                },
+            );
+            let canvas = tomori_scene::projection::face(
+                &panel,
+                false,
+                false,
+                tomori_scene::projection::Fit::SLOT,
+            );
+            let (image, place) = drawn_face_on(&gpu, &canvas, 2.3, 0.37);
+            crate::test_support::preview("TOMORI_TABLE_RULE_PREVIEW", &image);
+            let (left, top) = (canvas.padding.0 as f32, canvas.padding.1 as f32);
+            let cell = |column: usize, row: usize| {
+                place(
+                    left + (column * crate::ui_text::CELL_WIDTH) as f32,
+                    top + (row * crate::ui_text::CELL_HEIGHT) as f32,
+                )
+            };
+            // The rule below the header: the body's first row of nothing but a rule, below the panel's own.
+            let rule = (3..canvas.rows.len())
+                .find(|&row| {
+                    let cells = &canvas.rows[row].cells;
+                    !cells.is_empty() && cells.iter().all(|(ch, _)| *ch == '─')
+                })
+                .expect("a rule below the header");
+            let length = canvas.rows[rule].cells.len();
+            let (start, upper) = cell(0, rule);
+            let (end, lower) = cell(length, rule + 1);
+            let (_, ratio) = evenness(
+                &image,
+                start.ceil() as u32 + 3..end.floor() as u32 - 3,
+                upper.ceil() as u32..lower.floor() as u32,
+                |x, y| (x, y),
+            );
+            assert!(ratio < 1.1, "the rule is uneven along its length: {ratio}");
+            // The line between the columns, down the first row's lines, which wrap.
+            let lined = |row: usize| canvas.rows[row].cells.iter().position(|(ch, _)| *ch == '▏');
+            let column = lined(rule + 1).expect("a line between the columns");
+            let lines = (rule + 1..canvas.rows.len())
+                .take_while(|&row| {
+                    lined(row) == Some(column) && canvas.rows[row].cells[0].1.background.is_none()
+                })
+                .count();
+            assert!(lines >= 4, "the first row wraps: {lines}");
+            let (x, first) = cell(column, rule + 1);
+            let (_, last) = cell(column, rule + 1 + lines);
+            let span = (5.0 * 2.3) as u32;
+            let (added, ratio) = evenness(
+                &image,
+                first.ceil() as u32 + 3..last.floor() as u32 - 3,
+                x as u32 - span..x as u32 + span,
+                |y, x| (x, y),
+            );
+            assert!(added.iter().all(|&added| added > 0), "the line has gaps");
+            assert!(
+                ratio < 1.1,
+                "the line between the columns is uneven along its length: {ratio}"
+            );
+        });
+    }
 }

@@ -3,11 +3,11 @@
 
 //! Markdown-lite: a message's Markdown as blocks of text with their emphasis, for the transcript to style, so that none of `**`, `#` or backticks shows. Parsed with `base-markdown`, as the speech crate splits replies.
 //!
-//! Headings, list items with their bullets or numbers, code blocks, quotes, rules and table rows are blocks; strong text, emphasis and inline code are marked within them; links show their text only. A task item, `- [ ]` or `- [x]`, says whether it is ticked rather than showing its box as text, and every block of a list item knows the line of the source the item begins on, so that what is pointed at on a panel can be named.
+//! Headings, list items with their bullets or numbers, code blocks, quotes, rules and tables are blocks; strong text, emphasis and inline code are marked within them, as within each cell of a table; links show their text only, and a `<br>` breaks the line, as agents write one in a table's cell. A task item, `- [ ]` or `- [x]`, says whether it is ticked rather than showing its box as text, and every block of a list item knows the line of the source the item begins on, so that what is pointed at on a panel can be named.
 use std::sync::LazyLock;
 
 use base_markdown::{
-    EventParser, ParseOptions,
+    AlignKind, EventParser, ParseOptions,
     stream::{EventKind, Tag, TagKind},
 };
 
@@ -37,10 +37,46 @@ pub enum Kind {
     Code,
     Quote,
     Rule,
-    /// A table's row, its cells separated by " │ ".
-    TableRow {
-        header: bool,
-    },
+    /// A table, with its header, its rows and how each column is aligned; the block's own text is empty.
+    Table(Table),
+}
+
+/// Text with its marks, as a block or a table's cell holds it.
+pub type Text = Vec<(String, Inline)>;
+
+/// How a table's column is aligned, as its delimiter row says: `:---` or `---` left, `:---:` centred and `---:` right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    #[default]
+    Left,
+    Centre,
+    Right,
+}
+
+/// A table: its header's cells, its rows' cells and its columns' alignments. Rows may have fewer cells than the header,
+/// as GitHub's Markdown pads them, and the header is empty where its cells all are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Table {
+    pub align: Vec<Align>,
+    pub header: Vec<Text>,
+    pub rows: Vec<Vec<Text>>,
+}
+
+impl Table {
+    /// How many columns the table has: the most cells of any of its rows or its header.
+    pub fn columns(&self) -> usize {
+        self.rows
+            .iter()
+            .map(Vec::len)
+            .chain([self.header.len(), self.align.len()])
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+/// `text` without its marks.
+pub fn plain(text: &[(String, Inline)]) -> String {
+    text.iter().map(|(text, _)| text.as_str()).collect()
 }
 
 /// One block of a message.
@@ -58,7 +94,7 @@ impl Block {
     /// The block's text without its marks.
     #[cfg(test)]
     pub fn plain(&self) -> String {
-        self.text.iter().map(|(text, _)| text.as_str()).collect()
+        plain(&self.text)
     }
 }
 
@@ -73,8 +109,10 @@ struct Builder {
     strong: usize,
     emphasis: usize,
     quote: usize,
+    /// The table being read, its row being read and whether that row is its header.
+    table: Option<Table>,
+    row: Option<Vec<Text>>,
     header: bool,
-    cells: usize,
     /// The line each open list item begins on, the innermost last.
     items: Vec<usize>,
     /// A task's box was just read, so the space after it is not shown.
@@ -129,6 +167,14 @@ impl Builder {
     }
 
     fn push(&mut self, text: &str, inline: Inline) {
+        // Text in a table goes into its cell.
+        if let Some(cell) = self.row.as_mut().and_then(|row| row.last_mut()) {
+            match cell.last_mut() {
+                Some((last, mark)) if *mark == inline => last.push_str(text),
+                _ => cell.push((text.to_owned(), inline)),
+            }
+            return;
+        }
         let text = if std::mem::take(&mut self.boxed) {
             text.trim_start()
         } else {
@@ -159,12 +205,57 @@ impl Builder {
                 last.truncate(trimmed);
             }
             if !block.text.iter().all(|(text, _)| text.is_empty())
-                || matches!(block.kind, Kind::Rule | Kind::Item { .. })
+                || matches!(block.kind, Kind::Rule | Kind::Item { .. } | Kind::Table(_))
             {
                 self.blocks.push(block);
             }
         }
     }
+}
+
+impl Builder {
+    /// Ends the table's row being read, its cells trimmed, as its header or a row of its body.
+    fn end_row(&mut self) {
+        let (Some(table), Some(mut row)) = (&mut self.table, self.row.take()) else {
+            return;
+        };
+        for cell in &mut row {
+            trim(cell);
+        }
+        if self.header {
+            // A header of empty cells is none, as nothing would show in it.
+            if row.iter().any(|cell| !cell.is_empty()) {
+                table.header = row;
+            }
+        } else {
+            table.rows.push(row);
+        }
+    }
+}
+
+/// `text` without the spaces it starts and ends with, nor runs left empty by them.
+fn trim(text: &mut Text) {
+    if let Some((first, _)) = text.first_mut() {
+        let start = first.len() - first.trim_start().len();
+        first.drain(..start);
+    }
+    if let Some((last, _)) = text.last_mut() {
+        let end = last.trim_end().len();
+        last.truncate(end);
+    }
+    text.retain(|(text, _)| !text.is_empty());
+}
+
+/// Whether inline HTML is a line break, `<br>`, `<br/>` or `<br />`, in any case.
+fn line_break(html: &str) -> bool {
+    let tag = html.trim().to_ascii_lowercase();
+    let Some(inner) = tag
+        .strip_prefix("<br")
+        .and_then(|tag| tag.strip_suffix('>'))
+    else {
+        return false;
+    };
+    matches!(inner.trim(), "" | "/")
 }
 
 /// `text`'s blocks.
@@ -204,22 +295,36 @@ pub fn parse(source: &str) -> Vec<Block> {
                 }
                 Tag::Strong => builder.strong += 1,
                 Tag::Emphasis => builder.emphasis += 1,
-                Tag::TableHead => builder.header = true,
-                Tag::TableRow => {
-                    let header = builder.header;
-                    builder.open(Kind::TableRow { header });
-                    builder.cells = 0;
+                Tag::Table => {
+                    builder.flush();
+                    builder.table = Some(Table::default());
                 }
-                Tag::TableCell { .. } => {
-                    if builder.cells > 0 {
-                        builder.push(" │ ", Inline::Plain);
+                Tag::TableHead => builder.header = true,
+                Tag::TableRow => builder.row = Some(Vec::new()),
+                Tag::TableCell { alignment, .. } => {
+                    if builder.header
+                        && let Some(table) = &mut builder.table
+                    {
+                        table.align.push(match alignment {
+                            AlignKind::Center => Align::Centre,
+                            AlignKind::Right => Align::Right,
+                            _ => Align::Left,
+                        });
                     }
-                    builder.cells += 1;
+                    builder.row.get_or_insert_default().push(Vec::new());
                 }
                 _ => {}
             },
             EventKind::End(kind) => match kind {
-                TagKind::Paragraph | TagKind::Heading | TagKind::TableRow => builder.flush(),
+                TagKind::Paragraph | TagKind::Heading => builder.flush(),
+                TagKind::TableRow => builder.end_row(),
+                TagKind::Table => {
+                    builder.end_row();
+                    // A table's end always follows its start, which began one.
+                    let table = builder.table.take().unwrap_or_default();
+                    builder.open(Kind::Table(table));
+                    builder.flush();
+                }
                 TagKind::Item => {
                     // An item with nothing in it still shows its marker.
                     if let Some(marker) = builder.marker.take() {
@@ -242,7 +347,7 @@ pub fn parse(source: &str) -> Vec<Block> {
                 TagKind::Strong => builder.strong = builder.strong.saturating_sub(1),
                 TagKind::Emphasis => builder.emphasis = builder.emphasis.saturating_sub(1),
                 TagKind::TableHead => {
-                    builder.flush();
+                    builder.end_row();
                     builder.header = false;
                 }
                 _ => {}
@@ -279,13 +384,29 @@ pub fn parse(source: &str) -> Vec<Block> {
             // GitHub's Markdown, which this parses, has no math.
             EventKind::Html { value, .. } => {
                 let value = value.resolve(source).unwrap_or_default().to_owned();
-                builder.push(&value, Inline::Plain);
+                if line_break(&value) {
+                    builder.push("\n", Inline::Plain);
+                } else {
+                    builder.push(&value, Inline::Plain);
+                }
             }
             _ => {}
         }
     }
     builder.flush();
     builder.blocks
+}
+
+/// The tables among `source`'s blocks, for tests.
+#[cfg(test)]
+pub fn tables(source: &str) -> Vec<Table> {
+    parse(source)
+        .into_iter()
+        .filter_map(|block| match block.kind {
+            Kind::Table(table) => Some(table),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -357,19 +478,73 @@ mod tests {
 
     #[test]
     fn code_blocks_tables_and_quotes_are_blocks() {
-        let blocks = parse(
-            "```rust\nfn main() {}\n  let x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\n---\n",
-        );
+        let source = "```rust\nfn main() {}\n  let x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\n---\n";
+        let blocks = parse(source);
+        let cell = |text: &str| vec![(text.to_owned(), Inline::Plain)];
+        let table = Table {
+            align: vec![Align::Left; 2],
+            header: vec![cell("a"), cell("b")],
+            rows: vec![vec![cell("1"), cell("2")]],
+        };
         assert_eq!(
             plain(&blocks),
             [
                 (Kind::Code, "fn main() {}\n  let x = 1;".into()),
-                (Kind::TableRow { header: true }, "a │ b".into()),
-                (Kind::TableRow { header: false }, "1 │ 2".into()),
+                (Kind::Table(table), String::new()),
                 (Kind::Quote, "quoted".into()),
                 (Kind::Rule, String::new()),
             ]
         );
+        // Of all of them, one is a table.
+        assert_eq!(tables(source).len(), 1);
+    }
+
+    fn table(source: &str) -> Table {
+        tables(source).remove(0)
+    }
+
+    #[test]
+    fn a_table_keeps_its_alignment_its_cells_marks_and_rows_shorter_than_its_header() {
+        let table = table(
+            "| PR | What | Recommendation | Size |\n|:---|:---:|---:|---|\n| 233 | **Your call:** `B` and *sticks* | Rebase | 3 |\n| 90 | Short \\| row |\n",
+        );
+        assert_eq!(
+            table.align,
+            [Align::Left, Align::Centre, Align::Right, Align::Left]
+        );
+        assert_eq!(table.columns(), 4);
+        assert_eq!(
+            table
+                .header
+                .iter()
+                .map(|cell| super::plain(cell))
+                .collect::<Vec<_>>(),
+            ["PR", "What", "Recommendation", "Size"]
+        );
+        assert_eq!(
+            table.rows[0][1],
+            [
+                ("Your call:".into(), Inline::Strong),
+                (" ".into(), Inline::Plain),
+                ("B".into(), Inline::Code),
+                (" and ".into(), Inline::Plain),
+                ("sticks".into(), Inline::Emphasis),
+            ]
+        );
+        // An escaped pipe is the cell's text, and a row with fewer cells keeps them.
+        assert_eq!(super::plain(&table.rows[1][1]), "Short | row");
+        assert!(table.rows[1].len() <= 4);
+    }
+
+    #[test]
+    fn a_break_in_a_cell_is_kept_and_a_header_of_empty_cells_is_none() {
+        let table = table("| | |\n|---|---|\n| one<br>two | three<BR />four |\n");
+        assert!(table.header.is_empty());
+        assert_eq!(super::plain(&table.rows[0][0]), "one\ntwo");
+        assert_eq!(super::plain(&table.rows[0][1]), "three\nfour");
+        // A break elsewhere breaks the line, and other HTML is kept as text.
+        let blocks = parse("first<br/>second <br x> third");
+        assert_eq!(blocks[0].plain(), "first\nsecond <br x> third");
     }
 
     #[test]
