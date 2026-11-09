@@ -565,8 +565,9 @@ pub enum ClientMessage {
         wall: String,
     },
     /// Change the wall `wall` for everyone in the space: its `grid` of slots, how large its slots are, `scale` times a
-    /// flat wall's, its `shape`, flat or curved, its `tilt`, and, for a wall an owner added, its `pose`. Each left out stays as it
-    /// is. Panels in slots it no longer has go into its nearest free slots, or else float where they were. Participants
+    /// flat wall's, its `shape`, flat or curved, its `tilt`, and, for a wall an owner added or, where the server locks
+    /// walls, an environment's own wall that is unlocked, its `pose`. Each left out stays as it is. A locked wall is
+    /// refused. Panels in slots it no longer has go into its nearest free slots, or else float where they were. Participants
     /// only, and only to a server whose [`crate::SpaceState::walls`] is set. See `design/projection.md`.
     SetWall {
         wall: String,
@@ -601,6 +602,16 @@ pub enum ClientMessage {
         alone: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pose: Option<Pose>,
+    },
+    /// Lock the wall `wall`, so that nobody changes, moves or removes it, or unlock it, for everyone in the space; with
+    /// `reset`, an environment's own wall is first put back as the environment has it, where it stands and how it is
+    /// laid out, and locked. Owners only, and only to a server whose [`crate::SpaceState::wall_locks`] is set. See
+    /// `design/projection.md`.
+    LockWall {
+        wall: String,
+        locked: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reset: bool,
     },
     /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, in `slot` where it says, or, without a
     /// wall, leave it floating at `pose`, in the space's coordinates, for everyone in the space. Participants only, and

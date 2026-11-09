@@ -415,7 +415,7 @@ fn tools() -> Value {
         },
         {
             "name": "set_wall",
-            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
+            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added, or an environment's own once unlocked, in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands. A locked wall, as presence says, is changed by nobody, and an environment's own walls, such as a notice board, are locked until an owner unlocks them: locked true or false locks or unlocks a wall, and reset true puts an environment's own back where and as the environment has it, locked, each only when an owner asks, named in requested_by. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -432,6 +432,9 @@ fn tools() -> Value {
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
                     "attach": attach_schema(),
                     "detach": { "type": "boolean" },
+                    "locked": { "type": "boolean", "description": "Lock the wall, true, or unlock it, false. Only when an owner asks, named in requested_by." },
+                    "reset": { "type": "boolean", "description": "Put an environment's own wall back where and as the environment has it, locked. Only when an owner asks, named in requested_by." },
+                    "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed with locked or reset. {REQUESTED_BY}") },
                 },
                 "required": ["wall"],
             },
@@ -458,7 +461,7 @@ fn tools() -> Value {
         },
         {
             "name": "remove_wall",
-            "description": "Remove a wall someone added to your space, for everyone in it, by its identity or name as presence lists it, or looking or near, with a name or for whoever asked. The panels on it float where they were. The Tomori wall and an environment's own walls cannot be removed. Only when someone in the space asks; then tell them.",
+            "description": "Remove a wall someone added to your space, for everyone in it, by its identity or name as presence lists it, or looking or near, with a name or for whoever asked. The panels on it float where they were. The Tomori wall and an environment's own walls cannot be removed, nor a locked wall until an owner unlocks it. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -983,6 +986,11 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
                 .to_owned(),
         );
     }
+    let lock = crate::hub::tools::Lock {
+        locked: optional_flag(arguments, "locked")?,
+        reset: flag(arguments, "reset")?,
+        requested_by: requested_by(arguments)?,
+    };
     hub.agent_set_wall(
         session,
         wall,
@@ -991,6 +999,7 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         metres(arguments)?,
         place,
         joining,
+        lock,
     )
     .map(structured)
 }
@@ -1173,6 +1182,15 @@ fn rename_space(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
         format!("you renamed the space to {title}")
     };
     Ok(changed(result, ("title", &title), announcement))
+}
+
+/// The flag `name` of `arguments`, if it is given.
+fn optional_flag(arguments: &Value, name: &str) -> Result<Option<bool>, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(_) => Err(format!("{name} is true or false.")),
+    }
 }
 
 /// The `requested_by` argument of `arguments`, the participant whose words asked for a sensitive tool, if it is given, which the hub checks, and requires where the tool needs it. See `design/security.md`.

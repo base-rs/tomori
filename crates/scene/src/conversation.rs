@@ -2081,6 +2081,7 @@ impl Conversation {
                 | ClientMessage::RemoveWall { .. }
                 | ClientMessage::SetWall { .. }
                 | ClientMessage::AttachWall { .. }
+                | ClientMessage::LockWall { .. }
                 | ClientMessage::PlacePanel { .. }
                 | ClientMessage::DismissPanel { .. }
                 | ClientMessage::CheckPanelItem { .. }
@@ -3663,16 +3664,36 @@ impl Conversation {
     }
 
     /// What this participant may do with the joined space's walls on the headset: adjust them, as a participant in a space
-    /// whose server takes wall changes, and remove one someone added, as an owner there too. See `design/projection.md`.
+    /// whose server takes wall changes, and remove one someone added, as an owner there too; and, where the server locks
+    /// walls, see each one's lock, and lock and unlock them as an owner. See `design/projection.md`.
     pub fn wall_rights(&self) -> crate::projection::editing::Rights {
         let adjust = self.role.participates()
             && self.projection().is_some()
             && self.joined_space().is_some_and(|(space, _)| space.walls);
+        let locks = adjust
+            && self
+                .joined_space()
+                .is_some_and(|(space, _)| space.wall_locks);
         crate::projection::editing::Rights {
             adjust,
             remove: adjust && self.manages_walls(),
             snap: adjust && self.joined_space().is_some_and(|(space, _)| space.groups),
+            locks,
+            lock: locks && self.manages_walls(),
         }
+    }
+
+    /// Lock or unlock a wall, or put an environment's own back, as `change` says, for everyone in the space. Says whether
+    /// it asked, as only an owner does, in a space whose server locks walls.
+    pub fn lock_wall(&mut self, change: crate::projection::editing::LockChange) -> bool {
+        if !self.wall_rights().lock {
+            return false;
+        }
+        self.send(ClientMessage::LockWall {
+            wall: change.wall,
+            locked: change.locked,
+            reset: change.reset,
+        })
     }
 
     /// Change a wall as `change` says, for everyone in the space. Says whether it asked, as only a participant does, in a

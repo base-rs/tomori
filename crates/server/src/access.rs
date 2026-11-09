@@ -104,6 +104,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         // Walls change the space for everyone in it, as its environment does. See `design/projection.md`.
         | ClientMessage::AddWall { .. }
         | ClientMessage::RemoveWall { .. }
+        // Locking a wall changes what everyone else may do with it.
+        | ClientMessage::LockWall { .. }
         // A space's title is how everyone, in it and in the lobby, tells it apart, typed or said. See `design/spaces.md`.
         | ClientMessage::RenameSpace { .. }
         | ClientMessage::UtteranceBegin { titling: true, .. }
@@ -300,6 +302,11 @@ mod tests {
                 alone: false,
                 pose: None,
             },
+            ClientMessage::LockWall {
+                wall: "environment-0".into(),
+                locked: false,
+                reset: false,
+            },
         ]
     }
 
@@ -387,6 +394,7 @@ mod tests {
                     && kind != "rename_space"
                     && kind != "add_wall"
                     && kind != "remove_wall"
+                    && kind != "lock_wall"
                     && kind != "open_pairing"
                     && kind != "close_pairing"
             })

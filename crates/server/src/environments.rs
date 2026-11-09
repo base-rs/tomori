@@ -39,12 +39,91 @@ pub struct Environment {
     /// The avatar its agent shows as in its spaces, if it says, in place of the one the space's backend names.
     avatar: Option<String>,
     /// The projection walls of its own, in its own coordinates.
-    walls: Vec<tomori_protocol::Pose>,
+    walls: Vec<EnvironmentWall>,
     /// Those walls, carried into a space's coordinates, where home is the origin facing −Z.
-    carried: Vec<tomori_protocol::Pose>,
+    carried: Vec<EnvironmentWall>,
     /// The boxes of its scenery that nothing of Tomori's stands inside nor is seen through, in its own coordinates, each
     /// from its least to its greatest corner. See `design/environments.md`.
     solids: Vec<([f32; 3], [f32; 3])>,
+}
+
+/// One of an environment's own projection walls: where it stands, in the environment's own coordinates, upright and
+/// facing along its pose's +Z, and how it is laid out, flat, its grid of slots and their size, unless a space changes
+/// them: three columns of two rows of standard slots unless it says otherwise. It is locked, part of the place, such as
+/// a notice board or a console people walk up to, until a space's owner unlocks it. See `design/projection.md`.
+///
+/// ```
+/// use tomori_protocol::{Grid, Pose};
+/// use tomori_server::EnvironmentWall;
+///
+/// let board = Pose::at([3.0, 1.4, -4.0]);
+/// let notices = EnvironmentWall::new(board).with_grid(Grid::from((2, 1)));
+/// assert_eq!(notices.grid(), Grid::from((2, 1)));
+/// assert_eq!(EnvironmentWall::from(board).grid(), Grid::from((3, 2)));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvironmentWall {
+    pub pose: tomori_protocol::Pose,
+    grid: Option<tomori_protocol::Grid>,
+    scale: Option<f32>,
+}
+
+impl EnvironmentWall {
+    /// A wall at `pose`, of three columns of two rows of standard slots.
+    pub const fn new(pose: tomori_protocol::Pose) -> Self {
+        Self {
+            pose,
+            grid: None,
+            scale: None,
+        }
+    }
+
+    /// The wall, with `grid` of slots, within a wall's bounds, or else three columns of two rows.
+    pub fn with_grid(mut self, grid: tomori_protocol::Grid) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+
+    /// The wall, its slots `scale` times a standard slot's, from half to five times, or else a standard slot's.
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+
+    /// Its grid of slots, as it is unless a space changes it.
+    pub fn grid(&self) -> tomori_protocol::Grid {
+        self.layout().grid
+    }
+
+    /// How it is laid out unless a space changes it: flat, its grid and scale within bounds, or else a flat wall's.
+    pub(crate) fn layout(&self) -> crate::stage::Layout {
+        let flat = crate::stage::Layout::FLAT;
+        let scale = self
+            .scale
+            .filter(|scale| {
+                scale.is_finite()
+                    && (tomori_protocol::wall::SCALES.0..=tomori_protocol::wall::SCALES.1)
+                        .contains(scale)
+            })
+            .unwrap_or(flat.scale);
+        crate::stage::Layout {
+            grid: self.grid.filter(|grid| grid.valid()).unwrap_or(flat.grid),
+            scale,
+            ..flat
+        }
+    }
+}
+
+impl From<tomori_protocol::Pose> for EnvironmentWall {
+    fn from(pose: tomori_protocol::Pose) -> Self {
+        Self::new(pose)
+    }
+}
+
+impl PartialEq<tomori_protocol::Pose> for EnvironmentWall {
+    fn eq(&self, pose: &tomori_protocol::Pose) -> bool {
+        self.pose == *pose
+    }
 }
 
 impl fmt::Debug for Environment {
@@ -231,16 +310,18 @@ impl Environment {
 
     fn carry_walls(&mut self) {
         let carriage = self.carriage();
-        self.carried = self
-            .walls
-            .iter()
-            .filter_map(|wall| match carriage {
-                None => Some(*wall),
-                Some(carriage) => {
-                    crate::stage::valid_arrival(wall).map(|wall| carriage.carry(&wall))
-                }
-            })
-            .collect();
+        self.carried =
+            self.walls
+                .iter()
+                .filter_map(|wall| {
+                    let pose = match carriage {
+                        None => Some(wall.pose),
+                        Some(carriage) => crate::stage::valid_arrival(&wall.pose)
+                            .map(|pose| carriage.carry(&pose)),
+                    }?;
+                    Some(EnvironmentWall { pose, ..*wall })
+                })
+                .collect();
     }
 
     /// The environment, with the Tomori wall's home at `stage`, its `stage` anchor, in its own coordinates, upright and
@@ -272,26 +353,33 @@ impl Environment {
         self.stage
     }
 
-    /// The environment, with projection walls of its own at `walls`, in its own coordinates, each upright and facing
-    /// along its pose's +Z, of which the server uses at most six. The agent projects onto them, as onto the Tomori wall,
-    /// for whoever asks nearest them, and what is on them is kept for the space in this environment, hidden while the
-    /// space is in another. See `design/projection.md`.
+    /// The environment, with projection walls of its own, `walls`, in its own coordinates, each a pose, upright and
+    /// facing along its +Z, or an [`EnvironmentWall`], which says its grid and the size of its slots too, of which the
+    /// server uses at most six. They are part of the place, locked until a space's owner unlocks them, such as a notice
+    /// board or a console people walk up to and put what the agent shows on. The agent projects onto them, as onto the
+    /// Tomori wall, for whoever asks nearest them, and what is on them is kept for the space in this environment,
+    /// hidden while the space is in another. See `design/projection.md`.
     ///
     /// ```
-    /// use tomori_protocol::Pose;
-    /// use tomori_server::Environment;
+    /// use tomori_protocol::{Grid, Pose};
+    /// use tomori_server::{Environment, EnvironmentWall};
     ///
     /// let board = Pose { position: [3.0, 1.4, -4.0], orientation: [0.0, 0.0, 0.0, 1.0] };
     /// assert_eq!(Environment::new("observe", "Observe").with_walls([board]).walls(), [board]);
+    /// let notices = EnvironmentWall::new(board).with_grid(Grid::from((2, 1)));
+    /// assert_eq!(Environment::new("observe", "Observe").with_walls([notices]).walls(), [notices]);
     /// ```
-    pub fn with_walls(mut self, walls: impl IntoIterator<Item = tomori_protocol::Pose>) -> Self {
-        self.walls = walls.into_iter().collect();
+    pub fn with_walls(
+        mut self,
+        walls: impl IntoIterator<Item = impl Into<EnvironmentWall>>,
+    ) -> Self {
+        self.walls = walls.into_iter().map(Into::into).collect();
         self.carry_walls();
         self
     }
 
     /// Its own projection walls, in its own coordinates.
-    pub fn walls(&self) -> &[tomori_protocol::Pose] {
+    pub fn walls(&self) -> &[EnvironmentWall] {
         &self.walls
     }
 
@@ -666,7 +754,39 @@ mod tests {
         let pose = tomori_protocol::Pose::default();
         assert_ne!(plain, plain.clone().with_stage(pose));
         assert_ne!(plain, plain.clone().with_walls([pose]));
-        assert!(format!("{:?}", plain.clone().with_walls([pose])).contains("walls: [Pose"));
+        assert!(
+            format!("{:?}", plain.clone().with_walls([pose]))
+                .contains("walls: [EnvironmentWall { pose: Pose")
+        );
+        // A wall's own grid and slots' size, within bounds, or else a flat wall's.
+        let laid = |wall: EnvironmentWall| (wall.layout().grid, wall.layout().scale);
+        let flat = crate::stage::Layout::FLAT;
+        assert_eq!(
+            laid(
+                EnvironmentWall::new(pose)
+                    .with_grid(tomori_protocol::Grid::from((2, 1)))
+                    .with_scale(1.5)
+            ),
+            (tomori_protocol::Grid::from((2, 1)), 1.5)
+        );
+        for scale in [0.2, 6.0, f32::NAN] {
+            assert_eq!(
+                laid(EnvironmentWall::new(pose).with_scale(scale)),
+                (flat.grid, flat.scale)
+            );
+        }
+        assert_eq!(
+            EnvironmentWall::new(pose)
+                .with_grid(tomori_protocol::Grid::from((9, 4)))
+                .grid(),
+            flat.grid
+        );
+        assert_ne!(
+            plain.clone().with_walls([pose]),
+            plain.clone().with_walls([
+                EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((2, 1)))
+            ])
+        );
     }
 
     #[test]
@@ -778,7 +898,11 @@ mod tests {
         // Given in its own coordinates, they are kept as given.
         assert_eq!(
             (town.agent(), town.stage(), town.walls()),
-            (Some(balcony), Some(wall), &[board][..])
+            (
+                Some(balcony),
+                Some(wall),
+                &[EnvironmentWall::from(board)][..]
+            )
         );
         let anchors = offered.anchors("town");
         assert!(close(anchors.arrival.unwrap(), street));
@@ -796,7 +920,7 @@ mod tests {
             Pose::at([1.0, 1.2, -2.0]).facing_towards([0.0, 1.2, 0.0])
         ));
         assert!(close(
-            walls.declared[0],
+            walls.declared[0].pose,
             Pose::at([-2.0, 1.5, -4.0]).facing_towards([0.0, 1.5, 0.0])
         ));
         // Without an arrival, nothing moves; an arrival not finite is ignored, as none.

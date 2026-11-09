@@ -282,6 +282,12 @@ pub struct SpaceState {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub groups: bool,
+    /// Whether the server locks walls: it says which are locked, with [`crate::Wall::locked`], refuses every change to a
+    /// locked wall, takes [`crate::ClientMessage::LockWall`] from owners, and lets an environment's own wall, unlocked, be
+    /// moved. False from older servers, whose environment walls stay where the environment puts them; a client offers
+    /// no lock and moves no environment wall without it. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wall_locks: bool,
     /// Whether the server accepts [`crate::ClientMessage::DeleteSpace`] from an owner in the space. False from older
     /// servers; a client offers deleting the space only when this is set. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

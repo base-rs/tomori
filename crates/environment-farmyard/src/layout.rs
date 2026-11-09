@@ -87,9 +87,22 @@ pub const TROUGH_HEIGHT: f32 = 0.38;
 pub const FEEDER: Vec2 = Vec2::new(0.8, -6.8);
 pub const FEEDER_RADIUS: f32 = 0.28;
 pub const GRAIN_RADIUS: f32 = 0.9;
-/// Where the farmyard's own projection wall stands: on the right of the yard, short of the trough, at eye height, facing
-/// home, for what the agent projects for whoever asks from that side of the yard. See `design/projection.md`.
-pub const NOTICEBOARD: Vec3 = Vec3::new(3.6, 1.5, -5.4);
+/// Where the farmyard's own projection wall stands, the middle of its face: on the notice board against the right of
+/// the fence, short of the trough, a little below eye height, facing into the yard, along −X, for what the agent
+/// projects for whoever asks from that side of the yard, and what participants put on it. It is part of the place,
+/// locked until a space's owner unlocks it. See `design/projection.md`.
+pub const NOTICEBOARD: Vec3 = Vec3::new(4.565, 1.45, -4.8);
+/// The way the notice board faces: into the yard, square to the fence.
+pub const NOTICEBOARD_FACING: Vec3 = Vec3::new(0.0, 1.45, -4.8);
+/// The notice board's grid of slots, as `[columns, rows]`: two standard slots side by side, about 1.3 by 0.5 m.
+pub const NOTICEBOARD_GRID: [u32; 2] = [2, 1];
+/// The notice board's back, against which the wall stands: its least and greatest corners, `[x, y, z]`, wider and
+/// taller than the wall, so that the wood frames it.
+pub const NOTICEBOARD_BACK: [[f32; 3]; 2] = [[4.585, 1.08, -5.56], [4.63, 1.82, -4.04]];
+/// The notice board's two posts, either side of its back, `[x, z]` their middles, how thick they are and how tall.
+pub const NOTICEBOARD_POSTS: [[f32; 2]; 2] = [[4.63, -5.62], [4.63, -3.98]];
+pub const NOTICEBOARD_POST: f32 = 0.09;
+pub const NOTICEBOARD_HEIGHT: f32 = 2.05;
 /// The hay bales, stacked in the back corner.
 pub const HAY: Footprint = Footprint::new([3.0, -10.7], [4.6, -9.5]);
 
@@ -106,9 +119,19 @@ pub const AGENT_HOME: Vec3 = Vec3::new(-1.0, 1.5, -5.6);
 /// them, below their eyes, facing them, so that it reads from the arrival and hides neither the agent nor the coop.
 pub const TOMORI_WALL: Vec3 = Vec3::new(1.4, 0.9, -4.67);
 
+/// The notice board's footprint on the ground, its posts and its back, which nobody lands on and nothing walks through.
+pub fn noticeboard() -> Footprint {
+    let half = NOTICEBOARD_POST * 0.5;
+    let [first, last] = NOTICEBOARD_POSTS;
+    Footprint::new(
+        [NOTICEBOARD_BACK[0][0].min(first[0] - half), first[1] - half],
+        [first[0] + half, last[1] + half],
+    )
+}
+
 /// The solids of the yard that nothing stands inside nor is seen through, as `(least, greatest)` corners: the coop
-/// with its roof's overhang, its ramp, the trough, the feeder and the hay, each as high as it stands.
-pub fn solids() -> [([f32; 3], [f32; 3]); 5] {
+/// with its roof's overhang, its ramp, the trough, the feeder, the hay and the notice board, each as high as it stands.
+pub fn solids() -> [([f32; 3], [f32; 3]); 6] {
     let solid = |footprint: Footprint, height: f32| {
         (
             [footprint.low.x, 0.0, footprint.low.y],
@@ -121,12 +144,13 @@ pub fn solids() -> [([f32; 3], [f32; 3]); 5] {
         solid(TROUGH, TROUGH_HEIGHT),
         solid(obstacles()[3], 0.35),
         solid(HAY, 1.2),
+        solid(noticeboard(), NOTICEBOARD_HEIGHT),
     ]
 }
 
 /// What stands in the yard, which nobody lands on and nothing walks through: the coop and its ramp, the trough, the
-/// feeder and the hay.
-pub fn obstacles() -> [Footprint; 5] {
+/// feeder, the hay and the notice board.
+pub fn obstacles() -> [Footprint; 6] {
     [
         COOP,
         ramp(),
@@ -136,6 +160,7 @@ pub fn obstacles() -> [Footprint; 5] {
             [FEEDER.x + FEEDER_RADIUS, FEEDER.y + FEEDER_RADIUS],
         ),
         HAY,
+        noticeboard(),
     ]
 }
 
@@ -148,8 +173,8 @@ pub fn ramp() -> Footprint {
 /// Where participants may land in the yard, inside the fence and clear of what stands in it, by a margin: the rectangles
 /// a teleport profile's surfaces are made of, at the ground's height.
 pub const WALKABLE: [Footprint; 4] = [
-    // In front of everything, from the gate to the ramp's foot.
-    Footprint::new([-4.6, -5.9], [4.6, 1.2]),
+    // In front of everything, from the gate to the ramp's foot, short of the notice board.
+    Footprint::new([-4.6, -5.9], [4.35, 1.2]),
     // Between the coop and the trough and hay, past the feeder, to the back fence, and beside the coop's window.
     Footprint::new([-1.4, -10.6], [0.3, -5.9]),
     Footprint::new([1.3, -10.6], [2.6, -5.9]),
@@ -197,8 +222,8 @@ mod tests {
         assert!(ramp().high.y > COOP.high.y);
         let (centre, size) = walkable()[0];
         assert!(
-            centre.distance(Vec3::new(0.0, 0.0, -2.35)) < 1e-5
-                && size.distance(Vec2::new(9.2, 7.1)) < 1e-5
+            centre.distance(Vec3::new(-0.125, 0.0, -2.35)) < 1e-5
+                && size.distance(Vec2::new(8.95, 7.1)) < 1e-5
         );
         assert!(!WALKABLE[0].overlaps(&WALKABLE[1].grown(-0.1)));
     }
@@ -225,5 +250,48 @@ mod tests {
         let near = Vec2::new(AGENT_HOME.x, AGENT_HOME.z);
         assert!(!COOP.grown(0.6).contains(near) && !ramp().grown(0.6).contains(near));
         assert!(COOP.grown(2.5).contains(near), "by the coop");
+    }
+
+    #[test]
+    fn the_notice_board_stands_against_the_fence_its_wall_on_its_back_read_from_the_earth_in_front()
+    {
+        use tomori_environment::sightlines::{READING, Solid, Spot, readable};
+        let solids: Vec<Solid> = solids()
+            .into_iter()
+            .map(|(low, high)| Solid::new(low, high))
+            .collect();
+        let board = noticeboard();
+        // Inside the fence, against its right side, square to it, and clear of everything else that stands in the yard.
+        assert!(FENCE.grown(-0.3).contains(board.low) && FENCE.grown(-0.3).contains(board.high));
+        assert!(FENCE.high.x - board.high.x < 0.35);
+        assert_eq!(NOTICEBOARD_FACING.z, NOTICEBOARD.z);
+        for obstacle in &obstacles()[..5] {
+            assert!(!board.grown(0.3).overlaps(obstacle), "{obstacle:?}");
+        }
+        // Its wall, two slots wide and about 1.3 by 0.5 m, stands just in front of its back, which frames it, below the
+        // top of its posts, and the wall's middle is on neither side of the back's.
+        let back = NOTICEBOARD_BACK;
+        assert_eq!(NOTICEBOARD_GRID, [2, 1]);
+        let gap = back[0][0] - NOTICEBOARD.x;
+        assert!(gap > 0.0 && gap < 0.03, "{gap}");
+        let (width, height) = (1.32, 0.5);
+        assert!(back[1][2] - back[0][2] > width + 0.15 && back[1][1] - back[0][1] > height + 0.15);
+        assert!((NOTICEBOARD.z - (back[0][2] + back[1][2]) / 2.0).abs() < 1e-3);
+        assert!((NOTICEBOARD.y - (back[0][1] + back[1][1]) / 2.0).abs() < 1e-3);
+        assert!(back[1][1] < NOTICEBOARD_HEIGHT);
+        // Read from the earth in front of it, within reach, as the agent's panels go there for whoever asks from that
+        // side of the yard; and the arrival's sightlines to the Tomori wall and the agent stay clear of it.
+        let before = Vec3::new(NOTICEBOARD.x - 2.0, 0.0, NOTICEBOARD.z + 0.4);
+        assert!(
+            WALKABLE
+                .iter()
+                .any(|footprint| footprint.contains(Vec2::new(before.x, before.z)))
+        );
+        let reader = Spot::facing(before.to_array(), NOTICEBOARD.to_array());
+        let wall = Spot::facing(NOTICEBOARD.to_array(), NOTICEBOARD_FACING.to_array());
+        // Its row is narrower than the Tomori wall's, whose ends `readable` checks too, so its own ends stand clear.
+        assert_eq!(readable(&reader, &wall, &solids), Ok(()));
+        let eyes = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array()).eyes();
+        assert!(Vec3::from_array(eyes).distance(NOTICEBOARD) > READING);
     }
 }

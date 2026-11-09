@@ -10,6 +10,8 @@ const SNAPS: Rights = Rights {
     adjust: true,
     remove: false,
     snap: true,
+    locks: false,
+    lock: false,
 };
 
 /// A wall of `columns` by `rows` at `scale`, someone added, at `pose`.
@@ -623,10 +625,10 @@ fn a_tilted_wall_snaps_upright_none_snaps_to_one_tilted_and_a_wall_of_a_group_ha
     assert!(!projector.editor.snapping());
     // A wall of a group stands upright, and so has no hinge; alone, it has one.
     let (two, big) = grouped();
-    assert!(!handles(&two).contains(&Handle::Tilt));
+    assert!(!handles(&two, LockControls::default()).contains(&Handle::Tilt));
     let all = [&two, &big];
     let (points, _) = handle_points_among(&two, model(&two.pose).unwrap(), HOME, &all, None);
     assert!(points.iter().all(|(handle, _)| *handle != Handle::Tilt));
     let (alone, _) = pair();
-    assert!(handles(&alone).contains(&Handle::Tilt));
+    assert!(handles(&alone, LockControls::default()).contains(&Handle::Tilt));
 }

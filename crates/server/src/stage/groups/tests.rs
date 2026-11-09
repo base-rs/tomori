@@ -12,10 +12,10 @@ const SKY: Walls<'static> = Walls {
         position: [2.0, 1.5, -2.0],
         orientation: [0.0, 0.0, 0.0, 1.0],
     },
-    declared: &[Pose {
+    declared: &[crate::EnvironmentWall::new(Pose {
         position: [-4.0, 1.5, -4.0],
         orientation: [0.0, 0.0, 0.0, 1.0],
-    }],
+    })],
 };
 
 /// Facing home from 2.4 m ahead, at `x`.
@@ -637,4 +637,61 @@ fn a_group_s_walls_stand_upright_a_tilted_wall_snapped_standing_upright_and_none
     );
     assert_eq!(stage.rooms["sky"].walls[3].layout, None);
     assert_eq!(shown(&view(&stage), &flat).tilt, None);
+}
+
+#[test]
+fn a_locked_wall_is_neither_attached_nor_moved_with_its_group() {
+    let (mut stage, ids) = added(&[((2, 1), 1.0), ((1, 1), 1.0), ((1, 1), 1.0)]);
+    let (first, second, third) = (&ids[0], &ids[1], &ids[2]);
+    stage
+        .attach_wall(&SKY, second, right(first), false, None)
+        .unwrap();
+    // The group's first wall locked, the second may not carry it, nor bend it, and stays where it was.
+    assert_eq!(stage.lock_wall(&SKY, first, true, false), Ok(true));
+    let before = view(&stage);
+    let carried = WallChange {
+        pose: Some(ahead(-1.0)),
+        ..WallChange::default()
+    };
+    assert_eq!(
+        stage.set_wall(&SKY, second, carried),
+        Err(super::super::GROUP_LOCKED)
+    );
+    let bent = WallChange {
+        radius: Some(Some(3.0)),
+        ..WallChange::default()
+    };
+    assert_eq!(
+        stage.set_wall(&SKY, second, bent),
+        Err(super::super::GROUP_LOCKED)
+    );
+    assert_eq!(view(&stage).walls, before.walls);
+    // What moves no locked wall still changes: the second, attached to it, is given another column.
+    let wider = WallChange {
+        grid: Some(Grid::from((2, 1))),
+        ..WallChange::default()
+    };
+    assert_eq!(stage.set_wall(&SKY, second, wider), Ok(true));
+    assert_eq!(shown(&view(&stage), first).pose, shown(&before, first).pose);
+    // A locked wall is neither attached nor taken out; nor is its group carried to another wall.
+    for attach in [right(third), None] {
+        assert_eq!(
+            stage.attach_wall(&SKY, first, attach, false, None),
+            Err(super::super::LOCKED)
+        );
+    }
+    assert_eq!(
+        stage.attach_wall(
+            &SKY,
+            second,
+            Some(Attach::new(third, Edge::Bottom, Align::Start)),
+            false,
+            None
+        ),
+        Err(super::super::GROUP_LOCKED)
+    );
+    assert_eq!(shown(&view(&stage), first).pose, shown(&before, first).pose);
+    // Unlocked, the group is carried again.
+    assert_eq!(stage.lock_wall(&SKY, first, false, false), Ok(true));
+    assert_eq!(stage.set_wall(&SKY, second, carried), Ok(true));
 }

@@ -37,7 +37,7 @@ pub use image::without_image;
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use tomori_protocol::{
@@ -391,12 +391,12 @@ impl Projecting {
 }
 
 /// Where the walls of a space stand in its current environment: the environment, the Tomori wall's pose there, and
-/// the walls the environment declares, as its registration gives them.
+/// the walls the environment declares, as its registration gives them, carried into the space's coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct Walls<'a> {
     pub environment: &'a str,
     pub tomori: Pose,
-    pub declared: &'a [Pose],
+    pub declared: &'a [crate::EnvironmentWall],
 }
 
 impl Walls<'_> {
@@ -409,6 +409,11 @@ impl Walls<'_> {
         }
     }
 }
+/// What is refused of a locked wall, by participants and the agent alike.
+pub const LOCKED: &str = "That wall is locked: ask an owner to unlock it.";
+
+/// What is refused of a change that would move or reshape a locked wall of the group of the wall changed.
+pub const GROUP_LOCKED: &str = "A wall of its group is locked, and would move with it: ask an owner to unlock it, or take this wall out of the group first.";
 
 /// Where a participant puts a panel.
 #[derive(Clone, Debug, PartialEq)]
@@ -526,6 +531,9 @@ struct AddedWall {
     /// wall it is attached to, and is kept as it stands, so that a server that knows no groups reads it where it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attach: Option<tomori_protocol::Attach>,
+    /// Whether an owner locked it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    locked: bool,
 }
 
 /// What a space keeps for one environment: the walls owners added and the panels on the environment's walls or
@@ -537,9 +545,17 @@ struct Room {
     used: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     walls: Vec<AddedWall>,
-    /// How the environment's own walls are laid out in this space, by identity, where changed from a flat wall's.
+    /// How the environment's own walls are laid out in this space, by identity, where changed from how the environment
+    /// lays them out.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     layouts: BTreeMap<String, Layout>,
+    /// Where the environment's own walls stand in this space, by identity, where moved from where the environment puts
+    /// them, once unlocked.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    moved: BTreeMap<String, Pose>,
+    /// The environment's own walls an owner unlocked in this space, by identity; the rest are locked.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    unlocked: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     panels: Vec<Kept>,
 }
@@ -564,6 +580,9 @@ pub struct Stage {
     /// How the Tomori wall is laid out, in every environment, when changed from [`Layout::TOMORI`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tomori_layout: Option<Layout>,
+    /// Whether an owner locked the Tomori wall, in every environment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tomori_locked: bool,
 }
 
 fn schema() -> u32 {
@@ -579,6 +598,7 @@ impl Default for Stage {
             rooms: BTreeMap::new(),
             notices: BTreeMap::new(),
             tomori_layout: None,
+            tomori_locked: false,
         }
     }
 }
@@ -644,7 +664,10 @@ fn ago(seconds: u64) -> String {
 impl Stage {
     /// Whether it holds nothing, so that a space keeps nothing for it.
     pub fn is_empty(&self) -> bool {
-        self.tomori.is_empty() && self.rooms.is_empty() && self.tomori_layout.is_none()
+        self.tomori.is_empty()
+            && self.rooms.is_empty()
+            && self.tomori_layout.is_none()
+            && !self.tomori_locked
     }
 
     /// The next number in the stage's order.
@@ -660,16 +683,24 @@ impl Stage {
         let mut shown = vec![
             self.tomori_layout
                 .unwrap_or(Layout::TOMORI)
-                .apply(Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori)),
+                .apply(Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori))
+                .with_locked(self.tomori_locked),
         ];
         shown.extend(walls.declared.iter().take(DECLARED_WALLS).enumerate().map(
-            |(index, pose)| {
+            |(index, declared)| {
                 let id = format!("environment-{index}");
                 let layout = room
                     .and_then(|room| room.layouts.get(&id))
                     .copied()
-                    .unwrap_or(Layout::FLAT);
-                layout.apply(Wall::new(id, WallKind::Environment, *pose))
+                    .unwrap_or_else(|| declared.layout());
+                let pose = room
+                    .and_then(|room| room.moved.get(&id))
+                    .copied()
+                    .unwrap_or(declared.pose);
+                let locked = !room.is_some_and(|room| room.unlocked.contains(&id));
+                layout
+                    .apply(Wall::new(id, WallKind::Environment, pose))
+                    .with_locked(locked)
             },
         ));
         if let Some(room) = room {
@@ -680,6 +711,7 @@ impl Stage {
                     .unwrap_or(Layout::FLAT)
                     .apply(Wall::new(wall.id.clone(), WallKind::Added, wall.pose))
                     .with_group(group, joined.unwrap_or_default())
+                    .with_locked(wall.locked)
             }));
         }
         shown
@@ -1358,6 +1390,7 @@ impl Stage {
             pose,
             layout: (layout != Layout::FLAT).then_some(layout),
             attach: None,
+            locked: false,
         });
         Ok(id)
     }
@@ -1425,10 +1458,12 @@ impl Stage {
     }
 
     /// Change the wall `wall` in `walls`' environment as `change` says: its grid, how large its slots are, whether it is
-    /// curved, how far it tilts, and, for a wall an owner added, where it stands. The Tomori wall stays one row of at most
-    /// [`TOMORI_COLUMNS`], its slots its own size, where the environment puts it; an environment's own walls stay where
-    /// it puts them. A panel keeps its column and row, or, in one the wall no longer has, goes into its nearest free slot,
-    /// or else floats where it was: none is taken away. Returns whether that changed anything, or why it was refused.
+    /// curved, how far it tilts, and, for a wall an owner added or an environment's own, where it stands. A locked wall
+    /// is refused whatever is asked. The Tomori wall stays one row of at most [`TOMORI_COLUMNS`], its slots its own size,
+    /// where the environment puts it; an environment's own wall moved stands there for the space in that environment,
+    /// over where the environment puts it. A panel keeps its column and row, or, in one the wall no longer has, goes into
+    /// its nearest free slot, or else floats where it was: none is taken away. Returns whether that changed anything, or
+    /// why it was refused.
     pub(crate) fn set_wall(
         &mut self,
         walls: &Walls<'_>,
@@ -1438,6 +1473,9 @@ impl Stage {
         let Some(before) = self.shown_wall(walls, wall) else {
             return Err("That wall is not here.");
         };
+        if before.is_locked() {
+            return Err(LOCKED);
+        }
         let kind = before.kind;
         let old = Layout {
             grid: before.grid(),
@@ -1465,10 +1503,14 @@ impl Stage {
         };
         let pose = match (change.pose, kind) {
             (None, _) => before.pose,
-            (Some(pose), WallKind::Added) => {
+            (Some(pose), WallKind::Added | WallKind::Environment) => {
                 valid(&pose).ok_or("A wall must stand within 20 m of the space's middle.")?
             }
-            (Some(_), _) => return Err("Only a wall an owner added can be moved."),
+            (Some(_), _) => {
+                return Err(
+                    "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
+                );
+            }
         };
         if kind == WallKind::Tomori {
             if new.grid.rows != 1 || new.grid.columns > TOMORI_COLUMNS {
@@ -1499,11 +1541,18 @@ impl Stage {
                 self.tomori_layout = (new != Layout::TOMORI).then_some(new);
             }
             WallKind::Environment => {
-                let layouts = &mut self.room(walls.environment).layouts;
-                if new == Layout::FLAT {
-                    layouts.remove(wall);
+                let declared =
+                    Self::declared(walls, wall).expect("an environment's wall shown is declared");
+                let room = self.room(walls.environment);
+                if new == declared.layout() {
+                    room.layouts.remove(wall);
                 } else {
-                    layouts.insert(wall.to_owned(), new);
+                    room.layouts.insert(wall.to_owned(), new);
+                }
+                if pose == declared.pose {
+                    room.moved.remove(wall);
+                } else {
+                    room.moved.insert(wall.to_owned(), pose);
                 }
             }
             _ => {
@@ -1546,6 +1595,10 @@ impl Stage {
                     if let Err(error) = room.settle(&unchanged) {
                         *room = unchanged;
                         return Err(error);
+                    }
+                    if !room.keeps_locked(&unchanged) {
+                        *room = unchanged;
+                        return Err(GROUP_LOCKED);
                     }
                 } else {
                     added.pose = pose;
@@ -1645,6 +1698,9 @@ impl Stage {
                 "That wall is not here."
             });
         };
+        if shown.is_locked() {
+            return Err(LOCKED);
+        }
         let tick = self.tick();
         let room = self.room(walls.environment);
         // Taken out of its group first, the rest stay together where they still touch.
@@ -1663,6 +1719,148 @@ impl Stage {
             }
         }
         Ok(())
+    }
+
+    /// The environments the space keeps walls or panels for.
+    pub(crate) fn environments(&self) -> Vec<String> {
+        self.rooms.keys().cloned().collect()
+    }
+
+    /// Put each panel kept on a wall in `walls`' environment in a slot the wall no longer has, as when its environment
+    /// lays out its own wall anew, with fewer slots, into the wall's first free slot, or else floating beside the wall, to
+    /// its right, so that none is kept but hidden. Returns whether it moved any.
+    pub(crate) fn fit_slots(&mut self, walls: &Walls<'_>) -> bool {
+        let environment = walls.environment;
+        let mut moved = false;
+        for wall in self.walls(walls) {
+            let slots = wall.slots();
+            let list = self.list(environment, Some(&wall.id));
+            let beyond: Vec<String> = list
+                .iter()
+                .filter(|kept| kept.slot_on(&wall.id).is_some_and(|slot| slot >= slots))
+                .map(|kept| kept.id.clone())
+                .collect();
+            let mut floating = 0;
+            for id in beyond {
+                moved = true;
+                let list = self.list(environment, Some(&wall.id));
+                if let Some(slot) = Self::free_slot(list, &wall.id, slots) {
+                    let kept = list
+                        .iter_mut()
+                        .find(|kept| kept.id == id)
+                        .expect("a panel on the wall");
+                    kept.place = Placed::Wall {
+                        wall: wall.id.clone(),
+                        slot,
+                    };
+                    continue;
+                }
+                // Floating beside the wall, to its right, a slot's width further for each, facing as it faces.
+                let (width, _) = wall.size();
+                let (slot_width, _) = wall.slot_size();
+                let along = width / 2.0 + slot_width * (0.6 + 1.1 * floating as f32);
+                let yaw = wall.pose.yaw();
+                let [x, y, z] = wall.pose.position;
+                let pose = Pose {
+                    position: [
+                        x + along * yaw.cos() + 0.1 * yaw.sin(),
+                        y,
+                        z - along * yaw.sin() + 0.1 * yaw.cos(),
+                    ],
+                    orientation: wall.pose.orientation,
+                };
+                floating += 1;
+                let mut kept = self.take(environment, &id).expect("a panel on the wall");
+                kept.place = Placed::Free {
+                    pose: valid(&pose).unwrap_or(wall.pose),
+                };
+                kept.arranged = false;
+                kept.placed = self.tick();
+                self.list(environment, None).push(kept);
+            }
+        }
+        moved
+    }
+
+    /// The environment's own wall `wall` as `walls`' environment declares it, if it is one.
+    fn declared<'a>(walls: &Walls<'a>, wall: &str) -> Option<&'a crate::EnvironmentWall> {
+        let index: usize = wall
+            .strip_prefix("environment-")
+            .and_then(|index| index.parse().ok())?;
+        walls
+            .declared
+            .iter()
+            .take(DECLARED_WALLS)
+            .nth(index)
+            .filter(|_| format!("environment-{index}") == wall)
+    }
+
+    /// Lock the wall `wall` in `walls`' environment, or unlock it, for the space: the Tomori wall's in every
+    /// environment, an environment's own wall's or an added wall's in this one. With `reset`, an environment's own wall
+    /// is put back first as the environment has it, where it stands, its grid, slots and curve, its panels keeping their
+    /// column and row or else going into its nearest free slots or floating where they were, and it is locked, as the
+    /// environment has it. Returns whether that changed anything, or why it was refused. Who may ask is the caller's to
+    /// check: owners. See `design/projection.md`.
+    pub(crate) fn lock_wall(
+        &mut self,
+        walls: &Walls<'_>,
+        wall: &str,
+        locked: bool,
+        reset: bool,
+    ) -> Result<bool, &'static str> {
+        let Some(before) = self.shown_wall(walls, wall) else {
+            return Err("That wall is not here.");
+        };
+        if reset {
+            let Some(declared) = Self::declared(walls, wall).copied() else {
+                return Err(
+                    "Only an environment's own wall is put back as the environment has it.",
+                );
+            };
+            if !locked {
+                return Err("A wall put back as the environment has it is locked, as it has it.");
+            }
+            let after = declared
+                .layout()
+                .apply(Wall::new(wall, WallKind::Environment, declared.pose))
+                .with_locked(true);
+            if after == before {
+                return Ok(false);
+            }
+            if after.slots() > before.slots() {
+                self.has_room(walls, (after.slots() - before.slots()) as usize)?;
+            }
+            let room = self.room(walls.environment);
+            room.layouts.remove(wall);
+            room.moved.remove(wall);
+            room.unlocked.remove(wall);
+            self.rearrange(walls, &before, &after);
+            return Ok(true);
+        }
+        if before.is_locked() == locked {
+            return Ok(false);
+        }
+        match before.kind {
+            WallKind::Tomori => self.tomori_locked = locked,
+            WallKind::Environment => {
+                let unlocked = &mut self.room(walls.environment).unlocked;
+                if locked {
+                    unlocked.remove(wall);
+                } else {
+                    unlocked.insert(wall.to_owned());
+                }
+            }
+            _ => {
+                let room = self.room(walls.environment);
+                let added = room
+                    .walls
+                    .iter_mut()
+                    .find(|added| added.id == wall)
+                    .expect("an added wall shown is kept");
+                added.locked = locked;
+            }
+        }
+        Ok(true)
     }
 
     /// Put the panel `panel` where `target` says in `walls`' environment. Returns whether that changed anything, or why it
@@ -2001,7 +2199,7 @@ mod tests {
 
     #[test]
     fn panels_go_to_the_wall_nearest_whoever_asked_or_else_the_tomori_wall() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -2024,7 +2222,9 @@ mod tests {
             ]
         );
         // An environment declares at most so many walls.
-        let many: Vec<Pose> = (0..10).map(|index| pose(index as f32, -5.0)).collect();
+        let many: Vec<crate::EnvironmentWall> = (0..10)
+            .map(|index| pose(index as f32, -5.0).into())
+            .collect();
         let walls = Walls {
             declared: &many,
             ..SKY
@@ -2038,7 +2238,7 @@ mod tests {
 
     #[test]
     fn the_agent_s_panels_go_into_a_chosen_free_slot_onto_a_wall_or_floating() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -2124,7 +2324,7 @@ mod tests {
 
     #[test]
     fn the_agent_moves_its_own_panels_and_those_participants_placed_which_stay_theirs() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -2764,8 +2964,8 @@ mod tests {
             largest.body.chars().filter(|c| *c != '\n').count(),
             blocks::BODY_CHARS + 1
         );
-        let declared: Vec<Pose> = (0..DECLARED_WALLS)
-            .map(|index| pose(index as f32 - 3.0, -5.0))
+        let declared: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
+            .map(|index| pose(index as f32 - 3.0, -5.0).into())
             .collect();
         let walls = Walls {
             declared: &declared,
@@ -2788,6 +2988,7 @@ mod tests {
         let near = std::iter::once(None).chain(
             declared
                 .iter()
+                .map(|declared| &declared.pose)
                 .chain(&added)
                 .map(|pose| Some(pose.position)),
         );
@@ -2822,7 +3023,7 @@ mod tests {
 
     #[test]
     fn a_replys_code_panels_replace_the_last_ones_but_those_pulled_off_or_pinned() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -2958,8 +3159,8 @@ mod tests {
             slug: Some("a".repeat(blocks::ID_CHARS)),
             image: None,
         };
-        let declared: Vec<Pose> = (0..DECLARED_WALLS)
-            .map(|index| pose(index as f32 - 3.0, -5.0))
+        let declared: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
+            .map(|index| pose(index as f32 - 3.0, -5.0).into())
             .collect();
         let walls = Walls {
             declared: &declared,
@@ -2981,6 +3182,7 @@ mod tests {
         let near = std::iter::once(None).chain(
             declared
                 .iter()
+                .map(|declared| &declared.pose)
                 .chain(&added)
                 .map(|pose| Some(pose.position)),
         );
@@ -3076,7 +3278,7 @@ mod tests {
 
     #[test]
     fn panels_on_a_wall_the_environment_no_longer_declares_are_kept_but_not_shown() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -3267,7 +3469,7 @@ mod tests {
 
     #[test]
     fn an_update_keeps_a_participant_s_placing_and_moves_only_where_its_block_says() {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -3873,7 +4075,7 @@ mod tests {
                     pose: Some(pose(0.0, 1.0)),
                     ..WallChange::default()
                 },
-                "Only a wall an owner added can be moved.",
+                "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
             ),
         ] {
             assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, change), Err(error));
@@ -3891,7 +4093,7 @@ mod tests {
     #[test]
     fn an_environment_s_walls_change_for_the_space_in_that_environment_but_stay_where_it_puts_them()
     {
-        let declared = [pose(-3.0, -3.0)];
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
         let walls = Walls {
             declared: &declared,
             ..SKY
@@ -3910,6 +4112,15 @@ mod tests {
             pose: None,
             tilt: None,
         };
+        // Locked, as the environment has it, until an owner unlocks it, for the space in that environment.
+        assert!(stage.view("s", &walls, 0).walls[1].is_locked());
+        assert_eq!(stage.set_wall(&walls, "environment-0", curved), Err(LOCKED));
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, false),
+            Ok(true)
+        );
+        assert!(!stage.view("s", &walls, 0).walls[1].is_locked());
+        assert!(stage.view("s", &farmyard, 0).walls[1].is_locked());
         assert_eq!(stage.set_wall(&walls, "environment-0", curved), Ok(true));
         let view = stage.view("s", &walls, 0);
         let wall = view.wall("environment-0").unwrap();
@@ -3917,7 +4128,7 @@ mod tests {
             (wall.slots(), wall.scale(), wall.radius()),
             (4, 1.5, Some(4.0))
         );
-        assert_eq!(wall.pose, declared[0]);
+        assert_eq!(wall.pose, declared[0].pose);
         // Another environment's wall of the same identity is its own.
         assert_eq!(
             stage
@@ -3928,23 +4139,13 @@ mod tests {
             6
         );
         assert_eq!(
-            stage.set_wall(
-                &walls,
-                "environment-0",
-                WallChange {
-                    pose: Some(pose(0.0, 0.0)),
-                    ..WallChange::default()
-                }
-            ),
-            Err("Only a wall an owner added can be moved.")
-        );
-        assert_eq!(
             stage.set_wall(&walls, "environment-5", grid(1, 1)),
             Err("That wall is not here.")
         );
         let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
         assert_eq!(kept.view("s", &walls, 0).walls, view.walls);
-        // Laid out again as the environment's walls are by default, the space keeps nothing of its own for it.
+        // Laid out again as the environment's walls are by default, the space keeps nothing of its own for it but that
+        // it is unlocked.
         let back = WallChange {
             grid: Some(layout::FLAT_GRID),
             scale: Some(1.0),
@@ -3955,6 +4156,263 @@ mod tests {
         };
         assert_eq!(stage.set_wall(&walls, "environment-0", back), Ok(true));
         assert!(stage.rooms["sky"].layouts.is_empty());
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, false),
+            Ok(true)
+        );
+        assert!(stage.rooms["sky"].unlocked.is_empty());
+    }
+
+    #[test]
+    fn an_environment_s_wall_unlocked_moves_for_the_space_and_is_put_back_as_the_environment_has_it()
+     {
+        let declared =
+            [crate::EnvironmentWall::from(pose(-3.0, -3.0)).with_grid(Grid::from((2, 1)))];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        // Laid out as the environment declares it, two slots wide and one high, and locked.
+        let shown = stage.view("s", &walls, 0).walls[1].clone();
+        assert_eq!(
+            (shown.grid(), shown.is_locked()),
+            (Grid::from((2, 1)), true)
+        );
+        let onto = Destination::Wall {
+            wall: "environment-0".into(),
+            slot: None,
+        };
+        let a = stage.project_to(&walls, content("A"), &onto, 0);
+        let b = stage.project_to(&walls, content("B"), &onto, 0);
+        let moved = WallChange {
+            pose: Some(pose(2.0, -4.0)),
+            ..WallChange::default()
+        };
+        // Locked, it moves for nobody, and is removed by nobody.
+        assert_eq!(stage.set_wall(&walls, "environment-0", moved), Err(LOCKED));
+        assert_eq!(
+            stage.remove_wall(&walls, "environment-0"),
+            Err("Only a wall an owner added can be removed.")
+        );
+        // Unlocked, it moves, with its panels, and is kept where it was moved, across a restart, over where the
+        // environment puts it; but it is still never removed.
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, false),
+            Ok(true)
+        );
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, false),
+            Ok(false)
+        );
+        assert_eq!(stage.set_wall(&walls, "environment-0", moved), Ok(true));
+        assert_eq!(
+            stage.set_wall(&walls, "environment-0", grid(1, 1)),
+            Ok(true)
+        );
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        let view = kept.view("s", &walls, 0);
+        let wall = view.wall("environment-0").unwrap();
+        assert_eq!(wall.pose, pose(2.0, -4.0));
+        assert_eq!(wall.grid(), Grid::from((1, 1)));
+        assert!(!wall.is_locked());
+        assert_eq!(view.panel(&a).unwrap().place, on("environment-0", 0));
+        assert_ne!(view.panel(&b).unwrap().place, on("environment-0", 1));
+        assert_eq!(kept.floating("sky"), 1);
+        assert_eq!(
+            stage.remove_wall(&walls, "environment-0"),
+            Err("Only a wall an owner added can be removed.")
+        );
+        // Locked again, it stays where it was moved.
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, false),
+            Ok(true)
+        );
+        assert_eq!(stage.view("s", &walls, 0).walls[1].pose, pose(2.0, -4.0));
+        // Put back, it stands where and as the environment has it, locked, and the space keeps nothing of its own.
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, true),
+            Err("A wall put back as the environment has it is locked, as it has it.")
+        );
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, true),
+            Ok(true)
+        );
+        let wall = stage.view("s", &walls, 0).walls[1].clone();
+        assert_eq!(
+            (wall.pose, wall.grid(), wall.is_locked()),
+            (declared[0].pose, Grid::from((2, 1)), true)
+        );
+        let room = &stage.rooms["sky"];
+        assert!(room.layouts.is_empty() && room.moved.is_empty() && room.unlocked.is_empty());
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, true),
+            Ok(false)
+        );
+        // Only an environment's own wall is put back.
+        let added = stage.add_wall(&walls, &pose(0.0, 3.0), None).unwrap();
+        for wall in [TOMORI_WALL, added.as_str()] {
+            assert_eq!(
+                stage.lock_wall(&walls, wall, true, true),
+                Err("Only an environment's own wall is put back as the environment has it.")
+            );
+        }
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-3", true, false),
+            Err("That wall is not here.")
+        );
+    }
+
+    #[test]
+    fn panels_in_slots_an_environment_s_wall_no_longer_has_are_put_where_they_show() {
+        // Laid out three by two, as the farmyard's was, with panels in four of its slots.
+        let before = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
+        let walls = Walls {
+            declared: &before,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let panels: Vec<String> = [0, 2, 3, 4]
+            .into_iter()
+            .map(|slot| {
+                let onto = Destination::Wall {
+                    wall: "environment-0".into(),
+                    slot: Some(slot),
+                };
+                stage.project_to(&walls, content(&format!("Slot {slot}")), &onto, 0)
+            })
+            .collect();
+        assert!(!stage.fit_slots(&walls));
+        // Laid out anew two by one, the first beyond its slots takes its free one, and the rest float beside it, to its
+        // right, a slot apart, none hidden.
+        let after = [crate::EnvironmentWall::from(pose(-3.0, -3.0)).with_grid(Grid::from((2, 1)))];
+        let walls = Walls {
+            declared: &after,
+            ..SKY
+        };
+        assert_eq!(stage.environments(), ["sky"]);
+        assert!(stage.fit_slots(&walls));
+        assert!(!stage.fit_slots(&walls));
+        let view = stage.view("s", &walls, 0);
+        let place = |panel: &String| view.panel(panel).unwrap().place.clone();
+        assert_eq!(place(&panels[0]), on("environment-0", 0));
+        assert_eq!(place(&panels[1]), on("environment-0", 1));
+        let floating: Vec<Pose> = panels[2..]
+            .iter()
+            .map(|panel| match place(panel) {
+                Place::Free { pose } => pose,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let wall = view.wall("environment-0").unwrap();
+        let (width, _) = wall.size();
+        for (pose, nth) in floating.iter().zip([0.6, 1.7]) {
+            let along = width / 2.0 + wall.slot_size().0 * nth;
+            assert!((pose.position[0] - (-3.0 + along)).abs() < 1e-4, "{pose:?}");
+            assert!((pose.position[2] - (-3.0 + 0.1)).abs() < 1e-4, "{pose:?}");
+            assert_eq!(pose.orientation, wall.pose.orientation);
+        }
+    }
+
+    #[test]
+    fn an_environment_s_wall_is_put_back_only_while_the_walls_have_room_for_it() {
+        let declared =
+            [crate::EnvironmentWall::from(pose(-3.0, -3.0)).with_grid(Grid::from((2, 1)))];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, false),
+            Ok(true)
+        );
+        assert_eq!(
+            stage.set_wall(&walls, "environment-0", grid(1, 1)),
+            Ok(true)
+        );
+        // The Tomori wall's 6 and the environment's 1, with walls added of 71 more, hold as many slots as walls may.
+        for (index, (columns, rows)) in [(8, 3), (8, 3), (8, 2), (7, 1)].into_iter().enumerate() {
+            let layout = Layout {
+                grid: Grid::from((columns, rows)),
+                scale: 0.5,
+                ..Layout::FLAT
+            };
+            stage
+                .add_wall(&walls, &pose(index as f32, 3.0), Some(layout))
+                .unwrap();
+        }
+        assert_eq!(stage.slots_shown(&walls), SLOTS);
+        // Put back, it would have one more, so it is refused, saying why, and stays as it is.
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, true),
+            Err(
+                "The walls here hold as many slots as they can together: make another wall smaller first."
+            )
+        );
+        let wall = stage.view("s", &walls, 0).walls[1].clone();
+        assert_eq!((wall.grid(), wall.is_locked()), (Grid::from((1, 1)), false));
+    }
+
+    #[test]
+    fn a_locked_wall_refuses_every_change_and_removal_until_it_is_unlocked_and_is_kept_so() {
+        let mut stage = Stage::default();
+        let added = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let onto = Destination::Wall {
+            wall: added.clone(),
+            slot: None,
+        };
+        let panel = stage.project_to(&SKY, content("A"), &onto, 0);
+        // Added walls and the Tomori wall are unlocked unless an owner locks them.
+        let view = stage.view("s", &SKY, 0);
+        assert!(view.walls.iter().all(|wall| !wall.is_locked()));
+        for wall in [TOMORI_WALL, added.as_str()] {
+            assert_eq!(stage.lock_wall(&SKY, wall, true, false), Ok(true));
+        }
+        assert!(!stage.is_empty());
+        let changes = [
+            grid(2, 1),
+            WallChange {
+                scale: Some(1.5),
+                ..WallChange::default()
+            },
+            WallChange {
+                aspect: Some(Some(0.5)),
+                ..WallChange::default()
+            },
+            WallChange {
+                radius: Some(Some(3.0)),
+                ..WallChange::default()
+            },
+            WallChange {
+                pose: Some(pose(1.0, 3.0)),
+                ..WallChange::default()
+            },
+            WallChange::default(),
+        ];
+        for wall in [TOMORI_WALL, added.as_str()] {
+            for change in changes {
+                assert_eq!(stage.set_wall(&SKY, wall, change), Err(LOCKED), "{wall}");
+            }
+        }
+        assert_eq!(stage.remove_wall(&SKY, &added), Err(LOCKED));
+        // Panels still go onto a locked wall and come off it.
+        assert_eq!(
+            stage.place(&SKY, &panel, Target::Slot(added.clone(), 3)),
+            Ok(true)
+        );
+        // Kept across a restart, in every environment for the Tomori wall.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert!(kept.view("s", &SKY, 0).walls.iter().all(Wall::is_locked));
+        assert!(kept.view("s", &room("farmyard"), 0).walls[0].is_locked());
+        // Unlocked, they change again, and the added wall is removed.
+        let mut stage = kept;
+        for wall in [TOMORI_WALL, added.as_str()] {
+            assert_eq!(stage.lock_wall(&SKY, wall, false, false), Ok(true));
+            assert_eq!(stage.set_wall(&SKY, wall, grid(2, 1)), Ok(true));
+        }
+        assert_eq!(stage.remove_wall(&SKY, &added), Ok(()));
+        assert!(!stage.tomori_locked);
     }
 
     #[test]

@@ -88,6 +88,7 @@ A visitor cannot speak to the agent: push-to-talk and live voice are a collabora
 
 - `confirm_pairing` and `decline_pairing`, which decide whether a device becomes an owner; an owner must ask.
 - `remove_workers` with `force`, which stops a space's sub-agents while they work, losing what they were doing; an owner, or a collaborator in the space, must ask, since collaborators already direct the agent's work there. Removing finished workers needs no one, since it is the agent's own tidying of work it has reported, which `tomori-tools` asks it to do unprompted, and loses nothing still running; a requester named anyway is checked, so that a notice never names someone unchecked.
+- `set_wall` with `locked` or `reset`, which locks, unlocks or puts back a wall, changing what everyone else in the space may do with it (see `projection.md`); an owner must ask, as only an owner sends `LockWall` from a client.
 
 The other tools change only what everyone in the space sees and can change back, such as its speech setting, environment, title and where a panel is, or only read, so they carry no requester (see `mcp.md`).
 

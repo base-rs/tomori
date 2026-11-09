@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 2)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 3)]);
 /// ```
 pub fn builder() -> Builder {
     let builder = Server::builder()
@@ -72,10 +72,16 @@ pub fn farmyard_tomori_wall() -> tomori_protocol::Pose {
         .facing_towards(farmyard_eyes())
 }
 
-/// The farmyard's noticeboard, a projection wall of its own, facing where participants arrive.
-fn farmyard_noticeboard() -> tomori_protocol::Pose {
-    let board = tomori_environment_farmyard::layout::NOTICEBOARD.to_array();
-    tomori_protocol::Pose::at(board).facing_towards(farmyard_eyes())
+/// The farmyard's notice board, a projection wall of its own, two slots wide and one high, on the board against the
+/// fence, facing into the yard, locked as every environment's own wall is until a space's owner unlocks it.
+pub fn farmyard_noticeboard() -> tomori_server::EnvironmentWall {
+    use tomori_environment_farmyard::layout::{NOTICEBOARD, NOTICEBOARD_FACING, NOTICEBOARD_GRID};
+    let pose = tomori_protocol::Pose::at(NOTICEBOARD.to_array())
+        .facing_towards(NOTICEBOARD_FACING.to_array());
+    tomori_server::EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((
+        NOTICEBOARD_GRID[0],
+        NOTICEBOARD_GRID[1],
+    )))
 }
 
 #[cfg(test)]
@@ -93,7 +99,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 2)
+                ("farmyard", "Farmyard", 3)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
@@ -111,6 +117,13 @@ mod tests {
             .map(|environment| environment.walls().len())
             .collect();
         assert_eq!(walls, [0, 0, 1]);
+        // The farmyard's is its notice board, two slots wide and one high, facing into the yard, square to the fence.
+        let farmyard = &builder.environments()[2];
+        let board = farmyard.walls()[0];
+        assert_eq!(board.grid(), tomori_protocol::Grid::from((2, 1)));
+        // Facing along −X: a quarter turn the other way from +X.
+        let yaw = board.pose.yaw();
+        assert!((yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{yaw}");
         let homes: Vec<(bool, bool, bool, bool)> = builder
             .environments()
             .iter()

@@ -273,6 +273,61 @@ fn trees(shapes: &mut Shapes) {
     }
 }
 
+/// The notice board against the right of the fence: a wooden back on two posts, framed in darker wood, with a plank
+/// across its top and a little lean-to roof over it, sloping down towards the yard, as a farm's notice board stands
+/// against its fence. The farmyard's own projection wall stands on its back (see [`layout::NOTICEBOARD`]), so that what people
+/// put on it reads as part of the place.
+fn noticeboard(shapes: &mut Shapes) {
+    let [low, high] = layout::NOTICEBOARD_BACK.map(Vec3::from_array);
+    let post = layout::NOTICEBOARD_POST * 0.5;
+    let top = layout::NOTICEBOARD_HEIGHT - 0.12;
+    for [x, z] in layout::NOTICEBOARD_POSTS {
+        shapes.block(
+            Vec3::new(x - post, 0.0, z - post),
+            Vec3::new(x + post, top, z + post),
+            palette::DARK_WOOD,
+        );
+    }
+    shapes.block(low, high, palette::WOOD);
+    // A frame of darker wood about the back, proud of it, outside where the wall stands.
+    let (proud, trim) = (0.012, 0.05);
+    let front = low.x - proud;
+    for (from, to) in [
+        (
+            Vec3::new(front, low.y, low.z),
+            Vec3::new(low.x, low.y + trim, high.z),
+        ),
+        (
+            Vec3::new(front, high.y - trim, low.z),
+            Vec3::new(low.x, high.y, high.z),
+        ),
+        (
+            Vec3::new(front, low.y, low.z),
+            Vec3::new(low.x, high.y, low.z + trim),
+        ),
+        (
+            Vec3::new(front, low.y, high.z - trim),
+            Vec3::new(low.x, high.y, high.z),
+        ),
+    ] {
+        shapes.block(from, to, palette::DARK_WOOD);
+    }
+    // A plank across the top, like a sign without words, and the roof over it, overhanging the posts.
+    shapes.block(
+        Vec3::new(low.x - 0.01, high.y + 0.02, low.z + 0.05),
+        Vec3::new(high.x, high.y + 0.1, high.z - 0.05),
+        palette::WEATHERED,
+    );
+    let middle = (low.z + high.z) * 0.5;
+    let half = (high.z - low.z) * 0.5 + 0.16;
+    shapes.cuboid(
+        Vec3::new(low.x - 0.12, top + 0.06, middle),
+        Vec3::new(0.24, 0.025, half),
+        Quat::from_rotation_z(0.28),
+        palette::ROOF,
+    );
+}
+
 /// The yard, as a model of one node whose mesh draws it all.
 pub fn model() -> Model {
     let mut shapes = Shapes::new();
@@ -298,6 +353,7 @@ pub fn model() -> Model {
     trough(&mut shapes);
     feeder(&mut shapes);
     hay(&mut shapes);
+    noticeboard(&mut shapes);
     trees(&mut shapes);
     lantern(&mut shapes, &mut glass, layout::GATE_LANTERN);
     Model::built(
