@@ -340,9 +340,10 @@ pub fn same_surface(a: &Wall, b: &Wall) -> bool {
 }
 
 /// Whether a wall carried may snap to `wall`: one someone added, since the Tomori wall and an environment's walls stand
-/// where Tomori or the environment puts them, and not one locked in place, so that the server and every client agree.
+/// where Tomori or the environment puts them, not one locked in place, and not one tilted, since a group's walls stand
+/// upright, so that the server and every client agree.
 pub fn snaps_to(wall: &Wall) -> bool {
-    wall.kind == super::WallKind::Added && !wall.is_locked()
+    wall.kind == super::WallKind::Added && !wall.is_locked() && wall.tilt() == 0.0
 }
 
 /// The gap between the slots of `a` and `b` standing edge to edge: one gutter, at the larger of their two, so that

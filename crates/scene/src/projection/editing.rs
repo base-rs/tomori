@@ -837,19 +837,25 @@ fn lay_out_handles(
     };
     // Seen steeply, as a very tall wall's top is from below and to the side, a row is foreshortened more beyond the
     // wall than at its corners, so that the knob and the steppers of its columns may still come near the bar: they move
-    // on, beyond it, until they stand clear of it as seen.
+    // on, beyond it, until they stand clear of it as seen, with the handle of its rows where it stands beyond the knob.
+    let lifted: Vec<bool> = points
+        .iter()
+        .zip(&away)
+        .zip(&top)
+        .map(|(((handle, _), away), top)| *top || (*handle == Handle::Rows && *away < 0.0))
+        .collect();
     for _ in (0..BAR_ROWS).filter(|_| !below) {
         let beyond: Vec<Vec3> = points
             .iter()
-            .zip(&top)
-            .filter(|(_, top)| **top)
+            .zip(&lifted)
+            .filter(|(_, lifted)| **lifted)
             .map(|((_, at), _)| *at)
             .collect();
         if clear(&beyond, bar_row, bar_half) {
             break;
         }
-        for ((_, at), top) in points.iter_mut().zip(&top) {
-            if *top {
+        for ((_, at), lifted) in points.iter_mut().zip(&lifted) {
+            if *lifted {
                 *at += up * pv;
             }
         }

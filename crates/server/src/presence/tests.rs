@@ -1034,3 +1034,21 @@ fn a_layout_stands_in_front_of_whoever_it_is_for_as_far_as_it_takes_to_be_seen_w
             .all(|pose| pose.orientation[0] == 0.0 && pose.orientation[2] == 0.0)
     );
 }
+
+#[test]
+fn a_wall_the_agent_adds_stands_ahead_further_as_it_is_bigger_and_never_below_the_floor() {
+    let head = looking([0.0, 1.6, 0.0], [0.0, 1.6, -1.0]);
+    let at = |pose: Pose| pose.position;
+    // A standard wall stands 1.8 m ahead, a little below the eyes, as does one of twice a standard slot.
+    for scale in [1.0, 2.0] {
+        assert!(near(at(wall_in_front(&head, scale, 0.9)), [0.0, 1.5, -1.8]));
+    }
+    // A big wall stands as many times further as it is larger than twice, its middle as high while it clears the floor.
+    assert!(near(at(wall_in_front(&head, 5.0, 2.3)), [0.0, 1.5, -4.5]));
+    // One so tall that it would reach below the floor stands raised, its bottom 10 cm above it.
+    let tall = at(wall_in_front(&head, 5.0, 4.4));
+    assert!(near(tall, [0.0, 2.3, -4.5]), "{tall:?}");
+    // Someone below the floor where people arrive, such as in a pit, has it in front of them as it is.
+    let below = looking([0.0, -1.0, 0.0], [0.0, -1.0, -1.0]);
+    assert!(near(at(wall_in_front(&below, 5.0, 4.4)), [0.0, -1.1, -4.5]));
+}

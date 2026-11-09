@@ -467,3 +467,11 @@ fn a_locked_wall_is_no_snap_target_and_snaps_to_nothing() {
     let environment = Wall::new("environment-0", WallKind::Environment, ahead(0.0));
     assert!(!snaps_to(&environment));
 }
+
+#[test]
+fn a_tilted_wall_is_no_snap_target() {
+    let two = wall("wall-1", ahead(0.0), (2, 2), 0.9);
+    assert!(snaps_to(&two));
+    assert!(!snaps_to(&two.clone().with_tilt(Some(10.0))));
+    assert!(snaps_to(&two.with_tilt(Some(0.0))));
+}

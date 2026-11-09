@@ -842,6 +842,7 @@ fn the_hinge_moved_down_tilts_a_wall_towards_the_participant_evenly_and_snaps_up
             shape: None,
             pose: None,
             tilt: Some(layout::MOST_TILT),
+            join: None,
         })
     );
     // From the most it tilts down, one movement up as tall as the wall takes it to the most it tilts up, upright on

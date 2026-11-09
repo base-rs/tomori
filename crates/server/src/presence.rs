@@ -783,14 +783,23 @@ fn in_front(head: &Pose) -> Destination {
 /// middle is: as a wall a participant adds from the hand menu stands.
 const WALL_FRONT: (f32, f32) = (1.8, 0.1);
 
-/// Where a wall the agent adds for someone whose head is at `head` stands, its slots `scale` times a standard slot's:
-/// [`WALL_FRONT`] ahead of them, level, a little below their eyes, upright and facing them. A wall larger than
-/// [`BIG_SCALE`] stands as many times further as it is larger, so that its text looks as large as that one's does there,
-/// rather than a big wall towering over them.
-pub(crate) fn wall_in_front(head: &Pose, scale: f32) -> Pose {
+/// Where a wall the agent adds for someone whose head is at `head` stands, its slots `scale` times a standard slot's and
+/// `height` metres tall: [`WALL_FRONT`] ahead of them, level, a little below their eyes, upright and facing them. A wall
+/// larger than [`BIG_SCALE`] stands as many times further as it is larger, so that its text looks as large as that
+/// one's does there, rather than a big wall towering over them; and a wall so tall that it would reach below the floor
+/// where people arrive, for someone standing above it, stands raised until its bottom is [`WALL_CLEARANCE`] above it.
+pub(crate) fn wall_in_front(head: &Pose, scale: f32, height: f32) -> Pose {
     let (distance, drop) = WALL_FRONT;
-    ahead_of(head, (distance * (scale / BIG_SCALE).max(1.0), drop))
+    let mut pose = ahead_of(head, (distance * (scale / BIG_SCALE).max(1.0), drop));
+    let least = height / 2.0 + WALL_CLEARANCE;
+    if head.position[1] > 0.0 && pose.position[1] < least {
+        pose.position[1] = least;
+    }
+    pose
 }
+
+/// How far above the floor where people arrive, in metres, a wall the agent adds stands at least.
+const WALL_CLEARANCE: f32 = 0.1;
 
 /// The largest a wall's slots are, against a standard slot's, that stands at [`WALL_FRONT`] when added: twice, the
 /// largest walls were before they could be big.

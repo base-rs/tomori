@@ -493,10 +493,6 @@ impl Hub {
                 rows.unwrap_or(grid.rows),
             )));
         }
-        if let Some(place) = place {
-            let scale = change.scale.unwrap_or(before.scale());
-            change.pose = Some(wall_place(place, origin.as_ref(), &people, scale)?);
-        }
         // Its slots' width and height asked for in metres pick the size of their text and their shape, each kept as it
         // is where not given.
         if metres.slot_width.is_some() || metres.slot_height.is_some() {
@@ -526,6 +522,18 @@ impl Hub {
             };
             let unit = unit.apply(before.clone());
             change.scale = Some((width / unit.size().0 * 100.0).round() / 100.0);
+        }
+        // Stood in front of someone, as large and as tall as it will be.
+        if let Some(place) = place {
+            let laid = crate::stage::Layout {
+                grid: change.grid.unwrap_or(before.grid()),
+                scale: change.scale.unwrap_or(before.scale()),
+                aspect: change.aspect.unwrap_or(before.aspect),
+                radius: change.radius.unwrap_or(before.radius()),
+                tilt: None,
+            }
+            .apply(before.clone());
+            change.pose = Some(wall_place(place, origin.as_ref(), &people, &laid)?);
         }
         // The wall it is attached to, by its identity or name, or as someone is looking at or near it.
         let joining = match joining {
@@ -599,12 +607,12 @@ impl Hub {
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let origin = record.model.origin();
-        let pose = wall_place(
-            place.unwrap_or("front"),
-            origin.as_ref(),
-            &people,
-            layout.scale,
-        )?;
+        let laid = layout.apply(tomori_protocol::Wall::new(
+            "",
+            tomori_protocol::WallKind::Added,
+            tomori_protocol::Pose::default(),
+        ));
+        let pose = wall_place(place.unwrap_or("front"), origin.as_ref(), &people, &laid)?;
         let id = record.stage.add_wall(&walls, &pose, Some(layout))?;
         let now = crate::cards::unix_now();
         let after = record.stage.view(&space, &walls, now);
@@ -901,19 +909,23 @@ pub(super) fn notice(body: String) -> crate::stage::Content {
     }
 }
 
-/// Where `place`, `front [NAME]`, stands a wall: in front of that participant, or of whoever asked, whose head was at
-/// `asker`, as one a participant adds from the hand menu stands in front of them.
+/// Where `place`, `front [NAME]`, stands `wall`, laid out as it will be: in front of that participant, or of whoever
+/// asked, whose head was at `asker`, as one a participant adds from the hand menu stands in front of them.
 fn wall_place(
     place: &str,
     asker: Option<&tomori_protocol::Pose>,
     people: &[(String, tomori_protocol::Pose)],
-    scale: f32,
+    wall: &tomori_protocol::Wall,
 ) -> Result<tomori_protocol::Pose, String> {
     let Some(crate::stage::Placement::Front(name)) = crate::stage::Placement::parse(place) else {
         return Err("A wall is put in front of someone: say front with their name, or front for whoever asked.".to_owned());
     };
     let head = crate::presence::head_of(name.as_deref(), asker, people)?;
-    Ok(crate::presence::wall_in_front(&head, scale))
+    Ok(crate::presence::wall_in_front(
+        &head,
+        wall.scale(),
+        wall.size().1,
+    ))
 }
 
 /// How `wall` is laid out, as the agent and everyone in the space are told: its columns and rows, its size and its

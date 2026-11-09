@@ -238,6 +238,32 @@ impl Room {
             }
             index += 1;
         }
+        // A group's walls stand upright, so that it reads as one board: a wall snapped while tilted stands upright, as it
+        // takes the radius of a curved wall.
+        let grouped: Vec<String> = self
+            .walls
+            .iter()
+            .filter_map(|added| added.attach.as_ref())
+            .map(|attach| attach.to.clone())
+            .chain(
+                self.walls
+                    .iter()
+                    .filter(|added| added.attach.is_some())
+                    .map(|added| added.id.clone()),
+            )
+            .collect();
+        for added in self
+            .walls
+            .iter_mut()
+            .filter(|added| grouped.contains(&added.id))
+        {
+            if let Some(layout) = added.layout.as_mut().filter(|layout| layout.tilt.is_some()) {
+                layout.tilt = None;
+                if *layout == Layout::FLAT {
+                    added.layout = None;
+                }
+            }
+        }
         // No two walls overlap, where either has changed.
         let shown_walls: Vec<Wall> = self.walls.iter().map(shown).collect();
         let changed = |wall: &Wall| {
@@ -307,12 +333,14 @@ impl Stage {
             self.shown_wall(walls, id)
                 .is_some_and(|shown| added(id) && group::snaps_to(&shown))
         };
-        let refusal = |id: &str| {
-            if self.shown_wall(walls, id).is_some() {
-                "Only walls someone added snap together: the Tomori wall and an environment's walls stand where they are put."
-            } else {
-                "That wall is not here."
+        let refusal = |id: &str| match self.shown_wall(walls, id) {
+            Some(shown) if added(id) && shown.tilt() != 0.0 => {
+                "A group's walls stand upright, so a tilted wall has none snapped to it: stand it upright first."
             }
+            Some(_) => {
+                "Only walls someone added snap together: the Tomori wall and an environment's walls stand where they are put."
+            }
+            None => "That wall is not here.",
         };
         if !added(wall) {
             return Err(refusal(wall));

@@ -1481,6 +1481,11 @@ impl Stage {
                 let room = self.room(walls.environment);
                 let unchanged = room.clone();
                 let members = room.group(wall);
+                if members.len() > 1 && new.tilt.is_some() {
+                    return Err(
+                        "A group's walls stand upright, so that it reads as one board: take this wall out of its group to tilt it.",
+                    );
+                }
                 let added = room
                     .walls
                     .iter_mut()
