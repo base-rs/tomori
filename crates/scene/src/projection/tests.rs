@@ -155,6 +155,87 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
     assert_eq!(name(&Panel::new("4", "", "", Place::Unknown)), "");
 }
 
+/// A checklist the agent calls `agenda`, some of its items ticked.
+fn checklist(id: &str, place: Place) -> Panel {
+    Panel::new(
+        id,
+        "Agenda",
+        "To cover:\n\n- [x] Panel ids\n- [ ] Decide the pairing window length before the next release\n  - [ ] Nested\n\nThen questions.",
+        place,
+    )
+    .with_slug(Some("agenda".into()))
+}
+
+#[test]
+fn a_checklist_shows_its_boxes_and_the_ray_names_the_item_it_meets() {
+    let text = face(&checklist("1", on(TOMORI_WALL, 0)), false, false, Fit::Slot).plain();
+    let lines: Vec<&str> = text.split('\n').map(str::trim_end).collect();
+    assert_eq!(lines[3], "To cover:");
+    assert_eq!(lines[4], "☑ Panel ids");
+    assert_eq!(lines[5], "☐ Decide the pairing window length");
+    assert_eq!(lines[6], "  before the next release");
+    assert_eq!(lines[7], "  ☐ Nested");
+    for (place, fit) in [
+        (on(TOMORI_WALL, 0), Fit::Slot),
+        (
+            Place::Free {
+                pose: Pose::upright_facing([0.5, 1.5, -1.5], [0.0, 1.6, 0.0]),
+            },
+            Fit::Text,
+        ),
+    ] {
+        let panel = checklist("agenda", place.clone());
+        let shown = projection(vec![panel.clone()]);
+        let mut projector = Projector::default();
+        let output = projector.update(input(&shown, None, 0.0, Instant::now()));
+        assert!(output.item.is_none());
+        let model = match &place {
+            Place::Wall { slot, .. } => slot_frames(
+                shown.wall(TOMORI_WALL).unwrap(),
+                model(&shown.wall(TOMORI_WALL).unwrap().pose).unwrap(),
+            )[*slot as usize],
+            Place::Free { pose } => model(pose).unwrap(),
+            _ => unreachable!("placed on a wall or floating"),
+        };
+        let (columns, body) = self::fit(&panel, fit);
+        let (_, height) = sized(columns, body);
+        // The middle of each row, from the title down, a little left of the middle.
+        let mut item_on = |row: usize| {
+            let y =
+                height / 2.0 - (PADDING.1 as f32 + (row as f32 + 0.5) * CELL_HEIGHT as f32) * PIXEL;
+            let point = model.transform_point3(Vec3::new(-0.05, y, 0.0));
+            let output = projector.update(input(&shown, at(point), 0.0, Instant::now()));
+            assert_eq!(output.pointed.as_ref().unwrap().0, "agenda");
+            assert_eq!(
+                output.item,
+                item_at(&panel, model, fit, output.pointed.unwrap().2)
+            );
+            output.item
+        };
+        // Not on the title, the metadata, the rule, nor a row of no item; each row of an item, wrapped or nested, names
+        // the line it begins on.
+        assert_eq!(
+            (0..8).map(&mut item_on).collect::<Vec<_>>(),
+            [None, None, None, None, Some(2), Some(3), Some(3), Some(4)],
+            "{fit:?}"
+        );
+        assert_eq!(item_on(8), None, "{fit:?}");
+    }
+    // A code panel names no item.
+    let code = code_panel("c", 4);
+    assert_eq!(item_at(&code, Mat4::IDENTITY, Fit::Slot, Vec3::ZERO), None);
+    // Off the panel, above it, none either.
+    assert_eq!(
+        item_at(
+            &checklist("1", Place::Unknown),
+            Mat4::IDENTITY,
+            Fit::Slot,
+            Vec3::new(0.0, 1.0, 0.0)
+        ),
+        None
+    );
+}
+
 /// A code panel of Rust, its block `lines` long, with a keyword and a function highlighted on its first line.
 fn code_panel(id: &str, lines: u32) -> Panel {
     use tomori_protocol::Span;

@@ -1174,6 +1174,126 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_CHECKLIST_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: an
+    /// agenda the agent projected as a checklist, some items ticked and some not, one nested, on the Tomori wall from
+    /// 0.6 m and from home, then the same list with nothing ticked.
+    #[test]
+    fn a_checklist_draws_empty_and_ticked_boxes_its_ticked_items_dimmed() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("checklist test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let ticked = "To cover today:\n\n- [x] Panel ids\n- [x] Updating in place\n- [ ] Decide the pairing window length\n  - [x] Ask about the headset\n  - [ ] Agree a default\n- [ ] Checklists on the wrist";
+            let unticked = ticked.replace("[x]", "[ ]");
+            let panel = |body: &str| {
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "Agenda",
+                    body,
+                    tomori_protocol::Place::Wall {
+                        wall: tomori_protocol::TOMORI_WALL.into(),
+                        slot: 2,
+                    },
+                )
+                .with_slug(Some("agenda".into()))
+                .with_age(5)
+            };
+            let wall = tomori_wall();
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = slots[2].w_axis.truncate();
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, slot + Vec3::Y * 0.1, Vec3::Y);
+            let mut capture = |body: &str, matrix: Mat4| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, Vec::new(), vec![panel(body)]);
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let close_ticked = capture(ticked, close);
+            let home_ticked = capture(ticked, from_home);
+            let close_unticked = capture(&unticked, close);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            image::imageops::replace(&mut sheet, &close_ticked, 0, 0);
+            image::imageops::replace(&mut sheet, &home_ticked, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &close_unticked, 0, (2 * HEIGHT).into());
+            crate::test_support::preview("TOMORI_CHECKLIST_PREVIEW", &sheet);
+            // A ticked box is green, so the ticked list has green ink and the unticked one none.
+            let green = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        g > 120 && g > r + 60 && g > b + 30
+                    })
+                    .count()
+            };
+            let bright = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| pixel.0[..3].iter().all(|channel| *channel > 200))
+                    .count()
+            };
+            assert!(green(&close_ticked) > 100);
+            assert!(green(&home_ticked) > 5);
+            assert_eq!(green(&close_unticked), 0);
+            // Ticked items' text is dimmed, so the list with four ticked has less bright ink than with none.
+            let (ticked_ink, unticked_ink) = (bright(&close_ticked), bright(&close_unticked));
+            assert!(ticked_ink * 10 < unticked_ink * 9);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// Set `TOMORI_CODE_WRAP_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: the
     /// block of Rust the maintainer looked at on the Quest 3, on the Tomori wall from 0.5 m, as an older server sent it,
     /// each line cut to 64 characters with "…", then as it is sent now, every line whole, a long one wrapping onto as many

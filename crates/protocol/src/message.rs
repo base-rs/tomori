@@ -84,10 +84,16 @@ pub enum Resource {
     /// while the space is in that environment. See `design/environments.md`.
     #[non_exhaustive]
     Object { object: String },
-    /// A panel projected in the space, by its [`crate::Panel::id`]. The server describes it from its own store of the
-    /// space's panels. See `design/projection.md`.
+    /// A panel projected in the space, by its [`crate::Panel::id`], and, where the ray meets a list item of a text
+    /// panel's body, the `line` of the body, counted from 0, that the item begins on. The server describes it from its own
+    /// store of the space's panels, and the item from its own copy of the body; an older server ignores `line`. See
+    /// `design/projection.md`.
     #[non_exhaustive]
-    Panel { panel: String },
+    Panel {
+        panel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<u32>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -116,6 +122,16 @@ impl Resource {
     pub fn panel(panel: impl Into<String>) -> Self {
         Self::Panel {
             panel: panel.into(),
+            line: None,
+        }
+    }
+
+    /// The projected panel whose [`crate::Panel::id`] is `panel`, pointed at on the list item that begins on `line` of
+    /// its body, counted from 0, or anywhere else on it without one.
+    pub fn panel_at(panel: impl Into<String>, line: Option<u32>) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line,
         }
     }
 }

@@ -1273,7 +1273,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
-        self.attended_with(resource, cards, objects, &|_| None)
+        self.attended_with(resource, cards, objects, &|_, _| None)
     }
 
     /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
@@ -1283,7 +1283,7 @@ impl SpaceModel {
         resource: &tomori_protocol::Resource,
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
-        panels: &dyn Fn(&str) -> Option<String>,
+        panels: &dyn Fn(&str, Option<u32>) -> Option<String>,
     ) -> Option<Attended> {
         match resource {
             tomori_protocol::Resource::Worker { worker, .. }
@@ -1322,12 +1322,12 @@ impl SpaceModel {
                 }))
             }
             // A panel's identity is only looked up: the stage describes the panel it has.
-            tomori_protocol::Resource::Panel { panel, .. }
+            tomori_protocol::Resource::Panel { panel, line, .. }
                 if panel.len() <= limits::IDENTIFIER_BYTES =>
             {
                 Some(Attended(Resolved::Panel {
                     id: panel.clone(),
-                    description: panels(panel)?,
+                    description: panels(panel, *line)?,
                 }))
             }
             _ => None,
@@ -1344,7 +1344,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
-        self.resolve_with(attention, cards, objects, &|_| None)
+        self.resolve_with(attention, cards, objects, &|_, _| None)
     }
 
     /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, as in
@@ -1354,7 +1354,7 @@ impl SpaceModel {
         attention: &[tomori_protocol::Resource],
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
-        panels: &dyn Fn(&str) -> Option<String>,
+        panels: &dyn Fn(&str, Option<u32>) -> Option<String>,
     ) -> Vec<Attended> {
         let mut resolved: Vec<Attended> = Vec::new();
         for attended in attention
@@ -3898,7 +3898,9 @@ mod tests {
     #[test]
     fn a_panel_attended_to_is_described_as_the_stage_describes_it_once() {
         let space = model();
-        let describe = |panel: &str| (panel == "panel-1").then(|| "panel \"Status\"".to_owned());
+        let describe = |panel: &str, _: Option<u32>| {
+            (panel == "panel-1").then(|| "panel \"Status\"".to_owned())
+        };
         let panel = tomori_protocol::Resource::panel("panel-1");
         let attention = space.resolve_with(
             &[

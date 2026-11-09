@@ -4017,3 +4017,30 @@ fn a_panel_pointed_at_as_the_words_begin_is_described_from_the_stage_before_them
     );
     assert_eq!(prompt.text, "ada: what's this?");
 }
+
+#[test]
+fn the_item_of_a_checklist_pointed_at_is_named_with_its_panel_s_id_before_the_words() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\nTo cover:\n\n- [x] Panel ids\n- [ ] Decide the pairing window\n```\n",
+    );
+    let panel = ada.projection().panels[0].id.clone();
+    // Pointed at on the line its second item begins on, as a client finds it under the ray.
+    let prompt = said(
+        &hub,
+        &ada,
+        &commands,
+        vec![tomori_protocol::Resource::panel_at(panel.clone(), Some(3))],
+        None,
+    );
+    assert_eq!(
+        prompt.text,
+        "ada: [Pointing at panel \"Agenda\" (id agenda, on the Tomori wall, projected just now; item 2 of 2, not ticked: \"Decide the pairing window\")] what's this?"
+    );
+}

@@ -20,10 +20,11 @@
 //! longest of those not arranged leaves it for a newcomer, or, when every one is arranged, the one there longest. Nothing
 //! else ever moves, so that nobody's reading is disturbed.
 mod blocks;
+pub(crate) mod checklist;
 mod code;
 mod placement;
 
-pub use blocks::panels;
+pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
 pub use code::Source;
 pub use placement::Placement;
 
@@ -133,6 +134,10 @@ pub struct Content {
     pub meta: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<Code>,
+    /// The agent's own id for a text panel, a short slug such as `agenda`, by which a later block with the same id, or
+    /// the `update_panel` tool, updates it in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 /// A panel found in a reply, as its block is read: its content, and, for a code panel, the code to highlight, which is
@@ -299,6 +304,9 @@ struct Kept {
     content: Content,
     /// When it was projected, in seconds since the epoch.
     created: u64,
+    /// When the agent last updated it in place, if it has, in seconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated: Option<u64>,
     /// When it was last put where it is, in the stage's own order, so that the one there longest leaves first.
     placed: u64,
     place: Placed,
@@ -342,7 +350,8 @@ impl Kept {
                 .collect(),
         )
         .with_age(now.saturating_sub(self.created))
-        .with_pinned(self.pinned);
+        .with_pinned(self.pinned)
+        .with_slug(self.content.slug.clone());
         panel.code = self.content.code.clone();
         panel
     }
@@ -556,6 +565,27 @@ impl Stage {
         }
     }
 
+    /// The panels kept in `environment`: those on the Tomori wall, then those on the environment's walls or floating in
+    /// it.
+    fn here<'a>(&'a self, environment: &str) -> impl Iterator<Item = &'a Kept> {
+        let room = self
+            .rooms
+            .get(environment)
+            .map(|room| room.panels.as_slice())
+            .unwrap_or_default();
+        self.tomori.iter().chain(room)
+    }
+
+    /// When the agent last updated the panel `panel` in `environment` in place, if it has, in seconds since the epoch.
+    pub(crate) fn updated(&self, environment: &str, panel: &str) -> Option<u64> {
+        self.kept(environment, panel).and_then(|kept| kept.updated)
+    }
+
+    /// The panel `panel` as it is kept in `environment`.
+    fn kept(&self, environment: &str, panel: &str) -> Option<&Kept> {
+        self.here(environment).find(|kept| kept.id == panel)
+    }
+
     /// Take the panel `panel` out of where it is in `environment`, if it is there.
     fn take(&mut self, environment: &str, panel: &str) -> Option<Kept> {
         if let Some(index) = self.tomori.iter().position(|kept| kept.id == panel) {
@@ -718,6 +748,7 @@ impl Stage {
             id: id.clone(),
             content,
             created: now,
+            updated: None,
             placed: 0,
             place: Placed::Free {
                 pose: Pose::default(),
@@ -814,21 +845,28 @@ impl Stage {
         let to = origin.map_or(Destination::Tomori, Destination::Nearest);
         let contents = contents
             .into_iter()
-            .map(|content| (content, to.clone()))
+            .map(|content| (content, to.clone(), false))
             .collect();
         self.project_placed(walls, contents, now)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
-    /// Project the panels of one reply, `contents`, at `now`, each where its destination says. If the reply has code
-    /// panels, they replace the code panels of the replies before, on any wall, but those a participant has pulled off
-    /// or put where they are: those are taken off first. Returns the panels' identities.
+    /// Project the panels of one reply, `contents`, at `now`, each where its destination says, and whether its block
+    /// said where it goes. If the reply has code panels, they replace the code panels of the replies before, on any wall,
+    /// but those a participant has pulled off or put where they are: those are taken off first. A text panel with the id
+    /// of one shown in `walls`' environment updates that one in place, as [`Stage::revise`] does, moving it only if its
+    /// block said where it goes; one with the id of a panel kept hidden with another environment takes that one's place,
+    /// projected here as new, so that an id names one panel in a space. Returns the panels' identities, and whether each
+    /// was updated in place.
     pub(crate) fn project_placed(
         &mut self,
         walls: &Walls<'_>,
-        contents: Vec<(Content, Destination)>,
+        contents: Vec<(Content, Destination, bool)>,
         now: u64,
-    ) -> Vec<String> {
-        if contents.iter().any(|(content, _)| content.code.is_some()) {
+    ) -> Vec<(String, bool)> {
+        if contents.iter().any(|(content, ..)| content.code.is_some()) {
             self.tomori.retain(|kept| !kept.replaced());
             for room in self.rooms.values_mut() {
                 room.panels.retain(|kept| !kept.replaced());
@@ -836,8 +874,95 @@ impl Stage {
         }
         contents
             .into_iter()
-            .map(|(content, to)| self.project_to(walls, content, &to, now))
+            .map(|(content, to, said)| {
+                let shown = content
+                    .slug
+                    .as_deref()
+                    .filter(|_| content.code.is_none())
+                    .and_then(|slug| self.named(walls.environment, slug));
+                match shown {
+                    Some(id) => {
+                        let to = said.then_some(&to);
+                        self.revise(walls, &id, content, to, now)
+                            .expect("a panel shown is kept");
+                        (id, true)
+                    }
+                    None => {
+                        if let Some(slug) = &content.slug {
+                            self.forget_named(slug);
+                        }
+                        (self.project_to(walls, content, &to, now), false)
+                    }
+                }
+            })
             .collect()
+    }
+
+    /// The identity of the text panel the agent calls `slug` in `environment`: on the Tomori wall, or on the
+    /// environment's walls or floating in it.
+    pub(crate) fn named(&self, environment: &str, slug: &str) -> Option<String> {
+        self.here(environment)
+            .find(|kept| kept.content.code.is_none() && kept.content.slug.as_deref() == Some(slug))
+            .map(|kept| kept.id.clone())
+    }
+
+    /// Forget every panel the agent calls `slug`, as one projected anew with that id takes their place.
+    fn forget_named(&mut self, slug: &str) {
+        let named = |kept: &Kept| kept.content.slug.as_deref() == Some(slug);
+        self.tomori.retain(|kept| !named(kept));
+        for room in self.rooms.values_mut() {
+            room.panels.retain(|kept| !named(kept));
+        }
+    }
+
+    /// What the text panel `panel` in `walls`' environment shows, if it is shown there and is not a code panel.
+    pub(crate) fn content(&self, walls: &Walls<'_>, panel: &str) -> Option<&Content> {
+        self.kept(walls.environment, panel)
+            .map(|kept| &kept.content)
+            .filter(|content| content.code.is_none())
+    }
+
+    /// Update the text panel `panel` in `walls`' environment in place at `now`, to show `content`, keeping its identity,
+    /// its id, its wall and slot or where it floats, whether a participant put it there,
+    /// and its place in its wall's order of who leaves first, so that it is not a new panel for placement or for making
+    /// room. With `to`, it then moves there, as [`Stage::relocate`] moves it, unless a participant put it where it
+    /// is: only `move_panel` moves a panel a participant placed. Returns whether it changed, or why it was refused.
+    pub(crate) fn revise(
+        &mut self,
+        walls: &Walls<'_>,
+        panel: &str,
+        mut content: Content,
+        to: Option<&Destination>,
+        now: u64,
+    ) -> Result<bool, &'static str> {
+        let environment = walls.environment;
+        let kept = self
+            .tomori
+            .iter_mut()
+            .chain(
+                self.rooms
+                    .get_mut(environment)
+                    .map(|room| room.panels.iter_mut())
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|kept| kept.id == panel)
+            .ok_or("That panel is not here.")?;
+        if kept.content.code.is_some() || content.code.is_some() {
+            return Err("A code panel cannot be updated in place.");
+        }
+        content.slug = kept.content.slug.clone();
+        let pinned = kept.pinned;
+        let changed = kept.content != content;
+        if changed {
+            kept.content = content;
+            kept.updated = Some(now);
+        }
+        let moved = match to {
+            Some(to) if !pinned => self.relocate(walls, panel, to).unwrap_or(false),
+            _ => false,
+        };
+        Ok(changed || moved)
     }
 
     /// Move the panel `panel` where `to` says in `walls`' environment, as its agent asked. One a participant put where it
@@ -990,12 +1115,23 @@ impl Stage {
     }
 
     /// The panel `panel`, as the agent is told about one a participant points at in `walls`' environment at `now`, such
-    /// as `panel "Build status" (on the Tomori wall, projected 2 minutes ago; source: "CI")`: everything in it cleaned onto
-    /// one line, without double quotes or square brackets, so that it cannot end the context block. `None` when it is
-    /// not shown there.
-    pub(crate) fn describe(&self, walls: &Walls<'_>, panel: &str, now: u64) -> Option<String> {
+    /// as `panel "Build status" (on the Tomori wall, projected 2 minutes ago; source: "CI")`, with its id, and, pointed
+    /// at on the list item that begins on `line` of its body, which item, such as `panel "Agenda" (id agenda, on the
+    /// Tomori wall, projected 5 minutes ago, updated just now; item 3 of 5, not ticked: "Decide the pairing window")`:
+    /// everything in it cleaned onto one line, without double quotes or square brackets, so that it cannot end the
+    /// context block. A line that begins no item is left out. `None` when it is not shown there.
+    pub(crate) fn describe(
+        &self,
+        walls: &Walls<'_>,
+        panel: &str,
+        line: Option<u32>,
+        now: u64,
+    ) -> Option<String> {
         let shown = self.view("", walls, now);
         let panel = shown.panel(panel)?;
+        let updated = self
+            .kept(walls.environment, &panel.id)
+            .and_then(|kept| kept.updated);
         let kind = if panel.code.is_some() {
             "code panel"
         } else {
@@ -1018,7 +1154,15 @@ impl Stage {
             Place::Wall { .. } => "on a wall",
             _ => "floating",
         };
-        let mut details = format!("{place}, projected {}", ago(panel.age));
+        let mut details = String::new();
+        if let Some(slug) = &panel.slug {
+            // A slug holds nothing to clean, but its letters, digits, `-` and `_`.
+            details.push_str(&format!("id {slug}, "));
+        }
+        details.push_str(&format!("{place}, projected {}", ago(panel.age)));
+        if let Some(updated) = updated {
+            details.push_str(&format!(", updated {}", ago(now.saturating_sub(updated))));
+        }
         // A code panel's language, in quotes, as it is from the agent's text, and the lines it shows, of how many.
         if let Some(code) = &panel.code {
             if !code.language.is_empty() {
@@ -1042,6 +1186,27 @@ impl Stage {
                 crate::space::one_line(&meta.value, blocks::META_VALUE_CHARS)
             ));
         }
+        // The item pointed at, in quotes, as it is the agent's text.
+        let items = checklist::items(&panel.body);
+        if panel.code.is_none()
+            && let Some(line) = line
+            && let Some((index, item)) = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| item.line as u64 == u64::from(line))
+        {
+            let state = match item.checked {
+                Some(true) => ", ticked",
+                Some(false) => ", not ticked",
+                None => "",
+            };
+            details.push_str(&format!(
+                "; item {} of {}{state}: \"{}\"",
+                index + 1,
+                items.len(),
+                crate::space::one_line(item.text, blocks::META_VALUE_CHARS)
+            ));
+        }
         Some(format!("{named} ({details})"))
     }
 }
@@ -1063,6 +1228,7 @@ mod tests {
             body: format!("About {title}."),
             meta: vec![("source".into(), "CI".into())],
             code: None,
+            slug: None,
         }
     }
 
@@ -1793,6 +1959,7 @@ mod tests {
             id: format!("hidden-{placed}"),
             content: content("hidden"),
             created: 0,
+            updated: None,
             placed,
             place: Placed::Free {
                 pose: pose(0.0, 0.0),
@@ -1933,6 +2100,7 @@ mod tests {
             body: "fn main() {}\n}".into(),
             meta: Vec::new(),
             code: Some(Code::new(language, lines)),
+            slug: None,
         }
     }
 
@@ -2017,13 +2185,13 @@ mod tests {
         let mut stage = Stage::default();
         let short = stage.project(&SKY, code("rust", 2), None, 0);
         assert_eq!(
-            stage.describe(&SKY, &short, 0).unwrap(),
+            stage.describe(&SKY, &short, None, 0).unwrap(),
             "code panel \"rust\" (on the Tomori wall, projected just now; language: \"rust\"; 2 lines)"
         );
         let long = stage.project(&SKY, code("ruby", 40), None, 0);
         assert!(
             stage
-                .describe(&SKY, &long, 0)
+                .describe(&SKY, &long, None, 0)
                 .unwrap()
                 .ends_with("; language: \"ruby\"; lines 1–2 of 40)")
         );
@@ -2032,11 +2200,11 @@ mod tests {
         plain.title = "code".into();
         let plain = stage.project(&SKY, plain, None, 0);
         assert_eq!(
-            stage.describe(&SKY, &plain, 0).unwrap(),
+            stage.describe(&SKY, &plain, None, 0).unwrap(),
             "code panel \"code\" (on the Tomori wall, projected just now; 2 lines)"
         );
         let hostile = stage.project(&SKY, code("\"]x[\"", 2), None, 0);
-        let described = stage.describe(&SKY, &hostile, 0).unwrap();
+        let described = stage.describe(&SKY, &hostile, None, 0).unwrap();
         assert_eq!(described.matches('"').count(), 4);
         assert!(!described.contains(['[', ']']));
     }
@@ -2070,6 +2238,8 @@ mod tests {
                 )
                 .with_spans(spans),
             ),
+            // The longest id, though only text panels are given one, so that the bound holds for either.
+            slug: Some("a".repeat(blocks::ID_CHARS)),
         };
         let declared: Vec<Pose> = (0..DECLARED_WALLS)
             .map(|index| pose(index as f32 - 3.0, -5.0))
@@ -2168,6 +2338,7 @@ mod tests {
             body: body.clone(),
             meta: Vec::new(),
             code: Some(Code::new("javascript", 240).with_spans(spans)),
+            slug: None,
         };
         let mut stage = Stage::default();
         for _ in 0..WALL_SLOTS {
@@ -2179,7 +2350,7 @@ mod tests {
         // Described with the lines it holds, of how many.
         assert!(
             stage
-                .describe(&SKY, &view.panels[0].id, 0)
+                .describe(&SKY, &view.panels[0].id, None, 0)
                 .unwrap()
                 .ends_with("lines 1–200 of 240)")
         );
@@ -2203,14 +2374,14 @@ mod tests {
         let mut stage = Stage::default();
         let id = stage.project(&SKY, content("Build status"), None, 1_000);
         assert_eq!(
-            stage.describe(&SKY, &id, 1_130).unwrap(),
+            stage.describe(&SKY, &id, None, 1_130).unwrap(),
             "panel \"Build status\" (on the Tomori wall, projected 2 minutes ago; source: \"CI\")"
         );
         let wall = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
         stage.place(&SKY, &id, Target::Wall(wall)).unwrap();
         assert!(
             stage
-                .describe(&SKY, &id, 1_000)
+                .describe(&SKY, &id, None, 1_000)
                 .unwrap()
                 .contains("(on a wall, projected just now;")
         );
@@ -2219,7 +2390,7 @@ mod tests {
             .unwrap();
         assert!(
             stage
-                .describe(&SKY, &id, 1_000)
+                .describe(&SKY, &id, None, 1_000)
                 .unwrap()
                 .contains("(floating, projected just now;")
         );
@@ -2231,15 +2402,16 @@ mod tests {
                 body: "Run \"cargo test\" [now]\nthen more".into(),
                 meta: vec![("note]".into(), "say \"hi\"".into())],
                 code: None,
+                slug: None,
             },
             None,
             0,
         );
         assert_eq!(
-            stage.describe(&SKY, &untitled, 0).unwrap(),
+            stage.describe(&SKY, &untitled, None, 0).unwrap(),
             "panel beginning \"Run 'cargo test' (now)\" (on the Tomori wall, projected just now; note): \"say 'hi'\")"
         );
-        assert!(stage.describe(&SKY, "panel-99", 0).is_none());
+        assert!(stage.describe(&SKY, "panel-99", None, 0).is_none());
         let hostile = stage.project(
             &SKY,
             Content {
@@ -2247,11 +2419,12 @@ mod tests {
                 body: String::new(),
                 meta: Vec::new(),
                 code: None,
+                slug: None,
             },
             None,
             0,
         );
-        let described = stage.describe(&SKY, &hostile, 0).unwrap();
+        let described = stage.describe(&SKY, &hostile, None, 0).unwrap();
         assert_eq!(described.matches('"').count(), 2);
         assert!(!described.contains(['[', ']']));
         assert!(described.chars().count() < crate::space::CONTEXT_CHARS);
@@ -2292,5 +2465,259 @@ mod tests {
         // A stage kept without a version, or with nothing, reads as the current one.
         let bare: Stage = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(bare, Stage::default());
+    }
+
+    /// A text panel the agent calls `slug`, titled `title`, showing `body`.
+    fn named(slug: &str, title: &str, body: &str) -> Content {
+        Content {
+            title: title.into(),
+            body: body.into(),
+            meta: Vec::new(),
+            code: None,
+            slug: Some(slug.into()),
+        }
+    }
+
+    /// Project `content` as the agent's reply does, where `to` says, said in its block or not.
+    fn reply(
+        stage: &mut Stage,
+        walls: &Walls<'_>,
+        content: Content,
+        to: Destination,
+        said: bool,
+        now: u64,
+    ) -> (String, bool) {
+        stage
+            .project_placed(walls, vec![(content, to, said)], now)
+            .remove(0)
+    }
+
+    #[test]
+    fn a_block_with_the_id_of_a_panel_shown_updates_it_in_place_keeping_where_it_is() {
+        let mut stage = Stage::default();
+        let (agenda, updated) = reply(
+            &mut stage,
+            &SKY,
+            named("agenda", "Agenda", "- [ ] One\n- [ ] Two"),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        assert!(!updated);
+        for index in 0..WALL_SLOTS - 1 {
+            stage.project(&SKY, content(&format!("other {index}")), None, 0);
+        }
+        // The same id again, from someone standing elsewhere, updates it where it is: the same identity, slot and
+        // panels, its new title, body and metadata, and the time it was updated.
+        let mut revised = named("agenda", "Agenda (revised)", "- [x] One\n- [ ] Two");
+        revised.meta = vec![("source".into(), "Notes".into())];
+        let (same, updated) = reply(
+            &mut stage,
+            &SKY,
+            revised,
+            Destination::Nearest([9.0, 1.5, 9.0]),
+            false,
+            60,
+        );
+        assert_eq!((same.as_str(), updated), (agenda.as_str(), true));
+        let view = stage.view("s", &SKY, 120);
+        assert_eq!(view.panels.len(), WALL_SLOTS as usize);
+        let panel = view.panel(&agenda).unwrap();
+        assert_eq!(panel.title, "Agenda (revised)");
+        assert_eq!(panel.body, "- [x] One\n- [ ] Two");
+        assert_eq!(panel.meta, [Meta::new("source", "Notes")]);
+        assert_eq!(panel.place, on(TOMORI_WALL, 0));
+        assert_eq!(panel.slug.as_deref(), Some("agenda"));
+        // Its age is still since it was projected, so that it is not framed as the wall's newest.
+        assert_eq!(panel.age, 120);
+        assert_eq!(
+            stage.describe(&SKY, &agenda, None, 120).unwrap(),
+            "panel \"Agenda (revised)\" (id agenda, on the Tomori wall, projected 2 minutes ago, updated a minute ago; source: \"Notes\")"
+        );
+        // It is not a new panel for making room: the full wall still gives it up first, as the one there longest.
+        let newcomer = stage.project(&SKY, content("newcomer"), None, 180);
+        let view = stage.view("s", &SKY, 180);
+        assert!(view.panel(&agenda).is_none());
+        assert_eq!(view.panel(&newcomer).unwrap().place, on(TOMORI_WALL, 0));
+        // An id is kept with the stage, and so is when it was updated.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept, stage);
+    }
+
+    #[test]
+    fn an_update_keeps_a_participant_s_placing_and_moves_only_where_its_block_says() {
+        let declared = [pose(-3.0, -3.0)];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let (agenda, _) = reply(
+            &mut stage,
+            &walls,
+            named("agenda", "Agenda", "- [ ] One"),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        // Unsaid, it stays where it is, wherever whoever asked stood.
+        reply(
+            &mut stage,
+            &walls,
+            named("agenda", "Agenda", "- [x] One"),
+            Destination::Nearest([-3.0, 1.5, -2.5]),
+            false,
+            0,
+        );
+        assert_eq!(
+            stage.view("s", &walls, 0).panel(&agenda).unwrap().place,
+            on(TOMORI_WALL, 0)
+        );
+        // Said, it moves there, as the agent's own panel.
+        let wall = Destination::Wall {
+            wall: "environment-0".into(),
+            slot: Some(2),
+        };
+        reply(
+            &mut stage,
+            &walls,
+            named("agenda", "Agenda", "- [x] One\n- [ ] Two"),
+            wall.clone(),
+            true,
+            0,
+        );
+        let panel = stage.view("s", &walls, 0).panel(&agenda).cloned().unwrap();
+        assert_eq!(panel.place, on("environment-0", 2));
+        assert_eq!(panel.body, "- [x] One\n- [ ] Two");
+        // Left floating by a participant, it keeps where it floats and stays pinned, even where its block says
+        // otherwise, as a participant's placing always stays; its text still changes.
+        let floating = Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
+        stage
+            .place(&walls, &agenda, Target::Free(floating))
+            .unwrap();
+        let (_, updated) = reply(
+            &mut stage,
+            &walls,
+            named("agenda", "Agenda", "- [x] One\n- [x] Two"),
+            Destination::Tomori,
+            true,
+            0,
+        );
+        assert!(updated);
+        let panel = stage.view("s", &walls, 0).panel(&agenda).cloned().unwrap();
+        assert_eq!(panel.place, Place::Free { pose: floating });
+        assert!(panel.pinned);
+        assert_eq!(panel.body, "- [x] One\n- [x] Two");
+        // The same text again changes nothing.
+        let before = stage.clone();
+        assert_eq!(
+            stage.revise(
+                &walls,
+                &agenda,
+                named("agenda", "Agenda", "- [x] One\n- [x] Two"),
+                None,
+                5
+            ),
+            Ok(false)
+        );
+        assert_eq!(stage, before);
+        // A code panel is never updated in place, nor named.
+        let code_panel = stage.project(&walls, code("rust", 2), None, 0);
+        assert_eq!(
+            stage.revise(&walls, &code_panel, content("text"), None, 0),
+            Err("A code panel cannot be updated in place.")
+        );
+        assert_eq!(
+            stage.revise(&walls, "panel-99", content("text"), None, 0),
+            Err("That panel is not here.")
+        );
+    }
+
+    #[test]
+    fn an_id_dismissed_or_kept_with_another_environment_is_projected_anew_here() {
+        let mut stage = Stage::default();
+        let (first, _) = reply(
+            &mut stage,
+            &SKY,
+            named("agenda", "Agenda", "One"),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        stage.project(&SKY, content("other"), None, 0);
+        stage.dismiss("sky", &first).unwrap();
+        // Dismissed, the id projects a new panel, placed as any new one is: the Tomori wall's first free slot.
+        let (second, updated) = reply(
+            &mut stage,
+            &SKY,
+            named("agenda", "Agenda", "Two"),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        assert!(!updated);
+        assert_ne!(second, first);
+        assert_eq!(
+            stage.view("s", &SKY, 0).panel(&second).unwrap().place,
+            on(TOMORI_WALL, 0)
+        );
+        // Floating in Sky, it is hidden in the farm; the same id there takes its place, projected anew, so that an id
+        // names one panel in a space, and Sky no longer has it on returning.
+        let floating = Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
+        stage.place(&SKY, &second, Target::Free(floating)).unwrap();
+        let farm = Walls {
+            environment: "farm",
+            ..SKY
+        };
+        assert_eq!(stage.named("farm", "agenda"), None);
+        let (third, updated) = reply(
+            &mut stage,
+            &farm,
+            named("agenda", "Agenda", "Three"),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        assert!(!updated);
+        assert_eq!(stage.named("farm", "agenda"), Some(third.clone()));
+        assert!(stage.view("s", &SKY, 0).panel(&second).is_none());
+        // On the Tomori wall, it travels with the space, and is the one updated in Sky.
+        assert_eq!(stage.named("sky", "agenda"), Some(third));
+    }
+
+    #[test]
+    fn the_item_pointed_at_is_described_with_its_number_and_whether_it_is_ticked() {
+        let mut stage = Stage::default();
+        let (agenda, _) = reply(
+            &mut stage,
+            &SKY,
+            named(
+                "agenda",
+                "Agenda",
+                "Topics:\n\n- [x] Panels\n- [ ] Decide the \"pairing\" [window]\n  - plain nested\n\n```\n- [ ] code\n```",
+            ),
+            Destination::Tomori,
+            false,
+            0,
+        );
+        let describe = |line| stage.describe(&SKY, &agenda, Some(line), 0).unwrap();
+        assert_eq!(
+            describe(3),
+            "panel \"Agenda\" (id agenda, on the Tomori wall, projected just now; item 2 of 3, not ticked: \"Decide the 'pairing' (window)\")"
+        );
+        assert!(describe(2).ends_with("; item 1 of 3, ticked: \"Panels\")"));
+        assert!(describe(4).ends_with("; item 3 of 3: \"plain nested\")"));
+        // A line that begins no item, one in code, and one past the end, name none.
+        for line in [0, 7, 99] {
+            assert!(describe(line).ends_with("projected just now)"), "{line}");
+        }
+        // A code panel's lines are not items.
+        let code_panel = stage.project(&SKY, code("markdown", 2), None, 0);
+        assert!(
+            !stage
+                .describe(&SKY, &code_panel, Some(0), 0)
+                .unwrap()
+                .contains("item")
+        );
     }
 }

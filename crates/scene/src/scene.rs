@@ -950,8 +950,18 @@ impl Step {
         // The hint beside a panel carried, over everything else.
         projection.extend(projected.hint);
         match (card, worker, &object) {
+            // Pointed at, rather than carried, it names the list item the ray meets, if any.
             _ if panel.is_some() => {
-                conversation.point(panel.clone().map(tomori_protocol::Resource::panel))
+                let item = projected
+                    .pointed
+                    .as_ref()
+                    .filter(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
+                    .and(projected.item);
+                conversation.point(
+                    panel
+                        .clone()
+                        .map(|panel| tomori_protocol::Resource::panel_at(panel, item)),
+                )
             }
             (Some(card), _, _) => conversation.point(Some(tomori_protocol::Resource::card(card))),
             (None, Some(worker), _) => {
@@ -2379,6 +2389,63 @@ mod tests {
                 slot: Some(3),
                 pose: None,
             })]
+        );
+    }
+
+    #[test]
+    fn pointed_at_on_a_checklist_item_as_x_is_pressed_the_words_name_its_line() {
+        use tomori_protocol::{Panel, Place, Pose, Resource, ServerMessage};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.projection = true));
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![Panel::new(
+                        "panel-1",
+                        "Agenda",
+                        "To cover:\n\n- [x] Panel ids\n- [ ] Pairing window",
+                        Place::Free {
+                            pose: Pose::upright_facing(ahead.to_array(), arrival::HOME.to_array()),
+                        },
+                    )]),
+            ),
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let now = Instant::now();
+        // From the top of the panel down, what X held attends to.
+        let mut named = Vec::new();
+        for step_down in 0..60 {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            if let Some(attended) = utterance.attention.first()
+                && named.last() != Some(attended)
+            {
+                named.push(attended.clone());
+            }
+        }
+        // The panel itself above its list, then each item by the line it begins on, then the panel again below.
+        assert_eq!(
+            named,
+            [
+                Resource::panel("panel-1"),
+                Resource::panel_at("panel-1", Some(2)),
+                Resource::panel_at("panel-1", Some(3)),
+                Resource::panel("panel-1"),
+            ]
         );
     }
 

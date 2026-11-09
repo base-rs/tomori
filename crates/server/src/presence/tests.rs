@@ -808,3 +808,34 @@ fn a_panel_carried_is_known_while_the_report_is_current_and_its_identity_bounded
     let long = "x".repeat(crate::limits::IDENTIFIER_BYTES + 1);
     assert_eq!(carrying(&long).carried(now), None);
 }
+
+#[test]
+fn a_panel_s_id_is_named_where_it_is_met_on_its_wall_and_floating() {
+    let mut projection = projection();
+    projection.panels[0].slug = Some("status".into());
+    projection.panels[1].slug = Some("notes".into());
+    let met = described(
+        &Met::Panel {
+            panel: "panel-1".into(),
+            wall: Some((TOMORI_WALL.into(), 2)),
+        },
+        1.0,
+        &projection,
+    );
+    assert_eq!(met["id"], "status");
+    // One without an id says none.
+    let unnamed = described(
+        &Met::Panel {
+            panel: "panel-3".into(),
+            wall: Some(("environment-0".into(), 4)),
+        },
+        1.0,
+        &projection,
+    );
+    assert!(unnamed.get("id").is_none());
+    let (walls, floating) = walls(&projection);
+    assert_eq!(walls[0]["used"][0]["id"], "status");
+    // The code panel on the right wall has none.
+    assert!(walls[1]["used"][0].get("id").is_none());
+    assert_eq!(floating[0]["id"], "notes");
+}

@@ -332,6 +332,10 @@ pub struct Panel {
     /// last ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// The agent's own id for it, a short slug such as `agenda`, by which the agent updates it in place, if it gave one.
+    /// An older client ignores it, and draws the panel's new text as it draws any change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 impl Panel {
@@ -351,7 +355,14 @@ impl Panel {
             place,
             code: None,
             pinned: false,
+            slug: None,
         }
+    }
+
+    /// The panel, which the agent calls `slug`.
+    pub fn with_slug(mut self, slug: Option<String>) -> Self {
+        self.slug = slug;
+        self
     }
 
     /// The panel, a code panel of `code`.
@@ -608,6 +619,35 @@ mod tests {
         let json = serde_json::json!({"kind": "panel", "panel": "panel-1"});
         assert_eq!(serde_json::to_value(&panel).unwrap(), json);
         assert_eq!(serde_json::from_value::<Resource>(json).unwrap(), panel);
+        // Pointed at on a list item, it names the line of the body the item begins on, which a reader that knows only
+        // the identity skips, as it skips any field it does not know.
+        let item = Resource::panel_at("panel-1", Some(4));
+        let json = serde_json::json!({"kind": "panel", "panel": "panel-1", "line": 4});
+        assert_eq!(serde_json::to_value(&item).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Resource>(json).unwrap(), item);
+        assert_eq!(Resource::panel_at("panel-1", None), panel);
+        // A panel with the agent's id carries it only when it has one, and a client that knows no id, as an older one,
+        // reads the rest as before, so that a panel updated in place shows its new text there too.
+        let plain = Panel::new("panel-1", "Agenda", "- [ ] One", Place::Unknown);
+        assert!(serde_json::to_value(&plain).unwrap().get("slug").is_none());
+        let named = plain.with_slug(Some("agenda".into()));
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["slug"], "agenda");
+        assert_eq!(
+            serde_json::from_value::<Panel>(json.clone()).unwrap(),
+            named
+        );
+        #[derive(Deserialize)]
+        struct Older {
+            id: String,
+            title: String,
+            body: String,
+        }
+        let older: Older = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            (older.id.as_str(), older.title.as_str(), older.body.as_str()),
+            ("panel-1", "Agenda", "- [ ] One")
+        );
         // An older client's Hello reads no projection, and a newer one's says it reads it.
         let hello: ClientMessage = serde_json::from_value(serde_json::json!({
             "type": "hello", "protocol": 2, "participant": "p", "name": "Ada"

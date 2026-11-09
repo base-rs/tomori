@@ -32,6 +32,7 @@ use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
 mod agent_pairing;
+pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
 pub(crate) mod tools;
 
@@ -3043,7 +3044,7 @@ impl Hub {
                             &attention,
                             state.cards_of(&space),
                             record.channel.as_ref(),
-                            &|panel| record.stage.describe(&walls, panel, now),
+                            &|panel, line| record.stage.describe(&walls, panel, line, now),
                         )
                     }
                     _ => Vec::new(),
@@ -3134,7 +3135,7 @@ impl Hub {
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
-                                    &|panel| space.stage.describe(&walls, panel, now),
+                                    &|panel, line| space.stage.describe(&walls, panel, line, now),
                                 )
                             })
                         })
@@ -4762,24 +4763,23 @@ impl Hub {
                 .into_iter()
                 .map(|(content, place)| {
                     // A placement that names someone who has not reported, or a wall not here, is as none.
-                    let to = place
-                        .and_then(|place| {
-                            crate::presence::destination(
-                                &place,
-                                origin.as_ref(),
-                                &people,
-                                &projection,
-                            )
+                    let said = place.and_then(|place| {
+                        crate::presence::destination(&place, origin.as_ref(), &people, &projection)
                             .ok()
-                        })
-                        .unwrap_or_else(|| {
-                            crate::presence::by_default(origin.as_ref(), &projection)
-                        });
-                    (content, to)
+                    });
+                    let placed = said.is_some();
+                    let to = said.unwrap_or_else(|| {
+                        crate::presence::by_default(origin.as_ref(), &projection)
+                    });
+                    (content, to, placed)
                 })
                 .collect();
-            for id in record.stage.project_placed(&walls, placed, now) {
-                log::info!("Space {space} projected {id}.");
+            for (id, updated) in record.stage.project_placed(&walls, placed, now) {
+                if updated {
+                    log::info!("Space {space} updated {id} in place.");
+                } else {
+                    log::info!("Space {space} projected {id}.");
+                }
             }
         }
         state.touch_projection(space);

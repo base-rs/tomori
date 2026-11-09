@@ -16,8 +16,9 @@
 //! ```
 //! ````
 //!
-//! `title` is the panel's title, `place` says where it goes (see [`super::placement`]), and every other key is its
-//! metadata. Without a header, the whole block is its body.
+//! `title` is the panel's title, `id` the agent's own name for it, by which a later block updates it in place (see
+//! [`slug`]), `place` says where it goes (see [`super::placement`]), and every other key is its metadata. Without a
+//! header, the whole block is its body.
 use super::placement::Placement;
 use super::{Content, Found};
 
@@ -38,6 +39,34 @@ pub const BODY_CHARS: usize = 1_200;
 pub const META_ENTRIES: usize = 4;
 pub const META_KEY_CHARS: usize = 24;
 pub const META_VALUE_CHARS: usize = 80;
+
+/// The longest id the agent may give a panel, in characters.
+pub const ID_CHARS: usize = 32;
+
+/// The id `value` names, in lower case, if it is one: from 1 to [`ID_CHARS`] ASCII letters, digits, `-` and `_`. Ids
+/// are the agent's names for its panels, scoped to the space, so that a later block or `update_panel` updates one in
+/// place; text that is not one names no panel.
+pub fn slug(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= ID_CHARS
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| value.to_ascii_lowercase())
+}
+
+/// `title` as a panel's title: on one line, cleaned and cut as a panel block's is.
+pub fn title(title: &str) -> String {
+    tomori_protocol::text::one_line(title, TITLE_CHARS)
+        .trim()
+        .to_owned()
+}
+
+/// `text` as a panel's body: its lines cleaned and cut as a panel block's are.
+pub fn clean_body(text: &str) -> String {
+    body(text.lines())
+}
 
 /// The info string's language that marks a panel block.
 const LANGUAGE: &str = "panel";
@@ -213,16 +242,18 @@ impl Content {
         let mut title = String::new();
         let mut meta: Vec<(String, String)> = Vec::new();
         let mut place = None;
+        let mut id = None;
         for (key, value) in header.iter().filter_map(|line| key_value(line)) {
             let key = key.to_ascii_lowercase();
-            if key == "place" {
+            if key == "id" {
+                // The first a block gives decides, whether it is valid or not, and none is metadata.
+                id.get_or_insert_with(|| slug(value));
+            } else if key == "place" {
                 // The first a block gives decides, whether it is known or not, and none is metadata.
                 place.get_or_insert_with(|| Placement::parse(value));
             } else if key == "title" {
                 if title.is_empty() {
-                    title = tomori_protocol::text::one_line(value, TITLE_CHARS)
-                        .trim()
-                        .to_owned();
+                    title = self::title(value);
                 }
             } else if meta.len() < META_ENTRIES && !meta.iter().any(|(known, _)| *known == key) {
                 let value = tomori_protocol::text::one_line(value, META_VALUE_CHARS)
@@ -240,6 +271,7 @@ impl Content {
                 body,
                 meta,
                 code: None,
+                slug: id.flatten(),
             },
             place.flatten(),
         ))
@@ -290,7 +322,34 @@ mod tests {
                 .map(|(key, value)| ((*key).into(), (*value).into()))
                 .collect(),
             code: None,
+            slug: None,
         }
+    }
+
+    #[test]
+    fn an_id_names_a_panel_by_a_short_slug_and_is_never_metadata() {
+        let parsed =
+            Content::parse("ID: Agenda_1\nid: other\ntitle: Agenda\n---\n- [ ] One").unwrap();
+        assert_eq!(parsed.slug.as_deref(), Some("agenda_1"));
+        assert!(parsed.meta.is_empty());
+        assert_eq!(parsed.title, "Agenda");
+        // An id that is not a slug names nothing, and the first decides even then.
+        for id in [
+            "two words",
+            "",
+            "quote\"",
+            "[x]",
+            "naïve",
+            &"a".repeat(ID_CHARS + 1),
+        ] {
+            let parsed = Content::parse(&format!("id: {id}\nid: later\n---\nBody")).unwrap();
+            assert_eq!(parsed.slug, None, "{id:?}");
+            assert!(parsed.meta.is_empty());
+        }
+        assert_eq!(slug(&"a".repeat(ID_CHARS)), Some("a".repeat(ID_CHARS)));
+        assert_eq!(slug(" to-do "), Some("to-do".to_owned()));
+        // A block of only an id holds nothing to show.
+        assert!(Content::parse("id: agenda\n---\n").is_none());
     }
 
     #[test]
