@@ -933,8 +933,53 @@ fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_t
     give(&hub, &space, "Ada", REQUEST_RECENT + Duration::from_secs(1));
     assert_eq!(
         refused(Some("Ada"), Needs::Owner),
-        "The words you were given last in this space are more than 10 minutes old, so Tomori will not act on them. Ask whoever wants this to say it again."
+        "The words you were given last in this space are more than 3 minutes old, so Tomori will not act on them. Ask whoever wants this to say it again."
     );
+    // Words given exactly as long ago as the window stand; a moment later, they do not.
+    give(&hub, &space, "Ada", Duration::ZERO);
+    let at = {
+        let state = hub.lock();
+        state.space(&space).unwrap().model.given().unwrap().at
+    };
+    let checked_at = |now: Instant| {
+        let state = hub.lock();
+        state.requester(&space, Some("Ada"), Needs::Owner, now)
+    };
+    assert!(checked_at(at + REQUEST_RECENT).is_ok());
+    assert!(
+        checked_at(at + REQUEST_RECENT + Duration::from_nanos(1))
+            .unwrap_err()
+            .ends_with("more than 3 minutes old, so Tomori will not act on them. Ask whoever wants this to say it again.")
+    );
+
+    // Input that did not come through Tomori after an owner's words, such as a message typed into the session or a sub-agent's report, leaves nobody's word behind the agent's turn, until someone speaks again.
+    let deliver = |key: &str| {
+        let mut state = hub.lock();
+        let model = &mut state.space_mut(&space).unwrap().model;
+        model.apply(Event::Delivered {
+            key: key.to_owned(),
+        });
+    };
+    deliver("msg_typed_in_the_terminal");
+    assert_eq!(
+        refused(Some("Ada"), Needs::Owner),
+        "Input that did not come through Tomori reached you after the words you were given last in this space, such as a message typed into your session or a sub-agent's report, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
+    );
+    give(&hub, &space, "Ada", Duration::ZERO);
+    assert!(check(Some("Ada"), Needs::Owner).is_ok());
+    // Nor does a connection lost to the session, which may have missed such input, until someone speaks again.
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .model
+        .apply(Event::Reconnecting {
+            reason: "The agent's connection was lost.".to_owned(),
+        });
+    assert!(refused(Some("Ada"), Needs::Owner).starts_with(
+        "Tomori lost its connection to your session after the words you were given last in this space"
+    ));
+    give(&hub, &space, "Ada", Duration::ZERO);
+    assert!(check(Some("Ada"), Needs::Owner).is_ok());
 
     // A collaborator may stop work in their space, but not decide a pairing.
     let _cy = asking(
