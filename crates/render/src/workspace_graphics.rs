@@ -37,11 +37,16 @@ struct Vertex {
 #[derive(Clone, Debug, PartialEq)]
 struct Sign {
     source_id: String,
-    // Both vectors lie in the scene XZ plane; normal points towards whoever the sign faces.
+    // Both vectors lie in the scene XZ plane; normal points towards whoever the sign faces, in this client its viewer.
+    // With the panel's origin, the station and `towards`, they place the sign's mesh rather than make it, so that a sign
+    // turning to follow its viewer, or gliding after its worker, is moved rather than built again (see [`mesh_key`]).
     right: [f32; 3],
     normal: [f32; 3],
     state: State,
     station: [f32; 3],
+    /// Along the ground from its station towards whoever it faces, which its leader's dot stands behind the station's
+    /// middle from.
+    towards: [f32; 3],
     /// Whether it stands in its own place, straight above its station, its post hanging below it, rather than moved
     /// aside or up, its post drawn down to its station.
     own: bool,
@@ -318,8 +323,7 @@ impl PageCache {
             .map(|entry| (mesh_id(&entry.0), entry))
             .collect();
         for panel in &panels {
-            let mut key = panel.clone();
-            key.opacity = 1.0;
+            let key = mesh_key(panel);
             let entry = if let Some(entry) = old
                 .remove(&mesh_id(&key))
                 .filter(|(cached, _, complete, _)| *complete && *cached == key)
@@ -328,7 +332,7 @@ impl PageCache {
             } else {
                 let waited = tomori_text::atlas::waited();
                 let mut vertices = Vec::new();
-                let surface = panel_mesh(&key, &mut vertices);
+                let surface = local_mesh(&key, &mut vertices);
                 self.builds += 1;
                 (
                     key,
@@ -343,23 +347,24 @@ impl PageCache {
         self.vertices.clear();
         self.ranges.clear();
         for (panel, (_, mesh, _, surface)) in panels.iter().zip(&self.meshes) {
-            let start = self.vertices.len() as u32;
+            let start = self.vertices.len();
             assert!(
-                self.vertices.len() + mesh.len() <= MAX_VERTICES,
+                start + mesh.len() + LEADER_VERTICES <= MAX_VERTICES,
                 "workspace budget must fit every supported panel"
             );
-            self.vertices.extend(mesh.iter().map(|v| {
-                let mut v = *v;
-                v.color[3] *= panel.opacity;
-                v
-            }));
-            let end = self.vertices.len() as u32;
+            // Placed where it stands now, facing whoever it faces, its leader drawn to its worker between its surface and
+            // the rest, as it was made.
+            place(panel, mesh, *surface, 1.0, &mut self.vertices);
+            for vertex in &mut self.vertices[start..] {
+                vertex.color[3] *= panel.opacity;
+            }
+            let end = self.vertices.len();
             if start != end && panel.opacity > 0.0 {
                 self.ranges.push(PanelRange {
                     center: panel.center(),
                     occludes: crate::occlusion::occludes(panel.opacity),
-                    vertices: start..end,
-                    surface: mesh[..((end - start) as usize).min(*surface)]
+                    vertices: start as u32..end as u32,
+                    surface: self.vertices[start..start + (end - start).min(*surface)]
                         .as_chunks::<3>()
                         .0
                         .iter()
@@ -371,6 +376,23 @@ impl PageCache {
         self.panels = panels;
         true
     }
+}
+
+/// What a panel's mesh is made from, which it is cached by: all of it but its opacity, which its vertices are faded by
+/// as they are placed, and, for a sign, where it stands, which way it faces and where its worker is, by which it is
+/// placed rather than made.
+fn mesh_key(panel: &Panel) -> Panel {
+    let mut key = panel.clone();
+    key.opacity = 1.0;
+    if let Some(sign) = &mut key.sign {
+        key.origin = [0.0; 3];
+        sign.right = [0.0; 3];
+        sign.normal = [0.0; 3];
+        sign.station = [0.0; 3];
+        sign.towards = [0.0; 3];
+        sign.own = false;
+    }
+    key
 }
 
 pub struct WorkspaceGraphics {
@@ -495,6 +517,7 @@ impl WorkspaceGraphics {
         queue: &wgpu::Queue,
         workspace: &Workspace,
         stations: &[Station],
+        viewer: Option<glam::Vec3>,
     ) {
         let cards = results(workspace);
         self.page = self.page.min(cards.len().saturating_sub(1));
@@ -509,6 +532,7 @@ impl WorkspaceGraphics {
             self.content_page,
             &self.content.pages,
             &mut self.placements,
+            viewer.map(|viewer| viewer.to_array()),
         );
         self.pages = pages;
         self.page = self.page.min(pages.saturating_sub(1));
@@ -548,30 +572,50 @@ impl WorkspaceGraphics {
         glyphs: &wgpu::BindGroup,
         scene_to_clip: glam::Mat4,
     ) {
-        if self.count == 0 {
-            return;
+        for (index, _) in self.order(scene_to_clip) {
+            self.draw_panel(pass, camera, glyphs, index);
         }
+    }
+
+    /// The order to draw its panels in for the eye `scene_to_clip` sees through, back to front, each with how far ahead
+    /// of the eye its middle is, so that the renderer can draw the space's panels between them, farthest first.
+    /// Blending is order dependent. Preserve each panel's background-first mesh order, but draw whole panels
+    /// back-to-front for this eye. Use overlap depths rather than center depths: a tilted card's center can be nearer
+    /// even though its overlapping edge is behind the sign.
+    pub fn order(&self, scene_to_clip: glam::Mat4) -> Vec<(usize, f32)> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+        panel_order(&self.cache.ranges, scene_to_clip)
+            .into_iter()
+            .map(|index| {
+                let ahead = (scene_to_clip * self.cache.ranges[index].center.extend(1.0)).w;
+                (index, ahead)
+            })
+            .collect()
+    }
+
+    /// Draw its panel `index`, of [`Self::order`], in the eye `camera` binds. The shared depth attachment still occludes
+    /// it with opaque scene bodies. Once drawn, a panel opaque enough to hide what is behind it writes its surface's
+    /// depth where it is itself opaque enough, so that panels and labels drawn later, behind it, are hidden; one fading
+    /// out does not, so fades never leave invisible occluders.
+    pub fn draw_panel(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera: &wgpu::BindGroup,
+        glyphs: &wgpu::BindGroup,
+        index: usize,
+    ) {
+        let range = &self.cache.ranges[index];
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera, &[]);
         pass.set_bind_group(1, glyphs, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        // Blending is order dependent. Preserve each panel's background-first
-        // mesh order, but draw whole panels back-to-front for this eye. The
-        // shared depth attachment still occludes them with opaque scene bodies.
-        // Use overlap depths rather than center depths: a tilted card's center
-        // can be nearer even though its overlapping edge is behind the sign.
-        // Once drawn, a panel opaque enough to hide what is behind it writes its
-        // surface's depth, so that panels and labels drawn later, behind it, are
-        // hidden; one fading out does not, so fades never leave invisible occluders.
-        for index in panel_order(&self.cache.ranges, scene_to_clip) {
-            let range = &self.cache.ranges[index];
-            pass.draw(range.vertices.clone(), 0..1);
-            if range.occludes {
-                let surface = range.vertices.start + range.surface.len() as u32 * 3;
-                pass.set_pipeline(&self.occluder);
-                pass.draw(range.vertices.start..surface, 0..1);
-                pass.set_pipeline(&self.pipeline);
-            }
+        pass.draw(range.vertices.clone(), 0..1);
+        if range.occludes {
+            let surface = range.vertices.start + range.surface.len() as u32 * 3;
+            pass.set_pipeline(&self.occluder);
+            pass.draw(range.vertices.start..surface, 0..1);
         }
     }
 }
@@ -603,6 +647,7 @@ fn layout(
     content_page: usize,
     content: &[Vec<String>],
     placements: &mut LabelPlacement,
+    viewer: Option<[f32; 3]>,
 ) -> (Vec<Panel>, usize) {
     let mut panels = Vec::new();
     let mut notices = Vec::new();
@@ -640,7 +685,12 @@ fn layout(
             .get(station.id.as_str())
             .copied()
             .unwrap_or(State::Unknown);
-        panels.push(station_panel(station, placements.position(station), state));
+        panels.push(station_panel(
+            station,
+            placements.position(station),
+            state,
+            viewer,
+        ));
     }
     if workspace.truncated {
         notices.push("Workspace discovery truncated [LIMIT]".into());
@@ -710,35 +760,53 @@ fn layout(
     (panels, pages)
 }
 
-fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
+/// Along the ground from `from` towards `face`, or towards `fallback` where `face` stands above or below it, or else
+/// straight along +Z: which way a sign at `from` faces.
+fn facing_from(from: [f32; 3], face: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
+    [face, fallback]
+        .into_iter()
+        .find_map(|to| {
+            glam::Vec2::new(to[0] - from[0], to[2] - from[2])
+                .try_normalize()
+                .filter(|_| (to[0] - from[0]).hypot(to[2] - from[2]) >= SIGN_NEAREST)
+                .map(|d| [d.x, 0.0, d.y])
+        })
+        .unwrap_or([0.0, 0.0, 1.0])
+}
+
+/// The sign of `station`, standing at `position`, turned about its upright to face `viewer`, this client's, or else
+/// whoever the agent faces.
+fn station_panel(
+    station: &Station,
+    position: [f32; 3],
+    state: State,
+    viewer: Option<[f32; 3]>,
+) -> Panel {
     let (state_text, accent) = state_label(&state);
     let [sx, sy, sz] = position;
-    // Facing whoever the agent faces, the eyes at home unless it is summoned.
-    let [vx, _, vz] = station.facing;
-    let (dx, dz) = (sx - vx, sz - vz);
-    let radius = dx.hypot(dz);
-    let normal = if radius > 0.0001 {
-        [-dx / radius, 0.0, -dz / radius]
-    } else {
-        [0.0, 0.0, 1.0]
-    };
+    // Facing this client's viewer, wherever they walk, or whoever the agent faces, the eyes at home unless it is
+    // summoned; upright, turning only about its own upright, so that it never leans.
+    let face = viewer.unwrap_or(station.facing);
+    let normal = facing_from(position, face, station.facing);
     let right = [normal[2], 0.0, -normal[0]];
     // Beyond reading distance from them, drawn larger in proportion, so that it reads as one there does.
     let scale = sign_scale(station.position, station.facing);
     let pixel = SIGN_PIXEL * scale;
-    let half_width = (SIGN_COLUMNS * 9) as f32 * pixel * 0.5;
     let lines = label_lines(&station.title, state_text);
+    // As wide as its widest row, its title's or its pill's, so that its rows stand centred above its worker.
+    let columns = sign_columns(&lines);
+    let half_width = (columns * 9) as f32 * pixel * 0.5;
     // Its bottom edge stands a little above the place it was given, whatever its height, so that a long title grows
-    // up from its worker rather than down over it.
+    // up from its worker rather than down over it; and a little behind it, so that its worker reads in front of it.
     let height = (lines.len() * 11 + 4) as f32 * pixel;
     Panel {
         origin: [
-            sx + normal[0] * 0.10 - right[0] * half_width,
+            sx - normal[0] * SIGN_BEHIND - right[0] * half_width,
             sy + SIGN_LIFT * scale + height,
-            sz + normal[2] * 0.10 - right[2] * half_width,
+            sz - normal[2] * SIGN_BEHIND - right[2] * half_width,
         ],
         pixel,
-        columns: SIGN_COLUMNS,
+        columns,
         lines,
         accent,
         opacity: station.opacity,
@@ -748,11 +816,34 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
             normal,
             state,
             station: station.position,
+            towards: facing_from(station.position, face, station.facing),
             own: position == station.position,
             scale,
         }),
         rule: None,
     }
+}
+
+/// The fewest cells across a sign, so that one with a short title is still a sign rather than a tag.
+const SIGN_FEWEST_COLUMNS: usize = 10;
+
+/// The cells across a sign of `lines`: as many as its widest row takes, its title's or its state's pill's, at least
+/// [`SIGN_FEWEST_COLUMNS`] and at most [`SIGN_COLUMNS`].
+fn sign_columns(lines: &[String]) -> usize {
+    let (status, title) = lines.split_last().expect("a sign has its state's row");
+    let pill = (pill_width(status) / 9.0).ceil() as usize;
+    title
+        .iter()
+        .map(|line| crate::ui_text::width(line))
+        .chain([pill, SIGN_FEWEST_COLUMNS])
+        .max()
+        .unwrap_or(SIGN_FEWEST_COLUMNS)
+        .min(SIGN_COLUMNS)
+}
+
+/// How wide a state's pill is, in font pixels, for its word `status`: its symbol, its word, and a little after.
+fn pill_width(status: &str) -> f32 {
+    PILL_SYMBOL + crate::ui_text::width(status) as f32 * 9.0 + 5.0
 }
 
 /// The cells across a worker's sign.
@@ -794,6 +885,12 @@ const SIGN_APART: [f32; 2] = [0.5, 1.0];
 /// How far above its station a sign's bottom edge stands in its own place, clear of its worker's flock and completed
 /// cube, its post hanging between; more for a sign drawn larger.
 const SIGN_LIFT: f32 = 0.3;
+/// How far behind its place a sign stands, in metres, from whoever it faces: so that its worker, whose flock reaches
+/// about 0.13 m about its middle, reads in front of the sign's leader and the dot that ends it, its anchor.
+const SIGN_BEHIND: f32 = 0.06;
+/// How near, along the ground, whoever a sign faces may stand to it before it faces whoever the agent faces instead, in
+/// metres: as someone standing beneath it, whose bearing from it would swing with every sway.
+const SIGN_NEAREST: f32 = 0.2;
 /// How large a sign's font pixel is, in metres, within [`SIGN_REACH`] of home.
 const SIGN_PIXEL: f32 = 0.0038;
 /// How far from whoever it faces a sign is drawn at [`SIGN_PIXEL`], in metres: the default arc's radius, so that its
@@ -1076,10 +1173,10 @@ fn status_symbol(
 
 /// How a worker's sign is drawn, in font pixels from its text's top-left corner, y down: its plate reaches
 /// [`PLATE_MARGIN`] beyond its text across and down, its corners rounded by [`PLATE_RADIUS`]; its title in one colour,
-/// [`TITLE`]; its state as a pill on its last row, [`PILL_HEIGHT`] tall, its symbol in its first [`PILL_SYMBOL`] and its
-/// word after; and a leader [`LEADER_WIDTH`] wide from the middle of its plate's bottom edge to its worker's middle,
-/// ending in a dot [`LEADER_DOT`] across. Depths, in metres in front of the sign's plane: the leader behind the plate,
-/// the pill on it, its text and symbol in front.
+/// [`TITLE`], each row centred; its state as a pill, centred on its last row, [`PILL_HEIGHT`] tall, its symbol in its
+/// first [`PILL_SYMBOL`] and its word after; and a leader [`LEADER_WIDTH`] wide from the middle of its plate's bottom
+/// edge to just behind its worker's middle, ending in a dot [`LEADER_DOT`] across. Depths, in metres in front of the
+/// sign's plane: the leader behind the plate, the pill on it, its text and symbol in front.
 const PLATE_MARGIN: [f32; 2] = [2.0, 3.0];
 const PLATE_RADIUS: f32 = 3.0;
 const PLATE: [f32; 3] = [0.016, 0.03, 0.055];
@@ -1092,11 +1189,17 @@ const SIGN_LEADER: f32 = -0.006;
 const SIGN_PLATE: f32 = -0.004;
 const SIGN_PILL: f32 = -0.002;
 const SIGN_TEXT: f32 = 0.0;
+/// The most vertices a sign's leader and its dot take.
+const LEADER_VERTICES: usize = 120;
+/// How deep a sign bows, in metres at the edges of a sign [`SIGN_COLUMNS`] wide, towards whoever it faces: only 5 cm
+/// across the roughly one-metre sign, as much for a narrower sign along the same curve.
+const SIGN_BOW: f32 = 0.05;
 
-/// A worker's sign: its plate, its title, its state's pill and the leader down to its worker, in the sign's own frame,
-/// `p` metres to a font pixel, x across and y up from its text's top-left corner, before it is bowed and placed.
+/// A worker's sign: its plate, its title and its state's pill, in the sign's own frame, `p` metres to a font pixel, x
+/// across and y up from its text's top-left corner, bowed towards whoever it faces along +z, before it is placed.
 /// Returns how many of its first vertices are its plate, its surface, which hides what is behind it.
 fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
+    let start = mesh.len();
     let p = panel.pixel;
     let color = |rgb: [f32; 3], alpha: f32| [rgb[0], rgb[1], rgb[2], alpha * panel.opacity];
     let width = (panel.columns * 9) as f32;
@@ -1114,36 +1217,7 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
     };
     shape(mesh, &plate, p, SIGN_PLATE);
     let surface = mesh.len();
-    // The leader, from the middle of the plate's bottom edge to the worker's middle, wherever the sign stands, ending in a
-    // dot there, in the state's colour, faint.
-    let station = glam::Vec3::from_array(sign.station) - glam::Vec3::from_array(panel.origin);
-    let to = [
-        station.dot(glam::Vec3::from_array(sign.right)) / p,
-        -station.y / p,
-    ];
-    let from = [width / 2.0, height + PLATE_MARGIN[1]];
-    shape(
-        mesh,
-        &Shape::Rule {
-            from,
-            to,
-            width: LEADER_WIDTH,
-            color: color(panel.accent, 0.55),
-        },
-        p,
-        SIGN_LEADER,
-    );
-    shape(
-        mesh,
-        &Shape::Disc {
-            centre: to,
-            radius: LEADER_DOT,
-            color: color(panel.accent, 0.85),
-        },
-        p,
-        SIGN_LEADER,
-    );
-    // The title, every row in one colour.
+    // A row, centred across the sign.
     let row = |mesh: &mut Vec<Vertex>, text: &str, x: f32, index: usize, rgb: [f32; 3]| {
         let cells: Vec<(char, ())> =
             crate::ui_text::cut(&[crate::ui_text::Span::new(text, ROW_STYLE)], panel.columns)
@@ -1171,18 +1245,21 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
         .lines
         .split_last()
         .expect("a sign has its state's row");
+    // The title, every row in one colour.
     for (index, line) in title.iter().enumerate() {
-        row(mesh, line, 0.0, index, TITLE);
+        let across = crate::ui_text::width(line).min(panel.columns) as f32 * 9.0;
+        row(mesh, line, ((width - across) / 2.0).round(), index, TITLE);
     }
     // Its state, a pill on the last row: tinted, its symbol, then its word, in the state's colour.
     let top = height - 11.0;
-    let words = crate::ui_text::width(status) as f32 * 9.0;
+    let pill = pill_width(status);
+    let left = ((width - pill) / 2.0).round();
     shape(
         mesh,
         &Shape::Rect {
-            x: -1.0,
+            x: left,
             y: top + (11.0 - PILL_HEIGHT) / 2.0,
-            width: PILL_SYMBOL + words + 5.0,
+            width: pill,
             height: PILL_HEIGHT,
             color: color(panel.accent, 0.2),
             radius: PILL_HEIGHT / 2.0,
@@ -1194,43 +1271,122 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
     status_symbol(
         mesh,
         sign.state,
-        [PILL_SYMBOL / 2.0, top + 5.5],
+        [left + 1.0 + PILL_SYMBOL / 2.0, top + 5.5],
         3.0,
         p,
         color(panel.accent, 1.0),
     );
-    row(mesh, status, PILL_SYMBOL, rows - 1, panel.accent);
+    row(
+        mesh,
+        status,
+        left + 1.0 + PILL_SYMBOL,
+        rows - 1,
+        panel.accent,
+    );
+    // Bowed about its middle.
+    let middle = width * p / 2.0;
+    let reach = (SIGN_COLUMNS * 9) as f32 * p / 2.0;
+    for vertex in &mut mesh[start..] {
+        let [x, _, z] = &mut vertex.position;
+        *z += SIGN_BOW * ((*x - middle) / reach).powi(2);
+    }
     surface
 }
 
-/// A panel's mesh: a sign's, or a card's or notice's. Returns how many of its first vertices are its surface, which
-/// hides what is behind it.
-fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
-    let start = mesh.len();
+/// A sign's leader, from the middle of its plate's bottom edge, where it stands now, to its dot, just behind its
+/// worker's middle from whoever it faces, wherever the sign stands, in the state's colour, faint, in the scene: a line
+/// and a dot in the plane through them that faces whoever the sign faces, so that both face them too.
+fn leader_mesh(panel: &Panel, sign: &Sign, opacity: f32, mesh: &mut Vec<Vertex>) {
     let p = panel.pixel;
-    let surface = match &panel.sign {
+    let right = glam::Vec3::from_array(sign.right);
+    let towards = glam::Vec3::from_array(sign.towards);
+    let height = (panel.lines.len() * 11) as f32 + PLATE_MARGIN[1];
+    let from = glam::Vec3::from_array(panel.origin)
+        + right * ((panel.columns * 9) as f32 * p / 2.0)
+        - glam::Vec3::Y * height * p;
+    let to = glam::Vec3::from_array(sign.station) - towards * SIGN_BEHIND;
+    let length = from.distance(to);
+    let up = (from - to) / length;
+    let across = up.cross(towards).try_normalize().unwrap_or(right);
+    let out = across.cross(up);
+    let accent = |alpha: f32| {
+        [
+            panel.accent[0],
+            panel.accent[1],
+            panel.accent[2],
+            alpha * opacity,
+        ]
+    };
+    // A sign's bottom edge stands above its worker, so its leader always has a length.
+    let mut pieces = Vec::new();
+    Shape::Rule {
+        from: [0.0, 0.0],
+        to: [0.0, -length / p],
+        width: LEADER_WIDTH,
+        color: accent(0.55),
+    }
+    .pieces(&mut pieces);
+    Shape::Disc {
+        centre: [0.0, 0.0],
+        radius: LEADER_DOT,
+        color: accent(0.85),
+    }
+    .pieces(&mut pieces);
+    for piece in pieces {
+        mesh.extend(piece.triangles().map(|([x, y], uv)| Vertex {
+            position: (to + across * (x * p) - up * (y * p) + out * SIGN_LEADER).to_array(),
+            color: piece.color,
+            uv,
+            weight: 0.0,
+        }));
+    }
+}
+
+/// A panel's mesh, in its own frame: a sign's, before it is placed and its leader drawn, or a card's or notice's, which
+/// stands where it is made. Returns how many of its first vertices are its surface, which hides what is behind it.
+fn local_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
+    let start = mesh.len();
+    let end = match &panel.sign {
         Some(sign) => sign_mesh(panel, sign, mesh),
         None => card_mesh(panel, mesh),
-    } - start;
-    for vertex in &mut mesh[start..] {
+    };
+    end - start
+}
+
+/// `mesh`, `panel`'s made by [`local_mesh`], its first `surface` vertices its surface, placed where `panel` stands and
+/// added to `out`: a sign's turned to face whoever it faces, and its leader drawn after its surface, `opacity` opaque,
+/// as `mesh` was made; a card's or notice's moved to its origin.
+fn place(panel: &Panel, mesh: &[Vertex], surface: usize, opacity: f32, out: &mut Vec<Vertex>) {
+    let origin = glam::Vec3::from_array(panel.origin);
+    let Some(sign) = &panel.sign else {
+        out.extend(mesh.iter().map(|vertex| Vertex {
+            position: (origin + glam::Vec3::from_array(vertex.position)).to_array(),
+            ..*vertex
+        }));
+        return;
+    };
+    let right = glam::Vec3::from_array(sign.right);
+    let normal = glam::Vec3::from_array(sign.normal);
+    let placed = |vertex: &Vertex| {
         let [x, y, z] = vertex.position;
-        vertex.position = if let Some(sign) = &panel.sign {
-            let mid = (panel.columns * 9) as f32 * p * 0.5;
-            // Only 5 cm of depth across the roughly one-metre sign.
-            let bow = 0.05 * ((x - mid) / mid).powi(2);
-            [
-                panel.origin[0] + sign.right[0] * x + sign.normal[0] * (z + bow),
-                panel.origin[1] + y,
-                panel.origin[2] + sign.right[2] * x + sign.normal[2] * (z + bow),
-            ]
-        } else {
-            [
-                panel.origin[0] + x,
-                panel.origin[1] + y,
-                panel.origin[2] + z,
-            ]
-        };
-    }
+        Vertex {
+            position: (origin + right * x + glam::Vec3::Y * y + normal * z).to_array(),
+            ..*vertex
+        }
+    };
+    let surface = surface.min(mesh.len());
+    out.extend(mesh[..surface].iter().map(placed));
+    leader_mesh(panel, sign, opacity, out);
+    out.extend(mesh[surface..].iter().map(placed));
+}
+
+/// A panel's mesh, where it stands: a sign's, its leader included, or a card's or notice's. Returns how many of its
+/// first vertices are its surface, which hides what is behind it.
+#[cfg(test)]
+fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
+    let mut local = Vec::new();
+    let surface = local_mesh(panel, &mut local);
+    place(panel, &local, surface, panel.opacity, mesh);
     surface
 }
 
@@ -1308,6 +1464,9 @@ fn card_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
 }
 
 #[cfg(test)]
+mod depth_writes;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::delegation::{Kind, Node, Presentation, Scene};
@@ -1358,6 +1517,7 @@ mod tests {
             content,
             &cache.pages,
             &mut LabelPlacement::default(),
+            None,
         )
     }
 
@@ -1441,7 +1601,7 @@ mod tests {
                 position: [0.0, 1.25, -2.8],
                 opacity: 1.0,
             };
-            let sign = station_panel(&station, station.position, State::Completed);
+            let sign = station_panel(&station, station.position, State::Completed, None);
             assert_eq!(
                 glyph_quads(&sign),
                 glyphs_in(&sign.lines, SIGN_COLUMNS),
@@ -1555,8 +1715,15 @@ mod tests {
                     })
                     .collect();
                 let mut placements = LabelPlacement::default();
-                let (panels, _) =
-                    layout(&Workspace::default(), &stations, 0, 0, &[], &mut placements);
+                let (panels, _) = layout(
+                    &Workspace::default(),
+                    &stations,
+                    0,
+                    0,
+                    &[],
+                    &mut placements,
+                    None,
+                );
                 assert_eq!(panels.len(), count, "count={count}, legacy={legacy}");
                 let ids: std::collections::BTreeSet<_> = panels
                     .iter()
@@ -1581,24 +1748,28 @@ mod tests {
                 let mut cache = PageCache::default();
                 cache.update(panels.clone());
                 assert_eq!(cache.ranges.len(), count);
-                assert_eq!(
-                    cache.vertices.len(),
-                    cache
-                        .meshes
-                        .iter()
-                        .map(|(_, mesh, _, _)| mesh.len())
-                        .sum::<usize>()
+                // Every sign's mesh, and its leader, drawn as it is placed.
+                let meshes = cache
+                    .meshes
+                    .iter()
+                    .map(|(_, mesh, _, _)| mesh.len())
+                    .sum::<usize>();
+                assert!(
+                    (meshes + count..=meshes + count * LEADER_VERTICES)
+                        .contains(&cache.vertices.len())
                 );
                 assert_eq!(
                     cache.ranges.last().unwrap().vertices.end as usize,
                     cache.vertices.len()
                 );
                 assert!(cache.vertices.len() <= MAX_VERTICES);
-                // Where each sign's bottom edge stands, which a title of another length leaves where it is.
+                // Where the middle of each sign's bottom edge stands, which a title of another length leaves where it is.
                 let bottom = |p: &Panel| {
-                    let mut at = p.origin;
-                    at[1] -= (p.lines.len() * 11 + 4) as f32 * p.pixel;
-                    at
+                    let right = glam::Vec3::from_array(p.sign.as_ref().unwrap().right);
+                    (glam::Vec3::from_array(p.origin)
+                        + right * ((p.columns * 9) as f32 * p.pixel / 2.0)
+                        - glam::Vec3::Y * ((p.lines.len() * 11 + 4) as f32 * p.pixel))
+                        .to_array()
                 };
                 let before: std::collections::BTreeMap<_, _> = panels
                     .iter()
@@ -1611,7 +1782,15 @@ mod tests {
                     s.state = State::Error;
                     s.opacity = 0.5;
                 }
-                let (next, _) = layout(&Workspace::default(), &edited, 0, 0, &[], &mut placements);
+                let (next, _) = layout(
+                    &Workspace::default(),
+                    &edited,
+                    0,
+                    0,
+                    &[],
+                    &mut placements,
+                    None,
+                );
                 for p in &next {
                     let at = bottom(p);
                     let was = before[&p.sign.as_ref().unwrap().source_id];
@@ -1647,6 +1826,7 @@ mod tests {
                     },
                     position,
                     State::Unknown,
+                    None,
                 )
             })
             .collect();
@@ -1772,8 +1952,8 @@ mod tests {
             position: [0.0, 1.2, -3.0],
         };
         // Where its leader ends: the lowest point of its mesh, its dot about the station's middle.
-        let leader_end = |sign: [f32; 3]| {
-            let panel = station_panel(&station, sign, State::Running);
+        let leader_end = |sign: [f32; 3], viewer: Option<[f32; 3]>| {
+            let panel = station_panel(&station, sign, State::Running, viewer);
             let mut mesh = Vec::new();
             panel_mesh(&panel, &mut mesh);
             mesh.iter()
@@ -1782,18 +1962,33 @@ mod tests {
                 .unwrap()
         };
         let middle = glam::Vec3::from_array(station.position);
-        // In its own place, straight above it, stacked above it, or beside it, its leader reaches down to the station's
-        // middle, ending in a dot there, in the sign's plane, so that from whoever it faces it is over the station.
-        for place in [
-            station.position,
-            [0.0, 1.2 + 2.0 * SIGN_ROW, -3.0],
-            [1.1, 1.2, -2.8],
+        // In its own place, straight above it, stacked above it, or beside it, and seen from home, from either side or
+        // from beside the station, its leader reaches down to the station's middle, ending in a dot just behind it from
+        // whoever it faces, so that the flock reads in front of its anchor.
+        for viewer in [
+            None,
+            Some([2.5, 1.6, -1.0]),
+            Some([-3.0, 1.7, -2.0]),
+            Some([0.8, 1.6, -3.0]),
         ] {
-            let panel = station_panel(&station, place, State::Running);
-            let normal = glam::Vec3::from_array(panel.sign.unwrap().normal);
-            let off = leader_end(place) - middle;
-            let across = off - normal * off.dot(normal);
-            assert!(across.length() < 0.03, "{place:?}: {off}");
+            let towards = glam::Vec3::from_array(facing_from(
+                station.position,
+                viewer.unwrap_or(station.facing),
+                station.facing,
+            ));
+            for place in [
+                station.position,
+                [0.0, 1.2 + 2.0 * SIGN_ROW, -3.0],
+                [1.1, 1.2, -2.8],
+            ] {
+                let off = leader_end(place, viewer) - middle;
+                let behind = -off.dot(towards);
+                let across = off - towards * off.dot(towards);
+                assert!(
+                    (behind - SIGN_BEHIND).abs() < 0.03 && across.length() < 0.03,
+                    "{viewer:?} {place:?}: {off}"
+                );
+            }
         }
     }
 
@@ -1825,10 +2020,26 @@ mod tests {
             let mut scene = Scene::new();
             let mut placements = LabelPlacement::default();
             scene.update(Some("root"), &workspace, 0.0);
-            layout(&workspace, scene.stations(), 0, 0, &[], &mut placements);
+            layout(
+                &workspace,
+                scene.stations(),
+                0,
+                0,
+                &[],
+                &mut placements,
+                None,
+            );
             scene.arrange(arrangement, tomori_scene::anchors::EYES, None);
             scene.update(Some("root"), &workspace, 0.0);
-            layout(&workspace, scene.stations(), 0, 0, &[], &mut placements);
+            layout(
+                &workspace,
+                scene.stations(),
+                0,
+                0,
+                &[],
+                &mut placements,
+                None,
+            );
             for station in scene.stations() {
                 assert_eq!(
                     placements.0[&station.id], station.position,
@@ -1857,7 +2068,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut placements = LabelPlacement::default();
         let signs = |scene: &Scene, placements: &mut LabelPlacement| {
-            let (panels, _) = layout(&workspace, scene.stations(), 0, 0, &[], placements);
+            let (panels, _) = layout(&workspace, scene.stations(), 0, 0, &[], placements, None);
             panels
                 .iter()
                 .map(|panel| (panel.sign.clone().unwrap().source_id, panel.origin))
@@ -1918,7 +2129,15 @@ mod tests {
                 })
                 .collect();
             let mut placements = LabelPlacement::default();
-            let (panels, _) = layout(&Workspace::default(), &stations, 0, 0, &[], &mut placements);
+            let (panels, _) = layout(
+                &Workspace::default(),
+                &stations,
+                0,
+                0,
+                &[],
+                &mut placements,
+                None,
+            );
             assert_eq!(panels.len(), 128);
             assert_eq!(placements.0.len(), 128);
             stations.remove(0);
@@ -1926,7 +2145,15 @@ mod tests {
             new.id = "a-new-first-id".into();
             stations.push(new);
             let before = placements.0.clone();
-            layout(&Workspace::default(), &stations, 0, 0, &[], &mut placements);
+            layout(
+                &Workspace::default(),
+                &stations,
+                0,
+                0,
+                &[],
+                &mut placements,
+                None,
+            );
             for s in &stations {
                 if let Some(p) = before.get(&s.id) {
                     assert_eq!(placements.0[&s.id], *p);
@@ -1946,7 +2173,7 @@ mod tests {
         };
         let scene = scene(&workspace);
         let (panels, _) = test_layout(&workspace, scene.stations(), 0, 0);
-        let labels: Vec<_> = panels.iter().filter(|p| p.columns == 28).collect();
+        let labels: Vec<_> = panels.iter().filter(|p| p.sign.is_some()).collect();
         assert_eq!(labels.len(), 64);
         for (i, label) in labels.iter().enumerate() {
             assert_eq!(label.lines[1], "Finished");
@@ -1969,7 +2196,7 @@ mod tests {
             test_layout(&partial, scene.stations(), 0, 0)
                 .0
                 .iter()
-                .filter(|p| p.columns == 28)
+                .filter(|p| p.sign.is_some())
                 .all(|p| p.lines[1] == "Finished")
         );
         for stale in [
@@ -1984,10 +2211,10 @@ mod tests {
             assert!(
                 panels
                     .iter()
-                    .filter(|p| p.columns == 28)
+                    .filter(|p| p.sign.is_some())
                     .all(|p| p.lines[1] == "Unknown")
             );
-            assert!(panels.iter().any(|p| p.columns == 28));
+            assert!(panels.iter().any(|p| p.sign.is_some()));
         }
         assert!(test_layout(&Workspace::default(), &[], 0, 0).0.is_empty());
     }
@@ -2117,7 +2344,7 @@ mod tests {
         scene.update(Some("root"), &workspace, 0.05);
         let arriving = &scene.stations()[0];
         let labels = test_layout(&workspace, scene.stations(), 0, 0).0;
-        let panel = labels.iter().find(|p| p.columns == 28).unwrap();
+        let panel = labels.iter().find(|p| p.sign.is_some()).unwrap();
         assert!(arriving.opacity > 0.0 && arriving.opacity < 1.0);
         assert_eq!(panel.opacity, arriving.opacity);
         assert_eq!(panel.lines[1], "Finished");
@@ -2127,7 +2354,7 @@ mod tests {
         scene.update(Some("root"), &Workspace::default(), 0.05);
         let departing = &scene.stations()[0];
         let labels = test_layout(&Workspace::default(), scene.stations(), 0, 0).0;
-        let panel = labels.iter().find(|p| p.columns == 28).unwrap();
+        let panel = labels.iter().find(|p| p.sign.is_some()).unwrap();
         assert!(departing.opacity < 1.0);
         assert_eq!(panel.opacity, departing.opacity);
         assert_eq!(panel.lines[1], "Unknown");
@@ -2142,7 +2369,7 @@ mod tests {
             state,
             opacity: 1.0,
         };
-        station_panel(&station, position, state)
+        station_panel(&station, position, state, None)
     }
 
     #[test]
@@ -2254,7 +2481,10 @@ mod tests {
                 .filter(|(x, _)| (x - mid).abs() < mid * 0.1)
                 .map(|(_, z)| *z)
                 .fold(f32::INFINITY, f32::min);
-            assert!(edge > middle + 0.03, "{edge} {middle}");
+            // As far as a sign as wide as the widest bows at as far from its middle.
+            let reach = (SIGN_COLUMNS * 9) as f32 * panel.pixel * 0.5;
+            let bowed = SIGN_BOW * (mid * 0.95 / reach).powi(2);
+            assert!(edge > middle + bowed, "{edge} {middle} {bowed}");
         }
         for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY, 101.0] {
             let workspace = Workspace {
@@ -2295,10 +2525,11 @@ mod tests {
         let plate = panel_mesh(&panel, &mut surface);
         let background = &mesh[..plate];
         let mid = (panel.columns * 9) as f32 * panel.pixel * 0.5;
+        let reach = (SIGN_COLUMNS * 9) as f32 * panel.pixel * 0.5;
         // Each vertex's depth in front of the sign's plane, before it is bowed.
         let depth = |v: &Vertex| {
             let (x, z) = local(v);
-            z - 0.05 * ((x - mid) / mid).powi(2)
+            z - SIGN_BOW * ((x - mid) / reach).powi(2)
         };
         // Check the foreground edges and their midpoints against the straight strip surfaces, not just against the
         // ideal quadratic bow: the text and symbol, 4 mm in front of the plate, and the pill, 2 mm.
@@ -2389,7 +2620,7 @@ mod tests {
             faded.opacity = opacity;
             cache.update(vec![faded, card.clone()]);
             assert_eq!(cache.builds, 2);
-            let sign_len = cache.meshes[0].1.len();
+            let sign_len = cache.ranges[0].vertices.end as usize;
             assert!(
                 cache.vertices[..sign_len]
                     .iter()
@@ -2401,6 +2632,29 @@ mod tests {
                 bytemuck::cast_slice::<Vertex, u8>(&original[sign_len..])
             );
         }
+        // Turned to face a viewer walking about it, or gliding after its worker, it is placed again, not built again.
+        let station = Station {
+            facing: crate::delegation::HOME_EYES,
+            id: "a".into(),
+            title: "Readable task".into(),
+            position: [0.0, 1.4, -2.7],
+            state: State::Waiting,
+            opacity: 1.0,
+        };
+        for (at, viewer) in [
+            ([0.0, 1.4, -2.7], [2.0, 1.6, -1.0]),
+            ([0.0, 1.4, -2.7], [-2.5, 1.6, -0.5]),
+            ([0.4, 1.5, -2.9], [-2.5, 1.6, -0.5]),
+        ] {
+            let moved = Station {
+                position: at,
+                ..station.clone()
+            };
+            let turned = station_panel(&moved, at, State::Waiting, Some(viewer));
+            assert!(cache.update(vec![turned, card.clone()]));
+            assert_eq!(cache.builds, 2);
+            assert_ne!(cache.vertices[0].position, original[0].position);
+        }
     }
 
     #[test]
@@ -2408,7 +2662,7 @@ mod tests {
         let projection = glam::Mat4::perspective_rh(0.95, 1.0, 0.05, 50.0);
         let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
         let mut rear = Panel {
-            origin: [-0.2, 2.0, -2.76],
+            origin: [-0.2, 2.0, -2.92],
             pixel: 0.0051,
             columns: COLUMNS,
             lines: vec![String::new(); ROWS],
@@ -2799,11 +3053,17 @@ mod tests {
                     graphics.hide();
                     let empty = capture(&graphics, matrix, false);
                     station.opacity = 1.0;
-                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    graphics.update(
+                        &device,
+                        &queue,
+                        &workspace,
+                        std::slice::from_ref(&station),
+                        None,
+                    );
                     let full = capture(&graphics, matrix, false);
                     // A farther result field fills the label's projected area. In
                     // particular, it must not paint over the foreground glyphs.
-                    let sign = station_panel(&station, station.position, State::Completed);
+                    let sign = station_panel(&station, station.position, State::Completed, None);
                     let rear = Panel {
                         origin: [-2.0, 2.5, -4.0],
                         pixel: 0.01,
@@ -2836,7 +3096,13 @@ mod tests {
                         "rear card hid foreground glyphs: {visible_glyphs}"
                     );
                     station.opacity = 0.2;
-                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    graphics.update(
+                        &device,
+                        &queue,
+                        &workspace,
+                        std::slice::from_ref(&station),
+                        None,
+                    );
                     let faded = capture(&graphics, matrix, false);
                     let difference =
                         |image: &[u8], x0: usize, x1: usize, y0: usize, y1: usize| -> u64 {
@@ -2869,7 +3135,13 @@ mod tests {
                     let transform = glam::Mat4::from_rotation_y(0.3)
                         * glam::Mat4::from_translation(glam::Vec3::new(0.4, 0.0, -0.2));
                     station.opacity = 1.0;
-                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    graphics.update(
+                        &device,
+                        &queue,
+                        &workspace,
+                        std::slice::from_ref(&station),
+                        None,
+                    );
                     let compensated =
                         capture(&graphics, (matrix * transform.inverse()) * transform, false);
                     let changed = changed_pixels(&full, &compensated);
@@ -2898,8 +3170,12 @@ mod tests {
                         sign_station.opacity = 1.0;
                         sign_station.position[0] = distance * bearing.sin();
                         sign_station.position[2] = -distance * bearing.cos();
-                        let sign =
-                            station_panel(&sign_station, sign_station.position, State::Completed);
+                        let sign = station_panel(
+                            &sign_station,
+                            sign_station.position,
+                            State::Completed,
+                            None,
+                        );
                         let rear = Panel {
                             origin: [-3.0, 3.2, -distance - 1.5],
                             pixel: 0.016,
@@ -3003,7 +3279,7 @@ mod tests {
                 for yaw in [-0.3_f32, 0.3] {
                     let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
                     let rear = Panel {
-                        origin: [if yaw < 0.0 { -0.2 } else { -1.84 }, 2.0, -2.76],
+                        origin: [if yaw < 0.0 { -0.2 } else { -1.84 }, 2.0, -2.92],
                         pixel: 0.0051,
                         columns: COLUMNS,
                         lines: vec![String::new(); ROWS],
@@ -3151,16 +3427,18 @@ mod tests {
                         opacity: 1.0,
                     })
                     .collect();
-                graphics.update(&device, &queue, &Workspace::default(), &stations);
+                graphics.update(&device, &queue, &Workspace::default(), &stations, None);
                 assert_eq!(graphics.cache.ranges.len(), 128);
-                assert_eq!(
-                    graphics.cache.vertices.len(),
-                    graphics
-                        .cache
-                        .meshes
-                        .iter()
-                        .map(|(_, mesh, _, _)| mesh.len())
-                        .sum::<usize>()
+                // Every sign's mesh, and its leader, drawn as it is placed.
+                let meshes = graphics
+                    .cache
+                    .meshes
+                    .iter()
+                    .map(|(_, mesh, _, _)| mesh.len())
+                    .sum::<usize>();
+                assert!(
+                    (meshes + 128..=meshes + 128 * LEADER_VERTICES)
+                        .contains(&graphics.cache.vertices.len())
                 );
                 assert!(graphics.vertex_capacity >= graphics.cache.vertices.len());
                 assert!(graphics.vertex_capacity < MAX_VERTICES);
@@ -3176,7 +3454,8 @@ mod tests {
                     let matrix =
                         projection * glam::Mat4::look_at_rh(eye, panel.center(), glam::Vec3::Y);
                     let image = capture(&graphics, matrix, false);
-                    let glyphs = (245..270)
+                    // Across the whole sign, which stands about the middle of the view, its rows centred.
+                    let glyphs = (230..285)
                         .flat_map(|y| (180..330).map(move |x| (y * 512 + x) * 4))
                         // The title's white at about half coverage or more: from two to five metres, and as much as 50° above the eyes, strokes are under a pixel wide and antialiased rather than aliased, so few pixels are wholly covered.
                         .filter(|&p| image[p] > 110 && image[p + 1] > 110 && image[p + 2] > 110)
@@ -3274,7 +3553,7 @@ mod tests {
             position: [0.0, 1.25, -2.8],
             opacity: 1.0,
         };
-        let sign = station_panel(&station, station.position, State::Completed);
+        let sign = station_panel(&station, station.position, State::Completed, None);
         let card = Panel {
             origin: [0.0, 2.0, -3.0],
             pixel: 0.005,
@@ -3344,6 +3623,235 @@ mod tests {
         assert!(cache.meshes.is_empty());
     }
 
+    /// Where someone stands to look at the arc about `origin`: as far from its middle as `audience` is, turned `degrees`
+    /// about it, to its left for positive, at the height of `audience`.
+    fn about(origin: glam::Vec3, audience: glam::Vec3, degrees: f32) -> [f32; 3] {
+        let from = (audience - origin).with_y(0.0);
+        (origin.with_y(audience.y) + glam::Quat::from_rotation_y(degrees.to_radians()) * from)
+            .to_array()
+    }
+
+    #[test]
+    fn each_sign_turns_upright_to_face_its_viewer_wherever_they_stand_its_rows_centred_above_its_worker()
+     {
+        use tomori_scene::anchors::{Anchor, EYES, HomeArc};
+        let stations: Vec<Station> = (0..6)
+            .map(|slot| Station {
+                facing: EYES.to_array(),
+                id: format!("w-{slot}"),
+                title: ["Mm", "MMMM MMMM", "MMMMMMMMMMMMMMMMMMMMMMMMMMM MMM"][slot % 3].into(),
+                state: State::Running,
+                opacity: 1.0,
+                position: HomeArc::at(Anchor::AGENT, EYES, slot).to_array(),
+            })
+            .collect();
+        let middle = glam::Vec3::new(0.0, 1.2, -3.2);
+        // From home, 45° to the left and 70° to the right about the arc's middle, from behind it, and from close beside
+        // one worker.
+        for viewer in [
+            EYES.to_array(),
+            about(middle, EYES, 45.0),
+            about(middle, EYES, -70.0),
+            about(middle, EYES, 180.0),
+            (glam::Vec3::from_array(stations[2].position) + glam::Vec3::new(0.5, 0.3, 0.6))
+                .to_array(),
+        ] {
+            let mut placements = LabelPlacement::default();
+            let (panels, _) = layout(
+                &Workspace::default(),
+                &stations,
+                0,
+                0,
+                &[],
+                &mut placements,
+                Some(viewer),
+            );
+            for (panel, station) in panels.iter().zip(&stations) {
+                let sign = panel.sign.as_ref().unwrap();
+                let (right, normal) = (
+                    glam::Vec3::from_array(sign.right),
+                    glam::Vec3::from_array(sign.normal),
+                );
+                // Upright: it turns only about its upright, never leaning.
+                assert_eq!((right.y, normal.y), (0.0, 0.0));
+                assert!((right.length() - 1.0).abs() < 1e-5 && right.dot(normal).abs() < 1e-5);
+                assert!(
+                    (right.cross(glam::Vec3::Y) - normal).length() < 1e-5,
+                    "readable, not mirrored"
+                );
+                // Facing the viewer, along the ground.
+                let place = glam::Vec3::from_array(station.position);
+                let towards = (glam::Vec3::from_array(viewer) - place)
+                    .with_y(0.0)
+                    .normalize();
+                assert!(
+                    normal.dot(towards) > 0.99999,
+                    "{viewer:?}: {normal} {towards}"
+                );
+                // Its plate's middle stands straight above its worker, a little behind it from the viewer.
+                let width = (panel.columns * 9) as f32 * panel.pixel;
+                let plate = glam::Vec3::from_array(panel.origin) + right * (width / 2.0);
+                let off = (plate - place).with_y(0.0);
+                assert!(off.dot(right).abs() < 1e-4, "{viewer:?}: {off}");
+                assert!(
+                    (off.dot(normal) + SIGN_BEHIND).abs() < 1e-4,
+                    "{viewer:?}: {off}"
+                );
+                // As wide as its widest row, and each row centred across it, within half a cell.
+                assert_eq!(
+                    panel.columns,
+                    sign_columns(&panel.lines),
+                    "{:?}",
+                    panel.lines
+                );
+                let mut local = Vec::new();
+                local_mesh(panel, &mut local);
+                for (index, line) in panel.lines.iter().enumerate() {
+                    let (top, bottom) = (
+                        -((index * 11) as f32) * panel.pixel,
+                        -(((index + 1) * 11) as f32) * panel.pixel,
+                    );
+                    // Its glyphs, in front of its plate and pill, before it is bowed.
+                    let reach = (SIGN_COLUMNS * 9) as f32 * panel.pixel / 2.0;
+                    let xs: Vec<f32> = local
+                        .as_chunks::<6>()
+                        .0
+                        .iter()
+                        .filter(|quad| {
+                            let [x, y, z] = quad
+                                .iter()
+                                .map(|v| glam::Vec3::from_array(v.position) / 6.0)
+                                .sum::<glam::Vec3>()
+                                .to_array();
+                            y < top
+                                && y > bottom
+                                && z - SIGN_BOW * ((x - width / 2.0) / reach).powi(2)
+                                    >= SIGN_TEXT - 1e-4
+                        })
+                        .flatten()
+                        .map(|v| v.position[0])
+                        .collect();
+                    if index + 1 == panel.lines.len() {
+                        // Its state's pill is centred as a whole, its symbol and word inside it.
+                        continue;
+                    }
+                    assert!(!xs.is_empty(), "{line:?}");
+                    let low = xs.iter().copied().fold(f32::INFINITY, f32::min);
+                    let high = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    assert!(
+                        ((low + high) / 2.0 - width / 2.0).abs() <= 4.5 * panel.pixel,
+                        "{line:?}: {low} {high} {width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn signs_turned_to_face_any_viewer_never_reach_one_another() {
+        use tomori_scene::anchors::{Anchor, EYES, HomeArc};
+        // Sixteen workers, each with a title six rows long, the longest a sign shows, at home, summoned and about a
+        // workers anchor across a yard, where its signs are drawn larger.
+        let summoner = glam::Vec3::new(3.0, 1.5, 1.0);
+        let summoned = Anchor {
+            position: summoner + glam::Vec3::new(1.5, -0.1, -0.6),
+            orientation: glam::Quat::IDENTITY,
+        };
+        let yard = Anchor {
+            position: glam::Vec3::new(2.0, 1.5, -7.7),
+            orientation: glam::Quat::IDENTITY,
+        };
+        for (origin, audience) in [(Anchor::AGENT, EYES), (summoned, summoner), (yard, EYES)] {
+            let stations: Vec<Station> = (0..16)
+                .map(|slot| Station {
+                    facing: audience.to_array(),
+                    id: format!("w-{slot:02}"),
+                    title: "Wide words ".repeat(14),
+                    state: State::Running,
+                    opacity: 1.0,
+                    position: HomeArc::at(origin, audience, slot).to_array(),
+                })
+                .collect();
+            let centre = stations
+                .iter()
+                .map(|s| glam::Vec3::from_array(s.position))
+                .sum::<glam::Vec3>()
+                / 16.0;
+            let mut placements = LabelPlacement::default();
+            // From whoever the agent faces, 45° to the left and 70° to the right about the arc's middle, from behind
+            // it, from within it, and from between two of its workers.
+            let between = (glam::Vec3::from_array(stations[0].position)
+                + glam::Vec3::from_array(stations[2].position))
+                / 2.0;
+            for viewer in [
+                audience.to_array(),
+                about(centre, audience, 45.0),
+                about(centre, audience, -70.0),
+                about(centre, audience, 180.0),
+                centre.with_y(audience.y).to_array(),
+                between.with_y(audience.y).to_array(),
+            ] {
+                let (panels, _) = layout(
+                    &Workspace::default(),
+                    &stations,
+                    0,
+                    0,
+                    &[],
+                    &mut placements,
+                    Some(viewer),
+                );
+                // Each sign's plate, as placed for this viewer: about the upright it turns on, how far it reaches
+                // along the ground, and how high it stands.
+                let plates: Vec<(glam::Vec3, f32, f32, f32)> = panels
+                    .iter()
+                    .map(|panel| {
+                        let mut mesh = Vec::new();
+                        let surface = panel_mesh(panel, &mut mesh);
+                        let plate = &mesh[..surface];
+                        let normal = glam::Vec3::from_array(panel.sign.as_ref().unwrap().normal);
+                        let width = (panel.columns * 9) as f32 * panel.pixel;
+                        let axis = glam::Vec3::from_array(panel.origin)
+                            + glam::Vec3::from_array(panel.sign.as_ref().unwrap().right)
+                                * (width / 2.0)
+                            + normal * SIGN_BEHIND;
+                        let reach = plate
+                            .iter()
+                            .map(|v| {
+                                (glam::Vec3::from_array(v.position) - axis)
+                                    .with_y(0.0)
+                                    .length()
+                            })
+                            .fold(0.0, f32::max);
+                        let low = plate
+                            .iter()
+                            .map(|v| v.position[1])
+                            .fold(f32::INFINITY, f32::min);
+                        let high = plate
+                            .iter()
+                            .map(|v| v.position[1])
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        (axis, reach, low, high)
+                    })
+                    .collect();
+                for (index, (axis, reach, low, high)) in plates.iter().enumerate() {
+                    // Turning about its upright, a sign reaches no further than half the room it is given, whichever
+                    // way it faces.
+                    let scale = panels[index].sign.as_ref().unwrap().scale;
+                    assert!(*reach <= SIGN_APART[1] * scale / 2.0, "{reach}");
+                    for (other, (them, their_reach, their_low, their_high)) in
+                        plates.iter().enumerate().skip(index + 1)
+                    {
+                        let apart = (*axis - *them).with_y(0.0).length();
+                        assert!(
+                            high < their_low || their_high < low || apart > reach + their_reach,
+                            "{viewer:?}: sign {index} reaches sign {other}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn on_the_default_arc_no_sign_reaches_another_worker_nor_another_sign_at_home_or_summoned() {
         use tomori_scene::anchors::{Anchor, EYES, HomeArc};
@@ -3379,7 +3887,15 @@ mod tests {
                 })
                 .collect();
             let mut placements = LabelPlacement::default();
-            let (panels, _) = layout(&Workspace::default(), &stations, 0, 0, &[], &mut placements);
+            let (panels, _) = layout(
+                &Workspace::default(),
+                &stations,
+                0,
+                0,
+                &[],
+                &mut placements,
+                None,
+            );
             assert_eq!(panels.len(), 16);
             // Each sign as a box: across along its right, up from its bottom to its top, and a little deep.
             let boxes: Vec<(glam::Vec3, glam::Vec3, glam::Vec3, f32, f32, f32)> = panels

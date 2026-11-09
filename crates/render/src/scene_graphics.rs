@@ -126,7 +126,14 @@ pub fn draw(
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
     renderer.set_presentation_page(frame.card);
     renderer.set_presentation_content_page(frame.content);
-    renderer.update_workspace(device, queue, frame.cubes, frame.stations, frame.workspace);
+    renderer.update_workspace(
+        device,
+        queue,
+        frame.cubes,
+        frame.stations,
+        frame.workspace,
+        frame.sign_facing,
+    );
     if let Some(arrival) = &frame.arrival {
         renderer.update_arrival(
             device,
