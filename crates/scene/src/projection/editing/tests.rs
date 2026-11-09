@@ -76,12 +76,12 @@ fn at(point: Vec3) -> Option<Ray> {
 
 /// Where `handle` of `wall`, standing where it says, is drawn, seen from home.
 fn handle(wall: &Wall, handle: Handle) -> Vec3 {
-    handle_point(wall, model(&wall.pose).unwrap(), handle, HOME).0
+    handle_point(wall, model(&wall.frame()).unwrap(), handle, HOME).0
 }
 
 /// A point of `wall`'s board, `x` and `y` from its middle in its own frame, in the scene.
 fn on(wall: &Wall, x: f32, y: f32) -> Vec3 {
-    model(&wall.pose)
+    model(&wall.frame())
         .unwrap()
         .transform_point3(Vec3::new(x, y, 0.0))
 }
@@ -92,7 +92,7 @@ fn holding(projection: &Projection, wall: &Wall, rights: Rights, now: Instant) -
     let mut projector = Projector::default();
     let target = match wall.board() {
         Some((_, height)) => on(wall, 0.0, height / 2.0 - 0.005),
-        None => model(&wall.pose)
+        None => model(&wall.frame())
             .unwrap()
             .transform_point3(Vec3::from_array(wall.slot_frames()[0].position)),
     };
@@ -180,7 +180,7 @@ fn a_panel_on_a_wall_is_taken_before_the_wall_and_a_participant_who_may_not_adju
     );
     let projection = shown(vec![wall.clone()], vec![panel]);
     let now = Instant::now();
-    let slot = model(&wall.pose)
+    let slot = model(&wall.frame())
         .unwrap()
         .transform_point3(Vec3::from_array(wall.slot_frames()[0].position));
     let mut projector = Projector::default();
@@ -212,12 +212,12 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     let now = Instant::now();
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let output = projector.update(frame(&projection, None, 0.0, ADJUST, now));
-    // Eleven handles and the hint, after the wall's own sheets.
+    // Twelve handles and the hint, after the wall's own sheets.
     let faces: Vec<String> = output
         .sheets
         .iter()
         .rev()
-        .take(12)
+        .take(13)
         .filter_map(|sheet| sheet.canvas.as_ref().map(Canvas::plain))
         .collect();
     let hint = &faces[0];
@@ -225,13 +225,14 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
         "more / fewer slots",
         "size and shape",
         "one fewer / more",
-        "pull to bend",
+        "move down to bend",
+        "move down to tilt",
         "carry it",
         "done",
     ] {
         assert!(hint.contains(row), "{row}: {hint}");
     }
-    assert_eq!(handles(&wall).len(), 11);
+    assert_eq!(handles(&wall).len(), 12);
     assert!(faces[1..].iter().any(|face| face.contains('●')));
     // A handle the ray meets is highlighted, ticks, and ends the ray.
     let bend = handle(&wall, Handle::Bend);
@@ -248,7 +249,7 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     assert!(!projector.stop_editing());
     // The Tomori wall has no corners or rows to change, its slots its own size in its one row.
     let tomori = tomori();
-    assert_eq!(handles(&tomori).len(), 4);
+    assert_eq!(handles(&tomori).len(), 5);
     let hint = super::hint(Controls::Controllers, &tomori, false, false, None).plain();
     assert!(
         !hint.contains("size and shape") && !hint.contains("carry it"),
@@ -261,7 +262,10 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
         "{keys}"
     );
     let keys = super::hint(Controls::Keyboard, &wall, false, false, None).plain();
-    assert!(keys.contains("drag up to bend"), "{keys}");
+    assert!(
+        keys.contains("drag down to bend") && keys.contains("drag down to tilt"),
+        "{keys}"
+    );
 }
 
 /// Drag `handle` of `wall`, which `projector` holds, to `to`, and let go: what is sent.
@@ -328,7 +332,8 @@ fn edges_give_a_wall_whole_columns_and_rows_and_corners_size_its_slots_in_steps(
         drag(&mut projector, &projection, &wall, Handle::Rows, still, now),
         None
     );
-    // A corner dragged half as far again from the middle makes the slots half as large again, in steps of 5%.
+    // A corner dragged a little over a fifth as far again from the middle makes the slots half as large again, as the
+    // square of how far it moved, in steps of 5%.
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let corner = handle(&wall, Handle::Corner(1, 1));
     let middle = Vec3::from_array(wall.pose.position);
@@ -337,30 +342,57 @@ fn edges_give_a_wall_whole_columns_and_rows_and_corners_size_its_slots_in_steps(
         &projection,
         &wall,
         Handle::Corner(1, 1),
-        middle + (corner - middle) * 1.5,
+        middle + (corner - middle) * 1.5f32.sqrt(),
         now,
     )
     .expect("larger slots");
     let scale = change.scale.unwrap();
     assert!((scale - 1.5).abs() < 0.051, "{scale}");
     assert!(((scale / SCALE_STEP).round() * SCALE_STEP - scale).abs() < 1e-5);
-    // Never beyond the largest.
+    // From a standard slot to the largest, five times as large, in one drag to a little over twice as far, and never
+    // beyond it.
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let change = drag(
         &mut projector,
         &projection,
         &wall,
         Handle::Corner(1, 1),
-        middle + (corner - middle) * 5.0,
+        middle + (corner - middle) * 5f32.sqrt(),
+        now,
+    )
+    .expect("the largest slots");
+    assert_eq!(change.scale, Some(layout::SCALES.1));
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let change = drag(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Corner(1, 1),
+        middle + (corner - middle) * 3.0,
         now,
     );
     assert!(change.is_none_or(|change| change.scale.is_none_or(|scale| scale <= layout::SCALES.1)));
+    // And back from the largest to a standard slot in one drag back.
+    let large = wall.clone().with_scale(layout::SCALES.1);
+    let large_projection = shown(vec![large.clone()], Vec::new());
+    let mut projector = holding(&large_projection, &large, ADJUST, now);
+    let corner = handle(&large, Handle::Corner(1, 1));
+    let change = drag(
+        &mut projector,
+        &large_projection,
+        &large,
+        Handle::Corner(1, 1),
+        middle + (corner - middle) * 0.2f32.sqrt(),
+        now,
+    )
+    .expect("standard slots");
+    assert!((change.scale.unwrap() - 1.0).abs() < 0.051, "{change:?}");
     // Dragged down alone, its slots grow taller, not wider, their text its size: nearly three times as tall snaps to
-    // 9:16, twice as tall is its own shape, and wider alone makes them wide.
+    // 9:16, twice as tall is its own shape, and wider alone makes them wide, each as the square of how far it moved.
     let stretched = |across: f32, down: f32| {
         let mut projector = holding(&projection, &wall, ADJUST, now);
         let corner = handle(&wall, Handle::Corner(1, -1));
-        let local = model(&wall.pose)
+        let local = model(&wall.frame())
             .unwrap()
             .inverse()
             .transform_point3(corner);
@@ -375,15 +407,15 @@ fn edges_give_a_wall_whole_columns_and_rows_and_corners_size_its_slots_in_steps(
         )
         .expect("a new shape")
     };
-    let tall = stretched(1.0, 2.95);
+    let tall = stretched(1.0, 2.95f32.sqrt());
     assert_eq!(
         (tall.aspect, tall.scale),
         (Some(9.0 / 16.0), None),
         "{tall:?}"
     );
-    let taller = stretched(1.0, 2.0);
+    let taller = stretched(1.0, 2f32.sqrt());
     assert_eq!(taller.aspect, Some(0.84));
-    let wide = stretched(1.9, 1.0);
+    let wide = stretched(1.9f32.sqrt(), 1.0);
     assert!(
         wide.aspect
             .is_some_and(|aspect| (aspect - 3.18).abs() < 0.02),
@@ -484,18 +516,19 @@ fn steppers_give_or_take_one_column_or_row_at_once_within_what_a_wall_may_have()
     assert_eq!(output.wall.unwrap().grid, Grid::new(5, 1));
 }
 
-/// Take hold of `wall`'s knob, which `projector` holds, with the hand at home, move the hand by each of `moves` in turn,
-/// and let go: what is drawn after each move, and what is sent.
-fn bend(
+/// Take hold of `wall`'s `handle`, the knob or the hinge, which `projector` holds, with the hand at home, move the hand
+/// by each of `moves` in turn, and let go: the wall drawn after each move, whether each ticked, and what is sent.
+fn move_hand(
     projector: &mut Projector,
     projection: &Projection,
     wall: &Wall,
+    handle: Handle,
     moves: &[Vec3],
     controls: Controls,
     now: Instant,
-) -> (Vec<Option<f32>>, Option<Change>) {
-    let knob = handle(wall, Handle::Bend);
-    let from = at(knob);
+) -> (Vec<Wall>, Vec<bool>, Option<Change>) {
+    let point = self::handle(wall, handle);
+    let from = at(point);
     let step = |projector: &mut Projector, ray: Option<Ray>, grip: f32| {
         let mut frame = frame(projection, ray, grip, ADJUST, now);
         frame.controls = controls;
@@ -505,65 +538,125 @@ fn bend(
     step(projector, from, 1.0);
     assert_eq!(
         projector.editor.drag.as_ref().map(|drag| drag.handle),
-        Some(Handle::Bend)
+        Some(handle)
     );
     let mut drawn = Vec::new();
+    let mut ticks = Vec::new();
     let mut ray = from;
     for moved in moves {
         // The hand moved, still aiming about where it took hold.
         ray = match controls {
-            Controls::Controllers => Ray::new(HOME + *moved, knob - HOME),
-            Controls::Keyboard => Ray::new(HOME, knob + *moved - HOME),
+            Controls::Controllers => Ray::new(HOME + *moved, point - HOME),
+            Controls::Keyboard => Ray::new(HOME, point + *moved - HOME),
         };
         let output = step(projector, ray, 1.0);
-        drawn.push(projector.editor.walls(projection)[0].radius());
-        // While it bends, the ray ends on the knob, and what it makes of the wall shows in place of the hint.
+        drawn.push(projector.editor.walls(projection)[0].clone());
+        ticks.push(output.wall_ticked);
+        // While it is dragged, the ray ends on the handle, and what it makes of the wall shows in place of the hint.
         assert!(output.hit.is_some_and(|hit| hit.held));
     }
-    (drawn, step(projector, ray, 0.0).wall)
+    (drawn, ticks, step(projector, ray, 0.0).wall)
+}
+
+/// Take hold of `wall`'s knob, which `projector` holds, move the hand by each of `moves` and let go: the radius drawn
+/// after each move, and what is sent.
+fn bend(
+    projector: &mut Projector,
+    projection: &Projection,
+    wall: &Wall,
+    moves: &[Vec3],
+    controls: Controls,
+    now: Instant,
+) -> (Vec<Option<f32>>, Option<Change>) {
+    let (drawn, _, sent) = move_hand(
+        projector,
+        projection,
+        wall,
+        Handle::Bend,
+        moves,
+        controls,
+        now,
+    );
+    (drawn.iter().map(Wall::radius).collect(), sent)
+}
+
+/// The curvature of each of `radii`, flat as 0.
+fn curvatures(radii: &[Option<f32>]) -> Vec<f32> {
+    radii
+        .iter()
+        .map(|radius| radius.map_or(0.0, |radius| 1.0 / radius))
+        .collect()
 }
 
 #[test]
-fn the_knob_drawn_towards_the_participant_bends_a_wall_evenly_and_back_flattens_it() {
+fn one_movement_down_as_tall_as_the_wall_bends_it_fully_and_back_up_flattens_it() {
     let wall = added();
     let projection = shown(vec![wall.clone()], Vec::new());
     let now = Instant::now();
-    let towards = model(&wall.pose).unwrap().transform_vector3(Vec3::Z);
-    // Drawn towards the participant step by step, it bends more at every step, evenly in its curvature, from flat to
-    // as tightly as it may.
+    // The wall is about 88 cm tall, and so is the hand's movement through the knob's whole range.
+    let height = wall.size().1;
+    assert_eq!(travel(&wall), height);
+    let full = height + DEAD_ZONE;
+    // Moved down step by step, it bends more at every step, evenly in its curvature, from flat to as tightly as it may,
+    // in one movement as tall as the wall.
     let mut projector = holding(&projection, &wall, ADJUST, now);
-    let moves: Vec<Vec3> = (1..=20).map(|step| towards * 0.02 * step as f32).collect();
-    let (drawn, sent) = bend(
+    let moves: Vec<Vec3> = (1..=20)
+        .map(|step| -Vec3::Y * full * step as f32 / 20.0)
+        .collect();
+    let (drawn, ticks, sent) = move_hand(
         &mut projector,
         &projection,
         &wall,
+        Handle::Bend,
         &moves,
         Controls::Controllers,
         now,
     );
-    let curvature: Vec<f32> = drawn
-        .iter()
-        .map(|radius| radius.map_or(0.0, |radius| 1.0 / radius))
-        .collect();
+    let radii: Vec<Option<f32>> = drawn.iter().map(Wall::radius).collect();
+    let curvature = curvatures(&radii);
     assert!(
         curvature.windows(2).all(|pair| pair[1] >= pair[0] - 1e-4),
         "{curvature:?}"
     );
-    assert_eq!(drawn[0], None, "a little is flat");
+    assert_eq!(radii[0], None, "a little is flat");
     let most = most_bend(&wall);
-    assert!(
-        (curvature[19] - most).abs() < 0.02,
-        "{curvature:?} to {most}"
-    );
-    // Even: halfway along, about half as curved.
+    assert_eq!(radii[19], bent(&wall, 1e3), "{curvature:?} to {most}");
+    assert!((curvature[19] - most).abs() < 0.01, "{curvature:?}");
+    // Even: halfway down, about half as curved.
     assert!((curvature[9] - most / 2.0).abs() < 0.03, "{curvature:?}");
+    // Reaching the end ticks, as a stop, once.
+    assert_eq!(ticks.iter().filter(|tick| **tick).count(), 1, "{ticks:?}");
+    assert!(ticks[19]);
     let Some(WallShape::Arc { radius }) = sent.as_ref().and_then(|change| change.shape) else {
         unreachable!("an arc, not {sent:?}");
     };
-    assert!(radius >= layout::LEAST_RADIUS && Some(radius) == drawn[19]);
+    assert!(radius >= layout::LEAST_RADIUS && Some(radius) == radii[19]);
+    // Fully bent, one movement back up as tall as the wall flattens it, less at every step.
+    let tightest = wall.clone().with_shape(WallShape::Arc { radius });
+    let projection = shown(vec![tightest.clone()], Vec::new());
+    let mut projector = holding(&projection, &tightest, ADJUST, now);
+    let moves: Vec<Vec3> = (1..=20)
+        .map(|step| Vec3::Y * full * step as f32 / 20.0)
+        .collect();
+    let (radii, sent) = bend(
+        &mut projector,
+        &projection,
+        &tightest,
+        &moves,
+        Controls::Controllers,
+        now,
+    );
+    let curvature = curvatures(&radii);
+    assert!(
+        curvature.windows(2).all(|pair| pair[1] <= pair[0] + 1e-4),
+        "{curvature:?}"
+    );
+    assert_eq!(radii[19], None);
+    assert_eq!(sent.and_then(|change| change.shape), Some(WallShape::Grid));
     // Back where it took hold, it is as it was, and nothing is sent; on the way, it flattens as it bent.
+    let projection = shown(vec![wall.clone()], Vec::new());
     let mut projector = holding(&projection, &wall, ADJUST, now);
-    let there_and_back = [towards * 0.2, towards * 0.1, towards * 0.001];
+    let there_and_back = [-Vec3::Y * 0.4, -Vec3::Y * 0.2, -Vec3::Y * 0.005];
     let (drawn, sent) = bend(
         &mut projector,
         &projection,
@@ -574,18 +667,18 @@ fn the_knob_drawn_towards_the_participant_bends_a_wall_evenly_and_back_flattens_
     );
     assert!(drawn[0].unwrap() < drawn[1].unwrap());
     assert_eq!((drawn[2], sent), (None, None));
-    // A curved wall: back to where it took hold, its radius exactly as it was; pushed away, flatter, then flat, and no
+    // A curved wall: back to where it took hold, its radius exactly as it was; moved up, flatter, then flat, and no
     // further.
     let curved = wall.clone().with_shape(WallShape::Arc { radius: 3.0 });
     let projection = shown(vec![curved.clone()], Vec::new());
     let mut projector = holding(&projection, &curved, ADJUST, now);
     assert_eq!(projector.editing_wall(), Some("wall-1"));
     let moves = [
-        towards * 0.1,
+        -Vec3::Y * 0.1,
         Vec3::ZERO,
-        -towards * 0.05,
-        -towards * 0.3,
-        -towards * 0.6,
+        Vec3::Y * 0.05,
+        Vec3::Y * 0.5,
+        Vec3::Y * 1.0,
     ];
     let (drawn, sent) = bend(
         &mut projector,
@@ -601,24 +694,45 @@ fn the_knob_drawn_towards_the_participant_bends_a_wall_evenly_and_back_flattens_
     assert_eq!((drawn[3], drawn[4]), (None, None));
     assert_eq!(sent.and_then(|change| change.shape), Some(WallShape::Grid));
     assert_eq!(bent(&curved, 0.0), Some(3.0));
-    assert_eq!(bent(&curved, 0.004), Some(3.0));
+    assert_eq!(bent(&curved, DEAD_ZONE * 0.9), Some(3.0));
+    assert_eq!(bent(&curved, -DEAD_ZONE * 0.9), Some(3.0));
     assert_eq!(bent(&wall, f32::NAN), None);
+    // Of every size, one movement as tall as the wall, within an arm's reach, takes it from flat to as tightly as it may
+    // bend and back.
+    for wall in walls_of_every_size() {
+        let flat = wall.clone().with_shape(WallShape::Grid);
+        let reach = travel(&flat);
+        assert!(
+            (TRAVELS.0..=TRAVELS.1).contains(&reach)
+                && (reach - flat.size().1.clamp(TRAVELS.0, TRAVELS.1)).abs() < 1e-6
+        );
+        let tightest = bent(&flat, 1e3).expect("every wall bends");
+        let Some(full) = bent(&flat, reach + DEAD_ZONE) else {
+            unreachable!("{:?} bends", flat.grid());
+        };
+        // To the centimetre the radius is rounded to.
+        assert!((full - tightest).abs() <= 0.011, "{full} {tightest}");
+        let curved = flat.with_shape(WallShape::Arc { radius: tightest });
+        assert_eq!(bent(&curved, -(reach + DEAD_ZONE)), None);
+    }
 }
 
 #[test]
-fn moving_the_hand_up_down_or_across_while_bending_changes_nothing_and_the_desktop_drags_up() {
+fn moving_the_hand_across_or_towards_the_wall_bends_nothing_jitter_is_tolerated_and_the_desktop_drags_down()
+ {
     let wall = added();
     let projection = shown(vec![wall.clone()], Vec::new());
     let now = Instant::now();
-    let towards = model(&wall.pose).unwrap().transform_vector3(Vec3::Z);
-    let across = model(&wall.pose).unwrap().transform_vector3(Vec3::X);
-    // Jitter up and down and across, however far, bends nothing.
+    let towards = model(&wall.frame()).unwrap().transform_vector3(Vec3::Z);
+    let across = model(&wall.frame()).unwrap().transform_vector3(Vec3::X);
+    // Moving across or towards the wall, however far, and up and down within the dead zone, bends nothing.
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let jitter = [
-        Vec3::Y * 0.05,
-        -Vec3::Y * 0.08,
-        across * 0.1,
-        Vec3::Y * 0.3 - across * 0.2,
+        towards * 0.3,
+        -towards * 0.3,
+        across * 0.2,
+        Vec3::Y * 0.008 - across * 0.2,
+        -Vec3::Y * 0.009 + towards * 0.1,
     ];
     let (drawn, sent) = bend(
         &mut projector,
@@ -632,13 +746,13 @@ fn moving_the_hand_up_down_or_across_while_bending_changes_nothing_and_the_deskt
         drawn.iter().all(Option::is_none) && sent.is_none(),
         "{drawn:?}"
     );
-    // Drawn towards the participant with jitter, it bends as far as without.
+    // Moved down with jitter across and towards the wall, it bends as far as without.
     let mut steady = holding(&projection, &wall, ADJUST, now);
     let (still, _) = bend(
         &mut steady,
         &projection,
         &wall,
-        &[towards * 0.2],
+        &[-Vec3::Y * 0.3],
         Controls::Controllers,
         now,
     );
@@ -647,19 +761,19 @@ fn moving_the_hand_up_down_or_across_while_bending_changes_nothing_and_the_deskt
         &mut shaky,
         &projection,
         &wall,
-        &[towards * 0.2 + Vec3::Y * 0.04 - across * 0.03],
+        &[-Vec3::Y * 0.3 + towards * 0.04 - across * 0.03],
         Controls::Controllers,
         now,
     );
     assert_eq!(still, shaken);
     assert!(still[0].is_some());
-    // In the desktop window, whose ray begins at the eyes, dragging the knob up bends it, and down flattens it.
+    // In the desktop window, whose ray begins at the eyes, dragging the knob down bends it, and back up flattens it.
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let (drawn, sent) = bend(
         &mut projector,
         &projection,
         &wall,
-        &[Vec3::Y * 0.2, Vec3::ZERO],
+        &[-Vec3::Y * 0.3, Vec3::ZERO],
         Controls::Keyboard,
         now,
     );
@@ -674,6 +788,189 @@ fn moving_the_hand_up_down_or_across_while_bending_changes_nothing_and_the_deskt
         readout(Handle::Bend, &curved).plain().trim(),
         "◠ radius 2.4 m"
     );
+}
+
+#[test]
+fn the_hinge_moved_down_tilts_a_wall_towards_the_participant_evenly_and_snaps_upright() {
+    let wall = added();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let height = wall.size().1;
+    let full = height + DEAD_ZONE;
+    // Moved down step by step through half the wall's height, it tilts its top towards the participant more at every
+    // step, evenly, from upright to the most it may, snapping upright at first.
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let moves: Vec<Vec3> = (1..=20)
+        .map(|step| -Vec3::Y * (DEAD_ZONE + height / 2.0) * step as f32 / 20.0)
+        .collect();
+    let (drawn, ticks, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Tilt,
+        &moves,
+        Controls::Controllers,
+        now,
+    );
+    let tilts: Vec<f32> = drawn.iter().map(Wall::tilt).collect();
+    assert!(tilts.windows(2).all(|pair| pair[1] >= pair[0]), "{tilts:?}");
+    assert_eq!(tilts[0], 0.0, "a little is upright");
+    assert_eq!(tilts[19], layout::MOST_TILT);
+    // Even: halfway down, about halfway.
+    assert!(
+        (tilts[9] - layout::MOST_TILT / 2.0).abs() <= 1.5,
+        "{tilts:?}"
+    );
+    assert!(tilts.iter().all(|tilt| tilt.fract() == 0.0));
+    // Tilted, its top comes towards the participant, and its face looks down.
+    let tilted = drawn[19].frame();
+    let standing = model(&tilted).unwrap();
+    assert!(standing.transform_vector3(Vec3::Z).y < -0.7);
+    assert!(standing.transform_vector3(Vec3::Y).z > 0.7);
+    // Reaching the most ticks, as a stop, and so does leaving upright, never in between.
+    assert!(
+        ticks[19] && ticks.iter().filter(|tick| **tick).count() == 1,
+        "{ticks:?}"
+    );
+    assert_eq!(
+        sent,
+        Some(Change {
+            wall: "wall-1".into(),
+            grid: None,
+            scale: None,
+            aspect: None,
+            shape: None,
+            pose: None,
+            tilt: Some(layout::MOST_TILT),
+        })
+    );
+    // From the most it tilts down, one movement up as tall as the wall takes it to the most it tilts up, upright on
+    // the way, which ticks.
+    let down = wall.clone().with_tilt(Some(layout::MOST_TILT));
+    let projection = shown(vec![down.clone()], Vec::new());
+    let mut projector = holding(&projection, &down, ADJUST, now);
+    let moves: Vec<Vec3> = (1..=40)
+        .map(|step| Vec3::Y * full * step as f32 / 40.0)
+        .collect();
+    let (drawn, ticks, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &down,
+        Handle::Tilt,
+        &moves,
+        Controls::Controllers,
+        now,
+    );
+    let tilts: Vec<f32> = drawn.iter().map(Wall::tilt).collect();
+    assert!(tilts.windows(2).all(|pair| pair[1] <= pair[0]), "{tilts:?}");
+    assert_eq!(tilts[39], -layout::MOST_TILT);
+    let upright = tilts.iter().position(|tilt| *tilt == 0.0).unwrap();
+    assert!(ticks[upright] && ticks[39], "{ticks:?}");
+    assert_eq!(
+        sent.and_then(|change| change.tilt),
+        Some(-layout::MOST_TILT)
+    );
+    // Back where it took hold, within the dead zone, it is as it was and nothing is sent; near upright, it is upright.
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let (drawn, _, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Tilt,
+        &[-Vec3::Y * 0.2, Vec3::Y * 0.004],
+        Controls::Controllers,
+        now,
+    );
+    assert!(drawn[0].tilt() > 10.0 && drawn[1].tilt() == 0.0 && sent.is_none());
+    assert_eq!(tilted_by(&wall, DEAD_ZONE * 0.9), 0.0);
+    let slightly = height * UPRIGHT_SNAP / 90.0 * 0.9 + DEAD_ZONE;
+    assert_eq!(tilted_by(&wall, slightly), 0.0);
+    assert_eq!(tilted_by(&wall, f32::NAN), 0.0);
+    let ten = wall.clone().with_tilt(Some(10.0));
+    assert_eq!(tilted_by(&ten, 0.005), 10.0);
+    assert!(tilted_by(&ten, 0.1) > 10.0 && tilted_by(&ten, -0.1) < 10.0);
+    // In the desktop window, dragging it down tilts it down too.
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let (drawn, _, _) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Tilt,
+        &[-Vec3::Y * 0.2],
+        Controls::Keyboard,
+        now,
+    );
+    assert!(drawn[0].tilt() > 10.0);
+    // Moving across or towards the wall tilts nothing.
+    let towards = model(&wall.frame()).unwrap().transform_vector3(Vec3::Z);
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let (drawn, _, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Tilt,
+        &[towards * 0.3, Vec3::X * 0.3],
+        Controls::Controllers,
+        now,
+    );
+    assert!(drawn.iter().all(|wall| wall.tilt() == 0.0) && sent.is_none());
+    // Its readout says how it tilts.
+    assert_eq!(readout(Handle::Tilt, &wall).plain().trim(), "upright");
+    assert_eq!(
+        readout(Handle::Tilt, &ten).plain().trim(),
+        "tilted 10° down"
+    );
+    assert_eq!(
+        readout(Handle::Tilt, &wall.clone().with_tilt(Some(-20.0)))
+            .plain()
+            .trim(),
+        "tilted 20° up"
+    );
+}
+
+/// How far `wall` tilts with the hand moved `moved` metres down from its hinge.
+fn tilted_by(wall: &Wall, moved: f32) -> f32 {
+    tilted(wall, moved)
+}
+
+#[test]
+fn the_hinge_stands_on_the_line_a_flat_wall_tilts_about_and_a_tilted_wall_is_held_drawn_and_carried_tilted()
+ {
+    let now = Instant::now();
+    // Flat, its hinge stays where it was as the wall tilts, so that the ray stays on it.
+    let wall = added();
+    let before = handle(&wall, Handle::Tilt);
+    for tilt in [-45.0, -20.0, 30.0, 45.0] {
+        let tilted = wall.clone().with_tilt(Some(tilt));
+        assert!(
+            handle(&tilted, Handle::Tilt).distance(before) < 0.02,
+            "{tilt}"
+        );
+    }
+    // A tilted wall is taken hold of where it is drawn, its handles about it, and carried tilted, its pose sent upright
+    // and its tilt kept.
+    let tilted = wall.clone().with_tilt(Some(30.0));
+    let projection = shown(vec![tilted.clone()], Vec::new());
+    let mut projector = holding(&projection, &tilted, ADJUST, now);
+    assert_eq!(projector.editing_wall(), Some("wall-1"));
+    let ray = at(on(&tilted, 0.3, 0.2));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, now));
+    let moved = Ray::new(HOME, on(&tilted, 0.3, 0.2) + Vec3::X * 0.5 - HOME);
+    projector.update(frame(&projection, moved, 1.0, ADJUST, now));
+    let shown = projector.editor.walls(&projection)[0].clone();
+    assert_eq!(shown.tilt(), 30.0);
+    let [x, _, z, _] = shown.pose.orientation;
+    assert!(x.abs() < 1e-4 && z.abs() < 1e-4, "{:?}", shown.pose);
+    let sent = projector
+        .update(frame(&projection, moved, 0.0, ADJUST, now))
+        .wall
+        .expect("moved");
+    assert_eq!(sent.tilt, None);
+    let pose = sent.pose.expect("a pose");
+    assert!((pose.position[0] - 0.5).abs() < 0.05, "{pose:?}");
+    let [x, _, z, _] = pose.orientation;
+    assert!(x.abs() < 1e-4 && z.abs() < 1e-4, "{pose:?}");
 }
 
 #[test]
@@ -765,7 +1062,7 @@ fn a_wall_no_longer_shown_or_rights_lost_let_go_of_it() {
 #[test]
 fn a_ray_along_or_away_from_a_wall_meets_its_plane_nowhere_and_a_drag_along_it_changes_nothing() {
     let wall = added();
-    let frame = model(&wall.pose).unwrap();
+    let frame = model(&wall.frame()).unwrap();
     let along = Ray::new(on(&wall, 0.0, 0.0) + Vec3::Z * 0.5, Vec3::X).unwrap();
     assert_eq!(on_plane(frame, &along), None);
     let away = Ray::new(on(&wall, 0.0, 0.0) + Vec3::Z * 0.5, Vec3::Z).unwrap();
@@ -803,13 +1100,12 @@ fn a_change_sent_is_drawn_until_the_server_agrees_curved_or_not_or_a_while_passe
     let wall = added();
     let projection = shown(vec![wall.clone()], Vec::new());
     let now = Instant::now();
-    let towards = model(&wall.pose).unwrap().transform_vector3(Vec3::Z);
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let (_, sent) = bend(
         &mut projector,
         &projection,
         &wall,
-        &[towards * 0.3],
+        &[-Vec3::Y * 0.3],
         Controls::Controllers,
         now,
     );
@@ -861,7 +1157,7 @@ fn of_two_handles_or_two_walls_the_ray_meets_the_nearer_is_taken_and_a_press_wit
     // The ray meets both walls, through an empty slot of the nearer; the nearer is taken.
     let mut projector = Projector::default();
     let through = at(on(&wall, 0.0, 0.05)).unwrap();
-    let frame = model(&behind.pose).unwrap();
+    let frame = model(&behind.frame()).unwrap();
     assert!(crate::projection::wall_hit(&behind, frame, &through).is_some());
     projector.update(frame_at(&projection, Some(through), 1.0, now));
     assert_eq!(projector.editing_wall(), Some("wall-1"));
@@ -967,11 +1263,12 @@ fn a_handle_the_ray_meets_is_pointed_at_rather_than_a_panel_behind_it() {
     );
 }
 
-/// The walls whose handles are checked: every grid's extremes, sizes and shapes of slot, flat and curved.
+/// The walls whose handles are checked: every grid's extremes, sizes and shapes of slot, flat and curved, the largest a
+/// big wall's, and tilted either way as far as they tilt.
 fn walls_of_every_size() -> Vec<Wall> {
     let mut walls = Vec::new();
     for (columns, rows) in [(1, 1), (2, 1), (3, 2), (4, 1), (8, 3), (6, 4), (1, 4)] {
-        for scale in [0.5, 1.0, 2.0] {
+        for scale in [0.5, 1.0, 2.0, layout::SCALES.1] {
             for aspect in [None, Some(0.25), Some(0.5625), Some(4.0)] {
                 for radius in [None, Some(1.5), Some(3.0)] {
                     let wall = added()
@@ -988,15 +1285,25 @@ fn walls_of_every_size() -> Vec<Wall> {
             }
         }
     }
+    let tilted: Vec<Wall> = walls
+        .iter()
+        .filter(|wall| wall.aspect.is_none() && [1, 3, 4].contains(&wall.grid().columns))
+        .flat_map(|wall| {
+            [layout::MOST_TILT, -layout::MOST_TILT, 20.0]
+                .map(|tilt| wall.clone().with_tilt(Some(tilt)))
+        })
+        .collect();
+    walls.extend(tilted);
     walls.push(tomori());
     walls.push(tomori().with_grid(Grid::new(1, 1).unwrap()));
+    walls.push(tomori().with_tilt(Some(-30.0)));
     walls
 }
 
 /// Each handle of `wall` seen from `viewer`, as the rectangle its face takes from the eyes: its middle's angles across
 /// and up from where the wall's middle is seen, and half its width and height, in radians.
 fn seen(wall: &Wall, viewer: Vec3) -> Vec<(Handle, Vec2, Vec2)> {
-    let frame = model(&wall.pose).unwrap();
+    let frame = model(&wall.frame()).unwrap();
     let ahead = (frame.transform_point3(Vec3::ZERO) - viewer).normalize();
     let right = ahead.cross(Vec3::Y).normalize();
     let up = right.cross(ahead);
@@ -1031,12 +1338,12 @@ fn no_two_handles_overlap_at_any_size_shape_or_distance_and_each_is_large_enough
         // From nearby to across the space, straight on and from either side.
         for distance in [0.8, 1.5, 3.0, 6.0] {
             for side in [-50f32, -25.0, 0.0, 25.0, 50.0] {
-                let facing = model(&wall.pose).unwrap().transform_vector3(Vec3::Z);
+                let facing = model(&wall.frame()).unwrap().transform_vector3(Vec3::Z);
                 let viewer = middle + Quat::from_rotation_y(side.to_radians()) * facing * distance;
                 // Only where the whole wall is within view as its middle is looked at, as a participant editing it
                 // would stand; nearer, they turn to its edges.
                 let ahead = (middle - viewer).normalize();
-                let frame = model(&wall.pose).unwrap();
+                let frame = model(&wall.frame()).unwrap();
                 let [a, b, c, d] = corners(wall);
                 if [a, b, c, d].iter().any(|corner| {
                     (frame.transform_point3(*corner) - viewer)
@@ -1087,7 +1394,7 @@ fn a_ray_at_a_handle_s_edge_takes_it_and_never_its_neighbour() {
         added().with_shape(WallShape::Arc { radius: 2.0 }),
     ] {
         let projection = shown(vec![wall.clone()], Vec::new());
-        let frame = model(&wall.pose).unwrap();
+        let frame = model(&wall.frame()).unwrap();
         let (points, size) = handle_points(&wall, frame, HOME);
         let mut projector = holding(&projection, &wall, ADJUST, now);
         assert_eq!(projector.editing_wall(), Some("wall-1"));
@@ -1149,7 +1456,7 @@ fn the_ray_ends_on_a_handle_a_wall_or_a_panel_whichever_is_nearest_and_on_what_i
     let hit = length(&output, board);
     assert!((hit.point - on(&wall, 0.0, 0.42)).length() < 1e-3 && !hit.held);
     // On a panel in a slot, at the panel, just in front of the wall.
-    let slot = model(&wall.pose)
+    let slot = model(&wall.frame())
         .unwrap()
         .transform_point3(Vec3::from_array(wall.slot_frames()[0].position));
     let output = projector.update(frame_at(&projection, at(slot), 0.0, now));
@@ -1237,7 +1544,7 @@ fn filling(wall: &Wall) -> Vec<Panel> {
 
 /// `wall`'s bar, standing where it says, seen from home.
 fn bar_of(wall: &Wall) -> Bar {
-    bar(wall, model(&wall.pose).unwrap(), HOME)
+    bar(wall, model(&wall.frame()).unwrap(), HOME)
 }
 
 /// The bars drawn in `output`: faces without text, filled.
@@ -1253,7 +1560,7 @@ fn bars(output: &crate::projection::Output) -> Vec<&Canvas> {
 /// The viewers a wall is checked from: nearby to across the space, straight on and from either side, where the whole
 /// wall is within view as its middle is looked at, as a participant would stand.
 fn viewers(wall: &Wall) -> Vec<Vec3> {
-    let frame = model(&wall.pose).unwrap();
+    let frame = model(&wall.frame()).unwrap();
     let middle = Vec3::from_array(wall.pose.position);
     let facing = frame.transform_vector3(Vec3::Z);
     let mut viewers = Vec::new();
@@ -1278,7 +1585,7 @@ fn viewers(wall: &Wall) -> Vec<Vec3> {
 fn a_wall_s_bar_is_met_along_its_length_and_across_its_thickness_flat_or_curved_near_or_far() {
     let mut checked = 0;
     for wall in walls_of_every_size() {
-        let frame = model(&wall.pose).unwrap();
+        let frame = model(&wall.frame()).unwrap();
         for viewer in viewers(&wall) {
             checked += 1;
             let bar = bar(&wall, frame, viewer);
@@ -1341,7 +1648,7 @@ fn a_wall_s_bar_is_met_along_its_length_and_across_its_thickness_flat_or_curved_
 fn the_bar_stands_clear_of_every_handle_and_its_drawn_face_within_where_it_is_met() {
     let mut checked = 0;
     for wall in walls_of_every_size() {
-        let frame = model(&wall.pose).unwrap();
+        let frame = model(&wall.frame()).unwrap();
         for viewer in viewers(&wall) {
             checked += 1;
             let (points, size) = handle_points(&wall, frame, viewer);
@@ -1406,7 +1713,7 @@ fn a_full_curved_wall_is_taken_hold_of_and_carried_again_by_its_bar_while_its_pa
     let projection = shown(vec![wall.clone(), tomori()], filling(&wall));
     let bar = bar_of(&wall);
     // A panel pointed at takes the grip, as ever.
-    let slot = model(&wall.pose)
+    let slot = model(&wall.frame())
         .unwrap()
         .transform_point3(Vec3::from_array(wall.slot_frames()[5].position));
     let mut projector = Projector::default();
@@ -1445,10 +1752,11 @@ fn a_full_curved_wall_is_taken_hold_of_and_carried_again_by_its_bar_while_its_pa
     let tomori = tomori();
     let projection = shown(vec![tomori.clone()], filling(&tomori));
     let bar = bar_of(&tomori);
-    let below =
-        model(&tomori.pose)
-            .unwrap()
-            .transform_point3(Vec3::new(0.0, -tomori.size().1 / 2.0, 0.0));
+    let below = model(&tomori.frame()).unwrap().transform_point3(Vec3::new(
+        0.0,
+        -tomori.size().1 / 2.0,
+        0.0,
+    ));
     assert!(
         bar.middle.y < below.y && bar.middle.y > 0.15,
         "{:?}",

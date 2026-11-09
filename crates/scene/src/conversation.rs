@@ -3696,6 +3696,7 @@ impl Conversation {
             aspect: change.aspect,
             shape: change.shape,
             pose: change.pose,
+            tilt: change.tilt,
         })
     }
 

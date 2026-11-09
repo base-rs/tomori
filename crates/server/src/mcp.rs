@@ -415,7 +415,7 @@ fn tools() -> Value {
         },
         {
             "name": "set_wall",
-            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 2, or width picks it to make the wall that many metres wide; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; place, front or front NAME, stands a wall someone added in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
+            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -428,6 +428,7 @@ fn tools() -> Value {
                     "slot_width": { "type": "number", "exclusiveMinimum": 0 },
                     "slot_height": { "type": "number", "exclusiveMinimum": 0 },
                     "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                    "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
                     "attach": attach_schema(),
                     "detach": { "type": "boolean" },
@@ -438,7 +439,7 @@ fn tools() -> Value {
         },
         {
             "name": "add_wall",
-            "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked; columns, rows, scale, aspect or slot_width and slot_height, and radius lay it out as set_wall does, by default three columns of two rows of standard slots, flat. At most six are added in each environment. Only when someone in the space asks; then tell them.",
+            "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked, a big wall, of a scale above 2, as many times further as its scale is above 2; columns, rows, scale, aspect or slot_width and slot_height, radius and tilt lay it out as set_wall does, by default three columns of two rows of standard slots, flat and upright. At most six are added in each environment. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -450,6 +451,7 @@ fn tools() -> Value {
                     "slot_width": { "type": "number", "exclusiveMinimum": 0 },
                     "slot_height": { "type": "number", "exclusiveMinimum": 0 },
                     "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                    "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
                 },
             },
             "annotations": change,
@@ -920,6 +922,16 @@ fn optional_aspect(arguments: &Value) -> Result<Option<Option<f32>>, String> {
     Ok(Some((aspect != 0.0).then_some(aspect)))
 }
 
+/// How far `arguments` ask a wall to tilt, as `tilt`, in degrees: 0 for upright, as `Some(None)`; left out, `None`. Its
+/// bounds are the stage's to refuse, saying why.
+fn optional_tilt(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+    let tilt = optional_number(arguments, "tilt")?;
+    if tilt.is_some_and(|tilt| !tilt.is_finite()) {
+        return Err("tilt is a number of degrees, from -45 to 45.".to_owned());
+    }
+    Ok(tilt.map(|tilt| (tilt != 0.0).then_some(tilt)))
+}
+
 /// The sizes in metres `arguments` ask for: the wall's `width`, and its slots' `slot_width` and `slot_height`.
 fn metres(arguments: &Value) -> Result<crate::hub::tools::Metres, String> {
     Ok(crate::hub::tools::Metres {
@@ -962,6 +974,7 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         aspect: optional_aspect(arguments)?,
         radius,
         pose: None,
+        tilt: optional_tilt(arguments)?,
     };
     let joining = joining(arguments)?;
     if joining.is_some() && place.is_some() {
@@ -1044,6 +1057,7 @@ fn new_layout(arguments: &Value) -> Result<(crate::stage::Layout, Option<f32>, b
         scale,
         aspect,
         radius: radius.unwrap_or(flat.radius),
+        tilt: optional_tilt(arguments)?.flatten(),
     };
     let sized = sized
         || metres.width.is_some()

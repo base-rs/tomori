@@ -2210,9 +2210,12 @@ fn the_server_takes_each_slot_to_be_where_it_is_drawn() {
         curved(),
         turned(curved(), [1.0, 0.8, 4.0], [-2.0, 0.8, 1.0]),
         turned(flat.clone(), [0.0, 1.5, -2.0], [0.0, 1.5, 0.0]),
-        turned(flat, [3.0, 1.4, 1.0], [0.0, 1.6, -1.0]),
+        turned(flat.clone(), [3.0, 1.4, 1.0], [0.0, 1.6, -1.0]),
+        // Tilted, flat and curved, either way.
+        turned(flat.clone(), [0.0, 3.0, -2.5], [0.0, 3.0, 0.0]).with_tilt(Some(30.0)),
+        turned(curved(), [1.0, 0.8, 4.0], [-2.0, 0.8, 1.0]).with_tilt(Some(-45.0)),
     ] {
-        let drawn: Vec<Vec3> = slot_frames(&wall, model(&wall.pose).unwrap())
+        let drawn: Vec<Vec3> = slot_frames(&wall, model(&wall.frame()).unwrap())
             .iter()
             .map(|frame| frame.transform_point3(Vec3::ZERO))
             .collect();
@@ -2225,6 +2228,46 @@ fn the_server_takes_each_slot_to_be_where_it_is_drawn() {
             );
         }
     }
+}
+
+#[test]
+fn a_tilted_wall_draws_its_panels_tilted_with_it_and_the_ray_aims_at_its_slots_where_they_stand() {
+    // A wall above and ahead, tilted down towards home, a panel in its first slot.
+    let wall = Wall::new(
+        "wall-1",
+        WallKind::Added,
+        Pose::upright_facing([0.0, 3.0, -2.5], [0.0, 3.0, 0.0]),
+    )
+    .with_tilt(Some(30.0));
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![wall.clone()])
+        .with_panels(vec![panel("a", on("wall-1", 0))]);
+    let frame = model(&wall.frame()).unwrap();
+    let slots = slot_frames(&wall, frame);
+    let output = Projector::default().update(input(&shown, None, 0.0, Instant::now()));
+    // The panel stands in its slot, facing down towards home as the wall does.
+    let drawn = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.model)
+        .find(|model| model.w_axis.truncate().distance(slots[0].w_axis.truncate()) < 0.05)
+        .expect("the panel in its slot");
+    assert!(drawn.transform_vector3(Vec3::Z).normalize().y < -0.4);
+    // The ray aims at each slot where it stands, tilted, and points at the panel there.
+    let walls = [(&wall, frame)];
+    for (index, slot) in slots.iter().enumerate() {
+        let point = slot.transform_point3(Vec3::ZERO);
+        let aimed = aim(&walls, &Ray::new(HOME, point - HOME).unwrap()).unwrap();
+        assert_eq!((aimed.wall.as_str(), aimed.slot), ("wall-1", index as u32));
+        assert!(aimed.point.unwrap().distance(point) < 1e-3);
+    }
+    let output = Projector::default().update(input(
+        &shown,
+        at(slots[0].transform_point3(Vec3::ZERO)),
+        0.0,
+        Instant::now(),
+    ));
+    assert_eq!(output.pointed.unwrap().0, "a");
 }
 
 /// The 17 lines of JavaScript the maintainer could not see all of on the Quest 3, long enough that several wrap.

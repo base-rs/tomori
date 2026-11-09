@@ -64,7 +64,19 @@ pub const MOST_ROWS: u32 = 4;
 pub const MOST_SLOTS: u32 = 24;
 
 /// The least and most a wall's slots are scaled: the size of the text in them, as a proportion of a standard slot's.
-pub const SCALES: (f32, f32) = (0.5, 2.0);
+/// Five times a standard slot's is a wall for reading from across a yard, such as a dashboard, as legible from 15 m as
+/// a standard one from 3 m. An older client, which took at most twice, draws a larger wall at twice.
+pub const SCALES: (f32, f32) = (0.5, 5.0);
+
+/// The widest and tallest a wall is, in metres: a cinema's screen, 16 m by 9 m.
+pub const MOST_SIZE: (f32, f32) = (16.0, 9.0);
+
+/// The most a wall tilts from upright, either way, about its horizontal middle line, in degrees.
+pub const MOST_TILT: f32 = 45.0;
+
+/// The least and most a wall tilts, in degrees: from [`MOST_TILT`] with its top away, facing up, to as much with its
+/// top towards the front, facing down.
+pub const TILTS: (f32, f32) = (-MOST_TILT, MOST_TILT);
 
 /// A standard slot's width over its height, about 5:3.
 pub const STANDARD_ASPECT: f32 = SLOT_PIXELS.0 as f32 / SLOT_PIXELS.1 as f32;
@@ -430,11 +442,36 @@ impl Wall {
         }
     }
 
+    /// How far it tilts from upright, in degrees: as it says, within [`TILTS`], or else upright.
+    pub fn tilt(&self) -> f32 {
+        match self.tilt {
+            Some(tilt) if tilt.is_finite() => tilt.clamp(TILTS.0, TILTS.1),
+            _ => 0.0,
+        }
+    }
+
+    /// Where its slots are laid out about, in the space: its pose, tilted by its [`Wall::tilt`] about the pose's own
+    /// horizontal axis, through its middle, its top towards the front for a positive tilt. Its slots, its board and
+    /// everything drawn on it stand in this frame; an upright wall's is its pose.
+    pub fn frame(&self) -> Pose {
+        let tilt = self.tilt();
+        if tilt == 0.0 {
+            return self.pose;
+        }
+        // Turned about +X, +Z (its facing) goes down and +Y (its top) forward.
+        let (sin, cos) = (tilt.to_radians() / 2.0).sin_cos();
+        Pose {
+            position: self.pose.position,
+            orientation: multiply(self.pose.orientation, [sin, 0.0, 0.0, cos]),
+        }
+    }
+
     /// Where `slot` stands in the space, if the wall has it: its middle, facing out of the wall.
     pub fn slot_pose(&self, slot: u32) -> Option<Pose> {
+        let frame = self.frame();
         self.slot_frames()
             .get(slot as usize)
-            .map(|frame| frame.pose(&self.pose))
+            .map(|slot| slot.pose(&frame))
     }
 }
 
@@ -712,5 +749,93 @@ mod tests {
         );
         // A degenerate rotation is taken as none.
         assert_eq!(rotate([0.0; 4], [1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn a_tilted_wall_stands_its_slots_tilted_about_its_horizontal_middle_line_within_its_bounds() {
+        let upright = Wall::new("w", WallKind::Added, level());
+        assert_eq!((upright.tilt(), upright.frame()), (0.0, upright.pose));
+        // Tilted down, as a wall above someone is, its top comes towards the front and its face looks down; its
+        // slots tilt with it about its middle, which stays where it is.
+        let tilted = upright.clone().with_tilt(Some(30.0));
+        assert_eq!(tilted.tilt(), 30.0);
+        let frame = tilted.frame();
+        assert_eq!(frame.position, upright.pose.position);
+        let facing = rotate(frame.orientation, [0.0, 0.0, 1.0]);
+        let top = rotate(frame.orientation, [0.0, 1.0, 0.0]);
+        let (sin, cos) = 30f32.to_radians().sin_cos();
+        assert!((facing[1] + sin).abs() < 1e-5 && (facing[2] - cos).abs() < 1e-5);
+        assert!((top[2] - sin).abs() < 1e-5 && (top[1] - cos).abs() < 1e-5);
+        for slot in 0..tilted.slots() {
+            let (before, after) = (
+                upright.slot_pose(slot).unwrap(),
+                tilted.slot_pose(slot).unwrap(),
+            );
+            let from = |pose: &Pose| {
+                [0, 1, 2].map(|axis| pose.position[axis] - upright.pose.position[axis])
+            };
+            let [_, y, z] = from(&before);
+            let [x, y2, z2] = from(&after);
+            // Turned about the line through its middle along its own x.
+            assert!((x - from(&before)[0]).abs() < 1e-5);
+            assert!((y2 - (y * cos - z * sin)).abs() < 1e-5);
+            assert!((z2 - (y * sin + z * cos)).abs() < 1e-5);
+            let faces = rotate(after.orientation, [0.0, 0.0, 1.0]);
+            assert!((faces[1] + sin).abs() < 1e-5, "{faces:?}");
+        }
+        // The top row, above the middle, comes forward; the bottom row goes back.
+        assert!(tilted.slot_pose(0).unwrap().position[2] > -2.0);
+        assert!(tilted.slot_pose(5).unwrap().position[2] < -2.0);
+        // A curved wall tilts its whole arc about its middle too, each slot facing the line it curves about, tilted.
+        let curved = upright
+            .clone()
+            .with_shape(WallShape::Arc { radius: 2.0 })
+            .with_tilt(Some(-20.0));
+        let (sin, cos) = (-20f32).to_radians().sin_cos();
+        for (slot, frame) in curved.slot_frames().iter().enumerate() {
+            let pose = curved.slot_pose(slot as u32).unwrap();
+            let [x, y, z] = frame.position;
+            let at = [0, 1, 2].map(|axis| pose.position[axis] - upright.pose.position[axis]);
+            assert!((at[0] - x).abs() < 1e-5);
+            assert!((at[1] - (y * cos - z * sin)).abs() < 1e-5);
+            assert!((at[2] - (y * sin + z * cos)).abs() < 1e-5);
+        }
+        // Beyond its bounds, the nearest it may tilt; nonsense, upright.
+        assert_eq!(upright.clone().with_tilt(Some(80.0)).tilt(), MOST_TILT);
+        assert_eq!(upright.clone().with_tilt(Some(-80.0)).tilt(), -MOST_TILT);
+        let nonsense = upright.clone().with_tilt(Some(f32::NAN));
+        assert_eq!((nonsense.tilt(), nonsense.frame()), (0.0, upright.pose));
+    }
+
+    #[test]
+    fn a_wall_says_its_tilt_only_where_it_tilts_and_one_from_an_older_server_is_upright() {
+        let upright = Wall::new("w", WallKind::Added, level());
+        let json = serde_json::to_value(&upright).unwrap();
+        assert!(json.get("tilt").is_none(), "{json}");
+        let tilted = upright.clone().with_tilt(Some(-12.5));
+        let json = serde_json::to_value(&tilted).unwrap();
+        assert_eq!(json["tilt"], -12.5);
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), tilted);
+        // An older server's wall says no tilt, and is upright.
+        let mut older = serde_json::to_value(&upright).unwrap();
+        older.as_object_mut().unwrap().remove("tilt");
+        assert_eq!(serde_json::from_value::<Wall>(older).unwrap().tilt(), 0.0);
+    }
+
+    #[test]
+    fn a_big_wall_s_slots_are_up_to_five_times_a_standard_slot_within_a_cinema_s_screen() {
+        let big = Wall::new("w", WallKind::Added, level()).with_scale(SCALES.1);
+        assert_eq!(big.scale(), 5.0);
+        let (width, height) = big.slot_size();
+        assert!(
+            (width - SLOT_SIZE.0 * 5.0).abs() < 1e-4 && (height - SLOT_SIZE.1 * 5.0).abs() < 1e-4
+        );
+        // Three columns of two rows at five times are within a cinema's screen, and their text five times as large.
+        let (width, height) = big.size();
+        assert!(
+            width <= MOST_SIZE.0 && height <= MOST_SIZE.1,
+            "{width} {height}"
+        );
+        assert!(big.slot_frames().iter().all(|frame| frame.scale == 5.0));
     }
 }

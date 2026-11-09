@@ -3201,6 +3201,7 @@ mod tests {
             shape: None,
             pose: None,
             join: None,
+            tilt: None,
         };
         assert!(!conversation.set_wall(change.clone()));
         assert!(!conversation.remove_wall_by_id("wall-1".into()));

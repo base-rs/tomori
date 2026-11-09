@@ -810,6 +810,67 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
 }
 
 #[test]
+fn a_big_wall_is_read_as_much_further_away_as_its_text_is_larger() {
+    let home = [0.0, 1.6, 0.0];
+    let onto = |wall: &str, slot| Destination::Wall {
+        wall: wall.into(),
+        slot,
+    };
+    // A wall five times as large 15 m away reads as a standard one 3 m away, so a panel goes onto it, in the slot
+    // looked at; one of standard slots there gives way to the Tomori wall.
+    for (scale, expected) in [(5.0, Some(1)), (1.0, None), (0.7, None)] {
+        let far = wall_at("environment-0", [0.0, 2.2, -15.0]).with_scale(scale);
+        let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), far.clone()]);
+        let slot = slots(&far)[1].middle;
+        let chosen = looking_at(&looking(home, slot), &projection);
+        match expected {
+            Some(slot) => assert_eq!(chosen, onto("environment-0", Some(slot)), "{scale}"),
+            None => assert_eq!(chosen, onto(TOMORI_WALL, None), "{scale}"),
+        }
+    }
+    // As far as its text is larger: five times 4 m, and no less than 4 m for a wall smaller than a standard one.
+    let wall = wall_at("environment-0", [0.0, 2.2, -15.0]);
+    assert_eq!(reading(&wall.clone().with_scale(5.0)), 20.0);
+    assert_eq!(reading(&wall.clone().with_scale(0.5)), READING);
+    assert_eq!(reading(&wall), READING);
+}
+
+#[test]
+fn a_tilted_wall_is_met_and_described_where_clients_draw_it() {
+    let home = [0.0, 1.6, 0.0];
+    // A wall above and ahead, tilted down towards home.
+    let above = Wall::new(
+        "wall-1",
+        WallKind::Added,
+        Pose::upright_facing([0.0, 3.2, -2.5], [0.0, 3.2, 0.0]),
+    )
+    .with_tilt(Some(35.0));
+    let projection = Projection::new("space-1", "sky").with_walls(vec![above.clone()]);
+    // Its slots stand where the shared layout puts them, tilted, each facing down towards home.
+    for (slot, rectangle) in slots(&above).iter().enumerate() {
+        let pose = above.slot_pose(slot as u32).unwrap();
+        assert!(near(rectangle.middle, pose.position));
+        let facing = rotate(pose.orientation, [0.0, 0.0, 1.0]);
+        assert!(facing[1] < -0.5, "{facing:?}");
+    }
+    // Looked at, each slot is met where it is drawn, and its board too.
+    for slot in 0..above.slots() {
+        let middle = slots(&above)[slot as usize].middle;
+        assert!(matches!(
+            meet(home, forward(&looking(home, middle)), &projection, &[]),
+            Some((Met::Wall { ref wall, slot: Some(met) }, _)) if wall == "wall-1" && met == slot
+        ));
+    }
+    // Its top row stands forward of where it would upright, and its bottom row back.
+    let upright = Wall::new("w", WallKind::Added, above.pose);
+    let z = |wall: &Wall, slot: u32| wall.slot_pose(slot).unwrap().position[2];
+    assert!(z(&above, 1) > z(&upright, 1) + 0.1 && z(&above, 4) < z(&upright, 4) - 0.1);
+    // The agent is told how it tilts.
+    let (walls, _) = super::walls(&projection);
+    assert_eq!(walls[0]["tilt"], 35.0);
+}
+
+#[test]
 fn a_wall_just_off_the_gaze_is_looked_at_and_the_nearest_of_those_looked_at_is_chosen() {
     let home = [0.0, 1.6, 0.0];
     // A low wall 3 m ahead, whose top row of slots is under 10° below eye level, so that a level gaze passes over it.

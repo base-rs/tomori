@@ -115,8 +115,9 @@ impl WallShape {
     }
 }
 
-/// A wall panels are projected onto, upright, facing along its pose's +Z, in the space's coordinates. Where its slots
-/// stand is [`Wall::slot_frames`].
+/// A wall panels are projected onto, facing along its pose's +Z, in the space's coordinates: upright, or tilted by its
+/// [`Wall::tilt`] about its horizontal middle line. Where its slots stand is [`Wall::slot_frames`], in its
+/// [`Wall::frame`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Wall {
@@ -158,6 +159,12 @@ pub struct Wall {
     /// ask. See `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// How far it tilts from upright about its horizontal middle line, in degrees, within [`layout::TILTS`]: positive
+    /// with its top towards the front, so that it faces down, as a wall above the people in front of it does, and
+    /// negative with its top away, facing up. Upright unless it says otherwise; an older client draws it upright. Its
+    /// slots stand in [`Wall::frame`], its pose tilted so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tilt: Option<f32>,
 }
 
 impl Wall {
@@ -174,6 +181,7 @@ impl Wall {
             group: None,
             joined: Vec::new(),
             locked: false,
+            tilt: None,
         }
     }
 
@@ -217,6 +225,13 @@ impl Wall {
     /// The wall, its slots `aspect` times as wide as they are tall, or a standard slot's shape with `None`.
     pub fn with_aspect(mut self, aspect: Option<f32>) -> Self {
         self.aspect = aspect;
+        self
+    }
+
+    /// The wall, tilted `tilt` degrees from upright about its horizontal middle line, its top towards the front for a
+    /// positive tilt, or upright with `None`.
+    pub fn with_tilt(mut self, tilt: Option<f32>) -> Self {
+        self.tilt = tilt;
         self
     }
 }
@@ -965,6 +980,7 @@ mod tests {
                     aspect: None,
                     shape: Some(WallShape::Arc { radius: 3.0 }),
                     pose: None,
+                    tilt: None,
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "grid": [4, 1],
                     "shape": {"kind": "arc", "radius": 3.0}}),
@@ -977,9 +993,10 @@ mod tests {
                     aspect: Some(0.5625),
                     shape: Some(WallShape::Grid),
                     pose: Some(pose),
+                    tilt: Some(-12.0),
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "scale": 1.5,
-                    "aspect": 0.5625, "shape": {"kind": "grid"}, "pose": pose_json}),
+                    "aspect": 0.5625, "shape": {"kind": "grid"}, "pose": pose_json, "tilt": -12.0}),
             ),
             (
                 ClientMessage::DismissPanel {

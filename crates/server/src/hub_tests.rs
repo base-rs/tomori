@@ -4164,6 +4164,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
             aspect: None,
             shape,
             pose: None,
+            tilt: None,
         }
     };
     // A visitor changes nothing.
@@ -4189,6 +4190,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
         aspect: None,
         shape: None,
         pose: None,
+        tilt: None,
     });
     assert_eq!(
         cy.errors(),
@@ -4517,6 +4519,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             aspect: None,
             shape: Some(tomori_protocol::WallShape::Arc { radius: 3.0 }),
             pose: None,
+            tilt: None,
         });
         ada.send(ClientMessage::SetWall {
             wall: tomori_protocol::TOMORI_WALL.to_owned(),
@@ -4525,6 +4528,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             aspect: None,
             shape: None,
             pose: None,
+            tilt: None,
         });
         let projection = ada.projection();
         assert_eq!(

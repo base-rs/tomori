@@ -2712,3 +2712,127 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
         "Tell everyone in the space that you removed the added wall 1; the 2 panels on it float where they were."
     );
 }
+
+#[test]
+fn the_agent_tilts_a_wall_someone_looks_at_and_makes_a_big_wall_stand_as_far_as_it_reads() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = tomori_server::test_support::TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let home = [0.0, 1.6, 0.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, [0.0, 1.6, -1.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
+    let now = |result: &Value| {
+        assert_ne!(result["isError"], true, "{result}");
+        result["structuredContent"]["now"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let added = tool("add_wall", json!({"place": "front Ada"}));
+    let wall = added["structuredContent"]["wall"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(walls()[1]["tilt"], 0.0);
+    // "Tilt this wall down a bit": the wall she is looking at, its top towards her.
+    let down = tool("set_wall", json!({"wall": "looking Ada", "tilt": 10}));
+    assert_eq!(down["structuredContent"]["name"], "added wall 1", "{down}");
+    assert!(now(&down).ends_with("flat, tilted 10° down"), "{down}");
+    assert_eq!(walls()[1]["tilt"], 10.0);
+    // Her client is sent its tilt.
+    let shown = ada.wait_for(|message| match message {
+        tomori_protocol::ServerMessage::Projection { projection } => projection
+            .wall(&wall)
+            .filter(|wall| wall.tilt.is_some())
+            .cloned(),
+        _ => None,
+    });
+    assert_eq!(shown.tilt, Some(10.0));
+    // Back, facing up, and upright again.
+    let up = tool("set_wall", json!({"wall": wall, "tilt": -20}));
+    assert!(now(&up).ends_with("flat, tilted 20° up"), "{up}");
+    let upright = tool("set_wall", json!({"wall": wall, "tilt": 0}));
+    assert!(now(&upright).ends_with("flat"), "{upright}");
+    assert_eq!(walls()[1]["tilt"], 0.0);
+    // Beyond 45°, or not a number, it is refused, saying why.
+    assert_eq!(
+        failure(&tool("set_wall", json!({"wall": wall, "tilt": 60}))),
+        "A wall tilts at most 45° from upright, either way."
+    );
+    assert_eq!(
+        failure(&tool("set_wall", json!({"wall": wall, "tilt": "down"}))),
+        "tilt is a number."
+    );
+    assert_eq!(
+        failure(&tool("set_wall", json!({"wall": wall, "tilt": 1e300}))),
+        "tilt is a number of degrees, from -45 to 45."
+    );
+    assert_eq!(
+        failure(&tool(
+            "add_wall",
+            json!({"place": "front Ada", "tilt": "down"})
+        )),
+        "tilt is a number."
+    );
+    // A new wall may be tilted as it is added.
+    let tilted = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 1, "rows": 1, "tilt": -15}),
+    );
+    assert!(now(&tilted).ends_with("flat, tilted 15° up"), "{tilted}");
+    // A big wall, five times a standard slot, for a dashboard far away, stands two and a half times as far as a
+    // standard one, its text as large to her as a wall of twice a standard slot's at 1.8 m.
+    let big = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 2, "rows": 1, "scale": 5}),
+    );
+    assert!(
+        now(&big).starts_with("2 slots wide and 1 high, 6.7 by 2.3 m, its slots 302 by 180 cm"),
+        "{big}"
+    );
+    let big = big["structuredContent"]["wall"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listed = walls();
+    let position = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == big.as_str())
+        .unwrap()["position"]
+        .clone();
+    assert!(
+        (position[2].as_f64().unwrap() + 4.5).abs() < 0.05,
+        "{position}"
+    );
+    // Beyond five times, refused.
+    let result = tool("set_wall", json!({"wall": big, "scale": 6}));
+    assert_eq!(
+        failure(&result),
+        "A wall's slots are from half to five times a standard slot's size."
+    );
+}

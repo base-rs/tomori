@@ -1522,8 +1522,8 @@ mod tests {
 
     /// Set `TOMORI_WALL_HANDLES_PREVIEW` to a PNG path to save what this renders: a wall someone added, taken hold of
     /// with the grip, its handles around it, the knob the ray meets highlighted, and the hint of the controls above it;
-    /// then its right edge dragged out to a fourth column; then its knob drawn 20 cm towards the participant, bending it
-    /// halfway, its radius said above it, before either is let go.
+    /// then its right edge dragged out to a fourth column; then its knob taken and the hand moved down half the wall's
+    /// height, bending it halfway, its radius said above it, before either is let go.
     #[test]
     fn a_wall_taken_hold_of_shows_its_handles_and_hint_and_changes_as_they_are_dragged() {
         const WIDTH: u32 = 960;
@@ -1649,7 +1649,8 @@ mod tests {
                 )),
                 "{sent:?}"
             );
-            // The knob drawn 20 cm towards the participant, bending the wall halfway, as it was before the server answered.
+            // The knob taken and the hand moved down half the wall's height, bending the wall halfway, as it was before the
+            // server answered.
             let mut conversation = joined();
             show_editable_walls(&mut conversation, vec![wall.clone()], panels.clone());
             let mut step = Step::default();
@@ -1665,13 +1666,33 @@ mod tests {
                 &mut conversation,
                 &senses(point(Handle::Bend), 1.0),
             );
-            let drawn = arrival::HOME + frame.transform_vector3(Vec3::Z) * 0.2;
+            let half = tomori_scene::projection::editing::DEAD_ZONE
+                + tomori_scene::projection::editing::travel(&wall) / 2.0;
+            let drawn = arrival::HOME - Vec3::Y * half;
             let bent = capture(
                 &mut step,
                 &mut conversation,
                 &from(drawn, point(Handle::Bend), 1.0),
             );
             assert_ne!(bent, held);
+            capture(
+                &mut step,
+                &mut conversation,
+                &from(drawn, point(Handle::Bend), 0.0),
+            );
+            let sent = conversation.take_actions();
+            assert!(
+                sent.iter().any(|action| matches!(
+                    action,
+                    tomori_client::connection::Action::Send(
+                        tomori_protocol::ClientMessage::SetWall {
+                            shape: Some(tomori_protocol::WallShape::Arc { .. }),
+                            ..
+                        }
+                    )
+                )),
+                "{sent:?}"
+            );
             let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
             image::imageops::replace(&mut sheet, &held, 0, 0);
             image::imageops::replace(&mut sheet, &widened, 0, HEIGHT.into());
@@ -3573,6 +3594,345 @@ mod tests {
                     draw(&mut renderer, &device, &queue, &mut panels, &frame);
                 }
             }
+        });
+    }
+
+    /// An offscreen eye `WIDTH` by `HEIGHT` for the wall tests below: its texture and its view.
+    fn eye(
+        device: &wgpu::Device,
+        label: &str,
+        size: (u32, u32),
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        (texture, view)
+    }
+
+    /// The mean difference between `a` and `b`, as a proportion of full, within the rectangle from `from` to `to`, in
+    /// pixels.
+    fn difference(
+        a: &image::RgbaImage,
+        b: &image::RgbaImage,
+        from: (u32, u32),
+        to: (u32, u32),
+    ) -> f32 {
+        let mut total = 0.0;
+        let mut count = 0.0;
+        for x in from.0..to.0 {
+            for y in from.1..to.1 {
+                let (p, q) = (a.get_pixel(x, y).0, b.get_pixel(x, y).0);
+                total += (0..3)
+                    .map(|channel| (f32::from(p[channel]) - f32::from(q[channel])).abs())
+                    .sum::<f32>()
+                    / (3.0 * 255.0);
+                count += 1.0;
+            }
+        }
+        total / count
+    }
+
+    /// Set `TOMORI_WALL_TILT_PREVIEW` to a PNG path to save what this renders: a wall someone added above and ahead of
+    /// the participant, upright; the same wall tilted 30° down towards them, as the server sends it; taken hold of, its
+    /// handles around it and the hinge at the middle of its left edge highlighted under the ray; and its hinge dragged,
+    /// the hand moved down, tilting it towards them as it would be before it is let go, the tilt said above it.
+    #[test]
+    fn a_wall_above_is_drawn_tilted_down_towards_the_participant_and_tilts_as_its_hinge_is_dragged()
+    {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Panel, Place, Wall, WallKind};
+        use tomori_scene::projection::editing::{Handle, handle_point};
+        let middle = Vec3::new(0.0, 2.75, -2.2);
+        let upright = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), [0.0, 2.75, 0.0]),
+        );
+        let tilted = upright.clone().with_tilt(Some(30.0));
+        let panels: Vec<Panel> = ["Build", "Tests", "Coverage", "Release"]
+            .iter()
+            .enumerate()
+            .map(|(slot, title)| {
+                Panel::new(
+                    format!("panel-{slot}"),
+                    *title,
+                    format!("**{title}** is green.\n\n- checked\n- kept"),
+                    Place::Wall {
+                        wall: "wall-1".into(),
+                        slot: slot as u32,
+                    },
+                )
+            })
+            .collect();
+        let frame_of = |wall: &Wall| {
+            let frame = wall.frame();
+            Mat4::from_rotation_translation(
+                glam::Quat::from_array(frame.orientation),
+                Vec3::from_array(frame.position),
+            )
+        };
+        let hinge = handle_point(&upright, frame_of(&upright), Handle::Tilt, arrival::HOME).0;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let (texture, view) = eye(&device, "wall tilt test eye", (WIDTH, HEIGHT));
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let view_matrix = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let from = |hand: Vec3, aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(hand, aim - hand),
+                ..Default::default()
+            };
+            let senses = |aim: Vec3, grip: f32| from(arrival::HOME, aim, grip);
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[view_matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let away = senses(arrival::HOME + Vec3::new(2.0, -1.0, 0.0), 0.0);
+            // Upright, and tilted as the server sends it.
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![upright.clone()], panels.clone());
+            let shown_upright = capture(&mut Step::default(), &mut conversation, &away);
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![tilted.clone()], panels.clone());
+            let shown_tilted = capture(&mut Step::default(), &mut conversation, &away);
+            // Where the top row's first slot is drawn, in pixels, upright and tilted: the tilted one is drawn where it
+            // stands tilted, and not where it stood.
+            let pixel = |at: Vec3| {
+                let clip = view_matrix * at.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                assert!(x.abs() < 1.0 && y.abs() < 1.0, "{at} is in view");
+                (
+                    ((x + 1.0) / 2.0 * WIDTH as f32) as u32,
+                    ((1.0 - y) / 2.0 * HEIGHT as f32) as u32,
+                )
+            };
+            let around = |(x, y): (u32, u32)| ((x - 20, y - 20), (x + 20, y + 20));
+            // The wall as drawn, upright or tilted, in pixels: over it, the tilted one is drawn where it stands, square
+            // to the eyes, and the upright one foreshortened.
+            let (board_width, board_height) = upright.board().unwrap();
+            let corners: Vec<(u32, u32)> = [-1.0, 1.0]
+                .iter()
+                .flat_map(|x| [-1.0, 1.0].map(|y| (*x, y)))
+                .flat_map(|(x, y)| {
+                    let local = Vec3::new(x * board_width / 2.0, y * board_height / 2.0, 0.0);
+                    [&upright, &tilted].map(|wall| pixel(frame_of(wall).transform_point3(local)))
+                })
+                .collect();
+            let over = (
+                (
+                    corners.iter().map(|at| at.0).min().unwrap(),
+                    corners.iter().map(|at| at.1).min().unwrap(),
+                ),
+                (
+                    corners.iter().map(|at| at.0).max().unwrap(),
+                    corners.iter().map(|at| at.1).max().unwrap(),
+                ),
+            );
+            assert!(
+                difference(&shown_upright, &shown_tilted, over.0, over.1) > 0.01,
+                "the tilted wall is drawn where it stands"
+            );
+            // Tilted towards the eyes below it, its first slot is drawn taller than upright.
+            let height = |wall: &Wall| {
+                let frame = tomori_scene::projection::slot_frames(wall, frame_of(wall))[0];
+                let (_, slot_height) = wall.slot_size();
+                let half = Vec3::Y * slot_height / 2.0 / wall.scale();
+                pixel(frame.transform_point3(-half)).1 - pixel(frame.transform_point3(half)).1
+            };
+            let (square, foreshortened) = (height(&tilted), height(&upright));
+            assert!(square > foreshortened + 5, "{square} {foreshortened}");
+            // Taken hold of, its hinge pointed at, highlighted.
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![upright.clone()], panels.clone());
+            let mut step = Step::default();
+            let board = middle + Vec3::Y * 0.42;
+            capture(&mut step, &mut conversation, &senses(board, 1.0));
+            capture(&mut step, &mut conversation, &senses(board, 0.0));
+            let held = capture(&mut step, &mut conversation, &senses(hinge, 0.0));
+            assert!(
+                difference(
+                    &shown_upright,
+                    &held,
+                    around(pixel(hinge)).0,
+                    around(pixel(hinge)).1
+                ) > 0.02,
+                "the hinge is drawn"
+            );
+            // Its hinge dragged, the hand moved down 25 cm: the wall tilts towards the participant before it is let go.
+            capture(&mut step, &mut conversation, &senses(hinge, 1.0));
+            let dragged = capture(
+                &mut step,
+                &mut conversation,
+                &from(arrival::HOME - Vec3::Y * 0.25, hinge, 1.0),
+            );
+            assert!(
+                difference(&held, &dragged, over.0, over.1) > 0.01,
+                "the wall tilts as the hinge is dragged"
+            );
+            capture(
+                &mut step,
+                &mut conversation,
+                &from(arrival::HOME - Vec3::Y * 0.25, hinge, 0.0),
+            );
+            let sent = conversation.take_actions();
+            assert!(
+                sent.iter().any(|action| matches!(
+                    action,
+                    tomori_client::connection::Action::Send(tomori_protocol::ClientMessage::SetWall { tilt: Some(tilt), .. })
+                        if *tilt > 15.0
+                )),
+                "{sent:?}"
+            );
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 4);
+            for (row, image) in [&shown_upright, &shown_tilted, &held, &dragged]
+                .iter()
+                .enumerate()
+            {
+                image::imageops::replace(&mut sheet, *image, 0, (HEIGHT * row as u32).into());
+            }
+            crate::test_support::preview("TOMORI_WALL_TILT_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_BIG_WALL_PREVIEW` to a PNG path to save what this renders: a standard wall 3 m away, a wall five times
+    /// as large 15 m away, which looks the same, its text as large to the eye, and a standard wall 15 m away, too small
+    /// to read, each with the same panels, from home.
+    #[test]
+    fn a_big_wall_far_away_reads_as_a_standard_wall_does_near() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Panel, Place, Wall, WallKind};
+        // To the right of straight ahead, clear of the swarm and the pill.
+        let ahead = Vec3::new(1.0, 0.0, -1.0).normalize();
+        let wall_at = |distance: f32, scale: f32| {
+            // Its middle at eye height, so that it is seen square on.
+            let at = arrival::HOME + ahead * distance;
+            Wall::new(
+                "wall-1",
+                WallKind::Added,
+                tomori_protocol::Pose::upright_facing(at.to_array(), arrival::HOME.to_array()),
+            )
+            .with_scale(scale)
+        };
+        let panels: Vec<Panel> = ["Build", "Deploys", "Errors"]
+            .iter()
+            .enumerate()
+            .map(|(slot, title)| {
+                Panel::new(
+                    format!("panel-{slot}"),
+                    *title,
+                    format!("**{title}**: 12 today, 3 failing.\n\n- api: ok\n- web: slow"),
+                    Place::Wall {
+                        wall: "wall-1".into(),
+                        slot: slot as u32,
+                    },
+                )
+            })
+            .collect();
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let (texture, view) = eye(&device, "big wall test eye", (WIDTH, HEIGHT));
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 60.0);
+            let view_matrix =
+                lens * Mat4::look_at_rh(arrival::HOME, arrival::HOME + ahead, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            let mut capture = |wall: Wall| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, vec![wall], panels.clone());
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[view_matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let near = capture(wall_at(3.0, 1.0));
+            let big = capture(wall_at(15.0, tomori_protocol::wall::SCALES.1));
+            let small = capture(wall_at(15.0, 1.0));
+            // Over the wall, as the standard one near is seen: the big one far away is drawn alike, its text as large,
+            // while the standard one as far away is not.
+            let (width, height) = wall_at(3.0, 1.0).size();
+            let half =
+                |size: f32| (size / 2.0 / 3.0 / (1.0f32 / 2.0).tan() * HEIGHT as f32 / 2.0) as u32;
+            let (across, down) = (
+                half(width).min(WIDTH / 2 - 1),
+                half(height).min(HEIGHT / 2 - 1),
+            );
+            let from = (WIDTH / 2 - across, HEIGHT / 2 - down);
+            let to = (WIDTH / 2 + across, HEIGHT / 2 + down);
+            let alike = difference(&near, &big, from, to);
+            let unlike = difference(&near, &small, from, to);
+            assert!(alike < unlike / 3.0, "{alike} against {unlike}");
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            for (row, image) in [&near, &big, &small].iter().enumerate() {
+                image::imageops::replace(&mut sheet, *image, 0, (HEIGHT * row as u32).into());
+            }
+            crate::test_support::preview("TOMORI_BIG_WALL_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
 }

@@ -286,6 +286,7 @@ mod tests {
                 aspect: None,
                 shape: None,
                 pose: None,
+                tilt: None,
             },
             ClientMessage::CheckPanelItem {
                 panel: "panel-1".into(),
