@@ -11,6 +11,7 @@ mod audio;
 mod cards;
 mod channel;
 pub mod checklist;
+pub mod entourage;
 mod frame;
 mod keepalive;
 mod message;

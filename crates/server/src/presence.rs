@@ -989,12 +989,10 @@ pub(crate) fn destination(
     })
 }
 
-/// How far in front of someone the agent stands when it goes to them, in metres, and how far below their eyes: near
-/// enough to look at something together, and far enough not to crowd them.
-const BEFORE: (f32, f32) = (1.5, 0.2);
-
-/// Where the agent stands when it goes to someone whose head is at `head`: [`BEFORE`] in front of them, level, the way
-/// they face about the vertical, facing them. See `design/environments.md`.
+/// Where the agent stands when it goes to someone whose head is at `head`: `tomori_protocol::entourage::SUMMONED` in
+/// front of them, the way they face about the vertical, a little above their eyes, as a participant's summons stands
+/// it, with room for its wall beneath it however they sit or stand (`entourage::summoned`), facing them. See
+/// `design/environments.md`.
 pub(crate) fn before(head: &Pose) -> Pose {
     let ahead = forward(head);
     let (x, z) = match ahead[0].hypot(ahead[2]) {
@@ -1002,8 +1000,53 @@ pub(crate) fn before(head: &Pose) -> Pose {
         _ => (0.0, -1.0),
     };
     let [px, py, pz] = head.position;
-    let at = [px + x * BEFORE.0, py - BEFORE.1, pz + z * BEFORE.0];
-    Pose::at(at).facing_towards([px, at[1], pz])
+    let away = tomori_protocol::entourage::SUMMONED;
+    tomori_protocol::entourage::summoned(
+        [px + x * away, py, pz + z * away],
+        head.position,
+        tomori_protocol::entourage::FLOOR,
+    )
+}
+
+/// How far from where `tomori_protocol::entourage::summoned` would stand it a summons a client stood may be, in metres,
+/// and stand where the client stood it: as far as their eyes move between the presence the server last had and the
+/// client's own.
+const SUMMONED_WITHIN: f32 = 0.15;
+
+/// Where the agent a participant summoned to `at` stands, for everyone: where their client stood it, if that is within
+/// [`SUMMONED_WITHIN`] of where `tomori_protocol::entourage::summoned` stands it about their eyes, `eyes`, as the server
+/// last knew them, and otherwise there, so that a client from before it, which left it nearer or lower, sees it with
+/// room for its wall beneath it; or, where the server does not know their eyes, where they left it, no lower than
+/// `entourage::LOWEST_AGENT` above the floor. See `design/environments.md`.
+pub(crate) fn summoned(at: &Pose, eyes: Option<[f32; 3]>) -> Pose {
+    match eyes.filter(|eyes| eyes.iter().all(|value| value.is_finite())) {
+        Some(eyes) => {
+            let rule = tomori_protocol::entourage::summoned(
+                at.position,
+                eyes,
+                tomori_protocol::entourage::FLOOR,
+            );
+            let off = (0..3)
+                .map(|axis| (rule.position[axis] - at.position[axis]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            if off <= SUMMONED_WITHIN { *at } else { rule }
+        }
+        None => {
+            let [x, y, z] = at.position;
+            Pose {
+                position: [
+                    x,
+                    y.max(
+                        tomori_protocol::entourage::FLOOR
+                            + tomori_protocol::entourage::LOWEST_AGENT,
+                    ),
+                    z,
+                ],
+                ..*at
+            }
+        }
+    }
 }
 
 /// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, which way it faces, whether it is

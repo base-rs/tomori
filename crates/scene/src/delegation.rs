@@ -1288,23 +1288,17 @@ fn glide(from: Vec3, to: Vec3, dt: f32) -> Vec3 {
     if next.distance(to) < 1e-4 { to } else { next }
 }
 
-/// World-anchored polar arc around the viewer's recenter home (0, 0 in XZ).
-/// Sixteen angular columns, at least 18⅔ degrees apart, and twelve rows, the
-/// first two either side of the eyes at home, 85 cm apart, so that a sign above
-/// a worker never reaches the worker above it.
-/// All 192 remembered slots have distinct sightlines, not hidden radial layers.
-/// Early slots flank the coordinator; large workspaces require looking around
-/// and up. This is fixed scene-home geometry, never a head-locked overlay.
-/// [`crate::anchors::HomeArc`] stands the same arc about whoever watches.
+/// World-anchored polar arc around the viewer's recenter home (0, 0 in XZ), through the agent's default home: the
+/// default arc, [`crate::anchors::HomeArc`], about the eyes at home, through [`crate::anchors::Anchor::AGENT`], 2.3 m
+/// ahead: its first two rows of five columns to each side of the agent, from 55⅔° and 26° apart, as far apart along the
+/// arc as at 3.2 m, either side of the agent's height; and the rest on the arc 3.2 m from home, sixteen columns from 40°
+/// and 18⅔° apart, above the band, the three columns that do not fit on it from two rows up, each row 85 cm above the
+/// last, so that a sign above a worker never reaches the worker above it. All 192 remembered slots have distinct sightlines, not
+/// hidden radial layers. Early slots flank the coordinator; large workspaces require looking around and up. This is
+/// fixed scene-home geometry, never a head-locked overlay. [`crate::anchors::HomeArc`] stands the same arc about
+/// whoever watches.
 pub fn slot_position(slot: usize) -> Vec3 {
-    let (side, column, row) = slot_lane(slot);
-    let radius = crate::anchors::ARC_RADIUS;
-    let angle = slot_angle(column);
-    Vec3::new(
-        side * radius * angle.sin(),
-        slot_height(row),
-        -radius * angle.cos(),
-    )
+    crate::anchors::HomeArc::at(crate::anchors::Anchor::AGENT, crate::anchors::EYES, slot)
 }
 
 /// The side of `slot`'s column, -1 on the left and 1 on the right, its column, from the nearest the middle, and its
@@ -1316,20 +1310,11 @@ pub(crate) fn slot_lane(slot: usize) -> (f32, usize, usize) {
     (side, lane / 2, (slot / 32) * 2 + (slot % 8) / 4)
 }
 
-/// How far a column stands from straight ahead, in radians. Keep the entire coordinator cone clear, including the
-/// last columns: sixteen columns span the remaining 280 degrees, including the rear gap.
+/// How far a column stands from the agent, about whoever watches, on an arc [`crate::anchors::ARC_RADIUS`] from them or
+/// further, in radians. Keep the entire coordinator cone clear, including the last columns: sixteen columns span the
+/// remaining 280 degrees, including the rear gap.
 pub(crate) fn slot_angle(column: usize) -> f32 {
     (40.0 + column as f32 * (280.0 / 15.0)).to_radians()
-}
-
-/// How high a row stands above home's floor, with the eyes at home 1.6 m above it: the first two 0.45 m below and 0.4 m
-/// above the eyes, then one lower, then upwards, each 85 cm from the next, room for a sign of six rows of title between
-/// a worker and the worker above it. Before November 2026 they stood 55 cm apart, from 1.35 m, and a long sign, or a
-/// completed cube above it, overlapped. See `design/interaction.md`.
-pub(crate) fn slot_height(row: usize) -> f32 {
-    [
-        1.15, 2.00, 0.30, 2.85, 3.70, 4.55, 5.40, 6.25, 7.10, 7.95, 8.80, 9.65,
-    ][row]
 }
 
 fn sample(samples: &[Vec3; MAX_COORDINATOR_SAMPLES], count: usize, id: &str, i: usize) -> Vec3 {
@@ -2509,9 +2494,10 @@ mod tests {
         let points: Vec<_> = (0..SLOT_COUNT).map(slot_position).collect();
         for (i, p) in points.iter().enumerate() {
             assert!(p.is_finite());
-            assert!((0.2..9.7).contains(&p.y));
+            assert!((0.2..12.5).contains(&p.y), "{i}: {p}");
+            // On the band through the agent's default home, 2.3 m from home, or the arc 3.2 m from home above it.
             let radius = p.x.hypot(p.z);
-            assert!((radius - 3.2).abs() < 0.0001);
+            assert!((radius - 2.3).abs() < 0.0001 || (radius - 3.2).abs() < 0.0001);
             assert!(p.to_array().iter().all(|v| v.abs() <= 100.0));
             for q in points.iter().skip(i + 1) {
                 assert!(p.distance(*q) > 0.54, "{p:?} {q:?}");
@@ -2544,7 +2530,8 @@ mod tests {
                 for (i, station) in stations.iter().enumerate() {
                     let p = Vec3::from_array(station.position);
                     assert_eq!(p, slot_position(i));
-                    assert!((p.x.hypot(p.z) - 3.2).abs() < 0.0001);
+                    // On the arc through the agent, as far from home as it is, about its height.
+                    assert!((p.x.hypot(p.z) - (-CENTER.z)).abs() < 0.0001);
                     assert!(p.x.abs() > 1.6 && p.z < 0.0);
                     assert!((1.1..2.1).contains(&p.y));
                     for other in stations.iter().skip(i + 1) {
@@ -2607,11 +2594,12 @@ mod tests {
                 assert!(right.x > previous.x && right.z > previous.z);
             }
         }
+        // Sixteen workers, all on the band through the agent, 2.3 m from home, which holds eighteen.
         assert!(
             scene
                 .workers
                 .values()
-                .all(|worker| { (worker.anchor.x.hypot(worker.anchor.z) - 3.2).abs() < 0.0001 })
+                .all(|worker| { (worker.anchor.x.hypot(worker.anchor.z) - 2.3).abs() < 0.0001 })
         );
         // Rotation changes the view coordinates, not Scene's world positions.
         let world = Vec3::from_array(original["w-00"]);
@@ -3580,7 +3568,7 @@ mod tests {
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(
-                scene.workers[id].anchor,
+                scene.workers[id].place,
                 crate::anchors::HomeArc::at(away, crate::anchors::EYES, scene.slots[id])
             );
         }

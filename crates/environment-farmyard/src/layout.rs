@@ -3,8 +3,8 @@
 
 //! Where everything in the farmyard is, in the yard's own coordinates, metres, with the gate on the +Z side, the coop
 //! towards −Z, and the ground at 0: the fence and its gate, the coop and its ramp, the water trough, the feed and the
-//! hay; and where participants arrive, [`ARRIVAL`], where the agent's home is, [`AGENT_HOME`], and the Tomori wall's,
-//! [`TOMORI_WALL`]. The scenery draws them here, the participants land where [`walkable`] says, and the flock keeps
+//! hay; and where participants arrive, [`ARRIVAL`], and where the agent's home is, [`AGENT_HOME`], with the Tomori
+//! wall's home beneath it, as Tomori stands it by default. The scenery draws them here, the participants land where [`walkable`] says, and the flock keeps
 //! clear of them, so that all three agree; Tomori carries them all into a space's coordinates, where the arrival is
 //! home, at the origin facing −Z (see `design/environments.md`).
 use glam::{Vec2, Vec3};
@@ -107,17 +107,16 @@ pub const NOTICEBOARD_HEIGHT: f32 = 2.05;
 pub const HAY: Footprint = Footprint::new([3.0, -10.7], [4.6, -9.5]);
 
 /// Where participants arrive in the yard, home: inside the gate, on the earth, facing [`ARRIVAL_FACING`], so that they
-/// see at once the coop, the agent beside it and the Tomori wall. Travel from there is free.
+/// see at once the coop, the agent beside it and the Tomori wall beneath it. Travel from there is free.
 pub const ARRIVAL: Vec3 = Vec3::new(0.6, 0.0, -2.4);
 /// What participants face as they arrive: the coop's front corner, beside its ramp.
 pub const ARRIVAL_FACING: Vec3 = Vec3::new(-1.6, 0.0, -7.0);
 /// The agent's home: beside the coop's front corner, clear of the coop and its ramp, at the height of its eaves, about
 /// 3.6 m from the eyes where participants arrive, facing them. It appears here as a space opens, and stays here until a
-/// participant summons it; its workers stand about it.
+/// participant summons it; its workers stand about it, and the Tomori wall beneath it, as Tomori stands the wall
+/// beneath the agent's home by default, the middle of its row 0.88 m below the swarm's middle, about 3.7 m from those
+/// eyes, so that it reads from the arrival.
 pub const AGENT_HOME: Vec3 = Vec3::new(-1.0, 1.5, -5.6);
-/// The Tomori wall's home, the middle of its row: ahead and to the right of where participants arrive, 2.4 m from
-/// them, below their eyes, facing them, so that it reads from the arrival and hides neither the agent nor the coop.
-pub const TOMORI_WALL: Vec3 = Vec3::new(1.4, 0.9, -4.67);
 
 /// The notice board's footprint on the ground, its posts and its back, which nobody lands on and nothing walks through.
 pub fn noticeboard() -> Footprint {
@@ -229,24 +228,37 @@ mod tests {
     }
 
     #[test]
-    fn the_tomori_wall_reads_and_the_agent_is_seen_from_where_participants_arrive() {
-        use tomori_environment::sightlines::{Solid, Spot, readable, seen};
+    fn the_tomori_wall_beneath_the_agent_reads_and_the_agent_is_seen_from_where_participants_arrive()
+     {
+        use tomori_environment::sightlines::{READING, Solid, Spot, readable, seen};
+        use tomori_protocol::{Pose, entourage};
         let arrival = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array());
         let eyes = arrival.eyes();
         let solids: Vec<Solid> = solids()
             .into_iter()
             .map(|(low, high)| Solid::new(low, high))
             .collect();
-        // Each faces the eyes where participants arrive, as the server registers them.
-        let wall = Spot::facing(TOMORI_WALL.to_array(), eyes);
-        let agent = Spot::facing(AGENT_HOME.to_array(), eyes);
-        assert_eq!(readable(&arrival, &wall, &solids), Ok(()));
-        assert_eq!(seen(&arrival, &agent, &solids), Ok(()));
+        // The agent faces the eyes where participants arrive, as the server registers it, and the Tomori wall stands
+        // beneath it, as the server stands it, on the ground where they arrive.
+        let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(eyes);
+        let wall = entourage::wall_beneath(&agent, ARRIVAL.y);
+        assert_eq!(
+            readable(&arrival, &Spot::new(wall.position, wall.yaw()), &solids),
+            Ok(())
+        );
+        assert_eq!(
+            seen(&arrival, &Spot::new(agent.position, agent.yaw()), &solids),
+            Ok(())
+        );
+        // Within reading distance, though further than the default's 2.3 m, below the swarm with the gap, and above
+        // the ground.
+        let far = Vec3::from_array(eyes).distance(Vec3::from_array(wall.position));
+        assert!(far > 3.5 && far < READING, "{far}");
+        assert!((AGENT_HOME.y - wall.position[1] - entourage::BENEATH).abs() < 1e-5);
+        assert!(wall.position[1] - entourage::ROW_HALF >= ARRIVAL.y + entourage::CLEARANCE);
         // Inside the fence, and the agent by the coop, but not inside it nor over its ramp.
         let inside = FENCE.grown(-0.3);
-        for at in [AGENT_HOME, TOMORI_WALL] {
-            assert!(inside.contains(Vec2::new(at.x, at.z)), "{at}");
-        }
+        assert!(inside.contains(Vec2::new(AGENT_HOME.x, AGENT_HOME.z)));
         let near = Vec2::new(AGENT_HOME.x, AGENT_HOME.z);
         assert!(!COOP.grown(0.6).contains(near) && !ramp().grown(0.6).contains(near));
         assert!(COOP.grown(2.5).contains(near), "by the coop");

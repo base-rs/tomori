@@ -4333,8 +4333,12 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                // Its entourage gathers about whoever summoned it.
+                // Its entourage gathers about whoever summoned it, the agent a little above their eyes, with room for
+                // its wall beneath it, as their client stands it.
                 let summoner = at.and_then(|_| state.eyes(participant));
+                let at = at.map(|at| {
+                    crate::stage::valid(&crate::presence::summoned(&at, summoner)).unwrap_or(at)
+                });
                 let record = state.space(&space).expect("in it");
                 let travel = at.and_then(|at| self.travel_spot(record, &at, summoner));
                 if state.summon(&space, at, summoner, travel) {

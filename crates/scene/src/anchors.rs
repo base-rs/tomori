@@ -6,13 +6,13 @@
 //! participant summoned the agent, and the placement of workers about the workers anchor, which an environment's
 //! client crate may register beside its scenery. Every anchor faces along its +Z, the way it looks. Without them, the
 //! layout is exactly the default: home at the origin facing −Z, the swarm at [`crate::swarm::CENTER`], facing home, and
-//! the workers on [`slot_position`]'s arc about home. See `design/environments.md`.
+//! the workers on [`crate::delegation::slot_position`]'s arc about home. See `design/environments.md`.
 use std::sync::Arc;
 
 use glam::{Quat, Vec3};
 use tomori_protocol::Pose;
 
-use crate::delegation::{State, slot_position};
+use crate::delegation::State;
 
 /// How far from the space's middle, on each axis, an anchor may stand, in metres, as the server bounds it.
 pub const REACH: f32 = 20.0;
@@ -222,29 +222,45 @@ pub type Placement = Arc<dyn WorkerPlacement>;
 /// them to be.
 pub const EYES: Vec3 = Vec3::new(0.0, 1.6, 0.0);
 
-/// How far from whoever watches the workers stand at least, horizontally, in metres: the default arc's radius.
+/// How far from whoever watches the arc stands at which its columns stand at their own angles, 40° from the agent and
+/// 18⅔° apart, and its rows 85 cm apart, in metres; nearer, its columns stand as far apart along the arc as they do here,
+/// so that their signs keep clear of one another and of the swarm, and further, its columns stand at those angles, its
+/// rows spread in proportion, as its signs are drawn larger there.
 pub const ARC_RADIUS: f32 = 3.2;
 
-/// The row of the default arc that stands lowest above the floor.
-const LOWEST_ROW: usize = 2;
+/// How near whoever watches the arc stands at least, horizontally, in metres: as near as the agent's default home, and
+/// a summoned agent, stand (`tomori_protocol::entourage::SUMMONED`), so that its first columns stand in front of them.
+pub const NEAREST_ARC: f32 = tomori_protocol::entourage::SUMMONED;
 
-/// The default placement: [`slot_position`]'s arc, about whoever watches, the `audience`, with the arrangement's middle,
-/// the agent, straight ahead of them in the middle of its gap: its columns from 40° either side of the way the
-/// arrangement's middle stands from their eyes, alternately left and right, two rows to each column pair, at least
-/// [`ARC_RADIUS`] from them, or as far as the middle stands, and its rows' heights about their eyes as the default's
-/// are about the eyes at home, spread in proportion where it stands further than [`ARC_RADIUS`], as its signs are
-/// drawn larger there. So the workers stand about the agent, its gap kept clear for it and its wall, as they
-/// stood before environments placed the agent, whoever the agent faces turning their head left and right to see them,
-/// at home and summoned alike; and at [`Anchor::AGENT`], watched from [`EYES`], exactly where they always have.
+/// How far below the agent's middle the arc's first row stands, and how far apart its rows stand, in metres, at
+/// [`ARC_RADIUS`] or nearer: the first row a little below the agent's middle, the second above it, so that the agent
+/// stands within the band they make, then each row above the last, every one above the Tomori wall beneath the agent.
+pub const ROW_BELOW: f32 = 0.25;
+pub const ROW_APART: f32 = 0.85;
+
+/// The lowest any worker stands above the floor, in metres.
+const LOWEST: f32 = 0.3;
+
+/// The default placement: one curved band about whoever watches, the `audience`, on which the arrangement's middle, the
+/// agent, itself stands, in the middle of its gap: its radius is the horizontal distance between them, but at least
+/// [`NEAREST_ARC`], and its workers stand along it to either side of the agent, alternately left and right, two rows to
+/// each pair of columns, from 40° of the agent's bearing from their eyes, 18⅔° apart, or as far apart along the arc
+/// where it stands nearer than [`ARC_RADIUS`], at about the agent's height: the first row [`ROW_BELOW`] below its
+/// middle, the rest [`ROW_APART`] above one another, spread in proportion where it stands further than [`ARC_RADIUS`],
+/// as its signs are drawn larger there, so that the Tomori wall stands beneath the band. Nearer than [`ARC_RADIUS`], the
+/// band holds the first two rows of the columns that fit before where the last stands at [`ARC_RADIUS`], five at the
+/// default home's 2.3 m, eighteen workers; the rest stand on the arc [`ARC_RADIUS`] from whoever watches, at their
+/// columns' own angles, above and behind the band, the columns that do not fit from two rows up, so that as many
+/// workers as there are look around and up. So the
+/// workers stand about the agent, all about as far from whoever watches as it is, facing them, nothing behind it, as
+/// they stood before environments placed the agent, at home and summoned alike; and at [`Anchor::AGENT`], watched from
+/// [`EYES`], where [`crate::delegation::slot_position`] puts them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HomeArc;
 
 impl HomeArc {
-    /// Where the default arc stands `slot` about whoever's eyes are at `audience`, about `origin`.
+    /// Where the default arc stands `slot` about whoever's eyes are at `audience`, through `origin`.
     pub fn at(origin: Anchor, audience: Vec3, slot: usize) -> Vec3 {
-        if origin == Anchor::AGENT && audience == EYES {
-            return slot_position(slot);
-        }
         let (side, column, row) = crate::delegation::slot_lane(slot);
         let across = Vec3::new(
             origin.position.x - audience.x,
@@ -259,18 +275,37 @@ impl HomeArc {
                 .unwrap_or(Vec3::NEG_Z)
         });
         let right = Vec3::new(-ahead.z, 0.0, ahead.x);
-        let angle = crate::delegation::slot_angle(column);
-        let radius = across.length().max(ARC_RADIUS);
+        let radius = across.length().max(NEAREST_ARC);
+        // Nearer than the arc's own radius, its columns stand as far apart along it as there, as many as fit before the
+        // last column there; their rows above the first two, and the rest of the columns, two rows up, stand on the
+        // arc's own radius, at their own angles, above and behind the band.
+        let widen = (ARC_RADIUS / radius).max(1.0);
+        let last = crate::delegation::slot_angle(COLUMNS - 1);
+        let fit = (0..COLUMNS)
+            .take_while(|column| crate::delegation::slot_angle(*column) * widen <= last + 1e-4)
+            .count();
+        let (radius, angle, level) = if fit < COLUMNS && (column >= fit || row >= 2) {
+            let lift = if column >= fit { 2 } else { 0 };
+            (
+                radius.max(ARC_RADIUS),
+                crate::delegation::slot_angle(column),
+                row + lift,
+            )
+        } else {
+            (radius, crate::delegation::slot_angle(column) * widen, row)
+        };
         let direction = ahead * angle.cos() + right * (side * angle.sin());
-        // Wider than the default's, its rows spread in proportion, as its signs are drawn larger, so that no sign reaches
-        // the worker above it; but none stands nearer the floor below their eyes than the lowest row does.
-        let spread = radius / ARC_RADIUS;
-        let floor = audience.y - EYES.y;
-        let height = (crate::delegation::slot_height(row) - EYES.y) * spread;
-        let y = (audience.y + height).max(floor + crate::delegation::slot_height(LOWEST_ROW));
+        // Further than the arc's own radius, its rows spread in proportion, as its signs are drawn larger, so that no
+        // sign reaches the worker above it.
+        let spread = (radius / ARC_RADIUS).max(1.0);
+        let y = (origin.position.y + (level as f32 * ROW_APART - ROW_BELOW) * spread)
+            .max(tomori_protocol::entourage::FLOOR + LOWEST);
         Vec3::new(audience.x, y, audience.z) + direction * radius
     }
 }
+
+/// How many columns the arc has on each side of the agent.
+const COLUMNS: usize = 8;
 
 impl WorkerPlacement for HomeArc {
     fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
@@ -348,6 +383,7 @@ impl std::fmt::Debug for Arrangement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delegation::slot_position;
 
     fn pose(position: [f32; 3], orientation: [f32; 4]) -> Pose {
         Pose {
@@ -437,11 +473,12 @@ mod tests {
         };
         let first = HomeArc::at(overhead, EYES, 0);
         assert!(
-            first.x < -2.0 && (Vec3::new(first.x, 0.0, first.z).length() - ARC_RADIUS).abs() < 1e-4
+            first.x < -1.0
+                && (Vec3::new(first.x, 0.0, first.z).length() - NEAREST_ARC).abs() < 1e-4
         );
-        // With the arrangement's middle 6 m further on, the arc about the eyes at home widens to stand as far as it does,
-        // each worker at its slot's bearing, its rows spread about their eyes in proportion, as its signs are drawn
-        // larger, the lowest never nearer the floor than the default's lowest row.
+        // With the arrangement's middle 6 m further on, the arc about the eyes at home widens to pass through it, each
+        // worker at its column's own angle from it, its rows about its height spread in proportion, as its signs are
+        // drawn larger.
         let further = Anchor {
             position: crate::swarm::CENTER + Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
@@ -449,15 +486,40 @@ mod tests {
         let (moved, panicked) = place(further, None, &worker);
         assert!(!panicked);
         assert!((Vec3::new(moved.x, 0.0, moved.z).length() - 8.3).abs() < 1e-4);
+        let (_, column, _) = crate::delegation::slot_lane(3);
         assert!(
-            (moved.x.atan2(-moved.z) - slot_position(3).x.atan2(-slot_position(3).z)).abs() < 1e-5
+            (moved.x.atan2(-moved.z) - crate::delegation::slot_angle(column)).abs() < 1e-5,
+            "{moved}"
         );
         let spread = 8.3 / ARC_RADIUS;
-        assert!((moved.y - (EYES.y + (slot_position(3).y - EYES.y) * spread)).abs() < 1e-4);
+        assert!((moved.y - (further.position.y - ROW_BELOW * spread)).abs() < 1e-4);
         let above = HomeArc::at(further, EYES, 4);
-        assert!((above.y - (EYES.y + (slot_position(4).y - EYES.y) * spread)).abs() < 1e-4);
-        let lowest = HomeArc::at(further, EYES, 32);
-        assert!((lowest.y - slot_position(32).y).abs() < 1e-5, "{lowest}");
+        assert!((above.y - (further.position.y + (ROW_APART - ROW_BELOW) * spread)).abs() < 1e-4);
+        // Nearer than the arc's own radius, its columns stand as far apart along it as there: at the default home, from
+        // 55⅔°, those past the last there in rows above.
+        let near = |slot: usize| {
+            let at = slot_position(slot);
+            at.x.atan2(-at.z).abs().to_degrees()
+        };
+        assert!((near(0) - 40.0 * ARC_RADIUS / 2.3).abs() < 1e-3);
+        assert!((near(2) - near(0) - 280.0 / 15.0 * ARC_RADIUS / 2.3).abs() < 1e-3);
+        // Its column 5, past 170⅔° there, and its third row, stand on the arc 3.2 m from home, at their own angles, two
+        // rows up, above and behind the band.
+        assert_eq!(crate::delegation::slot_lane(18), (-1.0, 5, 0));
+        let outer = slot_position(18);
+        assert!((Vec3::new(outer.x, 0.0, outer.z).length() - ARC_RADIUS).abs() < 1e-4);
+        assert!((near(18) - crate::delegation::slot_angle(5).to_degrees()).abs() < 1e-3);
+        assert!((outer.y - (slot_position(0).y + 2.0 * ROW_APART)).abs() < 1e-4);
+        assert_eq!(crate::delegation::slot_lane(32), (-1.0, 0, 2));
+        let third = slot_position(32);
+        assert!((Vec3::new(third.x, 0.0, third.z).length() - ARC_RADIUS).abs() < 1e-4);
+        assert!((third.y - (slot_position(0).y + 2.0 * ROW_APART)).abs() < 1e-4);
+        // A middle low by the floor keeps every worker above it.
+        let low = Anchor {
+            position: Vec3::new(0.0, 0.2, -3.0),
+            orientation: Quat::IDENTITY,
+        };
+        assert!((HomeArc::at(low, EYES, 0).y - 0.3).abs() < 1e-5);
         let fixed: Placement = Arc::new(Fixed(Vec3::new(1.0, 1.0, 1.0)));
         let others = [Placed::new("ses_0", 0, State::Running, Vec3::ZERO)];
         let mut placing = Placing::new("ses_1", 3);
@@ -514,9 +576,9 @@ mod tests {
         assert!(close(ahead, Vec3::new(1.3, 1.4, 0.0)), "{ahead}");
         for slot in 0..8 {
             let at = HomeArc::at(side, EYES, slot);
-            // On a circle of 3.2 m about home, as the default arc is about home.
+            // On the circle about home through the arrangement's middle, 2.3 m from home, as the default arc is.
             assert!(
-                (Vec3::new(at.x, 0.0, at.z).length() - 3.2).abs() < 1e-3,
+                (Vec3::new(at.x, 0.0, at.z).length() - 2.3).abs() < 1e-3,
                 "{slot}: {at}"
             );
         }

@@ -205,28 +205,23 @@ pub struct Frame<'a> {
 /// shorter tug lets it go back, as before. See `design/environments.md`.
 pub const SUMMON_HOLD: f32 = 0.5;
 
-/// How near, horizontally, the agent a participant summons stands to their head at least, in metres, and how far below
-/// and above their eyes at most: near enough to look at something together, and never in their face.
-pub const SUMMON_NEAREST: f32 = 1.2;
-const SUMMON_BELOW: f32 = 1.0;
-const SUMMON_ABOVE: f32 = 0.6;
+/// How near, horizontally, the agent a participant summons stands to their head at least, in metres: near enough to
+/// look at something together, never in their face, and far enough that the Tomori wall beneath it is read and seen
+/// below the swarm (`tomori_protocol::entourage::SUMMONED`).
+pub const SUMMON_NEAREST: f32 = tomori_protocol::entourage::SUMMONED;
 
 /// Where the agent stands when a participant whose head is at `head` lets it go at `at`, having drawn it there with
-/// the trigger: there, but at least [`SUMMON_NEAREST`] from their head horizontally, and within reach of their eyes'
-/// height, facing them. See `design/environments.md`.
+/// the trigger: the way `at` lies from them, at least [`SUMMON_NEAREST`] from their head horizontally, a little above
+/// their eyes, however they sit or stand, with room for the Tomori wall beneath it above the floor, facing them, as
+/// `tomori_protocol::entourage::summoned` stands it, which the server keeps. Without a head, where it was let go, no
+/// lower than that room needs. See `design/environments.md`.
 pub fn summoned_at(at: Vec3, head: Option<Vec3>) -> tomori_protocol::Pose {
+    use tomori_protocol::entourage;
     let Some(head) = head.filter(|head| head.is_finite()) else {
-        return tomori_protocol::Pose::at(at.to_array());
+        let lowest = entourage::FLOOR + entourage::LOWEST_AGENT;
+        return tomori_protocol::Pose::at([at.x, at.y.max(lowest), at.z]);
     };
-    let across = Vec3::new(at.x - head.x, 0.0, at.z - head.z);
-    let away = across.try_normalize().unwrap_or(Vec3::NEG_Z);
-    let level = head + away * across.length().max(SUMMON_NEAREST);
-    let spot = Vec3::new(
-        level.x,
-        at.y.clamp(head.y - SUMMON_BELOW, head.y + SUMMON_ABOVE),
-        level.z,
-    );
-    tomori_protocol::Pose::at(spot.to_array()).facing_towards(head.to_array())
+    entourage::summoned(at.to_array(), head.to_array(), entourage::FLOOR)
 }
 
 /// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there,
@@ -5198,7 +5193,8 @@ mod tests {
                     < 1e-4,
                 "{spot_at}"
             );
-            assert!((spot_at.y - at.y).abs() < 1e-5);
+            // A little above their eyes, wherever it was drawn, with room for its wall beneath it.
+            assert!((spot_at.y - (head.y + tomori_protocol::entourage::RISE)).abs() < 1e-5);
             let towards = (head - spot_at).normalize();
             let ahead = glam::Quat::from_array(spot.orientation) * Vec3::Z;
             assert!(ahead.dot(Vec3::new(towards.x, 0.0, towards.z).normalize()) > 0.999);
@@ -5343,14 +5339,53 @@ mod tests {
 
     #[test]
     fn a_summons_without_a_head_stands_where_it_was_let_go() {
-        let at = Vec3::new(0.3, 1.2, -0.4);
+        use tomori_protocol::entourage::{LOWEST_AGENT, RISE};
+        let at = Vec3::new(0.3, 1.6, -0.4);
         assert_eq!(
             summoned_at(at, None),
             tomori_protocol::Pose::at(at.to_array())
         );
-        // Let go straight above the head, it stands ahead of them.
+        // Let go low, it stands no lower than the wall beneath it needs.
+        let low = summoned_at(Vec3::new(0.3, 0.5, -0.4), None);
+        assert_eq!(low.position, [0.3, LOWEST_AGENT, -0.4]);
+        // Let go straight above the head, it stands ahead of them, a little above their eyes.
         let above = summoned_at(Vec3::new(0.0, 2.5, 0.0), Some(Vec3::new(0.0, 1.6, 0.0)));
-        assert_eq!(above.position, [0.0, 2.2, -SUMMON_NEAREST]);
+        assert_eq!(above.position, [0.0, 1.6 + RISE, -SUMMON_NEAREST]);
+    }
+
+    #[test]
+    fn a_summons_stands_the_agent_above_the_eyes_with_room_for_its_wall_beneath_however_they_sit_or_stand()
+     {
+        use tomori_protocol::entourage::{self, LOWEST_AGENT, RISE};
+        // From someone seated, their eyes 1 m up, to someone tall standing, 1.8 m, drawing it down by their knees.
+        for tenth in 10..=18 {
+            let head = Vec3::new(0.2, tenth as f32 / 10.0, 0.5);
+            let spot = summoned_at(head + Vec3::new(0.4, -0.9, -0.6), Some(head));
+            let at = Vec3::from_array(spot.position);
+            assert!(
+                (at.y - (head.y + RISE).max(LOWEST_AGENT)).abs() < 1e-5,
+                "{at}"
+            );
+            assert!(Vec3::new(at.x - head.x, 0.0, at.z - head.z).length() >= SUMMON_NEAREST - 1e-4);
+            // Its wall beneath it stands clear of the floor and is seen beneath the swarm from their eyes.
+            let wall = entourage::wall_beneath(&spot, entourage::FLOOR);
+            assert!(wall.position[1] - entourage::ROW_HALF >= entourage::CLEARANCE);
+            let tomori = tomori_protocol::Wall::new(
+                tomori_protocol::TOMORI_WALL,
+                tomori_protocol::WallKind::Tomori,
+                tomori_protocol::Pose::upright_facing(
+                    wall.position,
+                    [head.x, wall.position[1], head.z],
+                ),
+            )
+            .with_shape(tomori_protocol::WallShape::Arc { radius: 2.3 })
+            .with_grid(tomori_protocol::wall::ARC_GRID)
+            .with_scale(tomori_protocol::wall::ARC_SCALE);
+            assert!(
+                entourage::seen_beneath(head.to_array(), &spot, &tomori),
+                "{head}"
+            );
+        }
     }
 
     #[test]
