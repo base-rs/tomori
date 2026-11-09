@@ -15,7 +15,8 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tomori_protocol::{
-    CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, Wall, WallKind, wall as layout,
+    CODE_LINES, Code, Panel, Place, Pose, Projection, TOMORI_WALL, TokenKind, Wall, WallKind,
+    wall as layout,
 };
 
 use crate::{
@@ -1244,6 +1245,25 @@ fn agrees(place: &Place, target: &Target) -> bool {
     }
 }
 
+/// `walls`, the Tomori wall standing where it is drawn while it travels, `travelling`.
+fn travelled(mut walls: Vec<Wall>, travelling: Option<(Pose, f32)>) -> Vec<Wall> {
+    if let Some((pose, _)) = travelling {
+        for wall in walls.iter_mut().filter(|wall| wall.id == TOMORI_WALL) {
+            wall.pose = pose;
+        }
+    }
+    walls
+}
+
+/// Of `walls`, those a panel can be put on and taken hold of: not the Tomori wall while it is `travelling`.
+fn pickable<'a>(walls: &[(&'a Wall, Mat4)], travelling: bool) -> Vec<(&'a Wall, Mat4)> {
+    walls
+        .iter()
+        .filter(|(wall, _)| !(travelling && wall.id == TOMORI_WALL))
+        .copied()
+        .collect()
+}
+
 /// Where a wall added by a participant whose head is at `head` stands: [`WALL_DISTANCE`] ahead of them, level, a
 /// little below their eyes, upright and facing them.
 pub fn added_wall(head: Pose) -> Pose {
@@ -1366,6 +1386,9 @@ pub struct Projector {
     limits: HashMap<String, usize>,
     /// The wall taken hold of, its handles, and a wall carried.
     editor: editing::Editor,
+    /// The Tomori wall travelling with the agent, and how far folded it is this frame, from 0, unfolded, to 1.
+    travel: travel::Travel,
+    fold: f32,
 }
 
 /// A code panel's code laid out, at each width its faces have had, and the body and code it was laid out from.
@@ -1397,6 +1420,11 @@ impl Projector {
             return Output::default();
         };
         self.lay_out(projection);
+        // The Tomori wall travelling with the agent folds, travels and unfolds; meanwhile nothing is put on it by hand,
+        // nor is it taken hold of, and a wall the editor held lets go of it, as of a wall no longer shown. See
+        // `design/projection.md`.
+        let travelling = self.travel.follow(projection, input.now);
+        self.fold = travelling.map_or(0.0, |(_, fold)| fold);
         if let Some((panel, since)) = &self.thrown
             && (projection.panel(panel).is_none()
                 || input.now.saturating_duration_since(*since) >= PENDING)
@@ -1418,12 +1446,13 @@ impl Projector {
             self.held = None;
         }
         let viewer = input.viewer.unwrap_or(HOME);
-        // The walls as drawn: one being changed as it is being changed.
-        let shown_walls = self.editor.walls(projection);
+        // The walls as drawn: one being changed as it is being changed, and the Tomori wall where it travels.
+        let shown_walls = travelled(self.editor.walls(projection), travelling);
         let walls: Vec<(&Wall, Mat4)> = shown_walls
             .iter()
             .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
             .collect();
+        let pickable = pickable(&walls, travelling.is_some());
         let mut output = Output::default();
         // The panel carried follows the ray, facing the viewer, as far along it and as turned as the right stick puts it.
         if let Some(held) = &mut self.held
@@ -1447,8 +1476,8 @@ impl Projector {
             input
                 .ray
                 .filter(|_| input.active && input.pointing)
-                .and_then(|ray| aim(&walls, &ray))
-                .or_else(|| snap(&walls, held.model.w_axis.truncate()))
+                .and_then(|ray| aim(&pickable, &ray))
+                .or_else(|| snap(&pickable, held.model.w_axis.truncate()))
         });
         // Let go, or taken by something else, it goes into that slot, or floats where it is, as it is turned.
         if (released || !input.active)
@@ -1502,6 +1531,11 @@ impl Projector {
                 standing
                     .iter()
                     .filter(|(panel, ..)| Some(panel.id.as_str()) != carried.as_deref())
+                    // Nothing on the Tomori wall is pointed at while it travels.
+                    .filter(|(panel, ..)| {
+                        travelling.is_none()
+                            || !matches!(&panel.place, Place::Wall { wall, .. } if wall == TOMORI_WALL)
+                    })
                     .filter_map(|(panel, model, fit)| {
                         hit(*model, self.size(panel, *fit), &ray)
                             .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
@@ -1541,12 +1575,12 @@ impl Projector {
                 now: input.now,
                 dt: input.dt,
             },
-            &walls,
+            &pickable,
         );
         output.wall = edited.change;
         output.wall_ticked = edited.ticked;
         // What the editor changed this frame is drawn this frame, the panels on a wall with it.
-        let redrawn = self.editor.walls(projection);
+        let redrawn = travelled(self.editor.walls(projection), travelling);
         let walls: Vec<(&Wall, Mat4)> = redrawn
             .iter()
             .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
@@ -1722,19 +1756,24 @@ impl Projector {
                     None if wall.group.is_some() => boards::sheets(wall, *frame, &drawn),
                     None => vec![Sheet {
                         canvas: Some(wall_face(wall)),
-                        model: Some(*frame * Mat4::from_scale(Vec3::splat(wall.scale()))),
+                        model: Some(
+                            *frame
+                                * Mat4::from_scale(Vec3::splat(wall.scale() * self.folded(wall))),
+                        ),
                     }],
                     Some(_) => {
                         let (_, height) = wall.size();
-                        let mut boards: Vec<Sheet> = slot_frames(wall, *frame)
+                        let mut boards: Vec<Sheet> = self
+                            .frames(wall, *frame)
                             .into_iter()
                             .map(|model| Sheet {
                                 canvas: Some(slot_board(wall_border(wall), Cells::of(wall))),
                                 model: Some(model),
                             })
                             .collect();
-                        // Below its rows, since the status pill stands just above the Tomori wall from home.
-                        if boards::labelled(wall, &drawn) {
+                        // Below its rows, since the status pill stands just above the Tomori wall from home; not
+                        // while it is folded.
+                        if boards::labelled(wall, &drawn) && self.folded(wall) == 1.0 {
                             boards.push(Sheet {
                                 canvas: Some(arc_label(wall)),
                                 model: Some(
@@ -1810,13 +1849,38 @@ impl Projector {
                 .iter()
                 .find(|(shown, _)| shown.id == *wall)
                 .and_then(|(wall, frame)| {
-                    slot_frames(wall, *frame)
+                    self.frames(wall, *frame)
                         .get(*slot as usize)
                         .map(|model| (*model, Fit::Slot(Cells::of(wall))))
                 }),
             Place::Free { pose } => model(pose).map(|model| (model, Fit::Text)),
             _ => None,
         }
+    }
+
+    /// Where each of `wall`'s slots stands, given its `frame`, as [`slot_frames`] says, and, for the Tomori wall while it
+    /// travels, folded as far as it is.
+    fn frames(&self, wall: &Wall, frame: Mat4) -> Vec<Mat4> {
+        let slots = slot_frames(wall, frame);
+        if wall.id == TOMORI_WALL && self.fold > 0.0 {
+            travel::fold(&slots, frame, self.fold)
+        } else {
+            slots
+        }
+    }
+
+    /// How large `wall`'s own board is drawn, as a proportion of its size: smaller as the Tomori wall folds.
+    fn folded(&self, wall: &Wall) -> f32 {
+        if wall.id == TOMORI_WALL {
+            travel::board_scale(self.fold)
+        } else {
+            1.0
+        }
+    }
+
+    /// Whether the Tomori wall is travelling with the agent, folded or folding.
+    pub fn travelling(&self) -> bool {
+        self.travel.travelling()
     }
 
     /// The panel being carried, by identity.
@@ -1929,6 +1993,7 @@ impl Projector {
 mod boards;
 pub mod editing;
 mod image;
+pub mod travel;
 
 #[cfg(test)]
 mod tests;

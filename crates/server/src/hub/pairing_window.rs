@@ -248,7 +248,9 @@ impl Hub {
             .iter_mut()
             .filter(|record| !record.model.is_closed())
         {
-            let walls = environments.walls(&record.model.environment);
+            let walls = environments
+                .walls(&record.model.environment)
+                .travelling(record.travel);
             let content = crate::stage::Content {
                 title: "Pairing".to_owned(),
                 body: body.clone(),

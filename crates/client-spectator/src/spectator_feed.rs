@@ -418,8 +418,11 @@ impl Feed {
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
         self.scene
             .set_coordinator_samples(self.swarm.coordinator.departures());
-        self.scene
-            .arrange(arrangement.workers, arrangement.placement);
+        self.scene.arrange(
+            arrangement.workers,
+            arrangement.audience,
+            arrangement.placement,
+        );
         self.scene.update(root, workspace, dt);
 
         // Convert protocol poses to controller poses for the frame.

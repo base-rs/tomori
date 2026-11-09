@@ -29,6 +29,7 @@ mod groups;
 mod image;
 mod layouts;
 mod placement;
+pub(crate) mod travel;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
 pub use code::Source;
@@ -398,6 +399,17 @@ pub struct Walls<'a> {
     pub declared: &'a [Pose],
 }
 
+impl Walls<'_> {
+    /// The walls, the Tomori wall at `travel` while it is away from its home, at its travel spot while the agent is
+    /// summoned, or else at its home. See [`travel`].
+    pub fn travelling(self, travel: Option<Pose>) -> Self {
+        Self {
+            tomori: travel.unwrap_or(self.tomori),
+            ..self
+        }
+    }
+}
+
 /// Where a participant puts a panel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -671,6 +683,23 @@ impl Stage {
             }));
         }
         shown
+    }
+
+    /// Where the Tomori wall, as the space has laid it out, stands in `walls`' environment while the agent stands at
+    /// `agent`, summoned to someone whose eyes are at `eyes`: its travel spot, clear of `solids` and every other wall
+    /// shown, or none where no spot is clear. See [`travel::spot`].
+    pub(crate) fn travel_spot(
+        &self,
+        walls: &Walls<'_>,
+        eyes: Option<[f32; 3]>,
+        agent: &Pose,
+        solids: &[tomori_environment::sightlines::Solid],
+    ) -> Option<Pose> {
+        let shown = self.walls(walls);
+        let (tomori, others) = shown
+            .split_first()
+            .expect("the Tomori wall is always shown");
+        travel::spot(eyes, agent, tomori, others, solids)
     }
 
     /// The wall `wall` shown in `walls`' environment, if it is.

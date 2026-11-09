@@ -174,7 +174,9 @@ impl Hub {
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let panels: Vec<Value> = projection
@@ -226,7 +228,9 @@ impl Hub {
         let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let id = find(&projection, &update.panel)?;

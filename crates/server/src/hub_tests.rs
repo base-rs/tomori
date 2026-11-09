@@ -4398,6 +4398,166 @@ fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_
     assert_eq!(summoned(&vic), Some(None));
 }
 
+/// The horizontal distance between `a` and `b`.
+fn across(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (a[0] - b[0]).hypot(a[2] - b[2])
+}
+
+#[test]
+fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyone_and_home_again() {
+    let (hub, _jobs) = hub();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    vic.join(&space);
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    // The space has made its Tomori wall three slots wide, tilted a little back.
+    ada.send(ClientMessage::SetWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+        grid: Some(tomori_protocol::Grid::from((3, 1))),
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(-15.0),
+    });
+    let home = ada.projection();
+    assert_eq!(home.walls[0].pose, crate::stage::default_stage());
+    vic.read();
+    // Ada stands 3 m to the right of home, facing +X, and summons the agent 1.5 m ahead of her.
+    let eyes = [3.0, 1.6, 0.0];
+    ada.send(looking(eyes, [5.0, 1.6, 0.0]));
+    let at = tomori_protocol::Pose::at([4.5, 1.6, 0.0]).facing_towards(eyes);
+    ada.send(ClientMessage::PlaceAgent { at: Some(at) });
+    // Everyone, the visitor too, is told whom its entourage gathers about, and sees its wall go before her, 2.3 m ahead
+    // of her eyes and 1.08 m below them, facing her, as its home stands before home, its panels in their slots.
+    let messages = vic.read();
+    let state = messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::Space { state } => Some(state.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("told of the summons");
+    assert_eq!(
+        (state.summoned, state.summoner),
+        (crate::stage::valid(&at), Some(eyes))
+    );
+    let away = messages
+        .into_iter()
+        .filter_map(|message| match message {
+            ServerMessage::Projection { projection } => Some(*projection),
+            _ => None,
+        })
+        .next_back()
+        .expect("sent as the wall moves");
+    let wall = &away.walls[0];
+    assert!((across(wall.pose.position, eyes) - crate::stage::travel::DISTANCE).abs() < 1e-3);
+    assert!(wall.pose.position[0] > eyes[0] + 2.0);
+    assert!((wall.pose.position[1] - (eyes[1] - crate::stage::travel::DROP)).abs() < 1e-4);
+    assert_eq!((wall.slots(), wall.tilt()), (3, -15.0));
+    assert_eq!(away.panels, home.panels);
+    // A reply meanwhile goes onto it where it is.
+    reply(&hub, &space, "m2", PANEL_REPLY);
+    let projection = ada.projection();
+    assert_eq!(projection.walls[0].pose, wall.pose);
+    assert_eq!(
+        projection
+            .panels
+            .iter()
+            .filter(|panel| matches!(&panel.place, tomori_protocol::Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL))
+            .count(),
+        2
+    );
+    // Its shape changed while it is away is the space's, kept for home too; nobody carries it, away or at home.
+    ada.read();
+    ada.send(ClientMessage::SetWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: Some(upright([3.0, 1.0, -2.0])),
+        tilt: None,
+    });
+    assert_eq!(ada.errors(), ["Only a wall an owner added can be moved."]);
+    ada.send(ClientMessage::SetWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+        grid: Some(tomori_protocol::Grid::from((2, 1))),
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: None,
+    });
+    assert_eq!(ada.projection().walls[0].pose, wall.pose);
+    // Summoned to the same place again, nothing moves and nobody is told.
+    vic.read();
+    ada.send(ClientMessage::PlaceAgent { at: Some(at) });
+    assert!(vic.projections().is_empty());
+    // Sent home, it goes home with the agent, as the space laid it out, for everyone.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    let back = vic.projections().pop().expect("sent as it goes home");
+    assert_eq!(back.walls[0].pose, crate::stage::default_stage());
+    assert_eq!((back.walls[0].slots(), back.walls[0].tilt()), (2, -15.0));
+    let state = hub
+        .lock()
+        .space(&space)
+        .map(|record| (record.summoner, record.travel));
+    assert_eq!(state, Some((None, None)));
+}
+
+#[test]
+fn the_tomori_wall_stays_home_where_no_travel_spot_is_clear_and_goes_home_as_the_environment_changes()
+ {
+    let (hub, _jobs) = hub();
+    // A barn all about where anyone stands in the far field.
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("field", "Field")
+            .with_solids([([2.0, -1.0, -8.0], [12.0, 4.0, 8.0])]),
+    ]));
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "field".to_owned(),
+    });
+    let eyes = [6.0, 1.6, 0.0];
+    ada.send(looking(eyes, [8.0, 1.6, 0.0]));
+    ada.send(ClientMessage::PlaceAgent {
+        at: Some(tomori_protocol::Pose::at([7.5, 1.6, 0.0]).facing_towards(eyes)),
+    });
+    // The agent goes; its wall, with nowhere clear to stand, stays home.
+    assert!(hub.lock().space(&space).unwrap().summoned.is_some());
+    assert_eq!(
+        ada.projection().walls[0].pose,
+        crate::stage::default_stage()
+    );
+    // In open ground it goes, and as the space changes environment, it is at home in the new one.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".to_owned(),
+    });
+    ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, 3.0]));
+    ada.send(ClientMessage::PlaceAgent {
+        at: Some(tomori_protocol::Pose::at([0.0, 1.6, 1.5]).facing_towards([0.0, 1.6, 0.0])),
+    });
+    assert!(ada.projection().walls[0].pose.position[2] > 2.0);
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "field".to_owned(),
+    });
+    assert_eq!(
+        ada.projection().walls[0].pose,
+        crate::stage::default_stage()
+    );
+    assert_eq!(
+        hub.lock().space(&space).map(|record| record.travel),
+        Some(None)
+    );
+}
+
 #[test]
 fn a_space_names_the_avatar_its_backend_names_to_everyone_in_it() {
     let backend = FakeBackend::new();
@@ -4542,13 +4702,21 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             slot: None,
             pose: Some(upright([0.5, 1.4, -1.0])),
         });
-        (space, ada.projection())
+        let shown = ada.projection();
+        // Summoned, the agent takes its Tomori wall with it, for this run only.
+        ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, 3.0]));
+        ada.send(ClientMessage::PlaceAgent {
+            at: Some(tomori_protocol::Pose::at([0.0, 1.6, 1.5]).facing_towards([0.0, 1.6, 0.0])),
+        });
+        assert_ne!(ada.projection().walls[0].pose, shown.walls[0].pose);
+        (space, shown)
     };
     let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
     let (hub, _jobs) = hub();
     assert_eq!(hub.restore(store).len(), 1);
     let ada = Client::projecting(&hub, Access::open(), "ada");
     ada.join(&shown.0);
+    // The agent and its wall are at home again.
     let mut restored = ada.projection();
     // Only its age has moved on.
     for (panel, before) in restored.panels.iter_mut().zip(&shown.1.panels) {
