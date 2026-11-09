@@ -265,6 +265,51 @@ fn a_large_image_is_scaled_down_keeping_its_shape() {
     fs::remove_dir_all(folder).unwrap();
 }
 
+/// A picture of `width` by `height`, mid grey, edged one pixel wide in red along its top, green along its bottom, blue
+/// down its left and yellow down its right.
+fn edged(width: u32, height: u32) -> RgbImage {
+    RgbImage::from_fn(width, height, |x, y| match (x, y) {
+        (_, 0) => Rgb([255, 0, 0]),
+        (_, y) if y == height - 1 => Rgb([0, 255, 0]),
+        (0, _) => Rgb([0, 0, 255]),
+        (x, _) if x == width - 1 => Rgb([255, 255, 0]),
+        _ => Rgb([128, 128, 128]),
+    })
+}
+
+#[test]
+fn an_image_needing_no_scaling_keeps_its_size_and_every_edge_pixel() {
+    let folder = folder("edges");
+    // The headset's test image's size, a tall one, an odd one, and one as large as is sent, opaque and transparent.
+    for (width, height) in [(1_024, 768), (768, 1_024), (333, 101), (IMAGE_SIDE, 1_536)] {
+        let picture = edged(width, height);
+        // With an alpha channel, though wholly opaque, it is laid over white, which changes nothing.
+        let alpha = RgbaImage::from_fn(width, height, |x, y| {
+            let Rgb([red, green, blue]) = *picture.get_pixel(x, y);
+            Rgba([red, green, blue, 255])
+        });
+        let mut bytes = io::Cursor::new(Vec::new());
+        alpha.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        fs::write(folder.join("alpha.png"), bytes.into_inner()).unwrap();
+        fs::write(
+            folder.join("opaque.png"),
+            encoded(&picture, ImageFormat::Png),
+        )
+        .unwrap();
+        for name in ["opaque.png", "alpha.png"] {
+            let prepared = prepare(&folder, name).unwrap();
+            assert_eq!(
+                (prepared.image.width, prepared.image.height),
+                (width, height),
+                "{name}"
+            );
+            // Pixel for pixel what was read, its last row and column included.
+            assert_eq!(sent(&prepared), picture, "{name}, {width} × {height}");
+        }
+    }
+    fs::remove_dir_all(folder).unwrap();
+}
+
 #[test]
 fn an_image_whose_png_is_too_large_is_halved_until_it_fits() {
     // Noise does not compress: 2048 by 2048 of it is about 12 MB as a PNG, and 1024 by 1024 about 3 MB.
