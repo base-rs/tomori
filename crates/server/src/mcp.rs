@@ -363,13 +363,13 @@ fn tools() -> Value {
         },
         {
             "name": "panels",
-            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, and how long ago it was projected and last updated; and, for a text panel, its body and its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text. Read a list here before changing it.",
+            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, and how long ago it was projected and last updated; and, for a text panel, its body, its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text, and its revision, which counts each change of its content. Read a list here before changing it.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },
         {
             "name": "update_panel",
-            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
+            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; revision is the panel's revision you last read, as panels gives it: give it whenever you name items by number, and if the panel has changed since, as when a participant ticked an item, the update is refused with its current revision, so read it again with panels and redo the update; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -389,6 +389,11 @@ fn tools() -> Value {
                         "description": "Items to untick, each by its number from 1 or its text.",
                     },
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The panel's revision you last read, as panels gives it; refused if it has changed since.",
+                    },
                 },
                 "required": ["panel"],
             },
@@ -767,14 +772,21 @@ fn items(arguments: &Value, name: &str) -> Result<Vec<agent_panels::Item>, Strin
 fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
     let panel = text(arguments, "panel")?;
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
-    let update = Update {
-        panel: panel.to_owned(),
-        title: optional_text(arguments, "title", crate::limits::IDENTIFIER_BYTES)?,
-        body: optional_text(arguments, "body", crate::stage::BLOCK_BYTES)?,
-        check: items(arguments, "check")?,
-        uncheck: items(arguments, "uncheck")?,
-        place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
-    };
+    let update =
+        Update {
+            panel: panel.to_owned(),
+            title: optional_text(arguments, "title", crate::limits::IDENTIFIER_BYTES)?,
+            body: optional_text(arguments, "body", crate::stage::BLOCK_BYTES)?,
+            check: items(arguments, "check")?,
+            uncheck: items(arguments, "uncheck")?,
+            place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
+            revision: match arguments.get("revision") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_u64().ok_or(
+                    "revision is the panel's revision, a whole number, as panels gives it.",
+                )?),
+            },
+        };
     hub.agent_update_panel(session, update).map(structured)
 }
 

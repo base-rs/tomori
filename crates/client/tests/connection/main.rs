@@ -538,6 +538,7 @@ fn requires_welcome_first_and_only_once() {
     let refusal = raw::message(&ServerMessage::Error {
         error: "full".into(),
         space: None,
+        panel: None,
     });
     let (reason, _) = raw_disconnect(Some(refusal), TIMEOUT);
     assert_eq!(

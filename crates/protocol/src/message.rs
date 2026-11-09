@@ -621,10 +621,17 @@ pub enum ClientMessage {
     /// pointing at it. Participants only, and only to a server whose [`crate::SpaceState::checks`] is set. The server
     /// ticks it in its own copy of the body, refusing a panel not here and a line that begins no item with a box, and
     /// tells the agent before the next words spoken in the space. See `design/projection.md`.
+    ///
+    /// A client also says the panel's [`crate::Panel::revision`] it saw. Where the panel has changed since, as when the
+    /// agent rewrote its body, the server refuses the tick, naming the panel in its [`ServerMessage::Error`], rather than
+    /// tick whatever item is on `line` now, and the participant looks again. An older client says none, and its tick
+    /// goes by `line` alone.
     CheckPanelItem {
         panel: String,
         line: u32,
         checked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
     },
     /// Send the image `image`, by the [`crate::Image::hash`] of an image panel in the client's space, as
     /// [`crate::FrameKind::Image`] frames. Only a client whose `Hello` sets `images` sends it, for an image it does not
@@ -839,6 +846,11 @@ pub enum ServerMessage {
         /// The space a refused `Join` named, so that a client can tell its join was refused rather than some other request. Absent for other errors.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
+        /// The panel a refused [`ClientMessage::CheckPanelItem`] named, so that a client can tell its tick was refused,
+        /// cue it and show the item as the projection sent again says. Absent for other errors, and ignored by older
+        /// clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<String>,
     },
     /// The cards of the current space, sent to a client that asked with [`ClientMessage::WatchCards`], at once and
     /// whenever they or their placements change. See `design/github.md`.

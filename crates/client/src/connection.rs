@@ -1300,6 +1300,11 @@ impl Connection {
                     self.feedback.emit(Feedback::NotSent(Hand::Left), now);
                 }
             }
+            // A participant's tick refused, as when the panel changed since they saw it, is cued as a request that could
+            // not be done; the projection sent again shows the item as it is. See `design/feedback.md`.
+            Event::Message(ServerMessage::Error { panel: Some(_), .. }) => {
+                self.feedback.emit(Feedback::NotSent(Hand::Right), now);
+            }
             Event::Message(ServerMessage::Speech { replay: true, .. }) => {
                 if self.replay.played(now) {
                     self.feedback.emit(Feedback::CatchingUp, now);

@@ -292,7 +292,7 @@ fn a_refused_join_names_the_space() {
         space: "space-missing".into(),
     });
     let (error, space) = ada.wait_for(|message| match message {
-        ServerMessage::Error { error, space } => Some((error.clone(), space.clone())),
+        ServerMessage::Error { error, space, .. } => Some((error.clone(), space.clone())),
         _ => None,
     });
     assert_eq!(error, "That space does not exist.");

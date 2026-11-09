@@ -4904,10 +4904,12 @@ fn a_participant_ticks_a_checklist_item_for_everyone_and_the_agent_is_told_befor
     for client in [&ada, &cy, &vic] {
         client.read();
     }
+    // As an older client ticks, by its line alone.
     let tick = |line: u32, checked: bool| ClientMessage::CheckPanelItem {
         panel: panel.clone(),
         line,
         checked,
+        revision: None,
     };
     let body = |client: &Client| {
         client
@@ -4967,14 +4969,16 @@ fn a_participant_ticks_a_checklist_item_for_everyone_and_the_agent_is_told_befor
                 panel: "panel-99".into(),
                 line: 2,
                 checked: true,
+                revision: None,
             },
             "That panel is not here.",
         ),
     ] {
         ada.send(message);
         let messages = ada.read();
+        // Naming the panel, so that the client cues the tick refused.
         assert!(messages.iter().any(
-            |message| matches!(message, ServerMessage::Error { error: said, .. } if said == error)
+            |message| matches!(message, ServerMessage::Error { error: said, panel: Some(_), .. } if said == error)
         ));
         assert!(
             messages
@@ -4986,6 +4990,7 @@ fn a_participant_ticks_a_checklist_item_for_everyone_and_the_agent_is_told_befor
         panel: "x".repeat(limits::IDENTIFIER_BYTES + 1),
         line: 2,
         checked: true,
+        revision: None,
     });
     assert_eq!(ada.errors().len(), 1);
     // Outside a space, there is nothing to tick.

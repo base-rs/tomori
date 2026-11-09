@@ -31,6 +31,9 @@ pub(crate) struct Update {
     pub uncheck: Vec<Item>,
     /// Where it moves, in the forms a `place` header takes.
     pub place: Option<String>,
+    /// The panel's revision the agent last read, as `panels` gives it: where the panel has changed since, as when a
+    /// participant ticked an item, the update is refused, so that an item named by its number is never another.
+    pub revision: Option<u64>,
 }
 
 /// The identity of the panel `panel` names in `projection`: by the id the agent gave it, by its identity, or by its
@@ -157,6 +160,7 @@ fn described(projection: &Projection, panel: &Panel, updated: Option<u64>) -> Va
         None => {
             described["body"] = json!(panel.body);
             described["items"] = items(&panel.body);
+            described["revision"] = json!(panel.revision);
         }
     }
     described
@@ -231,6 +235,15 @@ impl Hub {
             .content(&walls, &id)
             .cloned()
             .ok_or("A code panel cannot be updated in place: project a new one.")?;
+        // Changed since the revision the agent read, the update is refused, rather than tick another item than it named.
+        let current = record.stage.revision(&walls, &id).expect("a panel shown");
+        if let Some(read) = update.revision
+            && read != current
+        {
+            return Err(format!(
+                "That panel has changed since revision {read}, as someone ticked an item or its text was updated; it is at revision {current} now. Read it again with panels, and redo the update from what it shows."
+            ));
+        }
         if let Some(title) = &update.title {
             content.title = crate::stage::clean_title(title);
         }
@@ -288,6 +301,7 @@ impl Hub {
             "changed": changed,
             "place": panel.place,
             "items": items(&panel.body),
+            "revision": panel.revision,
         });
         if let Some(slug) = &panel.slug {
             result["id"] = json!(slug);
