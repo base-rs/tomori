@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The glyph atlas on the GPU: a single-channel texture holding `tomori-text`'s atlas, which panels, labels and signs sample through one bind group. [`Glyphs::sync`] uploads the rows the atlas has gained since it last ran, from the shelf that was open then, and the whole atlas when it has grown, which also replaces the bind group. Glyphs never move in the atlas, so meshes built from it before stay valid.
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use tomori_text::atlas::{self, WIDTH};
 
 /// How a thread that draws frames limits the time it spends drawing new glyphs into the atlas each frame, which [`Glyphs::sync`] ends.
@@ -218,6 +218,49 @@ impl Glyphs {
             .unwrap_or_else(PoisonError::into_inner)
             .binding
             .clone()
+    }
+}
+
+/// The renderer's atlas on the GPU, as a scenery draws text from it: the layout to build a text pipeline with, such as
+/// [`Pipeline::shared`](crate::ui_panel::Pipeline::shared), and the bind group to draw from, as last synced. It cannot
+/// sync the atlas, which the renderer does once a frame, before the eyes, ending the frame of drawing glyphs, so that a
+/// scenery's new glyphs share the frame's budget with the panels'. See `design/text.md`.
+///
+/// A scenery builds its text, such as a [`Panel`](crate::ui_panel::Panel)'s canvas, in
+/// [`Scenery::animate`](crate::scenery::Scenery::animate), before the renderer syncs the atlas, so that its new glyphs
+/// count against this frame's budget and reach the GPU this frame; text built later, in
+/// [`Scenery::prepare_eye`](crate::scenery::Scenery::prepare_eye) or a pass, counts against the next frame's budget, and
+/// its new glyphs reach the GPU only with the next frame's sync.
+#[derive(Clone)]
+pub struct SharedGlyphs(Arc<Glyphs>);
+
+impl SharedGlyphs {
+    /// An atlas texture of its own, which nothing syncs, for a scenery made without a renderer, as in a test; one made
+    /// from an `Arc<Glyphs>` is synced by whoever holds that.
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self(Arc::new(Glyphs::new(device)))
+    }
+
+    /// The layout of [`Self::binding`], for the pipelines that draw text.
+    pub fn layout(&self) -> &wgpu::BindGroupLayout {
+        self.0.layout()
+    }
+
+    /// The bind group that draws from the atlas as last synced, which changes as the atlas grows, so a scenery takes it
+    /// again each frame it draws.
+    pub fn binding(&self) -> wgpu::BindGroup {
+        self.0.binding()
+    }
+
+    /// The atlas, which this crate syncs.
+    pub(crate) fn glyphs(&self) -> &Glyphs {
+        &self.0
+    }
+}
+
+impl From<Arc<Glyphs>> for SharedGlyphs {
+    fn from(glyphs: Arc<Glyphs>) -> Self {
+        Self(glyphs)
     }
 }
 

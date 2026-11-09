@@ -37,15 +37,9 @@ pub fn lighting() -> Lighting {
     .with_lamp(Lamp::new(layout::GATE_LANTERN, 4.5, palette::GLOW * 1.1))
 }
 
-/// Where the eye is, from its view and projection: the point every ray of the view begins from.
-pub fn eye(scene_to_clip: Mat4) -> Vec3 {
-    let origin = scene_to_clip.inverse() * glam::Vec4::new(0.0, 0.0, 1.0, 0.0);
-    if origin.w.abs() > f32::EPSILON {
-        origin.truncate() / origin.w
-    } else {
-        Vec3::ZERO
-    }
-}
+/// Where the eye is, from its view and projection: the point every ray of the view begins from, as every scenery is
+/// told it.
+pub use tomori_render::scenery::eye;
 
 /// One model the farmyard draws, uploaded once, with its instances placed.
 struct Drawn {

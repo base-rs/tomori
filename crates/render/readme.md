@@ -10,6 +10,8 @@ cargo add tomori-render
 
 `scenery::Scenery` is what a client draws for a space bound to an environment, natively in each eye's pass. Implement it to draw an environment of your own, and register it by the environment's identifier in `scenery::Sceneries`, or with [`tomori-client-quest`](https://crates.io/crates/tomori-client-quest)'s `tomori::Builder::scenery`, at the environment's protocol version with `Sceneries::register_versioned` or `Builder::versioned_scenery`. `Sceneries::set_locomotion`, or `tomori::Builder::locomotion`, declares how participants travel in a space bound to the environment, teleporting onto walkable surfaces or flying, while its scenery is drawn. `Sceneries::present_over_grid` presents an environment with no scenery of its own over the grid, as the GitHub prototype's cards are. `Sceneries` starts with nothing but the Minimal grid, which is built in: each environment's client crate registers itself, as [`tomori-environment-sky-client`](https://crates.io/crates/tomori-environment-sky-client)'s `register` does Sky, and an application registers the environments it presents.
 
+A scenery is made for a `scenery::Target`, built with `Target::new`, which carries the renderer's glyph atlas, `glyphs::SharedGlyphs`, for a scenery's own text, drawn with `ui_panel::Pipeline::shared`; `Scenery::prepare_eye` tells it where each eye is, from `scenery::eye`, and is `Scenery::prepare` by default.
+
 The `test-gpu` feature adds the shared device for offscreen rendering tests and WGSL validation, for other crates' tests; they run on a GPU or on Mesa's lavapipe.
 
 Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).

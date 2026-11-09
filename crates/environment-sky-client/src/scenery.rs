@@ -84,14 +84,15 @@ mod tests {
         tomori_render::test_gpu::with(|gpu| {
             let mut sceneries = Sceneries::empty();
             register(&mut sceneries);
-            let created = sceneries.create(&Target {
-                device: &gpu.device,
-                queue: &gpu.queue,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                width: 32,
-                height: 32,
-                samples: 1,
-            });
+            let created = sceneries.create(&Target::new(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                32,
+                32,
+                1,
+                tomori_render::glyphs::SharedGlyphs::new(&gpu.device),
+            ));
             assert_eq!(created.len(), 1);
             let (environment, mut sky) = created.into_iter().next().unwrap();
             assert_eq!(environment.id(), crate::ID);

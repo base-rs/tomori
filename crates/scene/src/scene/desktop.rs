@@ -911,4 +911,30 @@ mod tests {
                 .any(|object| object.position.distance(palm) < 0.5)
         );
     }
+
+    #[test]
+    fn page_up_and_down_and_the_brackets_reach_an_environment_with_nothing_carried() {
+        let (mut conversation, done) = crate::scene::tests::lamp(Default::default(), false);
+        let mut desktop = desktop(&mut conversation);
+        let mut now = Instant::now();
+        for _ in 0..40 {
+            now += Duration::from_millis(100);
+            desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        }
+        assert!(desktop.step.client.is_some());
+        for (key, stick) in [
+            (Direction::Up, Vec2::Y),
+            (Direction::Down, Vec2::NEG_Y),
+            (Direction::Left, Vec2::NEG_X),
+            (Direction::Right, Vec2::X),
+        ] {
+            desktop.key(Key::Right(key), true, false, &mut conversation);
+            now += Duration::from_millis(16);
+            desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            assert_eq!(done.lock().unwrap().last().unwrap().3, stick, "{key:?}");
+            desktop.key(Key::Right(key), false, false, &mut conversation);
+            now += Duration::from_millis(16);
+            desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        }
+    }
 }

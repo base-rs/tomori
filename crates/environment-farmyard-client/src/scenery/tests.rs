@@ -153,14 +153,15 @@ fn average(pixels: &[u8], low: (f32, f32), high: (f32, f32)) -> [f32; 3] {
 
 fn target(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> Farmyard {
     Farmyard::new(
-        &Target {
+        &Target::new(
             device,
             queue,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            width: WIDTH,
-            height: HEIGHT,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            WIDTH,
+            HEIGHT,
             samples,
-        },
+            tomori_render::glyphs::SharedGlyphs::new(device),
+        ),
         &Coop::Built,
         Library::shared(),
     )
@@ -230,14 +231,15 @@ fn the_farmyard_is_an_evening_yard_with_a_warmly_lit_red_coop() {
         // Registered, the build's sceneries make it for their targets.
         let mut sceneries = tomori_render::scenery::Sceneries::empty();
         crate::register(&mut sceneries);
-        let made = sceneries.create(&Target {
-            device: &device,
-            queue: &queue,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            width: WIDTH,
-            height: HEIGHT,
-            samples: 4,
-        });
+        let made = sceneries.create(&Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            WIDTH,
+            HEIGHT,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        ));
         assert_eq!(made.len(), 1);
         assert_eq!(capture(&device, &queue, made[0].1.as_ref(), 4, HOME), home);
         assert!(pollster::block_on(scope.pop()).is_none());

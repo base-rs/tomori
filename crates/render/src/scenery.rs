@@ -10,7 +10,9 @@ use glam::{Mat4, Vec3};
 
 use crate::{environment::Environment, locomotion::Locomotion};
 
-/// What a scenery is given when the renderer creates it.
+/// What a scenery is given when the renderer creates it, including the renderer's glyph atlas, which a scenery draws
+/// text of its own from; see `design/text.md`.
+#[non_exhaustive]
 pub struct Target<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
@@ -18,6 +20,42 @@ pub struct Target<'a> {
     pub width: u32,
     pub height: u32,
     pub samples: u32,
+    pub glyphs: crate::glyphs::SharedGlyphs,
+}
+
+impl<'a> Target<'a> {
+    /// The eyes' targets, `width` by `height` in `format` with `samples` samples per pixel, drawn by `device` and
+    /// `queue`, with text drawn from `glyphs`.
+    pub fn new(
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+        glyphs: crate::glyphs::SharedGlyphs,
+    ) -> Self {
+        Self {
+            device,
+            queue,
+            format,
+            width,
+            height,
+            samples,
+            glyphs,
+        }
+    }
+}
+
+/// Where the eye is in the scene, from its view and projection: the point every ray of the view begins from, or the
+/// scene's origin for a view that has none, such as an orthographic one, or that cannot be inverted.
+pub fn eye(scene_to_clip: Mat4) -> Vec3 {
+    let origin = scene_to_clip.inverse() * glam::Vec4::Z;
+    if origin.w.abs() > f32::EPSILON {
+        origin.truncate() / origin.w
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Scenery drawn natively in each eye's pass.
@@ -33,6 +71,12 @@ pub trait Scenery {
     }
     /// Before the eye's pass: per-eye uniforms, for the eye's view and projection.
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4);
+    /// Before the eye's pass, in place of [`Scenery::prepare`]: per-eye uniforms, for the eye's view and projection and
+    /// where the eye is in the scene, from [`eye`], so that labels can face each eye. By default it is
+    /// [`Scenery::prepare`], which a scenery that overrides this may leave empty.
+    fn prepare_eye(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4, _position: Vec3) {
+        self.prepare(queue, eye, scene_to_clip);
+    }
     /// Before the eye's pass: work in its own passes, such as Sky's clouds.
     fn encode(&self, _encoder: &mut wgpu::CommandEncoder, _eye: usize) {}
     /// In the eye's pass, before the scene.
@@ -286,6 +330,264 @@ mod tests {
             .drawn
             .is_none()
         );
+    }
+
+    #[test]
+    fn the_eye_is_where_every_ray_of_its_view_begins() {
+        let position = Vec3::new(1.0, 1.6, 3.0);
+        let view = Mat4::look_at_rh(position, Vec3::new(0.0, 1.0, -2.0), Vec3::Y);
+        let projection = Mat4::perspective_rh(1.4, 0.95, 0.05, 100.0);
+        assert!(eye(projection * view).distance(position) < 1e-3);
+        let infinite = Mat4::perspective_infinite_rh(1.4, 1.0, 0.05);
+        assert!(eye(infinite * view).distance(position) < 1e-3);
+        // A view with no such point, or none at all, is seen from the origin.
+        assert_eq!(eye(Mat4::IDENTITY), Vec3::ZERO);
+        assert_eq!(eye(Mat4::ZERO), Vec3::ZERO);
+    }
+
+    /// A scenery that implements only what a scenery must, keeping each eye it was prepared for and its matrix, and how
+    /// many eyes it drew.
+    #[derive(Clone, Default)]
+    struct Prepared(Arc<std::sync::Mutex<PreparedFor>>);
+
+    /// Each eye a scenery was prepared for, with its matrix, and how many eyes it drew.
+    type PreparedFor = (Vec<(usize, Mat4)>, usize);
+
+    impl Scenery for Prepared {
+        fn prepare(&self, _queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
+            self.0.lock().unwrap().0.push((eye, scene_to_clip));
+        }
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {
+            self.0.lock().unwrap().1 += 1;
+        }
+
+        fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {}
+    }
+
+    #[test]
+    fn a_scenery_that_only_prepares_is_prepared_where_it_is_told_where_the_eye_is() {
+        use crate::graphics::Renderer;
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            let prepared = Prepared::default();
+            let matrix = Mat4::from_translation(Vec3::X);
+            prepared.prepare_eye(&queue, 1, matrix, Vec3::Y);
+            assert_eq!(prepared.0.lock().unwrap().0, [(1, matrix)]);
+            // A renderer prepares it so for each eye, and draws it.
+            let mut sceneries = Sceneries::empty();
+            let registered = prepared.clone();
+            sceneries.register("plain", move |_| {
+                Box::new(registered.clone()) as Box<dyn Scenery>
+            });
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let mut renderer =
+                Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &sceneries);
+            renderer.set_scenery(crate::arrival_motion::Scenery {
+                environment: Environment::new("plain"),
+                reveal: None,
+            });
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("plain scenery eye"),
+                    size: wgpu::Extent3d {
+                        width: 8,
+                        height: 8,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            renderer.render(
+                &device,
+                &queue,
+                std::slice::from_ref(&view),
+                &[matrix],
+                Mat4::IDENTITY,
+                &[],
+            );
+            let told = prepared.0.lock().unwrap();
+            assert_eq!(told.0, [(1, matrix), (0, matrix)]);
+            assert_eq!(told.1, 1);
+        });
+    }
+
+    /// What a scenery that draws a label of its own was told: where each eye was, as it was prepared, and the atlas's
+    /// bind group it last drew from.
+    #[derive(Default)]
+    struct Told {
+        eyes: Vec<Vec3>,
+        bound: Option<wgpu::BindGroup>,
+    }
+
+    type Eyes = Arc<std::sync::Mutex<Told>>;
+
+    /// A scenery that draws a label of its own, from the renderer's atlas, built as it is animated, and keeps where each
+    /// eye was.
+    struct Labelled {
+        glyphs: crate::glyphs::SharedGlyphs,
+        pipeline: crate::ui_panel::Pipeline,
+        panel: crate::ui_panel::Panel,
+        canvas: crate::ui_panel::Canvas,
+        eyes: Eyes,
+    }
+
+    impl Labelled {
+        fn new(target: &Target, text: &str, eyes: Eyes) -> Self {
+            let pipeline = crate::ui_panel::Pipeline::shared(
+                target.device,
+                target.format,
+                &target.glyphs,
+                target.samples,
+            );
+            let panel = crate::ui_panel::Panel::new(target.device, &pipeline, 1_000);
+            let mut canvas = crate::ui_panel::Canvas::new(8, 0.25);
+            canvas.rows.push(crate::ui_text::Row::text(
+                text,
+                crate::ui_text::Style::plain([1.0; 4]),
+                8,
+            ));
+            Self {
+                glyphs: target.glyphs.clone(),
+                pipeline,
+                panel,
+                canvas,
+                eyes,
+            }
+        }
+    }
+
+    impl Scenery for Labelled {
+        fn animate(
+            &mut self,
+            _device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            _drawn: &(dyn std::any::Any + Send + Sync),
+        ) {
+            self.panel.set(queue, &self.canvas);
+        }
+
+        fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
+            // The label stands two metres ahead of the origin.
+            let model = Mat4::from_translation(Vec3::new(0.0, 0.0, -2.0));
+            self.panel.prepare(queue, eye, scene_to_clip * model);
+        }
+
+        fn prepare_eye(
+            &self,
+            queue: &wgpu::Queue,
+            eye: usize,
+            scene_to_clip: Mat4,
+            position: Vec3,
+        ) {
+            self.eyes.lock().unwrap().eyes.push(position);
+            self.prepare(queue, eye, scene_to_clip);
+        }
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
+
+        fn draw_translucent(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
+            let binding = self.glyphs.binding();
+            self.pipeline.set(pass, &binding);
+            self.panel.draw(pass, &self.pipeline, eye);
+            self.eyes.lock().unwrap().bound = Some(binding);
+        }
+
+        fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {}
+    }
+
+    #[test]
+    fn a_scenery_draws_text_from_the_renderer_s_atlas_within_its_frame_and_is_told_where_each_eye_is()
+     {
+        use crate::graphics::Renderer;
+        use tomori_text::atlas;
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let kanji = crate::test_support::undrawn('\u{9c40}', 2);
+            let eyes = Eyes::default();
+            let mut sceneries = Sceneries::empty();
+            let told = eyes.clone();
+            sceneries.register("signs", move |target| {
+                Box::new(Labelled::new(target, &kanji, told.clone())) as Box<dyn Scenery>
+            });
+            let mut renderer =
+                Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &sceneries);
+            renderer.set_scenery(crate::arrival_motion::Scenery {
+                environment: Environment::new("signs"),
+                reveal: None,
+            });
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("labelled scenery eye"),
+                    size: wgpu::Extent3d {
+                        width: 8,
+                        height: 8,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            let position = Vec3::new(0.5, 1.6, 1.0);
+            let eye_to_clip = Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0)
+                * Mat4::look_at_rh(position, Vec3::new(0.0, 0.0, -2.0), Vec3::Y);
+            // One new glyph a frame: the label's new glyphs count against the frame the renderer ends as it syncs the
+            // atlas, so that the second waits for the next frame, and is drawn then.
+            let _budget = crate::test_support::Budgeted::new(atlas::Budget {
+                time: std::time::Duration::MAX,
+                glyphs: 1,
+            });
+            let mut waited = Vec::new();
+            for _ in 0..3 {
+                let before = atlas::waited();
+                renderer.animate(&device, &queue, &());
+                waited.push(atlas::waited() - before);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[eye_to_clip],
+                    Mat4::IDENTITY,
+                    &[],
+                );
+            }
+            assert_eq!(waited, [1, 0, 0]);
+            // It draws from the atlas the renderer syncs, and is told where the eye is in the scene.
+            let told = eyes.lock().unwrap();
+            assert_eq!(told.bound, Some(renderer.shared_glyphs().binding()));
+            assert_eq!(told.eyes.len(), 3);
+            assert!(told.eyes.iter().all(|eye| eye.distance(position) < 1e-3));
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    #[test]
+    fn a_target_hands_a_scenery_an_atlas_that_only_its_holder_syncs() {
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let held = Arc::new(crate::glyphs::Glyphs::new(&device));
+            let target = Target::new(&device, &queue, format, 8, 8, 1, held.clone().into());
+            assert_eq!((target.width, target.height, target.samples), (8, 8, 1));
+            assert_eq!(target.format, format);
+            // The handle draws from the atlas its holder syncs, whose bind group changes as it grows.
+            assert_eq!(target.glyphs.binding(), held.binding());
+            assert_eq!(target.glyphs.layout(), held.layout());
+            held.sync(&device, &queue);
+            assert_eq!(target.glyphs.binding(), held.binding());
+            // One of its own draws from a texture nothing else does.
+            let own = crate::glyphs::SharedGlyphs::new(&device);
+            assert_ne!(own.binding(), held.binding());
+            crate::ui_panel::Pipeline::shared(&device, format, &own, 1);
+        });
     }
 
     #[test]
