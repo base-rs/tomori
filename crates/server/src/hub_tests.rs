@@ -3888,14 +3888,16 @@ fn a_reply_s_panels_float_beside_whoever_asked_when_no_wall_they_look_at_is_read
     .join("\n\n");
     reply(&hub, &space, "m1", &text);
     let projection = ada.projection();
-    let floating = |title: &str| match projection
-        .panels
-        .iter()
-        .find(|panel| panel.title == title)
-        .map(|panel| &panel.place)
-    {
-        Some(tomori_protocol::Place::Free { pose }) => *pose,
-        other => unreachable!("{title}: {other:?}"),
+    let floating = |title: &str| {
+        let place = projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .map(|panel| &panel.place);
+        let Some(tomori_protocol::Place::Free { pose }) = place else {
+            unreachable!("{title} floats");
+        };
+        *pose
     };
     // Without a placement, beside Ada, to her right and then her left, at reading distance, a little below her eyes.
     assert_eq!(aside(eyes, ahead, &floating("Checklist")), 30.0);

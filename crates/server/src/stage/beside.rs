@@ -181,16 +181,19 @@ mod tests {
         let turned = spot(&head(eyes, 90.0), &[], &[], &[]).expect("clear");
         assert!((bearing(eyes, &turned) - 120.0).abs() < 1e-3);
         assert!(turned.position[2] > eyes[2]);
-        // Looking straight down, beside them is beside the way the top of their head faces.
-        let down = Pose::at(eyes).facing_towards([eyes[0], 9.0, eyes[2] + 1e-6]);
-        let below = spot(&down, &[], &[], &[]).expect("clear");
-        assert!((below.position[1] - (eyes[1] - DROP)).abs() < 1e-5);
-        // Looking straight up, beside the way the back of their head faces.
-        let up = Pose::at(eyes).facing_towards([eyes[0], -9.0, eyes[2] + 1e-6]);
-        let above = spot(&up, &[], &[], &[]).expect("clear");
-        let (x, z) = level_ahead(&up);
-        assert!((x.hypot(z) - 1.0).abs() < 1e-4);
-        assert!((above.position[1] - (eyes[1] - DROP)).abs() < 1e-5);
+        // Looking straight down, from facing −Z, beside them is beside the way the top of their head faces, −Z; looking
+        // straight up, the way its back faces, −Z too.
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        for tipped in [-half, half] {
+            let head = Pose {
+                position: eyes,
+                orientation: [tipped, 0.0, 0.0, half],
+            };
+            assert_eq!(level_ahead(&head), (0.0, -1.0), "{tipped}");
+            let pose = spot(&head, &[], &[], &[]).expect("clear");
+            assert!((bearing(eyes, &pose) - 30.0).abs() < 1e-3, "{pose:?}");
+            assert!((pose.position[1] - (eyes[1] - DROP)).abs() < 1e-5);
+        }
     }
 
     #[test]

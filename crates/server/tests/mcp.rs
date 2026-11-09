@@ -1877,6 +1877,23 @@ fn the_agent_floats_panels_and_images_beside_someone_by_their_name_or_handle() {
     );
     assert_ne!(updated["isError"], true, "{updated}");
     assert_eq!(aside(eyes, &floating(&todo)), 30.0);
+    // The agent comes to stand before her, beside or not; and a layout too large to stand beside her stands in front.
+    let moved = call(
+        &server,
+        &token,
+        caller,
+        "move_agent",
+        json!({"place": format!("beside {handle}")}),
+    );
+    assert_eq!(moved["structuredContent"]["moved"], true, "{moved}");
+    let built = call(
+        &server,
+        &token,
+        caller,
+        "create_layout",
+        json!({"place": "beside Ada", "walls": [{"id": "list", "columns": 1, "rows": 1}]}),
+    );
+    assert_ne!(built["isError"], true, "{built}");
     // A handle nobody has, and a form that names no wall where a wall is meant, are said.
     assert_eq!(
         failure(&call(

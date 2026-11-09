@@ -2375,12 +2375,12 @@ mod tests {
                 .to_degrees()
                 .round()
         };
-        let floating = |stage: &Stage, id: &str| match stage.view("s", &SKY, 0).panel(id) {
-            Some(Panel {
-                place: Place::Free { pose },
-                ..
-            }) => *pose,
-            other => unreachable!("{other:?}"),
+        let floating = |stage: &Stage, id: &str| {
+            let view = stage.view("s", &SKY, 0);
+            let Some(Place::Free { pose }) = view.panel(id).map(|panel| &panel.place) else {
+                unreachable!("{id} floats");
+            };
+            *pose
         };
         // Three in one reply: to their right, to their left, then further right, each facing them.
         let ids: Vec<(String, bool)> = stage.project_placed(
