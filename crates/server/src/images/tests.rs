@@ -280,8 +280,15 @@ fn edged(width: u32, height: u32) -> RgbImage {
 #[test]
 fn an_image_needing_no_scaling_keeps_its_size_and_every_edge_pixel() {
     let folder = folder("edges");
-    // The headset's test image's size, a tall one, an odd one, and one as large as is sent, opaque and transparent.
-    for (width, height) in [(1_024, 768), (768, 1_024), (333, 101), (IMAGE_SIDE, 1_536)] {
+    // The headset's test image's size, a tall one, an odd one, the two renders the maintainer saw as one tall image, and one
+    // as large as is sent, opaque and transparent: whatever slot it is shown in, it is sent at its own size.
+    for (width, height) in [
+        (1_024, 768),
+        (768, 1_024),
+        (333, 101),
+        (960, 1_440),
+        (IMAGE_SIDE, 1_536),
+    ] {
         let picture = edged(width, height);
         // With an alpha channel, though wholly opaque, it is laid over white, which changes nothing.
         let alpha = RgbaImage::from_fn(width, height, |x, y| {
