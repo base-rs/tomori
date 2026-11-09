@@ -11,6 +11,7 @@
 pub mod anchors;
 pub mod arrival;
 pub mod arrival_motion;
+pub mod avatar;
 pub mod board;
 pub mod canvas;
 pub mod caption;

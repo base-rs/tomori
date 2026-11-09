@@ -4299,6 +4299,67 @@ fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_
 }
 
 #[test]
+fn a_space_names_the_avatar_its_backend_names_to_everyone_in_it() {
+    let backend = FakeBackend::new();
+    backend.name_avatar("river");
+    let (hub, _jobs) = hub_with(backend);
+    let (space, _commands) = idle(&hub);
+    // An owner is offered the backend with its avatar.
+    let ada = Client::connect(&hub, Access::open());
+    ada.hello("ada");
+    let offered: Vec<_> = ada
+        .read()
+        .into_iter()
+        .filter_map(|message| match message {
+            ServerMessage::Welcome { backends, .. } => Some(backends),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(offered[0].avatar.as_deref(), Some("river"));
+    let avatar = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Space { state } => Some(state.avatar),
+                _ => None,
+            })
+            .next_back()
+    };
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    assert_eq!(avatar(&ada), Some(Some("river".to_owned())));
+    // A visitor, who is offered no backends, is told it with the space.
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    assert_eq!(avatar(&vic), Some(Some("river".to_owned())));
+    // An environment that names one overrides the backend's, for everyone in it; one clients cannot read does not.
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("farm", "Farm").with_avatar("hen"),
+        crate::Environment::new("odd", "Odd").with_avatar("he\u{202E}n"),
+    ]));
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "farm".to_owned(),
+    });
+    assert_eq!(avatar(&vic), Some(Some("hen".to_owned())));
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "odd".to_owned(),
+    });
+    assert_eq!(avatar(&vic), Some(Some("river".to_owned())));
+    // A backend that names none, as Tomori's own do, gives none: the swarm.
+    let (plain, _jobs) = self::hub();
+    let (space, _commands) = idle(&plain);
+    let ada = Client::greeted(&plain, Access::open(), "ada");
+    ada.send(ClientMessage::Join { space });
+    assert_eq!(avatar(&ada), Some(None));
+}
+
+#[test]
 fn the_agent_moving_its_space_moves_its_walls_as_an_owner_s_change_does() {
     let (hub, _jobs) = hub_waiting();
     let stage = upright([0.0, 1.5, -4.0]);

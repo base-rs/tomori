@@ -119,6 +119,8 @@ pub fn draw(
     if let Some(drawn) = &frame.environment {
         renderer.animate(device, queue, drawn.as_ref());
     }
+    // The avatar the space's backend names, while the swarm does not show; see `design/avatars.md`.
+    renderer.set_avatar(device, queue, frame.avatar.as_ref());
     renderer.set_landing(frame.landing);
     renderer.set_blink(frame.blink);
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
@@ -147,7 +149,6 @@ pub fn draw(
         frame.projection.iter().chain(&frame.cards),
     );
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3124,6 +3125,148 @@ mod tests {
             );
             crate::test_support::preview("TOMORI_DEPTH_ORDER_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// A figure standing at its anchor, heard from above it, showing what its scenery draws from its second frame.
+    struct Figure {
+        anchor: tomori_scene::anchors::Anchor,
+        frames: usize,
+    }
+
+    impl tomori_scene::avatar::Avatar for Figure {
+        fn update(&mut self, input: &tomori_scene::avatar::Input) {
+            self.anchor = input.anchor;
+            self.frames += 1;
+        }
+
+        fn voices(&self, voices: &mut Vec<[f32; 3]>) {
+            voices.push((self.anchor.position + Vec3::Y * 0.3).to_array());
+        }
+
+        fn departures(&self, departures: &mut Vec<[f32; 3]>) {
+            self.voices(departures);
+        }
+
+        fn bounds(&self) -> crate::arrival_motion::Sphere {
+            crate::arrival_motion::Sphere {
+                centre: self.anchor.position,
+                radius: 0.5,
+            }
+        }
+
+        fn drawn(&self) -> Option<tomori_scene::client_side::Drawn> {
+            (self.frames > 1)
+                .then(|| std::sync::Arc::new(self.frames) as tomori_scene::client_side::Drawn)
+        }
+    }
+
+    /// A scenery that draws nothing, and panics when given what its avatar shows.
+    struct Breaking;
+
+    impl crate::scenery::Scenery for Breaking {
+        fn animate(
+            &mut self,
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+            _drawn: &(dyn std::any::Any + Send + Sync),
+        ) {
+            panic!("the figure's scenery cannot show it");
+        }
+
+        fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
+
+        fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {}
+    }
+
+    #[test]
+    fn an_avatar_whose_scenery_panics_falls_back_to_the_swarm_seen_and_heard() {
+        use crate::scenery::{Sceneries, Scenery};
+        // Its scenery panics as it is made, or as it is given what the figure shows.
+        let made = |_: &crate::scenery::Target| -> Box<dyn Scenery> {
+            panic!("the figure's scenery cannot be made")
+        };
+        let animated = |_: &crate::scenery::Target| -> Box<dyn Scenery> { Box::new(Breaking) };
+        Breaking.set_reveal(None);
+        let figure = |_: &str| -> Box<dyn tomori_scene::avatar::Avatar> {
+            Box::new(Figure {
+                anchor: tomori_scene::anchors::Anchor::AGENT,
+                frames: 0,
+            })
+        };
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("figure eye"),
+                    size: wgpu::Extent3d {
+                        width: 16,
+                        height: 16,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            for (scenery, frames) in [
+                (
+                    Box::new(made)
+                        as Box<dyn Fn(&crate::scenery::Target) -> Box<dyn Scenery> + Send + Sync>,
+                    1,
+                ),
+                (Box::new(animated), 2),
+            ] {
+                let mut sceneries = Sceneries::empty();
+                sceneries.set_avatar("figure", figure, scenery);
+                let mut conversation = lobby(tomori_protocol::ConnectionRole::Owner);
+                conversation.set_avatars(sceneries.avatars());
+                conversation.set_avatar_failures(sceneries.avatar_failures());
+                conversation.apply(space(|state| state.avatar = Some("figure".into())));
+                let mut renderer =
+                    Renderer::with_sceneries(&device, &queue, format, 16, 16, 1, &sceneries);
+                let mut panels = Panels::new(&device, &renderer);
+                let mut step = Step::default();
+                let senses = Senses {
+                    focused: true,
+                    ..Default::default()
+                };
+                let now = Instant::now();
+                // The figure shows for as many frames as its scenery lasts.
+                for _ in 0..frames {
+                    let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+                    assert!(frame.avatar.is_some());
+                    assert!(frame.swarm.agents.is_empty());
+                    draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[Mat4::IDENTITY],
+                        Mat4::IDENTITY,
+                        &[],
+                    );
+                }
+                // Then, from the next frame on, the swarm shows in its place, and the agent is heard from it.
+                for _ in 0..3 {
+                    let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+                    assert!(frame.avatar.is_none());
+                    assert_eq!(frame.swarm.agents.len(), crate::swarm::AGENT_COUNT);
+                    let agents: Vec<[f32; 3]> = frame
+                        .swarm
+                        .agents
+                        .iter()
+                        .map(|agent| agent.position.to_array())
+                        .collect();
+                    assert_eq!(frame.agent, tomori_scene::spatial_audio::centre(&agents));
+                    draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                }
+            }
         });
     }
 }

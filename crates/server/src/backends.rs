@@ -20,6 +20,7 @@ type Boxed<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 trait DynamicBackend: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
+    fn avatar(&self) -> Option<&str>;
     fn sessions<'a>(&'a self, directory: &'a str) -> Boxed<'a, Vec<SessionSummary>>;
     fn create(&self, spec: SessionSpec) -> Boxed<'_, AnySession>;
     fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession>;
@@ -39,6 +40,10 @@ impl<B: Backend> DynamicBackend for B {
 
     fn capabilities(&self) -> Capabilities {
         Backend::capabilities(self)
+    }
+
+    fn avatar(&self) -> Option<&str> {
+        Backend::avatar(self)
     }
 
     fn sessions<'a>(&'a self, directory: &'a str) -> Boxed<'a, Vec<SessionSummary>> {
@@ -179,6 +184,10 @@ impl Backend for AnyBackend {
         self.0.capabilities()
     }
 
+    fn avatar(&self) -> Option<&str> {
+        self.0.avatar()
+    }
+
     async fn sessions(&self, directory: &str) -> Result<Vec<SessionSummary>> {
         self.0.sessions(directory).await
     }
@@ -297,16 +306,30 @@ impl Backends {
         self.backends.iter().map(Backend::name)
     }
 
-    /// The backends, for a client to show: their name and whether existing sessions can be attached.
+    /// The backends, for a client to show: their name, whether existing sessions can be attached and their avatar.
     pub fn info(&self) -> Vec<BackendInfo> {
         self.backends
             .iter()
             .map(|backend| BackendInfo {
                 name: Backend::name(backend).to_owned(),
                 attach: Backend::capabilities(backend).attach,
+                avatar: avatar(backend),
             })
             .collect()
     }
+
+    /// The avatar that represents the agent of the backend `name`, as clients are sent it: none for a backend not
+    /// offered, or one that names none or an identifier clients do not read. See `design/avatars.md`.
+    pub fn avatar(&self, name: &str) -> Option<String> {
+        self.get(name).and_then(avatar)
+    }
+}
+
+/// The avatar `backend` names, as clients are sent it: none for an identifier they do not read.
+fn avatar(backend: &AnyBackend) -> Option<String> {
+    Backend::avatar(backend)
+        .filter(|avatar| tomori_protocol::valid_avatar(avatar))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -333,5 +356,29 @@ mod tests {
             assert_eq!(Session::next_event(&session).await.unwrap(), Event::Idle);
             assert_eq!(fake.started()[0].log().interrupts, 1);
         });
+    }
+
+    #[test]
+    fn a_backend_s_avatar_is_sent_only_when_clients_read_it() {
+        let fake = FakeBackend::new();
+        let backends = Backends::new().with(fake.clone());
+        // None by default: the swarm.
+        assert_eq!(backends.avatar("fake"), None);
+        assert_eq!(backends.info()[0].avatar, None);
+        fake.name_avatar("river");
+        assert_eq!(backends.avatar("fake").as_deref(), Some("river"));
+        assert_eq!(backends.info()[0].avatar.as_deref(), Some("river"));
+        // A backend not offered names none.
+        assert_eq!(backends.avatar("gone"), None);
+        // An identifier clients do not read is sent as none.
+        let unreadable = FakeBackend::new();
+        unreadable.name_avatar(&"r".repeat(tomori_protocol::AVATAR_BYTES + 1));
+        let backends = Backends::new().with(unreadable);
+        assert_eq!(backends.avatar("fake"), None);
+        assert_eq!(backends.info()[0].avatar, None);
+        // So is one that would read otherwise than it is.
+        let reversed = FakeBackend::new();
+        reversed.name_avatar("riv\u{202E}er");
+        assert_eq!(Backends::new().with(reversed).avatar("fake"), None);
     }
 }

@@ -8,7 +8,7 @@ This describes where a client's playback sounds from, how its sources are balanc
 
 | Source | Where it sounds from |
 | --- | --- |
-| Agent speech, live or played again | the middle of the swarm, as it moves |
+| Agent speech, live or played again | the middle of the avatar's voice points, as it moves: by default the swarm's agents; the agent anchor where it gives none that is finite and within 90 m of the space's middle (see `avatars.md`) |
 | Another participant | their head, from their presence |
 | A sound cue | towards the hand that acted, from the agent for a request or a catch-up, or in the middle (see `feedback.md`) |
 | A source the client cannot place | in the middle of the head, at unity, as before |
@@ -56,7 +56,7 @@ In November 2026 the user, speaking from the headset, asked for the audio to be 
 
 ## Scope
 
-`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), its outputs (`speaker.rs`), the live microphone's session (`capture.rs`) and the echo test (`connection.rs`), in `crates/scene` the scene of voices (`spatial_audio.rs`) and the rendering of the player for a device (`playback.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
+`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), its outputs (`speaker.rs`), the live microphone's session (`capture.rs`) and the echo test (`connection.rs`), in `crates/scene` the scene of voices (`spatial_audio.rs`) and where the agent's voice comes from (`avatar.rs`) and the rendering of the player for a device (`playback.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
 
 ## Validation
 

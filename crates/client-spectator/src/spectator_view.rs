@@ -32,7 +32,18 @@ impl SpectatorView {
         input.renderer.set_environment(frame.environment);
         // Its scenery draws in its own coordinates, carried into the space's, as on the headset.
         input.renderer.set_carriage(self.feed.carriage());
-        // The feed animates a swarm as large as the renderer's.
+        // The feed animates a swarm as large as the renderer's, or none while another avatar shows, which its own
+        // scenery draws. See `design/avatars.md`.
+        input
+            .renderer
+            .set_avatar(input.device, input.queue, self.feed.avatar().as_ref());
+        input.swarm.agents.resize(
+            frame.agents.len(),
+            crate::swarm::Agent {
+                position: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+            },
+        );
         for (agent, position) in input.swarm.agents.iter_mut().zip(&frame.agents) {
             agent.position = Vec3::from_array(*position);
         }

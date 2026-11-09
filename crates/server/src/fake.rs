@@ -83,6 +83,8 @@ struct FakeShared {
     tool_failure: AtomicBool,
     /// Each registration of tools, with its directory and server, and each removal, with its directory and `None`.
     tools: Mutex<Vec<(String, Option<ToolServer>)>>,
+    /// The avatar the backend names; see [`FakeBackend::name_avatar`].
+    avatar: std::sync::OnceLock<String>,
 }
 
 impl FakeBackend {
@@ -170,6 +172,12 @@ impl FakeBackend {
     /// The sessions whose instruction entries the server forgot, with the keys, in order.
     pub fn forgotten(&self) -> Vec<(String, Vec<String>)> {
         self.shared.forgotten.lock().unwrap().clone()
+    }
+
+    /// Name `avatar` as the one that represents this backend's agent, from now on, rather than none, the swarm. Only the
+    /// first name given is kept. See `design/avatars.md`.
+    pub fn name_avatar(&self, avatar: &str) {
+        let _ = self.shared.avatar.set(avatar.to_owned());
     }
 
     /// Delete no sessions, as a backend without [`Capabilities::delete`].
@@ -300,6 +308,10 @@ impl Backend for FakeBackend {
 
     fn name(&self) -> &str {
         FAKE_BACKEND_NAME
+    }
+
+    fn avatar(&self) -> Option<&str> {
+        self.shared.avatar.get().map(String::as_str)
     }
 
     fn capabilities(&self) -> Capabilities {

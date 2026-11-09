@@ -74,6 +74,34 @@ pub struct BackendInfo {
     pub name: String,
     /// Existing sessions can be listed and attached through [`crate::ClientMessage::CreateSpace`]'s `session`.
     pub attach: bool,
+    /// The avatar that represents the backend's agent, by identifier, which [`valid_avatar`] accepts; none for the
+    /// swarm, and from older servers. See `design/avatars.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+/// The longest avatar identifier, in bytes, that a server sends and a client reads. See `design/avatars.md`.
+pub const AVATAR_BYTES: usize = 128;
+
+/// Whether `avatar` can name an avatar: not empty, at most [`AVATAR_BYTES`], and without control characters,
+/// bidirectional controls or invisible formatting characters, so that it reads as it is when a client names it.
+pub fn valid_avatar(avatar: &str) -> bool {
+    !avatar.is_empty() && avatar.len() <= AVATAR_BYTES && !avatar.chars().any(hidden)
+}
+
+/// Whether `character` changes how text around it reads without being seen: a control character, a bidirectional
+/// control, or a zero-width or invisible formatting character.
+fn hidden(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{061C}'
+                | '\u{FEFF}'
+        )
 }
 
 /// A directory a space may run in, as offered to a client. A client cannot type a path, so it chooses from what the server sent.
@@ -275,6 +303,11 @@ pub struct SpaceState {
     /// go back as the trigger is let go.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub summons: bool,
+    /// The avatar that represents the space's agent, as its backend names it, by identifier: none for the swarm, from
+    /// older servers, and when the server no longer offers the backend. A client shows the swarm for one its build
+    /// lacks, and says so. See `design/avatars.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 /// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
@@ -960,6 +993,64 @@ mod tests {
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());
+    }
+
+    #[test]
+    fn avatars_are_sent_only_when_named_and_absent_from_older_servers() {
+        let state = SpaceState {
+            avatar: Some("river".into()),
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["avatar"], "river");
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        // None sends no field, and an older server's state, without it, reads as none: the swarm.
+        let plain = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(plain.get("avatar").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(plain).unwrap().avatar,
+            None
+        );
+        // A backend's too.
+        let backend = BackendInfo {
+            name: "river".into(),
+            attach: false,
+            avatar: Some("river".into()),
+        };
+        let json = serde_json::to_value(&backend).unwrap();
+        assert_eq!(json["avatar"], "river");
+        assert_eq!(
+            serde_json::from_value::<BackendInfo>(json).unwrap(),
+            backend
+        );
+        let older: BackendInfo =
+            serde_json::from_value(serde_json::json!({"name": "opencode", "attach": true}))
+                .unwrap();
+        assert_eq!(older.avatar, None);
+        assert!(
+            serde_json::to_value(&older)
+                .unwrap()
+                .get("avatar")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_avatar_is_named_by_a_short_printable_identifier() {
+        assert!(valid_avatar("swarm"));
+        assert!(valid_avatar("river-2 ✨"));
+        assert!(valid_avatar(&"a".repeat(AVATAR_BYTES)));
+        assert!(!valid_avatar(""));
+        assert!(!valid_avatar(&"a".repeat(AVATAR_BYTES + 1)));
+        assert!(!valid_avatar("river\n"));
+        assert!(!valid_avatar("\u{7}"));
+        // Nothing that reads otherwise than it is: bidirectional controls and invisible formatting characters.
+        for hidden in [
+            '\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}',
+            '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}',
+        ] {
+            assert!(!valid_avatar(&format!("riv{hidden}er")), "{hidden:?}");
+        }
     }
 
     #[test]

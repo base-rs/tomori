@@ -36,6 +36,8 @@ pub struct Environment {
     workers: Option<tomori_protocol::Pose>,
     /// Where participants arrive in it, its `arrival` anchor, if it says, in its own coordinates.
     arrival: Option<tomori_protocol::Pose>,
+    /// The avatar its agent shows as in its spaces, if it says, in place of the one the space's backend names.
+    avatar: Option<String>,
     /// The projection walls of its own, in its own coordinates.
     walls: Vec<tomori_protocol::Pose>,
     /// Those walls, carried into a space's coordinates, where home is the origin facing −Z.
@@ -55,6 +57,7 @@ impl fmt::Debug for Environment {
             .field("agent", &self.agent)
             .field("workers", &self.workers)
             .field("arrival", &self.arrival)
+            .field("avatar", &self.avatar)
             .field("walls", &self.walls)
             .finish()
     }
@@ -71,6 +74,7 @@ impl PartialEq for Environment {
             && self.agent == other.agent
             && self.workers == other.workers
             && self.arrival == other.arrival
+            && self.avatar == other.avatar
             && self.walls == other.walls
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
@@ -95,6 +99,7 @@ impl Environment {
             agent: None,
             workers: None,
             arrival: None,
+            avatar: None,
             walls: Vec::new(),
             carried: Vec::new(),
         }
@@ -333,6 +338,27 @@ impl Environment {
     pub fn workers(&self) -> Option<tomori_protocol::Pose> {
         self.workers
     }
+
+    /// The environment, with the agent showing as the avatar `avatar` in its spaces, by identifier, in place of the one
+    /// the space's backend names, such as a character that suits the scene. The backend's avatar is the default; an
+    /// environment overrides it. The server sends it in the space's state if `tomori_protocol::valid_avatar` takes it,
+    /// and the backend's otherwise; a client whose build lacks it shows the swarm. See `design/avatars.md`.
+    ///
+    /// ```
+    /// use tomori_server::Environment;
+    ///
+    /// assert_eq!(Environment::new("farm", "Farm").with_avatar("hen").avatar(), Some("hen"));
+    /// assert_eq!(Environment::new("farm", "Farm").avatar(), None);
+    /// ```
+    pub fn with_avatar(mut self, avatar: impl Into<String>) -> Self {
+        self.avatar = Some(avatar.into());
+        self
+    }
+
+    /// The avatar its agent shows as in its spaces, if it says.
+    pub fn avatar(&self) -> Option<&str> {
+        self.avatar.as_deref()
+    }
 }
 
 /// The environments a server offers, in order: the first is the one a space whose creator names none is bound to. None by default: an application registers those it offers, each by the identity in its own crate. See `design/environments.md`.
@@ -404,6 +430,15 @@ impl Environments {
                 .unwrap_or_else(crate::stage::default_stage),
             declared: environment.map_or(&[], |environment| &environment.carried),
         }
+    }
+
+    /// The avatar the environment `id` names for its agent, as a space's state carries it, if it names one clients read,
+    /// and none when it is not offered. See `design/avatars.md`.
+    pub fn avatar(&self, id: &str) -> Option<String> {
+        self.get(id)
+            .and_then(Environment::avatar)
+            .filter(|avatar| tomori_protocol::valid_avatar(avatar))
+            .map(str::to_owned)
     }
 
     /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a

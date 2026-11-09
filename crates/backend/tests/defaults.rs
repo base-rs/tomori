@@ -166,6 +166,11 @@ fn a_backend_without_tools_refuses_them_as_unsupported() {
 }
 
 #[test]
+fn a_backend_that_names_no_avatar_is_shown_as_the_swarm() {
+    assert_eq!(Minimal.avatar(), None);
+}
+
+#[test]
 fn the_minimal_backend_refuses_everything_it_implements() {
     let backend = Minimal;
     assert_eq!(backend.name(), "minimal");

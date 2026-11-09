@@ -196,6 +196,9 @@ pub struct Frame<'a> {
     /// The carriage from the environment's own coordinates, in which its scenery draws, into the space's. See
     /// `design/environments.md`.
     pub carriage: crate::anchors::Anchor,
+    /// The registered avatar shown, while the swarm is not, and what it shows, for its scenery to draw. See
+    /// `design/avatars.md`.
+    pub avatar: Option<crate::avatar::Shown<'a>>,
 }
 
 /// How long the trigger must pull the swarm before letting go leaves the agent where it was drawn, in seconds: a
@@ -357,13 +360,14 @@ pub struct Step {
     indicator: Indicator,
     pointer: Pointer<arrival::Key>,
     hover: feedback::Hover,
-    swarm: Swarm,
+    /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
+    /// `design/avatars.md`.
+    coordinator: crate::avatar::Coordinator,
     signals: interaction::Signals,
     motion: arrival_motion::Motion,
     arrival_time: f32,
     delegation_scene: delegation::Scene,
     workers: delegation::Workers,
-    coordinator_samples: Vec<[f32; 3]>,
     presentation_navigation: CardNavigation,
     /// In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
     panel: PanelAnchor,
@@ -435,13 +439,12 @@ impl Default for Step {
             indicator: Indicator::default(),
             pointer: Pointer::default(),
             hover: feedback::Hover::default(),
-            swarm: Swarm::default(),
+            coordinator: crate::avatar::Coordinator::default(),
             signals: interaction::Signals::default(),
             motion: arrival_motion::Motion::default(),
             arrival_time: 0.0,
             delegation_scene: delegation::Scene::new(),
             workers: delegation::Workers::default(),
-            coordinator_samples: Vec::with_capacity(crate::swarm::AGENT_COUNT),
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
@@ -841,14 +844,13 @@ impl Step {
             dt,
         );
         // Follows the agent's activity, which can change many times a minute.
-        if visual.mode != self.swarm.visual.mode {
+        if visual.mode != self.coordinator.visual().mode {
             log::debug!(
                 "Swarm interaction: {:?}, session_working={}",
                 visual.mode,
                 visual.working
             );
         }
-        self.swarm.set_visual(visual, dt);
         // Arrival's objects move between its steps rather than cutting, and are pointed at where they are now. See `design/arrival.md`.
         self.arrival_time += dt;
         self.motion
@@ -980,16 +982,15 @@ impl Step {
         // The agent appears at its home as a space opens, or changes environment, and otherwise glides to where it is
         // summoned and back home; the workers stand about its home. See `design/environments.md`.
         let arrangement = conversation.arrangement();
-        if arrangement.home != self.agent_home {
-            self.agent_home = arrangement.home;
-            self.swarm.appear_at(arrangement.agent);
+        let appear = arrangement.home != self.agent_home;
+        self.agent_home = arrangement.home;
+        let mut anchor = arrangement.agent;
+        if appear {
             // A pull begun before the space opened or changed environment draws the swarm until it is let go, but
             // summons it nowhere, so that the agent stays at the new home, as everyone else sees it.
             if let Some((_, _, swarm)) = &mut self.summoning {
                 *swarm = false;
             }
-        } else {
-            self.swarm.set_anchor(arrangement.agent);
         }
         // Drawn with the trigger long enough and let go, in a space, the agent stays where it was drawn, for everyone.
         // The summons is the swarm's own rung of the trigger's order: a pull begun on a panel, a card or a worker draws
@@ -1013,13 +1014,20 @@ impl Step {
                     );
                     conversation.summon(Some(spot));
                     // It stands there at once here, as everyone else is told.
-                    self.swarm.set_anchor(
-                        crate::anchors::Anchor::from_pose(&spot).unwrap_or(arrangement.agent),
-                    );
+                    anchor = crate::anchors::Anchor::from_pose(&spot).unwrap_or(anchor);
                 }
             }
         }
-        self.swarm.step(dt, attractor);
+        // The agent stands there as the avatar the space's backend, or its environment, names, where this build
+        // registers it, or the swarm. See `design/avatars.md`.
+        self.coordinator.choose(conversation.avatar());
+        self.coordinator.update(
+            &crate::avatar::Input::new(visual, anchor, dt)
+                .appearing(appear)
+                .speaking(conversation.speech().playing)
+                .head(senses.head_pose.map(|pose| Vec3::from_array(pose.position)))
+                .attracted(attractor),
+        );
         let marker = match senses.marker {
             Marker::Always => senses.attractor,
             Marker::WhileAttracting => attractor,
@@ -1372,15 +1380,9 @@ impl Step {
             None => None,
         };
         let (root, workspace) = self.workers.update(conversation.joined_space());
-        self.coordinator_samples.clear();
-        self.coordinator_samples.extend(
-            self.swarm
-                .agents
-                .iter()
-                .map(|agent| agent.position.to_array()),
-        );
+        // Workers fly out from the agent and back to it, wherever it stands.
         self.delegation_scene
-            .set_coordinator_samples(&self.coordinator_samples);
+            .set_coordinator_samples(self.coordinator.departures());
         self.delegation_scene
             .arrange(arrangement.workers, arrangement.placement);
         self.delegation_scene.update(root, workspace, dt);
@@ -1423,7 +1425,7 @@ impl Step {
             scene,
         });
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
-        let agent = crate::spatial_audio::centre(&self.coordinator_samples);
+        let agent = self.coordinator.voice();
         // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates. Visitors send no presence; see `design/security.md`.
         let presence = senses
             .head_pose
@@ -1449,7 +1451,7 @@ impl Step {
         );
         Frame {
             scenery,
-            swarm: &self.swarm,
+            swarm: self.coordinator.swarm(),
             marker,
             attracting,
             card: self.presentation_navigation.card,
@@ -1473,6 +1475,7 @@ impl Step {
             blink: travel.blink,
             environment: drawn,
             carriage: arrangement.carriage,
+            avatar: self.coordinator.shown(),
         }
     }
 }
@@ -4908,7 +4911,8 @@ mod tests {
             step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
         }
         let middle = |step: &Step| {
-            step.swarm
+            step.coordinator
+                .swarm()
                 .agents
                 .iter()
                 .map(|agent| agent.position)
@@ -5266,6 +5270,131 @@ mod tests {
         assert!(Vec3::from_array(frame.agent).distance(Vec3::from_array(agent.position)) < 1.0);
         // The worker stands where the placement put it about the workers anchor.
         assert_eq!(frame.stations[0].position, [0.0, 1.5, -6.0]);
+    }
+
+    #[test]
+    fn the_avatar_the_space_s_backend_names_stands_in_for_the_swarm_from_the_first_frame() {
+        use crate::avatar::{Avatar, Factory, Input};
+        use std::sync::{Arc, Mutex};
+        /// A figure standing at its anchor: heard from its mouth, workers leaving from its hand.
+        struct Figure(Arc<Mutex<Vec<Input>>>, crate::anchors::Anchor);
+        impl Avatar for Figure {
+            fn update(&mut self, input: &Input) {
+                self.1 = input.anchor;
+                self.0.lock().unwrap().push(*input);
+            }
+            fn voices(&self, voices: &mut Vec<[f32; 3]>) {
+                voices.push((self.1.position + Vec3::Y * 0.3).to_array());
+            }
+            fn departures(&self, departures: &mut Vec<[f32; 3]>) {
+                departures.push((self.1.position + Vec3::X * 0.4).to_array());
+            }
+            fn bounds(&self) -> crate::arrival_motion::Sphere {
+                crate::arrival_motion::Sphere {
+                    centre: self.1.position,
+                    radius: 0.5,
+                }
+            }
+            fn drawn(&self) -> Option<crate::client_side::Drawn> {
+                Some(Arc::new(self.1.position))
+            }
+        }
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let made = Arc::new(Mutex::new(Vec::new()));
+        let factory: Factory = {
+            let (told, made) = (told.clone(), made.clone());
+            Arc::new(move |space: &str| {
+                made.lock().unwrap().push(space.to_owned());
+                Box::new(Figure(told.clone(), crate::anchors::Anchor::AGENT)) as Box<dyn Avatar>
+            })
+        };
+        let agent = tomori_protocol::Pose {
+            position: [3.0, 0.0, -5.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let figure = |state: &mut tomori_protocol::SpaceState| {
+            state.avatar = Some("figure".into());
+            state.anchors = tomori_protocol::Anchors::new().with_agent(agent);
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_avatars(vec![("figure".into(), factory)]);
+        let mut step = Step::default();
+        let now = Instant::now();
+        // Outside a space, the swarm.
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert!(frame.avatar.is_none());
+        assert_eq!(frame.swarm.agents.len(), crate::swarm::AGENT_COUNT);
+        // From the first frame in the space, while its scenery still grows in, the figure stands in for the swarm.
+        conversation.apply(space(figure));
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        let shown = frame.avatar.as_ref().expect("the figure shows");
+        assert_eq!(shown.avatar, "figure");
+        let position = *shown
+            .drawn
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Vec3>()
+            .unwrap();
+        assert_eq!(position, Vec3::from_array(agent.position));
+        // The renderer draws no swarm, though the ring beneath the agent stands where it does.
+        assert!(frame.swarm.agents.is_empty());
+        assert_eq!(frame.swarm.anchor().position, position);
+        // The agent is heard from its mouth, and a worker that arrives flies out from its hand.
+        assert_eq!(frame.agent, [3.0, 0.3, -5.0]);
+        conversation.apply(space(|state| {
+            figure(state);
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        let hand = Vec3::new(3.4, 0.0, -5.0);
+        let leaving = frame
+            .cubes
+            .iter()
+            .filter(|cube| Vec3::from_array(cube.position).distance(hand) < 0.2)
+            .count();
+        assert!(leaving > 0, "{:?}", frame.cubes);
+        // It was told the agent's state, where it stands and where the participant's head is.
+        let input = *told.lock().unwrap().last().unwrap();
+        assert_eq!(input.anchor.position, position);
+        assert_eq!(input.head, Some(arrival::HOME));
+        assert!(!input.speaking);
+        assert_eq!(input.attention, None);
+        assert_eq!(input.dt, FRAME);
+        assert_eq!(input.attractor, None);
+        // The agent at work, and the trigger pulled away from everything, which attracts: both reach it.
+        conversation.apply(space(|state| {
+            figure(state);
+            state.activity = tomori_protocol::Activity::Running;
+        }));
+        let pull = Vec3::new(1.0, 1.2, -1.5);
+        let pulling = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::Y),
+            trigger: Some(1.0),
+            attractor: Some(pull),
+            ..senses()
+        };
+        for _ in 0..10 {
+            step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        }
+        let input = *told.lock().unwrap().last().unwrap();
+        assert_eq!(input.attractor, Some(pull));
+        assert_eq!(input.visual.mode, interaction::Mode::Working);
+        assert!(input.visual.working);
+        // Made once, for the space, which it stands in.
+        assert_eq!(*made.lock().unwrap(), [SPACE]);
+        assert_eq!(step.coordinator.bounds().radius, 0.5);
+        // Leaving, the swarm again, where it glided meanwhile.
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::LEFT,
+        ));
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert!(frame.avatar.is_none());
+        assert_eq!(frame.swarm.agents.len(), crate::swarm::AGENT_COUNT);
     }
 
     #[test]

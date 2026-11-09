@@ -130,6 +130,16 @@ pub struct Renderer {
     sceneries: Vec<(Environment, Box<dyn crate::scenery::Scenery>)>,
     /// What this renderer can draw: the grid, then each scenery's environment.
     environments: Vec<Environment>,
+    /// What makes each registered avatar's scenery, by the avatar's identifier, and the scenery of the avatar shown
+    /// now, if any, with the avatar and the space it was made for, made when it first shows and dropped, with what it
+    /// holds on the GPU, when another avatar, the same in another space, or the swarm shows. See `design/avatars.md`.
+    avatar_sceneries: Vec<(&'static str, crate::scenery::Create)>,
+    avatar: Option<(String, String, Box<dyn crate::scenery::Scenery>)>,
+    /// The registered avatars whose scenery panicked as it was made or given what its avatar shows, which this renderer
+    /// never makes again, shared with the conversation, which shows the swarm in their place.
+    avatar_failures: tomori_scene::avatar::Failures,
+    /// The eyes' targets' size, for an avatar's scenery made later.
+    size: (u32, u32),
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
@@ -319,6 +329,15 @@ impl Renderer {
         let images =
             crate::panel_images::PanelImages::new(device, format, samples, panels.transforms());
         let blink_pipeline = blink_pipeline(device, format, samples);
+        let target = crate::scenery::Target::new(
+            device,
+            queue,
+            format,
+            width,
+            height,
+            samples,
+            glyphs.clone(),
+        );
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
@@ -327,16 +346,12 @@ impl Renderer {
             landing: None,
             blink: 0.0,
             blink_pipeline,
-            sceneries: sceneries.create(&crate::scenery::Target::new(
-                device,
-                queue,
-                format,
-                width,
-                height,
-                samples,
-                glyphs.clone(),
-            )),
+            sceneries: sceneries.create(&target),
             environments: sceneries.environments(),
+            avatar_sceneries: sceneries.avatar_sceneries(),
+            avatar: None,
+            avatar_failures: sceneries.avatar_failures(),
+            size: (width, height),
             pipeline,
             vertices,
             instances,
@@ -451,6 +466,10 @@ impl Renderer {
         for (_, scenery) in &mut self.sceneries {
             scenery.resize(device, width, height);
         }
+        self.size = (width, height);
+        if let Some((_, _, scenery)) = &mut self.avatar {
+            scenery.resize(device, width, height);
+        }
     }
 
     /// The scenery drawn now, if the environment has one.
@@ -500,6 +519,74 @@ impl Renderer {
     /// `design/environments.md`.
     pub fn set_carriage(&mut self, carriage: tomori_scene::anchors::Anchor) {
         self.carriage = Mat4::from_rotation_translation(carriage.orientation, carriage.position);
+    }
+
+    /// Draw the registered avatar `shown` names from now on, given what it shows, if anything, or none, while the swarm
+    /// shows, which [`Self::update`] draws. Its scenery is made when it first shows, and made anew for another space,
+    /// so that nothing of one space's shows in the next; it is dropped when the swarm or another avatar shows. An
+    /// avatar this renderer has no scenery for draws nothing, and so does one whose scenery panicked as it was made or
+    /// given what its avatar shows, from then on; a panic as it is drawn is not caught. See `design/avatars.md`.
+    pub fn set_avatar(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shown: Option<&crate::avatar::Shown<'_>>,
+    ) {
+        let Some(shown) = shown else {
+            self.avatar = None;
+            return;
+        };
+        let current = self
+            .avatar
+            .as_ref()
+            .is_some_and(|(avatar, space, _)| avatar == shown.avatar && space == shown.space);
+        if !current {
+            // The previous one's resources go before the next one's are made.
+            self.avatar = None;
+            let create = self
+                .avatar_sceneries
+                .iter()
+                .find(|(id, _)| *id == shown.avatar && !self.avatar_failures.contains(id))
+                .map(|(_, create)| create.clone());
+            if let Some(create) = create {
+                let target = crate::scenery::Target::new(
+                    device,
+                    queue,
+                    self.format,
+                    self.size.0,
+                    self.size.1,
+                    self.samples,
+                    self.glyphs.clone(),
+                );
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create(&target))) {
+                    Ok(scenery) => {
+                        self.avatar =
+                            Some((shown.avatar.to_owned(), shown.space.to_owned(), scenery));
+                    }
+                    Err(_) => self.give_up_avatar(shown.avatar),
+                }
+            }
+        }
+        if let (Some((_, _, scenery)), Some(drawn)) = (&mut self.avatar, &shown.drawn) {
+            let animated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scenery.animate(device, queue, drawn.as_ref())
+            }));
+            if animated.is_err() {
+                self.avatar = None;
+                self.give_up_avatar(shown.avatar);
+            }
+        }
+    }
+
+    /// Never make the scenery of the avatar `avatar` again, and tell the conversation, which shows the swarm in its
+    /// place from the next frame and says so.
+    fn give_up_avatar(&mut self, avatar: &str) {
+        self.avatar_failures.report(avatar);
+    }
+
+    /// The avatar's scenery drawn now, if any.
+    fn avatar(&self) -> Option<&dyn crate::scenery::Scenery> {
+        self.avatar.as_ref().map(|(_, _, scenery)| scenery.as_ref())
     }
 
     /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
@@ -702,6 +789,16 @@ impl Renderer {
                 scenery.prepare_eye(queue, eye, scenery_to_clip, position);
                 scenery.encode(&mut encoder, eye);
             }
+            // An avatar draws in the space's.
+            if let Some(scenery) = self.avatar() {
+                scenery.prepare_eye(
+                    queue,
+                    eye,
+                    scene_to_clip,
+                    crate::scenery::eye(scene_to_clip),
+                );
+                scenery.encode(&mut encoder, eye);
+            }
             // Separate buffers are important: two writes to one buffer before
             // submission would make both eyes use the right-eye transform.
             queue.write_buffer(
@@ -746,7 +843,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(scenery) = self.scenery() {
+            for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw(&mut pass, eye);
             }
             pass.set_pipeline(&self.pipeline);
@@ -755,7 +852,7 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instances.slice(..));
             pass.draw(0..self.vertex_count, 0..self.scene.len() as u32);
             self.controllers.draw(&mut pass);
-            if let Some(scenery) = self.scenery() {
+            for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw_translucent(&mut pass, eye);
             }
             self.workspace.draw(
