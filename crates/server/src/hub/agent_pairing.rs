@@ -80,15 +80,17 @@ impl Hub {
         self.pairing.read().expect("never left poisoned").is_some()
     }
 
-    /// The pairing waiting, as the `pairing` tool lists it to the agent of the space bound to `session`: only what the server knows itself, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. Never the code, nor the values it is derived from, nor the device's name, which the device chose and could carry an attacker's code or instructions. The server knows nothing else of the device, such as its kind or platform. See `design/security.md`.
+    /// The pairing waiting, as the `pairing` tool lists it to the agent of the space bound to `session`: only what the server knows itself, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is open and whether it is paused. Never the code, nor the values it is derived from, nor the device's name, which the device chose and could carry an attacker's code or instructions. The server knows nothing else of the device, such as its kind or platform. See `design/security.md`.
     pub(crate) fn tool_pairing(&self, session: &str) -> Result<Value, String> {
         let timeout = *self.pairing_timeout.read().expect("never left poisoned");
         let state = self.lock();
         self.calling_space(&state, session)?;
-        if !self.pairs() {
+        if self.pairing.read().expect("never left poisoned").is_none() {
             return Err(NO_PAIRING.to_owned());
         }
         let now = Instant::now();
+        // Whether a device may ask to pair; only an owner or the operator opens pairing, never the agent. See `design/security.md`.
+        let open = self.pairing_open(&state, now);
         let pending = state.pairing.as_ref().map(|pairing| {
             let waited = now.saturating_duration_since(pairing.started);
             // A device that has not revealed its value is withdrawn sooner.
@@ -105,6 +107,7 @@ impl Hub {
         });
         Ok(json!({
             "pending": pending,
+            "open": open,
             "paused": state.pairing_paused(now),
         }))
     }

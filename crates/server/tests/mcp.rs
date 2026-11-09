@@ -415,6 +415,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
         json!({})
     );
 
+    // None opens or closes pairing, which only an owner or the operator does; see `design/security.md`.
     let listed = rpc(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
     let names: Vec<&str> = listed["result"]["tools"]
         .as_array()

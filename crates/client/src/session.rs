@@ -317,6 +317,8 @@ async fn exchange(
             environment_state: true,
             // Every client built with this crate reads what is projected in its space, which it hands on as any other message. See `design/projection.md`.
             projection: true,
+            // Every client built with this crate reads whether pairing is open, which it hands on as any other message. See `design/security.md`.
+            pairing_window: true,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

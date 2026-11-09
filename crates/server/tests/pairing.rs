@@ -15,7 +15,7 @@ fn fingerprint() -> Fingerprint {
     Fingerprint::of(b"test certificate")
 }
 
-/// A server that admits by tokens, with visitors if `visitors`, and pairs, with its pairing handle.
+/// A server that admits by tokens, with visitors if `visitors`, and pairs, with its pairing handle, and pairing opened as the operator opens it, since it is closed by default, even without an owner.
 fn pairing_server(
     visitors: bool,
     configure: impl FnOnce(tomori_server::Server) -> tomori_server::Server + Send + 'static,
@@ -30,7 +30,9 @@ fn pairing_server(
         sender.send(server.pairing()).unwrap();
         server
     });
-    (server, receiver.recv().unwrap())
+    let pairing = receiver.recv().unwrap();
+    pairing.open().unwrap();
+    (server, pairing)
 }
 
 fn failed(client: &TestClient) -> String {
@@ -247,6 +249,8 @@ fn only_so_many_pairings_begin_within_the_window() {
     assert!(get(&server, "/", &owner).contains("Pairing is paused"));
     assert_eq!(post(&server, "/pairing/allow", &owner, "").0, 303);
     assert!(!pairing.paused());
+    // The server has an owner now, so pairing is open only in a window.
+    pairing.open().unwrap();
     pair(&mut quest);
     pairing.decline();
     failed(&quest);
@@ -318,6 +322,8 @@ fn without_visitors_a_device_asking_to_pair_may_only_pair() {
     let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     ada.create_space("Secret plans");
+    // An owner opens pairing for the device.
+    ada.send(&ClientMessage::OpenPairing);
     while let Some(message) = quest.next_message(Duration::from_millis(300)) {
         assert!(
             !matches!(
@@ -390,6 +396,8 @@ fn an_owner_confirms_a_pairing_on_the_status_page() {
     );
     let owner = format!("__Host-tomori-token={owner}");
     let collaborator = format!("__Host-tomori-token={collaborator}");
+    // The server has an owner, so an owner opens pairing first, here on the status page.
+    assert_eq!(post(&server, "/pairing/open", &owner, "").0, 303);
     // A device whose name carries digits, in any script, and number words.
     let mut quest = server.connect("quest", "Quest ٤٨٢ 913 four ２");
     let code = pair(&mut quest);
@@ -436,6 +444,7 @@ fn an_owner_declines_a_pairing_on_the_status_page() {
     let (server, pairing) = pairing_server(true, |server| server);
     let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     let owner = format!("__Host-tomori-token={owner}");
+    pairing.open().unwrap();
     let mut quest = server.connect("quest", "Quest 3");
     pair(&mut quest);
     let serial = pairing.pending().unwrap().serial;
@@ -470,6 +479,7 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
         server
     });
     let pairing = receiver.recv().unwrap();
+    pairing.open().unwrap();
 
     let connect = |token: Option<String>, pin: Option<Fingerprint>| {
         let mut options =

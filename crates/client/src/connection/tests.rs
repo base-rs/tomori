@@ -3178,15 +3178,16 @@ mod served {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    /// Pair as the participant does, the operator confirming the code on the server's console, and wait for `done`.
+    /// Pair as the participant does, the operator opening pairing, which is closed by default, and confirming the code on the server's console, and wait for `done`.
     fn pair(
         server: &Server,
         connection: &mut Connection,
         session: &mut Script,
         done: impl FnMut(&mut Connection, &mut Script) -> bool,
     ) {
-        session.pair();
         let pairing = server.pairing.as_ref().unwrap();
+        pairing.open().unwrap();
+        session.pair();
         let mut code = None;
         until(connection, session, |_, _| {
             code = pairing.pending().and_then(|pending| pending.code);

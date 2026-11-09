@@ -129,8 +129,8 @@ async fn read_form<B: ReadableBody>(mut body: B, cancellation: &Cancellation) ->
 
 /// Who a page request is from.
 enum Viewer {
-    /// An owner, as everyone is in `--auth open` mode.
-    Owner,
+    /// An owner, as everyone is in `--auth open` mode, by the name of their token, if they presented one.
+    Owner(Option<String>),
     /// Signed in, but not as an owner.
     Other,
     /// Not signed in, or with a token that is no longer accepted.
@@ -141,7 +141,7 @@ impl Application {
     fn viewer(&self, fields: &Fields) -> Viewer {
         let credentials = credentials(fields);
         match self.door.admit(&credentials, false) {
-            Some(access) if access.grant == Grant::Owner => Viewer::Owner,
+            Some(access) if access.grant == Grant::Owner => Viewer::Owner(access.name),
             Some(_) if credentials.token.is_some() => Viewer::Other,
             _ => Viewer::Nobody,
         }
@@ -154,12 +154,13 @@ impl Application {
 
     fn status_page<B: ReadableBody>(&self, fields: &Fields) -> Response<ResponseBody<B>> {
         match self.viewer(fields) {
-            Viewer::Owner => {
+            Viewer::Owner(_) => {
                 let tokens = self.door.store().map(|store| store.entries());
                 html(
                     200,
                     pages::status(
                         &self.hub.status(),
+                        self.hub.pairing_state().as_ref(),
                         self.hub.pending_pairing().as_ref(),
                         self.hub.pairing_paused(),
                         tokens.as_deref(),
@@ -190,7 +191,7 @@ impl Application {
             pages::SIGN_IN_PATH => self.sign_in(form.as_deref()),
             pages::SIGN_OUT_PATH => redirect(pages::SIGN_IN_PATH, Some(token_cookie(None))),
             pages::ALLOW_PAIRING_PATH => {
-                if !matches!(self.viewer(fields), Viewer::Owner) {
+                if !matches!(self.viewer(fields), Viewer::Owner(_)) {
                     return html(403, pages::not_an_owner());
                 }
                 self.hub.allow_pairing();
@@ -199,6 +200,9 @@ impl Application {
             }
             pages::CONFIRM_PAIRING_PATH | pages::DECLINE_PAIRING_PATH => {
                 self.decide_pairing(fields, form.as_deref(), path == pages::CONFIRM_PAIRING_PATH)
+            }
+            pages::OPEN_PAIRING_PATH | pages::CLOSE_PAIRING_PATH => {
+                self.open_pairing(fields, path == pages::OPEN_PAIRING_PATH)
             }
             _ => self.revoke(fields, form.as_deref()),
         }
@@ -211,7 +215,7 @@ impl Application {
         form: Option<&[u8]>,
         confirm: bool,
     ) -> Response<ResponseBody<B>> {
-        if !matches!(self.viewer(fields), Viewer::Owner) {
+        if !matches!(self.viewer(fields), Viewer::Owner(_)) {
             return html(403, pages::not_an_owner());
         }
         let Some(serial) = form
@@ -230,6 +234,31 @@ impl Application {
             }
         } else {
             self.hub.decline_pairing(Some(serial));
+        }
+        redirect(pages::STATUS_PATH, None)
+    }
+
+    /// Open pairing for a new device, or close it, as an owner on the status page. See `design/security.md`.
+    fn open_pairing<B: ReadableBody>(
+        &self,
+        fields: &Fields,
+        open: bool,
+    ) -> Response<ResponseBody<B>> {
+        let Viewer::Owner(name) = self.viewer(fields) else {
+            return html(403, pages::not_an_owner());
+        };
+        if open {
+            if let Err(error) = self
+                .hub
+                .open_pairing(crate::hub::Opener::status_page(name.as_deref()))
+            {
+                log::info!("Could not open pairing from the status page: {error}");
+            }
+        } else {
+            self.hub.close_pairing(format!(
+                "{} closed it on the status page.",
+                name.as_deref().unwrap_or("An owner")
+            ));
         }
         redirect(pages::STATUS_PATH, None)
     }
@@ -254,7 +283,7 @@ impl Application {
         fields: &Fields,
         form: Option<&[u8]>,
     ) -> Response<ResponseBody<B>> {
-        if !matches!(self.viewer(fields), Viewer::Owner) {
+        if !matches!(self.viewer(fields), Viewer::Owner(_)) {
             return html(403, pages::not_an_owner());
         }
         let id = form.and_then(|form| pages::form_value(form, "id"));
@@ -422,6 +451,8 @@ impl Handler for Application {
             | pages::CONFIRM_PAIRING_PATH
             | pages::DECLINE_PAIRING_PATH
             | pages::ALLOW_PAIRING_PATH
+            | pages::OPEN_PAIRING_PATH
+            | pages::CLOSE_PAIRING_PATH
                 if post =>
             {
                 let path = path.to_owned();
@@ -450,7 +481,9 @@ impl Handler for Application {
             | pages::REVOKE_PATH
             | pages::CONFIRM_PAIRING_PATH
             | pages::DECLINE_PAIRING_PATH
-            | pages::ALLOW_PAIRING_PATH => response(
+            | pages::ALLOW_PAIRING_PATH
+            | pages::OPEN_PAIRING_PATH
+            | pages::CLOSE_PAIRING_PATH => response(
                 Status::new(405).expect("valid status"),
                 "text/plain",
                 ResponseBody::fixed("Method not allowed.\n"),

@@ -89,6 +89,10 @@ fn name_not_changed(naming: Naming, reason: &str) -> String {
     format!("{}{reason}", naming.not_changed())
 }
 
+/// What the hand menu says while an owner's request to open pairing, or to close it, is on its way.
+const OPENING_PAIRING: &str = "Opening pairing for a new device...";
+const CLOSING_PAIRING: &str = "Closing pairing...";
+
 /// How long the device waits for a pairing to be confirmed before it gives up itself: the server's timeout and a margin. A pairing the device gives up on is cancelled, so one choice of the pairing object allows the server one try. See `design/security.md`.
 const PAIRING_PATIENCE: Duration = Duration::from_secs(135);
 
@@ -215,6 +219,10 @@ pub struct Conversation {
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
     certificate: Option<tomori_client::Fingerprint>,
     pairing: Option<Pairing>,
+    /// Whether the server refused to begin pairing because pairing is closed, so that the pairing object says so until it is chosen again, rather than trying again by itself. See `design/arrival.md`.
+    pairing_closed: bool,
+    /// Whether pairing is open on the server, for an owner whose server says: `None` until it says, `Some(None)` while closed, and `Some(Some(when))` while open, until about `when`. See `design/security.md`.
+    pairing_window: Option<Option<Instant>>,
     /// The knocks waiting on the space, while this participant is in it.
     knocks: Vec<tomori_protocol::KnockRequest>,
     /// What became of this visitor's knock on the space, if they knocked.
@@ -399,6 +407,8 @@ impl Conversation {
             role: ConnectionRole::Unknown,
             certificate: None,
             pairing: None,
+            pairing_closed: false,
+            pairing_window: None,
             knocks: Vec::new(),
             knock: None,
 
@@ -590,6 +600,8 @@ impl Conversation {
         self.role = ConnectionRole::Unknown;
         self.certificate = None;
         self.pairing = None;
+        self.pairing_closed = false;
+        self.pairing_window = None;
         self.knocks.clear();
         self.knock = None;
         self.jumping = false;
@@ -684,9 +696,10 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
-            // A pairing belongs to its connection; the server withdraws it.
+            // A pairing belongs to its connection; the server withdraws it. Whether pairing is open is told again on connecting.
             self.pairing = None;
             self.forget_turn();
+            self.pairing_window = None;
             self.stop_live();
             let naming = self.talk.as_ref().and_then(Talk::naming);
             match &self.talk {
@@ -790,7 +803,27 @@ impl Conversation {
             }
             ServerMessage::PairFailed { error } => {
                 self.pairing = None;
+                // Shown on the pairing object until it is chosen again, which asks again; nothing asks by itself. See `design/arrival.md`.
+                self.pairing_closed = error == tomori_protocol::PAIRING_CLOSED;
                 self.notice = Some(error);
+            }
+            ServerMessage::PairingWindow { closes_in } => {
+                self.pairing_window = Some(
+                    closes_in
+                        .map(|seconds| Instant::now() + Duration::from_secs(u64::from(seconds))),
+                );
+                // What this owner asked for is answered; a change someone else made shows in the menu's row.
+                if matches!(
+                    self.notice.as_deref(),
+                    Some(OPENING_PAIRING | CLOSING_PAIRING)
+                ) {
+                    self.notice = Some(match closes_in {
+                        Some(_) => {
+                            "Pairing is open: choose the new device's pairing object now.".into()
+                        }
+                        None => "Pairing is closed.".into(),
+                    });
+                }
             }
             ServerMessage::Role { role } => {
                 log::info!("Now {role:?}");
@@ -1393,6 +1426,11 @@ impl Conversation {
         let (label, detail, pending) = match &self.pairing {
             Some(Pairing::Waiting(code, _)) => (code.clone(), "Confirm on the server", true),
             Some(Pairing::Committed(..)) => ("Pairing...".to_owned(), "Choose to cancel", true),
+            None if self.pairing_closed => (
+                "Pairing is closed".to_owned(),
+                "Ask an owner to open it",
+                false,
+            ),
             None => ("Pair".to_owned(), "Become an owner", false),
         };
         arrival::Item {
@@ -1428,6 +1466,7 @@ impl Conversation {
             can_knock: self.can_knock(),
             knock: self.knock_state(),
             pairing: self.pairable().then(|| self.pairing_item().label),
+            pairing_window: self.pairing_window_left(Instant::now()),
             notice: self.notice.clone(),
             instructions: space.and_then(|space| space.instructions.clone()),
             space: space.map(|space| crate::hand_menu::SpaceInfo {
@@ -1714,6 +1753,7 @@ impl Conversation {
             crate::hand_menu::Choice::Admit(id) => self.decide_knock(&id, true),
             crate::hand_menu::Choice::Decline(id) => self.decide_knock(&id, false),
             crate::hand_menu::Choice::Pair => self.pair(),
+            crate::hand_menu::Choice::PairingWindow => self.toggle_pairing_window(),
             crate::hand_menu::Choice::ClearInstructions => self.instruct(""),
             crate::hand_menu::Choice::Mode(mode) => {
                 self.send(ClientMessage::SetMode { mode });
@@ -1845,6 +1885,35 @@ impl Conversation {
             && matches!(self.state, Some(ConnectionState::Connected { .. }))
     }
 
+    /// Whether pairing is open on the server, as the hand menu offers it to an owner whose server says: `Some(None)` while closed, and `Some(Some(seconds))` left while open at `now`. `None` for anyone else, and from a server that does not say. See `design/hand-menu.md`.
+    pub fn pairing_window_left(&self, now: Instant) -> Option<Option<u32>> {
+        let window = self
+            .pairing_window
+            .filter(|_| self.role == ConnectionRole::Owner)?;
+        Some(window.map(|until| {
+            let left = until.saturating_duration_since(now);
+            u32::try_from(left.as_secs() + u64::from(left.subsec_nanos() > 0)).unwrap_or(u32::MAX)
+        }))
+    }
+
+    /// Open pairing on the server so that a new device can ask to pair, or close it while it is open, as an owner whose server says whether it is open. See `design/security.md`.
+    pub fn toggle_pairing_window(&mut self) {
+        match self.pairing_window_left(Instant::now()) {
+            None if self.role == ConnectionRole::Owner => {
+                self.notice = Some("This server does not open pairing for new devices.".into());
+            }
+            None => self.notice = Some("Only owners can open pairing.".into()),
+            Some(None) => {
+                self.send(ClientMessage::OpenPairing);
+                self.notice = Some(OPENING_PAIRING.into());
+            }
+            Some(Some(_)) => {
+                self.send(ClientMessage::ClosePairing);
+                self.notice = Some(CLOSING_PAIRING.into());
+            }
+        }
+    }
+
     /// Start pairing, committing to a random value, or cancel the pairing in progress.
     pub fn pair(&mut self) {
         if self.pairing.take().is_some() {
@@ -1855,6 +1924,7 @@ impl Conversation {
         if !self.pairable() {
             return;
         }
+        self.pairing_closed = false;
         let device = tomori_security::pairing::Nonce::generate();
         self.actions.push(Action::Send(ClientMessage::PairBegin {
             commitment: device.commitment(),
@@ -2241,6 +2311,8 @@ impl Conversation {
         // What belonged to the connection goes with it, so that a token the server sends as the participant leaves, in the same frame, is not passed on.
         self.certificate = None;
         self.pairing = None;
+        self.pairing_closed = false;
+        self.pairing_window = None;
         self.knock = None;
         self.spaces.clear();
         self.listed = false;
@@ -5767,6 +5839,124 @@ mod tests {
             nonce: tomori_security::pairing::Nonce::generate().to_hex(),
         }));
         assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_device_refused_because_pairing_is_closed_says_so_and_does_not_ask_again() {
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::PairFailed {
+            error: tomori_protocol::PAIRING_CLOSED.into(),
+        }));
+        let item = conversation
+            .arrival()
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.key == arrival::Key::Pair)
+            .unwrap();
+        assert_eq!(
+            (item.label.as_str(), item.detail.as_deref()),
+            ("Pairing is closed", Some("Ask an owner to open it"))
+        );
+        assert_eq!(
+            conversation.menu_model().pairing.as_deref(),
+            Some("Pairing is closed")
+        );
+        assert_eq!(
+            conversation.status().as_deref(),
+            Some(tomori_protocol::PAIRING_CLOSED)
+        );
+        // Nothing asks again by itself, however long it waits.
+        conversation.expire_pairing(Instant::now() + PAIRING_PATIENCE * 2);
+        assert!(conversation.take_actions().is_empty());
+        // Chosen again, it asks again.
+        conversation.choose_object(&arrival::Key::Pair);
+        assert!(matches!(
+            &sent(&mut conversation)[..],
+            [ClientMessage::PairBegin { .. }]
+        ));
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pairing..."));
+        // Another refusal is shown as it is.
+        conversation.apply(Event::Message(ServerMessage::PairFailed {
+            error: "The pairing was declined.".into(),
+        }));
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+    }
+
+    #[test]
+    fn an_owner_opens_and_closes_pairing_from_the_hand_menu() {
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
+        let mut owner = connected_securely(ConnectionRole::Owner, certificate);
+        // A server that does not say offers nothing.
+        assert_eq!(owner.menu_model().pairing_window, None);
+        owner.toggle_pairing_window();
+        assert!(sent(&mut owner).is_empty());
+        assert_eq!(
+            owner.menu_model().notice.as_deref(),
+            Some("This server does not open pairing for new devices.")
+        );
+
+        owner.apply(Event::Message(ServerMessage::PairingWindow {
+            closes_in: None,
+        }));
+        assert_eq!(owner.menu_model().pairing_window, Some(None));
+        owner.choose_menu(crate::hand_menu::Choice::PairingWindow);
+        assert_eq!(sent(&mut owner), [ClientMessage::OpenPairing]);
+        assert_eq!(
+            owner.menu_model().notice.as_deref(),
+            Some("Opening pairing for a new device...")
+        );
+        owner.apply(Event::Message(ServerMessage::PairingWindow {
+            closes_in: Some(120),
+        }));
+        let now = Instant::now();
+        let left = owner.pairing_window_left(now).unwrap().unwrap();
+        assert!((119..=120).contains(&left), "{left}");
+        assert_eq!(
+            owner.pairing_window_left(now + Duration::from_secs(200)),
+            Some(Some(0))
+        );
+        assert_eq!(
+            owner.menu_model().notice.as_deref(),
+            Some("Pairing is open: choose the new device's pairing object now.")
+        );
+        owner.toggle_pairing_window();
+        assert_eq!(sent(&mut owner), [ClientMessage::ClosePairing]);
+        owner.apply(Event::Message(ServerMessage::PairingWindow {
+            closes_in: None,
+        }));
+        assert_eq!(
+            owner.menu_model().notice.as_deref(),
+            Some("Pairing is closed.")
+        );
+        // A change someone else makes shows in the row, without a notice.
+        owner.apply(Event::Message(ServerMessage::PairingWindow {
+            closes_in: Some(60),
+        }));
+        assert_eq!(
+            owner.menu_model().notice.as_deref(),
+            Some("Pairing is closed.")
+        );
+        assert!(owner.menu_model().pairing_window.flatten().is_some());
+        // It belongs to the connection.
+        owner.apply(Event::State(ConnectionState::Connecting { attempt: 2 }));
+        assert_eq!(owner.menu_model().pairing_window, None);
+
+        // Anyone but an owner is offered nothing, whatever a server sends.
+        let mut visitor = connected_securely(ConnectionRole::Visitor, certificate);
+        visitor.apply(Event::Message(ServerMessage::PairingWindow {
+            closes_in: None,
+        }));
+        assert_eq!(visitor.menu_model().pairing_window, None);
+        visitor.toggle_pairing_window();
+        assert!(sent(&mut visitor).is_empty());
+        assert_eq!(
+            visitor.menu_model().notice.as_deref(),
+            Some("Only owners can open pairing.")
+        );
     }
 
     #[test]

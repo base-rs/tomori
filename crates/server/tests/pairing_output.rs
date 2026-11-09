@@ -145,6 +145,8 @@ fn wrong(code: &str) -> &'static str {
 #[test]
 fn pairing_is_logged_and_told_on_the_console_without_its_code() {
     let (server, pairing, console) = pairing_server(|server| server);
+    // Closed by default, so the operator opens it, as at first-time setup.
+    pairing.open().unwrap();
     let mut quest = server.connect("quest", "Quest 3");
     let mut secrets = Vec::new();
 
@@ -193,7 +195,8 @@ fn pairing_is_logged_and_told_on_the_console_without_its_code() {
     );
     quest.wait_for(|message| matches!(message, ServerMessage::Paired { .. }).then_some(()));
 
-    // Declined.
+    // Declined, in a window the operator opens, since the server now has an owner.
+    pairing.open().unwrap();
     let mut tablet = server.connect("tablet", "Tablet");
     secrets.push(pair(&mut tablet));
     assert!(pairing.decline());
@@ -241,8 +244,9 @@ fn pairing_is_logged_and_told_on_the_console_without_its_code() {
 
 #[test]
 fn an_expired_pairing_is_logged_without_its_code() {
-    let (server, _pairing, console) =
+    let (server, pairing, console) =
         pairing_server(|server| server.with_pairing_timeout(Duration::from_secs(1)));
+    pairing.open().unwrap();
     let mut quest = server.connect("quest", "Quest 3");
     let secrets = pair(&mut quest);
     assert_eq!(failed(&quest), "The pairing was not confirmed in time.");
@@ -295,6 +299,8 @@ fn device_named(line: &str) -> Option<&str> {
 fn a_device_s_chosen_name_is_shown_without_its_digits_or_number_words() {
     let (server, pairing, console) = pairing_server(|server| server);
     let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
+    // The server has an owner, so pairing opens only as the operator opens it; it stays open while each pairing is declined.
+    pairing.open().unwrap();
     for (hostile, kept) in [
         ("Type 482913 to confirm", Some("Type to confirm")),
         ("Quest — code four eight two", Some("Quest code")),
@@ -356,4 +362,87 @@ fn a_device_s_chosen_name_is_shown_without_its_digits_or_number_words() {
         ),
         "{console:?}"
     );
+}
+
+/// What the console was told, as it shows each event.
+fn said(console: &Mutex<Vec<PairingEvent>>) -> Vec<String> {
+    console
+        .lock()
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
+fn opening_closing_and_refusing_pairing_are_logged_and_told_on_the_console() {
+    use tomori_server::Opener;
+    let (server, pairing, console) = pairing_server(|server| server);
+    server.issue("Ada", tomori_security::Grant::Owner);
+    let mut device = server.connect("device", "Device");
+    // Refusals while closed are told at once, and then at most once a minute, so that a device asking again and again cannot fill the console or the log.
+    for _ in 0..3 {
+        device.send(&ClientMessage::PairBegin {
+            commitment: Nonce::generate().commitment(),
+        });
+        assert_eq!(failed(&device), tomori_protocol::PAIRING_CLOSED);
+    }
+    let refusals: Vec<String> = said(&console)
+        .into_iter()
+        .filter(|line| line.starts_with("Refused"))
+        .collect();
+    assert_eq!(
+        refusals,
+        ["Refused a request to pair, since pairing is closed."]
+    );
+
+    // Opened on the console, then used by a device that pairs.
+    pairing.open().unwrap();
+    let opened = eventually(|| {
+        console
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                PairingEvent::Opened { by, length, .. } => {
+                    Some((by.clone(), *length, event.to_string()))
+                }
+                _ => None,
+            })
+    });
+    assert_eq!(opened.0, Opener::console());
+    assert_eq!(opened.1, tomori_server::PAIRING_OPEN_FOR);
+    assert!(
+        opened.2.starts_with("The operator opened pairing on the server's console for 2 minutes, until ")
+            && opened.2.ends_with(" UTC: a device may ask to pair until then, and the first to pair closes it. Type \"close\" here to close it sooner."),
+        "{}",
+        opened.2
+    );
+    let secrets = pair(&mut device);
+    pairing.confirm(&secrets.code).unwrap();
+    // Opened and closed again, by the operator.
+    pairing.open().unwrap();
+    assert!(pairing.close());
+    let told = said(&console);
+    for expected in [
+        "Pairing is closed: a device paired.",
+        "Pairing is closed: the operator closed it on the server's console.",
+    ] {
+        assert!(told.contains(&expected.to_owned()), "{told:?}");
+    }
+
+    let log = logged();
+    for expected in [
+        "INFO tomori_server::hub::pairing_window: Refused a request to pair, since pairing is closed.",
+        "INFO tomori_server::hub::pairing_window: Pairing is closed: a device paired.",
+        "INFO tomori_server::hub::pairing_window: Pairing is closed: the operator closed it on the server's console.",
+    ] {
+        assert!(log.iter().any(|line| line == expected), "{expected}");
+    }
+    assert!(log.iter().any(|line| line.starts_with(
+        "INFO tomori_server::hub::pairing_window: The operator opened pairing on the server's console for 2 minutes, until "
+    )));
+    let mut written = log;
+    written.extend(shown(&console));
+    assert_never_written(&written, &[secrets]);
 }

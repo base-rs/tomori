@@ -185,13 +185,25 @@ fn the_console_answers_the_operator() {
             .find(|said| said.starts_with(start))
             .unwrap_or_else(|| panic!("the server never said {start:?}"))
     };
-    said("No owner token is issued yet: run `tomori-server auth mint --owner --name NAME`.");
+    // Pairing is closed by default, even with no owner, and the server says how to open it for the first device.
+    said(
+        "No owner token is issued yet, and pairing is closed. To pair this server's first device, type \"pair\" here, which opens pairing for 2 minutes, or start the server with --open-pairing;",
+    );
     // Once it listens, it also handles signals.
     said("Tomori server listening on https://127.0.0.1:");
     writeln!(console, "decline").unwrap();
     said("No pairing is waiting.");
     writeln!(console, "allow").unwrap();
     said("Pairing is allowed again.");
+    // The operator opens pairing for a new device, and closes it; see `design/security.md`.
+    writeln!(console, "pair").unwrap();
+    said("The operator opened pairing on the server's console for 2 minutes, until ");
+    said("Pairing is open for 2 minutes: choose the pairing object on the device you are pairing.");
+    writeln!(console, "close").unwrap();
+    said("Pairing is closed: the operator closed it on the server's console.");
+    // Closed again, though there is no owner yet.
+    writeln!(console, "close").unwrap();
+    said("Pairing is not open.");
 
     // SAFETY: `kill` only sends a signal to the child.
     assert_eq!(
