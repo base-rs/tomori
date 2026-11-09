@@ -831,8 +831,9 @@ fn an_agent_s_confirmation_whose_token_cannot_be_issued_says_so() {
         Err("The token could not be issued. Tomori has said so on the space's wall; tell everyone there too.".to_owned())
     );
     let decisions = hub.status().pairing_decisions;
-    let prefix =
-        format!("The agent of space {space} (\"Space\"), session session, as Ada (entry 1, given ");
+    let prefix = format!(
+        "The agent of space {space} (\"Space\"), session session, as Ada#11 (entry 1, given "
+    );
     assert!(
         decisions.len() == 1
             && decisions[0].starts_with(&prefix)
@@ -949,6 +950,84 @@ fn requested_by_names_whoever_spoke_by_their_handle_where_another_shares_their_n
 }
 
 #[test]
+fn a_collaborator_who_takes_an_owner_s_name_never_passes_for_them() {
+    use crate::hub::provenance::Needs;
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let _ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::from_secs(5));
+    let cy = asking(
+        &hub,
+        &space,
+        "Cy",
+        Grant::Collaborator {
+            space: space.clone(),
+        },
+        Duration::from_secs(5),
+    );
+    // Names may repeat, so the collaborator may call themselves what the owner is called, and then speak.
+    cy.send(ClientMessage::SetName {
+        name: "ada".to_owned(),
+    });
+    let (owner, collaborator, source) = {
+        let state = hub.lock();
+        let record = |principal: &str| {
+            state
+                .participants
+                .values()
+                .find(|participant| participant.principal.as_deref() == Some(principal))
+                .unwrap()
+        };
+        let (owner, collaborator) = (record("token:Ada"), record("token:Cy"));
+        assert_eq!(collaborator.name, "ada");
+        assert_ne!(owner.tag, collaborator.tag);
+        (
+            crate::presence::handle(&owner.name, owner.tag),
+            crate::presence::handle(&collaborator.name, collaborator.tag),
+            collaborator.source,
+        )
+    };
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .model
+        .give(source, "ada", Instant::now());
+    let check = |requested_by: &str, needs: Needs| {
+        let state = hub.lock();
+        hub.requester(&state, &space, Some(requested_by), needs)
+    };
+    // Named as the owner is, by name, the name says neither; by the owner's handle, the words are not the owner's.
+    assert!(
+        check("Ada", Needs::Owner)
+            .unwrap_err()
+            .starts_with("More than one person in this space is called \"Ada\"")
+    );
+    assert!(check(&owner, Needs::Owner).unwrap_err().starts_with(
+        "The words you were given last in this space are not from the participant you named"
+    ));
+    // By their own handle, they are who spoke, with a collaborator's role, not the owner's.
+    assert_eq!(
+        check(&collaborator, Needs::Owner).unwrap_err(),
+        format!("{collaborator} is a collaborator here, and only an owner may ask for this.")
+    );
+    // What a collaborator may ask for, they ask as themselves, and the log says which of the two it was.
+    let asked = check(&collaborator, Needs::Participant).unwrap();
+    assert!(
+        asked
+            .logged()
+            .starts_with(&format!("{collaborator} (entry"))
+    );
+    // With the owner gone, the name names the collaborator alone, still with their own role.
+    drop(_ada);
+    hub.lock()
+        .participants
+        .retain(|_, participant| participant.principal.as_deref() != Some("token:Ada"));
+    assert_eq!(
+        check("Ada", Needs::Owner).unwrap_err(),
+        "Ada is a collaborator here, and only an owner may ask for this."
+    );
+}
+
+#[test]
 fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_tool() {
     use crate::hub::provenance::{Needs, REQUEST_RECENT, Requester};
     let (hub, _jobs) = hub();
@@ -981,7 +1060,7 @@ fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_t
     let ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::from_secs(5));
     let asked = check(Some("ada"), Needs::Owner).unwrap();
     assert!(
-        matches!(&asked, Requester { name, entry: 1, ago } if name == "Ada" && *ago >= Duration::from_secs(5)),
+        matches!(&asked, Requester { name, entry: 1, ago, .. } if name == "Ada" && *ago >= Duration::from_secs(5)),
         "{asked:?}"
     );
     // The agent named someone else than whoever spoke last.

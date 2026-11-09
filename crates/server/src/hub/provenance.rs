@@ -44,16 +44,19 @@ impl Needs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Requester {
     pub name: String,
+    /// Their tag, which tells them apart in the log from anyone else of their name.
+    pub tag: Option<u32>,
     pub entry: u64,
     pub ago: Duration,
 }
 
 impl Requester {
-    /// The requester as the log and the console say it: `Ada (entry 3, given 12 seconds ago)`.
+    /// The requester as the log and the console say it, by their handle, since names may repeat:
+    /// `Ada#23 (entry 3, given 12 seconds ago)`.
     pub fn logged(&self) -> String {
         format!(
             "{} (entry {}, given {} seconds ago)",
-            self.name,
+            crate::presence::handle(&self.name, self.tag),
             self.entry,
             self.ago.as_secs()
         )
@@ -201,6 +204,7 @@ impl HubState {
         }
         Ok(Requester {
             name: participant.name.clone(),
+            tag: participant.tag,
             entry: given.entry,
             ago,
         })
@@ -219,13 +223,16 @@ mod tests {
         assert!(!Needs::Participant.permits(ConnectionRole::Visitor));
         assert!(!Needs::Participant.permits(ConnectionRole::Pairing));
         assert_eq!(role_name(ConnectionRole::Pairing), "a visitor");
+        let ada = Requester {
+            name: "Ada".into(),
+            tag: Some(23),
+            entry: 3,
+            ago: Duration::from_millis(12_500),
+        };
+        // By their handle, so that the log tells apart two people of one name.
+        assert_eq!(ada.logged(), "Ada#23 (entry 3, given 12 seconds ago)");
         assert_eq!(
-            Requester {
-                name: "Ada".into(),
-                entry: 3,
-                ago: Duration::from_millis(12_500),
-            }
-            .logged(),
+            Requester { tag: None, ..ada }.logged(),
             "Ada (entry 3, given 12 seconds ago)"
         );
     }
