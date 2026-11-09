@@ -254,9 +254,11 @@ fn marks(rows: &[Row], columns: usize) -> Vec<Shape> {
         .map(|row| &row.cells[..row.cells.len().min(columns)])
         .collect();
     let mark = |cell: Option<&Cell>| {
-        cell.copied()
-            .filter(|&cell| marked(cell))
-            .and_then(|(_, style)| Some((style.mark?, style.color)))
+        let &(ch, style) = cell?;
+        style
+            .mark
+            .filter(|mark| mark.stand_in() == ch)
+            .map(|mark| (mark, style.color))
     };
     let mut shapes = Vec::new();
     let (width, height) = (CELL_WIDTH as f32, CELL_HEIGHT as f32);
@@ -392,11 +394,8 @@ impl Mesh {
         }
     }
 
-    /// A filled quad.
+    /// A filled quad: the backing, and the rows' and cells' backgrounds, none of which is ever empty.
     fn quad(&mut self, x: f32, y: f32, width: f32, height: f32, color: Rgba) {
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
         self.textured(
             Quad {
                 x,
