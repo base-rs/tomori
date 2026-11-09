@@ -312,7 +312,7 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
 }
 
 /// What `requested_by` is, as each tool that needs it describes it. See `design/security.md`.
-const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\". Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
+const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\", or, where someone else in the space shares their name, their id from presence, such as Ada#23. Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
 
 /// Every tool, as `tools/list` describes it.
 fn tools() -> Value {
@@ -345,7 +345,7 @@ fn tools() -> Value {
         },
         {
             "name": "presence",
-            "description": "Where the people in your space are, as their devices last reported, in the space's coordinates: each participant's and visitor's name, role, engagement and device; their head's position, yaw and pitch; on a headset, both hands' or controllers' positions and where the right controller points; what they are looking and pointing at, a wall, a slot, a panel or a person; the wall nearest them and the walls in their view; and how long ago they were reported, marked stale when their device has stopped reporting. Also the space's walls, where each stands and faces, its size and which slots hold which panels and which are free, and the panels floating. Visitors report no position.",
+            "description": "Where the people in your space are, as their devices last reported, in the space's coordinates: each participant's and visitor's name, which others may share, and id, their name and tag, such as Ada#23, which no one else has, role, engagement and device; their head's position, yaw and pitch; on a headset, both hands' or controllers' positions and where the right controller points; what they are looking and pointing at, a wall, a slot, a panel or a person; the wall nearest them and the walls in their view; and how long ago they were reported, marked stale when their device has stopped reporting. Also the space's walls, where each stands and faces, its size and which slots hold which panels and which are free, and the panels floating. Visitors report no position.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },
@@ -402,7 +402,7 @@ fn tools() -> Value {
         },
         {
             "name": "move_panel",
-            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall, or wall WALL slot N, into its slot N, numbered from 0 as presence lists them. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
+            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is beside NAME, floating beside them, to their right or left, clear of what floats there; near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating straight in front of them; or wall WALL, by its identity or name, such as Tomori wall, or wall WALL slot N, into its slot N, numbered from 0 as presence lists them. beside, near, looking and front alone are about whoever asked; NAME is a name as presence lists it, or, where two share it, the id presence gives, such as Ada#23. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -601,7 +601,7 @@ fn tools() -> Value {
                     "path": { "type": "string", "maxLength": crate::images::PATH_BYTES, "description": "The image file, absolute or relative to your working directory." },
                     "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line; the file's name if none." },
                     "caption": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "What it shows, in a sentence, drawn below it." },
-                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for move_panel: near NAME, looking NAME, front NAME, wall WALL or wall WALL slot N, or near, looking or front for whoever asked. Where they were looking as they asked, if not given." },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for move_panel: beside NAME, near NAME, looking NAME, front NAME, wall WALL or wall WALL slot N, or beside, near, looking or front for whoever asked. If not given, the wall they were looking at as they asked, if near enough to read, or else beside them." },
                 },
                 "required": ["path"],
             },

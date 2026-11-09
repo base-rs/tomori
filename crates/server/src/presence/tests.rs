@@ -196,7 +196,7 @@ fn a_ray_meets_the_nearest_panel_slot_wall_or_person_along_it() {
     let projection = projection();
     let slots = slots(&tomori());
     let home = [0.0, 1.6, 0.0];
-    let at = |pose: Pose, people: &[(&str, Vec3)]| {
+    let at = |pose: Pose, people: &[(&str, &str, Vec3)]| {
         meet(pose.position, forward(&pose), &projection, people).map(|(met, _)| met)
     };
     // Looking at slot 2 of the Tomori wall, the panel in it.
@@ -257,20 +257,26 @@ fn a_ray_meets_the_nearest_panel_slot_wall_or_person_along_it() {
         })
     );
     // Someone standing nearer than the wall, within a head's radius of the ray, is met first.
-    let bob = [("Bob", [-0.1, 1.05, -1.2])];
+    let bob = [("Bob", "Bob#12", [-0.1, 1.05, -1.2])];
     assert_eq!(
         at(looking(home, slots[2].middle), &bob),
-        Some(Met::Person { name: "Bob".into() })
+        Some(Met::Person {
+            name: "Bob".into(),
+            handle: "Bob#12".into()
+        })
     );
     // Behind the ray, past its range or straight up, nothing is.
     assert_eq!(
-        at(looking(home, [0.0, 1.2, 1.2]), &[("Bob", [0.0, 1.2, -1.2])]),
+        at(
+            looking(home, [0.0, 1.2, 1.2]),
+            &[("Bob", "Bob", [0.0, 1.2, -1.2])]
+        ),
         None
     );
     assert_eq!(
         at(
             looking(home, [0.0, 1.6, -60.0]),
-            &[("Far", [0.0, 1.6, -40.0])]
+            &[("Far", "Far", [0.0, 1.6, -40.0])]
         ),
         None
     );
@@ -378,9 +384,10 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     ];
     ada.hands = [None, None];
     let bob_head = [2.0, 1.7, 0.0];
-    let heads = [("Ada", home), ("Bob", bob_head)];
+    let heads = [("Ada", "Ada#10", home), ("Bob", "Bob#11", bob_head)];
     let headset = Person {
         name: "Ada",
+        tag: Some(10),
         role: tomori_protocol::ConnectionRole::Owner,
         engagement: Some(tomori_protocol::Engagement::Engaged),
         seen: Some(&ada),
@@ -388,6 +395,7 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     };
     let report = report(&headset, &projection, &heads, now);
     assert_eq!(report["name"], "Ada");
+    assert_eq!(report["id"], "Ada#10");
     assert_eq!(report["role"], "owner");
     assert_eq!(report["engagement"], "engaged");
     assert_eq!(report["device"], "headset");
@@ -429,11 +437,25 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     assert_eq!(report["pointing_at"], Value::Null);
     assert_eq!(report["looking_at"]["kind"], "person");
     assert_eq!(report["looking_at"]["name"], "Bob");
+    assert_eq!(report["looking_at"]["id"], "Bob#11");
+    // Another of the same name is someone else, whom they may look at too.
+    let namesakes = [("Ada", "Ada#10", home), ("Ada", "Ada#14", bob_head)];
+    let report = super::report(
+        &Person {
+            seen: Some(&hands),
+            ..headset
+        },
+        &projection,
+        &namesakes,
+        now,
+    );
+    assert_eq!(report["looking_at"]["id"], "Ada#14");
 
     // A desktop reports only its head: no hands, nor where it points. Looking at a code panel says its language.
     let bob = seen(looking(bob_head, slot_centres(&right_wall())[4]));
     let desktop = Person {
         name: "Bob",
+        tag: Some(11),
         role: tomori_protocol::ConnectionRole::Collaborator,
         engagement: None,
         seen: Some(&bob),
@@ -460,6 +482,7 @@ fn stale_unreported_and_visiting_people_say_so() {
     old.at = now.checked_sub(STALE).unwrap();
     let person = Person {
         name: "Ada",
+        tag: None,
         role: tomori_protocol::ConnectionRole::Owner,
         engagement: Some(tomori_protocol::Engagement::Away),
         seen: Some(&old),
@@ -506,6 +529,7 @@ fn stale_unreported_and_visiting_people_say_so() {
     let visitor = super::report(
         &Person {
             name: "Vic",
+            tag: Some(30),
             role: tomori_protocol::ConnectionRole::Visitor,
             engagement: None,
             seen: None,
@@ -516,6 +540,7 @@ fn stale_unreported_and_visiting_people_say_so() {
         now,
     );
     assert_eq!(visitor["name"], "Vic");
+    assert_eq!(visitor["id"], "Vic#30");
     assert_eq!(visitor["role"], "visitor");
     assert_eq!(
         visitor["presence"],
@@ -638,13 +663,17 @@ fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_name
     let ada = looking(home, slots[4].middle);
     let bob_at = [2.0, 1.6, 0.0];
     let bob = looking(bob_at, [3.0, 1.5, 0.3249]);
-    let people = vec![("Ada".to_owned(), ada), ("Bob".to_owned(), bob)];
+    let people = vec![
+        someone("Ada", Some(10), Some(ada)),
+        someone("Bob", Some(11), Some(bob)),
+    ];
     let to = |place: &str, asker: Option<&Pose>| {
         destination(
             &Placement::parse(place).unwrap(),
             asker,
             &people,
             &projection,
+            &[],
         )
     };
     let onto = |wall: &str, slot| Destination::Wall {
@@ -653,6 +682,8 @@ fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_name
     };
     // Near someone, by name in any case, or whoever asked: the wall nearest them.
     assert_eq!(to("near bob", None), Ok(Destination::Nearest(bob_at)));
+    // Or by their handle, its name in any case.
+    assert_eq!(to("near bob#11", None), Ok(Destination::Nearest(bob_at)));
     assert_eq!(to("nearest", Some(&ada)), Ok(Destination::Nearest(home)));
     // Where they look: the empty slot they look at, the wall whose board they look at, or the wall of the panel.
     assert_eq!(to("looking", Some(&ada)), Ok(onto(TOMORI_WALL, Some(4))));
@@ -702,6 +733,14 @@ fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_name
             "{front:?}"
         );
     }
+    // Beside them, floating, as the stage places it, clear of the environment's solids.
+    let beside = |head: Pose| Destination::Beside {
+        head,
+        solids: Vec::new(),
+    };
+    assert_eq!(to("beside Bob", Some(&ada)), Ok(beside(bob)));
+    assert_eq!(to("beside", Some(&ada)), Ok(beside(ada)));
+    assert_eq!(to("beside:ADA#10", None), Ok(beside(ada)));
     // A wall by its identity or its name, in any case, with or without "the".
     assert_eq!(to("wall Tomori wall", None), Ok(onto(TOMORI_WALL, None)));
     assert_eq!(
@@ -727,12 +766,115 @@ fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_name
     );
     assert!(to("front Zed", None).is_err());
     assert!(to("looking Zed", None).is_err());
-    // Without a placement, where whoever asked was looking, or the Tomori wall when nobody asked.
+    assert!(to("beside Zed", None).is_err());
+    // A handle no one has is a name no one has.
     assert_eq!(
-        by_default(Some(&ada), &projection),
+        to("near Bob#12", None),
+        Err("Nobody called \"Bob#12\" in this space has reported where they are.".to_owned())
+    );
+    // Without a placement, the wall whoever asked was looking at, if they could read it; or else beside them, as when
+    // they looked up past every wall, or at a floating panel; or the Tomori wall when nobody asked.
+    assert_eq!(
+        by_default(Some(&ada), &projection, &[]),
         onto(TOMORI_WALL, Some(4))
     );
-    assert_eq!(by_default(None, &projection), Destination::Tomori);
+    assert_eq!(by_default(Some(&up), &projection, &[]), beside(up));
+    assert_eq!(
+        by_default(Some(&at_float), &projection, &[]),
+        beside(at_float)
+    );
+    assert_eq!(by_default(None, &projection, &[]), Destination::Tomori);
+}
+
+/// Someone called `name`, with `tag`, whose head is at `head`, if they have reported it.
+fn someone(name: &str, tag: Option<u32>, head: Option<Pose>) -> Someone {
+    Someone {
+        name: name.to_owned(),
+        tag,
+        head,
+    }
+}
+
+#[test]
+fn a_name_several_share_is_refused_saying_their_handles_and_a_handle_names_one() {
+    let projection = projection();
+    let home = [0.0, 1.6, 0.0];
+    let left = looking([-2.0, 1.6, 0.0], [-2.0, 1.6, -2.0]);
+    let right = looking([2.0, 1.6, 0.0], [2.0, 1.6, -2.0]);
+    let people = vec![
+        someone("Samuel", Some(23), Some(left)),
+        someone("samuel", Some(41), Some(right)),
+        someone("Ada#3", Some(12), Some(looking(home, [0.0, 1.6, -2.0]))),
+        someone("Quest 3", Some(10), None),
+        someone("Vic", None, Some(left)),
+    ];
+    let to = |place: &str| {
+        destination(
+            &Placement::parse(place).unwrap(),
+            None,
+            &people,
+            &projection,
+            &[],
+        )
+    };
+    let ambiguous = "More than one person in this space is called \"Samuel\": say which, as Samuel#23 or samuel#41.";
+    for place in [
+        "beside Samuel",
+        "near Samuel",
+        "front SAMUEL",
+        "looking samuel",
+    ] {
+        let refused = to(place).unwrap_err();
+        assert!(
+            refused.starts_with("More than one person"),
+            "{place}: {refused}"
+        );
+    }
+    assert_eq!(to("beside Samuel"), Err(ambiguous.to_owned()));
+    // Each handle names one of them, as presence lists them.
+    assert_eq!(
+        to("beside Samuel#41"),
+        Ok(Destination::Beside {
+            head: right,
+            solids: Vec::new()
+        })
+    );
+    assert_eq!(
+        to("near samuel#23"),
+        Ok(Destination::Nearest(left.position))
+    );
+    // A name that looks like a handle, but is someone's whole name, is theirs.
+    assert_eq!(to("near Ada#3"), Ok(Destination::Nearest(home)));
+    // Without a tag, a name alone; someone in the space who has not reported is said not to have.
+    assert_eq!(to("near vic"), Ok(Destination::Nearest(left.position)));
+    assert_eq!(
+        to("near Quest 3#10"),
+        Err("Nobody called \"Quest 3#10\" in this space has reported where they are.".to_owned())
+    );
+    assert_eq!(
+        whom("  Samuel#23 ", &people).map(Someone::handle),
+        Ok("Samuel#23".to_owned())
+    );
+    // What is not a handle, after its #, is a name nobody has.
+    for named in ["Samuel#", "Samuel#x", "Samuel#99999999999"] {
+        assert_eq!(
+            whom(named, &people),
+            Err(format!(
+                "Nobody called {named:?} in this space has reported where they are."
+            ))
+        );
+    }
+    // One identity on two devices, sharing its name and tag, is one person: the first of them.
+    let devices = vec![
+        someone("Grace", Some(15), Some(left)),
+        someone("Grace", Some(15), Some(right)),
+    ];
+    assert_eq!(whom("grace", &devices), Ok(&devices[0]));
+    // The names presence gives, name and id alike, are what place takes.
+    for person in &people {
+        let id = person.handle();
+        assert_eq!(whom(&id, &people), Ok(person), "{id}");
+    }
 }
 
 /// A flat wall `id` with its middle at `at`, facing home.
@@ -745,11 +887,12 @@ fn wall_at(id: &str, at: Vec3) -> Wall {
 }
 
 #[test]
-fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
+fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view_with_looking_and_beside_by_default()
+ {
     let home = [0.0, 1.6, 0.0];
     let far = wall_at("environment-0", [0.0, 2.2, -7.0]);
     let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), far.clone()]);
-    let looks = |at: Vec3| looking_at(&looking(home, at), &projection);
+    let looks = |at: Vec3| looking_at(&looking(home, at), &projection, &[]);
     let onto = |wall: &str, slot| Destination::Wall {
         wall: wall.into(),
         slot,
@@ -761,10 +904,12 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
         Some((Met::Wall { ref wall, slot: Some(1) }, along)) if wall == "environment-0" && along > READING
     ));
     assert_eq!(looks(far_slot), onto(TOMORI_WALL, None));
-    assert_eq!(
-        by_default(Some(&looking(home, far_slot)), &projection),
-        onto(TOMORI_WALL, None)
-    );
+    // By default, a wall in view is no wall looked at: the panel floats beside them, rather than onto a wall they
+    // were not looking at.
+    assert!(matches!(
+        by_default(Some(&looking(home, far_slot)), &projection, &[]),
+        Destination::Beside { .. }
+    ));
     // Named, it is still that wall, however far.
     assert_eq!(
         destination(
@@ -772,6 +917,7 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
             Some(&looking(home, far_slot)),
             &[],
             &projection,
+            &[],
         ),
         Ok(onto("environment-0", None))
     );
@@ -782,6 +928,7 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
             None,
             &[],
             &projection,
+            &[],
         )
     };
     assert_eq!(named(5), Ok(onto("environment-0", Some(5))));
@@ -794,19 +941,29 @@ fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
     let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), readable.clone()]);
     let slot = slots(&readable)[1].middle;
     assert_eq!(
-        looking_at(&looking(home, slot), &projection),
+        looking_at(&looking(home, slot), &projection, &[]),
         onto("environment-0", Some(1))
     );
-    // Far from every wall, the panel floats in front of them.
+    // Far from every wall, the panel floats beside them.
     let away = [0.0, 1.6, 9.0];
     let alone = looking(away, [0.0, 1.6, 0.0]);
-    assert!(matches!(
-        looking_at(&alone, &projection),
-        Destination::Free(pose) if near(pose.position, [0.0, 1.45, 9.0 - FRONT.0])
-    ));
-    // Looking away from every wall, but near one, onto the nearest, as before.
+    assert_eq!(
+        looking_at(&alone, &projection, &[]),
+        Destination::Beside {
+            head: alone,
+            solids: Vec::new()
+        }
+    );
+    // Looking away from every wall, but near one, onto the nearest with looking, as before; by default, beside them.
     let behind = looking(home, [0.0, 1.6, 5.0]);
-    assert_eq!(looking_at(&behind, &projection), Destination::Nearest(home));
+    assert_eq!(
+        looking_at(&behind, &projection, &[]),
+        Destination::Nearest(home)
+    );
+    assert!(matches!(
+        by_default(Some(&behind), &projection, &[]),
+        Destination::Beside { .. }
+    ));
 }
 
 #[test]
@@ -822,7 +979,7 @@ fn a_big_wall_is_read_as_much_further_away_as_its_text_is_larger() {
         let far = wall_at("environment-0", [0.0, 2.2, -15.0]).with_scale(scale);
         let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), far.clone()]);
         let slot = slots(&far)[1].middle;
-        let chosen = looking_at(&looking(home, slot), &projection);
+        let chosen = looking_at(&looking(home, slot), &projection, &[]);
         match expected {
             Some(slot) => assert_eq!(chosen, onto("environment-0", Some(slot)), "{scale}"),
             None => assert_eq!(chosen, onto(TOMORI_WALL, None), "{scale}"),
@@ -894,7 +1051,7 @@ fn a_wall_just_off_the_gaze_is_looked_at_and_the_nearest_of_those_looked_at_is_c
         slot: None,
     };
     // The low wall they plainly look towards, rather than the nearer one in view.
-    assert_eq!(looking_at(&ahead, &projection), onto("environment-0"));
+    assert_eq!(looking_at(&ahead, &projection, &[]), onto("environment-0"));
     // A wall the gaze meets, 3.8 m away, and the low wall within the tolerance: the nearer of the two.
     let met = wall_at("environment-2", [0.0, 1.6, -3.8]);
     let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), low, side, met]);
@@ -902,7 +1059,7 @@ fn a_wall_just_off_the_gaze_is_looked_at_and_the_nearest_of_those_looked_at_is_c
         meet(home, forward(&ahead), &projection, &[]),
         Some((Met::Wall { ref wall, .. }, _)) if wall == "environment-2"
     ));
-    assert_eq!(looking_at(&ahead, &projection), onto("environment-0"));
+    assert_eq!(looking_at(&ahead, &projection, &[]), onto("environment-0"));
 }
 
 #[test]
@@ -1051,4 +1208,22 @@ fn a_wall_the_agent_adds_stands_ahead_further_as_it_is_bigger_and_never_below_th
     // Someone below the floor where people arrive, such as in a pit, has it in front of them as it is.
     let below = looking([0.0, -1.0, 0.0], [0.0, -1.0, -1.0]);
     assert!(near(at(wall_in_front(&below, 5.0, 4.4)), [0.0, -1.1, -4.5]));
+}
+
+#[test]
+fn panels_fanned_beside_someone_stand_as_the_stage_places_them_or_walled_in_in_front() {
+    let home = [0.0, 1.6, 0.0];
+    let head = looking(home, [0.0, 1.6, -2.0]);
+    let fanned = fanned_beside(&head, &[], &[], 3);
+    let bearings: Vec<f32> = fanned
+        .iter()
+        .map(|pose| {
+            let offset = sub(pose.position, home);
+            offset[0].atan2(-offset[2]).to_degrees().round()
+        })
+        .collect();
+    assert_eq!(bearings, [30.0, -30.0, 70.0]);
+    // Walled in, in front of them, as front puts it.
+    let around = ([-5.0, -1.0, -5.0], [5.0, 3.0, 5.0]);
+    assert_eq!(fanned_beside(&head, &[], &[around], 1), [front_of(&head)]);
 }

@@ -33,7 +33,37 @@ pub struct Entry {
     pub grant: Grant,
     /// When it was issued, in seconds since the Unix epoch.
     pub issued: u64,
+    /// The number that tells its holder apart from others with the same display name, as in `Ada#23`: from
+    /// [`FIRST_TAG`] to [`LAST_TAG`], no two tokens' the same, given as it is issued, or, for a token issued before
+    /// tags, as the store is read, the least free in the order tokens were issued, and kept with it as the store is next
+    /// changed, so that it stays the same however it is renamed.
+    /// None only once every tag is taken. See `design/security.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
     hash: String,
+}
+
+/// The least tag a token is given: every tag has at least two digits.
+pub const FIRST_TAG: u32 = 10;
+
+/// The greatest tag a token is given: every tag has at most four digits.
+pub const LAST_TAG: u32 = 9999;
+
+/// Give each of `entries` without a tag the least tag none of them has, in the order they were issued. Returns whether
+/// any was given one.
+fn tag(entries: &mut [Entry]) -> bool {
+    let mut used: std::collections::HashSet<u32> =
+        entries.iter().filter_map(|entry| entry.tag).collect();
+    let mut free = FIRST_TAG..=LAST_TAG;
+    let mut tagged = false;
+    for entry in entries.iter_mut().filter(|entry| entry.tag.is_none()) {
+        entry.tag = free.find(|tag| !used.contains(tag));
+        if let Some(tag) = entry.tag {
+            used.insert(tag);
+            tagged = true;
+        }
+    }
+    tagged
 }
 
 impl Entry {
@@ -114,6 +144,7 @@ impl TokenStore {
     }
 
     /// Issue a token named `name` that grants `grant`. Returns its entry and the token, which is not kept and cannot be shown again.
+    /// Its tag is the least none of the tokens in the file then has.
     pub fn issue(&self, name: &str, grant: Grant) -> Result<(Entry, String), StoreError> {
         let token = token::generate();
         let entry = Entry {
@@ -123,10 +154,18 @@ impl TokenStore {
             issued: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs()),
+            tag: None,
             hash: token::hash(&token),
         };
-        let issued = entry.clone();
+        let id = entry.id.clone();
         self.change(move |entries| entries.push(entry))?;
+        let issued = self
+            .read_state()
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+            .expect("written above");
         Ok((issued, token))
     }
 
@@ -200,6 +239,8 @@ impl TokenStore {
         fault::run(Operation::Lock, &lock_path, || lock.lock())?;
         let mut entries = read(&self.path)?;
         change(&mut entries);
+        // A token issued now is given its tag; one issued before tags keeps the one it was read with.
+        tag(&mut entries);
         write(&self.path, &entries)?;
         self.write_state().entries = entries;
         Ok(())
@@ -246,7 +287,10 @@ fn read(path: &Path) -> Result<Vec<Entry>, StoreError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let file: Stored = serde_json::from_str(&text).map_err(StoreError::Format)?;
+    let mut file: Stored = serde_json::from_str(&text).map_err(StoreError::Format)?;
+    // A token written before tags, or by an older process, is given the least free in the order tokens were issued,
+    // the same in every process reading the same file, and kept with it once the store is next changed.
+    tag(&mut file.tokens);
     Ok(file.tokens)
 }
 
@@ -406,6 +450,50 @@ mod tests {
                 name: "Quest 3".into(),
             })
         );
+        // Issued before tags, it is given the first as the store is read, and keeps it once the store next changes.
+        assert_eq!(store.entries()[0].tag, Some(FIRST_TAG));
+        let (later, _) = store.issue("Ada", Grant::Owner).unwrap();
+        assert_eq!(later.tag, Some(11));
+        let text = fs::read_to_string(directory.join(TOKENS_FILE)).unwrap();
+        assert!(
+            text.contains("\"tag\": 10") && text.contains("\"tag\": 11"),
+            "{text}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn each_token_has_a_tag_of_its_own_kept_as_it_is_renamed() {
+        let directory = directory("tags");
+        let store = TokenStore::open(&directory).unwrap();
+        let (ada, _) = store.issue("Ada", Grant::Owner).unwrap();
+        let (bob, _) = store.issue("Ada", Grant::Owner).unwrap();
+        assert_eq!((ada.tag, bob.tag), (Some(10), Some(11)));
+        // Renamed, it keeps its tag; reopened, as after a restart, too.
+        store.rename(&ada.id, "Robert", |_| false).unwrap();
+        let reopened = TokenStore::open(&directory).unwrap();
+        let tags: Vec<_> = reopened.entries().iter().map(|entry| entry.tag).collect();
+        assert_eq!(tags, [Some(10), Some(11)]);
+        // A token written without one by an older process is given the least free, as the server reads it again.
+        let mut file: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(directory.join(TOKENS_FILE)).unwrap())
+                .unwrap();
+        file["tokens"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tag")
+            .unwrap();
+        fs::write(directory.join(TOKENS_FILE), file.to_string()).unwrap();
+        assert!(!reopened.reload().unwrap());
+        assert_eq!(reopened.entry(&ada.principal().id).unwrap().tag, Some(10));
+        // With every tag taken, a token has none.
+        let mut entries = vec![ada.clone(); (LAST_TAG - FIRST_TAG + 2) as usize];
+        for entry in &mut entries {
+            entry.tag = None;
+        }
+        assert!(tag(&mut entries));
+        assert_eq!(entries[entries.len() - 2].tag, Some(LAST_TAG));
+        assert_eq!(entries.last().unwrap().tag, None);
         fs::remove_dir_all(directory).unwrap();
     }
 

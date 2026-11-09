@@ -50,7 +50,10 @@ impl Hub {
             Some(place) => super::tools::placement(place)?,
         };
         let (name, looking) = match placement {
-            Placement::Near(name) | Placement::Front(name) => (name, false),
+            // A layout is too large to stand beside someone, so beside them it stands in front of them.
+            Placement::Near(name) | Placement::Front(name) | Placement::Beside(name) => {
+                (name, false)
+            }
             Placement::Looking(name) => (name, true),
             Placement::Wall(..) => {
                 return Err("A layout stands in front of someone or where they are looking: say front, near or looking, with a name or for whoever asked.".to_owned());

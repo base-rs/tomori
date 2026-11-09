@@ -14,7 +14,8 @@ pub const USAGE: &str =
 
   mint      Issue an owner token and print it once. Give it to a client with --token, the
             tomori.token intent extra, or the sign-in page.
-  list      List the issued tokens by identifier, name and role, without revealing them.
+  list      List the issued tokens by identifier, role, name and tag, without revealing
+            them.
   rename    Change the display name of the token with this identifier, which everyone
             using it is known by, in spaces and to the agent.
   revoke    Revoke the token with this identifier; its connections end.";
@@ -123,7 +124,11 @@ pub(crate) fn run_named(
                         Grant::Owner => "owner".to_owned(),
                         Grant::Collaborator { space } => format!("collaborator in {space}"),
                     };
-                    format!("{}  {}  {:?}\n", entry.id, role, entry.name)
+                    // Its holder's handle, as the agent names them where others share the name.
+                    let tag = entry
+                        .tag
+                        .map_or_else(String::new, |tag| format!("  #{tag}"));
+                    format!("{}  {}  {:?}{tag}\n", entry.id, role, entry.name)
                 })
                 .collect())
         }
@@ -134,18 +139,14 @@ pub(crate) fn run_named(
                 ));
             };
             let name = crate::limits::name(&name)?;
-            let key = tomori_protocol::text::name_key(&name);
-            let taken = |other: &str| tomori_protocol::text::name_key(other) == key;
+            // Another token's name is no bar: tags tell their holders apart.
             match open()?
-                .rename(&id, &name, taken)
+                .rename(&id, &name, |_| false)
                 .map_err(|error| format!("Could not rename the token: {error}."))?
             {
                 tomori_security::Renamed::Renamed => {
                     Ok(format!("Renamed token {id} to {name:?}.\n"))
                 }
-                tomori_security::Renamed::Taken => Err(format!(
-                    "Another token is called {name:?}, so token {id} was not renamed."
-                )),
                 _ => Err(format!("No token has the identifier {id:?}.")),
             }
         }
@@ -206,7 +207,10 @@ mod tests {
         assert_eq!(entry.name, "Ada's Quest");
 
         let listed = run_in(&state, &["list"]).unwrap();
-        assert_eq!(listed, format!("{}  owner  \"Ada's Quest\"\n", entry.id));
+        assert_eq!(
+            listed,
+            format!("{}  owner  \"Ada's Quest\"  #10\n", entry.id)
+        );
         assert!(!listed.contains(token));
         store
             .issue(
@@ -230,7 +234,7 @@ mod tests {
         assert!(
             run_in(&state, &["list"])
                 .unwrap()
-                .starts_with(&format!("{}  owner  \"Ada Lovelace\"\n", entry.id))
+                .starts_with(&format!("{}  owner  \"Ada Lovelace\"  #10\n", entry.id))
         );
         assert_eq!(
             run_in(&state, &["rename", &entry.id, "/admin"]).unwrap_err(),
@@ -240,7 +244,7 @@ mod tests {
             run_in(&state, &["rename", "missing", "Ada"]).unwrap_err(),
             "No token has the identifier \"missing\"."
         );
-        // A name is cleaned before it is kept, and one another token has, in any case or hidden among invisible characters, is refused.
+        // A name is cleaned before it is kept; one another token has is theirs to take too, since tags tell them apart.
         assert_eq!(
             run_in(&state, &["rename", &entry.id, "Ada\u{202E}\n Lovelace"]).unwrap(),
             format!("Renamed token {} to \"Ada Lovelace\".\n", entry.id)
@@ -250,11 +254,13 @@ mod tests {
             "A name must not contain \":\", \"[\" or \"]\"."
         );
         assert_eq!(
-            run_in(&state, &["rename", &entry.id, "b\u{200B}OB"]).unwrap_err(),
-            format!(
-                "Another token is called \"bOB\", so token {} was not renamed.",
-                entry.id
-            )
+            run_in(&state, &["rename", &entry.id, "b\u{200B}OB"]).unwrap(),
+            format!("Renamed token {} to \"bOB\".\n", entry.id)
+        );
+        assert!(
+            run_in(&state, &["list"])
+                .unwrap()
+                .contains("collaborator in studio  \"Bob\"  #11")
         );
 
         assert_eq!(

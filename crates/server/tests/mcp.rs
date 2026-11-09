@@ -1204,6 +1204,12 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
             ("Vic", "visitor")
         ]
     );
+    // Each with their handle: a token holder's tag is their token's, and a visitor's one no token or participant has.
+    let ids: Vec<&str> = people
+        .iter()
+        .map(|person| person["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["Ada#10", "Bob#11", "Vic#12"]);
     assert_eq!(
         people[0]["presence"],
         "Their client has not reported where they are."
@@ -1758,6 +1764,143 @@ fn the_agent_shows_an_image_file_as_a_panel_whose_image_everyone_who_shows_image
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// How far `at` stands aside from the way someone at `eyes` looks, along −Z, in whole degrees clockwise as seen from
+/// above, so that their right is positive.
+fn aside(eyes: [f32; 3], at: &Value) -> f64 {
+    let x = at[0].as_f64().unwrap() - f64::from(eyes[0]);
+    let z = at[2].as_f64().unwrap() - f64::from(eyes[2]);
+    x.atan2(-z).to_degrees().round()
+}
+
+#[test]
+fn the_agent_floats_panels_and_images_beside_someone_by_their_name_or_handle() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_showing_images("ada", "Ada");
+    create(&mut ada, "Beside");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let caller = Some(session.as_str());
+    // Ada stands across the space from every wall, looking along −Z.
+    let eyes = [6.0, 1.6, 6.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(eyes, [6.0, 1.6, 0.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let presence =
+        || call(&server, &token, caller, "presence", json!({}))["structuredContent"].clone();
+    // Presence names her and gives her handle, which place takes as it takes her name.
+    let handle = eventually(|| {
+        let seen = presence();
+        let person = &seen["people"][0];
+        person["head"]
+            .is_object()
+            .then(|| person["id"].as_str().unwrap().to_owned())
+    });
+    assert!(handle.starts_with("Ada#"), "{handle}");
+    assert_eq!(presence()["people"][0]["name"], "Ada");
+    let floating = |panel: &str| {
+        eventually(|| {
+            presence()["floating"]
+                .as_array()?
+                .iter()
+                .find(|floating| floating["panel"] == panel)
+                .map(|floating| floating["position"].clone())
+        })
+    };
+
+    // A panel nobody asked for goes onto the Tomori wall; moved beside Ada, it floats to her right.
+    agent_replies(
+        &sessions[0],
+        "m1",
+        "A list.\n\n```panel\nid: todo\ntitle: Todo\n---\n- [ ] One\n```\n",
+    );
+    let todo = eventually(|| {
+        presence()["walls"][0]["used"][0]["panel"]
+            .as_str()
+            .map(str::to_owned)
+    });
+    let moved = call(
+        &server,
+        &token,
+        caller,
+        "move_panel",
+        json!({"panel": "todo", "place": "beside Ada"}),
+    );
+    assert_eq!(moved["structuredContent"]["moved"], true, "{moved}");
+    assert_eq!(moved["structuredContent"]["place"]["kind"], "free");
+    assert_eq!(aside(eyes, &floating(&todo)), 30.0);
+    // An image beside her handle fans to her left, clear of the list.
+    let folder = std::env::temp_dir().join(format!("tomori-mcp-beside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let picture = folder.join("render.png");
+    image::RgbImage::from_fn(30, 20, |x, y| image::Rgb([x as u8, y as u8, 128]))
+        .save(&picture)
+        .unwrap();
+    let shown = call(
+        &server,
+        &token,
+        caller,
+        "show_image",
+        json!({"path": picture.display().to_string(), "place": format!("beside {}", handle.to_lowercase())}),
+    );
+    assert_ne!(shown["isError"], true, "{shown}");
+    let image = shown["structuredContent"]["panel"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(aside(eyes, &floating(&image)), -30.0);
+    // Updated in place with beside, the list is in its own way no more than before: it stays where it is.
+    let updated = call(
+        &server,
+        &token,
+        caller,
+        "update_panel",
+        json!({"panel": "todo", "check": [1], "place": "beside"}),
+    );
+    assert!(
+        failure(&updated).starts_with("Nobody asked for this as they spoke"),
+        "{updated}"
+    );
+    let updated = call(
+        &server,
+        &token,
+        caller,
+        "update_panel",
+        json!({"panel": "todo", "check": [1], "place": format!("beside {handle}")}),
+    );
+    assert_ne!(updated["isError"], true, "{updated}");
+    assert_eq!(aside(eyes, &floating(&todo)), 30.0);
+    // A handle nobody has, and a form that names no wall where a wall is meant, are said.
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            caller,
+            "move_panel",
+            json!({"panel": "todo", "place": "beside Ada#9999"}),
+        )),
+        "Nobody called \"Ada#9999\" in this space has reported where they are."
+    );
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            caller,
+            "set_wall",
+            json!({"wall": "beside Ada", "columns": 2}),
+        )),
+        "beside names no wall: say which wall, or looking or near someone."
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 #[test]
 fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_where_someone_looks() {
     let backend = FakeBackend::new();
@@ -2246,7 +2389,7 @@ fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_d
         ),
         (
             json!({"place": "behind", "walls": [{"id": "a"}]}),
-            "Tomori does not know where \"behind\" is: say near NAME, looking NAME, front NAME, wall WALL or wall WALL slot N, or near, looking or front for whoever asked.",
+            "Tomori does not know where \"behind\" is: say near NAME, looking NAME, front NAME, beside NAME, wall WALL or wall WALL slot N, or near, looking, front or beside for whoever asked.",
         ),
         (
             json!({"walls": [{"id": "a"}]}),

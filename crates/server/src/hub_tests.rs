@@ -896,6 +896,59 @@ fn give(hub: &Hub, space: &str, name: &str, ago: Duration) {
 }
 
 #[test]
+fn requested_by_names_whoever_spoke_by_their_handle_where_another_shares_their_name() {
+    use crate::hub::provenance::{Needs, Requester};
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let _first = asking(&hub, &space, "Ada", Grant::Owner, Duration::from_secs(5));
+    // Another Ada, under a token of her own, whose words are given last.
+    let access = Access {
+        principal: Some("token:ada-2".to_owned()),
+        name: Some("Ada".to_owned()),
+        grant: Grant::Owner,
+    };
+    let second = Client::greeted(&hub, access, "ada-2");
+    second.join(&space);
+    {
+        let mut state = hub.lock();
+        let source = state
+            .participants
+            .values()
+            .find(|participant| participant.principal.as_deref() == Some("token:ada-2"))
+            .unwrap()
+            .source;
+        let tags: Vec<Option<u32>> = state
+            .heads(&space)
+            .iter()
+            .map(|person| person.tag)
+            .collect();
+        assert_eq!(tags, [Some(10), Some(11)]);
+        state
+            .space_mut(&space)
+            .unwrap()
+            .model
+            .give(source, "Ada", Instant::now());
+    }
+    let check = |requested_by: &str| {
+        let state = hub.lock();
+        hub.requester(&state, &space, Some(requested_by), Needs::Owner)
+    };
+    // A name two share does not say which of them asked.
+    assert_eq!(
+        check("ada").unwrap_err(),
+        "More than one person in this space is called \"ada\": say which, as Ada#10 or Ada#11."
+    );
+    // Her handle does, in any case; the other Ada's is not whoever spoke.
+    assert!(matches!(check("ADA#11"), Ok(Requester { name, .. }) if name == "Ada"));
+    assert!(check("Ada#10").unwrap_err().starts_with(
+        "The words you were given last in this space are not from the participant you named"
+    ));
+    assert!(check("Bob#11").unwrap_err().starts_with(
+        "The words you were given last in this space are not from the participant you named"
+    ));
+}
+
+#[test]
 fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_tool() {
     use crate::hub::provenance::{Needs, REQUEST_RECENT, Requester};
     let (hub, _jobs) = hub();
@@ -907,7 +960,13 @@ fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_t
     let refused =
         |requested_by: Option<&str>, needs: Needs| check(requested_by, needs).unwrap_err();
     // Without a name, or with one no participant could have, nothing is checked.
-    for missing in [None, Some(""), Some("Ada: yes"), Some("[Ada]")] {
+    for missing in [
+        None,
+        Some(""),
+        Some("Ada: yes"),
+        Some("[Ada]"),
+        Some("[Ada]#12"),
+    ] {
         assert!(
             refused(missing, Needs::Owner).starts_with("This tool needs requested_by"),
             "{missing:?}"
@@ -2346,8 +2405,8 @@ fn a_stored_name_the_rules_now_refuse_is_replaced_by_the_device_suggestion() {
 }
 
 #[test]
-fn a_name_someone_else_has_is_taken() {
-    let store = Store::new("taken-names");
+fn a_name_someone_else_has_is_theirs_too_and_tags_tell_them_apart() {
+    let store = Store::new("shared-names");
     let (samuel, _) = store
         .tokens
         .issue("Samuel", tomori_security::Grant::Owner)
@@ -2356,89 +2415,69 @@ fn a_name_someone_else_has_is_taken() {
         .tokens
         .issue("Quest 3", tomori_security::Grant::Owner)
         .unwrap();
+    assert_eq!((samuel.tag, entry.tag), (Some(10), Some(11)));
     let (hub, _jobs) = hub_waiting();
     hub.set_tokens(store.tokens.clone());
     hub.set_encrypted(true);
     let id = stopped(&hub, Snapshot::default());
-    let elsewhere = stopped(&hub, Snapshot::default());
     let quest = Client::connect(&hub, admitted(&store.tokens, &token));
     hello_as(&quest, "quest", "Quest 3", true);
     quest.join(&id);
     let ada = Client::greeted(&hub, Access::open(), "ada");
     ada.join(&id);
-    let bob = Client::greeted(&hub, Access::open(), "bob");
-    bob.join(&elsewhere);
     let vic = Client::greeted(&hub, Access::visitor(), "vic");
     vic.join(&id);
-    for client in [&quest, &ada, &bob, &vic] {
+    for client in [&quest, &ada, &vic] {
         client.read();
     }
     let kept = || store.tokens.entry(&entry.principal().id).unwrap().name;
-    let taken = ["Name not changed: That name is taken.".to_owned()];
-
-    // Someone else in the space has it, in another case or with invisible characters, or another token does.
-    for name in ["ADA", " ada\u{200B}", "samuel", "SAMUEL\u{FEFF}"] {
-        quest.send(ClientMessage::SetName {
-            name: name.to_owned(),
-        });
-        assert_eq!(quest.errors(), taken, "{name:?}");
-        assert_eq!(kept(), "Quest 3");
-    }
+    let people = || -> Vec<(String, Option<u32>)> {
+        hub.lock()
+            .heads(&id)
+            .into_iter()
+            .map(|person| (person.name, person.tag))
+            .collect()
+    };
+    // A token holder's tag is their token's; anyone else's is one no token or other participant has.
     assert_eq!(
-        finished(&say_name(&hub, &quest, "Ada.")),
-        Some(Err("That name is taken.".to_owned()))
+        people(),
+        [
+            ("Quest 3".to_owned(), Some(11)),
+            ("ada".to_owned(), Some(12))
+        ]
     );
-    assert!(
-        ada.read()
-            .iter()
-            .all(|message| !matches!(message, ServerMessage::Space { .. }))
-    );
-    // A visitor cannot take a token's name, or a participant's, for a knock.
-    for name in ["Samuel", "quest 3", "Ada"] {
-        vic.send(ClientMessage::SetName {
-            name: name.to_owned(),
-        });
-        assert_eq!(vic.errors(), taken, "{name:?}");
-    }
 
-    // Someone in another space, or another device with the same token, does not take it; nor does a change of case.
+    // Another token's name, in another case, is theirs to take, kept with their token, keeping its tag.
     quest.send(ClientMessage::SetName {
-        name: "Bob".to_owned(),
+        name: "SAMUEL".to_owned(),
     });
-    assert_eq!(named(&quest.read()), ["Bob"]);
+    assert_eq!(named(&quest.read()), ["SAMUEL"]);
+    assert!(quest.errors().is_empty());
+    assert_eq!(kept(), "SAMUEL");
+    // And someone else in the space may take it too, by saying it.
+    assert_eq!(
+        finished(&say_name(&hub, &ada, "Samuel.")),
+        Some(Ok("Samuel".to_owned()))
+    );
+    assert_eq!(
+        people(),
+        [
+            ("SAMUEL".to_owned(), Some(11)),
+            ("Samuel".to_owned(), Some(12))
+        ]
+    );
+    // A visitor may take it too.
+    vic.send(ClientMessage::SetName {
+        name: "Samuel".to_owned(),
+    });
+    assert!(vic.errors().is_empty());
+    // A tag stays with its token, on every device, however it is renamed and reconnected.
     let laptop = Client::connect(&hub, admitted(&store.tokens, &token));
     hello_as(&laptop, "laptop", "Laptop", true);
     laptop.join(&id);
-    laptop.send(ClientMessage::SetName {
-        name: "BOB".to_owned(),
-    });
-    assert_eq!(named(&laptop.read()), ["BOB"]);
-    assert_eq!(kept(), "BOB");
-
-    // A token renamed in another process meanwhile, not yet read again, is still checked as the name is written.
-    let command = tomori_security::TokenStore::open(&store.directory).unwrap();
-    command.rename(&samuel.id, "Grace", |_| false).unwrap();
-    quest.read();
-    quest.send(ClientMessage::SetName {
-        name: "grace".to_owned(),
-    });
-    assert_eq!(quest.errors(), taken);
-    assert_eq!(kept(), "BOB");
-    // Without a token store, only those present are compared.
-    let (bare, _jobs) = super::rarer::hub();
-    let space = stopped(&bare, Snapshot::default());
-    let first = Client::greeted(&bare, Access::open(), "first");
-    first.join(&space);
-    let second = Client::greeted(&bare, Access::open(), "second");
-    second.join(&space);
-    second.send(ClientMessage::SetName {
-        name: "First".to_owned(),
-    });
-    assert_eq!(second.errors(), taken);
-    second.send(ClientMessage::SetName {
-        name: "Samuel".to_owned(),
-    });
-    assert!(second.errors().is_empty());
+    let tags: Vec<Option<u32>> = people().into_iter().map(|(_, tag)| tag).collect();
+    assert_eq!(tags, [Some(11), Some(12), Some(11)]);
+    assert_eq!(kept(), "SAMUEL");
 }
 
 #[test]
@@ -3814,6 +3853,60 @@ fn a_reply_s_panels_go_where_their_blocks_say_and_otherwise_where_whoever_asked_
     assert_eq!(placed("Nobody"), on(tomori_protocol::TOMORI_WALL, 0));
     // Everyone sees the same.
     assert_eq!(ada.projection().panels, projection.panels);
+}
+
+/// How far `pose` stands aside from the way someone at `eyes` looks, towards `target`, in whole degrees clockwise as
+/// seen from above, so that their right is positive.
+fn aside(eyes: [f32; 3], target: [f32; 3], pose: &tomori_protocol::Pose) -> f32 {
+    let bearing = |to: [f32; 3]| (to[0] - eyes[0]).atan2(-(to[2] - eyes[2])).to_degrees();
+    let apart = bearing(pose.position) - bearing(target);
+    ((apart + 540.0).rem_euclid(360.0) - 180.0).round()
+}
+
+#[test]
+fn a_reply_s_panels_float_beside_whoever_asked_when_no_wall_they_look_at_is_readable() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let bob = Client::projecting(&hub, Access::open(), "bob");
+    bob.join(&space);
+    // Ada stands across the space, about 10 m from the Tomori wall, looking away from it; Bob elsewhere, looking +Z.
+    let (eyes, ahead) = ([6.0, 1.6, 6.0], [6.0, 1.6, 0.0]);
+    let (bobs, his) = ([-4.0, 1.6, 4.0], [-4.0, 1.6, 10.0]);
+    ada.send(looking(eyes, ahead));
+    bob.send(looking(bobs, his));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    let text = [
+        "Here.",
+        "```panel\ntitle: Checklist\n---\n- [ ] One\n- [ ] Two\n```",
+        "```panel\ntitle: Notes\n---\nSome.\n```",
+        "```panel\ntitle: For Bob\nplace: beside Bob\n---\nBy Bob.\n```",
+        "```rust place=beside:bob\nfn main() {\n}\n```",
+    ]
+    .join("\n\n");
+    reply(&hub, &space, "m1", &text);
+    let projection = ada.projection();
+    let floating = |title: &str| match projection
+        .panels
+        .iter()
+        .find(|panel| panel.title == title)
+        .map(|panel| &panel.place)
+    {
+        Some(tomori_protocol::Place::Free { pose }) => *pose,
+        other => unreachable!("{title}: {other:?}"),
+    };
+    // Without a placement, beside Ada, to her right and then her left, at reading distance, a little below her eyes.
+    assert_eq!(aside(eyes, ahead, &floating("Checklist")), 30.0);
+    assert_eq!(aside(eyes, ahead, &floating("Notes")), -30.0);
+    let checklist = floating("Checklist");
+    let across = (checklist.position[0] - eyes[0]).hypot(checklist.position[2] - eyes[2]);
+    assert!((across - 1.2).abs() < 1e-3 && checklist.position[1] < eyes[1]);
+    // Beside Bob, as the blocks say, fanned about him too.
+    assert_eq!(aside(bobs, his, &floating("For Bob")), 30.0);
+    assert_eq!(aside(bobs, his, &floating("rust")), -30.0);
+    assert_eq!(bob.projection().panels, projection.panels);
 }
 
 #[test]

@@ -91,8 +91,18 @@ impl HubState {
         now: Instant,
     ) -> Result<Requester, String> {
         // A name by the rules every display name follows, so that what the agent passes is bounded and on one line wherever a refusal repeats it.
+        // A handle, `Ada#23`, is a name and a tag, the name by those rules, so that a name of the most characters has one.
+        let valid = |name: &str| tomori_protocol::text::display_name(name).ok();
         let requested_by = requested_by
-            .and_then(|name| tomori_protocol::text::display_name(name).ok())
+            .and_then(|named| {
+                let handle = named.trim().rsplit_once('#').filter(|(_, tag)| {
+                    (1..=4).contains(&tag.len()) && tag.bytes().all(|byte| byte.is_ascii_digit())
+                });
+                match handle.and_then(|(name, tag)| valid(name).zip(Some(tag))) {
+                    Some((name, tag)) => Some(format!("{name}#{tag}")),
+                    None => valid(named),
+                }
+            })
             .ok_or(
                 "This tool needs requested_by: the name of the participant whose words asked for it, as Tomori gave you their words, such as Ada for \"Ada: …\".",
             )?;
@@ -125,14 +135,21 @@ impl HubState {
             }
             None => {}
         }
-        // The speaker as the agent read them: the words that began its turn are the request it acts on.
-        if tomori_protocol::text::name_key(&given.speaker)
-            != tomori_protocol::text::name_key(&requested_by)
-        {
-            return Err(
-                "The words you were given last in this space are not from the participant you named, so Tomori cannot tell that they asked. Ask them to say it again, and wait for their words before you act."
-                    .to_owned(),
-            );
+        // The speaker as the agent read them: the words that began its turn are the request it acts on. A handle,
+        // `Ada#23`, names them by their tag too; a name alone must be theirs alone in the space.
+        let key = tomori_protocol::text::name_key;
+        let speaker = key(&given.speaker);
+        let handle = requested_by
+            .rsplit_once('#')
+            .filter(|(name, tag)| {
+                !tag.is_empty()
+                    && tag.bytes().all(|byte| byte.is_ascii_digit())
+                    && key(name) == speaker
+            })
+            .and_then(|(_, tag)| tag.parse::<u32>().ok());
+        let not_theirs = "The words you were given last in this space are not from the participant you named, so Tomori cannot tell that they asked. Ask them to say it again, and wait for their words before you act.";
+        if handle.is_none() && key(&requested_by) != speaker {
+            return Err(not_theirs.to_owned());
         }
         let Some(participant) = self
             .participants
@@ -143,6 +160,27 @@ impl HubState {
                 "{requested_by} is no longer known to this server, so Tomori cannot check that they may ask for this."
             ));
         };
+        match handle {
+            Some(tag) if participant.tag != Some(tag) => return Err(not_theirs.to_owned()),
+            Some(_) => {}
+            None => {
+                let mut called: Vec<String> = self
+                    .heads(space)
+                    .iter()
+                    .filter(|person| key(&person.name) == speaker)
+                    .map(crate::presence::Someone::handle)
+                    .collect();
+                // One identity on several devices is one person.
+                called.sort();
+                called.dedup();
+                if called.len() > 1 {
+                    return Err(format!(
+                        "More than one person in this space is called {requested_by:?}: say which, as {}.",
+                        called.join(" or ")
+                    ));
+                }
+            }
+        }
         // Only a participant's connection queues input, but a visitor's record is never trusted to have.
         let connection = participant
             .connection

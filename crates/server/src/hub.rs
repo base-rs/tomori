@@ -614,6 +614,9 @@ struct ParticipantRecord {
     /// The principal they authenticated as, whose token keeps their name. See `design/security.md`.
     principal: Option<String>,
     name: String,
+    /// The number that tells them apart from others of the same name, as in `Ada#23`: their token's, kept with it, or,
+    /// without one, one no token or other participant has, kept while the server keeps them. See `design/security.md`.
+    tag: Option<u32>,
     source: u32,
     connection: Option<ConnectionId>,
     space: Option<String>,
@@ -1301,18 +1304,40 @@ impl HubState {
 
     /// The names of the participants in `space` and where their heads are, as they last reported, for placing what its
     /// agent projects near them or where they look. Visitors send no presence.
-    fn heads(&self, space: &str) -> Vec<(String, tomori_protocol::Pose)> {
+    /// The participants of `space`, by name and tag, each with their head as they last reported it, if they have, so
+    /// that the agent's tools find whom a name or handle means. Visitors report nothing, and are not among them.
+    fn heads(&self, space: &str) -> Vec<crate::presence::Someone> {
         self.space(space).map_or_else(Vec::new, |record| {
             record
                 .model
                 .participants
                 .iter()
                 .filter_map(|key| self.participants.get(key))
-                .filter_map(|participant| {
-                    Some((participant.name.clone(), participant.seen.as_ref()?.head))
+                .map(|participant| crate::presence::Someone {
+                    name: participant.name.clone(),
+                    tag: participant.tag,
+                    head: participant.seen.as_ref().map(|seen| seen.head),
                 })
                 .collect()
         })
+    }
+
+    /// The least tag, from [`tomori_security::FIRST_TAG`], that neither a token of `tokens` nor any participant the
+    /// server keeps has, for a participant without a token. See `design/security.md`.
+    fn free_tag(&self, tokens: Option<&tomori_security::TokenStore>) -> Option<u32> {
+        let mut used: std::collections::HashSet<u32> = self
+            .participants
+            .values()
+            .filter_map(|record| record.tag)
+            .collect();
+        used.extend(
+            tokens
+                .map(tomori_security::TokenStore::entries)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|entry| entry.tag),
+        );
+        (tomori_security::FIRST_TAG..=tomori_security::LAST_TAG).find(|tag| !used.contains(tag))
     }
 
     fn participants(&self, space: &SpaceModel) -> Vec<Participant> {
@@ -1523,37 +1548,7 @@ impl HubState {
         }
     }
 
-    /// Whether `name` is taken from `participant`, as a name they cannot choose: whoever else is in the space they are in has it, or another token than theirs does, compared as [`tomori_protocol::text::name_key`] compares names. Their own devices, holding their token, do not count. See `design/security.md`.
-    fn name_taken(
-        &self,
-        participant: &str,
-        name: &str,
-        tokens: Option<&tomori_security::TokenStore>,
-    ) -> bool {
-        let key = tomori_protocol::text::name_key(name);
-        let (principal, space) = self
-            .participants
-            .get(participant)
-            .map(|record| (record.principal.as_deref(), record.space.as_ref()))
-            .unwrap_or_default();
-        let present = space.is_some_and(|space| {
-            self.participants.iter().any(|(other, there)| {
-                other != participant
-                    && (principal.is_none() || there.principal.as_deref() != principal)
-                    && there.space.as_ref() == Some(space)
-                    && tomori_protocol::text::name_key(&there.name) == key
-            })
-        });
-        present
-            || tokens.is_some_and(|tokens| {
-                tokens.entries().iter().any(|entry| {
-                    Some(entry.principal().id.as_str()) != principal
-                        && tomori_protocol::text::name_key(&entry.name) == key
-                })
-            })
-    }
-
-    /// Rename `participant`, as they asked, from a message or an utterance's transcript, `utterance`, unless the name is taken (see [`Self::name_taken`]). A token holder's name is kept with their token, which the server writes outside the lock, and everyone holding it is renamed once it is written; anyone else's is kept only while the server keeps them. Renaming to the name they have already changes nothing. See `design/security.md`.
+    /// Rename `participant`, as they asked, from a message or an utterance's transcript, `utterance`. A name others have is theirs to take too, since each participant's tag tells them apart. A token holder's name is kept with their token, which the server writes outside the lock, and everyone holding it is renamed once it is written; anyone else's is kept only while the server keeps them. Renaming to the name they have already changes nothing. See `design/security.md`.
     fn rename_request(
         &mut self,
         participant: &str,
@@ -1567,20 +1562,6 @@ impl HubState {
             .get(participant)
             .map(|record| (record.principal.clone(), record.name == name))
             .unwrap_or_default();
-        if !unchanged && self.name_taken(participant, name, tokens.as_deref()) {
-            let error = "That name is taken.";
-            match utterance {
-                Some(utterance) => self.send(
-                    participant,
-                    ServerMessage::TranscriptFailed {
-                        utterance,
-                        error: error.to_owned(),
-                    },
-                ),
-                None => self.error(participant, format!("Name not changed: {error}")),
-            }
-            return;
-        }
         match (principal, tokens) {
             (Some(principal), Some(tokens)) if !unchanged => {
                 deferred.push(Deferred::Rename(Rename {
@@ -1628,7 +1609,13 @@ impl HubState {
     }
 
     /// Admit the visitor of `knock`, on its connection, as a collaborator in its space under `principal`, telling it `token`. The participant is kept under its new key, so that it keeps its number and place. Returns false if the visitor has gone.
-    fn admit(&mut self, knock: &KnockRecord, principal: String, token: String) -> bool {
+    fn admit(
+        &mut self,
+        knock: &KnockRecord,
+        principal: String,
+        tag: Option<u32>,
+        token: String,
+    ) -> bool {
         let still_here = self
             .connections
             .get(&knock.connection)
@@ -1660,6 +1647,8 @@ impl HubState {
             .retain(|waiting| waiting.participant != knock.participant);
         record.visitor = false;
         record.principal = Some(principal.clone());
+        // Their token's tag from now on, or, without one, the one they had.
+        record.tag = tag.or(record.tag);
         let space = record.space.clone();
         self.participants.insert(key.clone(), record);
         let connection = self
@@ -2202,7 +2191,7 @@ impl Hub {
         };
         let admitted = {
             let mut state = self.lock();
-            let admitted = state.admit(&knock, entry.principal().id, token);
+            let admitted = state.admit(&knock, entry.principal().id, entry.tag, token);
             if !admitted && let Some(record) = state.connections.get(&knock.connection) {
                 // Still connected, but no longer the visitor who knocked, such as after reconnecting.
                 record.outbox.message(ServerMessage::KnockState {
@@ -2453,12 +2442,9 @@ impl Hub {
             asked,
         } = rename;
         let id = principal.strip_prefix("token:").unwrap_or_default();
-        let key = tomori_protocol::text::name_key(&name);
-        let kept = match tokens.rename(id, &name, |other| {
-            tomori_protocol::text::name_key(other) == key
-        }) {
+        // Another token's name is no bar: tags tell their holders apart.
+        let kept = match tokens.rename(id, &name, |_| false) {
             Ok(tomori_security::Renamed::Renamed) => Ok(()),
-            Ok(tomori_security::Renamed::Taken) => Err("That name is taken."),
             Ok(_) => Err("Your token is no longer issued."),
             Err(error) => {
                 log::warn!("Could not keep the name of token {id}: {error}.");
@@ -2909,7 +2895,22 @@ impl Hub {
             }));
         }
         let name = kept.unwrap_or(suggested);
+        let tokens = self.token_store();
+        // A token holder's tag is their token's; anyone else's is one nobody has, kept while the server keeps them.
+        let token_tag = access
+            .principal
+            .as_deref()
+            .zip(tokens.as_deref())
+            .and_then(|(principal, tokens)| tokens.entry(principal))
+            .and_then(|entry| entry.tag);
         let participant = participant_key(access.principal.as_deref(), &participant);
+        let tag = token_tag.or_else(|| {
+            state
+                .participants
+                .get(&participant)
+                .and_then(|record| record.tag)
+                .or_else(|| state.free_tag(tokens.as_deref()))
+        });
         if !state.participants.contains_key(&participant) {
             state.next_source += 1;
             let source = state.next_source;
@@ -2920,6 +2921,7 @@ impl Hub {
                     departure: 0,
                     principal: access.principal.clone(),
                     name: String::new(),
+                    tag: None,
                     source,
                     connection: None,
                     space: None,
@@ -2937,6 +2939,7 @@ impl Hub {
             .get_mut(&participant)
             .expect("inserted above");
         record.name = name;
+        record.tag = tag;
         record.departed = None;
         // A new connection may be from a client that reports nothing, which stays at the live edge, and from another device.
         record.engagement = None;
@@ -5304,6 +5307,7 @@ impl Hub {
             .walls(&record.model.environment)
             .travelling(record.travel);
         let now = crate::cards::unix_now();
+        let solids = environments.solids(&record.model.environment);
         for (contents, origin) in replies {
             let projection = record.stage.view(space, &walls, now);
             let placed = contents
@@ -5311,8 +5315,14 @@ impl Hub {
                 .map(|(content, place)| {
                     // A placement that names someone who has not reported, or a wall not here, is as none.
                     let said = place.and_then(|place| {
-                        crate::presence::destination(&place, origin.as_ref(), &people, &projection)
-                            .ok()
+                        crate::presence::destination(
+                            &place,
+                            origin.as_ref(),
+                            &people,
+                            &projection,
+                            &solids,
+                        )
+                        .ok()
                     });
                     // A block with the id of a panel someone is carrying updates it in their hand, where it stays.
                     let held = content
@@ -5322,7 +5332,7 @@ impl Hub {
                         .is_some_and(|id| carried.contains(&id));
                     let placed = said.is_some() && !held;
                     let to = said.unwrap_or_else(|| {
-                        crate::presence::by_default(origin.as_ref(), &projection)
+                        crate::presence::by_default(origin.as_ref(), &projection, &solids)
                     });
                     (content, to, placed)
                 })
