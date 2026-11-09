@@ -109,7 +109,9 @@ impl Player {
             ..self.options
         });
         mixer.set_local_source(self.local_source);
-        mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
+        mixer.set_agent_muted(self.agent_muted);
+        // A mixer made while agent speech is skipped starts with it silent, rather than fading out what is not heard.
+        mixer.set_agent_skipped(self.agent_skipped);
         if self.probe {
             mixer.load_probe();
         }
@@ -136,11 +138,11 @@ impl Player {
                 }
                 Command::AgentMuted(muted) => {
                     self.agent_muted = muted;
-                    mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
+                    mixer.set_agent_muted(muted);
                 }
                 Command::AgentSkipped(skipped) => {
                     self.agent_skipped = skipped;
-                    mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
+                    mixer.set_agent_skipped(skipped);
                 }
                 Command::Play(earcon, direction) => mixer.play(earcon, direction),
                 Command::Ambient(sound, position) => mixer.ambient(sound, position),
