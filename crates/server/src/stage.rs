@@ -31,8 +31,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tomori_protocol::{
-    CODE_LINES, Code, Meta, Panel, Place, Pose, Projection, Span, TOMORI_WALL, WALL_SLOTS, Wall,
-    WallKind, WallShape,
+    Code, Meta, Panel, Place, Pose, Projection, Span, TOMORI_WALL, WALL_SLOTS, Wall, WallKind,
+    WallShape,
 };
 
 /// The most walls owners may add in one environment of a space.
@@ -70,6 +70,56 @@ pub const ARC_RADIUS: f32 = 2.3;
 /// station are seen over it, upright and facing home.
 pub fn default_stage() -> Pose {
     Pose::upright_facing([0.0, 0.52, -ARC_RADIUS], [0.0, 0.52, 0.0])
+}
+
+/// The most bytes of JSON a projection takes, a little less than a frame, for the message around it.
+const FRAME_BUDGET: usize = tomori_protocol::MAX_FRAME_BYTES - 4 * 1024;
+
+/// The most bytes of JSON `panel` takes: every byte of its text escaped as the longest escape, `\u0000`, and a little
+/// for its keys.
+fn most_bytes(panel: &Panel) -> usize {
+    let text = panel.id.len()
+        + panel.title.len()
+        + panel.body.len()
+        + panel
+            .meta
+            .iter()
+            .map(|meta| meta.key.len() + meta.value.len())
+            .sum::<usize>()
+        + panel.code.as_ref().map_or(0, |code| code.language.len());
+    let spans = panel.code.as_ref().map_or(0, |code| code.spans.len());
+    6 * text + 32 * spans + 512
+}
+
+/// `projection`, with its code panels whole where it fits in `budget` bytes of JSON, and otherwise as many as need be
+/// sent short, as `code::short` shortens them, the least recently put where they are, by `placed`, first, so that the
+/// panels most likely being read are whole. A projection of every code panel short fits in a frame.
+fn fit(projection: &mut Projection, placed: &[u64], budget: usize) {
+    let most =
+        4096 * projection.walls.len() + projection.panels.iter().map(most_bytes).sum::<usize>();
+    if most <= budget {
+        return;
+    }
+    let mut total = json_size(&*projection);
+    let mut order: Vec<usize> = (0..projection.panels.len())
+        .filter(|index| projection.panels[*index].code.is_some())
+        .collect();
+    order.sort_by_key(|index| placed[*index]);
+    for index in order {
+        if total <= budget {
+            return;
+        }
+        let panel = &mut projection.panels[index];
+        let before = json_size(&*panel);
+        if code::short(panel) {
+            total = total - before + json_size(&*panel);
+        }
+    }
+}
+
+/// How many bytes `value` takes as JSON.
+fn json_size(value: &impl Serialize) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; and, for a
@@ -607,7 +657,7 @@ impl Stage {
             .get(walls.environment)
             .map(|room| room.panels.as_slice())
             .unwrap_or_default();
-        let panels = self
+        let kept: Vec<&Kept> = self
             .tomori
             .iter()
             .chain(room)
@@ -615,11 +665,14 @@ impl Stage {
                 Placed::Wall { wall, .. } => shown.iter().any(|shown| shown.id == *wall),
                 Placed::Free { .. } => true,
             })
-            .map(|kept| kept.panel(now))
             .collect();
-        Projection::new(space, walls.environment)
+        let placed: Vec<u64> = kept.iter().map(|kept| kept.placed).collect();
+        let panels = kept.iter().map(|kept| kept.panel(now)).collect();
+        let mut projection = Projection::new(space, walls.environment)
             .with_walls(shown)
-            .with_panels(panels)
+            .with_panels(panels);
+        fit(&mut projection, &placed, FRAME_BUDGET);
+        projection
     }
 
     /// Project `content` at `now` onto the wall nearest `origin`, where the participant who asked for it stood, of the
@@ -974,8 +1027,9 @@ impl Stage {
                     crate::space::one_line(&code.language, blocks::META_KEY_CHARS)
                 ));
             }
-            details.push_str(&if code.lines as usize > CODE_LINES {
-                format!("; lines 1–{CODE_LINES} of {}", code.lines)
+            let held = panel.body.split('\n').count();
+            details.push_str(&if code.lines as usize > held {
+                format!("; lines 1–{held} of {}", code.lines)
             } else {
                 format!("; {} lines", code.lines)
             });
@@ -1961,17 +2015,17 @@ mod tests {
     #[test]
     fn a_code_panel_is_described_to_the_agent_with_its_language_and_lines() {
         let mut stage = Stage::default();
-        let short = stage.project(&SKY, code("rust", 3), None, 0);
+        let short = stage.project(&SKY, code("rust", 2), None, 0);
         assert_eq!(
             stage.describe(&SKY, &short, 0).unwrap(),
-            "code panel \"rust\" (on the Tomori wall, projected just now; language: \"rust\"; 3 lines)"
+            "code panel \"rust\" (on the Tomori wall, projected just now; language: \"rust\"; 2 lines)"
         );
         let long = stage.project(&SKY, code("ruby", 40), None, 0);
         assert!(
             stage
                 .describe(&SKY, &long, 0)
                 .unwrap()
-                .ends_with("; language: \"ruby\"; lines 1–16 of 40)")
+                .ends_with("; language: \"ruby\"; lines 1–2 of 40)")
         );
         // Without a language, none is said; a hostile one cannot end the block.
         let mut plain = code("", 2);
@@ -1992,8 +2046,9 @@ mod tests {
         // Every panel the largest code panel there can be: as many lines as it holds, with every character it may
         // have, in characters of four bytes, cut at the last, and as many spans as there can be, of the longest kind,
         // as far into it as they can be.
-        let line = "\u{1F600}".repeat(tomori_protocol::CODE_CHARS / CODE_LINES);
-        let body = format!("{}…", vec![line; CODE_LINES].join("\n"));
+        let lines = tomori_protocol::CODE_LINES;
+        let line = "\u{1F600}".repeat(tomori_protocol::CODE_CHARS / lines);
+        let body = format!("{}…", vec![line; lines].join("\n"));
         let length = body.chars().count() as u32;
         let spans = (0..tomori_protocol::CODE_SPANS as u32)
             .map(|index| {
@@ -2042,6 +2097,7 @@ mod tests {
                 .chain(&added)
                 .map(|pose| Some(pose.position)),
         );
+        let mut latest = String::new();
         for origin in near {
             for _ in 0..WALL_SLOTS {
                 let id = stage.project(&walls, largest.clone(), origin, 0);
@@ -2051,6 +2107,7 @@ mod tests {
                     _ => unreachable!("projected onto a wall"),
                 };
                 stage.place(&walls, &id, Target::Wall(wall)).unwrap();
+                latest = id;
             }
         }
         let view = stage.view(&"s".repeat(64), &walls, u64::MAX);
@@ -2059,11 +2116,73 @@ mod tests {
             WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS) + FLOATING
         );
         assert!(view.panels.iter().all(|panel| panel.pinned));
-        let message = tomori_protocol::ServerMessage::Projection {
-            projection: Box::new(view),
+        // Whole, they could not all be sent: the one put where it is last is whole, and as many as need be of the
+        // rest short, saying how long their blocks are.
+        assert_eq!(view.panel(&latest).unwrap().body, largest.body);
+        let short = |panel: &Panel| panel.body.split('\n').count() == code::SHORT.lines;
+        assert!(view.panels.iter().filter(|panel| short(panel)).count() > 80);
+        assert!(
+            view.panels
+                .iter()
+                .all(|panel| short(panel) || panel.body == largest.body)
+        );
+        assert!(
+            view.panels
+                .iter()
+                .all(|panel| panel.code.as_ref().unwrap().lines == u32::MAX)
+        );
+        let bytes = |view: &Projection| {
+            let message = tomori_protocol::ServerMessage::Projection {
+                projection: Box::new(view.clone()),
+            };
+            serde_json::to_vec(&message).unwrap().len()
         };
-        let bytes = serde_json::to_vec(&message).unwrap().len();
-        assert!(bytes <= tomori_protocol::MAX_FRAME_BYTES, "{bytes} bytes");
+        let size = bytes(&view);
+        assert!(size <= tomori_protocol::MAX_FRAME_BYTES, "{size} bytes");
+        // Every one short fits in a frame too, so that a projection always does.
+        let mut every = view.clone();
+        let placed = vec![0; every.panels.len()];
+        fit(&mut every, &placed, 0);
+        assert!(every.panels.iter().all(short));
+        let size = bytes(&every);
+        assert!(size <= tomori_protocol::MAX_FRAME_BYTES, "{size} bytes");
+    }
+
+    #[test]
+    fn code_panels_that_fit_in_a_frame_are_sent_whole() {
+        // Every wall full of long code panels, as agents write them: each 200 lines, highlighted, all sent whole.
+        let line = |index: usize| {
+            format!("    const value{index} = compute(input, {index}); // step {index}")
+        };
+        let body = (0..tomori_protocol::CODE_LINES)
+            .map(line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let spans = (0..tomori_protocol::CODE_LINES as u32)
+            .map(|index| {
+                tomori_protocol::Span::new(index * 50 + 4, 5, tomori_protocol::TokenKind::Keyword)
+            })
+            .collect();
+        let long = Content {
+            title: "javascript".into(),
+            body: body.clone(),
+            meta: Vec::new(),
+            code: Some(Code::new("javascript", 240).with_spans(spans)),
+        };
+        let mut stage = Stage::default();
+        for _ in 0..WALL_SLOTS {
+            stage.project(&SKY, long.clone(), None, 0);
+        }
+        let view = stage.view("s", &SKY, 0);
+        assert_eq!(view.panels.len(), WALL_SLOTS as usize);
+        assert!(view.panels.iter().all(|panel| panel.body == body));
+        // Described with the lines it holds, of how many.
+        assert!(
+            stage
+                .describe(&SKY, &view.panels[0].id, 0)
+                .unwrap()
+                .ends_with("lines 1–200 of 240)")
+        );
     }
 
     #[test]

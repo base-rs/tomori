@@ -155,6 +155,7 @@ impl Controls {
             replay: self.replay,
             left_stick: self.navigation,
             right_stick: self.presentation_navigation,
+            scroll: 0.0,
         }
     }
 }
@@ -863,6 +864,7 @@ mod tests {
                 replay: true,
                 left_stick: Vec2::new(0.8, -0.7),
                 right_stick: Vec2::new(-0.9, 0.6),
+                scroll: 0.0,
             }
         );
     }

@@ -12,6 +12,8 @@
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tomori_protocol::{
     CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, WALL_SLOTS, Wall, WallKind,
     WallShape,
@@ -49,18 +51,24 @@ const AIM_MARGIN: f32 = 0.03;
 pub const PIXEL: f32 = 0.0019;
 const PADDING: (usize, usize) = (6, 5);
 
-/// A code panel's face, in cells: a title, a row of its language, length and age, a rule, its lines, each after its
-/// number, and a row saying how many more lines there are.
+/// A code panel's face, in cells: a title, a row of its language, length and age, a rule, its rows of code, each line
+/// after its number, and a row saying what there is above and below them.
 pub const CODE_COLUMNS: usize = 48;
-const CODE_ROWS: usize = 3 + CODE_LINES + 1;
+/// A code panel's rows of code in a wall's slot.
+pub const SLOT_CODE_ROWS: usize = 16;
+#[cfg(test)]
+const CODE_ROWS: usize = 3 + SLOT_CODE_ROWS + 1;
+/// A code panel's rows of code floating, fitting its code: never fewer, nor more, so that at most it is about 75 cm
+/// tall, as tall as a text panel floating at most, about 28° from 1.5 m.
+pub const FIT_CODE_ROWS: (usize, usize) = (3, 40);
 const CODE_PADDING: (usize, usize) = (6, 12);
 /// The cells of a code panel's line number, and the space after it.
 const GUTTER: usize = 3;
-// The server cuts a code panel's lines where they reach as many characters together as its rows of code can show, so
-// that where they are cut is never shown.
-const _: () = assert!(CODE_LINES * (CODE_COLUMNS - GUTTER) <= tomori_protocol::CODE_CHARS);
+// Even a code panel the server sends short, as it does where a projection would not otherwise fit in a frame, fills a
+// slot's rows of code, however its lines wrap.
+const _: () = assert!(SLOT_CODE_ROWS * (CODE_COLUMNS - GUTTER) <= 720);
 /// The size of a font pixel on a code panel, in metres, smaller than a text panel's so that the same panel holds its
-/// [`CODE_COLUMNS`] and [`CODE_LINES`], legible from about 2 m.
+/// [`CODE_COLUMNS`] and [`SLOT_CODE_ROWS`], legible from about 2 m.
 pub const CODE_PIXEL: f32 = PIXEL * (COLUMNS * CELL_WIDTH + 2 * PADDING.0) as f32
     / (CODE_COLUMNS * CELL_WIDTH + 2 * CODE_PADDING.0) as f32;
 
@@ -108,6 +116,22 @@ const HINT_SPACE: usize = 2;
 /// A throw's colour, as it takes the panel away for everyone.
 const THROW: [f32; 4] = [1.0, 0.62, 0.3, 1.0];
 
+/// The fastest the right stick scrolls a panel, pushed all the way, in rows a second: about a slot's rows of code.
+pub const SCROLL_SPEED: f32 = 15.0;
+/// How far from the middle the right stick is pushed before it scrolls, as far as ends a push.
+const SCROLL_DEAD: f32 = 0.2;
+
+/// How many rows a second the right stick, pushed `forward` so far forward, scrolls a panel: up for forward, as it
+/// moves the transcript's focus up, and down for back, faster the further it is pushed, from none at [`SCROLL_DEAD`]
+/// from the middle to [`SCROLL_SPEED`], growing as the square, so that a little push reads slowly.
+pub fn scroll_rate(forward: f32) -> f32 {
+    if !forward.is_finite() {
+        return 0.0;
+    }
+    let past = ((forward.abs() - SCROLL_DEAD) / (1.0 - SCROLL_DEAD)).clamp(0.0, 1.0);
+    -forward.signum() * SCROLL_SPEED * past * past
+}
+
 /// The fewest cells a wrapped line of code keeps beside its hanging indent.
 const CODE_ROOM: usize = 16;
 /// The continuation marker, drawn in the gutter of a line of code's later rows.
@@ -119,6 +143,10 @@ const NEWEST: [f32; 4] = [0.3, 0.75, 0.95, 1.0];
 const HIGHLIGHT: [f32; 4] = [0.35, 0.95, 1.0, 1.0];
 const SLOT: [f32; 4] = [0.0, 0.0, 0.0, 0.3];
 const GHOST: [f32; 4] = [0.35, 0.95, 1.0, 0.16];
+/// The scroll bar's gap from the text and its width, and its thumb's least height, in font pixels, and its colours.
+const SCROLL_BAR: (f32, f32, f32) = (2.0, 2.0, 6.0);
+const SCROLL_TRACK: [f32; 4] = [0.6, 0.66, 0.75, 0.12];
+const SCROLL_THUMB: [f32; 4] = [0.6, 0.7, 0.82, 0.75];
 
 /// Where a participant puts a panel they let go.
 #[derive(Clone, Debug, PartialEq)]
@@ -154,13 +182,13 @@ fn body_rows(panel: &Panel, columns: usize) -> Vec<Vec<crate::ui_text::Cell>> {
     crate::transcript::parse_markdown(&panel.body, columns)
 }
 
-/// How many columns and body rows `panel`'s face has when it is sized as `fit` says: a slot's, or, to fit its text, as
-/// wide as its widest row, title and metadata, within [`FIT_COLUMNS`], its body wrapped at that width, as many rows as
-/// that takes, within [`FIT_ROWS`]. A code panel is always a slot's size, as its code face is.
+/// How many columns and body rows a text panel's face has when it is sized as `fit` says: a slot's, or, to fit its
+/// text, as wide as its widest row, title and metadata, within [`FIT_COLUMNS`], its body wrapped at that width, as many
+/// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
+/// [`CodeLayout`]'s.
 pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
     match fit {
         Fit::Slot => (COLUMNS, BODY_ROWS),
-        Fit::Text if panel.code.is_some() => (COLUMNS, BODY_ROWS),
         Fit::Text => {
             let widest = body_rows(panel, FIT_COLUMNS.1)
                 .iter()
@@ -191,10 +219,38 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
     }
 }
 
-/// The size of `panel`, in metres, sized as `fit` says.
+/// The size of `panel`, in metres, sized as `fit` says: a code panel floating is as tall as its code, as its
+/// [`CodeLayout`] says.
 pub fn fitted_size(panel: &Panel, fit: Fit) -> (f32, f32) {
-    let (columns, body) = self::fit(panel, fit);
-    sized(columns, body)
+    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    size_of(panel, fit, layout.as_ref())
+}
+
+/// The size of `panel`, in metres, sized as `fit` says, its code laid out as `layout`.
+fn size_of(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> (f32, f32) {
+    match (layout, fit) {
+        (Some(layout), Fit::Text) => {
+            let width = CODE_COLUMNS * CELL_WIDTH + 2 * CODE_PADDING.0;
+            let height = layout.face_rows(fit) * CELL_HEIGHT + 2 * CODE_PADDING.1;
+            (width as f32 * CODE_PIXEL, height as f32 * CODE_PIXEL)
+        }
+        _ => {
+            let (columns, body) = self::fit(panel, fit);
+            sized(columns, body)
+        }
+    }
+}
+
+/// How many rows down `panel`'s body scrolls at most, sized as `fit` says, its code laid out as `layout`: as many as it
+/// has that its face does not show at once.
+fn most_scroll(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> usize {
+    match layout {
+        Some(layout) => layout.most_scroll(fit),
+        None => {
+            let (columns, count) = self::fit(panel, fit);
+            body_rows(panel, columns).len().saturating_sub(count)
+        }
+    }
 }
 
 /// The size of a wall, in metres.
@@ -248,10 +304,20 @@ pub fn name(panel: &Panel) -> String {
 
 /// How many lines a code panel's block has, such as `40 lines`.
 fn length(code: &Code) -> String {
-    match code.lines {
+    lines(code.lines as usize)
+}
+
+/// `count` lines, such as `1 line` or `40 lines`.
+fn lines(count: usize) -> String {
+    match count {
         1 => "1 line".to_owned(),
-        lines => format!("{lines} lines"),
+        count => format!("{count} lines"),
     }
+}
+
+/// How many of its block's lines a code panel holds: those of its body, at most [`CODE_LINES`].
+fn held(panel: &Panel) -> usize {
+    panel.body.split('\n').count().min(CODE_LINES)
 }
 
 /// How long ago, briefly, with what a panel's metadata says, such as `source: CI · 5m`, or, for a code panel, its
@@ -293,11 +359,26 @@ pub fn palette(kind: TokenKind) -> crate::ui_text::Rgba {
     }
 }
 
-/// What a panel's face shows: its title, bold, its metadata and age, a rule, and its body as Markdown-lite, styled as
-/// the transcript styles a message, as wide and on as many rows as `fit` says, ending with "…" where it is longer; a
-/// code panel's, its code face, the size of a slot however it is fitted. A `highlighted` panel, pointed at or carried,
-/// is framed brightly, and the `newest` on its wall in blue.
+/// What a panel's face shows, scrolled to its top: its title, bold, its metadata and age, a rule, and its body as
+/// Markdown-lite, styled as the transcript styles a message, as wide and on as many rows as `fit` says, ending with "…"
+/// where it is longer; a code panel's, its code face. A `highlighted` panel, pointed at or carried, is framed brightly,
+/// and the `newest` on its wall in blue.
 pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas {
+    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    scrolled_face(panel, highlighted, newest, fit, 0, layout.as_ref())
+}
+
+/// What a panel's face shows, as [`face`] says, its body scrolled `scroll` rows down, as far as it goes, its code laid
+/// out as `layout`. A body longer than its face has a slim bar at its right edge, showing how far down it is scrolled
+/// and how much of it shows.
+fn scrolled_face(
+    panel: &Panel,
+    highlighted: bool,
+    newest: bool,
+    fit: Fit,
+    scroll: usize,
+    layout: Option<&CodeLayout>,
+) -> Canvas {
     let border = Some(if highlighted {
         HIGHLIGHT
     } else if newest {
@@ -305,8 +386,8 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas 
     } else {
         FRAME
     });
-    if let Some(code) = &panel.code {
-        let mut canvas = code_face(panel, code);
+    if let Some(layout) = layout {
+        let mut canvas = code_face(panel, layout, fit, scroll);
         canvas.border = border;
         return canvas;
     }
@@ -321,6 +402,9 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas 
         Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
     ];
     let mut body = body_rows(panel, columns);
+    let total = body.len();
+    let scroll = scroll.min(total.saturating_sub(body_count));
+    body.drain(..scroll);
     if body.len() > body_count {
         body.truncate(body_count);
         let last = &mut body[body_count - 1];
@@ -330,16 +414,151 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas 
     body.resize(body_count, Vec::new());
     rows.extend(body.into_iter().map(Row::new));
     canvas.rows = rows;
+    canvas.shapes = scroll_bar(columns, body_count, total, scroll);
     canvas
 }
 
-/// A code panel's face: its title, bold, its language, length and age, a rule, and its lines in monospace, each after
-/// its number, coloured by kind as [`palette`] colours them, then how many more lines its block has. A line longer than
-/// the panel wraps, as [`wrap_code`] wraps it, onto rows that hang an indent step under it, each marked as continued in
-/// the gutter; lines that do not all fit are left for the row saying how many more there are, and the first line, were
-/// it alone too long, ends with "…". Spans that are not valid for its body, as `valid_spans` checks them, are ignored,
-/// and the code drawn plain.
-fn code_face(panel: &Panel, code: &Code) -> Canvas {
+/// The slim bar at the right edge of a body of `total` rows, `shown` of them at once in a face `columns` wide, scrolled
+/// `scroll` rows down: a faint track as tall as the rows shown, and on it a brighter thumb, as tall and as far down as
+/// the rows shown are of them all. None where every row shows.
+fn scroll_bar(columns: usize, shown: usize, total: usize, scroll: usize) -> Vec<Rect> {
+    if total <= shown {
+        return Vec::new();
+    }
+    let x = (columns * CELL_WIDTH) as f32 + SCROLL_BAR.0;
+    let top = (3 * CELL_HEIGHT) as f32;
+    let track = (shown * CELL_HEIGHT) as f32;
+    let height = (track * shown as f32 / total as f32).max(SCROLL_BAR.2);
+    let y = (top + track * scroll as f32 / total as f32).min(top + track - height);
+    vec![
+        Rect {
+            x,
+            y: top,
+            width: SCROLL_BAR.1,
+            height: track,
+            color: SCROLL_TRACK,
+        },
+        Rect {
+            x,
+            y,
+            width: SCROLL_BAR.1,
+            height,
+            color: SCROLL_THUMB,
+        },
+    ]
+}
+
+/// One row of a code panel's code, as wrapped: the line it is of, from 0, whether it is that line's first, and its
+/// cells after the gutter.
+#[derive(Clone, Debug, PartialEq)]
+struct CodeRow {
+    line: usize,
+    first: bool,
+    cells: Vec<crate::ui_text::Cell>,
+}
+
+/// A code panel's code laid out: every row its lines take, each wrapped as [`wrap_code`] wraps it at its columns of code,
+/// coloured by kind as [`palette`] colours them, and how many of its block's lines it holds and was not sent, so that
+/// its face shows any part of it. Spans that are not valid for its body, as `valid_spans` checks them, are ignored, and
+/// the code laid out plain. Laid out once for each panel's code, rather than each frame, as a panel holds up to
+/// [`CODE_LINES`] lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeLayout {
+    rows: Vec<CodeRow>,
+    lines: usize,
+    unsent: usize,
+}
+
+impl CodeLayout {
+    /// The layout of `panel`'s code, `code`.
+    pub fn new(panel: &Panel, code: &Code) -> Self {
+        // The kind of each character of the body, in order.
+        let mut kinds = vec![TokenKind::Plain; panel.body.chars().count()];
+        if tomori_protocol::valid_spans(&panel.body, &code.spans) {
+            for span in &code.spans {
+                kinds[span.start as usize..span.end() as usize].fill(span.kind);
+            }
+        }
+        let mut at = 0;
+        let lines: Vec<&str> = panel.body.split('\n').take(CODE_LINES).collect();
+        let step = indent_step(&lines);
+        let room = CODE_COLUMNS - GUTTER;
+        let mut rows = Vec::new();
+        for (number, line) in lines.iter().enumerate() {
+            let mut spans: Vec<crate::ui_text::Span> = Vec::new();
+            for (index, c) in line.chars().enumerate() {
+                let style = Style::plain(palette(kinds[at + index]));
+                // Joined to the run before, of the same kind.
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.text.push(c),
+                    _ => spans.push(crate::ui_text::Span::new(c.to_string(), style)),
+                }
+            }
+            at += line.chars().count() + 1;
+            let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step);
+            // A line cut by the server ends with a dim "…": past what the panel holds, or, from an older server, at 64
+            // characters.
+            if let Some(last) = wrapped
+                .last_mut()
+                .and_then(|row| row.last_mut())
+                .filter(|(c, _)| *c == '…')
+            {
+                last.1 = Style::plain(DIM);
+            }
+            rows.extend(
+                wrapped
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, cells)| CodeRow {
+                        line: number,
+                        first: index == 0,
+                        cells,
+                    }),
+            );
+        }
+        Self {
+            rows,
+            lines: lines.len(),
+            unsent: (code.lines as usize).saturating_sub(lines.len()),
+        }
+    }
+
+    /// How many rows of code its face has, sized as `fit` says: a slot's, or, floating, as many as its code takes, within
+    /// [`FIT_CODE_ROWS`].
+    fn height(&self, fit: Fit) -> usize {
+        match fit {
+            Fit::Slot => SLOT_CODE_ROWS,
+            Fit::Text => self.rows.len().clamp(FIT_CODE_ROWS.0, FIT_CODE_ROWS.1),
+        }
+    }
+
+    /// Whether its face, sized as `fit` says, has a row below its code saying what there is above and below it: always
+    /// in a slot, and floating, only where it does not show all of its block.
+    fn footed(&self, fit: Fit) -> bool {
+        fit == Fit::Slot || self.rows.len() > self.height(fit) || self.unsent > 0
+    }
+
+    /// How many rows its face has, sized as `fit` says: its title, metadata and rule, its rows of code, and the row
+    /// below them, where it has one.
+    fn face_rows(&self, fit: Fit) -> usize {
+        3 + self.height(fit) + usize::from(self.footed(fit))
+    }
+
+    /// How many rows down it scrolls at most, sized as `fit` says: so far that its last row is its face's last.
+    fn most_scroll(&self, fit: Fit) -> usize {
+        self.rows.len().saturating_sub(self.height(fit))
+    }
+}
+
+/// A code panel's face, its code laid out as `layout`, sized as `fit` says and scrolled `scroll` rows down, as far as it
+/// goes: its title, bold, its language, length and age, a rule, and its rows of code from there, each line's first after
+/// its number and its later rows marked as continued in the gutter, then a row saying how many lines are above and below
+/// them, and how many are only in the transcript. A line that does not fit whole below the first shown is left for the
+/// row below, and the first, were it alone too tall for what is left, ends with a dim "…".
+fn code_face(panel: &Panel, layout: &CodeLayout, fit: Fit, scroll: usize) -> Canvas {
+    let height = layout.height(fit);
+    let scroll = scroll.min(layout.most_scroll(fit));
+    let room = CODE_COLUMNS - GUTTER;
     let mut canvas = Canvas::new(CODE_COLUMNS, CODE_PIXEL);
     canvas.padding = CODE_PADDING;
     canvas.background = [0.015, 0.025, 0.045, 0.95];
@@ -348,83 +567,89 @@ fn code_face(panel: &Panel, code: &Code) -> Canvas {
         Row::text(&about(panel), Style::plain(DIM), CODE_COLUMNS),
         Row::text(&"─".repeat(CODE_COLUMNS), Style::plain(DIM), CODE_COLUMNS),
     ];
-    // The kind of each character of the body, in order.
-    let mut kinds = vec![TokenKind::Plain; panel.body.chars().count()];
-    if tomori_protocol::valid_spans(&panel.body, &code.spans) {
-        for span in &code.spans {
-            kinds[span.start as usize..span.end() as usize].fill(span.kind);
-        }
-    }
-    let mut at = 0;
-    let lines: Vec<&str> = panel.body.split('\n').collect();
-    let step = indent_step(&lines);
-    let room = CODE_COLUMNS - GUTTER;
-    let mut shown = 0;
-    for (number, line) in lines.iter().enumerate().take(CODE_LINES) {
-        let mut spans: Vec<crate::ui_text::Span> = Vec::new();
-        for (index, c) in line.chars().enumerate() {
-            let style = Style::plain(palette(kinds[at + index]));
-            // Joined to the run before, of the same kind.
-            match spans.last_mut() {
-                Some(last) if last.style == style => last.text.push(c),
-                _ => spans.push(crate::ui_text::Span::new(c.to_string(), style)),
-            }
-        }
-        at += line.chars().count() + 1;
-        let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step);
-        // A line cut by the server ends with a dim "…": past what the panel can show, or, from an older server, at 64
-        // characters.
-        if let Some(last) = wrapped
-            .last_mut()
-            .and_then(|row| row.last_mut())
-            .filter(|(c, _)| *c == '…')
-        {
-            last.1 = Style::plain(DIM);
-        }
-        let left = CODE_ROWS - 1 - rows.len();
-        if wrapped.len() > left {
-            // A line that does not fit is left for the row saying how many more there are, unless it is the first,
-            // which shows what fits, ending with "…".
-            if shown > 0 {
+    let first = layout.rows.get(scroll).map(|row| row.line);
+    let mut at = scroll;
+    let mut shown: Vec<&CodeRow> = Vec::new();
+    while let Some(row) = layout.rows.get(at)
+        && shown.len() < height
+    {
+        // A later line that does not fit whole is left for the row below, which counts it.
+        if row.first && Some(row.line) != first {
+            let tall = layout.rows[at..]
+                .iter()
+                .take_while(|next| next.line == row.line)
+                .count();
+            if tall > height - shown.len() {
                 break;
             }
-            // Cut, the last row ends with "…", dim, as there are always rows left for the first line.
-            crate::ui_text::fit(&mut wrapped, left, room);
-            let row = wrapped.len() - 1;
-            let end = wrapped[row].len() - 1;
-            wrapped[row][end].1 = Style::plain(DIM);
         }
-        for (index, cells) in wrapped.into_iter().enumerate() {
-            // The line's number on its first row only; its later rows are marked as continued.
-            let gutter = match index {
-                0 => crate::ui_text::Span::new(
-                    format!("{:>width$} ", number + 1, width = GUTTER - 1),
-                    Style::plain(DIM),
-                ),
-                _ => crate::ui_text::Span::new(
-                    format!("{CONTINUED:>width$} ", width = GUTTER - 1),
-                    Style::plain(CONTINUED_COLOR),
-                ),
-            };
-            let mut row = cut(&[gutter], GUTTER);
-            row.extend(cells);
-            rows.push(Row::new(row));
-        }
-        shown += 1;
+        shown.push(row);
+        at += 1;
     }
-    rows.resize(CODE_ROWS - 1, Row::default());
-    let more = (code.lines as usize).saturating_sub(shown);
-    rows.push(match more {
-        0 => Row::default(),
-        1 => Row::text("…1 more line", Style::plain(DIM), CODE_COLUMNS),
-        more => Row::text(
-            &format!("…{more} more lines"),
+    // The first line shown, cut by the face's end, ends with a dim "…".
+    let cut_short = layout.rows.get(at).is_some_and(|row| !row.first);
+    for (index, row) in shown.iter().enumerate() {
+        // The line's number on its first row only; its later rows are marked as continued.
+        let gutter = match row.first {
+            true => crate::ui_text::Span::new(
+                format!("{:>width$} ", row.line + 1, width = GUTTER - 1),
+                Style::plain(DIM),
+            ),
+            false => crate::ui_text::Span::new(
+                format!("{CONTINUED:>width$} ", width = GUTTER - 1),
+                Style::plain(CONTINUED_COLOR),
+            ),
+        };
+        let mut cells = row.cells.clone();
+        if cut_short && index == shown.len() - 1 {
+            let mut last = vec![cells, Vec::new()];
+            crate::ui_text::fit(&mut last, 1, room);
+            cells = last.remove(0);
+            // `fit` ends it with "…", the last cell.
+            let end = cells.len() - 1;
+            cells[end].1 = Style::plain(DIM);
+        }
+        let mut drawn = cut(&[gutter], GUTTER);
+        drawn.extend(cells);
+        rows.push(Row::new(drawn));
+    }
+    rows.resize(3 + height, Row::default());
+    if layout.footed(fit) {
+        rows.push(Row::text(
+            &around(layout, scroll, at),
             Style::plain(DIM),
             CODE_COLUMNS,
-        ),
-    });
+        ));
+    }
     canvas.rows = rows;
+    canvas.shapes = scroll_bar(CODE_COLUMNS, height, layout.rows.len(), scroll);
     canvas
+}
+
+/// What the row below a code panel's code says of `layout`, its rows shown from `scroll` until `end`: how many lines
+/// start above them, as `↑ 3 above`; how many are not shown whole below them, those only in the transcript among them,
+/// as `↓ 4 more`; or, below the last it holds, how many it was not sent, as `180 more lines in the transcript`.
+fn around(layout: &CodeLayout, scroll: usize, end: usize) -> String {
+    let above = layout
+        .rows
+        .get(scroll)
+        .filter(|_| scroll > 0)
+        .map_or(0, |row| row.line + usize::from(!row.first));
+    let below = layout
+        .rows
+        .get(end)
+        .map_or(0, |row| layout.lines - row.line);
+    let mut parts = Vec::new();
+    if above > 0 {
+        parts.push(format!("↑ {above} above"));
+    }
+    match (below, layout.unsent) {
+        (0, 0) => {}
+        (0, 1) => parts.push("1 more line in the transcript".to_owned()),
+        (0, unsent) => parts.push(format!("{unsent} more lines in the transcript")),
+        (below, unsent) => parts.push(format!("↓ {} more", below + unsent)),
+    }
+    parts.join(" · ")
 }
 
 /// The indent step of code's `lines`: the least indentation any line has, of two to four spaces, or four where none is
@@ -609,8 +834,8 @@ pub fn slot_frames(wall: &Wall, frame: Mat4) -> Vec<Mat4> {
 }
 
 /// The label on the ray naming `panel`, pointed at where the ray meets it, `at`, facing `viewer`: what it is called, its
-/// metadata, and when and where it was projected.
-pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
+/// metadata, and when and where it was projected; and, where it `scrolls`, how to scroll it with those controls.
+pub fn label(panel: &Panel, at: Vec3, viewer: Vec3, scrolls: Option<Controls>) -> Sheet {
     let mut canvas = Canvas::new(LABEL_COLUMNS, LABEL_PIXEL);
     canvas.background = [0.0, 0.0, 0.0, 0.88];
     canvas.border = Some(HIGHLIGHT);
@@ -625,8 +850,9 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
         ))
     }));
     if let Some(code) = &panel.code {
-        let mut about = vec![if code.lines as usize > CODE_LINES {
-            format!("lines 1–{CODE_LINES} of {}", code.lines)
+        let held = held(panel);
+        let mut about = vec![if code.lines as usize > held {
+            format!("lines 1–{held} of {}", code.lines)
         } else {
             length(code)
         }];
@@ -652,6 +878,19 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
         Style::plain(DIM),
         LABEL_COLUMNS,
     ));
+    if let Some(controls) = scrolls {
+        let control = match controls {
+            Controls::Controllers => "Stick ↕",
+            Controls::Keyboard => "Wheel",
+        };
+        canvas.rows.push(Row::new(cut(
+            &[
+                crate::ui_text::Span::new(format!("{control}  "), Style::bold(BRIGHT)),
+                crate::ui_text::Span::new("scroll", Style::plain(TEXT)),
+            ],
+            LABEL_COLUMNS,
+        )));
+    }
     let towards = (viewer - at).try_normalize().unwrap_or(Vec3::Z);
     let (_, height) = canvas.size();
     Sheet {
@@ -934,6 +1173,9 @@ pub struct Input<'a> {
     pub straighten: bool,
     /// The controls the hint beside a panel carried names.
     pub controls: Controls,
+    /// A panel to scroll, this participant's own view of it, which nobody else sees: the one pointed at as the right
+    /// stick was pushed or the mouse's wheel turned, and how many rows down, or up where fewer than none.
+    pub scroll: Option<(&'a str, f32)>,
     pub now: Instant,
     /// Seconds since the last frame.
     pub dt: f32,
@@ -971,6 +1213,21 @@ pub struct Projector {
     /// A panel thrown away, hidden from when it was until the server's projection no longer shows it, or [`PENDING`]
     /// passes.
     thrown: Option<(String, Instant)>,
+    /// How far down each panel is scrolled, in rows, this participant's own, kept while it is projected: in a slot again
+    /// after floating, it is as it was.
+    scrolls: HashMap<String, f32>,
+    /// Each code panel's code laid out, and the code it was laid out from, laid out again only when that changes.
+    layouts: HashMap<String, Laid>,
+    /// How far down each panel shown this frame scrolls at most, in rows, as it is sized.
+    limits: HashMap<String, usize>,
+}
+
+/// A code panel's code laid out, and the body and code it was laid out from.
+#[derive(Clone, Debug)]
+struct Laid {
+    body: String,
+    code: Code,
+    layout: Arc<CodeLayout>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -987,8 +1244,12 @@ impl Projector {
             self.aim = None;
             self.pending = None;
             self.thrown = None;
+            self.scrolls.clear();
+            self.layouts.clear();
+            self.limits.clear();
             return Output::default();
         };
+        self.lay_out(projection);
         if let Some((panel, since)) = &self.thrown
             && (projection.panel(panel).is_none()
                 || input.now.saturating_duration_since(*since) >= PENDING)
@@ -1065,6 +1326,24 @@ impl Projector {
                     .map(|(model, fit)| (panel, model, fit))
             })
             .collect();
+        // How far each panel shown scrolls, as it is sized now, and the one scrolled, within that.
+        self.limits = standing
+            .iter()
+            .map(|(panel, _, fit)| {
+                (
+                    panel.id.clone(),
+                    most_scroll(panel, *fit, self.layout(&panel.id)),
+                )
+            })
+            .collect();
+        if let Some((panel, rows)) = input.scroll
+            && let Some(limit) = self.limits.get(panel)
+            && rows.is_finite()
+        {
+            let limit = *limit as f32;
+            let scroll = self.scrolls.entry(panel.to_owned()).or_default();
+            *scroll = (scroll.min(limit) + rows).clamp(0.0, limit);
+        }
         // The nearest panel the ray meets, other than one carried, is pointed at.
         let carried = self.held();
         output.pointed = input
@@ -1075,7 +1354,7 @@ impl Projector {
                     .iter()
                     .filter(|(panel, ..)| Some(panel.id.as_str()) != carried)
                     .filter_map(|(panel, model, fit)| {
-                        hit(*model, fitted_size(panel, *fit), &ray)
+                        hit(*model, self.size(panel, *fit), &ray)
                             .map(|distance| (panel.id.clone(), distance, ray.at(distance)))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1142,7 +1421,7 @@ impl Projector {
                 hint_sheet(
                     hint(input.controls, release),
                     held.model,
-                    fitted_size(panel, Fit::Text),
+                    self.size(panel, Fit::Text),
                     viewer,
                 )
             });
@@ -1184,11 +1463,13 @@ impl Projector {
             _ => false,
         };
         let sheet = |panel: &Panel, model: Mat4, fit: Fit| Sheet {
-            canvas: Some(face(
+            canvas: Some(scrolled_face(
                 panel,
                 highlighted == Some(panel.id.as_str()),
                 newest(panel),
                 fit,
+                self.scroll(&panel.id),
+                self.layout(&panel.id),
             )),
             model: Some(model),
         };
@@ -1300,6 +1581,56 @@ impl Projector {
     /// The panel being carried, by identity.
     pub fn held(&self) -> Option<&str> {
         self.held.as_ref().map(|held| held.panel.as_str())
+    }
+
+    /// Whether `panel`, shown last frame, has more than its face shows at once, so that it scrolls.
+    pub fn scrollable(&self, panel: &str) -> bool {
+        self.limits.get(panel).is_some_and(|limit| *limit > 0)
+    }
+
+    /// How many rows down `panel` is scrolled, this participant's own, as far as it goes as it was last sized.
+    pub fn scroll(&self, panel: &str) -> usize {
+        let limit = self.limits.get(panel).copied().unwrap_or_default();
+        let scroll = self.scrolls.get(panel).copied().unwrap_or_default();
+        (scroll.round() as usize).min(limit)
+    }
+
+    /// Lay out the code of each of `projection`'s code panels whose code has changed, or is new, and forget those of
+    /// panels, and how far they are scrolled, no longer projected.
+    fn lay_out(&mut self, projection: &Projection) {
+        self.layouts.retain(|id, _| {
+            projection
+                .panel(id)
+                .is_some_and(|panel| panel.code.is_some())
+        });
+        self.scrolls.retain(|id, _| projection.panel(id).is_some());
+        for panel in &projection.panels {
+            let Some(code) = &panel.code else {
+                continue;
+            };
+            let current = self
+                .layouts
+                .get(&panel.id)
+                .is_some_and(|laid| laid.body == panel.body && laid.code == *code);
+            if !current {
+                let laid = Laid {
+                    body: panel.body.clone(),
+                    code: code.clone(),
+                    layout: Arc::new(CodeLayout::new(panel, code)),
+                };
+                self.layouts.insert(panel.id.clone(), laid);
+            }
+        }
+    }
+
+    /// The layout of `panel`'s code, if it is a code panel.
+    fn layout(&self, panel: &str) -> Option<&CodeLayout> {
+        self.layouts.get(panel).map(|laid| laid.layout.as_ref())
+    }
+
+    /// The size of `panel`, in metres, sized as `fit` says, as it is drawn.
+    fn size(&self, panel: &Panel, fit: Fit) -> (f32, f32) {
+        size_of(panel, fit, self.layout(&panel.id))
     }
 }
 

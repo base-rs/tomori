@@ -250,7 +250,13 @@ impl Contents for Participant {
                     return Ok(Flow::Exit);
                 }
             }
-            Input::Wheel(_) => {}
+            // The wheel scrolls the panel the mouse points at, a touchpad's pixels counted in notches.
+            Input::Wheel(delta) => desktop.wheel(match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, lines) => lines,
+                winit::event::MouseScrollDelta::PixelDelta(position) => {
+                    position.y as f32 / tomori_scene::scene::desktop::WHEEL_PIXELS
+                }
+            }),
         }
         Ok(Flow::Continue)
     }
@@ -373,6 +379,13 @@ mod tests {
             assert_eq!(
                 input(Input::Wheel(winit::event::MouseScrollDelta::LineDelta(
                     0.0, 1.0
+                ))),
+                Flow::Continue
+            );
+            // A touchpad's scroll, in pixels, scrolls as the wheel's notches.
+            assert_eq!(
+                input(Input::Wheel(winit::event::MouseScrollDelta::PixelDelta(
+                    winit::dpi::PhysicalPosition::new(0.0, -80.0)
                 ))),
                 Flow::Continue
             );

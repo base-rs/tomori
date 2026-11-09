@@ -52,6 +52,9 @@ pub struct Buttons {
     pub replay: bool,
     pub left_stick: Vec2,
     pub right_stick: Vec2,
+    /// How many rows the mouse's wheel scrolled the panel pointed at since the last frame: down, or up where fewer
+    /// than none. A headset scrolls with the right stick instead.
+    pub scroll: f32,
 }
 
 /// How the attractor is drawn.
@@ -188,34 +191,58 @@ pub struct Frame<'a> {
 }
 
 /// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum RightStick {
     /// At the middle.
     #[default]
     Free,
     /// A panel was carried as it left the middle: the push moves and turns it.
     Carried,
-    /// Nothing was carried: the push moves the transcript's focus or pages cards, as ever.
+    /// Nothing was carried, and the ray pointed at this panel, which has more than it shows: the push scrolls it, for
+    /// this participant alone.
+    Scrolled(String),
+    /// Nothing was carried, nor a panel that scrolls pointed at: the push moves the transcript's focus or pages cards,
+    /// as ever.
     Other,
 }
 
 impl RightStick {
-    /// Whose the push is with the stick at `stick`, `carrying` a panel or not.
-    fn update(self, stick: Vec2, carrying: bool) -> Self {
+    /// Whose the push is with the stick at `stick`, `carrying` a panel or not, pointing at a panel that `scrolls` or not.
+    fn update(self, stick: Vec2, carrying: bool, scrolls: Option<&str>) -> Self {
         // A stick that reads nonsense is at the middle.
         if !stick.is_finite() || stick.length() < STICK_CENTRE {
             return Self::Free;
         }
-        match self {
-            Self::Free if carrying => Self::Carried,
-            Self::Free => Self::Other,
-            owner => owner,
+        match (self, scrolls) {
+            (Self::Free, _) if carrying => Self::Carried,
+            (Self::Free, Some(panel)) => Self::Scrolled(panel.to_owned()),
+            (Self::Free, None) => Self::Other,
+            (owner, _) => owner,
         }
     }
 }
 
 /// How near the middle the right stick returns to end a push.
 const STICK_CENTRE: f32 = 0.2;
+
+/// The panel to scroll this frame, and by how many rows: the one the right stick scrolls, `stick`, pushed so far
+/// forward, for `dt` seconds, at [`crate::projection::scroll_rate`], and the rows the wheel scrolled since the last
+/// frame, `wheel`, of the same panel or, while the stick scrolls none, of another.
+fn scrolled(
+    stick: Option<&(String, f32)>,
+    wheel: Option<(String, f32)>,
+    dt: f32,
+) -> Option<(String, f32)> {
+    let stick = stick
+        .map(|(panel, forward)| (panel.clone(), crate::projection::scroll_rate(*forward) * dt));
+    match (stick, wheel) {
+        (Some((panel, rows)), Some((wheeled, more))) if panel == wheeled => {
+            Some((panel, rows + more))
+        }
+        (Some(stick), _) => Some(stick),
+        (None, wheel) => wheel,
+    }
+}
 
 /// Where travel applies: the joined space, by its identifier, and its environment as drawn.
 fn place(conversation: &Conversation) -> locomotion::Place<'_> {
@@ -275,6 +302,12 @@ pub struct Step {
     /// frame, which turns the panel back to square.
     carry_stick: Vec2,
     straighten: bool,
+    /// The panel the right stick scrolls, and how far forward it is pushed, from the last buttons, and the panel the
+    /// mouse's wheel scrolled since the last frame, and by how many rows.
+    scroll_stick: Option<(String, f32)>,
+    wheel: Option<(String, f32)>,
+    /// The panel the ray pointed at last frame, not one carried, which a push of the right stick or the wheel scrolls.
+    pointed_panel: Option<String>,
     /// The panel carried as B was pressed, and when: thrown away for everyone if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     throwing: Option<(String, Instant)>,
@@ -319,6 +352,9 @@ impl Default for Step {
             right_stick: RightStick::Free,
             carry_stick: Vec2::ZERO,
             straighten: false,
+            scroll_stick: None,
+            wheel: None,
+            pointed_panel: None,
             throwing: None,
             controls: crate::projection::Controls::default(),
             client: None,
@@ -343,6 +379,8 @@ impl Step {
         self.right_stick = RightStick::Free;
         self.carry_stick = Vec2::ZERO;
         self.straighten = false;
+        self.scroll_stick = None;
+        self.wheel = None;
         self.throwing = None;
     }
 
@@ -405,14 +443,37 @@ impl Step {
         }
         // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
         let wrist_active = self.wrist.state().active();
-        // A push of the right stick is the panel carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. See `design/projection.md`.
+        // A push of the right stick is the panel carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. Otherwise, while the transcript does not show, a push that leaves the middle pointing at a panel with more than it shows scrolls it, for this participant alone, and nothing else. See `design/projection.md`.
         let carrying = self.projector.held().is_some();
-        self.right_stick = self.right_stick.update(buttons.right_stick, carrying);
+        let scrolls = self
+            .pointed_panel
+            .as_deref()
+            .filter(|panel| !wrist_active && self.projector.scrollable(panel));
+        self.right_stick =
+            std::mem::take(&mut self.right_stick).update(buttons.right_stick, carrying, scrolls);
         let (carry_stick, right) = match self.right_stick {
             RightStick::Carried => (buttons.right_stick, Vec2::ZERO),
+            RightStick::Scrolled(_) => (Vec2::ZERO, Vec2::ZERO),
             _ => (Vec2::ZERO, buttons.right_stick),
         };
         self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
+        self.scroll_stick = match &self.right_stick {
+            RightStick::Scrolled(panel) if focused => Some((panel.clone(), buttons.right_stick.y)),
+            _ => None,
+        };
+        // The mouse's wheel scrolls the panel pointed at, unless one is carried or the transcript shows.
+        if let Some(panel) = &self.pointed_panel
+            && focused
+            && !carrying
+            && !wrist_active
+            && buttons.scroll.is_finite()
+            && buttons.scroll != 0.0
+        {
+            match &mut self.wheel {
+                Some((scrolled, rows)) if scrolled == panel => *rows += buttons.scroll,
+                wheel => *wheel = Some((panel.clone(), buttons.scroll)),
+            }
+        }
         // B pressed while a panel is carried is the panel's, and nothing else's until it is let go: let go soon enough,
         // while the panel is still carried, it throws the panel away for everyone; held longer, it does nothing, and
         // never leaves the space. B on its own never dismisses a panel. See `design/projection.md`.
@@ -728,6 +789,9 @@ impl Step {
             stick: self.carry_stick,
             straighten: std::mem::take(&mut self.straighten),
             controls: self.controls,
+            scroll: scrolled(self.scroll_stick.as_ref(), self.wheel.take(), dt)
+                .as_ref()
+                .map(|(panel, rows)| (panel.as_str(), *rows)),
             now,
             dt,
         });
@@ -878,8 +942,11 @@ impl Step {
                 shown,
                 *point,
                 senses.viewer.unwrap_or(arrival::HOME),
+                self.projector.scrollable(panel).then_some(self.controls),
             ));
         }
+        // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
+        self.pointed_panel = panel.clone().filter(|_| self.projector.held().is_none());
         // The hint beside a panel carried, over everything else.
         projection.extend(projected.hint);
         match (card, worker, &object) {
@@ -2051,7 +2118,202 @@ mod tests {
         );
         step.blur(&mut conversation);
         assert_eq!(step.right_stick, RightStick::Free);
-        assert_eq!(RightStick::Other.update(Vec2::NAN, true), RightStick::Free);
+        assert_eq!(
+            RightStick::Other.update(Vec2::NAN, true, None),
+            RightStick::Free
+        );
+    }
+
+    #[test]
+    fn a_push_of_the_right_stick_pointing_at_a_panel_with_more_than_it_shows_scrolls_it_for_this_participant()
+     {
+        use tomori_protocol::{Code, Panel, Place};
+        let mut conversation = joined();
+        // Thirty lines of code in the Tomori wall's middle slot, more than a slot shows.
+        let body: Vec<String> = (1..=30)
+            .map(|line| format!("let x{line} = {line};"))
+            .collect();
+        show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![
+                Panel::new(
+                    "panel-1",
+                    "rust",
+                    body.join("\n"),
+                    Place::Wall {
+                        wall: tomori_protocol::TOMORI_WALL.into(),
+                        slot: 2,
+                    },
+                )
+                .with_code(Code::new("rust", 30)),
+            ],
+        );
+        let wall = tomori_wall();
+        let frame = Mat4::from_rotation_translation(
+            glam::Quat::from_array(wall.pose.orientation),
+            Vec3::from_array(wall.pose.position),
+        );
+        let slot = crate::projection::slot_frames(&wall, frame)[2]
+            .w_axis
+            .truncate();
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let on_panel = Senses {
+            ray: Ray::new(arrival::HOME, slot - arrival::HOME),
+            grip: Some(0.0),
+            ..senses()
+        };
+        let away = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::Y),
+            ..on_panel
+        };
+        let footer = |frame: &Frame<'_>| {
+            frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_ref())
+                .find(|canvas| canvas.plain().starts_with("rust"))
+                .map(|canvas| canvas.plain().lines().last().unwrap().trim_end().to_owned())
+                .unwrap()
+        };
+        let buttons = |step: &mut Step, conversation: &mut Conversation, buttons: Buttons| {
+            step.buttons(&buttons, true, conversation, &mut felt(), now);
+        };
+        // Pointed at, its label says the stick scrolls it.
+        let frame = step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(footer(&frame), "↓ 14 more");
+        assert!(
+            frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_ref())
+                .any(|canvas| canvas.plain().contains("Stick ↕  scroll"))
+        );
+        conversation.take_actions();
+        // Pulled back, the stick scrolls it down, faster the further it is pulled, paging no cards and sending nothing.
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::NEG_Y),
+        );
+        assert!(matches!(step.right_stick, RightStick::Scrolled(ref panel) if panel == "panel-1"));
+        step.update(&on_panel, &mut conversation, &mut feedback, now, 0.2);
+        assert_eq!(step.projector.scroll("panel-1"), 3);
+        assert_eq!(step.presentation_navigation.card, 0);
+        assert!(conversation.take_actions().is_empty());
+        // The push stays the panel's while the ray wanders off it, until the stick comes back to the middle.
+        step.update(&away, &mut conversation, &mut feedback, now, 10.0);
+        assert_eq!(step.projector.scroll("panel-1"), 14);
+        let frame = step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(footer(&frame), "↑ 14 above");
+        buttons(&mut step, &mut conversation, Buttons::default());
+        assert_eq!(step.right_stick, RightStick::Free);
+        // Pushed forward, it scrolls back up.
+        step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::Y),
+        );
+        step.update(&on_panel, &mut conversation, &mut feedback, now, 0.4);
+        assert_eq!(step.projector.scroll("panel-1"), 8);
+        buttons(&mut step, &mut conversation, Buttons::default());
+        // A push begun pointing at nothing that scrolls is not the panel's, even once the ray comes back to it.
+        step.update(&away, &mut conversation, &mut feedback, now, FRAME);
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::NEG_Y),
+        );
+        assert_eq!(step.right_stick, RightStick::Other);
+        step.update(&on_panel, &mut conversation, &mut feedback, now, 1.0);
+        assert_eq!(step.projector.scroll("panel-1"), 8);
+        buttons(&mut step, &mut conversation, Buttons::default());
+        // The wheel scrolls the panel pointed at, by its rows, at once.
+        step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.scroll = -3.0),
+        );
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.scroll = -2.0),
+        );
+        step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.projector.scroll("panel-1"), 3);
+        // A push begun scrolling, then the grip pulling the panel off, scrolls it no further and does not push it.
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::Y),
+        );
+        let gripped = Senses {
+            grip: Some(1.0),
+            ..on_panel
+        };
+        step.update(&gripped, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        let carried = |frame: &Frame<'_>| {
+            frame
+                .projection
+                .iter()
+                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("rust"))
+                .map(|sheet| sheet.model.unwrap().w_axis.truncate())
+                .unwrap()
+        };
+        let before = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, FRAME));
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::Y),
+        );
+        assert_eq!(step.right_stick, RightStick::Scrolled("panel-1".into()));
+        let after = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, 0.5));
+        assert!(before.distance(after) < 1e-4);
+        // Carried, a new push moves it, as ever, and the wheel scrolls nothing.
+        buttons(&mut step, &mut conversation, Buttons::default());
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| {
+                buttons.right_stick = Vec2::Y;
+                buttons.scroll = 3.0;
+            }),
+        );
+        assert_eq!(step.right_stick, RightStick::Carried);
+        assert_eq!(step.wheel, None);
+        let pushed = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, 0.5));
+        assert!(pushed.distance(arrival::HOME) > after.distance(arrival::HOME) + 0.1);
+        // Losing focus forgets the scrolling push and the wheel.
+        step.blur(&mut conversation);
+        assert_eq!(
+            (step.scroll_stick.clone(), step.wheel.clone()),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn the_stick_and_the_wheel_scroll_together_the_stick_s_panel_first() {
+        let stick = ("panel-1".to_owned(), -1.0);
+        let rows = crate::projection::SCROLL_SPEED * 0.5;
+        // Both on one panel add; on two, the stick's, until it is let go; either alone, its own.
+        assert_eq!(
+            scrolled(Some(&stick), Some(("panel-1".into(), 2.0)), 0.5),
+            Some(("panel-1".into(), rows + 2.0))
+        );
+        assert_eq!(
+            scrolled(Some(&stick), Some(("panel-2".into(), 2.0)), 0.5),
+            Some(("panel-1".into(), rows))
+        );
+        assert_eq!(
+            scrolled(None, Some(("panel-2".into(), 2.0)), 0.5),
+            Some(("panel-2".into(), 2.0))
+        );
+        assert_eq!(scrolled(None, None, 0.5), None);
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         stick: Vec2::ZERO,
         straighten: false,
         controls: Controls::Controllers,
+        scroll: None,
         now,
         dt: 1.0 / 72.0,
     }
@@ -289,7 +290,7 @@ fn code_rows(canvas: &Canvas) -> Vec<String> {
 }
 
 /// Each line of code `rows` show: its number, and the code of each of its rows, without the gutter, and the later rows
-/// without their hanging indent.
+/// without their hanging indent. Rows scrolled to partway through a line are of a line numbered 0.
 fn joined(rows: &[String]) -> Vec<(usize, Vec<String>)> {
     let mut lines: Vec<(usize, Vec<String>)> = Vec::new();
     for row in rows.iter().filter(|row| !row.is_empty()) {
@@ -298,13 +299,10 @@ fn joined(rows: &[String]) -> Vec<(usize, Vec<String>)> {
                 .nth(GUTTER)
                 .map_or(row.len(), |(at, _)| at),
         );
-        match gutter.trim() {
-            "↪" => lines
-                .last_mut()
-                .unwrap()
-                .1
-                .push(code.trim_start().to_owned()),
-            number => lines.push((number.parse().unwrap(), vec![code.to_owned()])),
+        match (gutter.trim(), lines.last_mut()) {
+            ("↪", Some(last)) => last.1.push(code.trim_start().to_owned()),
+            ("↪", None) => lines.push((0, vec![code.trim_start().to_owned()])),
+            (number, _) => lines.push((number.parse().unwrap(), vec![code.to_owned()])),
         }
     }
     lines
@@ -353,7 +351,7 @@ fn the_maintainers_block_wraps_every_line_whole_onto_as_many_rows_as_it_needs() 
             words(source[number - 1])
         );
     }
-    assert_eq!(row_text(&canvas.rows[CODE_ROWS - 1]), "…1 more line");
+    assert_eq!(row_text(&canvas.rows[CODE_ROWS - 1]), "↓ 1 more");
     // Every row, its gutter and hanging indent counted, is within the panel's columns, and the comment's colour carries
     // across each of its rows, the marker dim.
     assert!(
@@ -469,7 +467,7 @@ fn where_the_server_cuts_code_is_never_shown_but_as_the_panel_running_out() {
         let drawn = joined(&rows);
         for (row, text) in rows.iter().enumerate() {
             assert!(
-                !text.contains('…') || (drawn.len() == 1 && row == CODE_LINES - 1),
+                !text.contains('…') || (drawn.len() == 1 && row == SLOT_CODE_ROWS - 1),
                 "{lines} × {length}: {rows:#?}"
             );
         }
@@ -557,11 +555,11 @@ fn a_first_line_of_code_taller_than_the_panel_is_cut_and_says_there_is_more() {
     // Every row of code is the first line's, the last ending with a dim "…", and the next line counted as more.
     assert!(rows[3].starts_with(" 1 "));
     assert!(
-        rows[4..3 + CODE_LINES]
+        rows[4..3 + SLOT_CODE_ROWS]
             .iter()
             .all(|row| row.starts_with(" ↪ "))
     );
-    let last = &canvas.rows[3 + CODE_LINES - 1];
+    let last = &canvas.rows[3 + SLOT_CODE_ROWS - 1];
     assert_eq!(last.cells.last().unwrap(), &('…', Style::plain(DIM)));
     assert!(
         canvas
@@ -569,18 +567,53 @@ fn a_first_line_of_code_taller_than_the_panel_is_cut_and_says_there_is_more() {
             .iter()
             .all(|row| crate::ui_text::whole(&row.cells))
     );
-    assert_eq!(rows[CODE_ROWS - 1].trim_end(), "…1 more line");
+    // The first line, not shown whole, is counted with the next.
+    assert_eq!(rows[CODE_ROWS - 1].trim_end(), "↓ 2 more");
 }
 
 #[test]
-fn a_code_panel_keeps_a_slots_size_floating() {
-    let panel = code_panel("c", 3);
-    assert_eq!(fit(&panel, Fit::Text), (COLUMNS, BODY_ROWS));
-    assert_eq!(fitted_size(&panel, Fit::Text), panel_size());
-    assert_eq!(
-        face(&panel, false, false, Fit::Text).plain(),
-        face(&panel, false, false, Fit::Slot).plain()
-    );
+fn a_code_panel_floating_fits_its_code_and_takes_a_slot_s_size_on_a_wall() {
+    // A short block floating is as tall as its lines, at least a few rows, with no row below them, as it shows them all.
+    let short = code_panel("c", 3);
+    let canvas = face(&short, false, false, Fit::Text);
+    assert_eq!(canvas.rows.len(), 3 + FIT_CODE_ROWS.0);
+    assert_eq!(canvas.size(), fitted_size(&short, Fit::Text));
+    assert_eq!(fitted_size(&short, Fit::Text).0, panel_size().0);
+    assert!(fitted_size(&short, Fit::Text).1 < panel_size().1);
+    assert!(canvas.shapes.is_empty());
+    // The 17 lines the maintainer could not see, which wrap onto more rows than a slot has, grow it to show them all.
+    let lines: Vec<String> = (1..=17)
+        .map(|line| {
+            format!("    const value{line} = compute(input, options, {line}); // step {line} of the build")
+        })
+        .collect();
+    let long = Panel::new("c", "javascript", lines.join("\n"), on(TOMORI_WALL, 0))
+        .with_code(Code::new("javascript", 17));
+    let slot = face(&long, false, false, Fit::Slot);
+    assert_eq!(slot.rows.len(), CODE_ROWS);
+    assert!(row_text(&slot.rows[CODE_ROWS - 1]).starts_with("↓ "));
+    let floating = face(&long, false, false, Fit::Text);
+    let drawn = joined(&floating.rows[3..].iter().map(row_text).collect::<Vec<_>>());
+    assert_eq!(drawn.len(), 17);
+    assert_eq!(drawn.last().unwrap().0, 17);
+    assert!(floating.rows.len() > CODE_ROWS && floating.rows.len() <= 3 + FIT_CODE_ROWS.1);
+    assert_eq!(floating.size(), fitted_size(&long, Fit::Text));
+    assert!(floating.shapes.is_empty());
+    // Taller than a panel floating may be, it shows as many rows as it may, scrolls, and says what is below.
+    let many: Vec<String> = (1..=120).map(|line| format!("line {line}")).collect();
+    let tall =
+        Panel::new("c", "text", many.join("\n"), Place::Unknown).with_code(Code::new("", 120));
+    let canvas = face(&tall, false, false, Fit::Text);
+    assert_eq!(canvas.rows.len(), 3 + FIT_CODE_ROWS.1 + 1);
+    assert_eq!(row_text(canvas.rows.last().unwrap()), "↓ 80 more");
+    assert_eq!(canvas.size(), fitted_size(&tall, Fit::Text));
+    let (_, height) = fitted_size(&tall, Fit::Text);
+    assert!(height > 0.7 && height < 0.8, "{height}");
+    // On a wall, every code panel is a slot's size.
+    for panel in [&short, &long, &tall] {
+        assert_eq!(fitted_size(panel, Fit::Slot), panel_size());
+        assert_eq!(face(panel, false, false, Fit::Slot).rows.len(), CODE_ROWS);
+    }
 }
 
 #[test]
@@ -588,7 +621,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
     // An older server cut each line to 64 characters.
     let long = "x".repeat(63);
     let body = std::iter::once(format!("{long}…"))
-        .chain((2..=CODE_LINES).map(|line| format!("line {line}")))
+        .chain((2..=SLOT_CODE_ROWS).map(|line| format!("line {line}")))
         .collect::<Vec<_>>()
         .join("\n");
     let mut panel = Panel::new("c", "text", body, Place::Unknown)
@@ -608,24 +641,28 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
     assert!(lines[4].ends_with('…'));
     assert_eq!(canvas.rows[4].cells.last().unwrap().1.color, DIM);
     // So the last line no longer fits, and is counted among those not shown.
-    assert_eq!(lines[3 + CODE_LINES - 1].trim_end(), "15 line 15");
-    assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…25 more lines");
+    assert_eq!(lines[3 + SLOT_CODE_ROWS - 1].trim_end(), "15 line 15");
+    assert_eq!(lines[CODE_ROWS - 1].trim_end(), "↓ 25 more");
     // Without the long line, every line fits, and the rest are counted.
-    let body = (1..=CODE_LINES)
+    let body = (1..=SLOT_CODE_ROWS)
         .map(|line| format!("line {line}"))
         .collect::<Vec<_>>()
         .join("\n");
     panel.body = body;
     let text = face(&panel, false, false, Fit::Slot).plain();
     let lines: Vec<&str> = text.split('\n').collect();
-    assert_eq!(lines[3 + CODE_LINES - 1].trim_end(), "16 line 16");
-    assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…24 more lines");
-    // One more line is said as one.
-    panel.code = Some(Code::new("", CODE_LINES as u32 + 1));
+    assert_eq!(lines[3 + SLOT_CODE_ROWS - 1].trim_end(), "16 line 16");
+    // Every line it holds fits, and the rest of its block, which it was not sent, is only in the transcript.
+    assert_eq!(
+        lines[CODE_ROWS - 1].trim_end(),
+        "24 more lines in the transcript"
+    );
+    // One more line, which it was not sent, is said as one.
+    panel.code = Some(Code::new("", SLOT_CODE_ROWS as u32 + 1));
     assert!(
         face(&panel, false, false, Fit::Slot)
             .plain()
-            .ends_with("…1 more line")
+            .ends_with("1 more line in the transcript")
     );
     // A code panel of one line says so; a server's lines beyond what a panel holds are not drawn.
     let one = Panel::new("c", "sh", "ls", Place::Unknown).with_code(Code::new("sh", 1));
@@ -638,7 +675,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
         .with_code(Code::new("sh", 40));
     let text = face(&many, false, false, Fit::Slot).plain();
     assert_eq!(text.split('\n').count(), CODE_ROWS);
-    assert!(text.ends_with("…24 more lines"));
+    assert!(text.ends_with("↓ 24 more"));
 }
 
 #[test]
@@ -668,7 +705,7 @@ fn a_code_panel_whose_spans_are_not_valid_is_drawn_plain() {
 #[test]
 fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
     let lines = |panel: &Panel| -> Vec<String> {
-        label(panel, Vec3::new(0.0, 1.5, -3.0), HOME)
+        label(panel, Vec3::new(0.0, 1.5, -3.0), HOME, None)
             .canvas
             .unwrap()
             .plain()
@@ -684,7 +721,7 @@ fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
         lines(&code_panel("c", 40).with_pinned(true)),
         [
             "rust",
-            "rust · lines 1–16 of 40 · pinned",
+            "rust · lines 1–3 of 40 · pinned",
             "5m ago, on the Tomori wall"
         ]
     );
@@ -705,7 +742,7 @@ fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
 fn the_ray_s_label_names_a_panel_with_its_metadata_and_where_it_is() {
     let point = Vec3::new(0.0, 1.5, -3.0);
     let label_of = |place: Place| {
-        let sheet = label(&panel("1", place), point, HOME);
+        let sheet = label(&panel("1", place), point, HOME, None);
         (sheet.canvas.unwrap().plain(), sheet.model.unwrap())
     };
     let (text, model) = label_of(on(TOMORI_WALL, 0));
@@ -1815,4 +1852,339 @@ fn the_server_takes_each_slot_to_be_where_it_is_drawn() {
             );
         }
     }
+}
+
+/// The 17 lines of JavaScript the maintainer could not see all of on the Quest 3, long enough that several wrap.
+fn reported_block() -> Panel {
+    let lines: Vec<String> = (1..=17)
+        .map(|line| match line % 3 {
+            0 => format!(
+                "  const step{line} = await build(project, {{ target: 'quest', release: true }});"
+            ),
+            _ => format!("  log('step {line}');"),
+        })
+        .collect();
+    Panel::new("c", "javascript", lines.join("\n"), on(TOMORI_WALL, 0))
+        .with_code(Code::new("javascript", 17))
+}
+
+/// What the row below `canvas`'s code says.
+fn footer(canvas: &Canvas) -> String {
+    row_text(canvas.rows.last().unwrap()).trim_end().to_owned()
+}
+
+/// `panel`'s face sized as `fit` says, scrolled `scroll` rows down.
+fn scrolled(panel: &Panel, fit: Fit, scroll: usize) -> Canvas {
+    let layout = panel.code.as_ref().map(|code| CodeLayout::new(panel, code));
+    scrolled_face(panel, false, false, fit, scroll, layout.as_ref())
+}
+
+#[test]
+fn the_right_stick_scrolls_faster_the_further_it_is_pushed_up_for_forward() {
+    assert_eq!(scroll_rate(0.0), 0.0);
+    assert_eq!(scroll_rate(SCROLL_DEAD), 0.0);
+    assert_eq!(scroll_rate(-SCROLL_DEAD), 0.0);
+    assert_eq!(scroll_rate(1.0), -SCROLL_SPEED);
+    assert_eq!(scroll_rate(-1.0), SCROLL_SPEED);
+    // Past the end, as fast as at it, and as the square of how far past the dead zone in between.
+    assert_eq!(scroll_rate(-2.0), SCROLL_SPEED);
+    assert!((scroll_rate(-0.6) - SCROLL_SPEED / 4.0).abs() < 1e-5);
+    assert!(scroll_rate(-0.4) < scroll_rate(-0.6));
+    assert_eq!(scroll_rate(f32::NAN), 0.0);
+}
+
+#[test]
+fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
+    let panel = reported_block();
+    let layout = CodeLayout::new(&panel, panel.code.as_ref().unwrap());
+    let most = layout.most_scroll(Fit::Slot);
+    assert!(most > 0);
+    // At the top, the lines below that do not fit, as on the headset, and the bar's thumb at the top of its track.
+    let top = scrolled(&panel, Fit::Slot, 0);
+    assert!(footer(&top).starts_with("↓ "), "{}", footer(&top));
+    assert!(!footer(&top).contains('↑'));
+    let [track, thumb] = top.shapes.as_slice() else {
+        panic!("a bar: {:?}", top.shapes);
+    };
+    assert_eq!((track.color, thumb.color), (SCROLL_TRACK, SCROLL_THUMB));
+    assert_eq!(thumb.y, track.y);
+    assert!(thumb.height < track.height);
+    // Its track is beside the rows of code, inside the face's padding.
+    assert!(track.x > (CODE_COLUMNS * CELL_WIDTH) as f32);
+    assert!(track.x + track.width <= (CODE_COLUMNS * CELL_WIDTH + CODE_PADDING.0) as f32);
+    assert_eq!(track.y, (3 * CELL_HEIGHT) as f32);
+    assert_eq!(track.height, (SLOT_CODE_ROWS * CELL_HEIGHT) as f32);
+    // Scrolled to the end, the last line is the last row, nothing is below, and the lines above are counted.
+    let end = scrolled(&panel, Fit::Slot, most);
+    let rows: Vec<String> = end.rows[3..CODE_ROWS - 1].iter().map(row_text).collect();
+    assert_eq!(joined(&rows).last().unwrap().0, 17);
+    assert!(!rows.last().unwrap().is_empty());
+    let above = footer(&end);
+    assert!(
+        above.starts_with("↑ ") && above.ends_with(" above"),
+        "{above}"
+    );
+    assert!(!above.contains('↓'));
+    let [track, thumb] = end.shapes.as_slice() else {
+        panic!("a bar");
+    };
+    assert!((thumb.y + thumb.height - (track.y + track.height)).abs() < 1e-3);
+    // No further, however far it is asked.
+    assert_eq!(scrolled(&panel, Fit::Slot, most + 50).plain(), end.plain());
+    // In between, both, every line counted once, those not whole below and those starting above.
+    let middle = scrolled(&panel, Fit::Slot, most / 2);
+    let text = footer(&middle);
+    let (up, down) = text.split_once(" · ").expect("above and below");
+    let count = |part: &str| -> usize { part.split(' ').nth(1).unwrap().parse().unwrap() };
+    assert!(up.starts_with("↑ ") && down.starts_with("↓ "), "{text}");
+    let drawn = joined(
+        &middle.rows[3..CODE_ROWS - 1]
+            .iter()
+            .map(row_text)
+            .collect::<Vec<_>>(),
+    );
+    let whole = drawn.iter().filter(|(number, _)| *number > 0).count();
+    assert!(count(up) + count(down) + whole >= 17);
+    // A row scrolled to partway through a wrapped line begins with its continuation, unnumbered.
+    let wrapped = layout
+        .rows
+        .iter()
+        .position(|row| !row.first)
+        .expect("a line wraps");
+    let partway = scrolled(&panel, Fit::Slot, wrapped);
+    assert!(row_text(&partway.rows[3]).starts_with(" ↪ "));
+    assert!(footer(&partway).starts_with(&format!("↑ {} above", layout.rows[wrapped].line + 1)));
+    // Every row of every scroll is within the panel's columns, and the face the same size.
+    for scroll in 0..=most {
+        let canvas = scrolled(&panel, Fit::Slot, scroll);
+        assert_eq!(canvas.rows.len(), CODE_ROWS);
+        assert!(
+            canvas
+                .rows
+                .iter()
+                .all(|row| row.cells.len() <= CODE_COLUMNS)
+        );
+    }
+    // A panel that shows all of itself has no bar and nothing to scroll.
+    let short = code_panel("s", 3);
+    let layout = CodeLayout::new(&short, short.code.as_ref().unwrap());
+    assert_eq!(layout.most_scroll(Fit::Slot), 0);
+    assert!(scrolled(&short, Fit::Slot, 5).shapes.is_empty());
+    assert_eq!(footer(&scrolled(&short, Fit::Slot, 5)), "");
+}
+
+#[test]
+fn a_code_panel_says_how_many_lines_it_was_not_sent_below_the_last_it_holds() {
+    // A block of 200 lines of which the server sent 30, as where a projection would not fit in a frame.
+    let body: Vec<String> = (1..=30).map(|line| format!("line {line}")).collect();
+    let panel =
+        Panel::new("c", "text", body.join("\n"), Place::Unknown).with_code(Code::new("", 200));
+    // Those below, sent or not, are counted as more until the last it holds is shown; then those it was not sent, as
+    // only in the transcript.
+    assert_eq!(footer(&scrolled(&panel, Fit::Slot, 0)), "↓ 184 more");
+    assert_eq!(
+        footer(&scrolled(&panel, Fit::Slot, usize::MAX)),
+        "↑ 14 above · 170 more lines in the transcript"
+    );
+    // Floating, it shows every line it holds, and says so.
+    let floating = scrolled(&panel, Fit::Text, 0);
+    assert_eq!(floating.rows.len(), 3 + 30 + 1);
+    assert_eq!(footer(&floating), "170 more lines in the transcript");
+    assert!(floating.shapes.is_empty());
+    // A line the server cut ends with a dim "…".
+    let cut = Panel::new("c", "text", "a\nbcd…", Place::Unknown).with_code(Code::new("", 9));
+    let canvas = scrolled(&cut, Fit::Slot, 0);
+    assert_eq!(
+        canvas.rows[4].cells.last().unwrap(),
+        &('…', Style::plain(DIM))
+    );
+    assert_eq!(footer(&canvas), "7 more lines in the transcript");
+}
+
+#[test]
+fn a_text_panel_longer_than_its_face_scrolls_too() {
+    let body: Vec<String> = (1..=20).map(|line| format!("- step {line}")).collect();
+    let panel = Panel::new("t", "Steps", body.join("\n"), on(TOMORI_WALL, 0));
+    let most = most_scroll(&panel, Fit::Slot, None);
+    assert_eq!(most, 20 - BODY_ROWS);
+    // At the top, cut with "…", with a bar beside the body; at the end, its last row shown whole.
+    let top = scrolled(&panel, Fit::Slot, 0);
+    assert!(row_text(&top.rows[3 + BODY_ROWS - 1]).ends_with('…'));
+    assert_eq!(top.shapes.len(), 2);
+    assert_eq!(top.shapes[0].height, (BODY_ROWS * CELL_HEIGHT) as f32);
+    let end = scrolled(&panel, Fit::Slot, most + 3);
+    assert_eq!(row_text(&end.rows[3]).trim(), "• step 9");
+    assert_eq!(row_text(&end.rows[3 + BODY_ROWS - 1]).trim(), "• step 20");
+    assert_eq!(end.rows.len(), 3 + BODY_ROWS);
+    // Floating, it fits, and has nothing to scroll.
+    assert_eq!(most_scroll(&panel, Fit::Text, None), 0);
+    assert!(scrolled(&panel, Fit::Text, 4).shapes.is_empty());
+}
+
+/// The faces drawn in `output`, as text.
+fn faces(output: &Output) -> Vec<String> {
+    output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_ref())
+        .map(Canvas::plain)
+        .collect()
+}
+
+#[test]
+fn each_participant_scrolls_a_panel_for_themselves_alone() {
+    let now = Instant::now();
+    let shown = projection(vec![reported_block(), panel("t", on(TOMORI_WALL, 1))]);
+    // Two participants see the same projection.
+    let (mut mine, mut theirs) = (Projector::default(), Projector::default());
+    let before = faces(&mine.update(input(&shown, None, 0.0, now)));
+    theirs.update(input(&shown, None, 0.0, now));
+    assert!(mine.scrollable("c"));
+    assert!(!mine.scrollable("t"));
+    assert!(!mine.scrollable("nothing"));
+    // Scrolling mine moves only my view of it, sends nothing, and leaves the other panel and theirs where they were.
+    let scroll = |rows: f32| Input {
+        scroll: Some(("c", rows)),
+        ..input(&shown, None, 0.0, now)
+    };
+    let output = mine.update(scroll(2.4));
+    assert_eq!(mine.scroll("c"), 2);
+    assert_eq!(output.placed, None);
+    assert!(!output.picked);
+    let after = faces(&output);
+    assert_ne!(after, before);
+    assert!(after.iter().any(|face| face.contains("↑ ")));
+    assert_eq!(
+        after
+            .iter()
+            .filter(|face| face.starts_with("Panel t"))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .filter(|face| face.starts_with("Panel t"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(faces(&theirs.update(input(&shown, None, 0.0, now))), before);
+    assert_eq!(theirs.scroll("c"), 0);
+    // It stops at either end, however far it is asked to go, and scrolls back from there at once.
+    let most = mine.limits["c"];
+    mine.update(scroll(1_000.0));
+    assert_eq!(mine.scroll("c"), most);
+    mine.update(scroll(-1.0));
+    assert_eq!(mine.scroll("c"), most - 1);
+    mine.update(scroll(-1_000.0));
+    assert_eq!(mine.scroll("c"), 0);
+    mine.update(scroll(f32::NAN));
+    assert_eq!(mine.scroll("c"), 0);
+    // A panel that shows all of itself does not scroll.
+    mine.update(Input {
+        scroll: Some(("t", 5.0)),
+        ..input(&shown, None, 0.0, now)
+    });
+    assert_eq!(mine.scroll("t"), 0);
+    // Its code is laid out once, and again only when it changes.
+    let laid = Arc::clone(&mine.layouts["c"].layout);
+    mine.update(input(&shown, None, 0.0, now));
+    assert!(Arc::ptr_eq(&laid, &mine.layouts["c"].layout));
+    let mut changed = shown.clone();
+    changed.panels[0].body.push_str("\n  done();");
+    mine.update(input(&changed, None, 0.0, now));
+    assert!(!Arc::ptr_eq(&laid, &mine.layouts["c"].layout));
+    // Gone, it is forgotten, as is everything once nothing is projected.
+    mine.update(scroll(3.0));
+    let gone = projection(vec![panel("t", on(TOMORI_WALL, 1))]);
+    mine.update(input(&gone, None, 0.0, now));
+    assert!(!mine.scrolls.contains_key("c") && mine.layouts.is_empty());
+    mine.update(Input {
+        projection: None,
+        ..input(&shown, None, 0.0, now)
+    });
+    assert!(mine.limits.is_empty());
+}
+
+#[test]
+fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_scroll_again_on_a_wall()
+ {
+    let now = Instant::now();
+    let mut on_wall = reported_block();
+    let shown = projection(vec![on_wall.clone()]);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, None, 0.0, now));
+    projector.update(Input {
+        scroll: Some(("c", 4.0)),
+        ..input(&shown, None, 0.0, now)
+    });
+    assert_eq!(projector.scroll("c"), 4);
+    // Pulled off and carried, it is as tall as its code, and pointed at at that size, its hint below it.
+    let centre = slot_centre(&shown, 0);
+    projector.update(input(&shown, at(centre), 0.0, now));
+    let output = projector.update(input(&shown, at(centre), 1.0, now));
+    assert!(output.picked);
+    let output = projector.update(input(&shown, at(centre), 1.0, now));
+    let carried = output
+        .sheets
+        .iter()
+        .find(|sheet| {
+            sheet
+                .canvas
+                .as_ref()
+                .unwrap()
+                .plain()
+                .starts_with("javascript")
+        })
+        .unwrap();
+    let canvas = carried.canvas.as_ref().unwrap();
+    assert!(canvas.size().1 > panel_size().1);
+    assert_eq!(canvas.size(), fitted_size(&on_wall, Fit::Text));
+    assert!(!projector.scrollable("c"));
+    let drawn = joined(&canvas.rows[3..].iter().map(row_text).collect::<Vec<_>>());
+    assert_eq!(drawn.first().unwrap().0, 1);
+    assert_eq!(drawn.last().unwrap().0, 17);
+    let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
+    assert!(hint.y < centre.y - canvas.size().1 / 2.0);
+    // Left floating, it stays so; the server agrees.
+    projector.update(input(&shown, at(centre + Vec3::X * 2.0), 0.0, now));
+    on_wall.place = Place::Free {
+        pose: Pose::upright_facing((centre + Vec3::X * 2.0).to_array(), HOME.to_array()),
+    };
+    let floating = projection(vec![on_wall.clone()]);
+    projector.update(input(&floating, None, 0.0, now + PENDING));
+    assert!(!projector.scrollable("c"));
+    assert_eq!(projector.scroll("c"), 0);
+    // Put back on the wall, it is a slot's size again, scrolled as it was.
+    on_wall.place = on(TOMORI_WALL, 0);
+    let back = projection(vec![on_wall]);
+    let output = projector.update(input(&back, None, 0.0, now + PENDING));
+    assert!(projector.scrollable("c"));
+    assert_eq!(projector.scroll("c"), 4);
+    let canvas = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_ref())
+        .find(|canvas| canvas.plain().starts_with("javascript"))
+        .unwrap();
+    assert_eq!(canvas.rows.len(), CODE_ROWS);
+    assert!(footer(canvas).starts_with("↑ "));
+}
+
+#[test]
+fn the_ray_s_label_says_how_to_scroll_a_panel_that_scrolls() {
+    let lines = |scrolls| -> Vec<String> {
+        label(&reported_block(), Vec3::new(0.0, 1.5, -3.0), HOME, scrolls)
+            .canvas
+            .unwrap()
+            .plain()
+            .lines()
+            .map(|line| line.trim_end().to_owned())
+            .collect()
+    };
+    assert_eq!(lines(None).len(), 3);
+    assert_eq!(
+        lines(Some(Controls::Controllers)).last().unwrap(),
+        "Stick ↕  scroll"
+    );
+    assert_eq!(
+        lines(Some(Controls::Keyboard)).last().unwrap(),
+        "Wheel  scroll"
+    );
 }
