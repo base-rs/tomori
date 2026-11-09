@@ -9,6 +9,8 @@ license.workspace = true
 readme = "readme.md"
 keywords = ["tomori", "xr", "agents", "client", "scene"]
 categories = ["game-development", "network-programming"]
+# The test that no shape is drawn as text reads the other crates of the workspace, which a package does not hold.
+exclude = ["tests/shapes_in_text.rs"]
 
 [features]
 # `test_support`: a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, with `scene::fixtures` and `Conversation::take_actions`, shared with the other client crates' tests. Enabled only by tests; every other test hook is `cfg(test)`.
