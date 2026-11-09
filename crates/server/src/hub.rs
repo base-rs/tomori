@@ -2084,6 +2084,17 @@ impl Hub {
         self.reconcile_server_sides(&mut state);
     }
 
+    /// Offer `environment` in place of the one with its identifier, or else after the others, as [`Self::set_environments`] offers them, as in [`crate::Server::with_environment`].
+    pub(crate) fn set_environment(&self, environment: crate::Environment) {
+        let environments = self.environments().clone().with(environment);
+        self.set_environments(environments);
+    }
+
+    /// The environments offered for spaces, in order.
+    pub(crate) fn environments_offered(&self) -> Vec<crate::Environment> {
+        self.environments().as_slice().to_vec()
+    }
+
     /// The environments offered for spaces.
     /// Where the Tomori wall of the space `record` stands while its agent is summoned to `at`, before whoever's eyes are
     /// at `eyes`: its travel spot, clear of the environment's solids and the space's other walls, or none where no spot
@@ -5400,12 +5411,6 @@ impl Hub {
             .write()
             .expect("environments are never left poisoned");
         *environments = environments.clone().with(environment);
-    }
-
-    /// The environments offered, as clients are told them.
-    #[cfg(any(test, feature = "fake"))]
-    pub(crate) fn environment_info(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
-        self.environments().info()
     }
 
     /// Notified when someone starts watching the cards.

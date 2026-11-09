@@ -278,7 +278,7 @@ impl Server {
         self
     }
 
-    /// Offer `environments` for spaces, in order, in place of those offered before, which are none until some are: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. It may be called before or after [`Self::with_kept_spaces`]: a space's layer of the instructions is looked up in the environments offered whenever it is shown or given to the agent, so a restored space is given the same layer as a new one. See `design/environments.md`.
+    /// Offer `environments` for spaces, in order, in place of those offered before, which are none until some are: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. It may be called before or after [`Self::with_kept_spaces`]: a space's layer of the instructions is looked up in the environments offered whenever it is shown or given to the agent, so a restored space is given the same layer as a new one. [`Self::with_environment`] changes one of them. See `design/environments.md`.
     pub fn with_environments(self, environments: impl IntoIterator<Item = Environment>) -> Self {
         self.hub.set_environments(Environments::new(environments));
         self
@@ -300,18 +300,23 @@ impl Server {
         self
     }
 
-    /// The environments offered.
-    #[cfg(test)]
-    pub(crate) fn environments(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
-        self.hub.environment_info()
+    /// Offer `environment` in place of the one offered with its identifier, keeping that one's place in the order, which decides the default and the order clients see, or else after those offered, as [`Builder::environment`](crate::Builder::environment) registers one, so that a [`CommandOption`](crate::CommandOption) can change one environment without knowing the others. Its label, version, instructions, anchors, walls and server side are all the new one's: one registered with a server side and offered again without one has none. It takes effect exactly as [`Self::with_environments`] does, for every space, kept or new, whenever it is next shown or given to the agent; once the server serves, a space bound to it whose server side is not the same one has that side stopped and the new one started. See `design/builders.md`.
+    pub fn with_environment(self, environment: Environment) -> Self {
+        self.hub.set_environment(environment);
+        self
+    }
+
+    /// The environments offered, in order, the first the default, so that an option can change one of them, such as its server side, rather than make it again. Unlike [`Builder::environments`](crate::Builder::environments) it returns copies, since the list is shared with the running server; a copy shares its server side, so giving one back unchanged restarts nothing.
+    pub fn environments(&self) -> Vec<Environment> {
+        self.hub.environments_offered()
     }
 
     /// The labels of the environments offered, in order.
     #[cfg(test)]
     pub(crate) fn environment_labels(&self) -> Vec<String> {
         self.environments()
-            .into_iter()
-            .map(|environment| environment.label)
+            .iter()
+            .map(|environment| environment.label().to_owned())
             .collect()
     }
 
@@ -321,7 +326,7 @@ impl Server {
         self,
         environments: impl IntoIterator<Item = Environment>,
     ) -> Self {
-        if self.hub.environment_info().is_empty() {
+        if self.hub.environments_offered().is_empty() {
             self.hub.set_environments(Environments::new(environments));
         }
         self
@@ -2191,6 +2196,84 @@ mod tests {
             .with_workspace_roots(WorkspaceRoots::none())
     }
 
+    #[test]
+    fn an_environment_offered_again_replaces_the_one_with_its_identifier_in_its_place() {
+        struct Idle;
+        impl tomori_environment::ServerSide for Idle {
+            fn run(&self, _: &tomori_environment::Space) -> tomori_environment::Result<()> {
+                Ok(())
+            }
+        }
+        let ids = |server: &Server| -> Vec<(String, String, u32, bool)> {
+            server
+                .environments()
+                .iter()
+                .map(|environment| {
+                    (
+                        environment.id().to_owned(),
+                        environment.label().to_owned(),
+                        environment.version(),
+                        environment.server_side().is_some(),
+                    )
+                })
+                .collect()
+        };
+        // None are offered until some are, and one offered alone is the default.
+        assert!(server().environments().is_empty());
+        let server = server().with_environment(Environment::new("observe", "Observe"));
+        assert_eq!(
+            ids(&server),
+            [("observe".to_owned(), "Observe".to_owned(), 1, false)]
+        );
+        // Those offered before are kept, in order.
+        let server = server.with_environments([
+            Environment::new("sky", "Sky"),
+            Environment::new("observe", "Observe").with_instructions("Mind the topology."),
+            Environment::new(tomori_protocol::GRID, "Grid"),
+        ]);
+        // The identifier is the key: the first, the default, is replaced in its place, whatever its label and version.
+        let server = server.with_environment(Environment::new("sky", "Night").with_version(2));
+        // One with a server side replaces one without, and is offered with the new one's instructions, here none.
+        let server =
+            server.with_environment(Environment::new("observe", "Live").with_server_side(Idle));
+        // One not offered yet goes after the others.
+        let server = server.with_environment(Environment::new("farmyard", "Farmyard"));
+        assert_eq!(
+            ids(&server),
+            [
+                ("sky".to_owned(), "Night".to_owned(), 2, false),
+                ("observe".to_owned(), "Live".to_owned(), 1, true),
+                (
+                    tomori_protocol::GRID.to_owned(),
+                    "Grid".to_owned(),
+                    1,
+                    false
+                ),
+                ("farmyard".to_owned(), "Farmyard".to_owned(), 1, false),
+            ]
+        );
+        assert_eq!(server.environments()[1].instructions(), "");
+        let space = tomori_environment::Space::new("space-1", "Fleet", "/");
+        assert_eq!(
+            server.environments()[1]
+                .server_side()
+                .expect("it has a side")
+                .run(&space),
+            Ok(())
+        );
+        assert_eq!(
+            Environments::new(server.environments()).choose(None),
+            Ok("sky".to_owned())
+        );
+        // One without a server side replaces one with, and has none.
+        let server = server.with_environment(Environment::new("observe", "Observe"));
+        assert_eq!(
+            ids(&server)[1],
+            ("observe".to_owned(), "Observe".to_owned(), 1, false)
+        );
+        assert_eq!(server.environments().len(), 4);
+    }
+
     // Small builders called only from other crates are inlined there, where their coverage is not counted as theirs, so each is also called in this crate's tests.
     #[test]
     fn the_participant_retention_given_is_kept() {
@@ -2389,7 +2472,7 @@ mod tests {
             server
                 .environments()
                 .iter()
-                .any(|environment| environment.id == "github" && environment.label == "GitHub")
+                .any(|environment| environment.id() == "github" && environment.label() == "GitHub")
         );
         // Nobody watches, so it waits, until serving ends.
         let later = Cancellation::new();
