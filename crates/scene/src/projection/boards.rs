@@ -110,6 +110,19 @@ fn uncovered((from, to): (f32, f32), covered: &[(f32, f32)]) -> Vec<(f32, f32)> 
 /// Whether `wall` shows its group's label: its group's top left wall, or, curved, as a curved wall's label is below
 /// its slots, its bottom left, as they stand on the surface of its group's first wall.
 pub(super) fn labelled(wall: &Wall, walls: &[&Wall]) -> bool {
+    chosen(wall, walls, true)
+}
+
+/// Whether `wall` shows its group's one grab bar: its group's top left wall, whose slots reach highest, so that the bar,
+/// above its top edge, stands above every wall of its group and over none of their slots, whatever their shapes. See
+/// `design/projection.md`.
+pub(super) fn bears_bar(wall: &Wall, walls: &[&Wall]) -> bool {
+    chosen(wall, walls, false)
+}
+
+/// Whether `wall` is its group's top left wall among `walls`, or, for its `label` where the group is curved, its bottom
+/// left, as they stand on the surface of its group's first wall: a wall alone is.
+fn chosen(wall: &Wall, walls: &[&Wall], label: bool) -> bool {
     let mut group: Vec<&Wall> = members(wall, walls);
     if group.is_empty() {
         return true;
@@ -120,11 +133,11 @@ pub(super) fn labelled(wall: &Wall, walls: &[&Wall]) -> bool {
         .find(|other| Some(&other.id) == wall.group.as_ref())
         .copied()
         .unwrap_or(wall);
-    let curved = first.radius().is_some();
+    let low = label && first.radius().is_some();
     let place = |other: &Wall| {
         let (u, y, _, _) = group::on_surface(&first.pose, first.radius(), &other.pose);
         let slots = other.extent().shifted(u, y);
-        let height = if curved { -slots.bottom } else { slots.top };
+        let height = if low { -slots.bottom } else { slots.top };
         // Highest first, by a centimetre, then leftmost.
         (-(height * 100.0).round(), slots.left)
     };
@@ -135,6 +148,25 @@ pub(super) fn labelled(wall: &Wall, walls: &[&Wall]) -> bool {
             a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
         })
         .is_some_and(|chosen| chosen.id == wall.id)
+}
+
+/// The edges of `wall` joined to another wall of its group among `walls`, as the server says and as they stand.
+pub(super) fn joined_edges(wall: &Wall, walls: &[&Wall]) -> Vec<Edge> {
+    joins(wall, walls)
+        .into_iter()
+        .map(|(edge, _)| edge)
+        .collect()
+}
+
+/// The slots of the other walls of `wall`'s group among `walls`, as they stand on `wall`'s surface, from its pose.
+pub(super) fn members_slots(wall: &Wall, walls: &[&Wall]) -> Vec<group::Extent> {
+    members(wall, walls)
+        .into_iter()
+        .map(|other| {
+            let (u, y, _, _) = group::on_surface(&wall.pose, wall.radius(), &other.pose);
+            other.extent().shifted(u, y)
+        })
+        .collect()
 }
 
 /// `wall`'s board, standing at `frame`, as one of its group among `walls`, drawn as [`board`] says: a translucent board,

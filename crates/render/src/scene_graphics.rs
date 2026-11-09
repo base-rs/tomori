@@ -1852,7 +1852,9 @@ mod tests {
     /// Set `TOMORI_WALL_GROUP_PREVIEW` to a PNG path to save what this renders: a wall two by two and a big one by one
     /// snapped to its right, a panel in every slot, drawn as one board, with the same walls drawn apart below for
     /// comparison; `TOMORI_WALL_CURVED_GROUP_PREVIEW`, a curved group of three about home, labelled once; and
-    /// `TOMORI_WALL_SNAP_PREVIEW`, the big wall carried mid-way to the other's edge, where it would snap outlined.
+    /// `TOMORI_WALL_SNAP_PREVIEW`, the big wall carried mid-way to the other's edge, where it would snap outlined; and
+    /// `TOMORI_WALL_STACKED_GROUP_PREVIEW`, a wide wall with two tall walls snapped above its ends, near and far, drawn for
+    /// someone who may adjust walls, its one bar above the top left tall wall.
     #[test]
     fn walls_snapped_together_read_as_one_board_and_a_wall_carried_near_one_shows_where_it_snaps() {
         const WIDTH: u32 = 960;
@@ -2064,6 +2066,89 @@ mod tests {
             let carried = capture(&mut step, &mut conversation, &senses(midway, 1.0), at_group);
             assert_ne!(carried, apart);
             crate::test_support::preview("TOMORI_WALL_SNAP_PREVIEW", &carried);
+            // The maintainer's arrangement, a wide wall below and two tall walls snapped above its ends, near and far:
+            // drawn for someone who may adjust walls, its one bar shows above the top left tall wall, and every slot
+            // looks exactly as it does without the bar, which covers none of them.
+            let mut stacked_sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            for (row, distance) in [2.6_f32, 9.0].into_iter().enumerate() {
+                let base =
+                    tomori_protocol::Pose::upright_facing([0.0, 1.0, -distance], [0.0, 1.0, 0.0]);
+                let wide = added("wall-6", base, (4, 1), 1.0);
+                let tall = |id: &str, align| {
+                    let mut tall = added(id, base, (1, 1), 1.0).with_aspect(Some(0.5));
+                    tall.pose = group::attached_pose(&wide, &tall, Edge::Top, align).unwrap();
+                    tall
+                };
+                let (left, right) = (tall("wall-7", Align::Start), tall("wall-8", Align::End));
+                let joins = |wall: &Wall, others: [&Wall; 2]| {
+                    others
+                        .into_iter()
+                        .filter_map(|other| {
+                            group::joined(wall, other)
+                                .map(|(edge, ..)| Join::new(edge, other.id.clone()))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let walls = vec![
+                    wide.clone()
+                        .with_group(Some("wall-6".into()), joins(&wide, [&left, &right])),
+                    left.clone()
+                        .with_group(Some("wall-6".into()), joins(&left, [&wide, &right])),
+                    right
+                        .clone()
+                        .with_group(Some("wall-6".into()), joins(&right, [&wide, &left])),
+                ];
+                let mut stacked_panels = filling("wall-6", 4, 0);
+                stacked_panels.extend(filling("wall-7", 1, 1));
+                stacked_panels.extend(filling("wall-8", 1, 2));
+                let looking = lens
+                    * Mat4::look_at_rh(
+                        arrival::HOME,
+                        Vec3::new(0.0, 1.0 + 0.1 * distance, -distance),
+                        Vec3::Y,
+                    );
+                let mut conversation = joined();
+                show_projection(&mut conversation, walls.clone(), stacked_panels.clone());
+                let plain = capture(&mut Step::default(), &mut conversation, &away, looking);
+                let mut conversation = joined();
+                show_editable_walls(&mut conversation, walls.clone(), stacked_panels.clone());
+                let editable = capture(&mut Step::default(), &mut conversation, &away, looking);
+                assert_ne!(plain, editable, "the bar is drawn at {distance} m");
+                let pixel = |at: Vec3| {
+                    let clip = looking * at.extend(1.0);
+                    let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                    (
+                        ((x + 1.0) / 2.0 * WIDTH as f32) as u32,
+                        ((1.0 - y) / 2.0 * HEIGHT as f32) as u32,
+                    )
+                };
+                for wall in &walls {
+                    for slot in wall.slot_frames() {
+                        let ([x, y, _], [width, height]) = (slot.position, slot.size);
+                        for (across, up) in (0..=4).flat_map(|a| (0..=4).map(move |b| (a, b))) {
+                            let at = frame_of(wall).transform_point3(Vec3::new(
+                                x + width * (across as f32 / 4.0 - 0.5) * 0.98,
+                                y + height * (up as f32 / 4.0 - 0.5) * 0.98,
+                                0.0,
+                            ));
+                            let (px, py) = pixel(at);
+                            assert_eq!(
+                                plain.get_pixel(px, py),
+                                editable.get_pixel(px, py),
+                                "{} at {distance} m, {across} across and {up} up",
+                                wall.id
+                            );
+                        }
+                    }
+                }
+                image::imageops::replace(
+                    &mut stacked_sheet,
+                    &editable,
+                    0,
+                    (HEIGHT * row as u32).into(),
+                );
+            }
+            crate::test_support::preview("TOMORI_WALL_STACKED_GROUP_PREVIEW", &stacked_sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

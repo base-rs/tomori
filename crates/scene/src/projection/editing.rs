@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use tomori_protocol::{
-    Attach, Grid, Pose, Projection, Wall, WallKind, WallShape, group, wall as layout,
+    Attach, Edge, Grid, Pose, Projection, Wall, WallKind, WallShape, group, wall as layout,
 };
 
 use super::{
@@ -339,26 +339,87 @@ fn handles(wall: &Wall) -> Vec<Handle> {
 /// for them, the knob and the steppers move along it, then to a row or column of their own beyond it. The knob and the
 /// steppers of its columns stand a row beyond its [`Bar`], which stays where it is whether the wall is held or not.
 pub fn handle_points(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Vec3)>, f32) {
-    let (points, size, _) = lay_out(wall, frame, viewer);
+    handle_points_among(wall, frame, viewer, &[], None)
+}
+
+/// Where `wall`'s handles stand, as [`handle_points`] lays them out, among `walls` as they are drawn, where it is one of
+/// a group: those along an edge another wall of its group is joined across stand along the opposite edge instead, and
+/// any that would still stand over the slots of another wall of its group, as large as it is seen, are left out, but
+/// for `keep`, the handle being dragged. So none covers what the group shows, however far away it is seen.
+pub fn handle_points_among(
+    wall: &Wall,
+    frame: Mat4,
+    viewer: Vec3,
+    walls: &[&Wall],
+    keep: Option<Handle>,
+) -> (Vec<(Handle, Vec3)>, f32) {
+    let (points, size, _) = lay_out(wall, frame, viewer, &Around::of(wall, walls, keep));
     (points, size)
 }
 
 /// Where `wall`'s grab bar stands, the wall standing at `frame` and seen from `viewer`, as [`handle_points`] lays it
 /// out with its handles.
 pub fn bar(wall: &Wall, frame: Mat4, viewer: Vec3) -> Bar {
-    lay_out(wall, frame, viewer).2
+    lay_out(wall, frame, viewer, &Around::default()).2
 }
 
-/// A wall's handles and its bar, as [`handle_points`] and [`bar`] lay them out.
-fn lay_out(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Vec3)>, f32, Bar) {
+/// Where `wall`'s grab bar stands among `walls` as they are drawn, as [`bar`] says, if it shows one: a group shows one
+/// bar, above its top left wall, whose slots reach highest, clear of every wall of its group, which carries the whole
+/// group as any of its walls does. See `design/projection.md`.
+pub fn group_bar(wall: &Wall, frame: Mat4, viewer: Vec3, walls: &[&Wall]) -> Option<Bar> {
+    super::boards::bears_bar(wall, walls)
+        .then(|| lay_out(wall, frame, viewer, &Around::of(wall, walls, None)).2)
+}
+
+/// What stands about a wall of a group, which its handles and bar keep clear of: the slots of the other walls of its
+/// group, as they stand on its surface, from its pose; the edges another wall of its group is joined across; the handle
+/// being dragged, which stays where it is; and whether it shows its group's bar.
+#[derive(Clone, Debug, Default)]
+struct Around {
+    slots: Vec<group::Extent>,
+    joined: Vec<Edge>,
+    keep: Option<Handle>,
+    /// It shows its group's bar, which then stands over none of those slots.
+    bar: bool,
+}
+
+impl Around {
+    fn of(wall: &Wall, walls: &[&Wall], keep: Option<Handle>) -> Self {
+        Self {
+            slots: super::boards::members_slots(wall, walls),
+            joined: super::boards::joined_edges(wall, walls),
+            keep,
+            bar: super::boards::bears_bar(wall, walls),
+        }
+    }
+
+    /// Whether a box `x` and `y` from a wall's pose on its surface, reaching `half` either way across and up, stands over
+    /// none of the slots about it.
+    fn clear(&self, x: f32, y: f32, half: (f32, f32)) -> bool {
+        self.slots.iter().all(|slots| {
+            x + half.0 <= slots.left
+                || x - half.0 >= slots.right
+                || y + half.1 <= slots.bottom
+                || y - half.1 >= slots.top
+        })
+    }
+}
+
+/// A wall's handles and its bar, as [`handle_points_among`] and [`group_bar`] lay them out.
+fn lay_out(
+    wall: &Wall,
+    frame: Mat4,
+    viewer: Vec3,
+    around: &Around,
+) -> (Vec<(Handle, Vec3)>, f32, Bar) {
     // Laid out once at the size its corners take, and again at the size its farthest handle then takes, so that none is
     // smaller than its angle.
-    let (points, ..) = lay_out_handles(wall, frame, viewer, None);
+    let (points, ..) = lay_out_handles(wall, frame, viewer, None, around);
     let far = points
         .iter()
         .map(|(_, at)| at.distance(viewer))
         .fold(0.3, f32::max);
-    lay_out_handles(wall, frame, viewer, Some(far))
+    lay_out_handles(wall, frame, viewer, Some(far), around)
 }
 
 /// A wall's grab bar: a thin bar a participant who may adjust walls takes hold of the wall by with the grip, as they do
@@ -440,6 +501,7 @@ fn lay_out_handles(
     frame: Mat4,
     viewer: Vec3,
     far: Option<f32>,
+    around: &Around,
 ) -> (Vec<(Handle, Vec3)>, f32, Bar) {
     // The wall measured along itself, about its middle: a flat wall's board, or a curved wall's slots along their arc,
     // where a handle beyond its edge continues along the arc's last direction.
@@ -488,7 +550,9 @@ fn lay_out_handles(
     };
     let up = frame.transform_vector3(Vec3::Y);
     let (u, v) = (size / least(&tangent), size / least(&|_| up));
-    let at = place;
+    // Where each handle stands, along the wall and up it, put in the space once it is chosen.
+    let at = |x: f32, y: f32| (x, y);
+    let put = |(x, y): (f32, f32)| frame.transform_point3(place(x, y));
     let (xl, xr) = (left - OUTSET * u, right + OUTSET * u);
     let (yt, yb) = (top + OUTSET * v, bottom - OUTSET * v);
     let (pu, pv) = (SPACING * u, SPACING * v);
@@ -505,7 +569,7 @@ fn lay_out_handles(
         } else {
             at(beyond, centre)
         };
-        (columns, Vec3::ZERO, Vec3::ZERO)
+        (columns, (0.0, 0.0), (0.0, 0.0))
     } else if span >= 4.0 * pv - 1e-6 {
         (
             at(xr, between(centre, yb + 3.0 * pv, yt - pv)),
@@ -531,29 +595,47 @@ fn lay_out_handles(
     } else {
         at(0.0, yb - pv)
     };
+    // In a group, the handles along an edge another wall of its group is joined across stand along the opposite edge,
+    // where no wall is joined, and nowhere otherwise, and a corner beside a joined edge is left out, so that none stands
+    // in the gutter between two walls, over the other's slots: `Some(true)` where they stand opposite.
+    let joined = |edge: Edge| around.joined.contains(&edge);
+    let side = |edge: Edge| match (joined(edge), joined(edge.opposite())) {
+        (false, _) => Some(false),
+        (true, false) => Some(true),
+        (true, true) => None,
+    };
+    let corner = |x: i8, y: i8| {
+        let (across, up) = (
+            if x < 0 { Edge::Left } else { Edge::Right },
+            if y > 0 { Edge::Top } else { Edge::Bottom },
+        );
+        (!joined(across) && !joined(up))
+            .then(|| at(if x < 0 { xl } else { xr }, if y > 0 { yt } else { yb }))
+    };
+    let (right_side, top_side, bottom_side) =
+        (side(Edge::Right), side(Edge::Top), side(Edge::Bottom));
+    let mirrored = |(x, y): (f32, f32)| (-x, y);
     // The grab bar, at the middle of its top edge, or, for the Tomori wall, whose top the status pill stands just above
     // from home, below its label: a third of the wall long, within bounds, as long as it may be and stand a handle's
     // spacing, as seen, from the handles beside it, or else a row further out, where it has room.
     let middle = frame.transform_point3(Vec3::ZERO);
     let ahead = (middle - viewer).normalize_or(Vec3::NEG_Z);
-    let fixed: Vec<Vec3> = if tomori {
+    let fixed: Vec<(f32, f32)> = if tomori {
         vec![columns]
     } else {
-        vec![
-            at(xl, yt),
-            at(xr, yt),
-            at(xl, yb),
-            at(xr, yb),
-            columns,
-            rows,
-            row_fewer,
-            row_more,
-        ]
+        let corners = [(-1, 1), (1, 1), (-1, -1), (1, -1)]
+            .into_iter()
+            .filter_map(|(x, y)| corner(x, y));
+        let right = right_side.into_iter().flat_map(|opposite| {
+            [columns, row_fewer, row_more]
+                .map(|point| if opposite { mirrored(point) } else { point })
+        });
+        corners
+            .chain(right)
+            .chain((bottom_side == Some(false)).then_some(rows))
+            .collect()
     };
-    let fixed: Vec<Vec3> = fixed
-        .into_iter()
-        .map(|point| frame.transform_point3(point))
-        .collect();
+    let fixed: Vec<Vec3> = fixed.into_iter().map(put).collect();
     let below = tomori;
     // A handle's worth along the bar, as foreshortened where it stands, at the wall's middle.
     let towards = (middle - viewer).normalize_or(Vec3::NEG_Z);
@@ -577,13 +659,15 @@ fn lay_out_handles(
     let preferred = (width / 6.0).clamp(least, most);
     let clear = |fixed: &[Vec3], row: f32, half: f32| {
         let samples = ((2.0 * half / (0.2 * size)).ceil() as usize).max(1);
-        (0..=samples).all(|sample| {
-            let x = -half + 2.0 * half * sample as f32 / samples as f32;
-            let point = frame.transform_point3(Vec3::new(x, row, 0.0));
-            fixed
-                .iter()
-                .all(|handle| seen_apart(point, *handle, size, viewer, ahead))
-        })
+        // The bar its group shows stands over none of its group's slots, as thick as it is drawn.
+        (!around.bar || around.clear(0.0, row, (half, BAR_THICKNESS * size / 2.0)))
+            && (0..=samples).all(|sample| {
+                let x = -half + 2.0 * half * sample as f32 / samples as f32;
+                let point = frame.transform_point3(Vec3::new(x, row, 0.0));
+                fixed
+                    .iter()
+                    .all(|handle| seen_apart(point, *handle, size, viewer, ahead))
+            })
     };
     // As long as it may be, nearest the wall, that stands clear of `fixed`.
     let choose = |fixed: &[Vec3]| {
@@ -623,36 +707,36 @@ fn lay_out_handles(
             at(xr, yk + pv),
         )
     };
-    let local = handles(wall).into_iter().map(|handle| {
-        let point = match handle {
-            Handle::Corner(x, y) => at(if x < 0 { xl } else { xr }, if y > 0 { yt } else { yb }),
-            Handle::Columns => columns,
-            Handle::Rows => rows,
-            Handle::Step(Axis::Columns, step) => {
-                if step < 0 {
-                    fewer
-                } else {
-                    more
-                }
-            }
+    // Each handle, and whether it stands along the edge opposite its own: those of the top a row below the handle of its
+    // rows, those of the right edge along the left, and the handle of its rows a row beyond the knob.
+    let local = handles(wall).into_iter().filter_map(|handle| {
+        let (point, opposite) = match handle {
+            Handle::Corner(x, y) => (corner(x, y)?, false),
+            Handle::Columns => (columns, right_side?),
+            Handle::Rows => (rows, bottom_side?),
+            Handle::Step(Axis::Columns, step) => (if step < 0 { fewer } else { more }, top_side?),
             Handle::Step(Axis::Rows, step) => {
-                if step < 0 {
-                    row_fewer
-                } else {
-                    row_more
-                }
+                (if step < 0 { row_fewer } else { row_more }, right_side?)
             }
-            Handle::Bend => knob,
+            Handle::Bend => (knob, top_side?),
         };
-        (handle, frame.transform_point3(point))
+        let point = match handle {
+            _ if !opposite => point,
+            Handle::Bend | Handle::Step(Axis::Columns, _) => (point.0, -point.1 - pv),
+            Handle::Rows => (point.0, yk + pv),
+            _ => mirrored(point),
+        };
+        // Which way is away from the wall, along the edge it stands by: back along it where it stands opposite.
+        let away = if opposite { -1.0 } else { 1.0 };
+        Some(((handle, put(point)), away))
     });
-    let mut points: Vec<(Handle, Vec3)> = local.collect();
+    let (mut points, away): (Vec<(Handle, Vec3)>, Vec<f32>) = local.unzip();
     // A wall curved so far that it folds as seen from the side may still bring two together: the one that is not a
     // corner moves on, beyond its edge, until none overlaps.
-    let outward = |handle: Handle| match handle {
-        Handle::Bend | Handle::Step(Axis::Columns, _) => up.normalize_or(Vec3::Y) * pv,
-        Handle::Rows => -up.normalize_or(Vec3::Y) * pv,
-        _ => tangent(right).normalize_or(Vec3::X) * pu,
+    let outward = |handle: Handle, away: f32| match handle {
+        Handle::Bend | Handle::Step(Axis::Columns, _) => up.normalize_or(Vec3::Y) * pv * away,
+        Handle::Rows => -up.normalize_or(Vec3::Y) * pv * away,
+        _ => tangent(right * away).normalize_or(Vec3::X) * pu * away,
     };
     let rank = |handle: Handle| match handle {
         Handle::Corner(..) => 0,
@@ -674,7 +758,7 @@ fn lay_out_handles(
                 } else {
                     second
                 };
-                let by = outward(points[moving].0);
+                let by = outward(points[moving].0, away[moving]);
                 points[moving].1 += by;
                 moved = true;
             }
@@ -685,23 +769,46 @@ fn lay_out_handles(
     }
     // Handles moved on may come in line with the bar, seen from the side of a wall so curved that it folds: it is then
     // chosen again clear of them where they stand, and the knob and the steppers of its columns, beyond it, move with it.
-    let top = |handle: Handle| matches!(handle, Handle::Bend | Handle::Step(Axis::Columns, _));
+    let top: Vec<bool> = points
+        .iter()
+        .zip(&away)
+        .map(|((handle, _), away)| {
+            matches!(handle, Handle::Bend | Handle::Step(Axis::Columns, _)) && *away > 0.0
+        })
+        .collect();
     let others: Vec<Vec3> = points
         .iter()
-        .filter(|(handle, _)| !top(*handle))
-        .map(|(_, at)| *at)
+        .zip(&top)
+        .filter(|(_, top)| !**top)
+        .map(|((_, at), _)| *at)
         .collect();
     let (bar_row, bar_half) = if clear(&others, bar_row, bar_half) {
         (bar_row, bar_half)
     } else {
         let (row, half) = choose(&others);
-        for (handle, at) in &mut points {
-            if top(*handle) {
+        for ((_, at), top) in points.iter_mut().zip(&top) {
+            if *top {
                 *at += up * (beyond(row) - yk);
             }
         }
         (row, half)
     };
+    // Last, in a group, none stands over another wall's slots, as large as it is seen, but the handle being dragged.
+    if !around.slots.is_empty() {
+        let base = pose(frame);
+        let half = (u / 2.0, v / 2.0);
+        points.retain(|(handle, at)| {
+            let (x, y, ..) = group::on_surface(
+                &base,
+                radius,
+                &Pose {
+                    position: at.to_array(),
+                    orientation: base.orientation,
+                },
+            );
+            around.keep == Some(*handle) || around.clear(x, y, half)
+        });
+    }
     let bar = Bar {
         middle: frame.transform_point3(Vec3::new(0.0, bar_row, 0.0)),
         half: frame.transform_vector3(Vec3::X * bar_half),
@@ -752,7 +859,20 @@ fn nearest_handle(points: &[(Handle, Vec3)], size: f32, ray: &Ray) -> Option<(Ha
 /// Where `handle` of a wall like `wall`, standing at `frame`, is drawn, seen from `viewer`, and how large, as
 /// [`handle_points`] lays them out, or the wall's middle for a handle it does not have.
 pub fn handle_point(wall: &Wall, frame: Mat4, handle: Handle, viewer: Vec3) -> (Vec3, f32) {
-    let (points, size) = handle_points(wall, frame, viewer);
+    handle_point_among(wall, frame, handle, viewer, &[], None)
+}
+
+/// Where `handle` of `wall` is drawn among `walls`, as [`handle_points_among`] lays them out, keeping `keep`, and how
+/// large, or the wall's middle for a handle it does not show.
+pub fn handle_point_among(
+    wall: &Wall,
+    frame: Mat4,
+    handle: Handle,
+    viewer: Vec3,
+    walls: &[&Wall],
+    keep: Option<Handle>,
+) -> (Vec3, f32) {
+    let (points, size) = handle_points_among(wall, frame, viewer, walls, keep);
     let at = points
         .into_iter()
         .find(|(shown, _)| *shown == handle)
@@ -1041,10 +1161,11 @@ impl Editor {
         // The handle the ray meets, unless one is dragged: of those it passes near enough, the one whose middle it passes
         // nearest, as seen from where it begins, so that of two close together the one aimed at is taken.
         let mut met: Option<(Handle, f32)> = None;
+        let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
         if let (Some((wall, frame)), Some(ray), None, None) =
             (&editing, ray, &self.drag, &self.carry)
         {
-            let (points, size) = handle_points(wall, *frame, input.viewer);
+            let (points, size) = handle_points_among(wall, *frame, input.viewer, &all, None);
             met = nearest_handle(&points, size, &ray);
         }
         let hovered = self
@@ -1061,7 +1182,7 @@ impl Editor {
                 walls
                     .iter()
                     .filter_map(|(wall, frame)| {
-                        bar(wall, *frame, input.viewer)
+                        group_bar(wall, *frame, input.viewer, &all)?
                             .hit(&ray)
                             .map(|along| (wall.id.clone(), along))
                     })
@@ -1466,7 +1587,9 @@ impl Editor {
                 },
             )
         {
-            let (at, _) = handle_point(wall, *frame, handle, input.viewer);
+            let all: Vec<&Wall> = shown.iter().collect();
+            let keep = self.drag.as_ref().map(|drag| drag.handle);
+            let (at, _) = handle_point_among(wall, *frame, handle, input.viewer, &all, keep);
             let along = (at - ray.origin).dot(ray.direction).max(0.0);
             output.end = Some(ray.at(along));
             output.hit = Some(match self.drag {
@@ -1494,6 +1617,7 @@ impl Editor {
     /// facing the viewer, and the hint above it, as they are drawn.
     fn sheets(&self, walls: &[(&Wall, Mat4)], input: &Input<'_>) -> Vec<Sheet> {
         let mut sheets = Vec::new();
+        let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
         if input.rights.adjust {
             for (wall, frame) in walls {
                 let carried = self.carrying() == Some(wall.id.as_str());
@@ -1501,7 +1625,10 @@ impl Editor {
                     (Some(carry), Some(preview)) if carried => (preview, carry.model),
                     _ => (*wall, *frame),
                 };
-                let bar = bar(wall, frame, input.viewer);
+                // A group shows one bar, above its top left wall.
+                let Some(bar) = group_bar(wall, frame, input.viewer, &all) else {
+                    continue;
+                };
                 let on = self.bar.as_deref() == Some(wall.id.as_str());
                 sheets.push(Sheet {
                     model: Some(bar.model),
@@ -1569,7 +1696,8 @@ impl Editor {
                 model: Some(slot * Mat4::from_translation(Vec3::Z * LIFT)),
             }));
         }
-        let (points, size) = handle_points(wall, frame, input.viewer);
+        let keep = self.drag.as_ref().map(|drag| drag.handle);
+        let (points, size) = handle_points_among(wall, frame, input.viewer, &all, keep);
         if self.carry.is_none() {
             for (handle, at) in &points {
                 sheets.push(Sheet {
@@ -1602,10 +1730,21 @@ impl Editor {
         // Above the wall and its handles, clear of the status pill, which stands low in the view, facing the viewer at the
         // angle the hint beside a panel carried is drawn.
         let up = frame.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
-        let (knob, _) = handle_point(wall, frame, Handle::Bend, input.viewer);
+        let (knob, _) = handle_point_among(wall, frame, Handle::Bend, input.viewer, &all, keep);
+        // In a group, above its other walls' slots and its bar too, so that it covers nothing the group shows.
+        let slots = super::boards::members_slots(wall, &all)
+            .into_iter()
+            .map(|slots| frame.transform_point3(Vec3::new(0.0, slots.top, 0.0)));
+        let bars = walls
+            .iter()
+            .filter(|(other, _)| other.group.is_some() && other.group == wall.group)
+            .filter_map(|(other, at)| group_bar(other, *at, input.viewer, &all))
+            .map(|bar| bar.middle + up * bar.size * BAR_THICKNESS / 2.0);
         let top = points
             .iter()
             .map(|(_, at)| *at)
+            .chain(slots)
+            .chain(bars)
             .max_by(|a, b| a.dot(up).total_cmp(&b.dot(up)))
             .unwrap_or(knob);
         let above = knob + up * ((top - knob).dot(up) + size);
@@ -1876,6 +2015,8 @@ pub fn hint_with(
     canvas
 }
 
+#[cfg(test)]
+mod group_controls_tests;
 #[cfg(test)]
 mod snapping_tests;
 #[cfg(test)]
