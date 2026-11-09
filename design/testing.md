@@ -24,9 +24,13 @@ The only other exception is a file of raw device or platform calls that cannot r
 
 Coverage is not achieved through `#[coverage(off)]` or `cfg(coverage)`, nor by measuring less of the workspace.
 
+Every test in the workspace, including those in `tests/` directories and the examples', is meant to pass on macOS as well as on Linux; CI checks only Linux, so this is kept by hand, as best effort, by whoever runs the suite on a Mac. A test that needs what one platform cannot give it, such as a file name that is not UTF-8, PipeWire, an OpenXR runtime or a machine without a display, says so: it is compiled only where it can run, with `#[cfg(target_os = …)]`, or ignored elsewhere with `#[cfg_attr(…, ignore = "…")]` and its reason, so that it adds no region that CI does not run. A test that runs a window mode to see it fail without a display runs on Linux alone, where leaving out `DISPLAY` and `WAYLAND_DISPLAY` hides the display; on macOS the window opens and waits to be closed. A test that compares a path the code canonicalises compares it with the canonical form of the path it gave, since on macOS `/tmp` is a link to `/private/tmp`. A computed float is compared within a tolerance where platforms' maths libraries round differently, as macOS's `atan2f` and glibc's do.
+
 ## Rationale
 
 The last regions find as many bugs as the first ones, and they expose dead code. A lower floor makes people test code they don't care about whenever someone else's change lowers the total. With 100%, each change brings its own tests. Some code can't run in GitHub CI, such as the headset's OpenXR calls. An exclusion that names its file and reason, in the crate it belongs to, keeps that visible and reviewable, where scattered markers would not. Agreed with the maintainer in November 2026 in [#55](https://github.com/ioquatix/tomori/issues/55); see the proposal in [#111](https://github.com/ioquatix/tomori/pull/111).
+
+CI runs on Linux, but the maintainers also develop on Macs, where a test that fails or hangs for a reason of the platform's hides the failures that matter.
 
 ## Scope
 
@@ -37,3 +41,4 @@ Every workspace member's code, including its inline tests and the `bake/` packag
 - `cargo bake test:coverage --all-targets true` passes in CI. Its report lists each excluded file with its reason and its size, in regions and lines.
 - A change that adds or widens an exclusion is reviewed as lowering the target would be. Its file must hold only device or platform calls, its reason must say what cannot run, and no logic may have moved into it.
 - Search the source for `coverage(off)` and `cfg(coverage)`: there is neither.
+- `cargo test --workspace` on macOS passes, opening no window, when run by hand (CI does not check it). Every `ignore` in a test names its reason, and none applies on Linux unless the test needs something CI does not have.

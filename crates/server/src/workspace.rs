@@ -691,6 +691,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS's file systems refuse a name that is not UTF-8, so the directory cannot be made"
+    )]
     fn a_directory_whose_canonical_path_is_not_utf_8_is_refused() {
         use std::os::unix::ffi::OsStrExt;
         let scratch = Scratch::new("utf-8");

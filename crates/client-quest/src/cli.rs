@@ -253,16 +253,31 @@ mod tests {
             ("--console", Mode::Console),
             ("discover", Mode::Discover),
             ("--spectator", Mode::Spectator),
-            ("--spectator-pipewire", Mode::SpectatorPipewire),
-            (
-                "--spectator-pipewire-preview",
-                Mode::SpectatorPipewirePreview,
-            ),
             ("--licenses", Mode::Licenses),
             ("--help", Mode::Help),
             ("-h", Mode::Help),
         ] {
             assert_eq!(parse(&[argument]).unwrap().mode, mode, "{argument}");
+        }
+        // The PipeWire modes are named everywhere, and refused where there is no PipeWire.
+        let pipewire = [
+            ("--spectator-pipewire", Mode::SpectatorPipewire),
+            (
+                "--spectator-pipewire-preview",
+                Mode::SpectatorPipewirePreview,
+            ),
+        ];
+        #[cfg(target_os = "linux")]
+        for (argument, mode) in pipewire {
+            assert_eq!(parse(&[argument]).unwrap().mode, mode, "{argument}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        for (argument, _) in pipewire {
+            assert_eq!(
+                error(&[argument]),
+                "PipeWire video output requires Linux",
+                "{argument}"
+            );
         }
         assert_eq!(parse(&[]).unwrap().mode, Mode::Demo);
         assert_eq!(error(&["--fly"]), "Unknown option \"--fly\"; use --help");
@@ -285,7 +300,7 @@ mod tests {
         expected.name = Some("Ada".into());
         expected.token = Some("env-token".into());
         assert!(command.overrides == expected);
-        let command = parse(&[
+        let spectator = [
             "--spectator",
             "--server",
             "host:2",
@@ -295,10 +310,19 @@ mod tests {
             "s1",
             "--follow",
             "Bob",
-            "--audio-output",
-            "sink",
-        ])
-        .unwrap();
+        ];
+        let with_output = [&spectator[..], &["--audio-output", "sink"]].concat();
+        // An output is a PipeWire node, so it is refused where there is no PipeWire.
+        #[cfg(target_os = "linux")]
+        let command = parse(&with_output).unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let command = {
+            assert_eq!(
+                error(&with_output),
+                "--audio-output needs PipeWire, on Linux"
+            );
+            parse(&spectator).unwrap()
+        };
         assert_eq!(
             command.spectator_options(),
             SpectatorOptions {
@@ -308,6 +332,7 @@ mod tests {
                 token: Some("secret".into()),
             }
         );
+        #[cfg(target_os = "linux")]
         assert_eq!(command.audio_output.as_deref(), Some("sink"));
         for (option, what) in [
             ("--server", "an address"),

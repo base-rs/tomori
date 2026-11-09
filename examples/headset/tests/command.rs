@@ -29,10 +29,18 @@ fn it_takes_the_tomori_command_line() {
 }
 
 #[test]
-fn its_headset_and_windows_need_a_runtime_or_a_display() {
+fn its_headset_needs_a_runtime() {
     let output = headset(&["--xr"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("OpenXR"));
+}
+
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "only Linux runs a program without a display, by leaving out DISPLAY and WAYLAND_DISPLAY; elsewhere the window opens and waits to be closed"
+)]
+fn its_windows_need_a_display() {
     for arguments in [&[][..], &["--desktop"]] {
         assert!(!headset(arguments).status.success(), "{arguments:?}");
     }

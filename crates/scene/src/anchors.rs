@@ -586,8 +586,17 @@ mod tests {
 
     #[test]
     fn an_arrival_carries_the_environment_so_that_home_is_the_origin_facing_minus_z() {
-        // By default, it leaves everything where it is.
-        assert_eq!(Anchor::carriage(&Pose::HOME), Some(Anchor::HOME));
+        // By default, it leaves everything where it is, to within a rounding: macOS's `atan2f(0, −1)` is one step below
+        // the π that the compiler folds home's yaw to, which turns it by 2.4e-7 rad.
+        let home = Anchor::carriage(&Pose::HOME).unwrap();
+        assert!(close(home.position, Vec3::ZERO), "{home:?}");
+        assert!(
+            home.orientation.abs_diff_eq(Quat::IDENTITY, 1e-6),
+            "{home:?}"
+        );
+        // Exactly, where the compiler's π and the library's agree, as the shortcuts that compare with `HOME` rely on.
+        #[cfg(target_os = "linux")]
+        assert_eq!(home, Anchor::HOME);
         // Arriving 8 m along +X, facing −X: the environment's origin is 8 m ahead of home.
         let street = Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
         let carriage = Anchor::carriage(&street).unwrap();
