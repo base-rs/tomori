@@ -627,8 +627,12 @@ impl Hub {
                 }
             }
         }
+        // Changed first, it is locked as it now is, which a wall shown, not put back, always may be.
         if !lock_first && let Some(locked) = asked {
-            relocked = record.stage.lock_wall(&walls, &id, locked, false)?;
+            relocked = record
+                .stage
+                .lock_wall(&walls, &id, locked, false)
+                .expect("a wall shown locks");
         }
         changed |= relocked;
         let after = record.stage.view(&space, &walls, now);

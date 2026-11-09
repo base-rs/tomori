@@ -4301,7 +4301,8 @@ mod tests {
             .iter()
             .map(|panel| match place(panel) {
                 Place::Free { pose } => pose,
-                other => panic!("{other:?}"),
+                // The wall's two slots are taken, so the rest float.
+                _ => unreachable!("floating"),
             })
             .collect();
         let wall = view.wall("environment-0").unwrap();
