@@ -494,6 +494,11 @@ mod tests {
             ["(ˌIdˈi), ”ˌIdˈi, pˈænᵊl ˌIdˈi ænd sˈɛʃənˌIdˈi."]
         );
         assert_eq!(pronounced("The panel's id's text.", "id's"), ["ˌIdˈiz"]);
+        // In camel case, as normalization divides it.
+        assert_eq!(
+            sentences("The panelId and sessionIds."),
+            ["ðə pˈænᵊl ˌIdˈi ænd sˈɛʃən ˌIdˈiz."]
+        );
         // Not within a word.
         assert_eq!(
             sentences("I did have an idea, and it is valid."),

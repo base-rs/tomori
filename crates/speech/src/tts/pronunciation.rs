@@ -33,6 +33,10 @@ static RUN: LazyLock<Regex> =
 static POSSESSIVE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^['’]s\b").expect("a valid pattern"));
 
+/// What may follow a word joined to it in a run: `-`, `.` or `_`, then a letter or digit.
+static JOINED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[-._][\p{L}\p{N}]").expect("a valid pattern"));
+
 /// A word of a run.
 static PART: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]+").expect("a valid pattern"));
@@ -161,8 +165,10 @@ impl Pronunciations {
             }
             protected.push_str(&text[end..run.start()]);
             end = run.end();
+            // Not "'s" that a further word is joined to, as in "API's-based", whose "s-based" is a run of its own.
             let possessive = POSSESSIVE
                 .find(&text[run.end()..])
+                .filter(|possessive| !JOINED.is_match(&text[run.end() + possessive.end()..]))
                 .map_or("", |possessive| possessive.as_str());
             if self.words.contains_key(&run.as_str().to_lowercase()) {
                 if mark(&mut protected, run.as_str(), possessive) {
@@ -175,12 +181,32 @@ impl Pronunciations {
                 let (start, finish) = (run.start() + part.start(), run.start() + part.end());
                 protected.push_str(&text[within..start]);
                 let last = finish == run.end();
-                if mark(
-                    &mut protected,
-                    part.as_str(),
-                    if last { possessive } else { "" },
-                ) && last
+                let possessive = if last { possessive } else { "" };
+                let word = part.as_str();
+                // A word in camel case, such as "panelId", is read as its words, as normalization divides it, so each of them that has a pronunciation is marked, unless the whole word has one.
+                let pieces = camel_pieces(word);
+                let marked = if self.words.contains_key(&word.to_lowercase())
+                    || !pieces
+                        .iter()
+                        .any(|piece| self.words.contains_key(&piece.to_lowercase()))
                 {
+                    mark(&mut protected, word, possessive)
+                } else {
+                    let mut marked = false;
+                    for (index, piece) in pieces.iter().enumerate() {
+                        if index > 0 {
+                            protected.push(' ');
+                        }
+                        let final_piece = index + 1 == pieces.len();
+                        marked = mark(
+                            &mut protected,
+                            piece,
+                            if final_piece { possessive } else { "" },
+                        );
+                    }
+                    marked
+                };
+                if marked && last {
                     end += possessive.len();
                 }
                 within = finish;
@@ -190,6 +216,26 @@ impl Pronunciations {
         protected.push_str(&text[end..]);
         (protected, marks)
     }
+}
+
+/// The words of `word` in camel case, divided where normalization divides them, before a capital that follows a lowercase letter and precedes another, so that "panelId" is "panel" and "Id", but "macOS" and "OpenXR" are whole.
+fn camel_pieces(word: &str) -> Vec<&str> {
+    let characters: Vec<(usize, char)> = word.char_indices().collect();
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (position, &(index, capital)) in characters.iter().enumerate().skip(1) {
+        let lower = |at: usize| {
+            characters
+                .get(at)
+                .is_some_and(|(_, c)| c.is_ascii_lowercase())
+        };
+        if capital.is_ascii_uppercase() && lower(position - 1) && lower(position + 1) {
+            pieces.push(&word[start..index]);
+            start = index;
+        }
+    }
+    pieces.push(&word[start..]);
+    pieces
 }
 
 /// `word` as it is written in its markup, which the phonemizer tokenizes as it tokenizes text: as it is, except "id", which its tokenizer, following spaCy's, reads as "I'd", and "Id." as an abbreviation, losing the full stop that ends a sentence, so it is written "ID", which it reads as one word.
@@ -297,6 +343,13 @@ mod tests {
                 "The [README's](/ɹˈidmiz/), [ONNX’s](/ˈɑnɪksᵻz/) and sherpa_[onnx's](/ˈɑnɪksᵻz/), but not [README](/ɹˈidmi/)'sx.",
             ),
             ("ONNX_rt's and Bob's.", "[ONNX](/ˈɑnɪks/)_rt's and Bob's."),
+            // Not "'s" with a further word joined to it.
+            ("README's-based.", "[README](/ɹˈidmi/)'s-based."),
+            // Words in camel case, as normalization divides them, but not a whole word with a pronunciation, or one with no words that have one.
+            (
+                "getReadmeOnnx's, ReadmeFile, ReadMe, macONNX and OpenXR.",
+                "get [Readme](/ɹˈidmi/) [Onnx's](/ˈɑnɪksᵻz/), [Readme](/ɹˈidmi/) File, [ReadMe](/ɹˈidmi/), macONNX and OpenXR.",
+            ),
             ("Nothing to mark.", "Nothing to mark."),
         ] {
             assert_eq!(marked(&pronunciations, text), expected, "{text}");
