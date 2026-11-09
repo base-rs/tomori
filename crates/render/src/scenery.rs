@@ -99,6 +99,7 @@ pub struct Sceneries {
     locomotion: Vec<(Environment, Locomotion)>,
     over_grid: Vec<Environment>,
     client_sides: Vec<(Environment, tomori_scene::client_side::Factory)>,
+    worker_placements: Vec<(Environment, tomori_scene::anchors::Placement)>,
     licenses: Vec<(&'static str, &'static str)>,
 }
 
@@ -170,6 +171,26 @@ impl Sceneries {
     /// The client sides registered for each environment, for the conversation.
     pub fn client_sides(&self) -> Vec<(Environment, tomori_scene::client_side::Factory)> {
         self.client_sides.clone()
+    }
+
+    /// Place the delegated workers of a space bound to the environment `id`, where this build draws it, by `placement`,
+    /// about the workers anchor its server gives, in place of any registered before for it, rather than on the default
+    /// arc. See `design/environments.md`.
+    pub fn set_worker_placement(
+        &mut self,
+        id: &'static str,
+        placement: impl tomori_scene::anchors::WorkerPlacement + 'static,
+    ) {
+        let environment = Environment::new(id);
+        self.worker_placements
+            .retain(|(declared, _)| *declared != environment);
+        self.worker_placements
+            .push((environment, Arc::new(placement)));
+    }
+
+    /// The worker placements registered for each environment, for the conversation.
+    pub fn worker_placements(&self) -> Vec<(Environment, tomori_scene::anchors::Placement)> {
+        self.worker_placements.clone()
     }
 
     /// The locomotion declared for each environment, for the conversation.
@@ -329,6 +350,42 @@ mod tests {
             ))
             .drawn
             .is_none()
+        );
+    }
+
+    /// A placement that stands every worker at its origin.
+    struct AtOrigin;
+
+    impl tomori_scene::anchors::WorkerPlacement for AtOrigin {
+        fn place(
+            &self,
+            origin: tomori_scene::anchors::Anchor,
+            _worker: &tomori_scene::anchors::Placing<'_>,
+        ) -> Vec3 {
+            origin.position
+        }
+    }
+
+    #[test]
+    fn worker_placements_are_registered_by_identifier_and_none_by_default() {
+        assert!(Sceneries::default().worker_placements().is_empty());
+        let mut sceneries = Sceneries::empty();
+        sceneries.set_worker_placement("floor", AtOrigin);
+        sceneries.set_worker_placement("deck", AtOrigin);
+        // Registering an identifier again replaces it, at the end.
+        sceneries.set_worker_placement("floor", AtOrigin);
+        let registered = sceneries.worker_placements();
+        let ids: Vec<&str> = registered
+            .iter()
+            .map(|(environment, _)| environment.id())
+            .collect();
+        assert_eq!(ids, ["deck", "floor"]);
+        let origin = tomori_scene::anchors::Anchor::AGENT;
+        assert_eq!(
+            registered[0]
+                .1
+                .place(origin, &tomori_scene::anchors::Placing::new("ses_1", 0)),
+            origin.position
         );
     }
 

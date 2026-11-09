@@ -711,12 +711,14 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
         [0.0, 0.0, 1.0]
     };
     let right = [normal[2], 0.0, -normal[0]];
-    let pixel = 0.0038;
+    // Beyond reading distance from home, drawn larger in proportion, so that it reads as one there does.
+    let scale = sign_scale(station.position);
+    let pixel = SIGN_PIXEL * scale;
     let half_width = (SIGN_COLUMNS * 9) as f32 * pixel * 0.5;
     Panel {
         origin: [
             sx + normal[0] * 0.10 - right[0] * half_width,
-            sy + 0.42,
+            sy + SIGN_RISE * scale,
             sz + normal[2] * 0.10 - right[2] * half_width,
         ],
         pixel,
@@ -754,44 +756,108 @@ fn label_lines(title: &str, status: &str) -> Vec<String> {
     lines
 }
 
-/// Stable retained placement for legacy/arbitrary same-bearing snapshots.
-/// Normal scene stations already occupy the shared, non-overlapping lattice.
-/// Arbitrary old snapshots are assigned the nearest free cell, rather than
-/// letting a hostile near-home panel occupy most of the observer's sightlines.
-/// Worker anchors never move. Placements survive metadata/status/order changes
-/// and are bounded by the supported station set. A post preserves association.
+/// How far above a sign the next row of signs stands, in metres, when stations stand together: as the default arc's
+/// closest rows, whose signs never overlap; more for a sign drawn larger (see [`sign_scale`]).
+const SIGN_ROW: f32 = 0.55;
+/// The most rows of signs above a station, so that signs stand at most 4.95 m above it, or more for a sign drawn larger.
+const SIGN_ROWS: usize = 10;
+/// How far apart, along the arc about home, the columns of signs stand when stations stand together, in metres: wider
+/// than a sign, as the default arc's columns are; more for a sign drawn larger.
+const SIGN_COLUMN: f32 = 1.1;
+/// The columns of signs about a station, as seen from home: its own, then alternately right and left of it, as many as
+/// fit within [`SIGN_SPREAD`] of its bearing from home.
+const SIGN_COLUMNS_AROUND: [i8; 15] = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7];
+/// How far to either side of a station's bearing from home its sign may stand, in radians: 30°, so that a sign moved
+/// aside stays near its station, rather than standing over another cluster, and signs stack sooner.
+const SIGN_SPREAD: f32 = std::f32::consts::FRAC_PI_6;
+/// How far apart two signs must be, vertically or else horizontally, in metres, not to overlap: closer than the default
+/// arc's rows and columns, so that each of its signs stands above its own station; more for signs drawn larger.
+const SIGN_APART: [f32; 2] = [0.5, 1.0];
+/// How far above its station a sign stands in its own place; more for a sign drawn larger.
+const SIGN_RISE: f32 = 0.42;
+/// How large a sign's font pixel is, in metres, within [`SIGN_REACH`] of home.
+const SIGN_PIXEL: f32 = 0.0038;
+/// How far from home a sign is drawn at [`SIGN_PIXEL`], in metres: the default arc's radius, so that its signs are as
+/// they were, within about the distance their text is comfortable to read from (see `design/text.md`); beyond it, as
+/// about an agent's home across a yard or on a balcony, a sign is drawn larger in proportion, the same image at the
+/// same sharpness, so that it reads as one on the arc does.
+const SIGN_REACH: f32 = 3.2;
+
+/// How much larger the sign of a station at `station` is drawn than one within [`SIGN_REACH`] of home, and its rows,
+/// columns and rise spaced: 1 within it, and in proportion to the station's distance from home, horizontally, beyond.
+fn sign_scale(station: [f32; 3]) -> f32 {
+    (station[0].hypot(station[2]) / SIGN_REACH).max(1.0)
+}
+
+/// Where each station's sign stands: above its own station, wherever it stands, as the default arc and an environment's
+/// placement put it; or, when another sign is already within [`SIGN_APART`] of that, at the place nearest its own clear
+/// of every other sign, row by row above it, at most [`SIGN_ROWS`], and column by column beside it along the arc about
+/// home, within [`SIGN_SPREAD`] of its bearing, so that stations placed together, or at one spot, do not share a sign's
+/// place, and a sign rises above its station before it moves far aside. Where every such place is taken, as for very
+/// many stations at one spot, the sign stands above its own station, overlapping another, rather than further off. A
+/// sign stays where it is while its station does, through metadata, status, order and membership changes; when
+/// stations move, as when the workers' arrangement changes, every moved station's sign is forgotten before any is
+/// placed again, so that none is pushed aside by where a neighbour's stood. A post preserves association. Kept by
+/// identity: the sign's place, then the station's place it was worked out for.
 #[derive(Default)]
-struct LabelPlacement(std::collections::BTreeMap<String, [f32; 3]>);
+struct LabelPlacement(
+    std::collections::BTreeMap<String, [f32; 3]>,
+    std::collections::BTreeMap<String, [f32; 3]>,
+);
 
 impl LabelPlacement {
+    /// Keep the signs of `stations` that have not moved, forgetting those of stations that have gone or moved.
     fn retain(&mut self, stations: &[&Station]) {
-        self.0.retain(|id, _| {
+        let unmoved = |id: &String| {
             stations
                 .binary_search_by(|s| s.id.as_str().cmp(id.as_str()))
-                .is_ok()
-        });
+                .is_ok_and(|index| self.1.get(id) == Some(&stations[index].position))
+        };
+        let kept: std::collections::BTreeSet<String> =
+            self.0.keys().filter(|id| unmoved(id)).cloned().collect();
+        self.0.retain(|id, _| kept.contains(id));
+        self.1.retain(|id, _| kept.contains(id));
     }
 
     fn position(&mut self, station: &Station) -> [f32; 3] {
         if let Some(position) = self.0.get(&station.id) {
             return *position;
         }
-        // At most 127 existing labels reserve cells; 192 fixed cells fit every
-        // supported station even under adversarial bearings and title lengths.
-        let position = (0..192)
-            .map(crate::delegation::slot_position)
-            .map(|p| p.to_array())
-            .filter(|p| !self.0.values().any(|occupied| *occupied == *p))
-            .min_by(|a, b| {
-                glam::Vec3::from_array(*a)
-                    .distance_squared(glam::Vec3::from_array(station.position))
-                    .total_cmp(
-                        &glam::Vec3::from_array(*b)
-                            .distance_squared(glam::Vec3::from_array(station.position)),
-                    )
+        let own = glam::Vec3::from_array(station.position);
+        let scale = sign_scale(station.position);
+        // The angle about home between columns, a column apart at the station's distance, or half a turn nearer.
+        let step = 2.0
+            * (SIGN_COLUMN * scale * 0.5 / own.x.hypot(own.z))
+                .min(1.0)
+                .asin();
+        let place = |row: usize, column: i8| {
+            let beside = if column == 0 {
+                own
+            } else {
+                glam::Quat::from_rotation_y(f32::from(column) * step) * own
+            };
+            beside + glam::Vec3::Y * (row as f32 * SIGN_ROW * scale)
+        };
+        let clear = |candidate: &glam::Vec3| {
+            self.0.iter().all(|(id, other)| {
+                let apart = scale.max(self.1.get(id).map_or(1.0, |station| sign_scale(*station)));
+                let other = glam::Vec3::from_array(*other);
+                (candidate.y - other.y).abs() >= SIGN_APART[0] * apart
+                    || (candidate.x - other.x).hypot(candidate.z - other.z) >= SIGN_APART[1] * apart
             })
-            .expect("192 distinct label cells fit the 128 station input bound");
+        };
+        let columns = SIGN_COLUMNS_AROUND
+            .into_iter()
+            .filter(|column| f32::from(column.unsigned_abs()) * step <= SIGN_SPREAD + 1e-4);
+        // Nearest its own place first, so that it rises before it moves far aside; the first of equals by row.
+        let mut candidates: Vec<glam::Vec3> = (0..SIGN_ROWS)
+            .flat_map(|row| columns.clone().map(move |column| (row, column)))
+            .map(|(row, column)| place(row, column))
+            .collect();
+        candidates.sort_by(|a, b| a.distance_squared(own).total_cmp(&b.distance_squared(own)));
+        let position = candidates.into_iter().find(clear).unwrap_or(own).to_array();
         self.0.insert(station.id.clone(), position);
+        self.1.insert(station.id.clone(), station.position);
         position
     }
 }
@@ -1109,9 +1175,12 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
     if let Some(sign) = &panel.sign {
         let center = panel.center();
         let station = glam::Vec3::from_array(sign.station);
-        // A displaced legacy label keeps a thin, literal station association;
-        // this is a signpost, not an inferred worker communication edge.
-        if (center.x - station.x).hypot(center.z - station.z) > 0.2 {
+        // A sign moved off its own place, beside its station or above it, keeps a
+        // thin, literal station association; this is a signpost, not an inferred
+        // worker communication edge.
+        if (center.x - station.x).hypot(center.z - station.z) > 0.2
+            || (panel.origin[1] - station.y - SIGN_RISE * sign_scale(sign.station)).abs() > 0.01
+        {
             for (index, side) in [(2, 1.0), (4, 1.0), (5, -1.0)] {
                 mesh[start + index].position = (station
                     + glam::Vec3::Y * 0.18
@@ -1383,8 +1452,11 @@ mod tests {
                     );
                     assert_eq!(panel.lines.last().unwrap(), "UNKNOWN");
                     assert_eq!(panel.sign.as_ref().unwrap().station, stations[i].position);
+                    // At one spot, the signs about it hold 30 stations apart, three columns within 30° of ten rows;
+                    // beyond that they may overlap, rather than stand far off (see `LabelPlacement`).
                     assert!(
-                        panels[i + 1..].iter().all(|other| !overlaps(panel, other)),
+                        (legacy && count > 30)
+                            || panels[i + 1..].iter().all(|other| !overlaps(panel, other)),
                         "overlap: count={count}, legacy={legacy}, source={i}"
                     );
                 }
@@ -1453,6 +1525,232 @@ mod tests {
                 assert!(!overlaps(panel, other), "cell envelopes overlap: {i}, {j}");
             }
         }
+    }
+
+    #[test]
+    fn a_sign_stands_above_its_own_station_and_beside_those_placed_with_it() {
+        let station = |id: &str, position: [f32; 3]| Station {
+            id: id.into(),
+            title: "A title".into(),
+            state: State::Running,
+            opacity: 1.0,
+            position,
+        };
+        let mut placements = LabelPlacement::default();
+        // Placed by an environment off the default arc, or near home, a sign stands above its own station.
+        for alone in [
+            station("pod", [6.0, 1.2, -9.0]),
+            station("home", [0.5, 1.6, -0.5]),
+        ] {
+            assert_eq!(placements.position(&alone), alone.position);
+        }
+        // Stations clustered about the pod, 10.8 m from home, stand their signs nearest their own place first: rising
+        // in rows above it, before moving aside, each row as far apart as their larger signs need, clear of the others,
+        // and within 30° of their bearing from home.
+        let cluster: Vec<Station> = (0..3)
+            .map(|i| station(&format!("near-{i}"), [6.0 + 0.1 * i as f32, 1.2, -9.0]))
+            .collect();
+        let scale = sign_scale([6.0, 1.2, -9.0]);
+        assert!((scale - 6f32.hypot(9.0) / SIGN_REACH).abs() < 1e-5);
+        let signs: Vec<glam::Vec3> = cluster
+            .iter()
+            .map(|near| glam::Vec3::from_array(placements.position(near)))
+            .collect();
+        // The first rises a row, rather than moving a column aside.
+        let first = signs[0];
+        assert!((first.y - (1.2 + SIGN_ROW * scale)).abs() < 1e-4, "{first}");
+        let bearing = |at: glam::Vec3| at.x.atan2(-at.z);
+        for (index, (sign, near)) in signs.iter().zip(&cluster).enumerate() {
+            let near = glam::Vec3::from_array(near.position);
+            assert!((bearing(*sign) - bearing(near)).abs() <= SIGN_SPREAD + 1e-4);
+            // Near its station: a row or two up, or a column aside.
+            assert!(
+                sign.distance(near) <= 2.0 * SIGN_ROW * scale + 0.2,
+                "{index}: {sign}"
+            );
+            for other in signs[index + 1..]
+                .iter()
+                .chain([&glam::Vec3::new(6.0, 1.2, -9.0)])
+            {
+                assert!(
+                    (sign.y - other.y).abs() >= SIGN_APART[0] * scale - 1e-4
+                        || (sign.x - other.x).hypot(sign.z - other.z)
+                            >= SIGN_APART[1] * scale - 1e-4,
+                    "{index}: {sign} {other}"
+                );
+            }
+        }
+        // Stations at one spot near home, where columns about home cannot part them, stack in rows above it.
+        let mut stacked = LabelPlacement::default();
+        let rows: Vec<f32> = (0..3)
+            .map(|i| stacked.position(&station(&format!("at-{i}"), [0.0, 1.0, 0.0]))[1])
+            .collect();
+        assert_eq!(rows, [1.0, 1.0 + SIGN_ROW, 1.0 + 2.0 * SIGN_ROW]);
+        // A station that moves takes its sign with it, and the place it left is free again.
+        let moved = station("pod", [-6.0, 1.2, -9.0]);
+        let mut all: Vec<&Station> = cluster.iter().chain([&moved]).collect();
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        placements.retain(&all);
+        assert_eq!(placements.position(&moved), moved.position);
+        assert_eq!(placements.0.len(), 4);
+        assert!(!placements.0.contains_key("home"));
+    }
+
+    #[test]
+    fn signs_at_one_spot_stay_within_30_degrees_and_ten_rows_and_then_overlap() {
+        let station = |i: usize, position: [f32; 3]| Station {
+            id: format!("w-{i:02}"),
+            title: "A title".into(),
+            state: State::Running,
+            opacity: 1.0,
+            position,
+        };
+        // 64 at one spot 2 m ahead, and 64 at one spot just ahead of home, where columns cannot part them.
+        for spot in [[0.0, 1.2, -2.0], [0.0, 1.2, -0.3]] {
+            let stations: Vec<Station> = (0..64).map(|i| station(i, spot)).collect();
+            let mut placements = LabelPlacement::default();
+            let signs: Vec<glam::Vec3> = stations
+                .iter()
+                .map(|s| glam::Vec3::from_array(placements.position(s)))
+                .collect();
+            for sign in &signs {
+                // Within 30° of the spot's bearing from home, so never behind the participant, nor more than ten rows
+                // up.
+                assert!(sign.x.atan2(-sign.z).abs() <= SIGN_SPREAD + 1e-4, "{sign}");
+                assert!(sign.z <= 1e-4, "{sign}");
+                assert!(sign.y <= 1.2 + 9.0 * SIGN_ROW + 1e-4, "{sign}");
+                assert!(sign.y >= 1.2 - 1e-4, "{sign}");
+            }
+            if spot[2] == -0.3 {
+                // Only one column fits near home: ten rows, and then the rest stand on the station, overlapping.
+                assert_eq!(signs[9].y, 1.2 + 9.0 * SIGN_ROW);
+                assert_eq!(signs[10], glam::Vec3::from_array(spot));
+            }
+        }
+    }
+
+    #[test]
+    fn a_sign_moved_off_its_own_place_keeps_a_post_down_to_its_station() {
+        let station = Station {
+            id: "w".into(),
+            title: "A title".into(),
+            state: State::Running,
+            opacity: 1.0,
+            position: [0.0, 1.2, -3.0],
+        };
+        let post_bottom = |sign: [f32; 3]| {
+            let panel = station_panel(&station, sign, State::Running);
+            let mut mesh = Vec::new();
+            panel_mesh(&panel, &mut mesh);
+            mesh[..6]
+                .iter()
+                .map(|vertex| vertex.position[1])
+                .fold(f32::INFINITY, f32::min)
+        };
+        // In its own place, its post is its own, hanging below the sign rather than drawn to the station.
+        assert!((post_bottom(station.position) - (1.2 + 0.18)).abs() > 1e-3);
+        // Stacked straight above it, or beside it, the post reaches down to just above the station.
+        for moved in [[0.0, 1.2 + 2.0 * SIGN_ROW, -3.0], [1.1, 1.2, -2.8]] {
+            assert!(
+                (post_bottom(moved) - (1.2 + 0.18)).abs() < 1e-4,
+                "{moved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_turn_or_shift_of_the_arrangement_leaves_every_sign_above_its_worker() {
+        use crate::delegation::{Node, Scene, Workspace};
+        use tomori_scene::anchors::Anchor;
+        let workspace = Workspace {
+            nodes: (0..16)
+                .map(|i| Node {
+                    id: format!("w-{i:02}"),
+                    parent_id: Some("root".into()),
+                    title: format!("Task {i}"),
+                    state: State::Running,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        for arrangement in [
+            Anchor {
+                orientation: glam::Quat::from_rotation_y(1_f32.to_radians()),
+                ..Anchor::AGENT
+            },
+            Anchor {
+                position: tomori_scene::swarm::CENTER + glam::Vec3::new(0.05, 0.0, 0.0),
+                ..Anchor::AGENT
+            },
+        ] {
+            let mut scene = Scene::new();
+            let mut placements = LabelPlacement::default();
+            scene.update(Some("root"), &workspace, 0.0);
+            layout(&workspace, scene.stations(), 0, 0, &[], &mut placements);
+            scene.arrange(arrangement, None);
+            scene.update(Some("root"), &workspace, 0.0);
+            layout(&workspace, scene.stations(), 0, 0, &[], &mut placements);
+            for station in scene.stations() {
+                assert_eq!(
+                    placements.0[&station.id], station.position,
+                    "{}",
+                    station.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signs_follow_their_workers_when_the_arrangement_moves_and_back() {
+        use crate::delegation::{Node, Scene, Workspace};
+        use tomori_scene::anchors::Anchor;
+        let workspace = Workspace {
+            nodes: (0..3)
+                .map(|i| Node {
+                    id: format!("w-{i}"),
+                    parent_id: Some("root".into()),
+                    title: format!("Task {i}"),
+                    state: State::Running,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut scene = Scene::new();
+        let mut placements = LabelPlacement::default();
+        let signs = |scene: &Scene, placements: &mut LabelPlacement| {
+            let (panels, _) = layout(&workspace, scene.stations(), 0, 0, &[], placements);
+            panels
+                .iter()
+                .map(|panel| (panel.sign.clone().unwrap().source_id, panel.origin))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        scene.update(Some("root"), &workspace, 0.0);
+        let home = signs(&scene, &mut placements);
+        // The space moves to an environment whose workers anchor stands 6 m further off: every sign moves with its worker.
+        let away = Anchor {
+            position: tomori_scene::swarm::CENTER + glam::Vec3::new(0.0, 0.0, -6.0),
+            ..Anchor::AGENT
+        };
+        scene.arrange(away, None);
+        scene.update(Some("root"), &workspace, 0.0);
+        let moved = signs(&scene, &mut placements);
+        for (id, origin) in &moved {
+            let station = scene.stations().iter().find(|s| &s.id == id).unwrap();
+            // Above its worker, drawn larger so far off, and within 30° of its bearing from home.
+            assert!(
+                origin[1] >= station.position[1] + SIGN_RISE * sign_scale(station.position) - 1e-4
+            );
+            let bearing = |at: [f32; 3]| at[0].atan2(-at[2]);
+            assert!(
+                (bearing(*origin) - bearing(station.position)).abs() <= SIGN_SPREAD + 0.2,
+                "{id}"
+            );
+            assert!((home[id][2] - origin[2]).abs() > 3.0, "{id}");
+        }
+        // And back, where they were.
+        scene.arrange(Anchor::AGENT, None);
+        scene.update(Some("root"), &workspace, 0.0);
+        assert_eq!(signs(&scene, &mut placements), home);
     }
 
     #[test]

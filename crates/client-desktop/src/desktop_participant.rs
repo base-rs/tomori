@@ -96,6 +96,7 @@ impl Participant {
         conversation.set_over_grid(sceneries.over_grid());
         conversation.set_locomotion(sceneries.locomotion());
         conversation.set_client_sides(sceneries.client_sides());
+        conversation.set_worker_placements(sceneries.worker_placements());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,
@@ -455,6 +456,19 @@ mod tests {
         });
     }
 
+    /// A worker placement that stands every worker at its origin.
+    struct AtOrigin;
+
+    impl tomori_scene::anchors::WorkerPlacement for AtOrigin {
+        fn place(
+            &self,
+            origin: tomori_scene::anchors::Anchor,
+            _worker: &tomori_scene::anchors::Placing<'_>,
+        ) -> glam::Vec3 {
+            origin.position
+        }
+    }
+
     #[test]
     fn after_travelling_the_window_draws_the_space_and_its_panels_from_where_the_participant_is() {
         use glam::{Quat, Vec3};
@@ -474,7 +488,18 @@ mod tests {
                 "sky",
                 Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
             );
+            sceneries.set_worker_placement("sky", AtOrigin);
             let mut window = Participant::with_sceneries(gpu, conversation, connection, &sceneries);
+            // The build's worker placement reaches the conversation, as its client sides do.
+            let placements = window.conversation.worker_placements();
+            assert_eq!(placements.len(), 1);
+            assert_eq!(
+                placements[0].1.place(
+                    tomori_scene::anchors::Anchor::AGENT,
+                    &tomori_scene::anchors::Placing::new("ses_1", 0)
+                ),
+                tomori_scene::swarm::CENTER
+            );
             let mut surface = TestSurface::new(&device, FORMAT);
             let input = |window: &mut Participant, surface: &mut TestSurface, input| {
                 window.input(input, surface).unwrap();

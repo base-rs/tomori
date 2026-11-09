@@ -107,6 +107,8 @@ pub struct Feed {
     workers: Workers,
     scene: Scene,
     swarm: SwarmAnimation,
+    /// The agent's home as the swarm last stood at it, so that it appears at a new one, as the headset's does.
+    agent_home: tomori_scene::anchors::Anchor,
     sequence: u64,
     /// The scenery shown outside a space, or in one from a server that names no environment, from `TOMORI_ENVIRONMENT`.
     environment: Environment,
@@ -198,6 +200,7 @@ impl Feed {
             workers: Workers::default(),
             scene: Scene::new(),
             swarm: SwarmAnimation::new(),
+            agent_home: tomori_scene::anchors::Anchor::AGENT,
             sequence: 0,
             environment: Environment::initial(&[]),
             sceneries: Sceneries::empty(),
@@ -210,9 +213,22 @@ impl Feed {
     pub fn with_sceneries(mut self, sceneries: Sceneries) -> Self {
         self.conversation.set_drawable(sceneries.environments());
         self.conversation.set_over_grid(sceneries.over_grid());
+        self.conversation
+            .set_worker_placements(sceneries.worker_placements());
         self.environment = Environment::initial(&sceneries.environments());
         self.sceneries = sceneries;
         self
+    }
+
+    /// Where its swarm stands and faces, as the joined space's environment puts it, for the renderer's rings about it.
+    pub fn swarm_anchor(&self) -> tomori_scene::anchors::Anchor {
+        self.swarm.swarm.anchor()
+    }
+
+    /// The carriage from the joined space's environment's own coordinates, in which its scenery draws, into the
+    /// space's, for the renderer. See `design/environments.md`.
+    pub fn carriage(&self) -> tomori_scene::anchors::Anchor {
+        self.conversation.arrangement().carriage
     }
 
     /// The sceneries the spectator draws, for its renderer.
@@ -348,6 +364,14 @@ impl Feed {
             }
         };
 
+        // The swarm and the workers stand where the space's environment puts them, by the same rule as the headset. See `design/spectator.md`.
+        let arrangement = self.conversation.arrangement();
+        if arrangement.home != self.agent_home {
+            self.agent_home = arrangement.home;
+            self.swarm.swarm.appear_at(arrangement.agent);
+        } else {
+            self.swarm.swarm.set_anchor(arrangement.agent);
+        }
         // Use the same activity-driven swarm simulation as the headset.
         self.swarm
             .update(self.conversation.activity(), self.conversation.speech(), dt);
@@ -363,6 +387,8 @@ impl Feed {
         // Worker transitions depart from the animated coordinator, as on XR.
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
         self.scene.set_coordinator_samples(&agents);
+        self.scene
+            .arrange(arrangement.workers, arrangement.placement);
         self.scene.update(root, workspace, dt);
 
         // Convert protocol poses to controller poses for the frame.
@@ -722,6 +748,69 @@ mod tests {
             tomori_scene::test_support::SKY
         );
         assert_eq!(versioned(&mut feed, "sky", Some(2)), Environment::MINIMAL);
+    }
+
+    #[test]
+    fn the_spectator_stands_the_swarm_and_workers_where_the_headset_does() {
+        use tomori_scene::anchors::{Anchor, Placing, WorkerPlacement};
+        struct Ahead;
+        impl WorkerPlacement for Ahead {
+            fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
+                origin.place(Vec3::new(worker.slot as f32, 1.5, -2.0))
+            }
+        }
+        let mut sceneries = tomori_render::scenery::test::Counted::default()
+            .sceneries(tomori_scene::test_support::SKY.id());
+        sceneries.set_worker_placement(tomori_scene::test_support::SKY.id(), Ahead);
+        let mut feed = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        )
+        .with_sceneries(sceneries);
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        let agent = tomori_protocol::Pose {
+            position: [3.0, 1.6, -5.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let workers = tomori_protocol::Pose {
+            position: [0.0, 0.0, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(SpaceState {
+                    id: "space".into(),
+                    environment: "sky".into(),
+                    anchors: tomori_protocol::Anchors::new()
+                        .with_agent(agent)
+                        .with_workers(workers),
+                    workers: vec![tomori_protocol::Worker {
+                        id: "ses_a".into(),
+                        parent: None,
+                        title: "Review".into(),
+                        state: tomori_protocol::WorkerState::Running,
+                    }],
+                    ..Default::default()
+                }),
+            }));
+        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        assert_eq!(feed.swarm_anchor(), Anchor::from_pose(&agent).unwrap());
+        // As the headset's frame step places it, by the same placement about the same anchor.
+        assert_eq!(frame.worker_stations[0].position, [0.0, 1.5, -6.0]);
     }
 
     #[test]

@@ -54,9 +54,11 @@ const DOWNWARDS: f32 = 0.02;
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Surface {
-    /// A rectangle aligned with the scene's axes, centred at `centre`, `half` its size along X and Z. Made with [`Surface::rectangle`].
+    /// A rectangle centred at `centre`, `half` its size along its own X and Z, turned `yaw` about the vertical from the
+    /// scene's axes: aligned with them as an environment declares it, with [`Surface::rectangle`], and turned as it is
+    /// carried into a space whose home is elsewhere in the environment (see [`Locomotion::carried`]).
     #[non_exhaustive]
-    Rectangle { centre: Vec3, half: Vec2 },
+    Rectangle { centre: Vec3, half: Vec2, yaw: f32 },
     /// A disc centred at `centre`. Made with [`Surface::disc`].
     #[non_exhaustive]
     Disc { centre: Vec3, radius: f32 },
@@ -68,6 +70,7 @@ impl Surface {
         Self::Rectangle {
             centre,
             half: size.abs() * 0.5,
+            yaw: 0.0,
         }
     }
 
@@ -76,6 +79,22 @@ impl Surface {
         Self::Disc {
             centre,
             radius: radius.abs(),
+        }
+    }
+
+    /// The surface, given in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
+    /// turned with it.
+    pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
+        match *self {
+            Self::Rectangle { centre, half, yaw } => Self::Rectangle {
+                centre: carriage.place(centre),
+                half,
+                yaw: yaw + carriage.yaw(),
+            },
+            Self::Disc { centre, radius } => Self::Disc {
+                centre: carriage.place(centre),
+                radius,
+            },
         }
     }
 
@@ -89,8 +108,14 @@ impl Surface {
     /// Whether `point`, seen from above, is on the surface.
     pub fn contains(&self, point: Vec3) -> bool {
         match *self {
-            Self::Rectangle { centre, half } => {
-                (point.x - centre.x).abs() <= half.x && (point.z - centre.z).abs() <= half.y
+            Self::Rectangle { centre, half, yaw } => {
+                let offset = Vec3::new(point.x - centre.x, 0.0, point.z - centre.z);
+                let local = if yaw == 0.0 {
+                    offset
+                } else {
+                    Quat::from_rotation_y(-yaw) * offset
+                };
+                local.x.abs() <= half.x && local.z.abs() <= half.y
             }
             Self::Disc { centre, radius } => {
                 Vec2::new(point.x - centre.x, point.z - centre.z).length() <= radius
@@ -142,6 +167,29 @@ impl Locomotion {
         match self {
             Self::Fly { ceiling, .. } => Some(*ceiling),
             _ => None,
+        }
+    }
+
+    /// The profile, declared in an environment's own coordinates, in a space's, where `carriage` takes them, as for an
+    /// environment whose participants arrive elsewhere than its origin: its surfaces moved and turned, and its ceiling
+    /// raised or lowered, with it. Unchanged where the carriage leaves everything where it is. See
+    /// `design/environments.md`.
+    pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
+        if *carriage == crate::anchors::Anchor::HOME {
+            return self.clone();
+        }
+        let carry = |surfaces: &[Surface]| {
+            surfaces
+                .iter()
+                .map(|surface| surface.carried(carriage))
+                .collect()
+        };
+        match self {
+            Self::None => Self::None,
+            Self::Teleport { surfaces } => Self::teleport(carry(surfaces)),
+            Self::Fly { surfaces, ceiling } => {
+                Self::fly(carry(surfaces), ceiling + carriage.position.y)
+            }
         }
     }
 
@@ -1182,5 +1230,40 @@ mod tests {
             }),
             Outcome::default()
         );
+    }
+
+    #[test]
+    fn a_profile_declared_in_the_environment_s_coordinates_is_carried_into_the_space_s() {
+        // A deck 4 m by 1 m along X at the environment's origin, and participants arriving 8 m along +X, raised 0.5 m,
+        // facing its origin: in the space, the deck stands 8 m ahead, 0.5 m lower, and runs along Z.
+        let deck = Locomotion::fly(
+            vec![Surface::rectangle(
+                Vec3::new(0.0, 0.5, 0.0),
+                Vec2::new(4.0, 1.0),
+            )],
+            6.0,
+        );
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        let carried = deck.carried(&carriage);
+        assert_eq!(carried.ceiling(), Some(5.5));
+        let surface = carried.surfaces()[0];
+        assert!(surface.height().abs() < 1e-5);
+        assert!(surface.contains(Vec3::new(0.0, 0.0, -9.9)));
+        assert!(surface.contains(Vec3::new(0.4, 0.0, -8.0)));
+        assert!(!surface.contains(Vec3::new(1.0, 0.0, -8.0)));
+        // A ray from home lands on it there.
+        let landing = carried
+            .landing(&ray(Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.0, -7.0)))
+            .expect("lands");
+        assert!(
+            landing.distance(Vec3::new(0.0, 0.0, -7.0)) < 1e-3,
+            "{landing}"
+        );
+        // Unmoved, it is as declared; and none stays none.
+        assert_eq!(deck.carried(&crate::anchors::Anchor::HOME), deck);
+        assert_eq!(Locomotion::None.carried(&carriage), Locomotion::None);
+        let discs = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 1.0)]).carried(&carriage);
+        assert!(discs.surfaces()[0].contains(Vec3::new(0.0, 0.0, -8.5)));
     }
 }

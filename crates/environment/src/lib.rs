@@ -5,6 +5,8 @@
 //!
 //! An environment may have a server side: a program in the Tomori server that runs while a space is bound to the environment, and that can reach whatever the server can. The server starts it with the [`Space`] it runs for, on a thread of its own, and cancels it when the space is bound to another environment, closes, or the server stops; see `design/environments.md`.
 //!
+//! [`sightlines`] holds the rule every environment's tests check of where it has participants arrive and puts the Tomori wall's home and the agent's: that the wall can be read, and the agent seen, from the arrival.
+//!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them.
 use std::collections::VecDeque;
 use std::fmt;
@@ -12,6 +14,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use base_scheduler::Cancellation;
+
+pub mod sightlines;
 
 /// Why a server side stopped before its space was done with it, as the space shows it.
 ///

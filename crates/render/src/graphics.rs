@@ -7,7 +7,7 @@ use crate::{
     environment::Environment,
     hands::Hand,
     interaction::Mode,
-    swarm::{AGENT_COUNT, CENTER, Swarm},
+    swarm::{AGENT_COUNT, Swarm},
 };
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
@@ -117,6 +117,9 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
+    /// The transform from the environment's own coordinates, in which its scenery draws, into the space's, where home
+    /// is the origin facing −Z. See `design/environments.md`.
+    carriage: Mat4,
     /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
     landing: Option<glam::Vec3>,
     /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -320,6 +323,7 @@ impl Renderer {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
             reveal: None,
+            carriage: Mat4::IDENTITY,
             landing: None,
             blink: 0.0,
             blink_pipeline,
@@ -491,11 +495,22 @@ impl Renderer {
         }
     }
 
+    /// Draw the environment's scenery, in its own coordinates, carried into the space's by `carriage`, as for an
+    /// environment whose participants arrive elsewhere than its origin, from the next [`Self::set_scenery`]. See
+    /// `design/environments.md`.
+    pub fn set_carriage(&mut self, carriage: tomori_scene::anchors::Anchor) {
+        self.carriage = Mat4::from_rotation_translation(carriage.orientation, carriage.position);
+    }
+
     /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
     pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
         self.environment = scenery.environment;
         self.reveal = scenery.reveal;
-        let reveal = scenery.reveal.map(|sphere| (sphere.centre, sphere.radius));
+        // The scenery reveals its own coordinates: the sphere's centre, in the space's, carried back into them.
+        let back = self.carriage.inverse();
+        let reveal = scenery
+            .reveal
+            .map(|sphere| (back.transform_point3(sphere.centre), sphere.radius));
         for (_, scenery) in &mut self.sceneries {
             scenery.set_reveal(reveal);
         }
@@ -529,14 +544,17 @@ impl Renderer {
         if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
-        // Keep the coordinator's orientation ring in both environments.
+        // Keep the coordinator's orientation ring in both environments, on the floor beneath the swarm wherever it stands:
+        // on the room's floor, or, for a swarm raised above its usual height, on the floor it would stand that high over.
+        let centre = swarm.anchor().position;
+        let floor = (centre.y - crate::swarm::CENTER.y).max(0.0) + 0.015;
         for n in 0..40 {
             let angle = n as f32 * std::f32::consts::TAU / 40.0;
             self.scene.push(Instance {
                 position: [
-                    CENTER.x + angle.cos() * 1.25,
-                    0.015,
-                    CENTER.z + angle.sin() * 1.25,
+                    centre.x + angle.cos() * 1.25,
+                    floor,
+                    centre.z + angle.sin() * 1.25,
                 ],
                 scale: [0.035, 0.015, 0.035],
                 color: [0.08, 0.5, 0.65],
@@ -677,8 +695,11 @@ impl Renderer {
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
-                let position = crate::scenery::eye(scene_to_clip);
-                scenery.prepare_eye(queue, eye, scene_to_clip, position);
+                // The scenery draws in the environment's own coordinates, carried into the space's, and is told where
+                // each eye is in them.
+                let scenery_to_clip = scene_to_clip * self.carriage;
+                let position = crate::scenery::eye(scenery_to_clip);
+                scenery.prepare_eye(queue, eye, scenery_to_clip, position);
                 scenery.encode(&mut encoder, eye);
             }
             // Separate buffers are important: two writes to one buffer before
@@ -1004,11 +1025,14 @@ fn swarm_instances(swarm: &Swarm, scene: &mut Vec<Instance>) {
             base.map(|v| v * pulse)
         };
         scene.push(Instance {
-            position: [
-                CENTER.x + angle.cos() * 1.13,
-                CENTER.y + angle.sin() * 0.70,
-                CENTER.z - 0.28,
-            ],
+            // Behind the swarm's middle, as it faces, wherever it stands.
+            position: swarm
+                .at(glam::Vec3::new(
+                    angle.cos() * 1.13,
+                    angle.sin() * 0.70,
+                    -0.28,
+                ))
+                .to_array(),
             scale: [0.025, 0.025, 0.025],
             color,
             ..Default::default()
@@ -2640,6 +2664,59 @@ mod tests {
     }
 
     #[test]
+    fn the_swarm_s_rings_stand_about_it_wherever_it_stands() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            let mut swarm = Swarm::default();
+            swarm.visual.mode = Mode::Ready;
+            let anchor = tomori_scene::anchors::Anchor {
+                position: glam::Vec3::new(3.0, 1.8, -5.0),
+                orientation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            };
+            swarm.set_anchor(anchor);
+            renderer.update(&queue, &swarm, None, false);
+            // The halo stands 0.28 m behind the swarm's middle as it faces, and the floor ring 1.25 m about beneath it.
+            let halo: Vec<glam::Vec3> = renderer.scene[AGENT_COUNT..AGENT_COUNT + 48]
+                .iter()
+                .map(|instance| glam::Vec3::from_array(instance.position))
+                .collect();
+            for at in &halo {
+                assert!((at.x - (anchor.position.x - 0.28)).abs() < 1e-4, "{at}");
+            }
+            // Raised 0.4 m above the swarm's usual height, the ring is on the floor 0.4 m up.
+            let floor = renderer
+                .scene
+                .iter()
+                .filter(|instance| (instance.position[1] - 0.415).abs() < 1e-5)
+                .collect::<Vec<_>>();
+            assert_eq!(floor.len(), 40);
+            for instance in floor {
+                let across = glam::Vec2::new(
+                    instance.position[0] - anchor.position.x,
+                    instance.position[2] - anchor.position.z,
+                )
+                .length();
+                assert!((across - 1.25).abs() < 1e-4);
+            }
+            // Lower than its usual height, the ring stays on the room's floor.
+            swarm.set_anchor(tomori_scene::anchors::Anchor {
+                position: glam::Vec3::new(3.0, 0.6, -5.0),
+                ..anchor
+            });
+            renderer.update(&queue, &swarm, None, false);
+            assert_eq!(
+                renderer
+                    .scene
+                    .iter()
+                    .filter(|instance| instance.position[1] == 0.015)
+                    .count(),
+                40
+            );
+        });
+    }
+
+    #[test]
     fn a_blink_darkens_the_whole_view_to_black_and_back() {
         const SIZE: u32 = 64;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
@@ -2662,7 +2739,11 @@ mod tests {
             let view = texture.create_view(&Default::default());
             // From standing height at home, looking at the swarm's ring on the grid.
             let matrix = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0)
-                * Mat4::look_at_rh(glam::Vec3::new(0.0, 1.6, 1.0), CENTER, glam::Vec3::Y);
+                * Mat4::look_at_rh(
+                    glam::Vec3::new(0.0, 1.6, 1.0),
+                    crate::swarm::CENTER,
+                    glam::Vec3::Y,
+                );
             let capture = |renderer: &Renderer| -> Vec<u8> {
                 renderer.render(
                     &device,

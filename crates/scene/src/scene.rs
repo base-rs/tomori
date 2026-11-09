@@ -193,6 +193,37 @@ pub struct Frame<'a> {
     pub blink: f32,
     /// What the environment's client side shows, for its scenery to draw. See `design/environments.md`.
     pub environment: Option<crate::client_side::Drawn>,
+    /// The carriage from the environment's own coordinates, in which its scenery draws, into the space's. See
+    /// `design/environments.md`.
+    pub carriage: crate::anchors::Anchor,
+}
+
+/// How long the trigger must pull the swarm before letting go leaves the agent where it was drawn, in seconds: a
+/// shorter tug lets it go back, as before. See `design/environments.md`.
+pub const SUMMON_HOLD: f32 = 0.5;
+
+/// How near, horizontally, the agent a participant summons stands to their head at least, in metres, and how far below
+/// and above their eyes at most: near enough to look at something together, and never in their face.
+pub const SUMMON_NEAREST: f32 = 1.2;
+const SUMMON_BELOW: f32 = 1.0;
+const SUMMON_ABOVE: f32 = 0.6;
+
+/// Where the agent stands when a participant whose head is at `head` lets it go at `at`, having drawn it there with
+/// the trigger: there, but at least [`SUMMON_NEAREST`] from their head horizontally, and within reach of their eyes'
+/// height, facing them. See `design/environments.md`.
+pub fn summoned_at(at: Vec3, head: Option<Vec3>) -> tomori_protocol::Pose {
+    let Some(head) = head.filter(|head| head.is_finite()) else {
+        return tomori_protocol::Pose::at(at.to_array());
+    };
+    let across = Vec3::new(at.x - head.x, 0.0, at.z - head.z);
+    let away = across.try_normalize().unwrap_or(Vec3::NEG_Z);
+    let level = head + away * across.length().max(SUMMON_NEAREST);
+    let spot = Vec3::new(
+        level.x,
+        at.y.clamp(head.y - SUMMON_BELOW, head.y + SUMMON_ABOVE),
+        level.z,
+    );
+    tomori_protocol::Pose::at(spot.to_array()).facing_towards(head.to_array())
 }
 
 /// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there,
@@ -381,6 +412,13 @@ pub struct Step {
     /// Whose the last press of B was, for tests that check the order.
     #[cfg(test)]
     last_back: Option<crate::conversation::Back>,
+    /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
+    /// swarm appears at the new one rather than gliding. See `design/environments.md`.
+    agent_home: crate::anchors::Anchor,
+    /// While the trigger pulls the swarm, for how long, where it last drew it, and whether the pull is the swarm's own,
+    /// begun on nothing of Tomori's nor the environment's, so that letting go of such a pull after [`SUMMON_HOLD`]
+    /// summons the agent there.
+    summoning: Option<(f32, Vec3, bool)>,
 }
 
 impl Default for Step {
@@ -427,6 +465,8 @@ impl Default for Step {
             selector: crate::client_side::Selector::default(),
             #[cfg(test)]
             last_back: None,
+            agent_home: crate::anchors::Anchor::AGENT,
+            summoning: None,
         }
     }
 }
@@ -468,7 +508,7 @@ impl Step {
     /// Where the participant's room is in the space's scene, in the space `conversation` is in: the transform the frame's poses are given in, which each platform applies to its head, eyes, controllers and hands before [`Self::update`]. Anywhere else, or in another space, the room is back home. See `design/locomotion.md`.
     pub fn rig(&mut self, conversation: &Conversation) -> Rig {
         self.travel
-            .settle(place(conversation), conversation.locomotion())
+            .settle(place(conversation), &conversation.locomotion())
     }
 
     /// The participant recentred: the floating panel stands in front of them again.
@@ -937,6 +977,48 @@ impl Step {
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
         let attracting = pointing.attracting && !menu_shown && !wrist_active && !selecting;
         let attractor = senses.attractor.filter(|_| attracting);
+        // The agent appears at its home as a space opens, or changes environment, and otherwise glides to where it is
+        // summoned and back home; the workers stand about its home. See `design/environments.md`.
+        let arrangement = conversation.arrangement();
+        if arrangement.home != self.agent_home {
+            self.agent_home = arrangement.home;
+            self.swarm.appear_at(arrangement.agent);
+            // A pull begun before the space opened or changed environment draws the swarm until it is let go, but
+            // summons it nowhere, so that the agent stays at the new home, as everyone else sees it.
+            if let Some((_, _, swarm)) = &mut self.summoning {
+                *swarm = false;
+            }
+        } else {
+            self.swarm.set_anchor(arrangement.agent);
+        }
+        // Drawn with the trigger long enough and let go, in a space, the agent stays where it was drawn, for everyone.
+        // The summons is the swarm's own rung of the trigger's order: a pull begun on a panel, a card or a worker draws
+        // the swarm as ever but lets it go back, and one begun on an environment's selectable object never draws it.
+        match attractor {
+            Some(at) => {
+                let (held, swarm) = self.summoning.map_or(
+                    (0.0, rung == precedence::Trigger::Swarm),
+                    |(held, _, swarm)| (held, swarm),
+                );
+                self.summoning = Some((held + dt.max(0.0), at, swarm));
+            }
+            None => {
+                if let Some((held, at, true)) = self.summoning.take()
+                    && held >= SUMMON_HOLD
+                    && conversation.summons()
+                {
+                    let spot = summoned_at(
+                        at,
+                        senses.head_pose.map(|head| Vec3::from_array(head.position)),
+                    );
+                    conversation.summon(Some(spot));
+                    // It stands there at once here, as everyone else is told.
+                    self.swarm.set_anchor(
+                        crate::anchors::Anchor::from_pose(&spot).unwrap_or(arrangement.agent),
+                    );
+                }
+            }
+        }
         self.swarm.step(dt, attractor);
         let marker = match senses.marker {
             Marker::Always => senses.attractor,
@@ -950,9 +1032,10 @@ impl Step {
             && !wrist_active
             && conversation.joined_space().is_some();
         // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        let locomotion = conversation.locomotion();
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
-            locomotion: conversation.locomotion(),
+            locomotion: &locomotion,
             stick: self.travel_stick,
             ray: senses.ray,
             head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
@@ -1106,7 +1189,8 @@ impl Step {
                     .ray
                     .filter(|_| in_space && self.board.held().is_none()),
             )
-            .and_then(|(client, ray)| client.side.pick(&ray));
+            // The client side picks in the environment's own coordinates.
+            .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)));
         let object = picked.clone().filter(|picked| picked.distance < nearest);
         let (card, worker) = if object.is_some() {
             (None, None)
@@ -1259,7 +1343,11 @@ impl Step {
                 let environment = client.environment;
                 let updates =
                     conversation.environment_updates(environment.id(), environment.version());
-                let head = senses.head_pose.map(|pose| Vec3::from_array(pose.position));
+                let head = senses.head_pose.map(|pose| {
+                    arrangement
+                        .carriage
+                        .unplace(Vec3::from_array(pose.position))
+                });
                 let (left, right) = self.environment_sticks;
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
@@ -1276,7 +1364,8 @@ impl Step {
                     );
                 }
                 for (sound, position) in output.sounds {
-                    feedback.ambient(sound, position, now);
+                    let position = arrangement.carriage.place(Vec3::from_array(position));
+                    feedback.ambient(sound, position.to_array(), now);
                 }
                 output.drawn
             }
@@ -1292,6 +1381,8 @@ impl Step {
         );
         self.delegation_scene
             .set_coordinator_samples(&self.coordinator_samples);
+        self.delegation_scene
+            .arrange(arrangement.workers, arrangement.placement);
         self.delegation_scene.update(root, workspace, dt);
         // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
         let ray = senses.ray.filter(|_| senses.beam);
@@ -1381,6 +1472,7 @@ impl Step {
             landing: travel.landing,
             blink: travel.blink,
             environment: drawn,
+            carriage: arrangement.carriage,
         }
     }
 }
@@ -4598,6 +4690,349 @@ mod tests {
         }
     }
 
+    /// The [`ClientMessage::PlaceAgent`]s `conversation` sent since it was last asked.
+    fn placed(conversation: &mut Conversation) -> Vec<Option<tomori_protocol::Pose>> {
+        conversation
+            .take_actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::Send(tomori_protocol::ClientMessage::PlaceAgent { at }) => Some(at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pull_held_and_let_go_summons_the_agent_there_for_everyone_and_a_tug_does_not() {
+        let now = Instant::now();
+        let at = Vec3::new(0.8, 1.2, -0.6);
+        // Pull for `seconds`, then let go, and the frames after.
+        let pull = |step: &mut Step, conversation: &mut Conversation, seconds: f32| {
+            let pulling = Senses {
+                attractor: Some(at),
+                trigger: Some(1.0),
+                ..senses()
+            };
+            let frames = (seconds / FRAME).ceil() as usize;
+            for _ in 0..frames {
+                step.update(&pulling, conversation, &mut felt(), now, FRAME);
+            }
+            step.update(&senses(), conversation, &mut felt(), now, FRAME);
+        };
+        for role in [ConnectionRole::Owner, ConnectionRole::Collaborator] {
+            let mut conversation = lobby(role);
+            conversation.apply(space(|state| state.summons = true));
+            conversation.take_actions();
+            let mut step = Step::default();
+            // A tug lets it go back, as before, and tells nobody.
+            pull(&mut step, &mut conversation, 0.2);
+            assert!(placed(&mut conversation).is_empty());
+            // Held long enough, it stays where it was drawn, at least 1.2 m away and facing the participant, for
+            // everyone in the space.
+            pull(&mut step, &mut conversation, SUMMON_HOLD + 0.1);
+            let sent = placed(&mut conversation);
+            assert_eq!(sent.len(), 1, "{role:?}");
+            let spot = sent[0].expect("summoned somewhere");
+            let head = arrival::HOME;
+            let spot_at = Vec3::from_array(spot.position);
+            assert!(
+                (Vec3::new(spot_at.x - head.x, 0.0, spot_at.z - head.z).length() - SUMMON_NEAREST)
+                    .abs()
+                    < 1e-4,
+                "{spot_at}"
+            );
+            assert!((spot_at.y - at.y).abs() < 1e-5);
+            let towards = (head - spot_at).normalize();
+            let ahead = glam::Quat::from_array(spot.orientation) * Vec3::Z;
+            assert!(ahead.dot(Vec3::new(towards.x, 0.0, towards.z).normalize()) > 0.999);
+            let anchor = crate::anchors::Anchor::from_pose(&spot).unwrap();
+            assert_eq!(conversation.arrangement().agent, anchor);
+            // Nothing moves it of its own accord: it glides there and stays, and its voice comes from there.
+            let mut frame_agent = Vec3::ZERO;
+            for _ in 0..1500 {
+                let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+                assert_eq!(frame.swarm.anchor(), anchor);
+                frame_agent = Vec3::from_array(frame.agent);
+            }
+            assert!(frame_agent.distance(spot_at) < 1.0, "{frame_agent}");
+            assert!(placed(&mut conversation).is_empty());
+            // The workers stay at home.
+            assert_eq!(
+                conversation.arrangement().workers,
+                crate::anchors::Anchor::AGENT
+            );
+        }
+        // A visitor's pull lets it go back, as does one in a space whose server keeps no summons.
+        for (role, summons) in [
+            (ConnectionRole::Visitor, true),
+            (ConnectionRole::Owner, false),
+        ] {
+            let mut conversation = lobby(role);
+            conversation.apply(space(|state| state.summons = summons));
+            conversation.take_actions();
+            let mut step = Step::default();
+            pull(&mut step, &mut conversation, 1.0);
+            assert!(placed(&mut conversation).is_empty(), "{role:?}");
+            assert_eq!(
+                conversation.arrangement().agent,
+                crate::anchors::Anchor::AGENT
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_pull_of_the_swarm_s_own_summons_the_agent_in_the_trigger_s_order() {
+        let now = Instant::now();
+        let at = Vec3::new(0.8, 1.2, -0.6);
+        // Pull from `senses` for a second, then let go, and say whether the swarm was drawn throughout.
+        let pull = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
+            let pulling = Senses {
+                attractor: Some(at),
+                trigger: Some(1.0),
+                ..*senses
+            };
+            let mut drawn = true;
+            for _ in 0..(1.0 / FRAME).ceil() as usize {
+                drawn &= step
+                    .update(&pulling, conversation, &mut felt(), now, FRAME)
+                    .attracting;
+            }
+            let released = Senses {
+                trigger: Some(0.0),
+                ..*senses
+            };
+            step.update(&released, conversation, &mut felt(), now, FRAME);
+            drawn
+        };
+        let (mut conversation, done) = lamp(Default::default(), true);
+        conversation.apply(space(|state| state.summons = true));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let on_lamp = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            ..senses()
+        };
+        grow(&mut step, &mut conversation, &on_lamp, now);
+        // On the environment's selectable object, the pull selects it, and never draws the swarm nor summons it.
+        assert_eq!(step.aim, precedence::Aim::Environment);
+        assert!(!pull(&mut step, &mut conversation, &on_lamp));
+        assert!(!selects(&done).is_empty());
+        assert!(placed(&mut conversation).is_empty());
+        // On a panel in front of it, Tomori's, the pull draws the swarm as ever, but lets it go back.
+        code_ahead(&mut conversation, 1);
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.summons = true;
+        }));
+        conversation.take_actions();
+        grow(&mut step, &mut conversation, &on_lamp, now);
+        assert_eq!(step.aim, precedence::Aim::Tomori);
+        assert!(conversation.summons());
+        assert!(pull(&mut step, &mut conversation, &on_lamp));
+        assert!(placed(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.arrangement().agent,
+            crate::anchors::Anchor::AGENT
+        );
+        // On nothing, the swarm's own, the same pull summons it.
+        let away = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::Z),
+            ..senses()
+        };
+        grow(&mut step, &mut conversation, &away, now);
+        assert_eq!(step.aim, precedence::Aim::Nothing);
+        assert!(pull(&mut step, &mut conversation, &away));
+        assert_eq!(placed(&mut conversation).len(), 1);
+    }
+
+    #[test]
+    fn a_pull_held_as_the_environment_changes_summons_the_agent_nowhere() {
+        let now = Instant::now();
+        let pulling = Senses {
+            attractor: Some(Vec3::new(0.8, 1.2, -0.6)),
+            trigger: Some(1.0),
+            ..senses()
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.summons = true));
+        conversation.take_actions();
+        let mut step = Step::default();
+        for _ in 0..(SUMMON_HOLD / FRAME).ceil() as usize {
+            step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        }
+        // The space changes environment, whose agent's home is elsewhere, while the pull is held, and is held on.
+        let home = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
+        conversation.apply(space(|state| {
+            state.summons = true;
+            state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+        }));
+        for _ in 0..(SUMMON_HOLD / FRAME).ceil() as usize {
+            let frame = step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+            assert!(frame.attracting);
+        }
+        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        // Let go, the agent goes back to its new home, and nobody is told otherwise.
+        assert!(placed(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.arrangement().agent,
+            crate::anchors::Anchor::from_pose(&home).unwrap()
+        );
+        // The next pull summons it as ever.
+        for _ in 0..((SUMMON_HOLD + 0.1) / FRAME).ceil() as usize {
+            step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        }
+        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(placed(&mut conversation).len(), 1);
+    }
+
+    #[test]
+    fn a_summons_without_a_head_stands_where_it_was_let_go() {
+        let at = Vec3::new(0.3, 1.2, -0.4);
+        assert_eq!(
+            summoned_at(at, None),
+            tomori_protocol::Pose::at(at.to_array())
+        );
+        // Let go straight above the head, it stands ahead of them.
+        let above = summoned_at(Vec3::new(0.0, 2.5, 0.0), Some(Vec3::new(0.0, 1.6, 0.0)));
+        assert_eq!(above.position, [0.0, 2.2, -SUMMON_NEAREST]);
+    }
+
+    #[test]
+    fn the_agent_appears_at_its_home_as_the_space_opens_and_never_moves_of_its_own_accord() {
+        let now = Instant::now();
+        let home = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
+        let anchor = crate::anchors::Anchor::from_pose(&home).unwrap();
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let mut step = Step::default();
+        for _ in 0..200 {
+            step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        }
+        let middle = |step: &Step| {
+            step.swarm
+                .agents
+                .iter()
+                .map(|agent| agent.position)
+                .sum::<Vec3>()
+                / crate::swarm::AGENT_COUNT as f32
+        };
+        let before = middle(&step) - crate::swarm::CENTER;
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+        }));
+        // In the first frame in the space, it is there, not gliding.
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.anchor(), anchor);
+        let appeared = middle(&step);
+        assert!(appeared.distance(anchor.place(before)) < 0.2, "{appeared}");
+        // And it stays, through a long idle, with no summons.
+        for _ in 0..3000 {
+            let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(frame.swarm.anchor(), anchor);
+        }
+        assert!(placed(&mut conversation).is_empty());
+    }
+
+    #[test]
+    fn an_environment_arriving_elsewhere_is_carried_into_the_space_for_its_client_side_and_scenery()
+    {
+        use std::sync::{Arc, Mutex};
+        // A client side that records the ray and head it is given, and makes a sound at its own origin.
+        #[derive(Default)]
+        struct Seen {
+            rays: Vec<Ray>,
+            heads: Vec<Vec3>,
+        }
+        struct Recording(Arc<Mutex<Seen>>);
+        impl crate::client_side::ClientSide for Recording {
+            fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
+                self.0.lock().unwrap().rays.push(*ray);
+                None
+            }
+            fn update(
+                &mut self,
+                input: crate::client_side::Input<'_>,
+            ) -> crate::client_side::Output {
+                self.0.lock().unwrap().heads.extend(input.head);
+                crate::client_side::Output::new().with_sound(
+                    crate::client_side::Sound::new(vec![0.0; 4], 48_000),
+                    [0.0, 0.0, 0.0],
+                )
+            }
+        }
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let factory: crate::client_side::Factory = {
+            let seen = seen.clone();
+            Arc::new(move |_space: &str| {
+                Box::new(Recording(seen.clone())) as Box<dyn crate::client_side::ClientSide>
+            })
+        };
+        // Participants arrive 8 m along +X in the environment, facing its origin.
+        let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_client_sides(vec![(crate::test_support::SKY, factory)]);
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new().with_arrival(street);
+        }));
+        let carriage = conversation.arrangement().carriage;
+        assert!(
+            carriage
+                .place(Vec3::ZERO)
+                .distance(Vec3::new(0.0, 0.0, -8.0))
+                < 1e-4
+        );
+        let mut step = Step::default();
+        let pointing = Senses {
+            ray: Some(Ray {
+                origin: Vec3::new(0.0, 1.5, 0.0),
+                direction: Vec3::NEG_Z,
+            }),
+            beam: true,
+            ..senses()
+        };
+        let mut feedback = felt();
+        let mut frame_carriage = None;
+        for _ in 0..2000 {
+            let frame = step.update(
+                &pointing,
+                &mut conversation,
+                &mut feedback,
+                Instant::now(),
+                FRAME,
+            );
+            frame_carriage = Some(frame.carriage);
+        }
+        // The scenery is drawn carried, and the client side picks and hears in the environment's own coordinates:
+        // from the street, looking at its origin.
+        assert_eq!(frame_carriage, Some(carriage));
+        let seen = seen.lock().unwrap();
+        let ray = seen.rays.last().expect("picked");
+        assert!(
+            ray.origin.distance(Vec3::new(8.0, 1.5, 0.0)) < 1e-4,
+            "{:?}",
+            ray.origin
+        );
+        assert!(
+            ray.direction.distance(Vec3::NEG_X) < 1e-4,
+            "{:?}",
+            ray.direction
+        );
+        let head = seen.heads.last().expect("told where the head is");
+        assert!(head.distance(Vec3::new(8.0, 1.6, 0.0)) < 1e-4, "{head}");
+        drop(seen);
+        // Its sound, made at its origin, is heard 8 m ahead of home.
+        let (_, position) = feedback.take_ambient().next_back().expect("a sound");
+        assert!(Vec3::from_array(position).distance(Vec3::new(0.0, 0.0, -8.0)) < 1e-4);
+        // On the grid, nothing is carried.
+        conversation.apply(space(|state| {
+            state.environment = "minimal".into();
+            state.anchors = tomori_protocol::Anchors::new().with_arrival(street);
+        }));
+        assert_eq!(
+            conversation.arrangement().carriage,
+            crate::anchors::Anchor::HOME
+        );
+    }
+
     #[test]
     fn the_ray_chooses_what_it_points_at_and_draws_the_beam_where_the_platform_does() {
         let now = Instant::now();
@@ -4775,6 +5210,62 @@ mod tests {
                 .presence
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_swarm_and_workers_stand_where_the_space_s_environment_puts_them() {
+        use crate::anchors::{Anchor, Placing, WorkerPlacement};
+        struct Ahead;
+        impl WorkerPlacement for Ahead {
+            fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
+                origin.place(Vec3::new(worker.slot as f32, 1.5, -2.0))
+            }
+        }
+        let agent = tomori_protocol::Pose {
+            position: [3.0, 1.6, -5.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let workers = tomori_protocol::Pose {
+            position: [0.0, 0.0, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation
+            .set_worker_placements(vec![(crate::test_support::SKY, std::sync::Arc::new(Ahead))]);
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new()
+                .with_agent(agent)
+                .with_workers(workers);
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let mut step = Step::default();
+        let now = Instant::now();
+        // From the first frame in the space, while its scenery still grows in, the placement places the worker.
+        let first = step
+            .update(&senses(), &mut conversation, &mut felt(), now, FRAME)
+            .stations[0]
+            .position;
+        let scenery = step.motion.scenery(step.arrival_time);
+        assert!(
+            scenery.reveal.is_some()
+                || scenery.environment == crate::environment::Environment::MINIMAL,
+            "still growing in"
+        );
+        assert_eq!(first, [0.0, 1.5, -6.0]);
+        for _ in 0..1000 {
+            step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        }
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.anchor(), Anchor::from_pose(&agent).unwrap());
+        // The agent is heard from the swarm, where it has glided.
+        assert!(Vec3::from_array(frame.agent).distance(Vec3::from_array(agent.position)) < 1.0);
+        // The worker stands where the placement put it about the workers anchor.
+        assert_eq!(frame.stations[0].position, [0.0, 1.5, -6.0]);
     }
 
     #[test]

@@ -226,6 +226,14 @@ impl WallChange {
     }
 }
 
+/// Where the swarm's middle stands in an environment that gives no `agent` anchor, facing home: `tomori-scene`'s
+/// `swarm::CENTER`. See `design/environments.md`.
+pub const AGENT: [f32; 3] = [0.0, 1.4, -ARC_RADIUS];
+
+/// How far from an environment's origin, on each axis, its arrival and the anchors and walls it gives in its own
+/// coordinates may stand, in metres, before they are carried into a space's, where they are bounded by [`REACH`].
+pub const ARRIVAL_REACH: f32 = 1000.0;
+
 /// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; for a code
 /// panel, its language, length and spans, its body the first lines of its code; and for an image panel, its image, its
 /// body the image's caption. Made only by [`Content::parse`], for a text panel, `code::Lines::content`, for a code
@@ -538,14 +546,24 @@ impl Default for Stage {
 /// `pose`, with its orientation made a unit quaternion and upright, turned only about the vertical, as walls and panels
 /// stand, if it is finite, within [`REACH`] and has an orientation. One tilted is turned to face the way its +Z faces,
 /// levelled, or, where that is straight up or down, the way its +X faces turned a quarter towards it.
-fn valid(pose: &Pose) -> Option<Pose> {
+pub(crate) fn valid(pose: &Pose) -> Option<Pose> {
+    valid_within(pose, REACH)
+}
+
+/// `pose`, as [`valid`] makes it, but within [`ARRIVAL_REACH`]: an environment's arrival, or an anchor or wall in its
+/// own coordinates before it is carried into a space's.
+pub(crate) fn valid_arrival(pose: &Pose) -> Option<Pose> {
+    valid_within(pose, ARRIVAL_REACH)
+}
+
+fn valid_within(pose: &Pose, reach: f32) -> Option<Pose> {
     let length = pose
         .orientation
         .iter()
         .map(|value| value * value)
         .sum::<f32>()
         .sqrt();
-    if !(pose.position.iter().all(|value| value.abs() <= REACH)
+    if !(pose.position.iter().all(|value| value.abs() <= reach)
         && length > 0.5
         && length.is_finite())
     {
@@ -3384,8 +3402,10 @@ mod tests {
     #[test]
     fn the_tomori_wall_changes_within_its_limits_for_the_space_in_every_environment() {
         let mut stage = Stage::default();
+        // Each environment sets the wall's home, as the farmyard's stands ahead and to the right.
         let farmyard = Walls {
             environment: "farmyard",
+            tomori: Pose::upright_facing([1.2, 1.1, -2.4], [0.0, 1.6, 0.0]),
             ..SKY
         };
         assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, grid(4, 1)), Ok(true));
@@ -3394,11 +3414,14 @@ mod tests {
             ..WallChange::default()
         };
         assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, flat), Ok(true));
+        // The space's edits stand over each environment's home, which nothing moves: the wall stands at the home of
+        // the environment the space is in, with the edits made in another.
         for walls in [&SKY, &farmyard] {
             let view = stage.view("s", walls, 0);
             let tomori = &view.walls[0];
             assert_eq!((tomori.slots(), tomori.radius()), (4, None));
             assert_eq!(tomori.scale(), layout::ARC_SCALE);
+            assert_eq!(tomori.pose, walls.tomori);
         }
         for (change, error) in [
             (

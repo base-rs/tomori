@@ -223,6 +223,8 @@ pub enum MenuKey {
     Pill,
     /// Turn travel off on this headset, staying room scale, or on again.
     Travel,
+    /// Send the agent, summoned away from its home, back home, for everyone.
+    AgentHome,
     /// Add a projection wall where the participant stands, for everyone, as an owner.
     AddWall,
     /// Remove the added projection wall nearest the participant, for everyone, as an owner.
@@ -303,6 +305,9 @@ pub struct Model {
     pub pill: bool,
     /// Whether the participant travels on this headset, where the space's environment allows travel; `None` where it does not, which offers no setting. See `design/locomotion.md`.
     pub travel: Option<bool>,
+    /// Whether the agent stands away from its home, where a participant summoned it, and this participant may send it
+    /// home, which offers sending it home. See `design/environments.md`.
+    pub agent_away: bool,
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
@@ -386,6 +391,8 @@ pub enum Choice {
     Pill,
     /// Turn travel off here, or on again.
     Travel,
+    /// Send the agent home, for everyone.
+    AgentHome,
     /// Add a projection wall here, for everyone.
     AddWall,
     /// Remove the added wall nearest here, for everyone.
@@ -687,6 +694,10 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                             "Remove the nearest wall".into(),
                         );
                     }
+                }
+                // Only while a participant has summoned the agent away from its home.
+                if model.agent_away {
+                    button(&mut items, MenuKey::AgentHome, "Send Tomori home".into());
                 }
                 text(&mut items, MenuKind::Heading, "On this headset".into());
                 button(
@@ -1112,6 +1123,7 @@ impl HandMenu {
             MenuKey::Mute => Some(Choice::Mute),
             MenuKey::Pill => Some(Choice::Pill),
             MenuKey::Travel => Some(Choice::Travel),
+            MenuKey::AgentHome => Some(Choice::AgentHome),
             MenuKey::AddWall => Some(Choice::AddWall),
             MenuKey::RemoveWall => Some(Choice::RemoveWall),
             MenuKey::Layer(layer) => {
@@ -1921,6 +1933,19 @@ mod tests {
             assert_eq!(rows[pill + 2].key, MenuKey::Leave);
         }
         assert_eq!(menu.choose(&MenuKey::Travel), Some(Choice::Travel));
+        // While the agent is summoned away from its home, a participant can send it home, before this headset's own
+        // settings; and not otherwise.
+        assert!(!rows.iter().any(|row| row.key == MenuKey::AgentHome));
+        model.agent_away = true;
+        let rows = items(Some(Section::Space), &model);
+        let home = rows
+            .iter()
+            .position(|row| row.key == MenuKey::AgentHome)
+            .expect("offered");
+        assert_eq!(rows[home].text, "Send Tomori home");
+        assert_eq!(rows[home + 1].text, "On this headset");
+        assert_eq!(menu.choose(&MenuKey::AgentHome), Some(Choice::AgentHome));
+        model.agent_away = false;
         // An owner adds walls, and removes the nearest added one where there is one, before this headset's settings.
         assert!(!rows.iter().any(|row| row.key == MenuKey::AddWall));
         for (removable, keys) in [

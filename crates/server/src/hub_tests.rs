@@ -4207,6 +4207,98 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
 }
 
 #[test]
+fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_stays_at_its_home() {
+    let (hub, _jobs) = hub_waiting();
+    let agent = upright([4.0, 1.6, -5.0]);
+    let workers = upright([0.0, 0.0, -6.0]);
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("observe", "Observe")
+            .with_agent(agent)
+            .with_workers(workers),
+    ]));
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    let anchors = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Space { state } => Some(state.anchors),
+                _ => None,
+            })
+            .next_back()
+    };
+    // In Sky, which declares none, the space's state carries none.
+    assert_eq!(anchors(&vic), Some(tomori_protocol::Anchors::new()));
+    // An owner's change carries the new environment's anchors to everyone, visitors included.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "observe".to_owned(),
+    });
+    let expected = tomori_protocol::Anchors::new()
+        .with_agent(agent)
+        .with_workers(workers);
+    assert_eq!(anchors(&vic), Some(expected));
+    let moved = ada
+        .projections()
+        .pop()
+        .expect("sent as the environment changes");
+    // The Tomori wall does not follow the agent: the environment gives it no home, so it stands at the default.
+    assert_eq!(moved.walls[0].pose, crate::stage::default_stage());
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".to_owned(),
+    });
+    assert_eq!(anchors(&vic), Some(tomori_protocol::Anchors::new()));
+}
+
+#[test]
+fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_cannot() {
+    let (hub, _jobs) = hub();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    // Outside a space, nowhere to summon it to.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(ada.errors(), ["Join a space first."]);
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.send(ClientMessage::Join { space });
+    let summoned = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Space { state } => Some(state.summoned),
+                _ => None,
+            })
+            .next_back()
+    };
+    summoned(&ada);
+    summoned(&vic);
+    // Summoned, everyone sees it there; the same again changes nothing and tells nobody.
+    let beside = upright([1.0, 1.4, -1.5]);
+    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
+    assert_eq!(summoned(&vic), Some(Some(beside)));
+    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
+    assert_eq!(summoned(&vic), None);
+    // A visitor watches, but summons nothing.
+    vic.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // Sent home, everyone sees it at home again.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(summoned(&vic), Some(None));
+}
+
+#[test]
 fn the_agent_moving_its_space_moves_its_walls_as_an_owner_s_change_does() {
     let (hub, _jobs) = hub_waiting();
     let stage = upright([0.0, 1.5, -4.0]);

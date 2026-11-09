@@ -4091,6 +4091,7 @@ dependencies = [
  "tomori-client",
  "tomori-client-quest",
  "tomori-client-spectator",
+ "tomori-environment",
  "tomori-environment-farmyard",
  "tomori-environment-github-server",
  "tomori-environment-sky",

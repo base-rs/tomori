@@ -344,6 +344,8 @@ pub struct Conversation {
     locomotion: Vec<(Environment, Locomotion)>,
     /// The client sides this build registers, by environment. See `design/environments.md`.
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
+    /// The worker placements this build registers, by environment. See `design/environments.md`.
+    worker_placements: Vec<(Environment, crate::anchors::Placement)>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -496,6 +498,7 @@ impl Conversation {
             over_grid: Vec::new(),
             locomotion: Vec::new(),
             client_sides: Vec::new(),
+            worker_placements: Vec::new(),
             sessions: Vec::new(),
             session_page: 0,
             menu_backend: None,
@@ -1589,6 +1592,7 @@ impl Conversation {
             muted: self.muted,
             pill: self.pill,
             travel: self.declared_locomotion().travels().then_some(self.travel),
+            agent_away: self.summons() && self.arrangement().summoned(),
             pointed: None,
             feedback: self.feedback,
         }
@@ -1830,6 +1834,7 @@ impl Conversation {
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Travel => self.toggle_travel(),
+            crate::hand_menu::Choice::AgentHome => self.summon(None),
             crate::hand_menu::Choice::AddWall => self.add_wall(),
             crate::hand_menu::Choice::RemoveWall => self.remove_wall(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
@@ -2166,18 +2171,96 @@ impl Conversation {
             .map(|(_, factory)| (environment, factory.clone()))
     }
 
+    /// Place the workers of each environment `placements` names by its placement, in a space bound to it whose scenery
+    /// this build draws. See `design/environments.md`.
+    pub fn set_worker_placements(
+        &mut self,
+        placements: Vec<(Environment, crate::anchors::Placement)>,
+    ) {
+        self.worker_placements = placements;
+    }
+
+    /// The worker placements this build registers, as [`Self::set_worker_placements`] gave them.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn worker_placements(&self) -> &[(Environment, crate::anchors::Placement)] {
+        &self.worker_placements
+    }
+
+    /// Where the agent and the workers stand now: in a space, the agent where a participant summoned it, or else at
+    /// the home its state gives, the workers about the workers anchor, or else the agent's home, each that is valid,
+    /// by the placement registered for its environment where this build draws it at the space's version; and the
+    /// carriage of that environment's own coordinates into the space's, where it draws it. Otherwise, as outside a
+    /// space, the default layout. See `design/environments.md`.
+    pub fn arrangement(&self) -> crate::anchors::Arrangement {
+        let mut arrangement = crate::anchors::Arrangement::default();
+        let Some((space, _)) = self.joined_space() else {
+            return arrangement;
+        };
+        let anchor = |pose: Option<tomori_protocol::Pose>| {
+            pose.as_ref().and_then(crate::anchors::Anchor::from_pose)
+        };
+        if let Some(home) = anchor(space.anchors.agent) {
+            arrangement.home = home;
+        }
+        arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
+        arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
+        // The environment drawn: one this build cannot draw at the space's version is the grid.
+        let environment = self.environment_of(space);
+        arrangement.placement = self
+            .worker_placements
+            .iter()
+            .find(|(registered, _)| *registered == environment)
+            .map(|(_, placement)| placement.clone());
+        // Only the environment's own content is carried, and only where it is drawn: the grid stands as it is.
+        if environment.id() == space.environment
+            && environment != Environment::MINIMAL
+            && let Some(carriage) = space
+                .anchors
+                .arrival
+                .as_ref()
+                .and_then(crate::anchors::Anchor::carriage)
+        {
+            arrangement.carriage = carriage;
+        }
+        arrangement
+    }
+
+    /// Whether this participant may summon the agent and send it home in the joined space: a participant, not a
+    /// visitor, on a server that keeps where it is summoned to. See `design/environments.md`.
+    pub fn summons(&self) -> bool {
+        self.joined_space()
+            .is_some_and(|(space, _)| space.summons && self.role.participates())
+    }
+
+    /// Summon the joined space's agent to `at`, in the space's coordinates, facing along its +Z, for everyone in the
+    /// space, or, without it, send it home; it stands there at once here, as everyone else is told. Nothing where this
+    /// participant may not. See `design/environments.md`.
+    pub fn summon(&mut self, at: Option<tomori_protocol::Pose>) {
+        let participates = self.role.participates() && self.mode == Mode::Space;
+        let Some(space) = self
+            .space
+            .as_mut()
+            .filter(|space| participates && space.summons)
+        else {
+            return;
+        };
+        space.summoned = at;
+        self.send(ClientMessage::PlaceAgent { at });
+    }
+
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
     pub fn set_locomotion(&mut self, locomotion: Vec<(Environment, Locomotion)>) {
         self.locomotion = locomotion;
     }
 
     /// How the participant may travel: as declared for the joined space's environment, when this build draws it and travel is not turned off on this headset, and otherwise not at all. See `design/locomotion.md`.
-    pub fn locomotion(&self) -> &Locomotion {
-        const NONE: &Locomotion = &Locomotion::None;
+    pub fn locomotion(&self) -> Locomotion {
         if self.travel {
+            // Declared in the environment's own coordinates, it is carried into the space's.
             self.declared_locomotion()
+                .carried(&self.arrangement().carriage)
         } else {
-            NONE
+            Locomotion::None
         }
     }
 
@@ -7195,35 +7278,145 @@ mod tests {
         let teleport = Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]);
         // Tomori's own build declares none.
         let mut conversation = joined(|state| state.environment = "observe".into());
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
         conversation.set_locomotion(vec![(OBSERVE, teleport.clone())]);
         // Shown as the grid, it has none.
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
         assert_eq!(conversation.menu_model().travel, None);
         conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
-        assert_eq!(conversation.locomotion(), &teleport);
+        assert_eq!(conversation.locomotion(), teleport);
         // This headset can turn travel off, staying room scale, and on again, from the hand menu.
         assert_eq!(conversation.menu_model().travel, Some(true));
         conversation.choose_menu(crate::hand_menu::Choice::Travel);
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
         assert_eq!(conversation.menu_model().travel, Some(false));
         conversation.choose_menu(crate::hand_menu::Choice::Travel);
-        assert_eq!(conversation.locomotion(), &teleport);
+        assert_eq!(conversation.locomotion(), teleport);
         // Sky, which declares none, and the lobby have none.
         conversation.apply(space(|state| state.environment = "sky".into()));
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
         conversation.apply(space(|state| state.environment = "observe".into()));
-        assert_eq!(conversation.locomotion(), &teleport);
+        assert_eq!(conversation.locomotion(), teleport);
         // At a version this build does not have, the space is shown as the grid, which declares none.
         conversation.apply(space(|state| {
             state.environment = "observe".into();
             state.environment_version = Some(2);
         }));
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
         conversation.apply(space(|state| state.environment = "observe".into()));
-        assert_eq!(conversation.locomotion(), &teleport);
+        assert_eq!(conversation.locomotion(), teleport);
         hold_b(&mut conversation);
-        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.locomotion(), Locomotion::None);
+    }
+
+    #[test]
+    fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_s_placement() {
+        use crate::anchors::{Anchor, Placement, Placing, WorkerPlacement};
+        use tomori_protocol::{Anchors, Pose};
+        const OBSERVE: Environment = Environment::new("observe");
+        struct AtOrigin;
+        impl WorkerPlacement for AtOrigin {
+            fn place(&self, origin: Anchor, _worker: &Placing<'_>) -> glam::Vec3 {
+                origin.position
+            }
+        }
+        let placement: Placement = std::sync::Arc::new(AtOrigin);
+        let agent = Pose {
+            position: [2.0, 1.5, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let far = Pose {
+            position: [0.0, 0.0, -25.0],
+            ..agent
+        };
+        let observe = |state: &mut SpaceState| {
+            state.environment = "observe".into();
+            state.anchors = Anchors::new().with_agent(agent).with_workers(far);
+        };
+        // Outside a space, the default layout.
+        let lobby = in_lobby(Vec::new(), Vec::new());
+        let arrangement = lobby.arrangement();
+        assert_eq!(
+            (arrangement.agent, arrangement.workers),
+            (Anchor::AGENT, Anchor::AGENT)
+        );
+        assert!(arrangement.placement.is_none());
+        // In a space, its anchors, each that is valid, whether or not this build draws its environment: the workers
+        // about the agent's home, as the workers anchor given is too far.
+        let mut conversation = joined(observe);
+        conversation.set_worker_placements(vec![(OBSERVE, placement.clone())]);
+        assert_eq!(conversation.worker_placements().len(), 1);
+        let arrangement = conversation.arrangement();
+        assert_eq!(arrangement.agent, Anchor::from_pose(&agent).unwrap());
+        assert_eq!(arrangement.home, arrangement.agent);
+        assert_eq!(arrangement.workers, arrangement.home);
+        assert!(!arrangement.summoned());
+        // Shown as the grid, the default arc.
+        assert!(arrangement.placement.is_none());
+        conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        // Drawn, from the moment the space is joined: the conversation does not wait for the scenery to grow in.
+        let drawn = conversation.arrangement().placement.expect("drawn");
+        assert!(std::sync::Arc::ptr_eq(&drawn, &placement));
+        assert_eq!(
+            drawn.place(Anchor::AGENT, &Placing::new("ses_1", 0)),
+            Anchor::AGENT.position
+        );
+        // At a version this build does not have, the grid again; and in another environment, none.
+        conversation.apply(space(|state| {
+            observe(state);
+            state.environment_version = Some(2);
+        }));
+        assert!(conversation.arrangement().placement.is_none());
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new().with_workers(agent);
+        }));
+        let sky = conversation.arrangement();
+        assert!(sky.placement.is_none());
+        assert_eq!(sky.agent, Anchor::AGENT);
+        assert_eq!(sky.workers, Anchor::from_pose(&agent).unwrap());
+        // Summoned, the agent stands there, and its home and the workers stay where they were.
+        let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new().with_workers(agent);
+            state.summoned = Some(summoned);
+        }));
+        let away = conversation.arrangement();
+        assert!(away.summoned());
+        assert_eq!(away.agent, Anchor::from_pose(&summoned).unwrap());
+        assert_eq!(away.home, Anchor::AGENT);
+        assert_eq!(away.workers, Anchor::from_pose(&agent).unwrap());
+        // Leaving, the default layout.
+        conversation.apply(space(observe));
+        hold_b(&mut conversation);
+        assert!(conversation.arrangement().placement.is_none());
+        assert_eq!(conversation.arrangement().agent, Anchor::AGENT);
+    }
+
+    #[test]
+    fn a_participant_sends_the_summoned_agent_home_from_the_hand_menu() {
+        let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
+        // At home, or on a server that keeps no summons, nothing is offered and nothing is sent.
+        let mut conversation = joined(|state| state.summons = true);
+        assert!(!conversation.menu_model().agent_away);
+        let mut older = joined(|state| state.summoned = Some(summoned));
+        assert!(!older.menu_model().agent_away);
+        older.summon(None);
+        assert!(sent(&mut older).is_empty());
+        // Summoned away, the Space section offers to send it home, which tells everyone and stands it there at once.
+        conversation.apply(space(|state| {
+            state.summons = true;
+            state.summoned = Some(summoned);
+        }));
+        assert!(conversation.menu_model().agent_away);
+        conversation.choose_menu(crate::hand_menu::Choice::AgentHome);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::PlaceAgent { at: None }]
+        );
+        assert!(!conversation.arrangement().summoned());
+        assert!(!conversation.menu_model().agent_away);
     }
 
     #[test]
