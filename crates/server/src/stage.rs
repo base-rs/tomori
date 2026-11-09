@@ -27,11 +27,13 @@ pub(crate) use tomori_protocol::checklist;
 mod code;
 mod groups;
 mod image;
+mod layouts;
 mod placement;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
 pub use code::Source;
 pub use image::without_image;
+pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
 
 use std::collections::BTreeMap;

@@ -32,8 +32,9 @@ pub enum Placement {
     Looking(Option<String>),
     /// `front [NAME]`: floating in front of them, facing them.
     Front(Option<String>),
-    /// `wall WALL`: onto the wall with that identity, or that name, such as `Tomori wall` or `added wall 1`.
-    Wall(String),
+    /// `wall WALL`: onto the wall with that identity, or that name, such as `Tomori wall` or `added wall 1`; and, with
+    /// `slot N` after it, into that slot, numbered from 0 as `presence` numbers them, if it is free.
+    Wall(String, Option<u32>),
 }
 
 impl Placement {
@@ -45,7 +46,8 @@ impl Placement {
     /// near Ada        -> Near(Some("Ada"))
     /// nearest         -> Near(None)
     /// looking:Bob     -> Looking(Some("Bob"))
-    /// wall added wall 1 -> Wall("added wall 1")
+    /// wall added wall 1 -> Wall("added wall 1", None)
+    /// wall added wall 1 slot 2 -> Wall("added wall 1", Some(2))
     /// ```
     pub fn parse(value: &str) -> Option<Self> {
         let value = tomori_protocol::text::one_line(value, PLACE_CHARS);
@@ -59,7 +61,10 @@ impl Placement {
             "near" | "nearest" => Some(Self::Near(named)),
             "looking" | "look" => Some(Self::Looking(named)),
             "front" => Some(Self::Front(named)),
-            "wall" => named.map(Self::Wall),
+            "wall" => named.map(|named| {
+                let (wall, slot) = slotted(&named);
+                Self::Wall(wall.to_owned(), slot)
+            }),
             _ => None,
         }
     }
@@ -85,6 +90,33 @@ impl Placement {
         };
         let rest = format!("{} {}", info[..start].trim_end(), info[end..].trim_start());
         (rest.trim().to_owned(), Self::parse(value))
+    }
+}
+
+/// `named`, a wall's identity or name, and the slot `slot N` after it says, if it says one: `slot` in any case, and
+/// the number, separated by spaces or colons, as in `added wall 1 slot 2` or `wall-3:slot:2`.
+fn slotted(named: &str) -> (&str, Option<u32>) {
+    let separated = |c: char| c == ':' || c.is_whitespace();
+    let Some((before, number)) = named.trim_end().rsplit_once(separated) else {
+        return (named, None);
+    };
+    let Ok(slot) = number.parse::<u32>() else {
+        return (named, None);
+    };
+    let before = before.trim_end_matches(separated);
+    match before
+        .len()
+        .checked_sub(4)
+        .filter(|at| before.is_char_boundary(*at))
+    {
+        Some(at)
+            if before[at..].eq_ignore_ascii_case("slot")
+                && before[..at].ends_with(separated)
+                && !before[..at].trim_end_matches(separated).is_empty() =>
+        {
+            (before[..at].trim_end_matches(separated), Some(slot))
+        }
+        _ => (named, None),
     }
 }
 
@@ -138,12 +170,40 @@ mod tests {
         assert_eq!(Placement::parse("front"), Some(Placement::Front(None)));
         assert_eq!(
             Placement::parse("wall tomori"),
-            Some(Placement::Wall("tomori".into()))
+            Some(Placement::Wall("tomori".into(), None))
         );
         assert_eq!(
             Placement::parse("wall: added wall 1"),
-            Some(Placement::Wall("added wall 1".into()))
+            Some(Placement::Wall("added wall 1".into(), None))
         );
+        // A wall and a slot of it, by name or identity, with spaces or colons.
+        assert_eq!(
+            Placement::parse("wall added wall 1 slot 2"),
+            Some(Placement::Wall("added wall 1".into(), Some(2)))
+        );
+        assert_eq!(
+            Placement::parse("wall:wall-3:SLOT:0"),
+            Some(Placement::Wall("wall-3".into(), Some(0)))
+        );
+        assert_eq!(
+            Placement::parse("Wall the Tomori wall  slot  5"),
+            Some(Placement::Wall("the Tomori wall".into(), Some(5)))
+        );
+        // A number that is not after slot, or slot without a wall, is part of the wall's name.
+        for named in [
+            "added wall 1",
+            "slot 2",
+            "timeslot 2",
+            "added wall slot x",
+            "é slot 9999999999",
+            "x",
+        ] {
+            assert_eq!(
+                Placement::parse(&format!("wall {named}")),
+                Some(Placement::Wall(named.into(), None)),
+                "{named}"
+            );
+        }
         // A form it does not know, or a wall naming none, is ignored.
         assert_eq!(Placement::parse("wall"), None);
         assert_eq!(Placement::parse("behind Ada"), None);
@@ -186,7 +246,21 @@ mod tests {
             Placement::from_info("rust place=\"wall added wall 1"),
             (
                 "rust".to_owned(),
-                Some(Placement::Wall("added wall 1".into()))
+                Some(Placement::Wall("added wall 1".into(), None))
+            )
+        );
+        assert_eq!(
+            Placement::from_info("rust place=\"wall added wall 2 slot 3\""),
+            (
+                "rust".to_owned(),
+                Some(Placement::Wall("added wall 2".into(), Some(3)))
+            )
+        );
+        assert_eq!(
+            Placement::from_info("rust place=wall:wall-4:slot:1 title=a.rs"),
+            (
+                "rust title=a.rs".to_owned(),
+                Some(Placement::Wall("wall-4".into(), Some(1)))
             )
         );
         // Without one, or with one only inside another word, the info string is as it was.
