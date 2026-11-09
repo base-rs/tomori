@@ -3,7 +3,7 @@
 
 //! English phonemes for Kokoro's American voices, from misaki's rules and lexicons, which Kokoro was trained on, as `loqui-g2p` ports them to Rust, with its neural model for words they lack.
 //!
-//! Text is first normalized for what the agent writes and misaki reads poorly: times, ISO dates, units, Rust paths and generics, identifiers in snake or camel case, file names and paths, and web addresses. Words misaki gets wrong are given their phonemes: those in a dictionary of pronunciations, such as "README", and heteronyms that its tagger misreads, such as "live" in "go live".
+//! Text is first normalized for what the agent writes and misaki reads poorly: times, ISO dates, units, Rust paths and generics, identifiers in snake or camel case, names joined by hyphens, such as "base-http", file names and paths, and web addresses. Words misaki gets wrong are given their phonemes: those in a dictionary of pronunciations, such as "README", and heteronyms that its tagger misreads, such as "live" in "go live".
 use std::{path::Path, sync::LazyLock};
 
 use loqui_g2p::{Dialect, G2p, OovFallback};
@@ -40,11 +40,50 @@ impl English {
         }
     }
 
-    /// `text` as it is given to misaki: normalized, with markup giving the phonemes of each word that misaki would get wrong.
+    /// `text` as it is given to misaki: normalized, with names joined by hyphens divided into their words, and markup giving the phonemes of each word that misaki would get wrong.
     fn marked(&self, text: &str) -> String {
         let (text, marks) = self.pronunciations.protect(text);
-        let text = heteronyms::mark(&normalize(&text));
+        let text = heteronyms::mark(&self.divide(&normalize(&text)));
         pronunciation::restore(&text, &marks)
+    }
+
+    /// `text` with each run of words joined by hyphens that is a name, such as the crates "base-http" and "tokio-util", read as its words, with a space for each hyphen, as people say a name: each word is then pronounced as it is alone, with its pronunciation if it has one, such as "http" as its letters. A run is a name if it is in code, between backticks, if one of its words has a pronunciation, such as "json" in "serde-json", or if `loqui-g2p` would guess it whole. Other runs, whose every word it knows, such as "well-known", "push-to-talk" and "base-scheduler", are left to it, which says them as one word. A run with a word of no letters, such as "x86-64", is left as it is.
+    fn divide(&self, text: &str) -> String {
+        // Words of letters and digits, or placeholders for words with a pronunciation, joined by hyphens.
+        static HYPHENATED: LazyLock<Regex> = LazyLock::new(|| {
+            pattern(r"[\p{L}\p{N}\x{E000}-\x{F8FF}]+(?:-[\p{L}\p{N}\x{E000}-\x{F8FF}]+)+")
+        });
+        static CODE: LazyLock<Regex> = LazyLock::new(|| pattern(r"`[^`]+`"));
+
+        let code: Vec<_> = CODE.find_iter(text).map(|code| code.range()).collect();
+        HYPHENATED
+            .replace_all(text, |captures: &Captures| {
+                let run = &captures[0];
+                let start = captures.get(0).expect("the whole match").start();
+                let words: Vec<&str> = run.split('-').collect();
+                let lettered = words.iter().all(|word| {
+                    word.chars().any(|symbol| {
+                        symbol.is_alphabetic() || pronunciation::is_placeholder(symbol)
+                    })
+                });
+                let name = || {
+                    code.iter()
+                        .any(|code| code.start < start && start + run.len() < code.end)
+                        || run.chars().any(pronunciation::is_placeholder)
+                        || self.guesses_whole(run)
+                };
+                if lettered && name() {
+                    words.join(" ")
+                } else {
+                    run.to_owned()
+                }
+            })
+            .into_owned()
+    }
+
+    /// Whether `loqui-g2p` reads `run`, words joined by hyphens, by guessing the whole with its neural model, as it does when any of its words is in no lexicon, such as "http" in "base-http", which it reads as "based". That reading ignores misaki's markup for stress, which strips the stress of words read from the lexicon, so a run read the same with `[run](-2)` is guessed.
+    fn guesses_whole(&self, run: &str) -> bool {
+        phonemes(&self.g2p, run) == phonemes(&self.g2p, &format!("[{run}](-2)"))
     }
 }
 
@@ -491,7 +530,7 @@ mod tests {
         );
         assert_eq!(
             sentences("(id), \"id\", panel_id and session-id."),
-            ["(ˌIdˈi), ”ˌIdˈi, pˈænᵊl ˌIdˈi ænd sˈɛʃənˌIdˈi."]
+            ["(ˌIdˈi), ”ˌIdˈi, pˈænᵊl ˌIdˈi ænd sˈɛʃən ˌIdˈi."]
         );
         assert_eq!(pronounced("The panel's id's text.", "id's"), ["ˌIdˈiz"]);
         // In camel case, as normalization divides it.
@@ -547,6 +586,113 @@ mod tests {
     }
 
     #[test]
+    fn reads_names_joined_by_hyphens_as_their_words() {
+        // The maintainer heard the crate "base-http" said as "based", in November 2026, as `loqui-g2p` guessed it whole, since it has no "http" in its lexicon.
+        for (text, expected) in [
+            ("base-http", "bˈAs ˌAʧtˌitˌipˈi"),
+            ("the base-http crate", "ðə bˈAs ˌAʧtˌitˌipˈi kɹˈAt"),
+            ("`base-http`", "bˈAs ˌAʧtˌitˌipˈi"),
+            ("base_http", "bˈAs ˌAʧtˌitˌipˈi"),
+            ("base-http's", "bˈAs ˌAʧtˌitˌipˈiz"),
+            ("base-web-html", "bˈAs wˈɛb ˌAʧtˌiˌɛmˈɛl"),
+            ("tokio-util", "tˈOkiO jˈuTᵊl"),
+            ("hyper-util", "hˈIpəɹ jˈuTᵊl"),
+            ("http-body", "ˌAʧtˌitˌipˈi bˈɑdi"),
+            ("tower-http", "tˈWəɹ ˌAʧtˌitˌipˈi"),
+            ("base-rs", "bˈAs ˌɑɹˈɛs"),
+            // A word with a pronunciation.
+            ("serde-json", "sˈɜɹdi ʤˈAsᵊn"),
+            ("web-sys", "wˈɛb sˈɪs"),
+            ("js-sys", "ʤˌAˈɛs sˈɪs"),
+            ("async-trait", "ˈAsˌɪŋk tɹˈAt"),
+            // In code, even of words it knows.
+            ("`base-scheduler`", "bˈAs skˈɛʤələɹ"),
+            (
+                "Run `cargo add base-http tokio-util`.",
+                "ɹˈʌn kˈɑɹɡO ˈæd bˈAs ˌAʧtˌitˌipˈi tˈOkiO jˈuTᵊl.",
+            ),
+        ] {
+            assert_eq!(sentences(text), [expected], "{text}");
+        }
+        assert_eq!(
+            sentences(
+                "The base-http crate depends on tokio-util and serde-json, and base-scheduler is well-known."
+            ),
+            [
+                "ðə bˈAs ˌAʧtˌitˌipˈi kɹˈAt dəpˈɛndz ˌɔn tˈOkiO jˈuTᵊl ænd sˈɜɹdi ʤˈAsᵊn, ænd bˌAsskˈɛʤələɹ ɪz wˌɛlnˈOn."
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_words_joined_by_hyphens_that_it_knows_as_it_does() {
+        // Words it knows, each in its lexicon, are said as one word, as `loqui-g2p` says them, as are runs with a word of no letters.
+        let without = G2p::new(Dialect::American, OovFallback::Neural).unwrap();
+        for text in [
+            "well-known",
+            "real-time",
+            "up-to-date",
+            "push-to-talk",
+            "state-of-the-art",
+            "re-read",
+            "re-use",
+            "read-only",
+            "built-in",
+            "third-party",
+            "Wi-Fi",
+            "base-scheduler",
+            "base-security",
+            "rust-analyzer",
+            "x86-64",
+        ] {
+            assert_eq!(sentences(text), [phonemes(&without, text)], "{text}");
+        }
+        assert_eq!(sentences("well-known"), ["wˌɛlnˈOn"]);
+        assert_eq!(sentences("push-to-talk"), ["pˈʊʃtətˈɔk"]);
+        assert_eq!(sentences("base-scheduler"), ["bˌAsskˈɛʤələɹ"]);
+        // With a heteronym decided by Tomori.
+        assert_eq!(sentences("live-reload"), ["lˈIvɹilˈOd"]);
+        // Dates that are not dates.
+        assert_eq!(normalize("Build 2026-13-01."), "Build 2026-13-01.");
+        assert_eq!(
+            English::new().divide("2026-13-01 x86-64"),
+            "2026-13-01 x86-64"
+        );
+    }
+
+    #[test]
+    fn says_http_as_its_letters_everywhere() {
+        for (word, letters, possessive) in [
+            ("http", "ˌAʧtˌitˌipˈi", "z"),
+            ("https", "ˌAʧtˌitˌipˌiˈɛs", "ᵻz"),
+            ("html", "ˌAʧtˌiˌɛmˈɛl", "z"),
+        ] {
+            let capitalized = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+            for written in [word.to_owned(), word.to_uppercase(), capitalized] {
+                assert_eq!(sentences(&written), [letters], "{written}");
+                assert_eq!(sentences(&format!("`{written}`")), [letters], "{written}");
+                assert_eq!(
+                    pronounced(
+                        &format!("The {written}'s headers."),
+                        &format!("{written}'s")
+                    ),
+                    [format!("{letters}{possessive}")],
+                    "{written}'s"
+                );
+                assert_eq!(
+                    sentences(&format!("base-{written}")),
+                    [format!("bˈAs {letters}")],
+                    "base-{written}"
+                );
+            }
+        }
+        assert_eq!(
+            sentences("An HTTP request over https, by http-body."),
+            ["ɐn ˌAʧtˌitˌipˈi ɹəkwˈɛst ˈOvəɹ ˌAʧtˌitˌipˌiˈɛs, bI ˌAʧtˌitˌipˈi bˈɑdi."]
+        );
+    }
+
+    #[test]
     fn the_built_in_pronunciations_are_needed_and_right() {
         let without = G2p::new(Dialect::American, OovFallback::Neural).unwrap();
         let english = English::new();
@@ -556,12 +702,14 @@ mod tests {
         for (word, _) in document.iter() {
             let given = phonemes(&english.g2p, &english.marked(word));
             assert!(!given.is_empty(), "{word}");
-            // `loqui-g2p` reads it differently without it, as it is written in some case.
+            // `loqui-g2p` reads it differently without it, as it is written in some case, alone or with a possessive.
             let capitalized = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
             assert!(
                 [word.to_owned(), word.to_uppercase(), capitalized]
-                    .iter()
-                    .any(|written| phonemes(&without, written) != given),
+                    .into_iter()
+                    .flat_map(|written| [format!("{written}'s"), written])
+                    .any(|written| phonemes(&without, &written)
+                        != phonemes(&english.g2p, &english.marked(&written))),
                 "{word} is pronounced {given} without it"
             );
         }

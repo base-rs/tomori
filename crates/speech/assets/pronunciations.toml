@@ -42,6 +42,10 @@ urls = "URLs"
 usb = "USB"
 openxr = "OpenXR"
 promql = "PromQL"
+# Acronyms of no vowels, which it spells alone, but reads as words with a possessive in lowercase, such as "http's" as "tits".
+http = "HTTP"
+https = "HTTPS"
+html = "HTML"
 ai = "/ˌAˈI/"
 ios = "/ˌIˌOˈɛs/"
 uv = "U V"
@@ -75,3 +79,7 @@ dotenv = "dot env"
 journalctl = "journal control"
 enum = "/ˈinəm/"
 impl = "/ˈɪmpᵊl/"
+# As Rust's programmers say it, rather than as "a sync", which runs into the word after it, as in "async-trait", heard as "a synced rate".
+async = "/ˈAsˌɪŋk/"
+# Rust's short name for "system", as in the crates "web-sys" and "js-sys", which it reads as "size".
+sys = "sis"
