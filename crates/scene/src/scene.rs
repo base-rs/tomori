@@ -117,13 +117,16 @@ pub struct Arrival {
     pub time: f32,
 }
 
-/// This participant's head, controllers and hands, for the others in the space.
-#[derive(Clone, Copy, Debug)]
+/// This participant's head, controllers and hands, for the others in the space, and the panel they carry, if any, for
+/// the server alone.
+#[derive(Clone, Debug)]
 pub struct Presence {
     pub head: Pose,
     pub left: Option<Pose>,
     pub right: Option<Pose>,
     pub hands: [Option<Hand>; 2],
+    /// The panel carried, by its identity, so that the space's agent does not move it out of the hand.
+    pub carrying: Option<String>,
 }
 
 impl Presence {
@@ -134,6 +137,7 @@ impl Presence {
             self.left.map(Into::into),
             self.right.map(Into::into),
             self.hands,
+            self.carrying.as_deref(),
         );
     }
 }
@@ -979,6 +983,7 @@ impl Step {
                 left: senses.controllers[crate::controller::LEFT],
                 right: senses.controllers[crate::controller::RIGHT],
                 hands: senses.hands,
+                carrying: self.projector.held().map(str::to_owned),
             });
         // Arrival hides the panel; entering a space places it in front of the participant again.
         if in_arrival {
@@ -1747,6 +1752,12 @@ mod tests {
         // Pointed at, not carried, a press of B dismisses nothing, and no hint shows.
         let (shown, _) = frame(&mut step, &mut conversation, &senses, start);
         assert_eq!(shown, None);
+        assert_eq!(
+            step.update(&senses, &mut conversation, &mut felt(), start, FRAME)
+                .presence
+                .and_then(|presence| presence.carrying),
+            None
+        );
         b(&mut step, &mut conversation, true, true, start);
         b(
             &mut step,
@@ -1762,6 +1773,16 @@ mod tests {
         frame(&mut step, &mut conversation, &senses, start);
         let (shown, _) = frame(&mut step, &mut conversation, &senses, start);
         assert_eq!(step.projector.held(), Some("panel-1"));
+        // The server is told which panel is carried, so that the agent leaves it in the hand.
+        let carrying = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
+            step.update(senses, conversation, &mut felt(), start, FRAME)
+                .presence
+                .and_then(|presence| presence.carrying)
+        };
+        assert_eq!(
+            carrying(&mut step, &mut conversation, &senses).as_deref(),
+            Some("panel-1")
+        );
         let shown = shown.expect("the hint shows while carrying");
         assert!(shown.contains("throw away, for all"), "{shown}");
         assert!(shown.contains("leave it floating"), "{shown}");

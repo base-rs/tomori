@@ -693,3 +693,118 @@ fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_name
     );
     assert_eq!(by_default(None, &projection), Destination::Tomori);
 }
+
+/// A flat wall `id` with its middle at `at`, facing home.
+fn wall_at(id: &str, at: Vec3) -> Wall {
+    Wall::new(
+        id,
+        WallKind::Environment,
+        Pose::upright_facing(at, [0.0, at[1], 0.0]),
+    )
+}
+
+#[test]
+fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view() {
+    let home = [0.0, 1.6, 0.0];
+    let far = wall_at("environment-0", [0.0, 2.2, -7.0]);
+    let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), far.clone()]);
+    let looks = |at: Vec3| looking_at(&looking(home, at), &projection);
+    let onto = |wall: &str, slot| Destination::Wall {
+        wall: wall.into(),
+        slot,
+    };
+    // Looking past the low Tomori wall at a wall 7 m away, the panel goes onto the Tomori wall, which they can read.
+    let far_slot = slots(&far)[1].middle;
+    assert!(matches!(
+        meet(home, forward(&looking(home, far_slot)), &projection, &[]),
+        Some((Met::Wall { ref wall, slot: Some(1) }, along)) if wall == "environment-0" && along > READING
+    ));
+    assert_eq!(looks(far_slot), onto(TOMORI_WALL, None));
+    assert_eq!(
+        by_default(Some(&looking(home, far_slot)), &projection),
+        onto(TOMORI_WALL, None)
+    );
+    // Named, it is still that wall, however far.
+    assert_eq!(
+        destination(
+            &Placement::Wall("environment wall 1".into()),
+            Some(&looking(home, far_slot)),
+            &[],
+            &projection,
+        ),
+        Ok(onto("environment-0", None))
+    );
+    // A wall near enough to read, looked at, is still chosen, in the empty slot looked at.
+    let readable = wall_at("environment-0", [0.0, 1.6, -3.8]);
+    let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), readable.clone()]);
+    let slot = slots(&readable)[1].middle;
+    assert_eq!(
+        looking_at(&looking(home, slot), &projection),
+        onto("environment-0", Some(1))
+    );
+    // Far from every wall, the panel floats in front of them.
+    let away = [0.0, 1.6, 9.0];
+    let alone = looking(away, [0.0, 1.6, 0.0]);
+    assert!(matches!(
+        looking_at(&alone, &projection),
+        Destination::Free(pose) if near(pose.position, [0.0, 1.45, 9.0 - FRONT.0])
+    ));
+    // Looking away from every wall, but near one, onto the nearest, as before.
+    let behind = looking(home, [0.0, 1.6, 5.0]);
+    assert_eq!(looking_at(&behind, &projection), Destination::Nearest(home));
+}
+
+#[test]
+fn a_wall_just_off_the_gaze_is_looked_at_and_the_nearest_of_those_looked_at_is_chosen() {
+    let home = [0.0, 1.6, 0.0];
+    // A low wall 3 m ahead, whose top row of slots is under 10° below eye level, so that a level gaze passes over it.
+    let low = wall_at("environment-0", [0.0, 1.0, -3.0]);
+    // A wall to the left, nearer, in view but well off the gaze.
+    let side = wall_at("environment-1", [-1.5, 1.6, -2.0]);
+    let ahead = looking(home, [0.0, 1.6, -10.0]);
+    let projection =
+        Projection::new("space-1", "sky").with_walls(vec![tomori(), low.clone(), side.clone()]);
+    assert_eq!(meet(home, forward(&ahead), &projection, &[]), None);
+    let off = |wall: &Wall| {
+        slots(wall)
+            .iter()
+            .map(|slot| angle(forward(&ahead), sub(slot.middle, home)))
+            .fold(f32::INFINITY, f32::min)
+    };
+    assert!(off(&low) < GAZE && off(&side) > GAZE && off(&tomori()) > GAZE);
+    assert!(wall_distance(&side, home) < wall_distance(&low, home));
+    let onto = |wall: &str| Destination::Wall {
+        wall: wall.into(),
+        slot: None,
+    };
+    // The low wall they plainly look towards, rather than the nearer one in view.
+    assert_eq!(looking_at(&ahead, &projection), onto("environment-0"));
+    // A wall the gaze meets, 3.8 m away, and the low wall within the tolerance: the nearer of the two.
+    let met = wall_at("environment-2", [0.0, 1.6, -3.8]);
+    let projection = Projection::new("space-1", "sky").with_walls(vec![tomori(), low, side, met]);
+    assert!(matches!(
+        meet(home, forward(&ahead), &projection, &[]),
+        Some((Met::Wall { ref wall, .. }, _)) if wall == "environment-2"
+    ));
+    assert_eq!(looking_at(&ahead, &projection), onto("environment-0"));
+}
+
+#[test]
+fn a_panel_carried_is_known_while_the_report_is_current_and_its_identity_bounded() {
+    let now = Instant::now();
+    let head = looking([0.0, 1.6, 0.0], [0.0, 1.6, -1.0]);
+    let carrying = |panel: &str| {
+        Seen::reported(head, None, None, None, now)
+            .unwrap()
+            .carrying(Some(panel.to_owned()))
+    };
+    assert_eq!(carrying("panel-3").carried(now), Some("panel-3"));
+    assert_eq!(
+        carrying("panel-3").carried(now + STALE - Duration::from_millis(1)),
+        Some("panel-3")
+    );
+    assert_eq!(carrying("panel-3").carried(now + STALE), None);
+    assert_eq!(seen(head).carried(now), None);
+    let long = "x".repeat(crate::limits::IDENTIFIER_BYTES + 1);
+    assert_eq!(carrying(&long).carried(now), None);
+}

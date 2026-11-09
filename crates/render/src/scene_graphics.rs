@@ -798,6 +798,7 @@ mod tests {
             left: None,
             right: None,
             hands: None,
+            carrying: None,
         });
         client.say("u1", "show me the build status");
         let session = tomori_server::test_support::eventually(|| {

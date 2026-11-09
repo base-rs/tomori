@@ -172,7 +172,7 @@ impl Participant {
             drawn.frame.agent,
             conversation,
         );
-        if let Some(presence) = drawn.frame.presence {
+        if let Some(presence) = &drawn.frame.presence {
             presence.send(connection);
         }
         (drawn.view_projection, drawn.scene_to_space)

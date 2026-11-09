@@ -319,7 +319,7 @@ pub fn run(
             &conversation,
         );
         // Report this participant's head, controllers and hands to the server, so the others in the space can render them.
-        if let Some(presence) = drawn.frame.presence {
+        if let Some(presence) = &drawn.frame.presence {
             presence.send(&mut connection);
         }
         let (scene_to_space, projections) = (drawn.scene_to_space, drawn.projections);

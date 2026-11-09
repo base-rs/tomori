@@ -1161,6 +1161,23 @@ impl HubState {
         }
     }
 
+    /// The panels the participants in `space` are carrying at `now`, as their clients last reported, so that its agent
+    /// leaves them in their hands. Visitors carry nothing.
+    pub(crate) fn carried(&self, space: &str, now: Instant) -> Vec<String> {
+        self.space(space).map_or_else(Vec::new, |record| {
+            record
+                .model
+                .participants
+                .iter()
+                .filter_map(|key| self.participants.get(key))
+                .filter_map(|participant| {
+                    participant.seen.as_ref().and_then(|seen| seen.carried(now))
+                })
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
     /// The names of the participants in `space` and where their heads are, as they last reported, for placing what its
     /// agent projects near them or where they look. Visitors send no presence.
     fn heads(&self, space: &str) -> Vec<(String, tomori_protocol::Pose)> {
@@ -3231,18 +3248,21 @@ impl Hub {
                 left,
                 right,
                 hands,
+                carrying,
             } => {
                 let Some(space) = space.and_then(|space| state.space(space)) else {
                     return;
                 };
                 let source = state.participants[participant].source;
+                // The panel carried is the server's to know, and not relayed.
                 let seen = crate::presence::Seen::reported(
                     head,
                     left,
                     right,
                     hands.as_deref(),
                     Instant::now(),
-                );
+                )
+                .map(|seen| seen.carrying(carrying));
                 for other in space.model.members() {
                     if other != participant {
                         state.send(

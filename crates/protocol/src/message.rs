@@ -366,6 +366,11 @@ pub enum ClientMessage {
         /// Tracked hand skeletons, left then right. Absent from older clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
+        /// The panel this participant is carrying, by its identity, so that the space's agent does not move it out of
+        /// their hand. Not relayed to the others. Absent while they carry none, and from older clients. See
+        /// `design/projection.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carrying: Option<String>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -1245,6 +1250,7 @@ mod tests {
             left: None,
             right: None,
             hands: Some(Box::new(hands)),
+            carrying: None,
         };
         let client_json =
             serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
@@ -1274,10 +1280,26 @@ mod tests {
             left: None,
             right: None,
             hands: None,
+            carrying: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).unwrap(),
             serde_json::json!({"type": "presence", "head": head_json})
+        );
+        // The panel carried is named while there is one.
+        let carrying = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            carrying: Some("panel-3".into()),
+        };
+        let carrying_json =
+            serde_json::json!({"type": "presence", "head": head_json, "carrying": "panel-3"});
+        assert_eq!(serde_json::to_value(&carrying).unwrap(), carrying_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(carrying_json).unwrap(),
+            carrying
         );
     }
 

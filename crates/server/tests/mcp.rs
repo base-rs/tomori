@@ -1209,6 +1209,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         left: Some(looking([-0.2, 1.1, -0.3], [-0.2, 1.1, -1.0])),
         right: Some(looking([0.2, 1.1, -0.3], slots[2])),
         hands: None,
+        carrying: None,
     });
     let bob_head = [1.5, 1.7, 1.5];
     bob.send(&ClientMessage::Presence {
@@ -1216,6 +1217,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         left: None,
         right: None,
         hands: Some(Box::new([None, None])),
+        carrying: None,
     });
     // A visitor's presence is refused, and reaches nobody.
     vic.send(&ClientMessage::Presence {
@@ -1223,6 +1225,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     });
     assert!(!vic.error().is_empty());
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
@@ -1278,6 +1281,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     });
     let looked = eventually(|| {
         let seen = presence(&session);
@@ -1342,10 +1346,13 @@ fn agent_replies(session: &FakeSession, message: &str, text: &str) {
 }
 
 #[test]
-fn the_agent_moves_a_panel_it_projected_near_someone_or_where_they_look_but_not_one_put_by_hand() {
+fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_but_not_one_carried()
+ {
     let backend = FakeBackend::new();
     let server = start(&backend);
-    let mut ada = server.connect("ada", "Ada");
+    // Ada's client reads what is projected, so that she sees Tomori's notices.
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
     let space = create(&mut ada, "Studio");
     let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
     let sessions = backend.started();
@@ -1357,6 +1364,7 @@ fn the_agent_moves_a_panel_it_projected_near_someone_or_where_they_look_but_not_
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     });
     // Asked by nobody, two panels go onto the Tomori wall's first slots.
     agent_replies(
@@ -1473,7 +1481,8 @@ fn the_agent_moves_a_panel_it_projected_near_someone_or_where_they_look_but_not_
         "More than one panel here has that title, so name it by its identity, as presence lists it."
     );
 
-    // Once Ada puts it somewhere herself, it stays there.
+    // Once Ada puts it somewhere herself, the agent still moves it when asked, and it stays hers: pinned where it goes,
+    // with a notice on the Tomori wall saying what moved, and where.
     ada.send(&ClientMessage::PlacePanel {
         panel: build.clone(),
         wall: Some("tomori".into()),
@@ -1481,8 +1490,74 @@ fn the_agent_moves_a_panel_it_projected_near_someone_or_where_they_look_but_not_
         pose: None,
     });
     eventually(|| (walls(&session)[0]["used"][1]["slot"] == 5).then_some(()));
+    let floated = &move_panel(&build, "front Ada")["structuredContent"];
+    assert_eq!(floated["moved"], true, "{floated}");
+    assert_eq!(floated["place"]["kind"], "free");
+    let notice = |wanted: &str| {
+        ada.wait_for(|message| match message {
+            tomori_protocol::ServerMessage::Projection { projection } => projection
+                .panels
+                .iter()
+                .find(|panel| panel.title == "Moved" && panel.body == wanted)
+                .map(|panel| panel.id.clone()),
+            _ => None,
+        })
+    };
+    notice("Tomori moved 'Build status' to float in the space.");
+    let back = &move_panel(&build, "wall Tomori wall")["structuredContent"];
+    assert_eq!(back["moved"], true, "{back}");
+    notice("Tomori moved 'Build status' to the Tomori wall.");
+    let pinned = eventually(|| {
+        walls(&session)[0]["used"]
+            .as_array()?
+            .iter()
+            .find(|used| used["panel"] == build.as_str())
+            .map(|used| used["pinned"].clone())
+    });
+    assert_eq!(pinned, true);
+    // One notice replaces the last.
+    let titled = |title: &str| {
+        walls(&session)[0]["used"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|used| used["title"] == title)
+            .count()
+    };
+    assert_eq!(titled("Moved"), 1);
+    // The agent's own panel moves without a notice.
+    let notes_now = walls(&session)[0]["used"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|used| used["title"] == "Notes")
+        .map(|used| used["panel"].as_str().unwrap().to_owned())
+        .unwrap();
     assert_eq!(
-        failure(&move_panel(&build, "wall tomori")),
-        "A participant put that panel where it is, so it stays there."
+        move_panel(&notes_now, "front Ada")["structuredContent"]["moved"],
+        true
     );
+    assert_eq!(titled("Moved"), 1);
+
+    // While Ada carries it, it stays in her hand; once she puts it down, it moves again.
+    let carrying = |panel: Option<&str>| ClientMessage::Presence {
+        head: looking(home, slots[4]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: panel.map(str::to_owned),
+    };
+    ada.send(&carrying(Some(&build)));
+    let refused = eventually(|| {
+        let result = move_panel(&build, "front Ada");
+        (result["isError"] == true).then(|| failure(&result).to_owned())
+    });
+    assert_eq!(
+        refused,
+        "Someone is carrying that panel now, so it stays in their hand; ask them to put it down first."
+    );
+    ada.send(&carrying(None));
+    eventually(|| {
+        (move_panel(&build, "front Ada")["structuredContent"]["moved"] == true).then_some(())
+    });
 }

@@ -1894,7 +1894,7 @@ mod tests {
         assert!(drawn.frame.blink > 0.0 && drawn.frame.blink < 1.0);
         let presence = drawn.frame.presence.unwrap();
         // The headset's frame loop sends that presence as it is, so another participant in the space receives the head where this participant travelled, in the shared scene, and hears them there.
-        let head = relayed(presence);
+        let head = relayed(presence.clone());
         assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
         let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
         assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);

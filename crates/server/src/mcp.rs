@@ -343,7 +343,7 @@ fn tools() -> Value {
         },
         {
             "name": "move_panel",
-            "description": "Move a panel you projected in your space, for everyone in it, by its identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. A panel a participant put where it is stays there.",
+            "description": "Move a panel in your space, for everyone in it, by its identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

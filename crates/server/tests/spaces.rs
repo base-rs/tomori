@@ -70,6 +70,7 @@ fn participant_identities_are_never_sent_to_other_clients() {
             left: None,
             right: None,
             hands: None,
+            carrying: None,
         });
     }
 
@@ -2182,6 +2183,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         left: Some(head),
         right: None,
         hands: Some(Box::new([Some(left_hand), None])),
+        carrying: None,
     });
 
     bob.wait_for(|message| match message {
@@ -2209,6 +2211,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     });
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {
