@@ -340,10 +340,9 @@ pub fn same_surface(a: &Wall, b: &Wall) -> bool {
 }
 
 /// Whether a wall carried may snap to `wall`: one someone added, since the Tomori wall and an environment's walls stand
-/// where Tomori or the environment puts them. A wall locked in place, once walls can be locked, is to be refused here
-/// too, so that the server and every client agree.
+/// where Tomori or the environment puts them, and not one locked in place, so that the server and every client agree.
 pub fn snaps_to(wall: &Wall) -> bool {
-    wall.kind == super::WallKind::Added
+    wall.kind == super::WallKind::Added && !wall.is_locked()
 }
 
 /// The gap between the slots of `a` and `b` standing edge to edge: one gutter, at the larger of their two, so that
@@ -466,6 +465,10 @@ pub fn snap(carried: &Wall, target: &Wall) -> Option<Snap> {
 /// line, so that the participant need not line it up first. Of `target`'s edges, the one that ranks first: the nearest,
 /// a side before the top or bottom unless one is clearly nearer.
 pub fn snap_within(carried: &Wall, target: &Wall, leeway: Leeway) -> Option<Snap> {
+    // A locked wall is carried nowhere, nor snapped to.
+    if carried.is_locked() || target.is_locked() {
+        return None;
+    }
     let radius = target.radius();
     // Curved alike, it takes the other's radius, so that the two read as one curve.
     let shaped = match (radius, carried.radius()) {

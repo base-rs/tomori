@@ -449,3 +449,21 @@ fn a_wall_carried_with_another_keeps_where_it_stands_from_it() {
     let (u, y, depth, turn) = on_surface(&to, None, &moved);
     assert!(near(u, 1.0) && near(y, 0.0) && near(depth, 0.0) && near(turn, 0.0));
 }
+
+#[test]
+fn a_locked_wall_is_no_snap_target_and_snaps_to_nothing() {
+    let two = wall("wall-1", ahead(0.0), (2, 2), 0.9);
+    let small = wall("wall-2", ahead(0.0), (1, 1), 1.0);
+    let (u, y) = attached_offset(&two, &small, Edge::Right, Align::Start).unwrap();
+    let mut carried = small.clone();
+    carried.pose = along(&two.pose, None, u + 0.02, y);
+    assert!(snaps_to(&two) && snap(&carried, &two).is_some());
+    // Locked, the wall stood beside is no target, and a wall locked snaps to nothing.
+    let locked = two.clone().with_locked(true);
+    assert!(!snaps_to(&locked));
+    assert!(snap(&carried, &locked).is_none());
+    assert!(snap(&carried.clone().with_locked(true), &two).is_none());
+    // The Tomori wall and an environment's walls are no targets either.
+    let environment = Wall::new("environment-0", WallKind::Environment, ahead(0.0));
+    assert!(!snaps_to(&environment));
+}

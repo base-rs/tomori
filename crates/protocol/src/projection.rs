@@ -152,6 +152,12 @@ pub struct Wall {
     /// as one board. See [`group`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joined: Vec<Join>,
+    /// Whether it is locked: a locked wall is neither moved, resized, reshaped, bent nor removed, by anyone, until an
+    /// owner unlocks it, though panels still go onto it and come off it, and it snaps to nothing, nor anything to it.
+    /// Sent only where it is; an older client, which knows none, offers its controls, and the server refuses what they
+    /// ask. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl Wall {
@@ -167,7 +173,20 @@ impl Wall {
             aspect: None,
             group: None,
             joined: Vec::new(),
+            locked: false,
         }
+    }
+
+    /// The wall, locked or not.
+    pub fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Whether it is locked, so that nothing changes it, moves it or snaps to it, nor it to anything, until an owner
+    /// unlocks it.
+    pub fn is_locked(&self) -> bool {
+        self.locked
     }
 
     /// The wall, in the group `group`, joined to others across `joined`.
