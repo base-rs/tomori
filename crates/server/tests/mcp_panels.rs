@@ -559,6 +559,9 @@ fn a_tick_or_an_update_by_number_from_a_revision_since_changed_is_refused_rather
     })))
     .clone();
     assert_eq!(updated["revision"], 3);
+    // Ada is sent it, before she ticks, so that the projection sent again after her refusal is the one waited for
+    // below, rather than this one, which a projection still waiting to be sent would take the place of.
+    panels(&ada, |panels| panels[0].revision == 3);
     assert_eq!(
         failure(&update(
             json!({"panel": "agenda", "check": [1], "revision": "two"})
