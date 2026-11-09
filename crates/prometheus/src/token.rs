@@ -4,7 +4,12 @@
 //! Bearer tokens, and the sources a client asks for them.
 use std::fmt;
 
-/// A bearer token, sent only in the `authorization` field of a client's own requests. Its `Debug` hides it, and it has no `Display`, so that it is not printed by accident.
+/// A bearer token, for the `authorization` field of requests. Its `Debug` hides it, and it has no `Display`, so that it is not printed by accident; [`Token::expose`] is the one way to read it.
+///
+/// ```compile_fail,E0277
+/// let token = tomori_prometheus::Token::new("a-token").unwrap();
+/// println!("{token}");
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct Token(String);
 
@@ -23,8 +28,23 @@ impl Token {
             .then(|| Self(text.to_owned()))
     }
 
-    /// The token's text, for the `authorization` field and for removing it from what errors quote.
-    pub(crate) fn secret(&self) -> &str {
+    /// The token's text, the one way to read it, for the `authorization` field of a request, as `Bearer TOKEN`, and for removing it from text an error quotes; never log, print or store it. The client uses it for its own requests, and another client of the application's, such as one for another API of the same gateway, uses it to send the token a [`TokenSource`] made:
+    ///
+    /// ```
+    /// use tomori_prometheus::{Token, TokenSource};
+    ///
+    /// // Another client's `authorization` field, from the same source as the Prometheus client's. A source may run a
+    /// // command each time it is asked, so a real client keeps the token for its lifetime and asks again only when it
+    /// // expires or the endpoint refuses it with HTTP 401, as the Prometheus client does.
+    /// fn authorization(source: &dyn TokenSource) -> Result<String, String> {
+    ///     let token = source.token()?;
+    ///     Ok(format!("Bearer {}", token.expose()))
+    /// }
+    ///
+    /// let source = Token::new("a-token").unwrap();
+    /// assert_eq!(authorization(&source).unwrap(), "Bearer a-token");
+    /// ```
+    pub fn expose(&self) -> &str {
         &self.0
     }
 }
@@ -73,12 +93,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{REDACTED, Scrub};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_token_is_visible_ascii_and_never_printed() {
         let token = Token::new("  secret-1 ").unwrap();
-        assert_eq!(token.secret(), "secret-1");
+        assert_eq!(token.expose(), "secret-1");
         assert_eq!(format!("{token:?}"), "Token(..)");
+        assert_eq!(format!("{token:#?}"), "Token(..)");
         assert_eq!(Token::new(""), None);
         assert_eq!(Token::new("   "), None);
         assert_eq!(Token::new("caf\u{e9}"), None);
@@ -86,5 +109,38 @@ mod tests {
         assert_eq!(token.token(), Ok(token.clone()));
         let source = || Err::<Token, _>("no token".to_owned());
         assert_eq!(TokenSource::token(&source), Err("no token".to_owned()));
+    }
+
+    #[test]
+    fn exposing_reads_the_token_the_source_made_and_then_the_renewed_one() {
+        let made = AtomicUsize::new(0);
+        let source = move || {
+            let count = made.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Token::new(&format!("token-{count}")).unwrap())
+        };
+        let source: &dyn TokenSource = &source;
+        let first = source.token().unwrap();
+        assert_eq!(first.expose(), "token-1");
+        let renewed = source.token().unwrap();
+        assert_eq!(renewed.expose(), "token-2");
+        assert_eq!(first.expose(), "token-1");
+        assert_eq!(format!("{renewed:?}"), "Token(..)");
+    }
+
+    #[test]
+    fn text_quoting_an_exposed_token_is_scrubbed() {
+        let token = Token::new("eyJhbGciOi.payload.signature").unwrap();
+        let header = format!("Bearer {}", token.expose());
+        let scrub = Scrub {
+            token: Some(token.expose()),
+            host: "prometheus.example",
+            base: "",
+        };
+        let quoted = scrub.quote(&format!("the gateway refused authorization: {header}"));
+        assert_eq!(
+            quoted,
+            format!("the gateway refused authorization: Bearer {REDACTED}")
+        );
+        assert!(!quoted.contains(token.expose()));
     }
 }

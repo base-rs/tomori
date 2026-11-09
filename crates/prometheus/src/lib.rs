@@ -438,7 +438,7 @@ impl Client {
                 body: body.clone(),
                 authorization: token
                     .as_ref()
-                    .map(|(token, _)| format!("Bearer {}", token.secret())),
+                    .map(|(token, _)| format!("Bearer {}", token.expose())),
             })?;
             if reply.status == 401
                 && let Some((_, generation)) = &token
@@ -464,7 +464,7 @@ impl Client {
                 body: &reply.body,
             };
             let scrub = Scrub {
-                token: token.as_ref().map(|(token, _)| token.secret()),
+                token: token.as_ref().map(|(token, _)| token.expose()),
                 ..self.scrub()
             };
             return data::read(answer, &shared.labels, &scrub);

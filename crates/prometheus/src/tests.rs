@@ -808,13 +808,13 @@ fn a_token_refused_but_since_renewed_is_not_renewed_again() {
         .build()
         .unwrap();
     let (first, generation) = client.token(None).unwrap().unwrap();
-    assert_eq!((first.secret(), generation), ("token-1", 1));
+    assert_eq!((first.expose(), generation), ("token-1", 1));
     // This caller's request was refused, so it renews.
     let (second, renewed) = client.token(Some(generation)).unwrap().unwrap();
-    assert_eq!((second.secret(), renewed), ("token-2", 2));
+    assert_eq!((second.expose(), renewed), ("token-2", 2));
     // Another caller's request, sent with the first token, was refused too: it takes the renewed token.
     let (third, kept) = client.token(Some(generation)).unwrap().unwrap();
-    assert_eq!((third.secret(), kept), ("token-2", 2));
+    assert_eq!((third.expose(), kept), ("token-2", 2));
     assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
 
