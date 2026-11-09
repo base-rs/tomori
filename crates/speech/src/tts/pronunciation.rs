@@ -29,6 +29,14 @@ pub(crate) struct Pronunciations {
 static RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]+(?:[-._][\p{L}\p{N}]+)*").expect("a valid pattern"));
 
+/// A possessive `'s` that follows a run.
+static POSSESSIVE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^['’]s\b").expect("a valid pattern"));
+
+/// What may follow a word joined to it in a run: `-`, `.` or `_`, then a letter or digit.
+static JOINED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[-._][\p{L}\p{N}]").expect("a valid pattern"));
+
 /// A word of a run.
 static PART: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]+").expect("a valid pattern"));
@@ -119,7 +127,7 @@ impl Pronunciations {
         self.words.len()
     }
 
-    /// `text` with each word that has a pronunciation replaced by a placeholder, which passes through normalization unchanged, and the markup that [`restore`] puts in its place. A run of words, such as "sherpa-onnx", is replaced whole if it has a pronunciation, and otherwise each of its words that has one.
+    /// `text` with each word that has a pronunciation replaced by a placeholder, which passes through normalization unchanged, and the markup that [`restore`] puts in its place. A run of words, such as "sherpa-onnx", is replaced whole if it has a pronunciation, and otherwise each of its words that has one. A possessive `'s` after a word that has one is marked with it, as the phonemizer would otherwise say it as "s" whatever comes before.
     pub(crate) fn protect(&self, text: &str) -> (String, Vec<String>) {
         let text: String = text
             .chars()
@@ -127,36 +135,124 @@ impl Pronunciations {
             .collect();
         let mut marks = Vec::new();
         let mut protected = String::with_capacity(text.len());
-        let mut mark = |protected: &mut String, word: &str| match (
+        // Marks `word`, with `possessive` after it, if it has a pronunciation, and says whether it did.
+        let mut mark = |protected: &mut String, word: &str, possessive: &str| match (
             self.words.get(&word.to_lowercase()),
             char::from_u32(PLACEHOLDERS.start() + marks.len() as u32)
                 .filter(|&symbol| is_placeholder(symbol)),
         ) {
             (Some(phonemes), Some(placeholder)) => {
                 protected.push(placeholder);
-                marks.push(format!("[{word}](/{phonemes}/)"));
+                let suffix = if possessive.is_empty() {
+                    ""
+                } else {
+                    possessive_suffix(phonemes)
+                };
+                let word = markup_text(word);
+                marks.push(format!("[{word}{possessive}](/{phonemes}{suffix}/)"));
+                true
             }
-            _ => protected.push_str(word),
+            _ => {
+                protected.push_str(word);
+                false
+            }
         };
         let mut end = 0;
         for run in RUN.find_iter(&text) {
+            // The "s" of a possessive marked with the word before it.
+            if run.start() < end {
+                continue;
+            }
             protected.push_str(&text[end..run.start()]);
             end = run.end();
+            // Not "'s" that a further word is joined to, as in "API's-based", whose "s-based" is a run of its own.
+            let possessive = POSSESSIVE
+                .find(&text[run.end()..])
+                .filter(|possessive| !JOINED.is_match(&text[run.end() + possessive.end()..]))
+                .map_or("", |possessive| possessive.as_str());
             if self.words.contains_key(&run.as_str().to_lowercase()) {
-                mark(&mut protected, run.as_str());
+                if mark(&mut protected, run.as_str(), possessive) {
+                    end += possessive.len();
+                }
                 continue;
             }
             let mut within = run.start();
             for part in PART.find_iter(run.as_str()) {
                 let (start, finish) = (run.start() + part.start(), run.start() + part.end());
                 protected.push_str(&text[within..start]);
-                mark(&mut protected, part.as_str());
+                let last = finish == run.end();
+                let possessive = if last { possessive } else { "" };
+                let word = part.as_str();
+                // A word in camel case, such as "panelId", is read as its words, as normalization divides it, so each of them that has a pronunciation is marked, unless the whole word has one.
+                let pieces = camel_pieces(word);
+                let marked = if self.words.contains_key(&word.to_lowercase())
+                    || !pieces
+                        .iter()
+                        .any(|piece| self.words.contains_key(&piece.to_lowercase()))
+                {
+                    mark(&mut protected, word, possessive)
+                } else {
+                    let mut marked = false;
+                    for (index, piece) in pieces.iter().enumerate() {
+                        if index > 0 {
+                            protected.push(' ');
+                        }
+                        let final_piece = index + 1 == pieces.len();
+                        marked = mark(
+                            &mut protected,
+                            piece,
+                            if final_piece { possessive } else { "" },
+                        );
+                    }
+                    marked
+                };
+                if marked && last {
+                    end += possessive.len();
+                }
                 within = finish;
             }
             protected.push_str(&text[within..run.end()]);
         }
         protected.push_str(&text[end..]);
         (protected, marks)
+    }
+}
+
+/// The words of `word` in camel case, divided where normalization divides them, before a capital that follows a lowercase letter and precedes another, so that "panelId" is "panel" and "Id", but "macOS" and "OpenXR" are whole.
+fn camel_pieces(word: &str) -> Vec<&str> {
+    let characters: Vec<(usize, char)> = word.char_indices().collect();
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (position, &(index, capital)) in characters.iter().enumerate().skip(1) {
+        let lower = |at: usize| {
+            characters
+                .get(at)
+                .is_some_and(|(_, c)| c.is_ascii_lowercase())
+        };
+        if capital.is_ascii_uppercase() && lower(position - 1) && lower(position + 1) {
+            pieces.push(&word[start..index]);
+            start = index;
+        }
+    }
+    pieces.push(&word[start..]);
+    pieces
+}
+
+/// `word` as it is written in its markup, which the phonemizer tokenizes as it tokenizes text: as it is, except "id", which its tokenizer, following spaCy's, reads as "I'd", and "Id." as an abbreviation, losing the full stop that ends a sentence, so it is written "ID", which it reads as one word.
+fn markup_text(word: &str) -> &str {
+    if word.eq_ignore_ascii_case("id") {
+        "ID"
+    } else {
+        word
+    }
+}
+
+/// The phonemes of a possessive `'s` after `phonemes`, as misaki gives them after a word it knows: "s" after a voiceless consonant, "ᵻz" after a sibilant, and "z" otherwise.
+fn possessive_suffix(phonemes: &str) -> &'static str {
+    match phonemes.chars().last() {
+        Some(last) if "ptkfθ".contains(last) => "s",
+        Some(last) if "szʃʒʧʤ".contains(last) => "ᵻz",
+        _ => "z",
     }
 }
 
@@ -241,10 +337,44 @@ mod tests {
             ),
             // Not within a word.
             ("READMEs and onnxruntime.", "READMEs and onnxruntime."),
+            // With a possessive, said as misaki says one after a word it knows.
+            (
+                "The README's, ONNX’s and sherpa_onnx's, but not README'sx.",
+                "The [README's](/ɹˈidmiz/), [ONNX’s](/ˈɑnɪksᵻz/) and sherpa_[onnx's](/ˈɑnɪksᵻz/), but not [README](/ɹˈidmi/)'sx.",
+            ),
+            ("ONNX_rt's and Bob's.", "[ONNX](/ˈɑnɪks/)_rt's and Bob's."),
+            // Not "'s" with a further word joined to it.
+            ("README's-based.", "[README](/ɹˈidmi/)'s-based."),
+            // Words in camel case, as normalization divides them, but not a whole word with a pronunciation, or one with no words that have one.
+            (
+                "getReadmeOnnx's, ReadmeFile, ReadMe, macONNX and OpenXR.",
+                "get [Readme](/ɹˈidmi/) [Onnx's](/ˈɑnɪksᵻz/), [Readme](/ɹˈidmi/) File, [ReadMe](/ɹˈidmi/), macONNX and OpenXR.",
+            ),
             ("Nothing to mark.", "Nothing to mark."),
         ] {
             assert_eq!(marked(&pronunciations, text), expected, "{text}");
         }
+    }
+
+    #[test]
+    fn says_a_possessive_as_misaki_does() {
+        assert_eq!(possessive_suffix("ˌApˌikˈA"), "z");
+        assert_eq!(possessive_suffix("ɡˈɪt hˈʌb"), "z");
+        assert_eq!(possessive_suffix("ˌIdˈi"), "z");
+        assert_eq!(possessive_suffix("wˈɑzəm"), "z");
+        assert_eq!(possessive_suffix("ɹˈʌst sˈi"), "z");
+        assert_eq!(possessive_suffix("ˈɪmpk"), "s");
+        assert_eq!(possessive_suffix("ˈimæks"), "ᵻz");
+        assert_eq!(possessive_suffix(""), "z");
+    }
+
+    #[test]
+    fn writes_id_in_capitals_in_its_markup() {
+        let pronunciations = parse("id = \"/ˌIdˈi/\"\n");
+        assert_eq!(
+            marked(&pronunciations, "Its id. Id? ID's id_x."),
+            "Its [ID](/ˌIdˈi/). [ID](/ˌIdˈi/)? [ID's](/ˌIdˈiz/) [ID](/ˌIdˈi/)_x."
+        );
     }
 
     #[test]

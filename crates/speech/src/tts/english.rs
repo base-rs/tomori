@@ -475,6 +475,78 @@ mod tests {
     }
 
     #[test]
+    fn pronounces_id_as_its_letters() {
+        // The maintainer heard "id" said as the Freudian id, in November 2026.
+        for word in ["ID", "Id", "id"] {
+            assert_eq!(pronounced(&format!("Its {word} is 3."), word), ["ˌIdˈi"]);
+        }
+        for word in ["IDs", "ids"] {
+            assert_eq!(pronounced(&format!("The {word} match."), word), ["ˌIdˈiz"]);
+        }
+        // A panel's header line, code, punctuation and identifiers.
+        assert_eq!(sentences("id: 42"), ["ˌIdˈi: fˈɔɹTi tˈu"]);
+        assert_eq!(
+            sentences("Read the `id` and `ids` fields."),
+            ["ɹˈid ði ˌIdˈi ænd ˌIdˈiz fˈildz."]
+        );
+        assert_eq!(
+            sentences("(id), \"id\", panel_id and session-id."),
+            ["(ˌIdˈi), ”ˌIdˈi, pˈænᵊl ˌIdˈi ænd sˈɛʃənˌIdˈi."]
+        );
+        assert_eq!(pronounced("The panel's id's text.", "id's"), ["ˌIdˈiz"]);
+        // In camel case, as normalization divides it.
+        assert_eq!(
+            sentences("The panelId and sessionIds."),
+            ["ðə pˈænᵊl ˌIdˈi ænd sˈɛʃən ˌIdˈiz."]
+        );
+        // Not within a word.
+        assert_eq!(
+            sentences("I did have an idea, and it is valid."),
+            ["ˌI dˈɪd hæv ɐn Idˈiə, ænd ɪt ɪz vˈælɪd."]
+        );
+        // Its tokenizer reads "id" as "I'd", and "Id." as an abbreviation, which lost the full stop that ends a sentence.
+        assert_eq!(
+            sentences("Point at it and I'll inspect its id. Then its Id."),
+            ["pˈYnt æt ɪt ænd ˌIl ɪnspˈɛkt ɪts ˌIdˈi.", "ðˈɛn ɪts ˌIdˈi."]
+        );
+    }
+
+    #[test]
+    fn pronounces_acronyms_as_their_letters_in_any_case() {
+        for (word, expected) in [
+            ("adb", "ˌAdˌibˈi"),
+            ("apk", "ˌApˌikˈA"),
+            ("apks", "ˌApˌikˈAz"),
+            ("api", "ˌApˌiˈI"),
+            ("cli", "sˌiˌɛlˈI"),
+            ("cpu", "sˌipˌijˈu"),
+            ("gpu", "ʤˌipˌijˈu"),
+            ("os", "ˌOˈɛs"),
+            ("prs", "pˌiˈɑɹz"),
+            ("ui", "jˌuˈI"),
+            ("url", "jˌuˌɑɹˈɛl"),
+            ("urls", "jˌuˌɑɹˈɛlz"),
+            ("usb", "jˌuˌɛsbˈi"),
+            ("openxr", "ˌOpᵊnˌɛksˈɑɹ"),
+            ("promql", "pɹˌɑmkjˌuˈɛl"),
+        ] {
+            for written in [word.to_owned(), word.to_uppercase()] {
+                assert_eq!(
+                    pronounced(&format!("The {written} works."), &written),
+                    [expected],
+                    "{written}"
+                );
+            }
+        }
+        assert_eq!(pronounced("Run git rerere.", "rerere"), ["ɹˌiɹˌiɹˈi"]);
+        // As `loqui-g2p` already says them, with no pronunciation.
+        assert_eq!(
+            sentences("The IDs are on the APK's MCP panel, and the PRs pass CI."),
+            ["ði ˌIdˈiz ɑɹ ˌɔn ði ˌApˌikˈAz ˌɛmsˌipˈi pˈænᵊl, ænd ðə pˌiˈɑɹz pˈæs sˌiˈI."]
+        );
+    }
+
+    #[test]
     fn the_built_in_pronunciations_are_needed_and_right() {
         let without = G2p::new(Dialect::American, OovFallback::Neural).unwrap();
         let english = English::new();
