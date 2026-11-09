@@ -18,8 +18,8 @@ use crate::server_sides::{Inspecting, Uninspectable};
 /// How long the agent waits for an environment's server side to answer an inspection, unless the server sets another.
 pub const INSPECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The largest answer of a side taken, in bytes of JSON text.
-pub const INSPECTION_BYTES: usize = 16 * 1024;
+/// The largest answer of a side taken, in bytes of JSON text: `tomori_environment::INSPECTION_LIMIT`.
+pub use tomori_environment::INSPECTION_LIMIT as INSPECTION_BYTES;
 
 /// The longest id the tool takes, in bytes: an environment's identifier, `:` and a reference, with room to spare.
 pub const ID_BYTES: usize = 256;
@@ -261,6 +261,31 @@ mod tests {
             Err(format!(
                 "The environment's answer is {} bytes, more than the {INSPECTION_BYTES} Tomori passes on.",
                 INSPECTION_BYTES + 2
+            ))
+        );
+    }
+
+    /// An answer of exactly `tomori_environment::INSPECTION_LIMIT` bytes is taken whole, and one byte more refused.
+    #[test]
+    fn an_answer_at_the_limit_is_taken_whole_and_one_byte_more_refused() {
+        use tomori_environment::INSPECTION_LIMIT;
+        // Arrays of numbers, so that no string is cut: `[1,…,1,10]` at the limit, an even number of bytes, and
+        // `[1,…,1]` one byte longer.
+        let at = format!("[{}10]", "1,".repeat((INSPECTION_LIMIT - 4) / 2));
+        let over = format!("[{}1]", "1,".repeat((INSPECTION_LIMIT - 2) / 2));
+        assert_eq!(
+            (at.len(), over.len()),
+            (INSPECTION_LIMIT, INSPECTION_LIMIT + 1)
+        );
+        assert_eq!(
+            details(&at).unwrap(),
+            serde_json::from_str::<Value>(&at).unwrap()
+        );
+        assert_eq!(
+            details(&over),
+            Err(format!(
+                "The environment's answer is {} bytes, more than the {INSPECTION_LIMIT} Tomori passes on.",
+                INSPECTION_LIMIT + 1
             ))
         );
     }

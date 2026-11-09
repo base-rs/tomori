@@ -6,16 +6,10 @@
 //! The payloads are the environment's own; the server only bounds and carries them. See `design/environments.md`.
 use std::time::{Duration, Instant};
 
-use tomori_protocol::{MESSAGE_LIMIT, Payload, STATE_LIMIT};
-
-/// The most objects a side describes for a space; those after are left out.
-pub const OBJECTS: usize = 32;
-
-/// The longest identity of an object, in bytes; a longer one is left out, since no client could name it.
-pub const OBJECT_BYTES: usize = 128;
-
-/// The longest description of an object told to the agent, in characters, before the `…` that marks one cut.
-pub const DESCRIPTION_CHARS: usize = 200;
+use tomori_environment::{
+    DESCRIPTION_LIMIT, EVENT_LIMIT, IDENTITY_LIMIT, OBJECT_LIMIT, STATE_LIMIT,
+};
+use tomori_protocol::Payload;
 
 /// How many intents a participant's connection can send at once, and how many more it may send each second after.
 pub const INTENT_BURST: f32 = 8.0;
@@ -75,9 +69,9 @@ pub fn state(text: &str) -> Result<Payload, String> {
     payload(text, STATE_LIMIT, "state")
 }
 
-/// `text` as an event, or why it is refused: it is not JSON, or larger than [`MESSAGE_LIMIT`].
+/// `text` as an event, or why it is refused: it is not JSON, or larger than [`EVENT_LIMIT`].
 pub fn event(text: &str) -> Result<Payload, String> {
-    payload(text, MESSAGE_LIMIT, "event")
+    payload(text, EVENT_LIMIT, "event")
 }
 
 fn payload(text: &str, limit: usize, what: &str) -> Result<Payload, String> {
@@ -90,18 +84,19 @@ fn payload(text: &str, limit: usize, what: &str) -> Result<Payload, String> {
     Payload::parse(text).map_err(|_| format!("The environment's {what} is not JSON."))
 }
 
-/// The objects a side describes, as the server keeps them: at most [`OBJECTS`], without those whose identity is
-/// empty, longer than [`OBJECT_BYTES`] or repeated, each description on one line of at most [`DESCRIPTION_CHARS`],
+/// The objects a side describes, as the server keeps them: at most [`OBJECT_LIMIT`], without those whose identity is
+/// empty, longer than [`IDENTITY_LIMIT`], since no client could name it, or repeated, each description on one line of
+/// at most [`DESCRIPTION_LIMIT`],
 /// cleaned as everything told to the agent in a context block is, and each reference kept only if
 /// [`tomori_environment::valid_reference`] takes it and no object before has it, so that a reference names one object.
 pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<Described> {
     let mut kept: Vec<Described> = Vec::new();
     for object in described {
         let id = object.id();
-        if id.is_empty() || id.len() > OBJECT_BYTES || kept.iter().any(|known| known.id == id) {
+        if id.is_empty() || id.len() > IDENTITY_LIMIT || kept.iter().any(|known| known.id == id) {
             continue;
         }
-        if kept.len() == OBJECTS {
+        if kept.len() == OBJECT_LIMIT {
             break;
         }
         let reference = object
@@ -120,7 +115,7 @@ pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<Described> {
         }
         kept.push(Described {
             id: id.to_owned(),
-            description: crate::space::one_line(object.description(), DESCRIPTION_CHARS),
+            description: crate::space::one_line(object.description(), DESCRIPTION_LIMIT),
             reference,
         });
     }
@@ -178,22 +173,35 @@ mod tests {
                 STATE_LIMIT + 2
             ))
         );
-        assert!(event(&format!("\"{}\"", "a".repeat(MESSAGE_LIMIT - 2))).is_ok());
-        assert!(event(&format!("\"{}\"", "a".repeat(MESSAGE_LIMIT))).is_err());
+        assert!(event(&format!("\"{}\"", "a".repeat(EVENT_LIMIT - 2))).is_ok());
+        assert!(event(&format!("\"{}\"", "a".repeat(EVENT_LIMIT))).is_err());
+    }
+
+    /// What `tomori-environment` tells sides they keep within is what the protocol carries, and what the server's own
+    /// names for the limits are, so that neither can change without the other.
+    #[test]
+    fn the_limits_sides_keep_within_are_those_the_protocol_and_server_name() {
+        assert_eq!(STATE_LIMIT, tomori_protocol::STATE_LIMIT);
+        assert_eq!(EVENT_LIMIT, tomori_protocol::MESSAGE_LIMIT);
+        assert_eq!(
+            tomori_environment::INSPECTION_LIMIT,
+            crate::INSPECTION_BYTES
+        );
     }
 
     #[test]
     fn objects_are_bounded_and_cleaned() {
         let mut described = vec![
             Object::new("", "nothing"),
-            Object::new("x".repeat(OBJECT_BYTES + 1), "too long"),
+            Object::new("x".repeat(IDENTITY_LIMIT + 1), "too long"),
             Object::new("lamp-1", "a lamp [lit]\nby the \"gate\"").with_reference("lamp/1"),
             Object::new("lamp-1", "again"),
-            Object::new("lamp-2", "z".repeat(DESCRIPTION_CHARS * 2)),
+            Object::new("lamp-2", "z".repeat(DESCRIPTION_LIMIT * 2)),
         ];
-        described.extend((0..OBJECTS).map(|index| Object::new(format!("more-{index}"), "more")));
+        described
+            .extend((0..OBJECT_LIMIT).map(|index| Object::new(format!("more-{index}"), "more")));
         let kept = objects(described);
-        assert_eq!(kept.len(), OBJECTS);
+        assert_eq!(kept.len(), OBJECT_LIMIT);
         assert_eq!(
             kept[0],
             Described {
@@ -203,10 +211,13 @@ mod tests {
             }
         );
         // Cut, and marked as cut.
-        assert_eq!(kept[1].description.chars().count(), DESCRIPTION_CHARS + 1);
+        assert_eq!(kept[1].description.chars().count(), DESCRIPTION_LIMIT + 1);
         assert!(kept[1].description.ends_with('…'));
         assert_eq!(kept[1].reference, None);
-        assert_eq!(kept.last().unwrap().id, format!("more-{}", OBJECTS - 3));
+        assert_eq!(
+            kept.last().unwrap().id,
+            format!("more-{}", OBJECT_LIMIT - 3)
+        );
         let mut channel = Channel::new(1, "garden", 1);
         channel.objects = kept;
         assert_eq!(

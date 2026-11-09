@@ -1611,7 +1611,7 @@ impl SpaceModel {
             }
             // An object only of the environment the space is in now, as its side described it.
             tomori_protocol::Resource::Object { object, .. }
-                if object.len() <= crate::channel::OBJECT_BYTES =>
+                if object.len() <= tomori_environment::IDENTITY_LIMIT =>
             {
                 let channel = objects.filter(|channel| channel.environment == self.environment)?;
                 let described = channel.describe(object)?;
@@ -3848,7 +3848,7 @@ mod tests {
             tomori_environment::Object::new("post-1", "a fence post"),
             tomori_environment::Object::new(
                 "long-1",
-                "l".repeat(crate::channel::DESCRIPTION_CHARS * 2),
+                "l".repeat(tomori_environment::DESCRIPTION_LIMIT * 2),
             )
             .with_reference("x".repeat(tomori_environment::REFERENCE_BYTES)),
         ]);

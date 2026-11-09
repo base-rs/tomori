@@ -8,6 +8,8 @@
 //! [`sightlines`] holds the rule every environment's tests check of where it has participants arrive and puts the Tomori wall's home and the agent's: that the wall can be read, and the agent seen, from the arrival.
 //!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
+//!
+//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -142,6 +144,32 @@ pub struct Object {
 /// The longest reference of an object, in bytes: a longer one is left out, and the object described without it.
 pub const REFERENCE_BYTES: usize = 64;
 
+/// The largest state a side shares with [`Space::share`] or [`Space::announce`], as JSON text, in bytes: 64 KiB. The
+/// server refuses a larger one, saying why. The server's tests check that it equals `tomori_protocol::STATE_LIMIT`,
+/// the largest state the protocol carries.
+pub const STATE_LIMIT: usize = 64 * 1024;
+
+/// The largest event a side sends with [`Space::announce`], as JSON text, in bytes: 4 KiB. The server refuses a larger
+/// one, saying why. The server's tests check that it equals `tomori_protocol::MESSAGE_LIMIT`, the largest event the
+/// protocol carries.
+pub const EVENT_LIMIT: usize = 4 * 1024;
+
+/// The most objects a side describes with [`Space::describe`] that the server keeps: those after are left out.
+pub const OBJECT_LIMIT: usize = 32;
+
+/// The longest identity of an object, in bytes: the server leaves out an object whose identity is longer, or empty.
+pub const IDENTITY_LIMIT: usize = 128;
+
+/// The longest description of an object told to the space's agent, in characters, once the server has cleaned it onto
+/// one line: a longer one is cut to this many, followed by the `…` that marks it cut.
+pub const DESCRIPTION_LIMIT: usize = 200;
+
+/// The largest answer of an [`Inspector`], as JSON text, in bytes: 16 KiB. The server refuses a larger one, and tells
+/// the agent so. Within it, the server cuts each string to 2,000 characters, and the message of an [`Error`] the
+/// inspector answers with to 512; those are not exported, since the server cuts what is past them rather than refusing
+/// it.
+pub const INSPECTION_LIMIT: usize = 16 * 1024;
+
 /// Whether `reference` is one the server takes: 1 to [`REFERENCE_BYTES`] bytes of ASCII letters, digits, `-`, `_`,
 /// `.` and `/`, so that it can never end the agent's context block or be read as anything but a name.
 ///
@@ -202,7 +230,7 @@ impl Object {
 /// The server calls it on a thread of its own, never the side's, so that a side busy with its own work, such as a slow
 /// query, does not hold up the agent, and it may be called while the side runs; it is to answer from what the side
 /// shares with it, such as a snapshot behind a lock, or with a query of its own. The server waits for an answer for at
-/// most a few seconds, and refuses one that is not JSON or is larger than 16 KiB.
+/// most a few seconds, and refuses one that is not JSON or is larger than [`INSPECTION_LIMIT`], 16 KiB.
 ///
 /// What it answers is told to the space's agent, which reads it as data, never as instructions: the server removes
 /// control and format characters from every string and cuts long ones. It must hold nothing that should stay in the
@@ -417,22 +445,24 @@ impl Space {
 
     /// Keep `state`, the environment's own JSON text, for the space, replacing what was kept, and send it to everyone in
     /// the space who presents the environment at its version, now and as they join. The server refuses text that is
-    /// not JSON or is larger than its limit, 64 KiB, saying why.
+    /// not JSON or is larger than [`STATE_LIMIT`], 64 KiB, saying why.
     pub fn share(&self, state: impl Into<String>) -> Result<()> {
         self.outlet.share(state.into())
     }
 
     /// Send `event`, the environment's own JSON text, to everyone in the space now who presents the environment at its
     /// version, and keep `state`, which already includes the event, for whoever joins later, at once, so that nobody
-    /// misses the event or sees it twice. The server refuses an event larger than 4 KiB, saying why.
+    /// misses the event or sees it twice. The server refuses an event larger than [`EVENT_LIMIT`], 4 KiB, or a state
+    /// larger than [`STATE_LIMIT`], saying why.
     pub fn announce(&self, event: impl Into<String>, state: impl Into<String>) -> Result<()> {
         self.outlet.announce(event.into(), state.into())
     }
 
     /// Describe the objects a participant can point at in the space, replacing those described before, so that the
-    /// server can tell the space's agent what a participant points at as they speak. The server keeps at most 32, each
-    /// identity at most 128 bytes, and each description cleaned and cut to 200 characters, with its reference, if it
-    /// has one that [`valid_reference`] takes, which the agent may inspect it by (see [`Space::inspect_with`]).
+    /// server can tell the space's agent what a participant points at as they speak. The server keeps at most
+    /// [`OBJECT_LIMIT`], 32, each identity at most [`IDENTITY_LIMIT`], 128 bytes, and each description cleaned and cut
+    /// to [`DESCRIPTION_LIMIT`], 200 characters, with its reference, if it has one that [`valid_reference`] takes, of
+    /// at most [`REFERENCE_BYTES`], which the agent may inspect it by (see [`Space::inspect_with`]).
     pub fn describe(&self, objects: Vec<Object>) -> Result<()> {
         self.outlet.describe(objects)
     }
@@ -582,6 +612,18 @@ mod tests {
         for refused in ["", "a b", "a:b", "a[b", "a]b", "a\"b", "a\nb", "ä"] {
             assert!(!valid_reference(refused), "{refused:?}");
         }
+    }
+
+    /// The limits a side keeps within are those `design/environments.md` states, so that changing one is deliberate.
+    #[test]
+    fn the_limits_a_side_keeps_within_are_those_the_design_states() {
+        assert_eq!(STATE_LIMIT, 64 * 1024);
+        assert_eq!(EVENT_LIMIT, 4 * 1024);
+        assert_eq!(OBJECT_LIMIT, 32);
+        assert_eq!(IDENTITY_LIMIT, 128);
+        assert_eq!(DESCRIPTION_LIMIT, 200);
+        assert_eq!(REFERENCE_BYTES, 64);
+        assert_eq!(INSPECTION_LIMIT, 16 * 1024);
     }
 
     #[test]

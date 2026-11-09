@@ -3388,7 +3388,7 @@ fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_pa
             tomori_protocol::Resource::object("thing-1"),
             tomori_protocol::Resource::object("thing-1"),
             tomori_protocol::Resource::object("thing-2"),
-            tomori_protocol::Resource::object("x".repeat(crate::channel::OBJECT_BYTES + 1)),
+            tomori_protocol::Resource::object("x".repeat(tomori_environment::IDENTITY_LIMIT + 1)),
         ],
         seen: None,
     });
@@ -3512,6 +3512,79 @@ fn a_side_whose_binding_or_space_has_moved_on_keeps_and_sends_nothing() {
     assert_eq!(orphan.share("4".into()), Ok(()));
     assert_eq!(orphan.announce("4".into(), "4".into()), Ok(()));
     assert_eq!(orphan.describe(Vec::new()), Ok(()));
+}
+
+/// The limits `tomori-environment` exports are those the server enforces on a side's space: what is exactly at each is
+/// taken whole, and what is past it refused, left out or cut, so that changing a limit changes what the server does.
+#[test]
+fn a_side_s_space_is_held_to_the_limits_tomori_environment_exports() {
+    use tomori_environment::{
+        DESCRIPTION_LIMIT, EVENT_LIMIT, IDENTITY_LIMIT, OBJECT_LIMIT, Object, REFERENCE_BYTES,
+        STATE_LIMIT, Space,
+    };
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("counter", "Counter").with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "counter".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let space = Space::new(&id, "Counter", "/").with_outlet(Arc::new(SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "counter".to_owned(),
+        version: 1,
+    }));
+    // JSON text of exactly `bytes` bytes.
+    let text = |bytes: usize| format!("\"{}\"", "a".repeat(bytes - 2));
+    let kept = || {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.state.clone())
+            .map(|state| state.len())
+    };
+
+    assert_eq!(space.share(text(STATE_LIMIT)), Ok(()));
+    assert_eq!(kept(), Some(STATE_LIMIT));
+    assert!(space.share(text(STATE_LIMIT + 1)).is_err());
+    assert_eq!(space.announce(text(EVENT_LIMIT), text(STATE_LIMIT)), Ok(()));
+    assert!(space.announce(text(EVENT_LIMIT + 1), "{}").is_err());
+    assert!(space.announce("{}", text(STATE_LIMIT + 1)).is_err());
+    assert_eq!(kept(), Some(STATE_LIMIT));
+
+    let mut objects = vec![
+        Object::new("i".repeat(IDENTITY_LIMIT), "d".repeat(DESCRIPTION_LIMIT))
+            .with_reference("r".repeat(REFERENCE_BYTES)),
+        Object::new("j".repeat(IDENTITY_LIMIT + 1), "left out"),
+        Object::new("cut", "e".repeat(DESCRIPTION_LIMIT + 1))
+            .with_reference("s".repeat(REFERENCE_BYTES + 1)),
+    ];
+    objects.extend((0..OBJECT_LIMIT).map(|index| Object::new(format!("more-{index}"), "more")));
+    assert_eq!(space.describe(objects), Ok(()));
+    let state = hub.lock();
+    let described = &state.space(&id).unwrap().channel.as_ref().unwrap().objects;
+    assert_eq!(described.len(), OBJECT_LIMIT);
+    assert_eq!(described[0].id, "i".repeat(IDENTITY_LIMIT));
+    assert_eq!(described[0].description, "d".repeat(DESCRIPTION_LIMIT));
+    assert_eq!(described[0].reference, Some("r".repeat(REFERENCE_BYTES)));
+    // A reference past its limit is left out, and its object described without it.
+    assert_eq!(described[1].reference, None);
+    assert_eq!(
+        described[1].description,
+        format!("{}…", "e".repeat(DESCRIPTION_LIMIT))
+    );
+    assert_eq!(
+        described.last().unwrap().id,
+        format!("more-{}", OBJECT_LIMIT - 3)
+    );
+    drop(state);
+    hub.shutdown();
 }
 
 #[test]

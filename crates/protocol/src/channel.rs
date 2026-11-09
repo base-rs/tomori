@@ -9,11 +9,11 @@
 use serde::{Deserialize, Serialize};
 
 /// The largest state a server side keeps for a space, as its payload's JSON text, in bytes. A larger one is refused,
-/// and the side is told why.
+/// and the side is told why. `tomori-environment`'s `STATE_LIMIT` is the same, as the server's tests check.
 pub const STATE_LIMIT: usize = 64 * 1024;
 
 /// The largest event or intent, as its payload's JSON text, in bytes. A larger intent is dropped, and a larger event
-/// refused, and the side told why.
+/// refused, and the side told why. `tomori-environment`'s `EVENT_LIMIT` is the same, as the server's tests check.
 pub const MESSAGE_LIMIT: usize = 4 * 1024;
 
 /// An environment's own payload: any JSON value, which the channel carries without reading, and the environment's own
