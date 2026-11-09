@@ -23,7 +23,7 @@
 //! longest of those not arranged leaves it for a newcomer, or, when every one is arranged, the one there longest. Nothing
 //! else ever moves, so that nobody's reading is disturbed.
 mod blocks;
-pub(crate) mod checklist;
+pub(crate) use tomori_protocol::checklist;
 mod code;
 mod image;
 mod placement;
@@ -769,6 +769,20 @@ impl Stage {
         self.here(environment).find(|kept| kept.id == panel)
     }
 
+    /// The panel `panel` as it is kept in `environment`, to change.
+    fn here_mut(&mut self, environment: &str, panel: &str) -> Option<&mut Kept> {
+        self.tomori
+            .iter_mut()
+            .chain(
+                self.rooms
+                    .get_mut(environment)
+                    .map(|room| room.panels.iter_mut())
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|kept| kept.id == panel)
+    }
+
     /// Take the panel `panel` out of where it is in `environment`, if it is there.
     fn take(&mut self, environment: &str, panel: &str) -> Option<Kept> {
         if let Some(index) = self.tomori.iter().position(|kept| kept.id == panel) {
@@ -1138,18 +1152,8 @@ impl Stage {
         to: Option<&Destination>,
         now: u64,
     ) -> Result<bool, &'static str> {
-        let environment = walls.environment;
         let kept = self
-            .tomori
-            .iter_mut()
-            .chain(
-                self.rooms
-                    .get_mut(environment)
-                    .map(|room| room.panels.iter_mut())
-                    .into_iter()
-                    .flatten(),
-            )
-            .find(|kept| kept.id == panel)
+            .here_mut(walls.environment, panel)
             .ok_or("That panel is not here.")?;
         if kept.content.code.is_some() || content.code.is_some() {
             return Err("A code panel cannot be updated in place.");
@@ -1166,6 +1170,49 @@ impl Stage {
             _ => false,
         };
         Ok(changed || moved)
+    }
+
+    /// Tick, or untick, as `checked` says, the checklist item that begins on `line` of the text panel `panel`'s body in
+    /// `walls`' environment, as a participant asked by pressing A while pointing at it: in place, keeping everything
+    /// else about the panel, when the agent last updated it included, as [`checklist::set`] ticks it. Returns the item,
+    /// or `None` where it was already so, or why it was refused: a panel not here, one with no body of items, such as a
+    /// code or image panel, and a line that begins no item with a box. See `design/projection.md`.
+    pub(crate) fn tick_item(
+        &mut self,
+        walls: &Walls<'_>,
+        panel: &str,
+        line: u32,
+        checked: bool,
+    ) -> Result<Option<Ticked>, &'static str> {
+        let kept = self
+            .here_mut(walls.environment, panel)
+            .ok_or("That panel is not here.")?;
+        let content = &mut kept.content;
+        if content.code.is_some() || content.image.is_some() {
+            return Err("That panel has no checklist.");
+        }
+        let items = checklist::items(&content.body);
+        let (index, item) = items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| u64::try_from(item.line).ok() == Some(u64::from(line)))
+            .filter(|(_, item)| item.checked.is_some())
+            .ok_or("That is not an item of the panel's checklist.")?;
+        if item.checked == Some(checked) {
+            return Ok(None);
+        }
+        let ticked = Ticked {
+            number: index + 1,
+            count: items.len(),
+            text: item.text.to_owned(),
+            checked,
+            title: content.title.clone(),
+            start: content.body.lines().next().unwrap_or_default().to_owned(),
+            slug: content.slug.clone(),
+        };
+        content.body =
+            checklist::set(&content.body, item.line, checked).expect("an item is on its line");
+        Ok(Some(ticked))
     }
 
     /// Move the panel `panel` where `to` says in `walls`' environment, as its agent asked. One a participant put where it
@@ -1665,6 +1712,55 @@ impl Stage {
             ));
         }
         Some(format!("{named} ({details})"))
+    }
+}
+
+/// A checklist item a participant ticked or unticked, as [`Stage::tick_item`] found it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Ticked {
+    /// Its number, from 1, of how many items its panel has, as `update_panel` numbers them.
+    pub number: usize,
+    pub count: usize,
+    /// Its text, as the agent wrote it.
+    pub text: String,
+    /// Whether it is now ticked.
+    pub checked: bool,
+    /// Its panel's title, the first line of its body, for a panel without one, and the id the agent gave it.
+    title: String,
+    start: String,
+    slug: Option<String>,
+}
+
+impl Ticked {
+    /// What the agent is told of it, before the next words spoken in the space, as `who` ticked it, such as `Ada ticked
+    /// item 2 of 5 of panel "Agenda" (id agenda): "Panel ids"`: everything in it cleaned onto one line, without double
+    /// quotes or square brackets, as the context block's descriptions are, so that it cannot end its block.
+    pub(crate) fn note(&self, who: &str) -> String {
+        let verb = if self.checked { "ticked" } else { "unticked" };
+        let named = if self.title.is_empty() {
+            format!(
+                "panel beginning \"{}\"",
+                crate::space::one_line(&self.start, blocks::META_VALUE_CHARS)
+            )
+        } else {
+            format!(
+                "panel \"{}\"",
+                crate::space::one_line(&self.title, blocks::TITLE_CHARS)
+            )
+        };
+        // A slug holds nothing to clean, but its letters, digits, `-` and `_`.
+        let id = self
+            .slug
+            .as_ref()
+            .map(|slug| format!(" (id {slug})"))
+            .unwrap_or_default();
+        format!(
+            "{} {verb} item {} of {} of {named}{id}: \"{}\"",
+            crate::space::one_line(who, blocks::META_VALUE_CHARS),
+            self.number,
+            self.count,
+            crate::space::one_line(&self.text, blocks::META_VALUE_CHARS)
+        )
     }
 }
 
@@ -3214,6 +3310,90 @@ mod tests {
                 .describe(&SKY, &code_panel, Some(0), 0)
                 .unwrap()
                 .contains("item")
+        );
+    }
+
+    #[test]
+    fn a_participant_ticks_and_unticks_a_checklist_item_in_place() {
+        let mut stage = Stage::default();
+        let (agenda, _) = reply(
+            &mut stage,
+            &SKY,
+            named(
+                "agenda",
+                "Agenda [draft]",
+                "Topics:\n\n- [x] Panels\n- [ ] Decide the \"pairing\" window\n  - plain nested",
+            ),
+            Destination::Tomori,
+            false,
+            5,
+        );
+        let before = stage.view("s", &SKY, 10).panel(&agenda).unwrap().clone();
+        let ticked = stage.tick_item(&SKY, &agenda, 3, true).unwrap().unwrap();
+        assert_eq!((ticked.number, ticked.count, ticked.checked), (2, 3, true));
+        assert_eq!(
+            ticked.note("Ada"),
+            "Ada ticked item 2 of 3 of panel \"Agenda (draft)\" (id agenda): \"Decide the 'pairing' window\""
+        );
+        // In place: the same panel, where it was, its body ticked, and not counted as the agent's update.
+        let after = stage.view("s", &SKY, 10).panel(&agenda).unwrap().clone();
+        assert_eq!(
+            after.body,
+            "Topics:\n\n- [x] Panels\n- [x] Decide the \"pairing\" window\n  - plain nested"
+        );
+        assert_eq!((after.place, after.age), (before.place, before.age));
+        assert_eq!(stage.updated("sky", &agenda), None);
+        // Already so, nothing changes.
+        assert_eq!(stage.tick_item(&SKY, &agenda, 3, true), Ok(None));
+        // Floating, with the environment, it is ticked where it floats.
+        let floating = Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
+        stage.place(&SKY, &agenda, Target::Free(floating)).unwrap();
+        assert!(stage.tick_item(&SKY, &agenda, 3, false).unwrap().is_some());
+        assert!(stage.tick_item(&SKY, &agenda, 3, true).unwrap().is_some());
+        let unticked = stage.tick_item(&SKY, &agenda, 2, false).unwrap().unwrap();
+        assert_eq!(
+            unticked.note("Bob"),
+            "Bob unticked item 1 of 3 of panel \"Agenda (draft)\" (id agenda): \"Panels\""
+        );
+        // A line that begins no item, an item without a box, a line past the body, a panel not here and a code panel are
+        // refused.
+        for line in [0, 4, 99] {
+            assert_eq!(
+                stage.tick_item(&SKY, &agenda, line, true),
+                Err("That is not an item of the panel's checklist."),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            stage.tick_item(&SKY, "panel-99", 2, true),
+            Err("That panel is not here.")
+        );
+        let code_panel = stage.project(&SKY, code("markdown", 2), None, 0);
+        assert_eq!(
+            stage.tick_item(&SKY, &code_panel, 0, true),
+            Err("That panel has no checklist.")
+        );
+        // A panel without a title or an id is named by the start of its body.
+        let plain = stage.project(
+            &SKY,
+            Content {
+                title: String::new(),
+                body: "- [ ] One".into(),
+                meta: Vec::new(),
+                code: None,
+                slug: None,
+                image: None,
+            },
+            None,
+            0,
+        );
+        assert_eq!(
+            stage
+                .tick_item(&SKY, &plain, 0, true)
+                .unwrap()
+                .unwrap()
+                .note("Ada"),
+            "Ada ticked item 1 of 1 of panel beginning \"- ( ) One\": \"One\""
         );
     }
 

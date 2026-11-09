@@ -913,6 +913,44 @@ mod tests {
     }
 
     #[test]
+    fn enter_ticks_or_unticks_the_checklist_item_the_mouse_points_at_as_a_does() {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Head::default().transform().transform_vector3(-Vec3::Z) * 2.0;
+        show_checklist(&mut conversation, ahead, arrival::HOME);
+        let mut desktop = desktop(&mut conversation);
+        let now = Instant::now();
+        // Down the middle of the window, the mouse comes to the ticked item, whose label names Enter, A's key.
+        let on_item = (0..400).find(|row| {
+            desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.25 + *row as f32));
+            let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            label_hint(&drawn.frame.projection).as_deref() == Some("Enter  untick")
+        });
+        assert!(on_item.is_some(), "the mouse meets the ticked item");
+        // The left button is still the trigger, which attracts the swarm and ticks nothing.
+        desktop.mouse(Button::Left, true);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        desktop.mouse(Button::Left, false);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert!(conversation.take_actions().is_empty());
+        // Enter unticks it, for everyone.
+        tap(&mut desktop, Key::A, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::CheckPanelItem {
+                panel: "panel-1".into(),
+                line: 2,
+                checked: false,
+            })]
+        );
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(
+            label_hint(&drawn.frame.projection).as_deref(),
+            Some("Enter  tick")
+        );
+    }
+
+    #[test]
     fn page_up_and_down_and_the_brackets_reach_an_environment_with_nothing_carried() {
         let (mut conversation, done) = crate::scene::tests::lamp(Default::default(), false);
         let mut desktop = desktop(&mut conversation);

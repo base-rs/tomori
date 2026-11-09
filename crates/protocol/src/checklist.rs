@@ -5,7 +5,8 @@
 //! `-`, `*` or `+`, or numbered with `1.` or `1)`, and task items, `- [ ]` and `- [x]`, among them, which the agent
 //! ticks and unticks as a conversation covers them. Items are numbered from 1 in the order they are written, nested ones
 //! included, as the agent and attention name them. Lines inside a fenced code block are not items, and neither is a
-//! rule such as `- - -`. See `design/projection.md`.
+//! rule such as `- - -`. The server and clients read items by the same rule, so that the line a client points at, or
+//! ticks, is the item the server ticks. See `design/projection.md`.
 
 /// One list item of a body.
 #[derive(Clone, Debug, PartialEq)]

@@ -932,6 +932,15 @@ mod tests {
                 },
                 serde_json::json!({"type": "dismiss_panel", "panel": "panel-1"}),
             ),
+            (
+                ClientMessage::CheckPanelItem {
+                    panel: "panel-1".into(),
+                    line: 3,
+                    checked: true,
+                },
+                serde_json::json!({"type": "check_panel_item", "panel": "panel-1", "line": 3,
+                    "checked": true}),
+            ),
         ];
         for (message, json) in cases {
             assert_eq!(serde_json::to_value(&message).unwrap(), json);
@@ -940,6 +949,26 @@ mod tests {
                 message
             );
         }
+        // A server says it takes ticking only when it does; an older one's state, which says nothing, takes none.
+        let state = crate::SpaceState {
+            checks: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["checks"], true);
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("checks");
+        assert!(
+            !serde_json::from_value::<crate::SpaceState>(older)
+                .unwrap()
+                .checks
+        );
+        assert!(
+            serde_json::to_value(crate::SpaceState::default())
+                .unwrap()
+                .get("checks")
+                .is_none()
+        );
         let projection = ServerMessage::Projection {
             projection: Box::new(Projection::new("s", "sky")),
         };

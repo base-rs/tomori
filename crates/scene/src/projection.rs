@@ -929,8 +929,15 @@ pub fn slot_frames(wall: &Wall, frame: Mat4) -> Vec<Mat4> {
 }
 
 /// The label on the ray naming `panel`, pointed at where the ray meets it, `at`, facing `viewer`: what it is called, its
-/// metadata, and when and where it was projected; and, where it `scrolls`, how to scroll it with those controls.
-pub fn label(panel: &Panel, at: Vec3, viewer: Vec3, scrolls: Option<Controls>) -> Sheet {
+/// metadata, and when and where it was projected; where it `scrolls`, how to scroll it with those controls; and, where
+/// the ray meets a checklist item A would `tick`, whether it is ticked now, how to tick or untick it with those.
+pub fn label(
+    panel: &Panel,
+    at: Vec3,
+    viewer: Vec3,
+    scrolls: Option<Controls>,
+    tick: Option<(Controls, bool)>,
+) -> Sheet {
     let mut canvas = Canvas::new(LABEL_COLUMNS, LABEL_PIXEL);
     canvas.background = [0.0, 0.0, 0.0, 0.88];
     canvas.border = Some(HIGHLIGHT);
@@ -982,6 +989,22 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3, scrolls: Option<Controls>) -
             &[
                 crate::ui_text::Span::new(format!("{control}  "), Style::bold(BRIGHT)),
                 crate::ui_text::Span::new("scroll", Style::plain(TEXT)),
+            ],
+            LABEL_COLUMNS,
+        )));
+    }
+    if let Some((controls, checked)) = tick {
+        let control = match controls {
+            Controls::Controllers => "A",
+            Controls::Keyboard => "Enter",
+        };
+        canvas.rows.push(Row::new(cut(
+            &[
+                crate::ui_text::Span::new(format!("{control}  "), Style::bold(BRIGHT)),
+                crate::ui_text::Span::new(
+                    if checked { "untick" } else { "tick" },
+                    Style::plain(TEXT),
+                ),
             ],
             LABEL_COLUMNS,
         )));

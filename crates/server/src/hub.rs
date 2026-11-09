@@ -4026,6 +4026,43 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            // A participant ticks or unticks a checklist item they point at, for everyone, by the same rule as
+            // `update_panel`, and the agent is told before the next words spoken in the space, without a turn of its own.
+            ClientMessage::CheckPanelItem {
+                panel,
+                line,
+                checked,
+            } => {
+                if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let who = state.participants[participant].name.clone();
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.tick_item(&walls, &panel, line, checked) {
+                    Ok(Some(ticked)) => {
+                        record.model.note_tick(&panel, line, ticked.note(&who));
+                        log::info!(
+                            "A participant {} item {} of {panel} in space {space}.",
+                            if checked { "ticked" } else { "unticked" },
+                            ticked.number
+                        );
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    // Already so, it is sent again, so that a client that showed the change at once shows it as it is.
+                    Ok(None) => state.touch_projection(&space),
+                    Err(error) => {
+                        state.error(participant, error);
+                        state.touch_projection(&space);
+                    }
+                }
+            }
             ClientMessage::WatchCards => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -5567,6 +5604,8 @@ impl Hub {
                 state.projection = true;
                 // Participants adjust walls, and an owner's removal leaves a wall's panels floating.
                 state.walls = true;
+                // Participants tick and untick checklist items pointed at.
+                state.checks = true;
                 // An owner may delete any space, and its session too where its backend deletes sessions. See `design/spaces.md`.
                 state.deletes = true;
                 state.deletes_session = self

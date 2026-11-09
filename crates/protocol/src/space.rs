@@ -271,6 +271,11 @@ pub struct SpaceState {
     /// a client sends no `SetWall` and offers no wall editing. See `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub walls: bool,
+    /// Whether the server takes [`crate::ClientMessage::CheckPanelItem`] from participants, ticking and unticking a
+    /// text panel's checklist items. False from older servers, to which a client sends none and offers no ticking. See
+    /// `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks: bool,
     /// Whether the server accepts [`crate::ClientMessage::DeleteSpace`] from an owner in the space. False from older
     /// servers; a client offers deleting the space only when this is set. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

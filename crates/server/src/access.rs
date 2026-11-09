@@ -135,7 +135,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::DismissPanel { .. }
         | ClientMessage::SetWall { .. }
         // Visitors watch the agent, but summon it nowhere. See `design/environments.md`.
-        | ClientMessage::PlaceAgent { .. } => participant,
+        | ClientMessage::PlaceAgent { .. }
+        // Participants tick and untick checklist items for everyone, as they rearrange panels; visitors only watch.
+        | ClientMessage::CheckPanelItem { .. } => participant,
     };
     if permitted {
         None
@@ -283,6 +285,11 @@ mod tests {
                 aspect: None,
                 shape: None,
                 pose: None,
+            },
+            ClientMessage::CheckPanelItem {
+                panel: "panel-1".into(),
+                line: 0,
+                checked: true,
             },
         ]
     }

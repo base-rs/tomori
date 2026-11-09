@@ -1076,7 +1076,7 @@ fn a_code_panel_whose_spans_are_not_valid_is_drawn_plain() {
 #[test]
 fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
     let lines = |panel: &Panel| -> Vec<String> {
-        label(panel, Vec3::new(0.0, 1.5, -3.0), HOME, None)
+        label(panel, Vec3::new(0.0, 1.5, -3.0), HOME, None, None)
             .canvas
             .unwrap()
             .plain()
@@ -1113,7 +1113,7 @@ fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
 fn the_ray_s_label_names_a_panel_with_its_metadata_and_where_it_is() {
     let point = Vec3::new(0.0, 1.5, -3.0);
     let label_of = |place: Place| {
-        let sheet = label(&panel("1", place), point, HOME, None);
+        let sheet = label(&panel("1", place), point, HOME, None, None);
         (sheet.canvas.unwrap().plain(), sheet.model.unwrap())
     };
     let (text, model) = label_of(on(TOMORI_WALL, 0));
@@ -2561,13 +2561,19 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
 #[test]
 fn the_ray_s_label_says_how_to_scroll_a_panel_that_scrolls() {
     let lines = |scrolls| -> Vec<String> {
-        label(&reported_block(), Vec3::new(0.0, 1.5, -3.0), HOME, scrolls)
-            .canvas
-            .unwrap()
-            .plain()
-            .lines()
-            .map(|line| line.trim_end().to_owned())
-            .collect()
+        label(
+            &reported_block(),
+            Vec3::new(0.0, 1.5, -3.0),
+            HOME,
+            scrolls,
+            None,
+        )
+        .canvas
+        .unwrap()
+        .plain()
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .collect()
     };
     assert_eq!(lines(None).len(), 3);
     assert_eq!(
@@ -2578,6 +2584,52 @@ fn the_ray_s_label_says_how_to_scroll_a_panel_that_scrolls() {
         lines(Some(Controls::Keyboard)).last().unwrap(),
         "Wheel  scroll"
     );
+}
+
+#[test]
+fn the_ray_s_label_says_how_to_tick_or_untick_the_checklist_item_it_meets() {
+    let lines = |scrolls, tick| -> Vec<String> {
+        label(
+            &reported_block(),
+            Vec3::new(0.0, 1.5, -3.0),
+            HOME,
+            scrolls,
+            tick,
+        )
+        .canvas
+        .unwrap()
+        .plain()
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .collect()
+    };
+    // Nothing to tick says nothing of it.
+    assert_eq!(lines(None, None).len(), 3);
+    assert_eq!(
+        lines(None, Some((Controls::Controllers, false)))
+            .last()
+            .unwrap(),
+        "A  tick"
+    );
+    assert_eq!(
+        lines(None, Some((Controls::Controllers, true)))
+            .last()
+            .unwrap(),
+        "A  untick"
+    );
+    // The desktop window's A is Enter.
+    assert_eq!(
+        lines(None, Some((Controls::Keyboard, false)))
+            .last()
+            .unwrap(),
+        "Enter  tick"
+    );
+    // A panel that scrolls says both, scrolling first.
+    let both = lines(
+        Some(Controls::Controllers),
+        Some((Controls::Controllers, false)),
+    );
+    assert_eq!(both[both.len() - 2..], ["Stick ↕  scroll", "A  tick"]);
 }
 
 /// The table the maintainer could not read on the Quest 3, as the agent projected it.

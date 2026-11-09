@@ -365,6 +365,9 @@ pub struct Conversation {
     talk: Option<Talk>,
     /// What the participant points at now, a worker or a card, as the frame loop or console last reported.
     pointing_at: Option<tomori_protocol::Resource>,
+    /// The checklist item the participant points at now, by its panel and the line of the body it begins on, which A
+    /// ticks or unticks, as the frame step last reported. See `design/projection.md`.
+    pointed_item: Option<(String, u32)>,
     /// What each object of an environment's that the participant pointed at is called, by its identity, to name it as
     /// a worker or card is named. See `design/environments.md`.
     object_labels: std::collections::HashMap<String, String>,
@@ -517,6 +520,7 @@ impl Conversation {
             paged: None,
             talk: None,
             pointing_at: None,
+            pointed_item: None,
             object_labels: std::collections::HashMap::new(),
             cards: None,
             projection: None,
@@ -2069,6 +2073,7 @@ impl Conversation {
                 | ClientMessage::SetWall { .. }
                 | ClientMessage::PlacePanel { .. }
                 | ClientMessage::DismissPanel { .. }
+                | ClientMessage::CheckPanelItem { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -2850,6 +2855,16 @@ impl Conversation {
                     self.notice = Some("Read the request before choosing.".into());
                     return false;
                 }
+                // Pointing at a checklist item on a text panel, A ticks or unticks it, for everyone, after the right
+                // wrist's transcript, which the frame step gives A first, and the list. See `design/interaction.md`.
+                if let Some((panel, line)) = self.pointed_item.clone()
+                    && let Some(checked) = self.item_checked(&panel, line)
+                {
+                    if !self.check_item(&panel, line, !checked) {
+                        self.refused = true;
+                    }
+                    return false;
+                }
                 if self.decide_on_wrist
                     && self
                         .space
@@ -3435,6 +3450,60 @@ impl Conversation {
         if self.pointing_at != target {
             self.pointing_at = target;
         }
+    }
+
+    /// The checklist item the participant points at now, by its panel and the line of its body the item begins on, or
+    /// `None`: from the headset's ray or the desktop's mouse each frame, on a panel pointed at rather than carried. A
+    /// ticks or unticks it. See `design/projection.md`.
+    pub fn point_item(&mut self, item: Option<(String, u32)>) {
+        self.pointed_item = item;
+    }
+
+    /// Whether the checklist item that begins on `line` of the panel `panel`, which the joined space shows, is ticked, as
+    /// the item A would tick or untick there: `None` where there is no such item with a box, the panel is not a text
+    /// panel, or the server takes no ticking. See `design/projection.md`.
+    pub fn item_checked(&self, panel: &str, line: u32) -> Option<bool> {
+        if !self.joined_space().is_some_and(|(space, _)| space.checks) {
+            return None;
+        }
+        let shown = self.projection()?.panel(panel)?;
+        if shown.code.is_some() || shown.image.is_some() {
+            return None;
+        }
+        tomori_protocol::checklist::items(&shown.body)
+            .into_iter()
+            .find(|item| u32::try_from(item.line).ok() == Some(line))
+            .and_then(|item| item.checked)
+    }
+
+    /// Whether A would tick or untick a checklist item for this participant: one who takes part, as visitors only watch.
+    pub fn ticks(&self) -> bool {
+        self.role.participates()
+    }
+
+    /// Tick, or untick, as `checked` says, the checklist item that begins on `line` of the panel `panel`, which
+    /// [`Self::item_checked`] found shown, for everyone in the space, showing it so at once, until the server's projection
+    /// says how it is. Says whether it asked, as only a participant does; a visitor is told they only watch.
+    fn check_item(&mut self, panel: &str, line: u32, checked: bool) -> bool {
+        if !self.send(ClientMessage::CheckPanelItem {
+            panel: panel.to_owned(),
+            line,
+            checked,
+        }) {
+            return false;
+        }
+        let shown = self
+            .projection
+            .as_mut()
+            .and_then(|projection| projection.panels.iter_mut().find(|shown| shown.id == panel))
+            .expect("the panel of an item A ticks is shown");
+        shown.body = tomori_protocol::checklist::set(
+            &shown.body,
+            usize::try_from(line).expect("a line of a body shown is a usize"),
+            checked,
+        )
+        .expect("an item A ticks is on its line");
+        true
     }
 
     /// The participant points at `object`, something an environment shows, called `label`: attended to as
@@ -12797,6 +12866,146 @@ mod tests {
         assert!(conversation.projection().is_some());
         conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.projection.is_none());
+    }
+
+    #[test]
+    fn a_ticks_or_unticks_the_checklist_item_pointed_at_for_everyone_after_the_list_and_never_for_a_visitor()
+     {
+        let agenda = |body: &str| {
+            Event::Message(ServerMessage::Projection {
+                projection: Box::new(tomori_protocol::Projection::new(SPACE, "sky").with_panels(
+                    vec![tomori_protocol::Panel::new(
+                        "panel-1",
+                        "Agenda",
+                        body,
+                        tomori_protocol::Place::Wall {
+                            wall: tomori_protocol::TOMORI_WALL.into(),
+                            slot: 0,
+                        },
+                    )],
+                )),
+            })
+        };
+        let body = "To cover:\n\n- [ ] One\n- [x] Two\n- Three";
+        let tick = |line: u32, checked: bool| ClientMessage::CheckPanelItem {
+            panel: "panel-1".into(),
+            line,
+            checked,
+        };
+        let shown =
+            |conversation: &Conversation| conversation.projection().unwrap().panels[0].body.clone();
+        let mut conversation = joined(|space| {
+            space.projection = true;
+            space.checks = true;
+            space.speech = SpeechSetting::Full;
+        });
+        conversation.decide_on_wrist();
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.apply(agenda(body));
+        conversation.take_actions();
+        // Pointing at nothing, at a line of no item, or at an item without a box, A does nothing new.
+        for item in [None, Some(0), Some(4), Some(9)] {
+            conversation.point_item(item.map(|line| ("panel-1".to_owned(), line)));
+            assert!(conversation.press_a(None), "{item:?}");
+            assert!(sent(&mut conversation).is_empty());
+        }
+        assert_eq!(conversation.item_checked("panel-1", 4), None);
+        // Nor on a panel the space does not show, or with nothing projected.
+        assert_eq!(conversation.item_checked("panel-9", 2), None);
+        let mut unprojected = joined(|space| space.checks = true);
+        unprojected.point_item(Some(("panel-1".to_owned(), 2)));
+        assert_eq!(unprojected.item_checked("panel-1", 2), None);
+        assert!(unprojected.press_a(None));
+        // On an item with a box, it ticks it, showing it at once, and unticks it again.
+        conversation.point_item(Some(("panel-1".to_owned(), 2)));
+        assert_eq!(conversation.item_checked("panel-1", 2), Some(false));
+        assert!(!conversation.press_a(None));
+        assert!(!conversation.a_refused());
+        assert_eq!(sent(&mut conversation), [tick(2, true)]);
+        assert_eq!(
+            shown(&conversation),
+            "To cover:\n\n- [x] One\n- [x] Two\n- Three"
+        );
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [tick(2, false)]);
+        assert_eq!(shown(&conversation), body);
+        // A code panel's lines are no items to tick.
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky").with_panels(vec![
+                    tomori_protocol::Panel::new(
+                        "panel-1",
+                        "markdown",
+                        "- [ ] One",
+                        tomori_protocol::Place::Wall {
+                            wall: tomori_protocol::TOMORI_WALL.into(),
+                            slot: 0,
+                        },
+                    )
+                    .with_code(tomori_protocol::Code::new("markdown", 1)),
+                ]),
+            ),
+        }));
+        assert_eq!(conversation.item_checked("panel-1", 0), None);
+        // The server's projection says how it is.
+        conversation.apply(agenda("- [x] One"));
+        conversation.point_item(Some(("panel-1".to_owned(), 0)));
+        assert_eq!(conversation.item_checked("panel-1", 0), Some(true));
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [tick(0, false)]);
+        // The list comes first: open, A chooses from it, and ticks nothing.
+        conversation.space_menu = Some(0);
+        assert!(!conversation.press_a(None));
+        assert!(matches!(
+            sent(&mut conversation)[..],
+            [ClientMessage::SetSpeech { .. }]
+        ));
+        // Just after a request appears, A is refused, and ticks nothing; once it has been read, A ticks what is pointed
+        // at, ahead of saying to turn the wrist.
+        conversation.apply(space(|space| {
+            space.projection = true;
+            space.checks = true;
+            space.approval = Some(approval(&[]));
+        }));
+        conversation.apply(agenda("- [ ] One"));
+        conversation.take_actions();
+        conversation.request_at = Some(Instant::now());
+        assert!(!conversation.press_a(None));
+        assert!(conversation.a_refused());
+        assert!(sent(&mut conversation).is_empty());
+        settle(&mut conversation);
+        assert!(!conversation.press_a(None));
+        assert!(!conversation.a_refused());
+        assert_eq!(sent(&mut conversation), [tick(0, true)]);
+        // A server that takes no ticking is sent none, and A says to turn the wrist as before.
+        conversation.apply(space(|space| {
+            space.projection = true;
+            space.approval = Some(approval(&[]));
+        }));
+        conversation.apply(agenda("- [ ] One"));
+        conversation.take_actions();
+        settle(&mut conversation);
+        assert_eq!(conversation.item_checked("panel-1", 0), None);
+        assert!(!conversation.press_a(None));
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Turn your right wrist to decide.")
+        );
+        // A visitor ticks nothing, and is told why.
+        conversation.apply(space(|space| {
+            space.projection = true;
+            space.checks = true;
+        }));
+        conversation.apply(agenda("- [ ] One"));
+        conversation.apply(role(ConnectionRole::Visitor));
+        conversation.take_actions();
+        assert!(!conversation.ticks());
+        assert!(!conversation.press_a(None));
+        assert!(conversation.a_refused());
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.notice.as_deref(), Some(VISITING));
+        assert_eq!(shown(&conversation), "- [ ] One");
     }
 
     #[test]
