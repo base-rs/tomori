@@ -67,7 +67,7 @@ The server runs it on a thread of its own, once each time a space is bound to th
 
 `Builder::configure` changes the server after the command line has configured it and before it serves, with `Server`'s `with_` methods, such as `with_max_visitors` or `with_participant_retention`. Hooks run in the order they were given.
 
-`Builder::option` adds a command-line option of your own, a `CommandOption`, such as an environment's configuration: `--help` lists it after Tomori's own, the command line reads its value, and it changes the configured server before the hooks run. The GitHub environment prototype's `--github-repository` is one, which `tomori_environment_github_server::register` adds.
+`Builder::option` adds a command-line option of your own, a `CommandOption`, such as an environment's configuration: `--help` lists it after Tomori's own, the command line reads its value, calling its `parse` once each time it is given, and it changes the configured server before the hooks run, its `apply` given the value `parse` made for the last. The GitHub environment prototype's `--github-repository` is one, which `tomori_environment_github_server::register` adds.
 
 An environment whose spaces show cards that participants lay out, such as the GitHub prototype's issues and pull requests, implements `CardSource` and is offered with `Server::with_cards`, which reads the cards while someone watches them, within the source's rate limit.
 
