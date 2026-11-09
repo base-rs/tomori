@@ -303,10 +303,10 @@ mod tests {
             "Make it live, and keep them live.",
             "Are you live?",
         ] {
+            let decisions = decided(text);
             assert!(
-                decided(text).iter().all(|&live| live == "live"),
-                "{text}: {:?}",
-                decided(text)
+                decisions.iter().all(|&live| live == "live"),
+                "{text}: {decisions:?}"
             );
         }
     }
