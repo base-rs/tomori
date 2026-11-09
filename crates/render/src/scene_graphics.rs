@@ -1843,6 +1843,178 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_WALL_BAR_PREVIEW` to a PNG path to save what this renders: a curved wall someone added, four columns
+    /// of two rows, a panel in every slot, its bar above it, subtle; the ray on the bar, highlighted, saying what the grip
+    /// does; the wall taken hold of by its bar and let go, its handles around it and the bar still there, the knob a row
+    /// above it; and the Tomori wall, every slot full, its bar below its label, the ray on it.
+    #[test]
+    fn a_full_curved_wall_shows_its_bar_hovered_and_held_and_the_tomori_wall_s_below_it() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Grid, Panel, Place, Wall, WallKind, WallShape};
+        use tomori_scene::projection::editing::bar;
+        let middle = Vec3::new(0.0, 1.5, -2.6);
+        let wall = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), [0.0, 1.5, 0.0]),
+        )
+        .with_grid(Grid::new(4, 2).unwrap())
+        .with_shape(WallShape::Arc { radius: 2.0 });
+        let filling = |wall: &'static str, slots: u32| {
+            (0..slots).map(move |slot| {
+                Panel::new(
+                    format!("{wall}-{slot}"),
+                    format!("Topic {}", slot + 1),
+                    format!("- **Point** {}\n- Another point\n- And one more", slot + 1),
+                    Place::Wall {
+                        wall: wall.into(),
+                        slot,
+                    },
+                )
+            })
+        };
+        let tomori = tomori_scene::scene::fixtures::tomori_wall();
+        let panels: Vec<Panel> = filling("wall-1", 8)
+            .chain(filling(tomori_protocol::TOMORI_WALL, tomori.grid().slots()))
+            .collect();
+        let frame_of = |wall: &Wall| {
+            Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            )
+        };
+        let above = bar(&wall, frame_of(&wall), arrival::HOME);
+        let below = bar(&tomori, frame_of(&tomori), arrival::HOME);
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall bar test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses,
+                               looking: Vec3| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                let eye = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[eye],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                (read_back(&device, &queue, &texture, (WIDTH, HEIGHT)), eye)
+            };
+            // The pixels about where `point` is seen through `eye`.
+            let around = |(image, eye): &(image::RgbaImage, Mat4), point: Vec3| -> Vec<[u8; 4]> {
+                let clip = *eye * point.extend(1.0);
+                let (x, y) = (
+                    ((clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32) as u32,
+                    ((1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32) as u32,
+                );
+                (x.saturating_sub(20)..x + 20)
+                    .flat_map(|x| (y.saturating_sub(2)..y + 2).map(move |y| (x, y)))
+                    .map(|(x, y)| image.get_pixel(x, y).0)
+                    .collect()
+            };
+            let looking = middle + Vec3::Y * 0.1;
+            let aside = arrival::HOME + Vec3::new(3.0, 2.0, 0.0);
+            // A visitor sees no bar.
+            let mut conversation = joined();
+            tomori_scene::scene::fixtures::show_projection(
+                &mut conversation,
+                vec![wall.clone()],
+                panels.clone(),
+            );
+            let visitor = capture(
+                &mut Step::default(),
+                &mut conversation,
+                &senses(aside, 0.0),
+                looking,
+            );
+            // A participant who may adjust walls sees it, subtly, then highlighted as the ray meets it.
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![wall.clone()], panels.clone());
+            let mut step = Step::default();
+            let plain = capture(&mut step, &mut conversation, &senses(aside, 0.0), looking);
+            assert_ne!(
+                around(&plain, above.middle),
+                around(&visitor, above.middle),
+                "the bar is drawn"
+            );
+            let hovered = capture(
+                &mut step,
+                &mut conversation,
+                &senses(above.middle, 0.0),
+                looking,
+            );
+            assert_ne!(around(&hovered, above.middle), around(&plain, above.middle));
+            // Squeezed, the wall is carried; let go where it was, it is held, its handles shown.
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(above.middle, 1.0),
+                looking,
+            );
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(above.middle, 0.0),
+                looking,
+            );
+            let held = capture(&mut step, &mut conversation, &senses(aside, 0.0), looking);
+            assert_ne!(held.0, plain.0, "its handles and hint are drawn");
+            // The Tomori wall, full, its bar below it, the ray on it.
+            let mut step = Step::default();
+            let low = capture(
+                &mut step,
+                &mut conversation,
+                &senses(below.middle, 0.0),
+                Vec3::from_array(tomori.pose.position),
+            );
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 4);
+            for (row, (image, _)) in [&plain, &hovered, &held, &low].into_iter().enumerate() {
+                image::imageops::replace(&mut sheet, image, 0, (HEIGHT * row as u32).into());
+            }
+            crate::test_support::preview("TOMORI_WALL_BAR_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// What `texture`, `width` by `height`, holds once drawn.
     fn read_back(
         device: &wgpu::Device,

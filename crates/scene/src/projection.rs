@@ -854,6 +854,9 @@ fn ghost(cells: Cells) -> Canvas {
     canvas
 }
 
+/// How far below a curved wall's rows its label's middle stands, in metres.
+const ARC_LABEL_DROP: f32 = 0.04;
+
 /// A curved wall's label, below the middle of its row of slots.
 fn arc_label(wall: &Wall) -> Canvas {
     let (label, color) = wall_label(wall);
@@ -1674,7 +1677,10 @@ impl Projector {
                         boards.push(Sheet {
                             canvas: Some(arc_label(wall)),
                             model: Some(
-                                *frame * Mat4::from_translation(-Vec3::Y * (height / 2.0 + 0.04)),
+                                *frame
+                                    * Mat4::from_translation(
+                                        -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
+                                    ),
                             ),
                         });
                         boards

@@ -160,6 +160,8 @@ pub struct Editor {
     pending: Option<(Wall, Instant)>,
     /// The handle the ray meets.
     hovered: Option<Handle>,
+    /// The wall whose bar the ray meets, by identity.
+    bar: Option<String>,
     /// When B asked to remove the wall carried, which holds panels, so that another press confirms it.
     confirm: Option<Instant>,
 }
@@ -278,11 +280,24 @@ fn handles(wall: &Wall) -> Vec<Handle> {
 /// its middle, and the steppers of its rows along that edge towards its bottom corner; and the handle of its rows below
 /// its bottom edge, at its middle. Each handle's middle is at least [`SPACING`] handles from every other's, as seen from
 /// the viewer, however small the wall, whatever its shape and however obliquely it is seen: where an edge has no room
-/// for them, the knob and the steppers move along it, then to a row or column of their own beyond it.
+/// for them, the knob and the steppers move along it, then to a row or column of their own beyond it. The knob and the
+/// steppers of its columns stand a row beyond its [`Bar`], which stays where it is whether the wall is held or not.
 pub fn handle_points(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Vec3)>, f32) {
+    let (points, size, _) = lay_out(wall, frame, viewer);
+    (points, size)
+}
+
+/// Where `wall`'s grab bar stands, the wall standing at `frame` and seen from `viewer`, as [`handle_points`] lays it
+/// out with its handles.
+pub fn bar(wall: &Wall, frame: Mat4, viewer: Vec3) -> Bar {
+    lay_out(wall, frame, viewer).2
+}
+
+/// A wall's handles and its bar, as [`handle_points`] and [`bar`] lay them out.
+fn lay_out(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Vec3)>, f32, Bar) {
     // Laid out once at the size its corners take, and again at the size its farthest handle then takes, so that none is
     // smaller than its angle.
-    let (points, _) = lay_out_handles(wall, frame, viewer, None);
+    let (points, ..) = lay_out_handles(wall, frame, viewer, None);
     let far = points
         .iter()
         .map(|(_, at)| at.distance(viewer))
@@ -290,14 +305,86 @@ pub fn handle_points(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Ve
     lay_out_handles(wall, frame, viewer, Some(far))
 }
 
-/// The handles of `wall` as [`handle_points`] lays them out, sized for a handle `far` from the viewer, or else for its
-/// farthest corner.
+/// A wall's grab bar: a thin bar a participant who may adjust walls takes hold of the wall by with the grip, as they do
+/// its board, so that a wall whose every slot holds a panel, and which is curved, is as easy to take hold of as any.
+/// It stands at the middle of the wall's top edge, facing the way the wall faces there, or, for the Tomori wall, below
+/// its label, about a third of the wall long. See `design/projection.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar {
+    /// Its middle, in the space.
+    pub middle: Vec3,
+    /// From its middle to its right end, in the space.
+    pub half: Vec3,
+    /// The size of a handle of its wall, which its thickness and how near the ray passes it to meet it are measured
+    /// in.
+    pub size: f32,
+    /// Where it stands, facing the way its wall faces at its middle.
+    pub model: Mat4,
+}
+
+impl Bar {
+    /// How far along `ray` it is met, if the ray passes within [`HANDLE_REACH`] of a handle's size of it, in front of
+    /// where it begins, as near as a handle is met, so that it is as easy to hold.
+    pub fn hit(&self, ray: &Ray) -> Option<f32> {
+        // The nearest points of the ray and the bar's middle line, the bar's within its ends.
+        let (direction, along) = (ray.direction, self.half);
+        let from = ray.origin - self.middle;
+        let (b, c) = (direction.dot(along), along.length_squared());
+        let (d, e) = (direction.dot(from), along.dot(from));
+        let across = c - b * b;
+        let s = if across > 1e-9 {
+            (e - d * b) / across
+        } else {
+            0.0
+        };
+        let s = s.clamp(-1.0, 1.0);
+        let t = s * b - d;
+        let off = (from + direction * t - along * s).length();
+        (t > 0.0 && off <= self.size * HANDLE_REACH).then_some(t)
+    }
+}
+
+/// How thick a bar is drawn, in handles: thin, though it is met as near as a handle is.
+const BAR_THICKNESS: f32 = 0.45;
+
+/// How long a bar is, in handles, as seen, at least and at most, about a third of its wall's width between.
+const BAR_LEAST: f32 = 3.0;
+const BAR_MOST: f32 = 5.0;
+
+/// How many rows beyond its wall's edge a bar may move out to stand clear of handles, as seen from the side of a wall
+/// so curved that it folds, where they are moved on.
+const BAR_ROWS: usize = 8;
+
+/// Whether points `a` and `b`, as large as handles `size` across, stand a handle's [`SPACING`] apart as seen from
+/// `viewer` looking `ahead`, across or up, so that the ray meeting one never meets the other.
+fn seen_apart(a: Vec3, b: Vec3, size: f32, viewer: Vec3, ahead: Vec3) -> bool {
+    let right = ahead.cross(Vec3::Y).normalize_or(Vec3::X);
+    let up = right.cross(ahead);
+    let seen = |point: Vec3| {
+        let to = point - viewer;
+        let distance = to.length().max(1e-3);
+        let to = to / distance;
+        (
+            Vec2::new(
+                to.dot(right).atan2(to.dot(ahead)),
+                to.dot(up).clamp(-1.0, 1.0).asin(),
+            ),
+            size / distance,
+        )
+    };
+    let ((a, across), (b, other)) = (seen(a), seen(b));
+    let reach = (across + other) / 2.0 * SPACING;
+    (a.x - b.x).abs() >= reach || (a.y - b.y).abs() >= reach
+}
+
+/// The handles of `wall` and its bar as [`lay_out`] lays them out, sized for a handle `far` from the viewer, or else for
+/// its farthest corner.
 fn lay_out_handles(
     wall: &Wall,
     frame: Mat4,
     viewer: Vec3,
     far: Option<f32>,
-) -> (Vec<(Handle, Vec3)>, f32) {
+) -> (Vec<(Handle, Vec3)>, f32, Bar) {
     // The wall measured along itself, about its middle: a flat wall's board, or a curved wall's slots along their arc,
     // where a handle beyond its edge continues along the arc's last direction.
     let (width, height) = wall.size();
@@ -350,27 +437,7 @@ fn lay_out_handles(
     let (yt, yb) = (top + OUTSET * v, bottom - OUTSET * v);
     let (pu, pv) = (SPACING * u, SPACING * v);
     let between = |preferred: f32, low: f32, high: f32| preferred.max(low).min(high);
-    // Along the top: the corners, the knob at the middle where it has room, and the steppers towards the right corner.
     let room = xr - xl;
-    let (knob, fewer, more) = if room >= 4.0 * pu - 1e-6 {
-        (
-            at(between(0.0, xl + pu, xr - 3.0 * pu), yt),
-            at(xr - 2.0 * pu, yt),
-            at(xr - pu, yt),
-        )
-    } else if room >= 2.0 * pu - 1e-6 {
-        (
-            at(between(0.0, xl + pu, xr - pu), yt),
-            at(xr - pu, yt + pv),
-            at(xr, yt + pv),
-        )
-    } else {
-        (
-            at(xr - 2.0 * pu, yt + pv),
-            at(xr - pu, yt + pv),
-            at(xr, yt + pv),
-        )
-    };
     // Down the right: the handle of its columns at the middle, and the steppers of its rows towards the bottom corner.
     let span = yt - yb;
     let centre = (top + bottom) / 2.0;
@@ -407,6 +474,97 @@ fn lay_out_handles(
         at(between(0.0, xl + pu, xr - pu), yb)
     } else {
         at(0.0, yb - pv)
+    };
+    // The grab bar, at the middle of its top edge, or, for the Tomori wall, whose top the status pill stands just above
+    // from home, below its label: a third of the wall long, within bounds, as long as it may be and stand a handle's
+    // spacing, as seen, from the handles beside it, or else a row further out, where it has room.
+    let middle = frame.transform_point3(Vec3::ZERO);
+    let ahead = (middle - viewer).normalize_or(Vec3::NEG_Z);
+    let fixed: Vec<Vec3> = if tomori {
+        vec![columns]
+    } else {
+        vec![
+            at(xl, yt),
+            at(xr, yt),
+            at(xl, yb),
+            at(xr, yb),
+            columns,
+            rows,
+            row_fewer,
+            row_more,
+        ]
+    };
+    let fixed: Vec<Vec3> = fixed
+        .into_iter()
+        .map(|point| frame.transform_point3(point))
+        .collect();
+    let below = tomori;
+    // A handle's worth along the bar, as foreshortened where it stands, at the wall's middle.
+    let towards = (middle - viewer).normalize_or(Vec3::NEG_Z);
+    let across = tangent(0.0).normalize_or(Vec3::X);
+    let ub = size
+        / (1.0 - across.dot(towards).powi(2))
+            .max(0.0)
+            .sqrt()
+            .max(OBLIQUE);
+    let label = match radius {
+        Some(_) if below => super::ARC_LABEL_DROP + super::arc_label(wall).size().1 / 2.0,
+        _ => 0.0,
+    };
+    let first = if below {
+        bottom - label - OUTSET * v
+    } else {
+        yt
+    };
+    let outward = if below { -pv } else { pv };
+    let (least, most) = (BAR_LEAST * ub / 2.0, BAR_MOST * ub / 2.0);
+    let preferred = (width / 6.0).clamp(least, most);
+    let clear = |fixed: &[Vec3], row: f32, half: f32| {
+        let samples = ((2.0 * half / (0.2 * size)).ceil() as usize).max(1);
+        (0..=samples).all(|sample| {
+            let x = -half + 2.0 * half * sample as f32 / samples as f32;
+            let point = frame.transform_point3(Vec3::new(x, row, 0.0));
+            fixed
+                .iter()
+                .all(|handle| seen_apart(point, *handle, size, viewer, ahead))
+        })
+    };
+    // As long as it may be, nearest the wall, that stands clear of `fixed`.
+    let choose = |fixed: &[Vec3]| {
+        (0..BAR_ROWS)
+            .flat_map(|lift| {
+                (0..=4).map(move |step| {
+                    (
+                        first + outward * lift as f32,
+                        preferred + (least - preferred) * step as f32 / 4.0,
+                    )
+                })
+            })
+            .find(|(row, half)| clear(fixed, *row, *half))
+            .unwrap_or((first + outward * BAR_ROWS as f32, least))
+    };
+    let (bar_row, bar_half) = choose(&fixed);
+    // Along the top, a row beyond the bar where it stands there: the corners, the knob at the middle where it has room,
+    // and the steppers towards the right corner.
+    let yk = if below { yt } else { bar_row + pv };
+    let (knob, fewer, more) = if room >= 4.0 * pu - 1e-6 {
+        (
+            at(between(0.0, xl + pu, xr - 3.0 * pu), yk),
+            at(xr - 2.0 * pu, yk),
+            at(xr - pu, yk),
+        )
+    } else if room >= 2.0 * pu - 1e-6 {
+        (
+            at(between(0.0, xl + pu, xr - pu), yk),
+            at(xr - pu, yk + pv),
+            at(xr, yk + pv),
+        )
+    } else {
+        (
+            at(xr - 2.0 * pu, yk + pv),
+            at(xr - pu, yk + pv),
+            at(xr, yk + pv),
+        )
     };
     let local = handles(wall).into_iter().map(|handle| {
         let point = match handle {
@@ -468,7 +626,34 @@ fn lay_out_handles(
             break;
         }
     }
-    (points, size)
+    // Handles moved on may come in line with the bar, seen from the side of a wall so curved that it folds: it is then
+    // chosen again clear of them where they stand, and the knob and the steppers of its columns, beyond it, move with it.
+    let top = |handle: Handle| matches!(handle, Handle::Bend | Handle::Step(Axis::Columns, _));
+    let others: Vec<Vec3> = points
+        .iter()
+        .filter(|(handle, _)| !top(*handle))
+        .map(|(_, at)| *at)
+        .collect();
+    let (bar_row, bar_half) = if clear(&others, bar_row, bar_half) {
+        (bar_row, bar_half)
+    } else {
+        let (row, half) = choose(&others);
+        if !below {
+            for (handle, at) in &mut points {
+                if top(*handle) {
+                    *at += up * (row - bar_row);
+                }
+            }
+        }
+        (row, half)
+    };
+    let bar = Bar {
+        middle: frame.transform_point3(Vec3::new(0.0, bar_row, 0.0)),
+        half: frame.transform_vector3(Vec3::X * bar_half),
+        size,
+        model: frame * Mat4::from_translation(Vec3::new(0.0, bar_row, 0.0)),
+    };
+    (points, size, bar)
 }
 
 /// Whether handles `size` across, with their middles at `a` and `b`, stand apart as seen from `viewer`, looking towards
@@ -710,6 +895,7 @@ impl Editor {
         self.preview = None;
         self.confirm = None;
         self.hovered = None;
+        self.bar = None;
         self.wall.take().is_some()
     }
 
@@ -799,9 +985,30 @@ impl Editor {
             .as_ref()
             .map(|drag| drag.handle)
             .or(met.map(|(handle, _)| handle));
-        output.ticked = hovered.is_some() && hovered != self.hovered;
+        // The bar the ray meets, where it meets no handle, nearest along it, for a participant who may adjust walls.
+        let bar_met = ray
+            .filter(|_| {
+                input.rights.adjust && met.is_none() && self.drag.is_none() && self.carry.is_none()
+            })
+            .and_then(|ray| {
+                walls
+                    .iter()
+                    .filter_map(|(wall, frame)| {
+                        bar(wall, *frame, input.viewer)
+                            .hit(&ray)
+                            .map(|along| (wall.id.clone(), along))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+            });
+        let on_bar = bar_met.as_ref().map(|(wall, _)| wall.clone());
+        output.ticked = (hovered.is_some() && hovered != self.hovered)
+            || (on_bar.is_some() && on_bar != self.bar);
         self.hovered = hovered;
-        output.reach = met.map(|(_, along)| along);
+        self.bar = on_bar;
+        // A handle or a bar the ray meets is met before a panel behind it.
+        output.reach = met
+            .map(|(_, along)| along)
+            .or(bar_met.as_ref().map(|(_, along)| *along));
         // A squeeze takes the handle the ray meets, or, failing anything nearer, the wall it meets.
         if input.pressed && input.active && input.rights.adjust {
             if let (Some((handle, along)), Some((wall, frame)), Some(ray)) = (met, &editing, ray)
@@ -848,12 +1055,20 @@ impl Editor {
                     }
                 }
             } else if let Some(ray) = ray.filter(|_| self.drag.is_none() && self.carry.is_none()) {
-                // The wall's board or an empty slot nearer than anything else: it is taken hold of, and one someone
-                // added is carried.
+                // The wall's board, an empty slot or its bar nearer than anything else: it is taken hold of, and one
+                // someone added is carried.
                 let taken = walls
                     .iter()
                     .filter_map(|(wall, frame)| {
-                        super::wall_hit(wall, *frame, &ray).map(|along| (*wall, *frame, along))
+                        let bar = bar_met
+                            .as_ref()
+                            .filter(|(on, _)| *on == wall.id)
+                            .map(|(_, along)| *along);
+                        super::wall_hit(wall, *frame, &ray)
+                            .into_iter()
+                            .chain(bar)
+                            .min_by(f32::total_cmp)
+                            .map(|along| (*wall, *frame, along))
                     })
                     .filter(|(_, _, along)| *along < input.nearer && *along < input.panel)
                     .min_by(|a, b| a.2.total_cmp(&b.2));
@@ -1038,6 +1253,7 @@ impl Editor {
             output.hit = walls
                 .iter()
                 .filter_map(|(wall, frame)| super::wall_hit(wall, *frame, &ray))
+                .chain(bar_met.as_ref().map(|(_, along)| *along))
                 .min_by(f32::total_cmp)
                 .map(|along| crate::pointing::End::new(along, ray.at(along)));
         }
@@ -1045,15 +1261,50 @@ impl Editor {
         output
     }
 
-    /// The handles of the wall taken hold of, facing the viewer, and the hint below it, as it is drawn.
+    /// Each wall's bar, for a participant who may adjust walls, highlighted while the ray meets it or its wall is
+    /// carried, with what the grip does there while it is not taken hold of; and the handles of the wall taken hold of,
+    /// facing the viewer, and the hint above it, as they are drawn.
     fn sheets(&self, walls: &[(&Wall, Mat4)], input: &Input<'_>) -> Vec<Sheet> {
+        let mut sheets = Vec::new();
+        if input.rights.adjust {
+            for (wall, frame) in walls {
+                let carried = self.carrying() == Some(wall.id.as_str());
+                let (wall, frame) = match (&self.carry, &self.preview) {
+                    (Some(carry), Some(preview)) if carried => (preview, carry.model),
+                    _ => (*wall, *frame),
+                };
+                let bar = bar(wall, frame, input.viewer);
+                let on = self.bar.as_deref() == Some(wall.id.as_str());
+                sheets.push(Sheet {
+                    model: Some(bar.model),
+                    canvas: Some(bar_face(&bar, on || carried)),
+                });
+                if on && self.editing() != Some(wall.id.as_str()) {
+                    let up = frame.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
+                    let side = if wall.kind == WallKind::Tomori {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let edge = bar.middle + up * side * bar.size * HANDLE_REACH;
+                    let mut sheet = hint_above(bar_label(input.controls, wall), edge, input.viewer);
+                    // Below a bar below its wall, clear of it.
+                    if side < 0.0
+                        && let (Some(model), Some(canvas)) = (&mut sheet.model, &sheet.canvas)
+                    {
+                        *model = Mat4::from_translation(-Vec3::Y * canvas.size().1) * *model;
+                    }
+                    sheets.push(sheet);
+                }
+            }
+        }
         let Some((wall, frame)) = self
             .wall
             .as_ref()
             .and_then(|id| walls.iter().find(|(wall, _)| wall.id == *id))
             .map(|(wall, frame)| (*wall, *frame))
         else {
-            return Vec::new();
+            return sheets;
         };
         let preview = self
             .preview
@@ -1064,7 +1315,6 @@ impl Editor {
             Some(carry) => carry.model,
             None => model(&wall.pose).unwrap_or(frame),
         };
-        let mut sheets = Vec::new();
         let (points, size) = handle_points(wall, frame, input.viewer);
         if self.carry.is_none() {
             for (handle, at) in &points {
@@ -1104,6 +1354,55 @@ impl Editor {
         sheets.push(hint_above(hint, above, input.viewer));
         sheets
     }
+}
+
+/// A bar's face, as long and thick as `bar`, subtle, and bright while `highlighted`.
+fn bar_face(bar: &Bar, highlighted: bool) -> Canvas {
+    // Eight font pixels thick, and as many long as it is.
+    const THICK: usize = 8;
+    let pixel = (BAR_THICKNESS * bar.size / THICK as f32).max(1e-5);
+    let mut canvas = Canvas::new(0, pixel);
+    canvas.padding = (
+        ((bar.half.length() / pixel).round() as usize).max(THICK),
+        THICK / 2,
+    );
+    canvas.background = if highlighted {
+        HIGHLIGHT
+    } else {
+        [0.62, 0.68, 0.78, 0.42]
+    };
+    canvas
+}
+
+/// What the grip does on a bar of `wall`, as `controls` name it: takes hold of the wall to edit it, carrying one someone
+/// added.
+pub fn bar_label(controls: Controls, wall: &Wall) -> Canvas {
+    let grip = if controls == Controls::Keyboard {
+        "G"
+    } else {
+        "Grip"
+    };
+    let action = if wall.kind == WallKind::Added {
+        "carry and edit this wall"
+    } else {
+        "edit this wall"
+    };
+    let columns = crate::ui_text::width(grip) + 2 + crate::ui_text::width(action);
+    let mut canvas = Canvas::new(columns, HINT_ANGLE);
+    canvas.padding = (5, 4);
+    canvas.background = [0.0, 0.0, 0.0, 0.82];
+    canvas.border = Some(FRAME);
+    canvas.rows = vec![Row::new(cut(
+        &[
+            crate::ui_text::Span::new(
+                crate::ui_text::pad(grip, crate::ui_text::width(grip) + 2),
+                Style::bold(BRIGHT),
+            ),
+            crate::ui_text::Span::new(action, Style::plain(TEXT)),
+        ],
+        columns,
+    ))];
+    canvas
 }
 
 /// What a handle dragged makes of `wall`, as it would be let go now: for a corner, its slots' size and shape, such as
@@ -1214,7 +1513,7 @@ pub fn hint(
             false,
         ));
         if wall.kind == WallKind::Added {
-            rows.push((format!("{grip} wall"), "carry it".to_owned(), false));
+            rows.push((format!("{grip} bar"), "carry it".to_owned(), false));
         }
         rows.push((
             (if keyboard { "Backspace" } else { "B" }).to_owned(),

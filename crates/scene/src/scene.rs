@@ -4275,6 +4275,21 @@ mod tests {
             "{:?}",
             ends.end
         );
+        // At the wall's bar, above it, which takes hold of it as its board does: it ends there.
+        let bar = crate::projection::editing::bar(
+            &wall,
+            crate::board::model(&wall.pose).unwrap(),
+            arrival::HOME,
+        );
+        senses.ray = Ray::new(arrival::HOME, bar.middle - arrival::HOME);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let ends = beam(&frame);
+        assert!(
+            ends.hit && ends.end.distance(bar.middle) < 0.01,
+            "{:?} {:?}",
+            ends.end,
+            bar.middle
+        );
         // Taken hold of, at a handle, at the handle, however near the board behind it.
         senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
         senses.grip = Some(1.0);

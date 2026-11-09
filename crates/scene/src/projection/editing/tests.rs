@@ -1214,3 +1214,404 @@ fn of_two_handles_the_ray_meets_the_one_whose_middle_it_passes_nearest_is_taken(
         None
     );
 }
+
+/// A panel in every slot of `wall`.
+fn filling(wall: &Wall) -> Vec<Panel> {
+    (0..wall.grid().slots())
+        .map(|slot| {
+            Panel::new(
+                format!("panel-{slot}"),
+                "Notes",
+                "Full.",
+                Place::Wall {
+                    wall: wall.id.clone(),
+                    slot,
+                },
+            )
+        })
+        .collect()
+}
+
+/// `wall`'s bar, standing where it says, seen from home.
+fn bar_of(wall: &Wall) -> Bar {
+    bar(wall, model(&wall.pose).unwrap(), HOME)
+}
+
+/// The bars drawn in `output`: faces without text, filled.
+fn bars(output: &crate::projection::Output) -> Vec<&Canvas> {
+    output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter(|canvas| canvas.columns == 0 && canvas.rows.is_empty())
+        .collect()
+}
+
+/// The viewers a wall is checked from: nearby to across the space, straight on and from either side, where the whole
+/// wall is within view as its middle is looked at, as a participant would stand.
+fn viewers(wall: &Wall) -> Vec<Vec3> {
+    let frame = model(&wall.pose).unwrap();
+    let middle = Vec3::from_array(wall.pose.position);
+    let facing = frame.transform_vector3(Vec3::Z);
+    let mut viewers = Vec::new();
+    for distance in [0.8, 1.5, 3.0, 6.0] {
+        for side in [-50f32, -25.0, 0.0, 25.0, 50.0] {
+            let viewer = middle + Quat::from_rotation_y(side.to_radians()) * facing * distance;
+            let ahead = (middle - viewer).normalize();
+            if corners(wall).iter().all(|corner| {
+                (frame.transform_point3(*corner) - viewer)
+                    .normalize()
+                    .dot(ahead)
+                    >= 55f32.to_radians().cos()
+            }) {
+                viewers.push(viewer);
+            }
+        }
+    }
+    viewers
+}
+
+#[test]
+fn a_wall_s_bar_is_met_along_its_length_and_across_its_thickness_flat_or_curved_near_or_far() {
+    let mut checked = 0;
+    for wall in walls_of_every_size() {
+        let frame = model(&wall.pose).unwrap();
+        for viewer in viewers(&wall) {
+            checked += 1;
+            let bar = bar(&wall, frame, viewer);
+            let up = frame.transform_vector3(Vec3::Y);
+            let distance = bar.middle.distance(viewer);
+            // At least about 1.7° to aim at across it, and three handles along it, as the eyes see it.
+            let across = 2.0 * (bar.size * HANDLE_REACH / distance).atan();
+            assert!(across > 1.7f32.to_radians(), "{wall:?} from {viewer}");
+            let (left, right) = (bar.middle - bar.half, bar.middle + bar.half);
+            let along = (left - viewer)
+                .normalize()
+                .angle_between((right - viewer).normalize());
+            assert!(
+                along > 2.5 * HANDLE_ANGLE * 0.9,
+                "{:?} {:?} from {viewer}: {}°",
+                wall.grid(),
+                (wall.scale(), wall.aspect(), wall.radius()),
+                along.to_degrees()
+            );
+            // Along it, end to end, and up and down within most of a handle, the ray meets it where it passes it.
+            for s in [-0.95, -0.5, 0.0, 0.5, 0.95] {
+                for v in [-0.7, 0.0, 0.7] {
+                    let point = bar.middle + bar.half * s + up * bar.size * v;
+                    let ray = Ray::new(viewer, point - viewer).unwrap();
+                    let met = bar
+                        .hit(&ray)
+                        .unwrap_or_else(|| panic!("{s} {v} of {:?} from {viewer}", wall.grid()));
+                    assert!((met - point.distance(viewer)).abs() < bar.size, "{met}");
+                }
+            }
+            // Well beyond it, above or below, as seen from in front of it, it is not met.
+            let facing = frame.transform_vector3(Vec3::Z);
+            if (viewer - bar.middle).normalize().dot(facing) > 0.99 {
+                for v in [-1.5, 1.5] {
+                    let point = bar.middle + up * bar.size * v;
+                    assert_eq!(bar.hit(&Ray::new(viewer, point - viewer).unwrap()), None);
+                }
+            }
+            // Nor is it behind the ray.
+            assert_eq!(
+                bar.hit(&Ray::new(viewer, viewer - bar.middle).unwrap()),
+                None
+            );
+        }
+    }
+    assert!(checked > 1_000, "{checked}");
+    // A ray along the bar, from beyond its end, meets it.
+    let bar = bar_of(&added());
+    let length = bar.half.length();
+    let met = bar
+        .hit(&Ray::new(bar.middle + bar.half * 3.0, -bar.half).unwrap())
+        .unwrap();
+    assert!(
+        met >= 2.0 * length - 1e-3 && met <= 3.0 * length + 1e-3,
+        "{met}"
+    );
+}
+
+#[test]
+fn the_bar_stands_clear_of_every_handle_and_its_drawn_face_within_where_it_is_met() {
+    let mut checked = 0;
+    for wall in walls_of_every_size() {
+        let frame = model(&wall.pose).unwrap();
+        for viewer in viewers(&wall) {
+            checked += 1;
+            let (points, size) = handle_points(&wall, frame, viewer);
+            let bar = bar(&wall, frame, viewer);
+            assert!((bar.size - size).abs() < 1e-6);
+            // A ray at any handle's middle, or near its edge, meets no bar; and one anywhere along the bar meets no
+            // handle, so that the two are never confused.
+            for (handle, middle) in &points {
+                let towards = (*middle - viewer).normalize();
+                let right = towards.cross(Vec3::Y).normalize();
+                let up = right.cross(towards);
+                for edge in [Vec3::ZERO, right, -right, up, -up] {
+                    let point = *middle + edge * size * 0.45;
+                    let ray = Ray::new(viewer, point - viewer).unwrap();
+                    assert_eq!(
+                        bar.hit(&ray),
+                        None,
+                        "{handle:?} of {:?} {:?} from {viewer}",
+                        wall.grid(),
+                        (wall.scale(), wall.aspect(), wall.radius())
+                    );
+                }
+            }
+            let up = frame.transform_vector3(Vec3::Y);
+            for step in 0..=20 {
+                let s = -1.0 + step as f32 / 10.0;
+                for v in [-0.4, 0.0, 0.4] {
+                    let point = bar.middle + bar.half * s + up * size * v;
+                    let ray = Ray::new(viewer, point - viewer).unwrap();
+                    assert_eq!(
+                        nearest_handle(&points, size, &ray),
+                        None,
+                        "{s} along the bar of {:?} {:?} from {viewer}",
+                        wall.grid(),
+                        (wall.scale(), wall.aspect(), wall.radius())
+                    );
+                }
+            }
+            // Drawn thin, as long as it is, within where the ray meets it.
+            let face = bar_face(&bar, false).size();
+            // To within a font pixel, an eighth of its thickness, at either end.
+            assert!(
+                (face.0 - 2.0 * bar.half.length()).abs() <= face.1 / 8.0 * 1.01,
+                "{face:?}"
+            );
+            assert!(
+                face.1 < 2.0 * size * HANDLE_REACH && face.1 > 0.3 * size,
+                "{face:?} {size}"
+            );
+        }
+    }
+    assert!(checked > 1_000, "{checked}");
+}
+
+#[test]
+fn a_full_curved_wall_is_taken_hold_of_and_carried_again_by_its_bar_while_its_panels_still_take_the_grip()
+ {
+    let now = Instant::now();
+    let wall = added()
+        .with_grid(Grid::new(4, 2).unwrap())
+        .with_shape(WallShape::Arc { radius: 2.0 });
+    let projection = shown(vec![wall.clone(), tomori()], filling(&wall));
+    let bar = bar_of(&wall);
+    // A panel pointed at takes the grip, as ever.
+    let slot = model(&wall.pose)
+        .unwrap()
+        .transform_point3(Vec3::from_array(wall.slot_frames()[5].position));
+    let mut projector = Projector::default();
+    projector.update(frame_at(&projection, at(slot), 1.0, now));
+    assert_eq!(projector.held(), Some("panel-5"));
+    assert_eq!(projector.editing_wall(), None);
+    // The bar, at either end and its middle, takes hold of the wall and, as it was added, carries it.
+    for s in [-0.9, 0.0, 0.9] {
+        let mut projector = Projector::default();
+        let ray = at(bar.middle + bar.half * s);
+        let output = projector.update(frame_at(&projection, ray, 1.0, now));
+        assert!(output.wall_ticked);
+        assert_eq!(projector.held(), None);
+        assert_eq!(projector.carried_wall(), Some("wall-1"), "{s}");
+        // Let go, its handles show, the bar still where it was, and it carries the wall again.
+        projector.update(frame_at(&projection, ray, 0.0, now));
+        assert_eq!(projector.editing_wall(), Some("wall-1"));
+        assert_eq!(projector.carried_wall(), None);
+        let output = projector.update(frame_at(&projection, ray, 0.0, now));
+        let hint = output
+            .sheets
+            .last()
+            .unwrap()
+            .canvas
+            .as_ref()
+            .unwrap()
+            .plain();
+        assert!(
+            hint.contains("Grip bar") && hint.contains("carry it"),
+            "{hint}"
+        );
+        projector.update(frame_at(&projection, ray, 1.0, now));
+        assert_eq!(projector.carried_wall(), Some("wall-1"));
+    }
+    // The Tomori wall, every slot full, is taken hold of by its bar below it, and not carried.
+    let tomori = tomori();
+    let projection = shown(vec![tomori.clone()], filling(&tomori));
+    let bar = bar_of(&tomori);
+    let below =
+        model(&tomori.pose)
+            .unwrap()
+            .transform_point3(Vec3::new(0.0, -tomori.size().1 / 2.0, 0.0));
+    assert!(
+        bar.middle.y < below.y && bar.middle.y > 0.15,
+        "{:?}",
+        bar.middle
+    );
+    let mut projector = Projector::default();
+    projector.update(frame_at(&projection, at(bar.middle), 1.0, now));
+    assert_eq!(projector.editing_wall(), Some(TOMORI_WALL));
+    assert_eq!(projector.carried_wall(), None);
+    assert_eq!(projector.held(), None);
+}
+
+#[test]
+fn a_panel_in_front_of_a_bar_takes_the_grip_and_the_bar_in_front_of_one_takes_it_and_ends_the_ray()
+{
+    let now = Instant::now();
+    let wall = added();
+    let bar = bar_of(&wall);
+    let towards = (bar.middle - HOME).normalize();
+    let floating = |at: Vec3| {
+        Panel::new(
+            "panel-1",
+            "Floating",
+            "Here.",
+            Place::Free {
+                pose: Pose::upright_facing(at.to_array(), HOME.to_array()),
+            },
+        )
+    };
+    // Floating in front of it, the panel is pointed at and taken.
+    let projection = shown(vec![wall.clone()], vec![floating(HOME + towards * 1.0)]);
+    let mut projector = Projector::default();
+    let output = projector.update(frame_at(&projection, at(bar.middle), 0.0, now));
+    assert_eq!(
+        output.pointed.map(|(id, ..)| id),
+        Some("panel-1".to_owned())
+    );
+    projector.update(frame_at(&projection, at(bar.middle), 1.0, now));
+    assert_eq!(projector.held(), Some("panel-1"));
+    assert_eq!(projector.editing_wall(), None);
+    // Floating behind it, the bar is met first: pointed at rather than the panel, ending the ray, and taken.
+    let projection = shown(
+        vec![wall.clone()],
+        vec![floating(bar.middle + towards * 1.0)],
+    );
+    let mut projector = Projector::default();
+    let ray = at(bar.middle);
+    let output = projector.update(frame_at(&projection, ray, 0.0, now));
+    assert!(output.wall_ticked);
+    assert_eq!(output.pointed, None);
+    let hit = output.hit.expect("the ray ends on the bar");
+    assert!(!hit.held);
+    assert!(
+        (hit.distance - bar.middle.distance(HOME)).abs() < 0.01,
+        "{hit:?}"
+    );
+    assert!((ray.unwrap().at(hit.distance) - hit.point).length() < 1e-3);
+    projector.update(frame_at(&projection, ray, 1.0, now));
+    assert_eq!(projector.held(), None);
+    assert_eq!(projector.carried_wall(), Some("wall-1"));
+    // Something nearer that the grip would take, such as a card, takes it instead.
+    let mut projector = Projector::default();
+    let mut nearer = frame_at(&projection, ray, 1.0, now);
+    nearer.nearer = 0.5;
+    projector.update(nearer);
+    assert_eq!(projector.editing_wall(), None);
+}
+
+#[test]
+fn bars_show_only_to_those_who_may_adjust_walls_highlighted_with_what_the_grip_does_while_the_ray_meets_one()
+ {
+    let now = Instant::now();
+    let wall = added();
+    let projection = shown(vec![wall.clone(), tomori()], Vec::new());
+    let bar = bar_of(&wall);
+    let up = Vec3::Y * 2.0;
+    // A visitor, or anyone where the server takes no wall changes, sees none, and the ray passes through them.
+    let mut projector = Projector::default();
+    let output = projector.update(frame(
+        &projection,
+        at(bar.middle),
+        0.0,
+        Rights::default(),
+        now,
+    ));
+    assert!(bars(&output).is_empty());
+    assert_eq!(output.hit, None);
+    projector.update(frame(
+        &projection,
+        at(bar.middle),
+        1.0,
+        Rights::default(),
+        now,
+    ));
+    assert_eq!(projector.editing_wall(), None);
+    // A participant who may sees one on each wall, subtly.
+    let mut projector = Projector::default();
+    let output = projector.update(frame_at(&projection, at(HOME + up), 0.0, now));
+    let shown = bars(&output);
+    assert_eq!(shown.len(), 2);
+    assert!(shown.iter().all(|face| face.background[3] < 0.5));
+    // The ray on one highlights it and says what the grip does, ticking once as it arrives.
+    let output = projector.update(frame_at(&projection, at(bar.middle), 0.0, now));
+    assert!(output.wall_ticked);
+    assert_eq!(
+        bars(&output)
+            .iter()
+            .filter(|face| face.background == HIGHLIGHT)
+            .count(),
+        1
+    );
+    let label = |output: &crate::projection::Output| {
+        output
+            .sheets
+            .iter()
+            .filter_map(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .map(|canvas| (sheet.model, canvas.plain()))
+            })
+            .find(|(_, text)| text.contains("edit this wall"))
+    };
+    let (model, text) = label(&output).expect("what the grip does");
+    assert!(
+        text.contains("Grip") && text.contains("carry and edit"),
+        "{text}"
+    );
+    assert!(model.unwrap().w_axis.y > bar.middle.y);
+    let output = projector.update(frame_at(&projection, at(bar.middle), 0.0, now));
+    assert!(!output.wall_ticked);
+    // On the Tomori wall's, below it, which is edited but not carried.
+    let low = bar_of(&tomori());
+    let output = projector.update(frame_at(&projection, at(low.middle), 0.0, now));
+    let (model, text) = label(&output).expect("what the grip does");
+    assert!(!text.contains("carry"), "{text}");
+    assert!(model.unwrap().w_axis.y < low.middle.y);
+    // The desktop window names its key.
+    assert!(
+        bar_label(Controls::Keyboard, &wall)
+            .plain()
+            .starts_with("G  ")
+    );
+    // Carried, its bar is highlighted; held, its bar still shows, and what the grip does there is the hint's to say.
+    projector.update(frame_at(&projection, at(bar.middle), 1.0, now));
+    let output = projector.update(frame_at(
+        &projection,
+        at(bar.middle + Vec3::X * 0.2),
+        1.0,
+        now,
+    ));
+    assert_eq!(
+        bars(&output)
+            .iter()
+            .filter(|face| face.background == HIGHLIGHT)
+            .count(),
+        1
+    );
+    projector.update(frame_at(
+        &projection,
+        at(bar.middle + Vec3::X * 0.2),
+        0.0,
+        now,
+    ));
+    assert_eq!(projector.editing_wall(), Some("wall-1"));
+    let output = projector.update(frame_at(&projection, at(HOME + up), 0.0, now));
+    assert_eq!(bars(&output).len(), 2);
+    assert!(label(&output).is_none());
+}
