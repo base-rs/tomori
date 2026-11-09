@@ -231,6 +231,36 @@ fn muted_agent_speech_plays_silently_but_keeps_its_level() {
 }
 
 #[test]
+fn a_skip_fades_agent_speech_heard_out_and_its_end_heard_at_once() {
+    let mut mixer = mixer();
+    for sequence in 0..6 {
+        mixer.push(frame(AGENT_SOURCE, sequence, 100));
+    }
+    assert_eq!(mix(&mut mixer, 4), [100; 4]);
+    // Skipped while it is heard, it fades out over 10 ms, 10 samples at 1 kHz, rather than stopping on a step.
+    mixer.set_agent_skipped(true);
+    let near = |output: Vec<i16>, expected: [i16; 4]| {
+        assert!(
+            output
+                .iter()
+                .zip(expected)
+                .all(|(&sample, expected)| (sample - expected).abs() <= 1),
+            "{output:?}"
+        );
+    };
+    near(mix(&mut mixer, 4), [90, 80, 70, 60]);
+    near(mix(&mut mixer, 4), [50, 40, 30, 20]);
+    near(mix(&mut mixer, 4), [15, 10, 5, 0]);
+    assert_eq!(mix(&mut mixer, 4), [0; 4]);
+    // Still played, for its level, though silent here.
+    assert!(mixer.is_source_playing(AGENT_SOURCE));
+    // Its end, while nothing of it is heard, is heard at once.
+    mixer.set_agent_skipped(false);
+    mixer.push(frame(AGENT_SOURCE, 6, 100));
+    assert_eq!(mix(&mut mixer, 4), [100; 4]);
+}
+
+#[test]
 fn muting_also_silences_agent_speech_played_again() {
     let mut mixer = mixer();
     mixer.set_agent_muted(true);

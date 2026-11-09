@@ -59,6 +59,8 @@ pub enum Action {
     },
     /// Mute or unmute agent speech locally, live or played again.
     SetAgentMuted(bool),
+    /// Skip the rest of what the agent is saying on this device, live or played again, or stop skipping it, as the participant speaking over it does: see `design/speech.md`. Unlike the mute, it is not kept for later connections, whose players start with nothing skipped.
+    SetAgentSkipped(bool),
     /// Change and keep this device's Feedback setting. See `design/feedback.md`.
     SetFeedback(feedback::Settings),
 }
@@ -150,7 +152,7 @@ pub enum Report {
     SecurityNotice(String),
     /// Whether speech played again for this participant is playing. Reported once a frame.
     Replaying(bool),
-    /// Whether agent speech is playing on this device, live or played again, and even while muted locally, and how loud, from 0 to 1, as [`crate::playback::PlayerControl::agent_speech`] says. Reported once a frame, after [`Self::Replaying`], so that the agent can be seen speaking for as long as it is heard.
+    /// Whether agent speech is playing on this device, live or played again, and even while muted locally or skipped, and how loud, from 0 to 1, as [`crate::playback::PlayerControl::agent_speech`] says. Reported once a frame, after [`Self::Replaying`], so that the agent can be seen speaking for as long as it is heard.
     AgentSpeech { playing: bool, level: f32 },
 }
 
@@ -1516,6 +1518,13 @@ impl Connection {
                     self.voice.stop_live();
                 }
                 Action::SetAgentMuted(muted) => self.speaker.set_muted(muted),
+                // Without a player, nothing plays to skip; the next one starts with nothing skipped.
+                Action::SetAgentSkipped(skipped) => {
+                    let _ = self
+                        .speaker
+                        .control()
+                        .inspect(|control| control.set_agent_skipped(skipped));
+                }
                 Action::SetFeedback(settings) => {
                     self.feedback.set_settings(settings);
                     self.store.remember_feedback(settings);

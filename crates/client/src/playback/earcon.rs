@@ -28,11 +28,13 @@ pub enum Earcon {
     Knock,
     /// A low click: holding B left the space.
     Leave,
+    /// One soft note, settling: the agent finished speaking and it is the participant's turn.
+    YourTurn,
 }
 
 impl Earcon {
     /// Every cue, in the order a [`Bank`] holds them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Choose,
         Self::On,
         Self::Off,
@@ -43,6 +45,7 @@ impl Earcon {
         Self::CatchingUp,
         Self::Knock,
         Self::Leave,
+        Self::YourTurn,
     ];
 
     fn index(self) -> usize {
@@ -140,6 +143,13 @@ impl Earcon {
                 partials: WOOD,
                 attack: 1,
                 level: 0.12,
+            },
+            // The softest cue: one note, eased in, settling a little, so that it says the floor is free without calling for attention.
+            Self::YourTurn => Spec {
+                notes: vec![note(0, 200, G5, E5)],
+                partials: BELL,
+                attack: 40,
+                level: 0.05,
             },
         }
     }

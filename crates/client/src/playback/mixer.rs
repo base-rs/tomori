@@ -161,6 +161,12 @@ pub struct Mixer {
     local_source: Option<u32>,
     agent_volume: f32,
     agent_muted: bool,
+    /// Whether the rest of what the agent is saying is skipped here, which fades it out rather than stopping it.
+    agent_skipped: bool,
+    /// How far agent speech has faded out for a skip, in samples: 0 is full volume, and the fade length is silent.
+    skip_faded: u32,
+    /// Whether agent speech was heard in the last mix, so that a skip fades out only what is heard.
+    agent_heard: bool,
     limiter: Limiter,
     accumulator: Vec<f32>,
     /// One source's contribution to the current [`Self::mix`] call, so its level can be measured.
@@ -195,6 +201,9 @@ impl Mixer {
             local_source: None,
             agent_volume: 1.0,
             agent_muted: false,
+            agent_skipped: false,
+            skip_faded: 0,
+            agent_heard: false,
             limiter: Limiter::new(options.sample_rate),
             accumulator: Vec::new(),
             scratch: Vec::new(),
@@ -218,7 +227,7 @@ impl Mixer {
     pub fn ambient(&mut self, sound: Sound, position: spatial::Position) {
         let speaking = self.sources.iter().any(|(&id, source)| {
             if is_agent(id) {
-                !self.agent_muted && source.buffer.is_playing()
+                !self.agent_muted && !self.agent_skipped && source.buffer.is_playing()
             } else {
                 source.loud
             }
@@ -308,9 +317,7 @@ impl Mixer {
     /// Silence playback at once, without fading out, as for a mixer made while playback is already silenced.
     pub fn silence_now(&mut self) {
         self.silenced = true;
-        self.faded = (FADE.as_secs_f64() * f64::from(self.options.sample_rate))
-            .ceil()
-            .max(1.0) as u32;
+        self.faded = self.fade_length();
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -340,6 +347,24 @@ impl Mixer {
 
     pub fn set_agent_muted(&mut self, muted: bool) {
         self.agent_muted = muted;
+    }
+
+    /// Skip the rest of what the agent is saying here, or stop skipping it: agent speech heard in the last mix fades out
+    /// over [`FADE`], as silencing fades playback, so that it does not click, and back in when the skip ends; speech not
+    /// heard, as when muted, changes at once. Skipped speech is still consumed in real time, as muted speech is. See
+    /// `design/speech.md`.
+    pub fn set_agent_skipped(&mut self, skipped: bool) {
+        self.agent_skipped = skipped;
+        if !self.agent_heard {
+            self.skip_faded = if skipped { self.fade_length() } else { 0 };
+        }
+    }
+
+    /// The length of a fade, in samples.
+    fn fade_length(&self) -> u32 {
+        (FADE.as_secs_f64() * f64::from(self.options.sample_rate))
+            .ceil()
+            .max(1.0) as u32
     }
 
     pub fn statistics(&self) -> PlaybackStatistics {
@@ -448,6 +473,16 @@ impl Mixer {
         } else {
             self.agent_volume
         };
+        // A skip fades agent speech out, and its end back in, across this mix, at most as quickly as over [`FADE`].
+        let fade = self.fade_length();
+        let skip_from = 1.0 - self.skip_faded as f32 / fade as f32;
+        let step = u32::try_from(frames).unwrap_or(u32::MAX);
+        self.skip_faded = if self.agent_skipped {
+            self.skip_faded.saturating_add(step).min(fade)
+        } else {
+            self.skip_faded.saturating_sub(step)
+        };
+        let skip_to = 1.0 - self.skip_faded as f32 / fade as f32;
         // People speaking in the last mix, as measured then rather than by the slower speaking indicator, duck agent speech.
         let speaking = self
             .sources
@@ -459,7 +494,10 @@ impl Mixer {
         for (&id, source) in self.sources.iter_mut() {
             let placement = placement(&self.scene, rate, id, layout);
             let gain = if is_agent(id) {
-                (agent_gain * duck_from, agent_gain * duck_to)
+                (
+                    agent_gain * skip_from * duck_from,
+                    agent_gain * skip_to * duck_to,
+                )
             } else {
                 (1.0, 1.0)
             };
@@ -486,6 +524,12 @@ impl Mixer {
                 }
             }
         }
+        // Heard if agent speech played in this mix and was not silent here.
+        self.agent_heard = agent_gain * skip_to > 0.0
+            && self
+                .sources
+                .iter()
+                .any(|(&id, source)| is_agent(id) && source.buffer.is_playing());
         let idle_limit = (IDLE_LIMIT.as_secs_f64() * f64::from(rate)) as u64;
         self.sources.retain(|_, source| {
             source.buffer.has_audio() || source.buffer.idle_samples() < idle_limit
@@ -557,7 +601,7 @@ impl Mixer {
             let position = position + samples.len().min(frames);
             self.probe = (position < self.bank.probe().len()).then_some(position);
         }
-        let length = (FADE.as_secs_f64() * f64::from(rate)).ceil().max(1.0) as u32;
+        let length = fade;
         if self.silenced || self.faded > 0 {
             for frame in self.accumulator.chunks_exact_mut(channels) {
                 self.faded = if self.silenced {

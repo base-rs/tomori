@@ -125,6 +125,8 @@ pub enum Event {
     /// The recording reached 30 seconds, and then 10, before the server's limit, as the recording card turns amber and then red. Felt, and silent.
     LimitWarning,
     LimitCritical,
+    /// The agent finished speaking a reply this participant heard, and is idle: it is their turn. See [`Feedback::observe_turn`].
+    YourTurn,
 }
 
 /// One vibration of a pattern: when it starts after the event, how long it lasts (`None` is the shortest the controller can), and how strongly, from 0 to 1.
@@ -153,7 +155,8 @@ impl Event {
             | Self::LiveOn
             | Self::LiveOff
             | Self::LimitWarning
-            | Self::LimitCritical => Hand::Left,
+            | Self::LimitCritical
+            | Self::YourTurn => Hand::Left,
             Self::NotSent(hand) | Self::Shown(hand) => hand,
             Self::Hover
             | Self::Choose
@@ -176,7 +179,9 @@ impl Event {
     /// Where the cue sounds from: towards the hand that acted, from the agent for what the agent needs, or in the middle.
     pub fn direction(self) -> Direction {
         match self {
-            Self::RequestWaiting | Self::RequestReminder | Self::CatchingUp => Direction::Agent,
+            Self::RequestWaiting | Self::RequestReminder | Self::CatchingUp | Self::YourTurn => {
+                Direction::Agent
+            }
             Self::Sent => Direction::Centre,
             event => match event.hand() {
                 Hand::Left => Direction::Left,
@@ -202,6 +207,7 @@ impl Event {
             Self::CatchingUp => Some(Earcon::CatchingUp),
             Self::Knock => Some(Earcon::Knock),
             Self::Left => Some(Earcon::Leave),
+            Self::YourTurn => Some(Earcon::YourTurn),
         }
     }
 
@@ -209,7 +215,7 @@ impl Event {
     pub fn pattern(self) -> &'static [Pulse] {
         match self {
             // Very light, and as short as the controller allows.
-            Self::Hover | Self::Shown(_) => &[Pulse {
+            Self::Hover | Self::Shown(_) | Self::YourTurn => &[Pulse {
                 start: Duration::ZERO,
                 length: None,
                 amplitude: 0.15,
@@ -278,6 +284,8 @@ pub struct Feedback {
     knocks: Vec<String>,
     ambient: Vec<(crate::playback::Sound, crate::playback::spatial::Position)>,
     last_ambient: Option<Instant>,
+    /// When it last became the participant's turn, as [`Self::observe_turn`] last saw it, so that each turn is cued once.
+    turn: Option<Instant>,
 }
 
 impl Feedback {
@@ -516,6 +524,14 @@ impl Feedback {
         }
     }
 
+    /// When it last became the participant's turn to speak, if it has: the agent finished speaking a reply they heard and is idle (see `design/speech.md`). Each new turn is cued once, softly; a turn already cued, or none, is not.
+    pub fn observe_turn(&mut self, turn: Option<Instant>, now: Instant) {
+        if turn.is_some() && turn != self.turn {
+            self.emit(Event::YourTurn, now);
+        }
+        self.turn = turn;
+    }
+
     /// The knocks waiting on the space now, by id: a new one is cued.
     pub fn observe_knocks<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>, now: Instant) {
         let ids: Vec<&str> = ids.into_iter().collect();
@@ -583,7 +599,7 @@ mod tests {
         Duration::from_millis(milliseconds)
     }
 
-    const EVENTS: [Event; 18] = [
+    const EVENTS: [Event; 19] = [
         Event::Hover,
         Event::Choose,
         Event::RecordingStarts,
@@ -602,6 +618,7 @@ mod tests {
         Event::Shown(Hand::Right),
         Event::LimitWarning,
         Event::LimitCritical,
+        Event::YourTurn,
     ];
 
     #[test]
@@ -631,6 +648,7 @@ mod tests {
                 (Hand::Right, None, 1),
                 (Hand::Left, None, 1),
                 (Hand::Left, None, 2),
+                (Hand::Left, Some(Earcon::YourTurn), 1),
             ]
         );
         for event in EVENTS {
@@ -645,12 +663,13 @@ mod tests {
         // Hover is the lightest of all, and as short as the controller allows.
         let hover = Event::Hover.pattern()[0];
         assert_eq!(hover.length, None);
-        // A panel appearing is felt as hover is; everything else more firmly.
+        // A panel appearing, and the participant's turn, are felt as hover is; everything else more firmly.
         assert_eq!(Event::Shown(Hand::Right).pattern(), Event::Hover.pattern());
+        assert_eq!(Event::YourTurn.pattern(), Event::Hover.pattern());
         assert!(
             EVENTS[1..]
                 .iter()
-                .filter(|event| !matches!(event, Event::Shown(_)))
+                .filter(|event| !matches!(event, Event::Shown(_) | Event::YourTurn))
                 .all(|event| {
                     event
                         .pattern()
@@ -684,8 +703,40 @@ mod tests {
                 Direction::Right,
                 Direction::Left,
                 Direction::Left,
+                Direction::Agent,
             ]
         );
+    }
+
+    #[test]
+    fn each_turn_is_cued_once_and_only_at_full() {
+        let (mut feedback, now) = feedback();
+        feedback.observe_turn(None, now);
+        assert_eq!(feedback.take_earcons().count(), 0);
+        let turn = Some(now);
+        feedback.observe_turn(turn, now);
+        assert_eq!(
+            feedback.take_earcons().collect::<Vec<_>>(),
+            [(Earcon::YourTurn, Direction::Agent)]
+        );
+        assert_eq!(feedback.haptics(now).len(), 1);
+        // The same turn, seen again frame after frame, or forgotten, is not cued again.
+        feedback.observe_turn(turn, now + ms(20));
+        feedback.observe_turn(None, now + ms(40));
+        assert_eq!(feedback.take_earcons().count(), 0);
+        // A later turn is.
+        feedback.observe_turn(Some(now + ms(60)), now + ms(60));
+        assert_eq!(feedback.take_earcons().count(), 1);
+        feedback.haptics(now + ms(60));
+        // Reduced sounds and vibration leave it out, as they leave out everything that does not need the participant.
+        feedback.set_settings(Settings {
+            sounds: Level::Reduced,
+            vibration: Level::Reduced,
+            ..Settings::default()
+        });
+        feedback.observe_turn(Some(now + ms(80)), now + ms(80));
+        assert_eq!(feedback.take_earcons().count(), 0);
+        assert!(feedback.haptics(now + ms(80)).is_empty());
     }
 
     #[test]
