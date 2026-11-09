@@ -4011,7 +4011,7 @@ mod tests {
             &mut feedback,
             now,
         );
-        // It says the revision it shows, and counts its own tick, as the server will.
+        // It says the revision the server sent, which its own ticks shown at once do not change.
         assert_eq!(conversation.take_actions(), [tick(2, false, 4)]);
         assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
         // Shown at once, so the label on it now says A ticks it, and A does.
@@ -4023,7 +4023,7 @@ mod tests {
             &mut feedback,
             now,
         );
-        assert_eq!(conversation.take_actions(), [tick(2, true, 5)]);
+        assert_eq!(conversation.take_actions(), [tick(2, true, 4)]);
         // On the item below, not ticked, A ticks it.
         ray_on_item(&mut step, &mut conversation, ahead, "A  tick").expect("the second item");
         step.buttons(
@@ -4033,7 +4033,7 @@ mod tests {
             &mut feedback,
             now,
         );
-        assert_eq!(conversation.take_actions(), [tick(3, true, 6)]);
+        assert_eq!(conversation.take_actions(), [tick(3, true, 4)]);
         // The right wrist's transcript comes first: while it shows, A is its, and ticks nothing.
         let wrist = Senses {
             right_palm: Some(palm_up(0.0)),

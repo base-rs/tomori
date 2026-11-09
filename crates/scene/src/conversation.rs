@@ -3493,10 +3493,12 @@ impl Conversation {
 
     /// Tick, or untick, as `checked` says, the checklist item that begins on `line` of the panel `panel`, which
     /// [`Self::item_checked`] found shown, for everyone in the space, showing it so at once, until the server's projection
-    /// says how it is. It says the panel's revision it shows, so that the server refuses the tick where the panel has
-    /// changed since, rather than tick another item, and counts the tick's revision as the server will, so that another
-    /// tick before the projection comes back is not refused. Says whether it asked, as only a participant does; a visitor
-    /// is told they only watch. See `design/projection.md`.
+    /// says how it is. It says the panel's revision the server last sent, so that the server refuses the tick where the
+    /// panel has changed since, rather than tick another item. It never counts its own tick in that revision: a guess at
+    /// the revision the tick makes could equal the revision of another change, such as the agent's rewrite the tick
+    /// raced, and so let a second tick land on another item; a second tick before the projection comes back is refused
+    /// instead, and ticked again. Says whether it asked, as only a participant does; a visitor is told they only watch.
+    /// See `design/projection.md`.
     fn check_item(&mut self, panel: &str, line: u32, checked: bool) -> bool {
         let revision = self
             .projection()
@@ -3517,9 +3519,6 @@ impl Conversation {
             .as_mut()
             .and_then(|projection| projection.panels.iter_mut().find(|shown| shown.id == panel))
             .expect("the panel of an item A ticks is shown");
-        if revision.is_some() {
-            shown.revision += 1;
-        }
         shown.body = tomori_protocol::checklist::set(
             &shown.body,
             usize::try_from(line).expect("a line of a body shown is a usize"),
@@ -13107,17 +13106,17 @@ mod tests {
         conversation.apply(role(ConnectionRole::Collaborator));
         conversation.apply(agenda("- [ ] One\n- [ ] Two", 3));
         conversation.take_actions();
-        // It says the revision it shows, and counts its own tick as the server will, so that a second tick before the
-        // projection comes back says the revision the first made.
+        // It says the revision the server last sent, showing its tick at once but never counting it: had it guessed 4,
+        // the revision the agent's rewrite racing the tick made, a second tick would land on another item.
         conversation.point_item(Some(("panel-1".to_owned(), 0)));
         assert!(!conversation.press_a(None));
         assert_eq!(sent(&mut conversation), [tick(0, true, 3)]);
-        assert_eq!(shown(&conversation), ("- [x] One\n- [ ] Two".into(), 4));
+        assert_eq!(shown(&conversation), ("- [x] One\n- [ ] Two".into(), 3));
         conversation.point_item(Some(("panel-1".to_owned(), 1)));
         assert!(!conversation.press_a(None));
-        assert_eq!(sent(&mut conversation), [tick(1, true, 4)]);
-        // The agent rewrote the body meanwhile, so the server refused the second tick, naming the panel, and sends the
-        // projection again: the item shows as it is, and the refusal is no problem to show, only a cue.
+        assert_eq!(sent(&mut conversation), [tick(1, true, 3)]);
+        // The agent rewrote the body meanwhile, so the server refused both ticks, naming the panel, and sends the
+        // projection again: the items show as they are, and the refusal is no problem to show, only a cue.
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That panel changed as you ticked it; look again.".into(),
             space: None,
