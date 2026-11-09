@@ -284,6 +284,16 @@ impl Room {
         Ok(())
     }
 
+    /// Whether every locked wall stands and is laid out as it was in `before`, so that a group carried, bent or settled
+    /// moves none of them.
+    pub(super) fn keeps_locked(&self, before: &Room) -> bool {
+        self.walls.iter().filter(|added| added.locked).all(|added| {
+            before
+                .added(&added.id)
+                .is_some_and(|was| was.pose == added.pose && was.layout == added.layout)
+        })
+    }
+
     /// Each added wall in a group of more than one, by identity: its group, named by its first wall, and its edges joined
     /// to the group's other walls.
     pub(super) fn joins(&self) -> BTreeMap<String, (String, Vec<Join>)> {
@@ -345,6 +355,12 @@ impl Stage {
         if !added(wall) {
             return Err(refusal(wall));
         }
+        if self
+            .shown_wall(walls, wall)
+            .is_some_and(|shown| shown.is_locked())
+        {
+            return Err(super::LOCKED);
+        }
         if let Some(attach) = &attach {
             if !target(&attach.to) {
                 return Err(refusal(&attach.to));
@@ -383,6 +399,10 @@ impl Stage {
         if let Err(error) = room.settle(&before) {
             *room = before;
             return Err(error);
+        }
+        if !room.keeps_locked(&before) {
+            *room = before;
+            return Err(super::GROUP_LOCKED);
         }
         Ok(room.walls != before.walls)
     }

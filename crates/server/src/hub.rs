@@ -4036,6 +4036,43 @@ impl Hub {
                     }
                 }
             }
+            ClientMessage::LockWall {
+                wall,
+                locked,
+                reset,
+            } => {
+                if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let walls = environments
+                    .walls(&record.model.environment)
+                    .travelling(record.travel);
+                match record.stage.lock_wall(&walls, &wall, locked, reset) {
+                    Ok(true) => {
+                        log::info!(
+                            "An owner {} {wall} in space {space}.",
+                            match (reset, locked) {
+                                (true, _) => "put back and locked",
+                                (false, true) => "locked",
+                                (false, false) => "unlocked",
+                            }
+                        );
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    Ok(false) => state.touch_projection(&space),
+                    Err(error) => {
+                        state.error(participant, error);
+                        state.touch_projection(&space);
+                    }
+                }
+            }
             ClientMessage::RemoveWall { wall } => {
                 if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
                     state.error(participant, error);
@@ -4990,6 +5027,15 @@ impl Hub {
                         None
                     }
                 };
+                // Panels kept in slots a wall no longer has, as when an environment lays out its own wall anew, are put
+                // where they show.
+                let mut stage = kept.stage;
+                {
+                    let environments = self.environments();
+                    for environment in stage.environments() {
+                        stage.fit_slots(&environments.walls(&environment));
+                    }
+                }
                 state.spaces.push(SpaceRecord {
                     model,
                     commands,
@@ -5005,7 +5051,7 @@ impl Hub {
                     placements: kept.placements,
                     restoring: true,
                     channel: None,
-                    stage: kept.stage,
+                    stage,
                     summoned: None,
                     summoner: None,
                     travel: None,
@@ -5746,6 +5792,8 @@ impl Hub {
                 state.checks = true;
                 // Walls someone added snap together into groups, which move together. See `design/projection.md`.
                 state.groups = true;
+                // Walls are locked and unlocked by owners, an environment's own locked unless unlocked.
+                state.wall_locks = true;
                 // An owner may delete any space, and its session too where its backend deletes sessions. See `design/spaces.md`.
                 state.deletes = true;
                 state.deletes_session = self

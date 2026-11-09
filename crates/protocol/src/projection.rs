@@ -153,10 +153,12 @@ pub struct Wall {
     /// as one board. See [`group`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joined: Vec<Join>,
-    /// Whether it is locked: a locked wall is neither moved, resized, reshaped, bent nor removed, by anyone, until an
-    /// owner unlocks it, though panels still go onto it and come off it, and it snaps to nothing, nor anything to it.
-    /// Sent only where it is; an older client, which knows none, offers its controls, and the server refuses what they
-    /// ask. See `design/projection.md`.
+    /// Whether it is locked: a locked wall is neither moved, resized, reshaped, tilted, bent nor removed, by anyone,
+    /// until an owner unlocks it with [`crate::ClientMessage::LockWall`], though panels still go onto it and come off
+    /// it, and it snaps to nothing, nor anything to it. An environment's own walls are locked unless a space's owner
+    /// unlocked them, and others unlocked unless one locked them. Sent only by a server whose
+    /// [`crate::SpaceState::wall_locks`] is set; an older client, which knows none, offers its controls, and the server
+    /// refuses what they ask. See `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
     /// How far it tilts from upright about its horizontal middle line, in degrees, within [`layout::TILTS`]: positive
@@ -168,7 +170,7 @@ pub struct Wall {
 }
 
 impl Wall {
-    /// The flat wall `id` of `kind` at `pose`.
+    /// The flat wall `id` of `kind` at `pose`, unlocked.
     pub fn new(id: impl Into<String>, kind: WallKind, pose: Pose) -> Self {
         Self {
             id: id.into(),
@@ -923,6 +925,76 @@ mod tests {
         let [x, y, z, w] = Pose::upright_facing([0.0, 1.0, 0.0], [2.0, 0.0, 0.0]).orientation;
         let half = std::f32::consts::FRAC_1_SQRT_2;
         assert!(x == 0.0 && z == 0.0 && (y - half).abs() < 1e-6 && (w - half).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_wall_says_it_is_locked_only_where_it_is_and_a_reader_that_knows_no_lock_reads_the_rest() {
+        let pose = Pose {
+            position: [3.0, 1.4, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let open =
+            Wall::new("environment-0", WallKind::Environment, pose).with_grid(Grid::from((2, 1)));
+        assert!(!open.is_locked());
+        let json = serde_json::to_value(&open).unwrap();
+        assert!(json.get("locked").is_none(), "{json}");
+        let locked = open.clone().with_locked(true);
+        assert!(locked.is_locked());
+        let mut json = serde_json::to_value(&locked).unwrap();
+        assert_eq!(json["locked"], true);
+        assert_eq!(
+            serde_json::from_value::<Wall>(json.clone()).unwrap(),
+            locked
+        );
+        // An older server's wall, which says nothing of a lock, is unlocked; an older client, which knows none, reads
+        // the rest of a locked wall as it is.
+        json.as_object_mut().unwrap().remove("locked");
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), open);
+        // Locking and unlocking, and putting back, on the wire; `reset` only where it is asked.
+        use crate::ClientMessage;
+        for (message, json) in [
+            (
+                ClientMessage::LockWall {
+                    wall: "environment-0".into(),
+                    locked: false,
+                    reset: false,
+                },
+                serde_json::json!({"type": "lock_wall", "wall": "environment-0", "locked": false}),
+            ),
+            (
+                ClientMessage::LockWall {
+                    wall: "environment-0".into(),
+                    locked: true,
+                    reset: true,
+                },
+                serde_json::json!({"type": "lock_wall", "wall": "environment-0", "locked": true, "reset": true}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&message).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<ClientMessage>(json).unwrap(),
+                message
+            );
+        }
+        // A space's state says the server locks walls only where it does; an older server's says nothing, read as not.
+        let state = crate::SpaceState {
+            wall_locks: true,
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["wall_locks"], true);
+        json.as_object_mut().unwrap().remove("wall_locks");
+        assert!(
+            !serde_json::from_value::<crate::SpaceState>(json)
+                .unwrap()
+                .wall_locks
+        );
+        assert!(
+            serde_json::to_value(crate::SpaceState::default())
+                .unwrap()
+                .get("wall_locks")
+                .is_none()
+        );
     }
 
     #[test]

@@ -1362,6 +1362,8 @@ pub struct Output {
     pub hint: Option<Sheet>,
     /// A change to a wall to send, made with its handles or by carrying it.
     pub wall: Option<editing::Change>,
+    /// A wall to lock, unlock or put back, as an owner squeezed its padlock or `↺`.
+    pub lock: Option<editing::LockChange>,
     /// A wall was taken hold of, or the handle the ray meets changed, or the wall carried turned: to tick.
     pub wall_ticked: bool,
 }
@@ -1578,6 +1580,7 @@ impl Projector {
             &pickable,
         );
         output.wall = edited.change;
+        output.lock = edited.lock;
         output.wall_ticked = edited.ticked;
         // What the editor changed this frame is drawn this frame, the panels on a wall with it.
         let redrawn = travelled(self.editor.walls(projection), travelling);

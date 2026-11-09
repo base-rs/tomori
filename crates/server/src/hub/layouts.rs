@@ -136,11 +136,23 @@ impl Hub {
         if members.is_empty() {
             return Err("Only walls someone added can be removed: the Tomori wall and an environment's walls stay.".to_owned());
         }
-        // Each wall that may be removed: one that may not, such as one locked in place once walls can be locked, stays.
-        let members: Vec<String> = members
+        // Each wall that may be removed: one that may not, such as one locked, stays.
+        let (members, stayed): (Vec<String>, Vec<String>) = members
             .into_iter()
-            .filter(|member| record.stage.remove_wall(&walls, member).is_ok())
+            .partition(|member| record.stage.remove_wall(&walls, member).is_ok());
+        if members.is_empty() {
+            return Err("Every wall of that layout is locked: ask an owner in the space to unlock them first.".to_owned());
+        }
+        let stayed: Vec<String> = stayed
+            .iter()
+            .filter_map(|member| projection.wall(member))
+            .map(|wall| crate::presence::wall_name(&projection, wall))
             .collect();
+        let stays = match stayed.len() {
+            0 => String::new(),
+            1 => format!("; {} stays, locked", stayed[0]),
+            _ => format!("; {} stay, locked", stayed.join(", ")),
+        };
         let names: Vec<String> = members
             .iter()
             .filter_map(|member| projection.wall(member))
@@ -157,6 +169,7 @@ impl Hub {
             held => format!("; the {held} panels on them float where they were"),
         };
         let removed = names.join(", ");
+        let floated = format!("{floated}{stays}");
         let content = super::tools::notice(format!("The agent removed {removed}{floated}."));
         let panel = record
             .stage

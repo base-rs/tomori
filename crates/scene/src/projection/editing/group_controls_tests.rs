@@ -12,6 +12,8 @@ const SNAPS: Rights = Rights {
     adjust: true,
     remove: false,
     snap: true,
+    locks: false,
+    lock: false,
 };
 
 /// A wall of `columns` by `rows` at `scale`, someone added, its slots `aspect` times as wide as they are tall, or
@@ -327,7 +329,7 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
         let all: Vec<&Wall> = walls.iter().collect();
         for wall in &walls {
             let (shown, _) = handle_points_among(wall, frame(wall), HOME, &all, None);
-            for handle in handles(wall) {
+            for handle in handles(wall, LockControls::default()) {
                 let (kept, _) = handle_points_among(wall, frame(wall), HOME, &all, Some(handle));
                 assert!(shown.iter().all(|shown| kept.contains(shown)));
                 if point(&shown, handle).is_none() && point(&kept, handle).is_some() {
@@ -401,4 +403,88 @@ fn the_group_s_bar_carries_the_group_and_a_wall_below_it_still_comes_out_alone()
     assert!(projector.editor.detached);
     let output = projector.update(frame(&projection, at(slot), 0.0));
     assert_eq!(output.wall.unwrap().join, Some(Joining::Leave));
+}
+
+/// Where `handle` of `wall` stands among `walls`, with the padlock shown, on `wall`'s surface: across and up from its
+/// middle, in metres.
+fn padlock_on(wall: &Wall, walls: &[Wall]) -> Vec<(Handle, f32, f32)> {
+    let frame = model(&wall.frame()).unwrap();
+    let all: Vec<&Wall> = walls.iter().collect();
+    let controls = LockControls {
+        padlock: true,
+        reset: false,
+    };
+    let (points, _) = handle_points_among_with(wall, frame, HOME, &all, None, controls);
+    points
+        .into_iter()
+        .map(|(handle, at)| {
+            let local = frame.inverse().transform_point3(at);
+            (handle, local.x, local.y)
+        })
+        .collect()
+}
+
+#[test]
+fn a_wall_s_padlock_in_a_group_stands_clear_of_the_walls_joined_to_it_and_always_shows() {
+    // Alone, it stands above the top left corner.
+    let mut alone = vec![wall("a", (2, 1), 1.0, None, None).with_locked(true)];
+    alone[0].pose = ahead(3.0);
+    let (width, height) = alone[0].size();
+    let (_, x, y) = padlock_on(&alone[0], &alone)[0];
+    assert!(x < -width / 2.0 && y > height / 2.0, "{x} {y}");
+    // With a wall joined across its top, below its bottom left corner, as the knob is.
+    let stacked = group_of(
+        ahead(3.0),
+        vec![
+            wall("a", (2, 1), 1.0, None, None),
+            wall("b", (2, 1), 1.0, None, None),
+        ],
+        &[(0, Edge::Top, Align::Start)],
+    );
+    let points = padlock_on(&stacked[0], &stacked);
+    let (_, x, y) = *points
+        .iter()
+        .find(|(handle, ..)| *handle == Handle::Lock)
+        .unwrap();
+    assert!(x < -width / 2.0 && y < -height / 2.0, "{x} {y}");
+    // With a wall joined across its left, above its top right corner, as the handle of its columns moves.
+    let beside = group_of(
+        ahead(3.0),
+        vec![
+            wall("a", (2, 1), 1.0, None, None),
+            wall("b", (2, 1), 1.0, None, None),
+        ],
+        &[(0, Edge::Left, Align::Start)],
+    );
+    let points = padlock_on(&beside[0], &beside);
+    let (_, x, y) = *points
+        .iter()
+        .find(|(handle, ..)| *handle == Handle::Lock)
+        .unwrap();
+    assert!(x > width / 2.0 && y > height / 2.0, "{x} {y}");
+    // Joined on every side, it still shows, so that a wall that will not change says why.
+    let surrounded = group_of(
+        ahead(3.0),
+        vec![
+            wall("a", (1, 1), 1.0, None, None),
+            wall("l", (1, 1), 1.0, None, None),
+            wall("r", (1, 1), 1.0, None, None),
+            wall("t", (3, 1), 1.0, None, None),
+            wall("b", (3, 1), 1.0, None, None),
+        ],
+        &[
+            (0, Edge::Left, Align::Start),
+            (0, Edge::Right, Align::Start),
+            (1, Edge::Top, Align::Start),
+            (1, Edge::Bottom, Align::Start),
+        ],
+    );
+    let points = padlock_on(&surrounded[0].clone().with_locked(true), &surrounded);
+    assert_eq!(
+        points
+            .iter()
+            .map(|(handle, ..)| *handle)
+            .collect::<Vec<_>>(),
+        [Handle::Lock]
+    );
 }

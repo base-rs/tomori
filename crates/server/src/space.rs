@@ -2117,6 +2117,7 @@ impl SpaceModel {
             walls: false,
             checks: false,
             groups: false,
+            wall_locks: false,
             // Set by the hub, which knows the board.
             cards: false,
             // Set by the hub, which knows the backends.

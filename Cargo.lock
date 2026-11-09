@@ -4089,7 +4089,10 @@ dependencies = [
 name = "tomori-server-app"
 version = "0.2.0"
 dependencies = [
+ "glam",
+ "image",
  "libc",
+ "pollster",
  "tomori-client",
  "tomori-client-quest",
  "tomori-client-spectator",
@@ -4101,6 +4104,7 @@ dependencies = [
  "tomori-render",
  "tomori-scene",
  "tomori-server",
+ "wgpu",
 ]
 
 [[package]]

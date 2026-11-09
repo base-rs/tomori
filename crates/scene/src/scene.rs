@@ -1101,6 +1101,10 @@ impl Step {
             feedback.emit(feedback::Event::Hover, now);
             conversation.set_wall(change);
         }
+        if let Some(change) = projected.lock.clone() {
+            feedback.emit(feedback::Event::Choose, now);
+            conversation.lock_wall(change);
+        }
         if projected.wall_ticked {
             feedback.emit(feedback::Event::Hover, now);
         }
@@ -1661,6 +1665,21 @@ pub mod fixtures {
                         .with_revision(4),
                     ]),
             ),
+        }));
+        conversation.take_actions();
+    }
+
+    /// Showing `walls` and `panels` in [`SPACE`], whose server takes wall changes and locks walls.
+    pub fn show_lockable_walls(
+        conversation: &mut Conversation,
+        walls: Vec<tomori_protocol::Wall>,
+        panels: Vec<tomori_protocol::Panel>,
+    ) {
+        show_projection(conversation, walls, panels);
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.walls = true;
+            state.wall_locks = true;
         }));
         conversation.take_actions();
     }
@@ -3263,6 +3282,107 @@ mod tests {
             join: Some(Joining::Leave),
             ..change
         }));
+    }
+
+    #[test]
+    fn an_owner_unlocks_a_locked_wall_with_its_padlock_for_everyone_while_others_only_see_it_locked()
+     {
+        use crate::projection::editing::{LockChange, LockControls, handle_points_with};
+        use tomori_protocol::{ClientMessage, Pose, Wall, WallKind};
+        let wall = Wall::new(
+            "environment-0",
+            WallKind::Environment,
+            Pose::upright_facing([0.0, 1.5, -2.0], arrival::HOME.to_array()),
+        )
+        .with_grid(tomori_protocol::Grid::from((2, 1)))
+        .with_locked(true);
+        let board = Vec3::new(0.0, 1.5 + 0.2, -2.0);
+        let frame_of = crate::board::model(&wall.pose).unwrap();
+        let lock = LockControls {
+            padlock: true,
+            reset: false,
+        };
+        let (points, _) = handle_points_with(&wall, frame_of, arrival::HOME, lock);
+        let padlock = points[0].1;
+        let run = |role: ConnectionRole, locks: bool| {
+            let mut conversation = lobby(role);
+            if locks {
+                fixtures::show_lockable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+            } else {
+                fixtures::show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+            }
+            let mut step = Step::default();
+            let start = Instant::now();
+            let mut senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, board - arrival::HOME),
+                grip: Some(0.0),
+                ..senses()
+            };
+            for _ in 0..400 {
+                step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+            }
+            // Taken hold of by its board, it is held, not carried.
+            for grip in [1.0, 0.0] {
+                senses.grip = Some(grip);
+                step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+            }
+            assert_eq!(step.projector.editing_wall(), Some("environment-0"));
+            assert_eq!(step.projector.carried_wall(), None);
+            // Squeezed, its padlock unlocks it, for an owner.
+            senses.ray = Ray::new(arrival::HOME, padlock - arrival::HOME);
+            let mut hint = None;
+            for grip in [0.0, 1.0, 0.0] {
+                senses.grip = Some(grip);
+                let frame = step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+                hint = hint.or_else(|| {
+                    frame
+                        .projection
+                        .iter()
+                        .filter_map(|sheet| sheet.canvas.as_ref().map(crate::canvas::Canvas::plain))
+                        .find(|text| text.contains("done"))
+                });
+            }
+            (conversation.take_actions(), hint)
+        };
+        let unlocks = |sent: &[Action]| {
+            sent.iter()
+                .filter(|action| {
+                    matches!(
+                        action,
+                        Action::Send(ClientMessage::LockWall { wall, locked: false, reset: false })
+                            if wall == "environment-0"
+                    )
+                })
+                .count()
+        };
+        let (sent, hint) = run(ConnectionRole::Owner, true);
+        assert_eq!(unlocks(&sent), 1, "{sent:?}");
+        assert!(hint.unwrap().contains("unlock it to change it"));
+        // A collaborator sees it locked, told an owner can unlock it, and sends nothing.
+        let (sent, hint) = run(ConnectionRole::Collaborator, true);
+        assert_eq!(unlocks(&sent), 0, "{sent:?}");
+        assert!(sent.is_empty(), "{sent:?}");
+        assert!(hint.unwrap().contains("an owner can unlock it"));
+        // Where the server locks no walls, as an older one, there is no padlock to squeeze, and nothing is sent.
+        let (sent, _) = run(ConnectionRole::Owner, false);
+        assert_eq!(unlocks(&sent), 0, "{sent:?}");
+        // Nor does anyone ask a server that locks no walls, and only an owner asks one that does.
+        let mut conversation = lobby(ConnectionRole::Owner);
+        fixtures::show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+        let change = LockChange {
+            wall: "environment-0".into(),
+            locked: false,
+            reset: false,
+        };
+        assert!(!conversation.lock_wall(change.clone()));
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        fixtures::show_lockable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+        assert!(!conversation.lock_wall(change.clone()));
+        assert!(conversation.take_actions().is_empty());
+        let mut conversation = lobby(ConnectionRole::Owner);
+        fixtures::show_lockable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+        assert!(conversation.lock_wall(change));
     }
 
     #[test]

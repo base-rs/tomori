@@ -133,6 +133,12 @@ pub enum Handle {
     /// of, it tilts the wall's top towards the participant, so that it faces down, and up, tilts it back, upright near
     /// where it tilts least.
     Tilt,
+    /// The padlock beyond its top left corner, closed while the wall is locked and open while it is not: squeezed by an
+    /// owner, it locks or unlocks the wall, for everyone.
+    Lock,
+    /// Beside the padlock of an environment's own wall unlocked, for an owner: puts it back where and as the environment
+    /// has it, locked.
+    Reset,
 }
 
 /// What a participant may do with walls in the joined space.
@@ -144,6 +150,11 @@ pub struct Rights {
     pub remove: bool,
     /// Snap walls together, carrying a group as one and taking a wall out of one: in a space whose server snaps them.
     pub snap: bool,
+    /// The server locks walls: each says whether it is locked, a locked wall shows its padlock alone, and an
+    /// environment's own wall, unlocked, is carried as one someone added is.
+    pub locks: bool,
+    /// Lock and unlock walls, and put an environment's own back: an owner, where the server locks walls.
+    pub lock: bool,
 }
 
 /// What a change does to a wall's group.
@@ -153,6 +164,45 @@ pub enum Joining {
     Attach { attach: Attach, alone: bool },
     /// Take it out of its group, standing where it was let go.
     Leave,
+}
+
+/// Which of the lock's controls a wall taken hold of shows: where the server locks walls, its padlock, which says
+/// whether it is locked and, for an owner, locks and unlocks it; and, for an owner, beside the padlock of an
+/// environment's own wall unlocked, the control that puts it back where and as the environment has it, locked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LockControls {
+    pub padlock: bool,
+    pub reset: bool,
+}
+
+impl LockControls {
+    /// The lock's controls of `wall` for a participant with `rights`.
+    pub fn of(wall: &Wall, rights: Rights) -> Self {
+        let padlock = rights.adjust && rights.locks;
+        Self {
+            padlock,
+            reset: padlock
+                && rights.lock
+                && wall.kind == WallKind::Environment
+                && !wall.is_locked(),
+        }
+    }
+}
+
+/// A wall to lock or unlock, or, with `reset`, an environment's own wall to put back as the environment has it, locked,
+/// for everyone, as an owner asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockChange {
+    pub wall: String,
+    pub locked: bool,
+    pub reset: bool,
+}
+
+/// Whether a participant with `rights` carries `wall` when they take hold of it: one someone added, or, where the server
+/// locks walls, an environment's own, unless it is locked.
+pub fn carried(wall: &Wall, rights: Rights) -> bool {
+    !wall.is_locked()
+        && (wall.kind == WallKind::Added || (rights.locks && wall.kind == WallKind::Environment))
 }
 
 /// A change to a wall a participant made, to send: each left out stays as it is.
@@ -189,10 +239,13 @@ struct Drag {
     stopped: bool,
 }
 
-/// A wall someone added, carried along the ray, as a panel is: the point it was taken hold of stays on the ray, and it
-/// keeps facing the way it faced, turned only as the stick turns it, or squared up to face the participant.
+/// A wall someone added, or an environment's own unlocked, carried along the ray, as a panel is: the point it was taken
+/// hold of stays on the ray, and it keeps facing the way it faced, turned only as the stick turns it, or squared up to
+/// face the participant.
 #[derive(Clone, Debug, PartialEq)]
 struct Carry {
+    /// Whether B removes it: one someone added, as an environment's own is never removed.
+    removable: bool,
     manipulation: Manipulation,
     /// The way it faced as it was taken hold of, or squared up.
     facing: Quat,
@@ -276,6 +329,8 @@ pub struct Output {
     pub ticked: bool,
     /// A change to send.
     pub change: Option<Change>,
+    /// A wall to lock, unlock or put back, to send.
+    pub lock: Option<LockChange>,
     /// Where the ray ends, on a handle or the wall carried.
     pub end: Option<Vec3>,
     /// The handles and the hint.
@@ -327,11 +382,21 @@ fn corners(wall: &Wall) -> [Vec3; 4] {
     ]
 }
 
-/// Which handles `wall` has, for a participant who may adjust it: the Tomori wall's grid only in its one row, and its
-/// slots their own size.
-fn handles(wall: &Wall) -> Vec<Handle> {
-    // A wall that is locked, once walls may be, has none, and so neither the hinge. A wall in a group stands upright,
-    // so that the group reads as one board, and has no hinge.
+/// Which handles `wall` has, for a participant who may adjust it, with the lock's `controls`: the Tomori wall's grid
+/// only in its one row, and its slots their own size; and a wall locked, where the server locks walls, its padlock
+/// alone, so neither the hinge.
+fn handles(wall: &Wall, controls: LockControls) -> Vec<Handle> {
+    let mut lock = Vec::new();
+    if controls.padlock {
+        lock.push(Handle::Lock);
+        if wall.is_locked() {
+            return lock;
+        }
+    }
+    if controls.reset {
+        lock.push(Handle::Reset);
+    }
+    // A wall in a group stands upright, so that the group reads as one board, and has no hinge.
     let mut handles = vec![
         Handle::Columns,
         Handle::Step(Axis::Columns, -1),
@@ -352,6 +417,7 @@ fn handles(wall: &Wall) -> Vec<Handle> {
             Handle::Step(Axis::Rows, 1),
         ]);
     }
+    handles.extend(lock);
     handles
 }
 
@@ -369,6 +435,18 @@ pub fn handle_points(wall: &Wall, frame: Mat4, viewer: Vec3) -> (Vec<(Handle, Ve
     handle_points_among(wall, frame, viewer, &[], None)
 }
 
+/// Where each of `wall`'s handles stands, as [`handle_points`] lays them out, with the lock's `controls`: the padlock a
+/// row beyond its top left corner, level with the knob, and the control that puts it back a row beyond the padlock,
+/// each as far from every other handle; or, where it is locked, the padlock alone, where it would stand.
+pub fn handle_points_with(
+    wall: &Wall,
+    frame: Mat4,
+    viewer: Vec3,
+    controls: LockControls,
+) -> (Vec<(Handle, Vec3)>, f32) {
+    handle_points_among_with(wall, frame, viewer, &[], None, controls)
+}
+
 /// Where `wall`'s handles stand, as [`handle_points`] lays them out, among `walls` as they are drawn, where it is one of
 /// a group: those along an edge another wall of its group is joined across stand along the opposite edge instead, and
 /// any that would still stand over the slots of another wall of its group, as large as it is seen, are left out, but
@@ -380,7 +458,24 @@ pub fn handle_points_among(
     walls: &[&Wall],
     keep: Option<Handle>,
 ) -> (Vec<(Handle, Vec3)>, f32) {
-    let (points, size, _) = lay_out(wall, frame, viewer, &Around::of(wall, walls, keep));
+    handle_points_among_with(wall, frame, viewer, walls, keep, LockControls::default())
+}
+
+/// Where `wall`'s handles stand among `walls`, as [`handle_points_among`] lays them out, with the lock's `controls`, as
+/// [`handle_points_with`] places them: the padlock, which says why a wall will not change, is never left out, and
+/// stands along the bottom where another wall is joined across its top, and above its top right corner where one is
+/// joined across its left edge.
+pub fn handle_points_among_with(
+    wall: &Wall,
+    frame: Mat4,
+    viewer: Vec3,
+    walls: &[&Wall],
+    keep: Option<Handle>,
+    controls: LockControls,
+) -> (Vec<(Handle, Vec3)>, f32) {
+    let mut around = Around::of(wall, walls, keep);
+    around.controls = controls;
+    let (points, size, _) = lay_out(wall, frame, viewer, &around);
     (points, size)
 }
 
@@ -408,6 +503,8 @@ struct Around {
     keep: Option<Handle>,
     /// It shows its group's bar, which then stands over none of those slots.
     bar: bool,
+    /// The lock's controls it shows.
+    controls: LockControls,
 }
 
 impl Around {
@@ -417,6 +514,7 @@ impl Around {
             joined: super::boards::joined_edges(wall, walls),
             keep,
             bar: super::boards::bears_bar(wall, walls),
+            controls: LockControls::default(),
         }
     }
 
@@ -432,7 +530,7 @@ impl Around {
     }
 }
 
-/// A wall's handles and its bar, as [`handle_points_among`] and [`group_bar`] lay them out.
+/// A wall's handles and its bar, as [`handle_points_among_with`] and [`group_bar`] lay them out.
 fn lay_out(
     wall: &Wall,
     frame: Mat4,
@@ -440,13 +538,25 @@ fn lay_out(
     around: &Around,
 ) -> (Vec<(Handle, Vec3)>, f32, Bar) {
     // Laid out once at the size its corners take, and again at the size its farthest handle then takes, so that none is
-    // smaller than its angle.
-    let (points, ..) = lay_out_handles(wall, frame, viewer, None, around);
+    // smaller than its angle: the lock's included, and, with the padlock, the control that puts a wall back, as an
+    // environment's own wall unlocked shows it, so that a wall's padlock stands where it does, locked or not.
+    let sizing = Around {
+        controls: LockControls {
+            padlock: around.controls.padlock,
+            reset: around.controls.padlock,
+        },
+        ..around.clone()
+    };
+    let (points, ..) = lay_out_handles(wall, frame, viewer, None, &sizing);
     let far = points
         .iter()
         .map(|(_, at)| at.distance(viewer))
         .fold(0.3, f32::max);
-    lay_out_handles(wall, frame, viewer, Some(far), around)
+    let (mut points, size, bar) = lay_out_handles(wall, frame, viewer, Some(far), around);
+    // A locked wall's padlock alone, where it stands beside the rest.
+    let shown = handles(wall, around.controls);
+    points.retain(|(handle, _)| shown.contains(handle));
+    (points, size, bar)
 }
 
 /// A wall's grab bar: a thin bar a participant who may adjust walls takes hold of the wall by with the grip, as they do
@@ -645,7 +755,9 @@ fn lay_out_handles(
     // Down the left, the hinge at the middle, on the line the wall tilts about, so that it stays under the ray as the
     // wall tilts, or beyond the edge where there is no room between the corners. The Tomori wall has no corners; a wall
     // in a group, which stands upright, has no hinge.
-    let tilts = handles(wall).contains(&Handle::Tilt);
+    // Laid out as the wall is unlocked, so that a locked wall's padlock stands where it would beside the rest.
+    let unlocked = wall.clone().with_locked(false);
+    let tilts = handles(&unlocked, LockControls::default()).contains(&Handle::Tilt);
     let hinge = if tomori || span >= 2.0 * pv - 1e-6 {
         at(xl, centre)
     } else {
@@ -745,36 +857,63 @@ fn lay_out_handles(
         )
     };
     // Each handle, and whether it stands along the edge opposite its own: those of the top a row below the handle of its
-    // rows, those of the right edge along the left, and the handle of its rows a row beyond the knob.
-    let local = handles(wall).into_iter().filter_map(|handle| {
-        let (point, opposite) = match handle {
-            Handle::Corner(x, y) => (corner(x, y)?, false),
-            Handle::Columns => (columns, right_side?),
-            Handle::Rows => (rows, bottom_side?),
-            Handle::Step(Axis::Columns, step) => (if step < 0 { fewer } else { more }, top_side?),
-            Handle::Step(Axis::Rows, step) => {
-                (if step < 0 { row_fewer } else { row_more }, right_side?)
-            }
-            Handle::Bend => (knob, top_side?),
-            Handle::Tilt => (hinge, false),
-        };
-        let point = match handle {
-            _ if !opposite => point,
-            Handle::Bend | Handle::Step(Axis::Columns, _) => (point.0, -point.1 - pv),
-            Handle::Rows => (point.0, yk + pv),
-            _ => mirrored(point),
-        };
-        // Which way is away from the wall, along the edge it stands by: back along it where it stands opposite.
-        let away = if opposite { -1.0 } else { 1.0 };
-        Some(((handle, put(point)), away))
-    });
-    let (mut points, away): (Vec<(Handle, Vec3)>, Vec<f32>) = local.unzip();
+    // rows, those of the right edge along the left, and the handle of its rows a row beyond the knob. The padlock stands a
+    // row beyond the top left corner, level with the knob, and the control that puts the wall back a row beyond it: along
+    // the bottom where the top is joined, as the knob is, and above the top right corner where the left edge is joined.
+    let left_side = side(Edge::Left);
+    let local = handles(&unlocked, around.controls)
+        .into_iter()
+        .filter_map(|handle| {
+            let lock = |row: f32| {
+                let right = left_side == Some(true);
+                let mut point = at(if right { -xl } else { xl }, row);
+                if top_side == Some(true) {
+                    point.1 = -point.1 - pv;
+                }
+                (point, right)
+            };
+            let (point, opposite) = match handle {
+                Handle::Corner(x, y) => (corner(x, y)?, false),
+                Handle::Columns => (columns, right_side?),
+                Handle::Rows => (rows, bottom_side?),
+                Handle::Step(Axis::Columns, step) => {
+                    (if step < 0 { fewer } else { more }, top_side?)
+                }
+                Handle::Step(Axis::Rows, step) => {
+                    (if step < 0 { row_fewer } else { row_more }, right_side?)
+                }
+                Handle::Bend => (knob, top_side?),
+                Handle::Tilt => (hinge, false),
+                Handle::Lock => lock(yk),
+                Handle::Reset => lock(yk + pv),
+            };
+            let point = match handle {
+                _ if !opposite => point,
+                Handle::Bend | Handle::Step(Axis::Columns, _) => (point.0, -point.1 - pv),
+                Handle::Rows => (point.0, yk + pv),
+                Handle::Lock | Handle::Reset => point,
+                _ => mirrored(point),
+            };
+            // Which way is away from the wall, along the edge it stands by: back along it where it stands opposite.
+            let away = if opposite { -1.0 } else { 1.0 };
+            // Whether it stands a row beyond the bar, and moves with it.
+            let lifts = match handle {
+                Handle::Bend | Handle::Step(Axis::Columns, _) => !opposite,
+                Handle::Lock | Handle::Reset => top_side != Some(true),
+                _ => false,
+            };
+            Some(((handle, put(point)), (away, lifts)))
+        });
+    let (mut points, ways): (Vec<_>, Vec<(f32, bool)>) = local.unzip();
+    let (away, lifts): (Vec<f32>, Vec<bool>) = ways.into_iter().unzip();
     // A wall curved so far that it folds as seen from the side may still bring two together: the one that is not a
     // corner moves on, beyond its edge, until none overlaps.
     let outward = |handle: Handle, away: f32| match handle {
         Handle::Bend | Handle::Step(Axis::Columns, _) => up.normalize_or(Vec3::Y) * pv * away,
         Handle::Rows => -up.normalize_or(Vec3::Y) * pv * away,
         Handle::Tilt => -tangent(left).normalize_or(Vec3::X) * pu,
+        // Beyond the left edge, or the right where it stands there.
+        Handle::Lock | Handle::Reset => -tangent(left * away).normalize_or(Vec3::X) * pu * away,
         _ => tangent(right * away).normalize_or(Vec3::X) * pu * away,
     };
     let rank = |handle: Handle| match handle {
@@ -782,6 +921,8 @@ fn lay_out_handles(
         Handle::Columns | Handle::Rows | Handle::Tilt => 1,
         Handle::Bend => 2,
         Handle::Step(..) => 3,
+        Handle::Lock => 4,
+        Handle::Reset => 5,
     };
     let separate = |points: &mut Vec<(Handle, Vec3)>| {
         for _ in 0..8 {
@@ -811,13 +952,7 @@ fn lay_out_handles(
     separate(&mut points);
     // Handles moved on may come in line with the bar, seen from the side of a wall so curved that it folds: it is then
     // chosen again clear of them where they stand, and the knob and the steppers of its columns, beyond it, move with it.
-    let top: Vec<bool> = points
-        .iter()
-        .zip(&away)
-        .map(|((handle, _), away)| {
-            matches!(handle, Handle::Bend | Handle::Step(Axis::Columns, _)) && *away > 0.0
-        })
-        .collect();
+    let top = lifts;
     let others: Vec<Vec3> = points
         .iter()
         .zip(&top)
@@ -863,7 +998,8 @@ fn lay_out_handles(
     // Moved beyond the bar, they may come near a corner of a wall so curved that it folds as seen: they move on again,
     // outward, which only takes them further from the bar.
     separate(&mut points);
-    // Last, in a group, none stands over another wall's slots, as large as it is seen, but the handle being dragged.
+    // Last, in a group, none stands over another wall's slots, as large as it is seen, but the handle being dragged and
+    // the padlock, which says why a wall will not change.
     if !around.slots.is_empty() {
         let base = pose(frame);
         let half = (u / 2.0, v / 2.0);
@@ -876,7 +1012,7 @@ fn lay_out_handles(
                     orientation: base.orientation,
                 },
             );
-            around.keep == Some(*handle) || around.clear(x, y, half)
+            around.keep == Some(*handle) || *handle == Handle::Lock || around.clear(x, y, half)
         });
     }
     let bar = Bar {
@@ -961,11 +1097,18 @@ fn glyph(handle: Handle) -> &'static str {
         Handle::Bend => "●",
         // Drawn as shapes, a hinge and the face tilted about it.
         Handle::Tilt => " ",
+        // Drawn as a padlock, of shapes.
+        Handle::Lock => " ",
+        Handle::Reset => "↺",
     }
 }
 
-/// A handle's face, `size` across, highlighted while the ray meets it or it is dragged.
-fn handle_face(handle: Handle, size: f32, highlighted: bool) -> Canvas {
+/// The colour of a padlock closed, warm, so that a locked wall's is told from an open one's at a glance.
+pub const LOCKED: [f32; 4] = [1.0, 0.8, 0.38, 1.0];
+
+/// A handle's face, `size` across, highlighted while the ray meets it or it is dragged; the padlock closed while its
+/// wall is `locked`, and open while it is not.
+fn handle_face(handle: Handle, size: f32, highlighted: bool, locked: bool) -> Canvas {
     let mut canvas = Canvas::new(1, 1.0);
     // About square, so that it is as easy to meet across as down.
     canvas.padding = (4, 2);
@@ -978,6 +1121,10 @@ fn handle_face(handle: Handle, size: f32, highlighted: bool) -> Canvas {
     canvas.rows = vec![Row::text(glyph(handle), Style::bold(BRIGHT), 1)];
     if handle == Handle::Tilt {
         canvas.shapes = hinge_shapes();
+    }
+    if handle == Handle::Lock {
+        let [red, green, blue, _] = canvas.background;
+        canvas.shapes = padlock(locked, [red, green, blue, 1.0]);
     }
     let (width, _) = canvas.size_in_pixels();
     canvas.pixel = size / width as f32;
@@ -1006,6 +1153,68 @@ fn hinge_shapes() -> Vec<crate::shapes::Shape> {
             centre: middle,
             radius: 1.6,
             color: BRIGHT,
+        },
+    ]
+}
+
+/// A padlock in a cell, of shapes, in font pixels from its top left corner: a body below and a shackle above it, closed
+/// into the body while `locked`, in [`LOCKED`]'s warm colour, and, unlocked, raised out of it on one side, in the
+/// handles' bright one. `behind` is the colour behind it, which hides the shackle's ring below its legs.
+pub fn padlock(locked: bool, behind: [f32; 4]) -> Vec<crate::shapes::Shape> {
+    use crate::shapes::Shape;
+    use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH};
+    let (width, height) = (CELL_WIDTH as f32, CELL_HEIGHT as f32);
+    let color = if locked { LOCKED } else { BRIGHT };
+    // The body, a little rounded, across most of the cell's lower half.
+    let body = (1.0, height * 0.5, width - 2.0, height * 0.42);
+    let radius = (body.2 - 1.6) / 2.0;
+    let middle = width / 2.0;
+    // The shackle's top, a ring, its lower half hidden, with a leg down each side: open, it is raised, its right leg
+    // short of the body.
+    let lift = if locked { 0.0 } else { 2.0 };
+    let top = body.1 - 0.4 - lift;
+    let line = radius / 3.0;
+    let (left, right) = (middle - radius + line / 2.0, middle + radius - line / 2.0);
+    let right_end = if locked { body.1 + 0.5 } else { top + 0.8 };
+    vec![
+        Shape::Ring {
+            centre: [middle, top],
+            radius,
+            color,
+        },
+        Shape::Fill {
+            x: middle - radius - 0.5,
+            y: top,
+            width: 2.0 * radius + 1.0,
+            height: radius + 0.5,
+            color: behind,
+        },
+        Shape::Rule {
+            from: [left, top - 0.05],
+            to: [left, body.1 + 0.5],
+            width: line,
+            color,
+        },
+        Shape::Rule {
+            from: [right, top - 0.05],
+            to: [right, right_end],
+            width: line,
+            color,
+        },
+        Shape::Rect {
+            x: body.0,
+            y: body.1,
+            width: body.2,
+            height: body.3,
+            color,
+            radius: 0.8,
+            outline: None,
+        },
+        // Its keyhole, dark.
+        Shape::Disc {
+            centre: [middle, body.1 + body.3 * 0.42],
+            radius: 0.7,
+            color: behind,
         },
     ]
 }
@@ -1219,7 +1428,12 @@ impl Editor {
     /// B pressed while carrying a wall, with `held` panels on it, at `now`: the wall to remove, for an owner, or `None`
     /// when it holds panels and this is not a second press within [`CONFIRM`], which it then waits for.
     pub fn remove(&mut self, held: usize, now: Instant) -> Option<String> {
-        let wall = self.carrying()?.to_owned();
+        // Only a wall someone added, carried, is removed.
+        let wall = self
+            .carry
+            .as_ref()
+            .filter(|carry| carry.removable)
+            .and(self.wall.clone())?;
         let confirmed = self
             .confirm
             .is_some_and(|since| now.saturating_duration_since(since) < CONFIRM);
@@ -1271,6 +1485,7 @@ impl Editor {
                     && Vec3::from_array(wall.pose.position)
                         .distance(Vec3::from_array(sent.pose.position))
                         < 0.01
+                    && wall.is_locked() == sent.is_locked()
             });
             if agreed || input.now.saturating_duration_since(*since) >= PENDING {
                 self.pending = None;
@@ -1284,6 +1499,20 @@ impl Editor {
             || !input.rights.adjust
         {
             self.stop();
+        }
+        // Locked meanwhile, as by an owner elsewhere, a wall is no longer dragged or carried, but still held, so that its
+        // padlock says why.
+        if input.rights.locks
+            && (self.drag.is_some() || self.carry.is_some())
+            && self
+                .wall
+                .as_ref()
+                .and_then(|wall| input.projection.wall(wall))
+                .is_some_and(Wall::is_locked)
+        {
+            let held = self.wall.take();
+            self.stop();
+            self.wall = held;
         }
         if self
             .confirm
@@ -1304,7 +1533,9 @@ impl Editor {
         if let (Some((wall, frame)), Some(ray), None, None) =
             (&editing, ray, &self.drag, &self.carry)
         {
-            let (points, size) = handle_points_among(wall, *frame, input.viewer, &all, None);
+            let controls = LockControls::of(wall, input.rights);
+            let (points, size) =
+                handle_points_among_with(wall, *frame, input.viewer, &all, None, controls);
             met = nearest_handle(&points, size, &ray);
         }
         let hovered = self
@@ -1343,6 +1574,25 @@ impl Editor {
             {
                 output.took = true;
                 match handle {
+                    // The padlock locks or unlocks the wall, for an owner, shown so at once; for anyone else it only
+                    // says whether it is locked. Putting it back moves it where the server says, so it is let go.
+                    Handle::Lock | Handle::Reset => {
+                        if input.rights.lock {
+                            let reset = handle == Handle::Reset;
+                            let locked = reset || !wall.is_locked();
+                            output.lock = Some(LockChange {
+                                wall: wall.id.clone(),
+                                locked,
+                                reset,
+                            });
+                            if reset {
+                                self.stop();
+                                self.pending = None;
+                            } else {
+                                self.pending = Some((wall.clone().with_locked(locked), input.now));
+                            }
+                        }
+                    }
                     Handle::Step(axis, step) => {
                         let grid = wall.grid();
                         let stepped = match axis {
@@ -1409,9 +1659,17 @@ impl Editor {
                         output.ticked = true;
                         self.wall = Some(wall.id.clone());
                         self.confirm = None;
-                        if wall.kind == WallKind::Added {
+                        // A group with a wall locked in it stays where it is, as that wall would move with it.
+                        let anchored = wall.group.is_some()
+                            && walls.iter().any(|(other, _)| {
+                                other.id != wall.id
+                                    && other.group == wall.group
+                                    && other.is_locked()
+                            });
+                        if carried(wall, input.rights) && !anchored {
                             let (_, facing, _) = frame.to_scale_rotation_translation();
                             self.carry = Some(Carry {
+                                removable: wall.kind == WallKind::Added,
                                 manipulation: Manipulation::new(along),
                                 facing,
                                 grabbed: frame.inverse().transform_point3(ray.at(along)),
@@ -1754,7 +2012,13 @@ impl Editor {
         {
             let all: Vec<&Wall> = shown.iter().collect();
             let keep = self.drag.as_ref().map(|drag| drag.handle);
-            let (at, _) = handle_point_among(wall, *frame, handle, input.viewer, &all, keep);
+            let controls = LockControls::of(wall, input.rights);
+            let (points, _) =
+                handle_points_among_with(wall, *frame, input.viewer, &all, keep, controls);
+            let at = points
+                .iter()
+                .find(|(shown, _)| *shown == handle)
+                .map_or(frame.transform_point3(Vec3::ZERO), |(_, at)| *at);
             let along = (at - ray.origin).dot(ray.direction).max(0.0);
             output.end = Some(ray.at(along));
             output.hit = Some(match self.drag {
@@ -1807,7 +2071,11 @@ impl Editor {
                         1.0
                     };
                     let edge = bar.middle + up * side * bar.size * HANDLE_REACH;
-                    let mut sheet = hint_above(bar_label(input.controls, wall), edge, input.viewer);
+                    let mut sheet = hint_above(
+                        bar_label_for(input.controls, wall, input.rights),
+                        edge,
+                        input.viewer,
+                    );
                     // Below a bar below its wall, clear of it.
                     if side < 0.0
                         && let (Some(model), Some(canvas)) = (&mut sheet.model, &sheet.canvas)
@@ -1862,12 +2130,19 @@ impl Editor {
             }));
         }
         let keep = self.drag.as_ref().map(|drag| drag.handle);
-        let (points, size) = handle_points_among(wall, frame, input.viewer, &all, keep);
+        let controls = LockControls::of(wall, input.rights);
+        let (points, size) =
+            handle_points_among_with(wall, frame, input.viewer, &all, keep, controls);
         if self.carry.is_none() {
             for (handle, at) in &points {
                 sheets.push(Sheet {
                     model: Some(facing(*at, input.viewer, 1.0)),
-                    canvas: Some(handle_face(*handle, size, self.hovered == Some(*handle))),
+                    canvas: Some(handle_face(
+                        *handle,
+                        size,
+                        self.hovered == Some(*handle),
+                        wall.is_locked(),
+                    )),
                 });
             }
         }
@@ -1880,11 +2155,11 @@ impl Editor {
         // While a handle is dragged, what it makes of the wall, in place of what each control does.
         let hint = match &self.drag {
             Some(drag) => readout(drag.handle, wall),
-            None => hint_with(
+            None => hint_for(
                 input.controls,
                 wall,
                 self.carry.is_some(),
-                input.rights.remove,
+                input.rights,
                 self.confirm.map(|_| held),
                 Grouping {
                     grouped: !self.members.is_empty() && !self.detached,
@@ -1949,12 +2224,31 @@ fn bar_face(bar: &Bar, highlighted: bool) -> Canvas {
 /// What the grip does on a bar of `wall`, as `controls` name it: takes hold of the wall to edit it, carrying one someone
 /// added.
 pub fn bar_label(controls: Controls, wall: &Wall) -> Canvas {
+    bar_label_for(
+        controls,
+        wall,
+        Rights {
+            adjust: true,
+            ..Rights::default()
+        },
+    )
+}
+
+/// What the grip does on a bar of `wall` for a participant with `rights`: takes hold of it to edit it, carrying one it
+/// carries; or, where it is locked, takes hold of it to show its padlock, which an owner unlocks it with.
+pub fn bar_label_for(controls: Controls, wall: &Wall, rights: Rights) -> Canvas {
     let grip = if controls == Controls::Keyboard {
         "G"
     } else {
         "Grip"
     };
-    let action = if wall.kind == WallKind::Added {
+    let action = if rights.locks && wall.is_locked() {
+        if rights.lock {
+            "locked: take hold to unlock it"
+        } else {
+            "locked by an owner"
+        }
+    } else if carried(wall, rights) {
         "carry and edit this wall"
     } else {
         "edit this wall"
@@ -2061,10 +2355,52 @@ pub fn hint_with(
     confirm: Option<usize>,
     grouping: Grouping,
 ) -> Canvas {
+    let rights = Rights {
+        adjust: true,
+        remove: removes,
+        ..Rights::default()
+    };
+    hint_for(controls, wall, carried, rights, confirm, grouping)
+}
+
+/// The hint beside a wall taken hold of, as [`hint_with`] says it, for a participant with `rights`: B removes one
+/// someone added where they remove walls, and the bar carries one they carry. Where the server locks walls, a locked
+/// wall's says only that it is locked and, for an owner, that the grip on the padlock unlocks it; and an unlocked wall's
+/// says too, for an owner, that it locks it, and, for an environment's own, that the grip on `↺` puts it back, locked.
+pub fn hint_for(
+    controls: Controls,
+    wall: &Wall,
+    carried: bool,
+    rights: Rights,
+    confirm: Option<usize>,
+    grouping: Grouping,
+) -> Canvas {
     let keyboard = controls == Controls::Keyboard;
     let grip = if keyboard { "G" } else { "Grip" };
+    let removes = rights.remove && wall.kind == WallKind::Added;
+    let lock = LockControls::of(wall, rights);
     let mut rows: Vec<(String, String, bool)> = Vec::new();
-    if carried {
+    let done = (
+        (if keyboard { "Backspace" } else { "B" }).to_owned(),
+        "done".to_owned(),
+        false,
+    );
+    if lock.padlock && wall.is_locked() {
+        rows.push(if rights.lock {
+            (
+                format!("{grip} lock"),
+                "unlock it to change it".to_owned(),
+                false,
+            )
+        } else {
+            (
+                "Locked".to_owned(),
+                "an owner can unlock it".to_owned(),
+                false,
+            )
+        });
+        rows.push(done.clone());
+    } else if carried {
         rows.push((
             (if keyboard { "PgUp PgDn" } else { "Stick ↕" }).to_owned(),
             "further / closer".to_owned(),
@@ -2142,14 +2478,16 @@ pub fn hint_with(
             format!("{moving} down to tilt"),
             false,
         ));
-        if wall.kind == WallKind::Added {
+        if wall.kind == WallKind::Added || (rights.locks && self::carried(wall, rights)) {
             rows.push((format!("{grip} bar"), "carry it".to_owned(), false));
         }
-        rows.push((
-            (if keyboard { "Backspace" } else { "B" }).to_owned(),
-            "done".to_owned(),
-            false,
-        ));
+        if lock.padlock && rights.lock {
+            rows.push((format!("{grip} lock"), "lock it as it is".to_owned(), false));
+        }
+        if lock.reset {
+            rows.push((format!("{grip} ↺"), "put back, locked".to_owned(), false));
+        }
+        rows.push(done);
     }
     let keys = rows
         .iter()

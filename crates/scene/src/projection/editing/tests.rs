@@ -10,12 +10,16 @@ const ADJUST: Rights = Rights {
     adjust: true,
     remove: false,
     snap: true,
+    locks: false,
+    lock: false,
 };
 
 const OWNER: Rights = Rights {
     adjust: true,
     remove: true,
     snap: true,
+    locks: false,
+    lock: false,
 };
 
 /// An added wall 2.5 m ahead of home, facing it, flat, three columns of two rows.
@@ -232,7 +236,7 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     ] {
         assert!(hint.contains(row), "{row}: {hint}");
     }
-    assert_eq!(handles(&wall).len(), 12);
+    assert_eq!(handles(&wall, LockControls::default()).len(), 12);
     assert!(faces[1..].iter().any(|face| face.contains('●')));
     // A handle the ray meets is highlighted, ticks, and ends the ray.
     let bend = handle(&wall, Handle::Bend);
@@ -249,7 +253,7 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     assert!(!projector.stop_editing());
     // The Tomori wall has no corners or rows to change, its slots its own size in its one row.
     let tomori = tomori();
-    assert_eq!(handles(&tomori).len(), 5);
+    assert_eq!(handles(&tomori, LockControls::default()).len(), 5);
     let hint = super::hint(Controls::Controllers, &tomori, false, false, None).plain();
     assert!(
         !hint.contains("size and shape") && !hint.contains("carry it"),
@@ -1308,14 +1312,19 @@ fn seen(wall: &Wall, viewer: Vec3) -> Vec<(Handle, Vec2, Vec2)> {
     let ahead = (frame.transform_point3(Vec3::ZERO) - viewer).normalize();
     let right = ahead.cross(Vec3::Y).normalize();
     let up = right.cross(ahead);
-    let (points, size) = handle_points(wall, frame, viewer);
+    // With the lock's controls too, the padlock and the control that puts a wall back, which stand apart from the rest.
+    let lock = LockControls {
+        padlock: true,
+        reset: true,
+    };
+    let (points, size) = handle_points_with(wall, frame, viewer, lock);
     points
         .into_iter()
         .map(|(handle, at)| {
             let to = at - viewer;
             let distance = to.length();
             let to = to / distance;
-            let face = handle_face(handle, size, false).size();
+            let face = handle_face(handle, size, false, false).size();
             (
                 handle,
                 Vec2::new(to.dot(right).atan2(to.dot(ahead)), to.dot(up).asin()),
@@ -1949,4 +1958,345 @@ fn of_two_bars_the_ray_meets_the_nearer_takes_hold_of_its_wall() {
     let output = projector.update(frame_at(&projection, ray, 1.0, now));
     assert!(output.wall_ticked);
     assert_eq!(projector.carried_wall(), Some("wall-1"));
+}
+
+/// Where the server locks walls, as a collaborator and as an owner.
+const LOCKS: Rights = Rights {
+    adjust: true,
+    remove: false,
+    snap: true,
+    locks: true,
+    lock: false,
+};
+
+const LOCKER: Rights = Rights {
+    adjust: true,
+    remove: true,
+    snap: true,
+    locks: true,
+    lock: true,
+};
+
+/// The farmyard's notice board 2.5 m ahead of home, facing it, flat, two slots wide and one high, locked as the
+/// environment has it.
+fn notice_board() -> Wall {
+    Wall::new(
+        "environment-0",
+        WallKind::Environment,
+        Pose::upright_facing([0.0, 1.5, -2.5], HOME.to_array()),
+    )
+    .with_grid(Grid::new(2, 1).unwrap())
+    .with_locked(true)
+}
+
+/// The faces of the handles and the hint `output` draws, the hint first, as they read.
+fn faces(output: &crate::projection::Output, handles: usize) -> Vec<String> {
+    output
+        .sheets
+        .iter()
+        .rev()
+        .take(handles + 1)
+        .filter_map(|sheet| sheet.canvas.as_ref().map(Canvas::plain))
+        .collect()
+}
+
+#[test]
+fn a_locked_wall_taken_hold_of_shows_its_padlock_alone_moves_nowhere_and_only_an_owner_unlocks_it()
+{
+    let wall = notice_board();
+    let projection = shown(vec![tomori(), wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    // Its padlock alone, where it stands beyond the top left corner, a row above it, level with the knob.
+    let lock = LockControls::of(&wall, LOCKER);
+    assert_eq!(
+        lock,
+        LockControls {
+            padlock: true,
+            reset: false
+        }
+    );
+    let (points, _) = handle_points_with(&wall, frame_of, HOME, lock);
+    assert_eq!(
+        points.iter().map(|(handle, _)| *handle).collect::<Vec<_>>(),
+        [Handle::Lock]
+    );
+    let unlocked = wall.clone().with_locked(false);
+    let (all, _) = handle_points_with(
+        &unlocked,
+        frame_of,
+        HOME,
+        LockControls::of(&unlocked, LOCKER),
+    );
+    let padlock = points[0].1;
+    assert_eq!(
+        all.iter()
+            .find(|(handle, _)| *handle == Handle::Lock)
+            .unwrap()
+            .1,
+        padlock
+    );
+    let local = frame_of.inverse().transform_point3(padlock);
+    let corner = frame_of.inverse().transform_point3(
+        all.iter()
+            .find(|(handle, _)| *handle == Handle::Corner(-1, 1))
+            .unwrap()
+            .1,
+    );
+    let knob = frame_of.inverse().transform_point3(
+        all.iter()
+            .find(|(handle, _)| *handle == Handle::Bend)
+            .unwrap()
+            .1,
+    );
+    assert!(
+        (local.x - corner.x).abs() < 1e-4 && local.y > corner.y,
+        "{local} {corner}"
+    );
+    assert!(
+        (local.y - knob.y).abs() < 1e-4 && local.x < knob.x,
+        "{local} {knob}"
+    );
+    for rights in [LOCKS, LOCKER] {
+        // Taken hold of by its board, it is not carried, and drawn with its padlock, closed, and a hint.
+        let mut projector = Projector::default();
+        let ray = at(on(&wall, 0.0, 0.2));
+        projector.update(frame(&projection, ray, 1.0, rights, now));
+        assert_eq!(projector.editing_wall(), Some("environment-0"));
+        assert_eq!(projector.carried_wall(), None);
+        let away = at(on(&wall, -1.0, 0.2));
+        let output = projector.update(frame(&projection, away, 1.0, rights, now));
+        let output_let_go = projector.update(frame(&projection, away, 0.0, rights, now));
+        assert!(output.wall.is_none() && output_let_go.wall.is_none());
+        let output = projector.update(frame(&projection, None, 0.0, rights, now));
+        let drawn = faces(&output, 1);
+        let hint = &drawn[0];
+        if rights.lock {
+            assert!(
+                hint.contains("Grip lock") && hint.contains("unlock it to change it"),
+                "{hint}"
+            );
+        } else {
+            assert!(
+                hint.contains("Locked") && hint.contains("an owner can unlock it"),
+                "{hint}"
+            );
+        }
+        assert!(hint.contains("done"), "{hint}");
+        for row in [
+            "more / fewer slots",
+            "size and shape",
+            "pull to bend",
+            "carry it",
+            "remove",
+        ] {
+            assert!(!hint.contains(row), "{row}: {hint}");
+        }
+        // The ray at its padlock highlights it, ticks and ends there.
+        let output = projector.update(frame(&projection, at(padlock), 0.0, rights, now));
+        assert!(output.wall_ticked);
+        assert!(output.end.unwrap().distance(padlock) < 0.02);
+        assert_eq!(projector.editor.hovered, Some(Handle::Lock));
+        // A squeeze on it unlocks it for an owner, shown unlocked at once with every handle back; for anyone else, it
+        // only says it is locked.
+        let output = projector.update(frame(&projection, at(padlock), 1.0, rights, now));
+        projector.update(frame(&projection, at(padlock), 0.0, rights, now));
+        if rights.lock {
+            assert_eq!(
+                output.lock,
+                Some(LockChange {
+                    wall: "environment-0".into(),
+                    locked: false,
+                    reset: false
+                })
+            );
+            let drawn = projector.editor.walls(&projection);
+            assert!(!drawn[1].is_locked());
+            let output = projector.update(frame(&projection, None, 0.0, rights, now));
+            let hint = &faces(&output, 13)[0];
+            for row in [
+                "more / fewer slots",
+                "size and shape",
+                "carry it",
+                "lock it as it is",
+                "put back, locked",
+            ] {
+                assert!(hint.contains(row), "{row}: {hint}");
+            }
+            assert!(!hint.contains("remove"), "{hint}");
+            // Until the server agrees, or a while passes.
+            let agreed = shown(vec![tomori(), unlocked.clone()], Vec::new());
+            projector.update(frame(&agreed, None, 0.0, rights, now));
+            assert!(projector.editor.pending.is_none());
+        } else {
+            assert_eq!(output.lock, None);
+            assert!(projector.editor.walls(&projection)[1].is_locked());
+        }
+    }
+    // Where the server locks no walls, as an older one, a wall shows no padlock, and an environment's own is not carried.
+    let older = wall.clone().with_locked(false);
+    assert_eq!(LockControls::of(&older, OWNER), LockControls::default());
+    assert!(!carried(&older, OWNER));
+    assert!(carried(&older, LOCKS));
+    assert!(!carried(&wall, LOCKER));
+    assert!(carried(&added(), OWNER) && !carried(&added().with_locked(true), LOCKER));
+}
+
+#[test]
+fn an_environment_s_own_wall_unlocked_is_carried_and_put_down_but_never_removed_and_an_owner_puts_it_back()
+ {
+    let wall = notice_board().with_locked(false);
+    let projection = shown(vec![tomori(), wall.clone()], Vec::new());
+    let now = Instant::now();
+    // Taken hold of by its board, it is carried, and let go a metre to the left, its new pose is sent.
+    let mut projector = Projector::default();
+    let ray = at(on(&wall, 0.0, 0.2));
+    projector.update(frame(&projection, ray, 1.0, LOCKER, now));
+    assert_eq!(projector.carried_wall(), Some("environment-0"));
+    let output = projector.update(frame(&projection, ray, 1.0, LOCKER, now));
+    let hint = &faces(&output, 0)[0];
+    assert!(
+        hint.contains("further / closer") && !hint.contains("remove"),
+        "{hint}"
+    );
+    // B removes no environment's wall, even an owner's.
+    assert_eq!(projector.editor.remove(0, now), None);
+    assert_eq!(projector.carried_wall(), Some("environment-0"));
+    let left = at(on(&wall, -1.0, 0.2));
+    projector.update(frame(&projection, left, 1.0, LOCKER, now));
+    let output = projector.update(frame(&projection, left, 0.0, LOCKER, now));
+    let pose = output.wall.expect("a pose to send").pose.expect("moved");
+    assert!(pose.position[0] < -0.5, "{pose:?}");
+    // Its padlock, open, and the control that puts it back stand beside it for an owner; squeezed, that puts it back as
+    // the environment has it, locked, and lets go of it, as it goes where the server says.
+    let frame_of = model(&wall.pose).unwrap();
+    let mut projector = holding(&projection, &wall, LOCKER, now);
+    assert_eq!(projector.carried_wall(), None);
+    let projector_frame = frame(&projection, None, 0.0, LOCKER, now);
+    projector.update(projector_frame);
+    let (points, _) = handle_points_with(&wall, frame_of, HOME, LockControls::of(&wall, LOCKER));
+    assert_eq!(points.len(), 14);
+    let reset = points
+        .iter()
+        .find(|(handle, _)| *handle == Handle::Reset)
+        .unwrap()
+        .1;
+    let lock = points
+        .iter()
+        .find(|(handle, _)| *handle == Handle::Lock)
+        .unwrap()
+        .1;
+    // The control that puts it back stands a row beyond the padlock.
+    let local = |point: Vec3| frame_of.inverse().transform_point3(point);
+    assert!(local(reset).y > local(lock).y && (local(reset).x - local(lock).x).abs() < 1e-4);
+    let output = projector.update(frame(&projection, at(reset), 1.0, LOCKER, now));
+    assert_eq!(
+        output.lock,
+        Some(LockChange {
+            wall: "environment-0".into(),
+            locked: true,
+            reset: true
+        })
+    );
+    assert_eq!(projector.editing_wall(), None);
+    // A collaborator sees its padlock, open, but no control to put it back, and locks nothing with it.
+    assert_eq!(
+        LockControls::of(&wall, LOCKS),
+        LockControls {
+            padlock: true,
+            reset: false
+        }
+    );
+    let mut projector = holding(&projection, &wall, LOCKS, now);
+    let output = projector.update(frame(&projection, at(lock), 1.0, LOCKS, now));
+    assert_eq!(output.lock, None);
+    // An added wall has no control to put it back; the Tomori wall's padlock stands beside its own handles.
+    assert!(!LockControls::of(&added(), LOCKER).reset);
+    let tomori = tomori();
+    let (points, _) = handle_points_with(
+        &tomori,
+        model(&tomori.pose).unwrap(),
+        HOME,
+        LockControls::of(&tomori, LOCKER),
+    );
+    assert_eq!(points.len(), 6);
+}
+
+#[test]
+fn a_locked_wall_s_bar_says_it_is_locked_and_who_unlocks_it() {
+    let wall = notice_board();
+    let label = |rights: Rights| bar_label_for(Controls::Controllers, &wall, rights).plain();
+    assert!(label(LOCKER).contains("locked: take hold to unlock it"));
+    assert!(label(LOCKS).contains("locked by an owner"));
+    // Unlocked, it carries and edits it, as an added wall's does; where the server locks none, it edits it.
+    let unlocked = wall.clone().with_locked(false);
+    assert!(
+        bar_label_for(Controls::Controllers, &unlocked, LOCKS)
+            .plain()
+            .contains("carry and edit this wall")
+    );
+    assert!(
+        bar_label(Controls::Controllers, &unlocked)
+            .plain()
+            .contains("edit this wall")
+    );
+    // The desktop names its key.
+    assert!(
+        bar_label_for(Controls::Keyboard, &wall, LOCKER)
+            .plain()
+            .contains("G ")
+    );
+}
+
+#[test]
+fn the_padlock_is_drawn_of_shapes_closed_while_locked_and_open_while_not() {
+    let corner = handle_face(Handle::Corner(-1, 1), 0.05, false, false)
+        .mesh()
+        .len();
+    let closed = handle_face(Handle::Lock, 0.05, false, true);
+    let open = handle_face(Handle::Lock, 0.05, false, false);
+    assert!(
+        closed.mesh().len() > corner,
+        "{} {corner}",
+        closed.mesh().len()
+    );
+    assert_ne!(closed.shapes, open.shapes);
+    assert_eq!(closed.size(), open.size());
+    // The control that puts a wall back is an arrow the bundled fonts draw.
+    assert_eq!(glyph(Handle::Reset), "↺");
+    assert!(tomori_text::atlas::glyph('↺').is_some());
+}
+
+#[test]
+fn a_wall_locked_while_carried_is_put_down_held_and_a_group_with_a_locked_wall_is_not_carried() {
+    let wall = notice_board().with_locked(false);
+    let projection = shown(vec![tomori(), wall.clone()], Vec::new());
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(on(&wall, 0.0, 0.2));
+    projector.update(frame(&projection, ray, 1.0, LOCKS, now));
+    assert_eq!(projector.carried_wall(), Some("environment-0"));
+    // An owner elsewhere locks it: it is no longer carried, and letting go sends nothing, while it is still held, so
+    // that its padlock says why.
+    let locked = shown(vec![tomori(), wall.clone().with_locked(true)], Vec::new());
+    let left = at(on(&wall, -1.0, 0.2));
+    projector.update(frame(&locked, left, 1.0, LOCKS, now));
+    assert_eq!(projector.carried_wall(), None);
+    let output = projector.update(frame(&locked, left, 0.0, LOCKS, now));
+    assert_eq!(output.wall, None);
+    assert_eq!(projector.editing_wall(), Some("environment-0"));
+    // A wall of a group with a wall locked in it is held, but not carried, since the locked wall would move with it.
+    let group = Some("wall-1".to_owned());
+    let first = added()
+        .with_locked(true)
+        .with_group(group.clone(), Vec::new());
+    let mut second = added().with_group(group, Vec::new());
+    second.id = "wall-2".into();
+    second.pose.position[0] += 2.5;
+    let projection = shown(vec![tomori(), first, second.clone()], Vec::new());
+    let mut projector = Projector::default();
+    let ray = at(on(&second, 0.0, 0.0));
+    projector.update(frame(&projection, ray, 1.0, LOCKS, now));
+    assert_eq!(projector.editing_wall(), Some("wall-2"));
+    assert_eq!(projector.carried_wall(), None);
 }

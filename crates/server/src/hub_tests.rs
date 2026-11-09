@@ -3605,12 +3605,12 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
             space: space.clone(),
         });
     }
-    // Every space projects, and says so in its state, with that participants change its walls and snap them together;
-    // the Tomori wall stands beside the swarm, empty.
+    // Every space projects, and says so in its state, with that participants change its walls and snap them together,
+    // and owners lock them; the Tomori wall stands beside the swarm, empty.
     let messages = ada.read();
     assert!(messages.iter().any(|message| matches!(
         message,
-        ServerMessage::Space { state } if state.projection && state.walls && state.groups
+        ServerMessage::Space { state } if state.projection && state.walls && state.groups && state.wall_locks
     )));
     let projection = messages
         .into_iter()
@@ -4235,6 +4235,147 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
 }
 
 #[test]
+fn only_owners_lock_and_unlock_walls_and_a_locked_wall_changes_for_nobody() {
+    let (hub, _jobs) = hub_waiting();
+    let board = upright([3.0, 1.4, -4.0]);
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("farmyard", "Farmyard")
+            .with_walls([
+                crate::EnvironmentWall::new(board).with_grid(tomori_protocol::Grid::from((2, 1)))
+            ]),
+    ]));
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let cy = Client::projecting(
+        &hub,
+        Access {
+            principal: Some("token:cy".to_owned()),
+            name: None,
+            grant: Grant::Collaborator {
+                space: space.clone(),
+            },
+        },
+        "cy",
+    );
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    for client in [&ada, &cy, &vic] {
+        client.join(&space);
+    }
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "farmyard".to_owned(),
+    });
+    let environment = "environment-0".to_owned();
+    // The environment's own wall is laid out as it declares, and locked, for everyone, and the space says it locks walls.
+    for client in [&ada, &cy, &vic] {
+        let wall = client.projection().walls[1].clone();
+        assert_eq!(
+            (wall.kind, wall.grid(), wall.is_locked()),
+            (
+                tomori_protocol::WallKind::Environment,
+                tomori_protocol::Grid::from((2, 1)),
+                true
+            )
+        );
+    }
+    let moved = upright([1.0, 1.4, -3.0]);
+    let move_to = |pose: tomori_protocol::Pose| ClientMessage::SetWall {
+        wall: environment.clone(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: Some(pose),
+        tilt: None,
+    };
+    let lock = |locked: bool, reset: bool| ClientMessage::LockWall {
+        wall: environment.clone(),
+        locked,
+        reset,
+    };
+    // Locked, it moves for nobody, its refusal saying why; only an owner unlocks it.
+    cy.send(move_to(moved));
+    cy.send(lock(false, false));
+    vic.send(lock(false, false));
+    assert_eq!(
+        cy.errors(),
+        [crate::stage::LOCKED, "Only owners can do that."]
+    );
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    assert!(ada.projection().walls[1].is_locked());
+    // Unlocked by an owner, for everyone, a collaborator moves it, and it stands there for everyone.
+    ada.send(lock(false, false));
+    assert!(!vic.projection().walls[1].is_locked());
+    cy.send(move_to(moved));
+    for client in [&ada, &cy, &vic] {
+        let wall = client.projection().walls[1].clone();
+        assert_eq!((wall.pose, wall.is_locked()), (moved, false));
+    }
+    // A collaborator neither locks it nor puts it back; an owner puts it back where the environment has it, locked.
+    cy.send(lock(true, true));
+    assert_eq!(cy.errors(), ["Only owners can do that."]);
+    ada.send(lock(true, true));
+    for client in [&ada, &cy, &vic] {
+        let wall = client.projection().walls[1].clone();
+        assert_eq!((wall.pose, wall.is_locked()), (board, true));
+    }
+    // Locked again as it is, it changes nothing, and nothing is refused; outside a space, nothing changes.
+    ada.send(lock(true, false));
+    assert!(ada.errors().is_empty());
+    let lobby = Client::projecting(&hub, Access::open(), "lee");
+    lobby.send(lock(false, false));
+    assert_eq!(lobby.errors(), ["Join a space first."]);
+    assert!(ada.projection().walls[1].is_locked());
+    // Refusals say why: a wall not here, or one too long to name.
+    ada.send(ClientMessage::LockWall {
+        wall: "wall-9".into(),
+        locked: true,
+        reset: false,
+    });
+    ada.send(ClientMessage::LockWall {
+        wall: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+        locked: true,
+        reset: false,
+    });
+    assert_eq!(
+        ada.errors(),
+        [
+            "That wall is not here.".to_owned(),
+            format!(
+                "The wall is too long; the limit is {} bytes.",
+                limits::IDENTIFIER_BYTES
+            ),
+        ]
+    );
+    // An owner's added wall is unlocked; locked, it is refused to everyone, removal included, until unlocked.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let added = ada.projection().walls[2].clone();
+    assert!(!added.is_locked());
+    ada.send(ClientMessage::LockWall {
+        wall: added.id.clone(),
+        locked: true,
+        reset: false,
+    });
+    ada.send(ClientMessage::RemoveWall {
+        wall: added.id.clone(),
+    });
+    assert_eq!(ada.errors(), [crate::stage::LOCKED]);
+    ada.send(ClientMessage::LockWall {
+        wall: added.id.clone(),
+        locked: false,
+        reset: false,
+    });
+    ada.send(ClientMessage::RemoveWall { wall: added.id });
+    assert!(ada.errors().is_empty());
+    assert_eq!(ada.projection().walls.len(), 2);
+}
+
+#[test]
 fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tomori_wall_moves() {
     let (hub, _jobs) = hub_waiting();
     let stage = upright([0.0, 1.5, -4.0]);
@@ -4482,7 +4623,12 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         pose: Some(upright([3.0, 1.0, -2.0])),
         tilt: None,
     });
-    assert_eq!(ada.errors(), ["Only a wall an owner added can be moved."]);
+    assert_eq!(
+        ada.errors(),
+        [
+            "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved."
+        ]
+    );
     ada.send(ClientMessage::SetWall {
         wall: tomori_protocol::TOMORI_WALL.to_owned(),
         grid: Some(tomori_protocol::Grid::from((2, 1))),
@@ -4690,11 +4836,18 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             pose: None,
             tilt: None,
         });
+        // And whether an owner locked it.
+        ada.send(ClientMessage::LockWall {
+            wall: ada.projection().walls[1].id.clone(),
+            locked: true,
+            reset: false,
+        });
         let projection = ada.projection();
         assert_eq!(
             (projection.walls[0].slots(), projection.walls[1].slots()),
             (3, 4)
         );
+        assert!(projection.walls[1].is_locked());
         let panel = ada.projection().panels[0].id.clone();
         ada.send(ClientMessage::PlacePanel {
             panel,

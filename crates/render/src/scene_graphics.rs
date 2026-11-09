@@ -1702,6 +1702,162 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_WALL_LOCK_PREVIEW` to a PNG path to save what this renders: an environment's own wall, two slots wide
+    /// and one high, locked, taken hold of by an owner, its padlock alone, closed and warm, with the hint saying the grip
+    /// on it unlocks it; then unlocked with a squeeze on it, as it is before the server answers, its
+    /// padlock open, every handle around it and the control that puts it back above the padlock, with the hint.
+    #[test]
+    fn a_locked_wall_shows_its_padlock_alone_and_once_unlocked_its_handles_with_the_padlock_open() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Panel, Place, Wall, WallKind};
+        use tomori_scene::projection::editing::{Handle, LOCKED, LockControls, handle_points_with};
+        let middle = Vec3::new(-0.2, 1.45, -2.1);
+        let wall = Wall::new(
+            "environment-0",
+            WallKind::Environment,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), [-0.2, 1.45, 0.0]),
+        )
+        .with_grid(tomori_protocol::Grid::new(2, 1).unwrap())
+        .with_locked(true);
+        let frame =
+            Mat4::from_rotation_translation(glam::Quat::from_array(wall.pose.orientation), middle);
+        let panels = vec![Panel::new(
+            "panel-0",
+            "Notices",
+            "**Feed** the hens at six.",
+            Place::Wall {
+                wall: "environment-0".into(),
+                slot: 0,
+            },
+        )];
+        let lock = LockControls {
+            padlock: true,
+            reset: false,
+        };
+        let (points, _) = handle_points_with(&wall, frame, arrival::HOME, lock);
+        assert_eq!(points.len(), 1);
+        let padlock = points[0].1;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall lock test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let view_matrix =
+                lens * Mat4::look_at_rh(arrival::HOME, middle - Vec3::Y * 0.1, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let mut conversation = joined();
+            show_lockable_walls(&mut conversation, vec![wall.clone()], panels.clone());
+            let mut step = Step::default();
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[view_matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            // Taken hold of with a squeeze on its board, beside its panel, and let go: its padlock pointed at.
+            let board = frame.transform_point3(Vec3::new(0.35, 0.0, 0.0));
+            capture(&mut step, &mut conversation, &senses(board, 1.0));
+            capture(&mut step, &mut conversation, &senses(board, 0.0));
+            // Drawn with the ray on its board, so that the ray's end hides nothing of the padlock.
+            let aside = frame.transform_point3(Vec3::new(0.35, -0.1, 0.0));
+            let locked = capture(&mut step, &mut conversation, &senses(aside, 0.0));
+            // Squeezed, the padlock unlocks it, sent to the server and shown so at once.
+            capture(&mut step, &mut conversation, &senses(padlock, 0.0));
+            capture(&mut step, &mut conversation, &senses(padlock, 1.0));
+            let sent = conversation.take_actions();
+            assert!(
+                sent.iter().any(|action| matches!(
+                    action,
+                    tomori_client::connection::Action::Send(
+                        tomori_protocol::ClientMessage::LockWall { locked: false, .. }
+                    )
+                )),
+                "{sent:?}"
+            );
+            let unlocked_points = handle_points_with(
+                &wall.clone().with_locked(false),
+                frame,
+                arrival::HOME,
+                LockControls {
+                    padlock: true,
+                    reset: true,
+                },
+            )
+            .0;
+            assert!(
+                unlocked_points
+                    .iter()
+                    .any(|(handle, _)| *handle == Handle::Reset)
+            );
+            capture(&mut step, &mut conversation, &senses(padlock, 0.0));
+            let unlocked = capture(&mut step, &mut conversation, &senses(aside, 0.0));
+            assert_ne!(
+                locked, unlocked,
+                "its handles must be drawn once it is unlocked"
+            );
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            image::imageops::replace(&mut sheet, &locked, 0, 0);
+            image::imageops::replace(&mut sheet, &unlocked, 0, HEIGHT.into());
+            crate::test_support::preview("TOMORI_WALL_LOCK_PREVIEW", &sheet);
+            // The padlock is warm while locked, and bright once open: the warm colour is drawn only while it is locked.
+            let warm = |image: &image::RgbaImage| {
+                let [red, green, blue, _] =
+                    LOCKED.map(|channel| (channel.powf(1.0 / 2.2) * 255.0) as i32);
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        (r - red).abs() < 30 && (g - green).abs() < 30 && (b - blue).abs() < 40
+                    })
+                    .count()
+            };
+            let (closed, open) = (warm(&locked), warm(&unlocked));
+            assert!(closed > 4, "{closed}");
+            assert!(open * 4 < closed, "{open} {closed}");
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// Set `TOMORI_WALL_SHAPES_PREVIEW` to a PNG path to save what this renders: a wall of three tall slots, 9:16, holding a
     /// long list shown whole, a code panel and a short note, from home; and set `TOMORI_WALL_STEPPERS_PREVIEW` to save a
     /// small wall, one slot at half size, and a large one, eight columns of three, each taken hold of, its steppers apart.

@@ -1904,7 +1904,7 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
         ),
         (
             json!({"wall": "Tomori wall", "place": "front Ada"}),
-            "Only a wall an owner added can be moved.",
+            "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
         ),
         (
             json!({"wall": "near Zed"}),
