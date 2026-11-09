@@ -961,9 +961,11 @@ impl Step {
             .as_ref()
             .and_then(|client| client.focus.as_deref());
         let aim = self.aim;
+        let carrying_wall = self.projector.carried_wall().is_some();
         let rung = precedence::Trigger::first(|rung| match rung {
             precedence::Trigger::Menu => menu_shown || in_arrival,
             precedence::Trigger::Transcript => wrist_active,
+            precedence::Trigger::CarriedWall => carrying_wall,
             precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
             precedence::Trigger::Environment => focus.is_some(),
             precedence::Trigger::Swarm => true,
@@ -977,7 +979,13 @@ impl Step {
         }
         let selecting = self.selector.owns();
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
-        let attracting = pointing.attracting && !menu_shown && !wrist_active && !selecting;
+        // While a wall is carried, the trigger keeps it from snapping rather than attracting the swarm. See
+        // `design/projection.md`.
+        let attracting = pointing.attracting
+            && !menu_shown
+            && !wrist_active
+            && !selecting
+            && rung != precedence::Trigger::CarriedWall;
         let attractor = senses.attractor.filter(|_| attracting);
         // The agent appears at its home as a space opens, or changes environment, and otherwise glides to where it is
         // summoned and back home; the workers stand about its home. See `design/environments.md`.
@@ -1078,6 +1086,9 @@ impl Step {
             nearer: self.card_reach,
             stick: self.carry_stick,
             straighten: std::mem::take(&mut self.straighten),
+            free: senses
+                .trigger
+                .is_some_and(|trigger| trigger > crate::pointing::PULL),
             controls: self.controls,
             scroll: scrolled(self.scroll_stick.as_ref(), self.wheel.take(), dt)
                 .as_ref()
@@ -1616,6 +1627,7 @@ pub mod fixtures {
         conversation.apply(space(|state| {
             state.projection = true;
             state.walls = true;
+            state.groups = true;
         }));
         conversation.take_actions();
     }
@@ -2998,6 +3010,56 @@ mod tests {
     }
 
     #[test]
+    fn the_trigger_held_while_a_wall_is_carried_attracts_no_swarm_and_lets_it_go_unsnapped() {
+        use tomori_protocol::{Pose, Wall, WallKind};
+        let wall = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            Pose::upright_facing([0.0, 1.5, -2.0], arrival::HOME.to_array()),
+        );
+        let board = Vec3::new(0.0, 1.5 + 0.42, -2.0);
+        let mut conversation = lobby(ConnectionRole::Owner);
+        fixtures::show_editable_walls(&mut conversation, vec![wall], Vec::new());
+        let mut step = Step::default();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ray: Ray::new(arrival::HOME, board - arrival::HOME),
+            grip: Some(0.0),
+            ..senses()
+        };
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        }
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.carried_wall(), Some("wall-1"));
+        // Pulled while it is carried, the trigger attracts nothing, and the hint says it is left where it is.
+        senses.trigger = Some(1.0);
+        senses.attractor = Some(board);
+        for _ in 0..3 {
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert!(!frame.attracting);
+            assert!(frame.projection.iter().any(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|canvas| canvas.plain().contains("leave it here"))
+            }));
+        }
+        // Let go, it is no longer carried, and the trigger attracts the swarm again.
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.carried_wall(), None);
+        senses.ray = Ray::new(arrival::HOME, Vec3::Z);
+        senses.trigger = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        senses.trigger = Some(1.0);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(frame.attracting);
+    }
+
+    #[test]
     fn a_wall_is_carried_with_the_grip_put_down_where_let_go_and_removed_by_an_owner_s_b_asked_twice_with_panels()
      {
         use tomori_protocol::{ClientMessage, Panel, Place, Pose, Wall, WallKind};
@@ -3135,14 +3197,64 @@ mod tests {
             aspect: None,
             shape: None,
             pose: None,
+            join: None,
         };
         assert!(!conversation.set_wall(change.clone()));
         assert!(!conversation.remove_wall_by_id("wall-1".into()));
         assert!(conversation.take_actions().is_empty());
         let mut conversation = lobby(ConnectionRole::Collaborator);
         fixtures::show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
-        assert!(conversation.set_wall(change));
+        assert!(conversation.set_wall(change.clone()));
         assert!(!conversation.remove_wall_by_id("wall-1".into()));
+        // A snap is sent as one, and so is taking a wall out of its group, where it was let go.
+        use crate::projection::editing::Joining;
+        let attach = tomori_protocol::Attach::new(
+            "wall-2",
+            tomori_protocol::Edge::Right,
+            tomori_protocol::Align::Middle,
+        );
+        conversation.take_actions();
+        let pose = tomori_protocol::Pose::default();
+        assert!(conversation.set_wall(crate::projection::editing::Change {
+            join: Some(Joining::Attach {
+                attach: attach.clone(),
+                alone: true,
+            }),
+            ..change.clone()
+        }));
+        assert!(conversation.set_wall(crate::projection::editing::Change {
+            join: Some(Joining::Leave),
+            pose: Some(pose),
+            ..change.clone()
+        }));
+        assert_eq!(
+            conversation.take_actions(),
+            [
+                Action::Send(ClientMessage::AttachWall {
+                    wall: "wall-1".into(),
+                    attach: Some(attach.clone()),
+                    alone: true,
+                    pose: None,
+                }),
+                Action::Send(ClientMessage::AttachWall {
+                    wall: "wall-1".into(),
+                    attach: None,
+                    alone: true,
+                    pose: Some(pose),
+                }),
+            ]
+        );
+        // A server that snaps no walls is sent neither.
+        conversation.apply(fixtures::space(|state| {
+            state.projection = true;
+            state.walls = true;
+            state.groups = false;
+        }));
+        assert!(!conversation.wall_rights().snap);
+        assert!(!conversation.set_wall(crate::projection::editing::Change {
+            join: Some(Joining::Leave),
+            ..change
+        }));
     }
 
     #[test]

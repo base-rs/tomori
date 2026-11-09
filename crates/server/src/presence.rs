@@ -625,7 +625,20 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
             let size = wall.size();
             let grid = wall.grid();
             let kind = wall.kind;
-            json!({
+            // The walls it is snapped to, by name, across which of its edges.
+            let joined: Vec<Value> = wall
+                .joined
+                .iter()
+                .filter_map(|join| projection.wall(&join.wall).map(|other| (join, other)))
+                .map(|(join, other)| {
+                    json!({
+                        "edge": serde_json::to_value(join.edge).unwrap_or(Value::Null),
+                        "wall": other.id,
+                        "name": wall_name(projection, other),
+                    })
+                })
+                .collect();
+            let mut described = json!({
                 "id": wall.id,
                 "name": wall_name(projection, wall),
                 "kind": serde_json::to_value(kind).unwrap_or(Value::Null),
@@ -638,7 +651,12 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 "slot_size": [round(wall.slot_size().0, 2), round(wall.slot_size().1, 2)],
                 "used": used,
                 "free": free,
-            })
+            });
+            if let Some(group) = &wall.group {
+                described["group"] = json!(group);
+                described["joined"] = json!(joined);
+            }
+            described
         })
         .collect::<Vec<_>>();
     let floating = projection

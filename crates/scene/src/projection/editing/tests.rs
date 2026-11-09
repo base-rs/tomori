@@ -9,11 +9,13 @@ use tomori_protocol::{Panel, Place, TOMORI_WALL};
 const ADJUST: Rights = Rights {
     adjust: true,
     remove: false,
+    snap: true,
 };
 
 const OWNER: Rights = Rights {
     adjust: true,
     remove: true,
+    snap: true,
 };
 
 /// An added wall 2.5 m ahead of home, facing it, flat, three columns of two rows.
@@ -58,6 +60,7 @@ fn frame<'a>(
         nearer: f32::INFINITY,
         stick: Vec2::ZERO,
         straighten: false,
+        free: false,
         controls: Controls::Controllers,
         scroll: None,
         rights,

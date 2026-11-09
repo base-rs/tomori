@@ -2071,6 +2071,7 @@ impl Conversation {
                 | ClientMessage::AddWall { .. }
                 | ClientMessage::RemoveWall { .. }
                 | ClientMessage::SetWall { .. }
+                | ClientMessage::AttachWall { .. }
                 | ClientMessage::PlacePanel { .. }
                 | ClientMessage::DismissPanel { .. }
                 | ClientMessage::CheckPanelItem { .. }
@@ -3634,14 +3635,38 @@ impl Conversation {
         crate::projection::editing::Rights {
             adjust,
             remove: adjust && self.manages_walls(),
+            snap: adjust && self.joined_space().is_some_and(|(space, _)| space.groups),
         }
     }
 
     /// Change a wall as `change` says, for everyone in the space. Says whether it asked, as only a participant does, in a
     /// space whose server takes wall changes.
     pub fn set_wall(&mut self, change: crate::projection::editing::Change) -> bool {
-        if !self.wall_rights().adjust {
+        use crate::projection::editing::Joining;
+        let rights = self.wall_rights();
+        if !rights.adjust {
             return false;
+        }
+        // Snapping, or taking a wall out of its group, only where the server snaps walls.
+        match change.join {
+            Some(_) if !rights.snap => return false,
+            Some(Joining::Attach { attach, alone }) => {
+                return self.send(ClientMessage::AttachWall {
+                    wall: change.wall,
+                    attach: Some(attach),
+                    alone,
+                    pose: None,
+                });
+            }
+            Some(Joining::Leave) => {
+                return self.send(ClientMessage::AttachWall {
+                    wall: change.wall,
+                    attach: None,
+                    alone: true,
+                    pose: change.pose,
+                });
+            }
+            None => {}
         }
         self.send(ClientMessage::SetWall {
             wall: change.wall,

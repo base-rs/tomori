@@ -409,7 +409,7 @@ fn tools() -> Value {
         },
         {
             "name": "set_wall",
-            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 2, or width picks it to make the wall that many metres wide; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat; place, front or front NAME, stands a wall someone added in front of them. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
+            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 2, or width picks it to make the wall that many metres wide; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; place, front or front NAME, stands a wall someone added in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands; an environment's walls stay where they stand. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -423,6 +423,8 @@ fn tools() -> Value {
                     "slot_height": { "type": "number", "exclusiveMinimum": 0 },
                     "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "attach": attach_schema(),
+                    "detach": { "type": "boolean" },
                 },
                 "required": ["wall"],
             },
@@ -620,6 +622,20 @@ fn caller(params: &Value) -> Result<&str, String> {
         return Err("This call's session identifier is too long.".to_owned());
     }
     Ok(session)
+}
+
+/// The schema of a wall's attachment to another: the wall it is attached to, by identity or name, the edge of that wall
+/// it stands across, and how it is aligned along it.
+fn attach_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "to": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+            "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
+            "align": { "type": "string", "enum": ["start", "middle", "end"] },
+        },
+        "required": ["to", "edge"],
+    })
 }
 
 /// The text argument `name` of `arguments`.
@@ -857,8 +873,61 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         radius,
         pose: None,
     };
-    hub.agent_set_wall(session, wall, change, grid, metres(arguments)?, place)
-        .map(structured)
+    let joining = joining(arguments)?;
+    if joining.is_some() && place.is_some() {
+        return Err(
+            "Say either place or attach, not both: an attached wall stands beside the other."
+                .to_owned(),
+        );
+    }
+    hub.agent_set_wall(
+        session,
+        wall,
+        change,
+        grid,
+        metres(arguments)?,
+        place,
+        joining,
+    )
+    .map(structured)
+}
+
+/// What `arguments` ask of a wall's group: `attach`, `{ to, edge, align }`, its edge `left`, `right`, `top` or `bottom`
+/// and its alignment `start`, `middle` or `end`, by default `start`; or `detach`, to take it out of its group.
+fn joining(arguments: &Value) -> Result<Option<crate::hub::tools::Joining>, String> {
+    let detach = arguments
+        .get("detach")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let attach = match arguments.get("attach") {
+        None | Some(Value::Null) => None,
+        Some(attach) => {
+            let to = text(attach, "to")?;
+            crate::limits::check(to, crate::limits::IDENTIFIER_BYTES, "to")?;
+            let edge = text(attach, "edge")
+                .ok()
+                .and_then(tomori_protocol::Edge::parse)
+                .ok_or("attach's edge is left, right, top or bottom.")?;
+            let align = match attach.get("align") {
+                None | Some(Value::Null) => tomori_protocol::Align::Start,
+                Some(_) => text(attach, "align")
+                    .ok()
+                    .and_then(tomori_protocol::Align::parse)
+                    .ok_or("attach's align is start, middle or end.")?,
+            };
+            Some(crate::hub::tools::Joining::Attach {
+                to: to.to_owned(),
+                edge,
+                align,
+            })
+        }
+    };
+    match (attach, detach) {
+        (Some(_), true) => Err("Say either attach or detach, not both.".to_owned()),
+        (Some(attach), false) => Ok(Some(attach)),
+        (None, true) => Ok(Some(crate::hub::tools::Joining::Detach)),
+        (None, false) => Ok(None),
+    }
 }
 
 /// The `add_wall` tool.

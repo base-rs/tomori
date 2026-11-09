@@ -1966,6 +1966,137 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
 }
 
 #[test]
+fn the_agent_snaps_a_wall_beside_another_into_a_group_and_takes_it_out_again() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = tomori_server::test_support::TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    ada.send(&ClientMessage::Presence {
+        head: looking([0.0, 1.6, 0.0], [0.0, 1.4, -3.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    let tool =
+        |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
+    let walls = || {
+        call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    let first = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 2, "rows": 2, "scale": 0.95}),
+    );
+    assert_ne!(first["isError"], true, "{first}");
+    let second = tool(
+        "add_wall",
+        json!({"place": "front Ada", "columns": 1, "rows": 1, "scale": 1.9}),
+    );
+    assert_ne!(second["isError"], true, "{second}");
+    // Snapped to the right of the first, a big one beside a two by two, they are one group.
+    let snapped = tool(
+        "set_wall",
+        json!({"wall": "added wall 2", "attach": {"to": "added wall 1", "edge": "right"}}),
+    );
+    assert_ne!(snapped["isError"], true, "{snapped}");
+    let content = &snapped["structuredContent"];
+    assert_eq!(content["changed"], true);
+    let now = content["now"].as_str().unwrap();
+    assert!(
+        now.ends_with("flat, joined to added wall 1 on its left"),
+        "{now}"
+    );
+    let listed = eventually(|| {
+        let walls = walls();
+        walls[2].get("group").is_some().then_some(walls)
+    });
+    assert_eq!(listed[1]["group"], listed[2]["group"]);
+    assert_eq!(listed[1]["joined"][0]["edge"], "right");
+    assert_eq!(listed[1]["joined"][0]["name"], "added wall 2");
+    assert_eq!(listed[2]["joined"][0]["edge"], "left");
+    // Ada's client is sent the group, each wall's edge joined.
+    let projection = ada.wait_for(|message| match message {
+        tomori_protocol::ServerMessage::Projection { projection }
+            if projection
+                .walls
+                .iter()
+                .filter(|wall| wall.group.is_some())
+                .count()
+                == 2 =>
+        {
+            Some(projection.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(projection.walls[1].joined.len(), 1);
+    // What it cannot snap, it says.
+    for (arguments, error) in [
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "Tomori wall", "edge": "left"}}),
+            "Only walls someone added snap together: the Tomori wall and an environment's walls stand where they are put.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "added wall 1", "edge": "behind"}}),
+            "attach's edge is left, right, top or bottom.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "added wall 1", "edge": "left", "align": "spread"}}),
+            "attach's align is start, middle or end.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "added wall 1", "edge": "left"}, "detach": true}),
+            "Say either attach or detach, not both.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "added wall 1", "edge": "left"}, "place": "front"}),
+            "Say either place or attach, not both: an attached wall stands beside the other.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"edge": "left"}}),
+            "This tool needs to, as text.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "attic", "edge": "left"}}),
+            "There is no wall called \"attic\" here: name one as presence does, or say looking or near, with a name or for whoever asked.",
+        ),
+        (
+            json!({"wall": "added wall 2", "attach": {"to": "x".repeat(1025), "edge": "left"}}),
+            "The to is too long; the limit is 1024 bytes.",
+        ),
+    ] {
+        assert_eq!(failure(&tool("set_wall", arguments)), error);
+    }
+    // Made smaller and snapped below, at once, it moves; if it cannot be attached after it changed, it says so.
+    let below = tool(
+        "set_wall",
+        json!({"wall": "added wall 2", "scale": 1.0, "attach": {"to": "added wall 1", "edge": "bottom", "align": "middle"}}),
+    );
+    assert_ne!(below["isError"], true, "{below}");
+    let refused = tool(
+        "set_wall",
+        json!({"wall": "added wall 2", "scale": 1.2, "attach": {"to": "Tomori wall", "edge": "bottom"}}),
+    );
+    assert!(
+        failure(&refused)
+            .starts_with("The wall was changed, but not attached: Only walls someone added")
+    );
+    // Taken out again, it stands alone.
+    let detached = tool("set_wall", json!({"wall": "added wall 2", "detach": true}));
+    assert_ne!(detached["isError"], true, "{detached}");
+    eventually(|| walls()[2].get("group").is_none().then_some(()));
+    assert_eq!(
+        tool("set_wall", json!({"wall": "added wall 2", "detach": true}))["structuredContent"]["changed"],
+        false
+    );
+}
+
+#[test]
 fn the_agent_gives_a_wall_slots_of_any_shape_by_their_aspect_or_their_size_in_metres() {
     let backend = FakeBackend::new();
     let server = start(&backend);

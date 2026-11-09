@@ -583,6 +583,21 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pose: Option<Pose>,
     },
+    /// Snap the wall `wall`, one someone added, to another for everyone in the space, or take it out of its group. With
+    /// `attach`, it stands across `attach.edge` of the wall `attach.to`, aligned along it, their slots a gutter apart, and
+    /// the two are a group from then on: the group it was in comes with it, as it was carried with it, unless `alone`
+    /// takes it out of that first. Without, it leaves its group, standing at `pose` where given, or where it is; the rest
+    /// stay together only while they still touch. Participants only, and only to a server whose
+    /// [`crate::SpaceState::groups`] is set. See `design/projection.md`.
+    AttachWall {
+        wall: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach: Option<crate::Attach>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        alone: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose: Option<Pose>,
+    },
     /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, in `slot` where it says, or, without a
     /// wall, leave it floating at `pose`, in the space's coordinates, for everyone in the space. Participants only, and
     /// only to a server whose [`crate::SpaceState::projection`] is set. An older server, which knows no `slot`, puts it in

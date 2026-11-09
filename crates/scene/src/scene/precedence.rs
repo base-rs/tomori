@@ -92,6 +92,9 @@ pub(crate) enum Trigger {
     Menu,
     /// The right wrist's transcript while it shows: the pull does nothing.
     Transcript,
+    /// A wall carried: held, the trigger keeps it from snapping to another, so that let go it stays where it is, and the
+    /// pull attracts nothing.
+    CarriedWall,
     /// Anything else of Tomori's the ray is on, such as a panel, a card or a worker: the pull attracts the swarm, as
     /// ever, and never reaches the environment behind it.
     Tomori,
@@ -105,6 +108,7 @@ impl Ladder for Trigger {
     const ORDER: &'static [Self] = &[
         Self::Menu,
         Self::Transcript,
+        Self::CarriedWall,
         Self::Tomori,
         Self::Environment,
         Self::Swarm,
@@ -155,7 +159,12 @@ mod tests {
         for rung in [Left::Travel, Left::Tomori] {
             assert!(before(rung, Left::Environment), "{rung:?}");
         }
-        for rung in [Trigger::Menu, Trigger::Transcript, Trigger::Tomori] {
+        for rung in [
+            Trigger::Menu,
+            Trigger::Transcript,
+            Trigger::CarriedWall,
+            Trigger::Tomori,
+        ] {
             assert!(before(rung, Trigger::Environment), "{rung:?}");
         }
         // The environment comes before only the fallback that does nothing, or attracts the swarm.

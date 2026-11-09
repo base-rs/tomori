@@ -181,7 +181,7 @@ fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// The quaternion `a` then `b`, as `a * b`.
-fn multiply([ax, ay, az, aw]: [f32; 4], [bx, by, bz, bw]: [f32; 4]) -> [f32; 4] {
+pub(crate) fn multiply([ax, ay, az, aw]: [f32; 4], [bx, by, bz, bw]: [f32; 4]) -> [f32; 4] {
     [
         aw * bx + ax * bw + ay * bz - az * by,
         aw * by - ax * bz + ay * bw + az * bx,
@@ -385,6 +385,49 @@ impl Wall {
                 }
             })
             .collect()
+    }
+
+    /// The gap between its slots, across and down, in metres: a flat wall's gutter, or a curved wall's gap, at its scale.
+    pub fn gap(&self) -> f32 {
+        let scale = self.scale();
+        match self.radius() {
+            None => GUTTER * scale,
+            Some(_) => ARC_GAP * scale / ARC_SCALE,
+        }
+    }
+
+    /// Where its slots reach on its surface, from its pose: along it, about its middle, and up it, below a flat wall's
+    /// label or about a curved wall's middle. See [`super::group`].
+    pub fn extent(&self) -> super::group::Extent {
+        let grid = self.grid();
+        let gap = self.gap();
+        let (width, height) = self.slot_size();
+        let across = grid.columns as f32 * (width + gap) - gap;
+        let down = grid.rows as f32 * (height + gap) - gap;
+        let top = match self.radius() {
+            Some(_) => down / 2.0,
+            None => {
+                let (_, board) = board_pixels(grid, self.slot_pixels());
+                (board / 2.0 - TOP_PIXELS as f32) * PIXEL * self.scale()
+            }
+        };
+        super::group::Extent::new(-across / 2.0, across / 2.0, top - down, top)
+    }
+
+    /// The margin a flat wall's board has beyond its slots across `edge`, at its own scale, in metres: a gutter at its
+    /// sides, its label's row and a gap above, and below, a gutter and what makes the board a whole number of rows of
+    /// text.
+    pub fn margin(&self, edge: super::group::Edge) -> f32 {
+        let scale = self.scale();
+        match edge {
+            super::group::Edge::Top => TOP_PIXELS as f32 * PIXEL * scale,
+            super::group::Edge::Bottom => {
+                let (_, board) = self.board().unwrap_or_default();
+                let extent = self.extent();
+                extent.bottom + board / 2.0
+            }
+            _ => GUTTER * scale,
+        }
     }
 
     /// Where `slot` stands in the space, if the wall has it: its middle, facing out of the wall.

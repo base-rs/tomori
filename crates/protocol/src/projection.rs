@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Pose;
 
+pub mod group;
 pub mod layout;
 
+pub use group::{Align, Attach, Edge, Join};
 pub use layout::{Grid, SlotFrame};
 
 /// How many panels a wall holds unless it says otherwise, in slots numbered from 0, the most prominent first: a flat
@@ -141,6 +143,21 @@ pub struct Wall {
     /// draws standard slots at that scale, and so each panel at its text's size, smaller than its slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect: Option<f32>,
+    /// The group it is snapped into, if it is in one, named by the identity of the group's first wall: carrying any of
+    /// its walls carries them all. An older client draws each wall alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Its edges joined to another wall of its group, which stands across each, its slots a gutter from this wall's, as
+    /// the server finds them: a client leaves the border and outer margin off where they meet, so that the group reads
+    /// as one board. See [`group`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joined: Vec<Join>,
+    /// Whether it is locked: a locked wall is neither moved, resized, reshaped, bent nor removed, by anyone, until an
+    /// owner unlocks it, though panels still go onto it and come off it, and it snaps to nothing, nor anything to it.
+    /// Sent only where it is; an older client, which knows none, offers its controls, and the server refuses what they
+    /// ask. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl Wall {
@@ -154,7 +171,29 @@ impl Wall {
             grid: None,
             scale: None,
             aspect: None,
+            group: None,
+            joined: Vec::new(),
+            locked: false,
         }
+    }
+
+    /// The wall, locked or not.
+    pub fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Whether it is locked, so that nothing changes it, moves it or snaps to it, nor it to anything, until an owner
+    /// unlocks it.
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    /// The wall, in the group `group`, joined to others across `joined`.
+    pub fn with_group(mut self, group: Option<String>, joined: Vec<Join>) -> Self {
+        self.group = group;
+        self.joined = joined;
+        self
     }
 
     /// The wall, its slots laid out as `shape` says.
