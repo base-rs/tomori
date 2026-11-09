@@ -35,7 +35,24 @@ pub struct Given {
     pub speaker: String,
     /// When it was given to the agent.
     pub at: std::time::Instant,
+    /// Whether input that did not come through Tomori, or that Tomori may have missed, reached the agent after it, so
+    /// that its words are no longer the agent's latest input, and why.
+    pub superseded: Option<Superseded>,
 }
+
+/// Why the entry given last is no longer the agent's latest input. See `design/security.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Superseded {
+    /// The agent's session was given input Tomori did not send, such as a message typed into it outside Tomori, or
+    /// the agent's service's report that a sub-agent finished.
+    Input,
+    /// Tomori's connection to the agent's session was lost, so it may have missed input the session was given.
+    Reconnected,
+}
+
+/// How many of the keys of entries it gave its agent a space remembers, to tell its own deliveries from input that
+/// did not come through Tomori, which is more than can be delivered between two entries.
+const GIVEN_KEYS: usize = 64;
 
 /// The shared state of one space, driven by backend events and participant actions. Pure: no I/O.
 #[derive(Debug)]
@@ -69,6 +86,9 @@ pub struct SpaceModel {
     given: Option<Given>,
     /// How many entries have been given to the agent, numbering each.
     entries_given: u64,
+    /// The keys of the entries given to the agent most recently, at most [`GIVEN_KEYS`], as its backend reports
+    /// delivering them, so that a delivery of any other is input that did not come through Tomori.
+    given_keys: VecDeque<String>,
     /// Pending permissions, oldest first. The first is presented; the rest wait their turn.
     approvals: VecDeque<Permission>,
     /// Permissions whose decision has been sent to the backend but not yet confirmed.
@@ -593,6 +613,12 @@ pub fn is_activity(event: &Event) -> bool {
     )
 }
 
+/// `key` as a backend reports delivering it, without the `msg_` that OpenCode's message identifiers begin with, which
+/// its backend adds to a key without one and removes again from the delivery it reports.
+fn delivery_key(key: &str) -> &str {
+    key.strip_prefix("msg_").unwrap_or(key)
+}
+
 /// The text delivered to the agent for a queue entry. With attribution, the speaker's display name prefixes the text as `Name: text`.
 pub fn attributed(speaker: &str, text: &str, attribution: bool) -> String {
     if attribution && !speaker.is_empty() {
@@ -651,6 +677,7 @@ impl SpaceModel {
             in_flight: None,
             given: None,
             entries_given: 0,
+            given_keys: VecDeque::new(),
             approvals: VecDeque::new(),
             deciding: Vec::new(),
             questions: VecDeque::new(),
@@ -1221,7 +1248,18 @@ impl SpaceModel {
                 self.busy = Some(false);
                 self.turn_ended();
             }
-            Event::Delivered { key } => self.delivered(&key),
+            Event::Delivered { key } => {
+                // Input Tomori did not give, such as a message typed into the session outside Tomori or a sub-agent's
+                // report, means the participant's words are no longer the agent's latest input.
+                if !self
+                    .given_keys
+                    .iter()
+                    .any(|given| given == delivery_key(&key))
+                {
+                    self.supersede(Superseded::Input);
+                }
+                self.delivered(&key)
+            }
             Event::MessageStarted { message, role } => match role {
                 tomori_backend::Role::User => {
                     self.user_messages.insert(message);
@@ -1355,6 +1393,8 @@ impl SpaceModel {
                 self.unattended_problem();
             }
             Event::Reconnecting { reason } => {
+                // Whatever the session is given while Tomori cannot see it may not be a participant's.
+                self.supersede(Superseded::Reconnected);
                 if !self.closed {
                     self.error = Some(reason.clone());
                     self.reconnecting = Some(reason);
@@ -1402,6 +1442,7 @@ impl SpaceModel {
                 }
             }
             Event::Resynchronized { snapshot } => {
+                self.supersede(Superseded::Reconnected);
                 if !self.closed {
                     self.resynchronize(snapshot);
                 }
@@ -1743,6 +1784,10 @@ impl SpaceModel {
             .retain(|key, _| waiting.contains(key.as_str()));
         self.origins.retain(|key, _| waiting.contains(key.as_str()));
         self.seen.retain(|key, _| waiting.contains(key.as_str()));
+        if self.given_keys.len() == GIVEN_KEYS {
+            self.given_keys.pop_front();
+        }
+        self.given_keys.push_back(delivery_key(&key).to_owned());
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
         // Who began the turn, from the moment it is given, since the agent may call a tool before delivery is confirmed.
@@ -1752,6 +1797,7 @@ impl SpaceModel {
             source,
             speaker,
             at: std::time::Instant::now(),
+            superseded: None,
         });
         Some(prompt)
     }
@@ -1772,7 +1818,15 @@ impl SpaceModel {
             source,
             speaker: speaker.to_owned(),
             at,
+            superseded: None,
         });
+    }
+
+    /// The entry given last is no longer the agent's latest input, for `why`.
+    fn supersede(&mut self, why: Superseded) {
+        if let Some(given) = &mut self.given {
+            given.superseded.get_or_insert(why);
+        }
     }
 
     fn delivered(&mut self, key: &str) {
@@ -2715,6 +2769,73 @@ mod tests {
         space.apply(Event::Idle);
         space.set_attribution(false);
         assert_eq!(space.next_prompt().unwrap().text, "there");
+    }
+
+    #[test]
+    fn input_that_did_not_come_through_tomori_supersedes_the_words_given_last() {
+        let superseded = |space: &SpaceModel| space.given().unwrap().superseded;
+        let mut space = model();
+        space.enqueue("a".into(), 1, "Ada".into(), "confirm the pairing".into());
+        let prompt = space.next_prompt().unwrap();
+        // The entry's own delivery, reported by the backend or the send it made, with or without OpenCode's prefix, leaves Ada's words the agent's latest input.
+        space.sent(&prompt.key, Ok(()));
+        space.apply(Event::Delivered { key: "a".into() });
+        space.apply(Event::Delivered {
+            key: "msg_a".into(),
+        });
+        assert_eq!(superseded(&space), None);
+        // A message typed into the session outside Tomori, or the service's report that a sub-agent finished, which Tomori did not send, supersedes them.
+        space.apply(Event::Delivered {
+            key: "01JSYNTHETICSUBAGENTREPORT".into(),
+        });
+        assert_eq!(superseded(&space), Some(Superseded::Input));
+        // Their own delivery reported again does not make them the latest once more.
+        space.apply(Event::Delivered { key: "a".into() });
+        assert_eq!(superseded(&space), Some(Superseded::Input));
+        // The next entry Tomori gives is the agent's latest input, with a key OpenCode's prefix began.
+        space.apply(Event::Idle);
+        space.enqueue("msg_b".into(), 1, "Ada".into(), "decline it".into());
+        let prompt = space.next_prompt().unwrap();
+        assert_eq!(superseded(&space), None);
+        space.apply(Event::Delivered { key: "b".into() });
+        space.sent(&prompt.key, Ok(()));
+        assert_eq!(superseded(&space), None);
+        // Losing sight of the session, which may miss such input, supersedes them too, as does reading it again.
+        space.apply(Event::Reconnecting {
+            reason: "lost".into(),
+        });
+        assert_eq!(superseded(&space), Some(Superseded::Reconnected));
+        space.apply(Event::Delivered {
+            key: "other".into(),
+        });
+        assert_eq!(superseded(&space), Some(Superseded::Reconnected));
+        let mut space = model();
+        space.give(1, "Ada", std::time::Instant::now());
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot::default(),
+        });
+        assert_eq!(superseded(&space), Some(Superseded::Reconnected));
+        // With no words given, nothing is superseded.
+        let mut space = model();
+        space.apply(Event::Delivered {
+            key: "other".into(),
+        });
+        assert!(space.given().is_none());
+        // Only the most recent keys are remembered.
+        let mut space = model();
+        for index in 0..=GIVEN_KEYS {
+            space.enqueue(format!("k{index}"), 1, "Ada".into(), "hello".into());
+            let prompt = space.next_prompt().unwrap();
+            space.sent(&prompt.key, Ok(()));
+            space.apply(Event::Idle);
+        }
+        assert_eq!(space.given_keys.len(), GIVEN_KEYS);
+        space.apply(Event::Delivered {
+            key: format!("k{GIVEN_KEYS}"),
+        });
+        assert_eq!(superseded(&space), None);
+        space.apply(Event::Delivered { key: "k0".into() });
+        assert_eq!(superseded(&space), Some(Superseded::Input));
     }
 
     #[test]

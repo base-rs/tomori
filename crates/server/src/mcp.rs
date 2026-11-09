@@ -312,7 +312,7 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
 }
 
 /// What `requested_by` is, as each tool that needs it describes it. See `design/security.md`.
-const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\". Tomori checks that the words you were given last in this space are theirs, from the last 10 minutes, and that they are here now and may ask for it, and refuses otherwise.";
+const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\". Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
 
 /// Every tool, as `tools/list` describes it.
 fn tools() -> Value {

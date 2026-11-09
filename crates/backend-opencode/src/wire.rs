@@ -257,7 +257,11 @@ fn inbox_delivered(data: &Value, session_id: &str) -> Option<Event> {
         return None;
     }
     // The `inboxID` is the `msg_`-prefixed id we sent in `send_prompt`.
-    // Strip the prefix to recover the server's delivery key.
+    // Strip the prefix to recover the server's delivery key. OpenCode
+    // reports every user and synthetic item its inbox delivers this way,
+    // such as a prompt typed in its terminal or its report that a sub-agent
+    // finished, so a key the server did not send is input that did not come
+    // through it, which its check of who asked relies on.
     let inbox_id = data.get("inboxID")?.as_str()?;
     let key = inbox_id.strip_prefix("msg_").unwrap_or(inbox_id);
     Some(Event::Delivered {

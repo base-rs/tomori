@@ -1,15 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Who asked for what an agent does with a security-sensitive tool, checked by the server rather than left to the agent's judgement. Each such tool requires `requested_by`, the participant whose words asked for it, and the server checks, in code, that the entry of input given to the agent last, which began its current turn, is theirs, was given within [`REQUEST_RECENT`], came from a participant's connection, and that they are in the space now with the role the tool needs. See `design/security.md`.
+//! Who asked for what an agent does with a security-sensitive tool, checked by the server rather than left to the agent's judgement. Each such tool requires `requested_by`, the participant whose words asked for it, and the server checks, in code, that the entry of input given to the agent last, which began its current turn, is theirs, was given within [`REQUEST_RECENT`], came from a participant's connection, has not been followed by input that did not come through Tomori, and that they are in the space now with the role the tool needs. See `design/security.md`.
 use std::time::{Duration, Instant};
 
 use tomori_protocol::ConnectionRole;
 
 use super::{Hub, HubState};
+use crate::space::Superseded;
 
-/// How recently a participant's entry must have been given to the agent for a tool to act on it: long enough for an agent to work through a request, and short enough that words said long ago, or a turn left running, are not a standing permission. See `design/security.md`.
-pub const REQUEST_RECENT: Duration = Duration::from_secs(600);
+/// How recently a participant's entry must have been given to the agent for a tool to act on it: long enough for an agent to call the tool a request asks for, which it does at once, and short enough that words said earlier, or a turn left running, are not a standing permission. See `design/security.md`.
+pub const REQUEST_RECENT: Duration = Duration::from_secs(180);
 
 /// The role a tool needs of whoever asked for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +82,7 @@ impl Hub {
 }
 
 impl HubState {
-    /// Check that `requested_by` asked for what the agent of `space` is about to do, as [`Needs`] says they must be able to: the entry given to the agent last, within [`REQUEST_RECENT`] of `now`, is theirs, said on a participant's connection, and they are in the space now, connected, with the role needed. Returns who asked, or why the tool is refused, which names no one but whoever the agent named. See `design/security.md`.
+    /// Check that `requested_by` asked for what the agent of `space` is about to do, as [`Needs`] says they must be able to: the entry given to the agent last, within [`REQUEST_RECENT`] of `now`, is theirs, said on a participant's connection, is still the agent's latest input, with nothing given to its session since that did not come through Tomori, and they are in the space now, connected, with the role needed. Returns who asked, or why the tool is refused, which names no one but whoever the agent named. See `design/security.md`.
     pub(super) fn requester(
         &self,
         space: &str,
@@ -107,6 +108,22 @@ impl HubState {
                 "The words you were given last in this space are more than {} old, so Tomori will not act on them. Ask whoever wants this to say it again.",
                 super::spoken(REQUEST_RECENT)
             ));
+        }
+        // Input that did not come through Tomori, typed into the session or reported by the agent's service, came after the words, so they are not what the agent acts on now.
+        match given.superseded {
+            Some(Superseded::Input) => {
+                return Err(
+                    "Input that did not come through Tomori reached you after the words you were given last in this space, such as a message typed into your session or a sub-agent's report, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                );
+            }
+            Some(Superseded::Reconnected) => {
+                return Err(
+                    "Tomori lost its connection to your session after the words you were given last in this space, so it cannot tell that nothing else reached you since. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                );
+            }
+            None => {}
         }
         // The speaker as the agent read them: the words that began its turn are the request it acts on.
         if tomori_protocol::text::name_key(&given.speaker)
