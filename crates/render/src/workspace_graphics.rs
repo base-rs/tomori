@@ -3204,7 +3204,18 @@ mod tests {
             position: summoner + glam::Vec3::new(1.5, -0.1, -0.6),
             orientation: glam::Quat::IDENTITY,
         };
-        for (origin, audience) in [(Anchor::AGENT, EYES), (summoned, summoner)] {
+        // About a workers anchor further than the arc's radius, as the farmyard's beside its coop, 3.6 m from where
+        // participants arrive, and one across a yard, 8 m off: the arc widens, its signs drawn larger with it.
+        let anchor = |x: f32, z: f32| Anchor {
+            position: glam::Vec3::new(x, 1.5, z),
+            orientation: glam::Quat::IDENTITY,
+        };
+        for (origin, audience) in [
+            (Anchor::AGENT, EYES),
+            (summoned, summoner),
+            (anchor(-1.6, -3.2), EYES),
+            (anchor(2.0, -7.7), EYES),
+        ] {
             // Sixteen workers, each with a title six rows long, the longest a sign shows.
             let stations: Vec<Station> = (0..16)
                 .map(|slot| Station {

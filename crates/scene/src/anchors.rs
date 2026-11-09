@@ -225,11 +225,15 @@ pub const EYES: Vec3 = Vec3::new(0.0, 1.6, 0.0);
 /// How far from whoever watches the workers stand at least, horizontally, in metres: the default arc's radius.
 pub const ARC_RADIUS: f32 = 3.2;
 
+/// The row of the default arc that stands lowest above the floor.
+const LOWEST_ROW: usize = 2;
+
 /// The default placement: [`slot_position`]'s arc, about whoever watches, the `audience`, with the arrangement's middle,
 /// the agent, straight ahead of them in the middle of its gap: its columns from 40° either side of the way the
 /// arrangement's middle stands from their eyes, alternately left and right, two rows to each column pair, at least
 /// [`ARC_RADIUS`] from them, or as far as the middle stands, and its rows' heights about their eyes as the default's
-/// are about the eyes at home. So the workers stand about the agent, its gap kept clear for it and its wall, as they
+/// are about the eyes at home, spread in proportion where it stands further than [`ARC_RADIUS`], as its signs are
+/// drawn larger there. So the workers stand about the agent, its gap kept clear for it and its wall, as they
 /// stood before environments placed the agent, whoever the agent faces turning their head left and right to see them,
 /// at home and summoned alike; and at [`Anchor::AGENT`], watched from [`EYES`], exactly where they always have.
 #[derive(Clone, Copy, Debug, Default)]
@@ -258,8 +262,13 @@ impl HomeArc {
         let angle = crate::delegation::slot_angle(column);
         let radius = across.length().max(ARC_RADIUS);
         let direction = ahead * angle.cos() + right * (side * angle.sin());
-        let height = crate::delegation::slot_height(row) - EYES.y;
-        Vec3::new(audience.x, audience.y + height, audience.z) + direction * radius
+        // Wider than the default's, its rows spread in proportion, as its signs are drawn larger, so that no sign reaches
+        // the worker above it; but none stands nearer the floor below their eyes than the lowest row does.
+        let spread = radius / ARC_RADIUS;
+        let floor = audience.y - EYES.y;
+        let height = (crate::delegation::slot_height(row) - EYES.y) * spread;
+        let y = (audience.y + height).max(floor + crate::delegation::slot_height(LOWEST_ROW));
+        Vec3::new(audience.x, y, audience.z) + direction * radius
     }
 }
 
@@ -431,7 +440,8 @@ mod tests {
             first.x < -2.0 && (Vec3::new(first.x, 0.0, first.z).length() - ARC_RADIUS).abs() < 1e-4
         );
         // With the arrangement's middle 6 m further on, the arc about the eyes at home widens to stand as far as it does,
-        // each worker at its slot's bearing and height.
+        // each worker at its slot's bearing, its rows spread about their eyes in proportion, as its signs are drawn
+        // larger, the lowest never nearer the floor than the default's lowest row.
         let further = Anchor {
             position: crate::swarm::CENTER + Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
@@ -442,7 +452,12 @@ mod tests {
         assert!(
             (moved.x.atan2(-moved.z) - slot_position(3).x.atan2(-slot_position(3).z)).abs() < 1e-5
         );
-        assert!((moved.y - slot_position(3).y).abs() < 1e-5);
+        let spread = 8.3 / ARC_RADIUS;
+        assert!((moved.y - (EYES.y + (slot_position(3).y - EYES.y) * spread)).abs() < 1e-4);
+        let above = HomeArc::at(further, EYES, 4);
+        assert!((above.y - (EYES.y + (slot_position(4).y - EYES.y) * spread)).abs() < 1e-4);
+        let lowest = HomeArc::at(further, EYES, 32);
+        assert!((lowest.y - slot_position(32).y).abs() < 1e-5, "{lowest}");
         let fixed: Placement = Arc::new(Fixed(Vec3::new(1.0, 1.0, 1.0)));
         let others = [Placed::new("ses_0", 0, State::Running, Vec3::ZERO)];
         let mut placing = Placing::new("ses_1", 3);

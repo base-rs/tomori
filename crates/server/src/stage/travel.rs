@@ -34,9 +34,10 @@ const THICKNESS: f32 = 0.05;
 /// are at `eyes`, or, unknown, where the agent faces from 1.2 m away, as a participant's trigger leaves it: before them,
 /// [`DISTANCE`] ahead and [`DROP`] below their eyes, towards the agent, facing them, so that its curved row curves about
 /// them as it does about the eyes at home. Where that is not clear, it turns aside from the agent, up to 45° either way,
-/// and stands nearer or further, each within `tomori_environment::sightlines::READING` of their eyes, at the first spot at which every slot, at its corners
-/// and middle, stands outside the environment's `solids`, the other walls shown, `others`, and the swarm, and nothing of
-/// the solids and walls is between their eyes and any slot's middle. None where no spot is clear: it stays at home.
+/// and stands nearer or further, each within `tomori_environment::sightlines::READING` of their eyes, at the first spot
+/// at which no slot, along its edges or across its diagonals, passes through the environment's `solids`, the other
+/// walls shown, `others`, or the swarm, and nothing of the solids and walls is between their eyes and any slot's middle.
+/// None where no spot is clear: it stays at home.
 pub fn spot(
     eyes: Option<[f32; 3]>,
     agent: &Pose,
@@ -88,31 +89,52 @@ pub fn spot(
 }
 
 /// Whether every slot of `wall`, standing at `pose`, stands clear of `solids` and `swarm`, seen from `eyes` past the
-/// solids. Every spot tried is within reading distance of the eyes: at most [`DISTANCES`]' furthest ahead and [`DROP`]
-/// below them.
+/// solids: no edge of a slot, nor either of its diagonals, passes through any of them, so that one standing across a
+/// slot, between its corners, as another wall edge on does, counts too. Every spot tried is within reading distance of
+/// the eyes: at most [`DISTANCES`]' furthest ahead and [`DROP`] below them.
 fn clear(eyes: [f32; 3], pose: &Pose, wall: &Wall, solids: &[Solid], swarm: &Solid) -> bool {
     let mut placed = wall.clone();
     placed.pose = *pose;
-    let inside =
-        |point: [f32; 3]| swarm.contains(point) || solids.iter().any(|solid| solid.contains(point));
+    let crosses = |(from, to): ([f32; 3], [f32; 3])| {
+        swarm.blocks(from, to) || solids.iter().any(|solid| solid.blocks(from, to))
+    };
     let hidden = |point: [f32; 3]| solids.iter().any(|solid| solid.blocks(eyes, point));
     placed.slot_frames().iter().all(|slot| {
-        let (middle, corners) = corners(slot, pose);
-        !inside(middle) && !corners.into_iter().any(inside) && !hidden(middle)
+        let (middle, [a, b, c, d]) = corners(slot, pose);
+        // Its edges, about it, and its diagonals, across it.
+        let lines = [(a, b), (b, d), (d, c), (c, a), (a, d), (b, c)];
+        !lines.into_iter().any(crosses) && !hidden(middle)
     })
 }
 
-/// The middle and four corners of `slot`, on a wall standing at `wall`.
+/// `vector` turned by the quaternion `rotation`.
+fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
+    let length = (x * x + y * y + z * z + w * w).sqrt().max(f32::EPSILON);
+    let (x, y, z, w) = (x / length, y / length, z / length, w / length);
+    // v + 2w(q × v) + 2q × (q × v)
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let q = [x, y, z];
+    let t = cross(q, vector).map(|value| 2.0 * value);
+    let u = cross(q, t);
+    std::array::from_fn(|axis| vector[axis] + w * t[axis] + u[axis])
+}
+
+/// The middle and four corners of `slot`, on a wall standing at `wall`, as it is turned: bottom left, bottom right,
+/// top left and top right.
 fn corners(slot: &tomori_protocol::wall::SlotFrame, wall: &Pose) -> ([f32; 3], [[f32; 3]; 4]) {
     let at = slot.pose(wall);
-    let yaw = at.yaw();
-    let right = [yaw.cos(), 0.0, -yaw.sin()];
+    let right = rotate(at.orientation, [1.0, 0.0, 0.0]);
+    let up = rotate(at.orientation, [0.0, 1.0, 0.0]);
     let [width, height] = slot.size;
-    let corner = |across: f32, up: f32| {
+    let corner = |across: f32, rise: f32| {
         std::array::from_fn(|axis| {
-            at.position[axis]
-                + right[axis] * across * width / 2.0
-                + if axis == 1 { up * height / 2.0 } else { 0.0 }
+            at.position[axis] + right[axis] * across * width / 2.0 + up[axis] * rise * height / 2.0
         })
     };
     (
@@ -212,6 +234,22 @@ mod tests {
             assert!(!shed.blocks(eyes, middle));
         }
         assert!(across(spot.position, eyes) <= READING);
+        // A thin board standing across a slot, between its corners and its middle, as another wall seen edge on: it
+        // turns aside too, no edge or diagonal of any slot passing through it.
+        let board = Solid::new([0.1, 0.0, -2.6], [0.12, 2.0, -2.0]);
+        let thin = spot_with(eyes, &agent, &[], &[board]);
+        assert!(
+            across(thin.position, [0.0, 0.0, -DISTANCE]) > 0.3,
+            "{thin:?}"
+        );
+        let mut placed = tomori();
+        placed.pose = thin;
+        for slot in placed.slot_frames() {
+            let (_, [a, b, c, d]) = corners(&slot, &thin);
+            for (from, to) in [(a, b), (b, d), (d, c), (c, a), (a, d), (b, c)] {
+                assert!(!board.blocks(from, to));
+            }
+        }
         // A wall someone added there: the same.
         let added = Wall::new(
             "wall-1",
