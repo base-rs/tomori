@@ -148,6 +148,18 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
     assert!(close(at.position, [1.0, 1.4, -1.5]), "{at:?}");
     // It faces her.
     assert!(at.yaw().abs() < 1e-3, "{}", at.yaw());
+    // Its entourage gathers about her: its Tomori wall goes before her, 2.3 m ahead of her eyes and below them, as its
+    // home stands before home, for everyone.
+    assert_eq!(state.summoner, Some([1.0, 1.6, 0.0]));
+    let wall = ada.wait_for(|message| match message {
+        tomori_protocol::ServerMessage::Projection { projection }
+            if projection.walls[0].pose.position != [0.0, 0.52, -2.3] =>
+        {
+            Some(projection.walls[0].pose)
+        }
+        _ => None,
+    });
+    assert!(close(wall.position, [1.0, 0.52, -2.3]), "{wall:?}");
 
     // Somewhere it cannot go, or someone not here, is refused, saying why.
     assert!(

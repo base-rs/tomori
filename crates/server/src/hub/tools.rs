@@ -242,7 +242,9 @@ impl Hub {
         let people = state.heads(&space);
         let environments = self.environments();
         let record = state.space_mut(&space).expect("found above");
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let origin = record.model.origin();
@@ -349,7 +351,9 @@ impl Hub {
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let projection = record.stage.view(&space, &walls, crate::cards::unix_now());
         let now = std::time::Instant::now();
         let people: Vec<crate::presence::Person<'_>> = record
@@ -413,7 +417,9 @@ impl Hub {
         let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         // By its id, its identity, or else by its title, which must name only one.
@@ -479,7 +485,9 @@ impl Hub {
         let people = state.heads(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let origin = record.model.origin();
@@ -605,7 +613,9 @@ impl Hub {
         let people = state.heads(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let origin = record.model.origin();
         let laid = layout.apply(tomori_protocol::Wall::new(
             "",
@@ -644,7 +654,9 @@ impl Hub {
         let people = state.heads(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let origin = record.model.origin();
@@ -725,10 +737,19 @@ impl Hub {
                         "Nobody asked for this as they spoke, so name whom to go to.".to_owned()
                     })?,
                 };
-                Some(crate::presence::before(&head))
+                Some((crate::presence::before(&head), head.position))
             }
         };
-        let moved = state.summon(&space, at);
+        // Its entourage gathers about whomever it goes to: its workers, and its Tomori wall at its travel spot.
+        let record = state.space(&space).expect("found above");
+        let travel = at.and_then(|(at, eyes)| self.travel_spot(record, &at, Some(eyes)));
+        let moved = state.summon(
+            &space,
+            at.map(|(at, _)| at),
+            at.map(|(_, eyes)| eyes),
+            travel,
+        );
+        let at = at.map(|(at, _)| at);
         if moved {
             match at {
                 Some(_) => log::info!("The agent of space {space} moved itself to someone."),

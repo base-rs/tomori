@@ -181,6 +181,9 @@ pub struct Placing<'a> {
     pub state: State,
     pub slot: usize,
     pub workers: &'a [Placed<'a>],
+    /// Where the eyes are of whoever the agent faces, whom its entourage gathers about: at home, the eyes at home,
+    /// [`EYES`]; summoned, those of whoever summoned it. The default arc curves about them.
+    pub audience: Vec3,
 }
 
 impl<'a> Placing<'a> {
@@ -192,6 +195,7 @@ impl<'a> Placing<'a> {
             state: State::Unknown,
             slot,
             workers: &[],
+            audience: EYES,
         }
     }
 }
@@ -214,26 +218,63 @@ pub trait WorkerPlacement: Send + Sync {
 /// A worker placement, shared between the frame step and the spectator.
 pub type Placement = Arc<dyn WorkerPlacement>;
 
-/// The default placement: [`slot_position`]'s arc about home, which passes through the agent's default home, carried
-/// with it to the workers anchor, the arrangement's middle, and turned with it, so that by default workers stand about
-/// the agent's home as they stand about its default home, and at [`Anchor::AGENT`] exactly where they always have.
+/// Where the eyes are, at home, of participants arriving: 1.6 m above home, as `tomori_environment::sightlines` takes
+/// them to be.
+pub const EYES: Vec3 = Vec3::new(0.0, 1.6, 0.0);
+
+/// How far from whoever watches the workers stand at least, horizontally, in metres: the default arc's radius.
+pub const ARC_RADIUS: f32 = 3.2;
+
+/// The row of the default arc that stands lowest above the floor.
+const LOWEST_ROW: usize = 2;
+
+/// The default placement: [`slot_position`]'s arc, about whoever watches, the `audience`, with the arrangement's middle,
+/// the agent, straight ahead of them in the middle of its gap: its columns from 40° either side of the way the
+/// arrangement's middle stands from their eyes, alternately left and right, two rows to each column pair, at least
+/// [`ARC_RADIUS`] from them, or as far as the middle stands, and its rows' heights about their eyes as the default's
+/// are about the eyes at home, spread in proportion where it stands further than [`ARC_RADIUS`], as its signs are
+/// drawn larger there. So the workers stand about the agent, its gap kept clear for it and its wall, as they
+/// stood before environments placed the agent, whoever the agent faces turning their head left and right to see them,
+/// at home and summoned alike; and at [`Anchor::AGENT`], watched from [`EYES`], exactly where they always have.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HomeArc;
 
 impl HomeArc {
-    /// Where the default arc stands `slot` about `origin`.
-    pub fn at(origin: Anchor, slot: usize) -> Vec3 {
-        if origin == Anchor::AGENT {
-            slot_position(slot)
-        } else {
-            origin.place(slot_position(slot) - crate::swarm::CENTER)
+    /// Where the default arc stands `slot` about whoever's eyes are at `audience`, about `origin`.
+    pub fn at(origin: Anchor, audience: Vec3, slot: usize) -> Vec3 {
+        if origin == Anchor::AGENT && audience == EYES {
+            return slot_position(slot);
         }
+        let (side, column, row) = crate::delegation::slot_lane(slot);
+        let across = Vec3::new(
+            origin.position.x - audience.x,
+            0.0,
+            origin.position.z - audience.z,
+        );
+        // Towards the middle, or else, as from its very place, the way it faces them from.
+        let ahead = across.try_normalize().unwrap_or_else(|| {
+            let facing = origin.orientation * Vec3::Z;
+            Vec3::new(-facing.x, 0.0, -facing.z)
+                .try_normalize()
+                .unwrap_or(Vec3::NEG_Z)
+        });
+        let right = Vec3::new(-ahead.z, 0.0, ahead.x);
+        let angle = crate::delegation::slot_angle(column);
+        let radius = across.length().max(ARC_RADIUS);
+        let direction = ahead * angle.cos() + right * (side * angle.sin());
+        // Wider than the default's, its rows spread in proportion, as its signs are drawn larger, so that no sign reaches
+        // the worker above it; but none stands nearer the floor below their eyes than the lowest row does.
+        let spread = radius / ARC_RADIUS;
+        let floor = audience.y - EYES.y;
+        let height = (crate::delegation::slot_height(row) - EYES.y) * spread;
+        let y = (audience.y + height).max(floor + crate::delegation::slot_height(LOWEST_ROW));
+        Vec3::new(audience.x, y, audience.z) + direction * radius
     }
 }
 
 impl WorkerPlacement for HomeArc {
     fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
-        Self::at(origin, worker.slot)
+        Self::at(origin, worker.audience, worker.slot)
     }
 }
 
@@ -255,14 +296,16 @@ pub fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>
 }
 
 /// Where the agent and the workers stand in the joined space: the swarm at `agent`, where a participant summoned it or
-/// else at its `home`; the workers about `workers`, by default its home, by `placement`, or by [`HomeArc`] without one;
-/// and the `carriage` that takes the environment's own coordinates, its scenery's, walkable surfaces' and client
-/// side's, into the space's.
+/// else at its `home`; the workers about `workers`, the agent itself while it is summoned, or else the workers anchor,
+/// by default its home, by `placement`, or by [`HomeArc`] without one, gathered about `audience`, the eyes of whoever
+/// summoned it, or else those at home; and the `carriage` that takes the environment's own coordinates, its
+/// scenery's, walkable surfaces' and client side's, into the space's.
 #[derive(Clone)]
 pub struct Arrangement {
     pub agent: Anchor,
     pub home: Anchor,
     pub workers: Anchor,
+    pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
 }
@@ -281,6 +324,7 @@ impl Default for Arrangement {
             agent: Anchor::AGENT,
             home: Anchor::AGENT,
             workers: Anchor::AGENT,
+            audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
         }
@@ -294,6 +338,7 @@ impl std::fmt::Debug for Arrangement {
             .field("agent", &self.agent)
             .field("home", &self.home)
             .field("workers", &self.workers)
+            .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)
             .finish()
@@ -384,13 +429,35 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
         };
-        // Carried with the arrangement's middle, 6 m further on.
+        // With the arrangement's middle straight above the eyes it gathers about, its arc stands the way the middle faces
+        // them from: facing +X, it faces them from −X, so its workers stand towards −X.
+        let overhead = Anchor {
+            position: EYES + Vec3::Y,
+            orientation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let first = HomeArc::at(overhead, EYES, 0);
+        assert!(
+            first.x < -2.0 && (Vec3::new(first.x, 0.0, first.z).length() - ARC_RADIUS).abs() < 1e-4
+        );
+        // With the arrangement's middle 6 m further on, the arc about the eyes at home widens to stand as far as it does,
+        // each worker at its slot's bearing, its rows spread about their eyes in proportion, as its signs are drawn
+        // larger, the lowest never nearer the floor than the default's lowest row.
         let further = Anchor {
             position: crate::swarm::CENTER + Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
         };
         let (moved, panicked) = place(further, None, &worker);
-        assert!(close(moved, slot_position(3) + Vec3::new(0.0, 0.0, -6.0)) && !panicked);
+        assert!(!panicked);
+        assert!((Vec3::new(moved.x, 0.0, moved.z).length() - 8.3).abs() < 1e-4);
+        assert!(
+            (moved.x.atan2(-moved.z) - slot_position(3).x.atan2(-slot_position(3).z)).abs() < 1e-5
+        );
+        let spread = 8.3 / ARC_RADIUS;
+        assert!((moved.y - (EYES.y + (slot_position(3).y - EYES.y) * spread)).abs() < 1e-4);
+        let above = HomeArc::at(further, EYES, 4);
+        assert!((above.y - (EYES.y + (slot_position(4).y - EYES.y) * spread)).abs() < 1e-4);
+        let lowest = HomeArc::at(further, EYES, 32);
+        assert!((lowest.y - slot_position(32).y).abs() < 1e-5, "{lowest}");
         let fixed: Placement = Arc::new(Fixed(Vec3::new(1.0, 1.0, 1.0)));
         let others = [Placed::new("ses_0", 0, State::Running, Vec3::ZERO)];
         let mut placing = Placing::new("ses_1", 3);
@@ -436,7 +503,7 @@ mod tests {
         assert_eq!(Anchor::from_pose(&agent), Some(Anchor::AGENT));
         // The workers' arrangement made the same way stands exactly where the default does: the arc about home.
         let workers = Anchor::from_pose(&agent).unwrap();
-        assert_eq!(HomeArc::at(workers, 2), slot_position(2));
+        assert_eq!(HomeArc::at(workers, EYES, 2), slot_position(2));
         // To one side, facing home, its arc still curves about home: its middle slot stands nearer home than the
         // arrangement's middle, on the way to home, as the default's does.
         let side = Pose::at([2.3, 1.4, 0.0]).facing_towards([0.0, 1.4, 0.0]);
@@ -446,7 +513,7 @@ mod tests {
         let ahead = side.place(Vec3::Z);
         assert!(close(ahead, Vec3::new(1.3, 1.4, 0.0)), "{ahead}");
         for slot in 0..8 {
-            let at = HomeArc::at(side, slot);
+            let at = HomeArc::at(side, EYES, slot);
             // On a circle of 3.2 m about home, as the default arc is about home.
             assert!(
                 (Vec3::new(at.x, 0.0, at.z).length() - 3.2).abs() < 1e-3,

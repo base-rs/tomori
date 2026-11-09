@@ -1860,7 +1860,7 @@ impl Conversation {
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Travel => self.toggle_travel(),
-            crate::hand_menu::Choice::AgentHome => self.summon(None),
+            crate::hand_menu::Choice::AgentHome => self.summon(None, None),
             crate::hand_menu::Choice::AddWall => self.add_wall(),
             crate::hand_menu::Choice::RemoveWall => self.remove_wall(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
@@ -2269,7 +2269,8 @@ impl Conversation {
     }
 
     /// Where the agent and the workers stand now: in a space, the agent where a participant summoned it, or else at
-    /// the home its state gives, the workers about the workers anchor, or else the agent's home, each that is valid,
+    /// the home its state gives, the workers about it while it is summoned, gathered about whoever summoned it, or else
+    /// about the workers anchor, or else the agent's home, gathered about the eyes at home, each that is valid,
     /// by the placement registered for its environment where this build draws it at the space's version; and the
     /// carriage of that environment's own coordinates into the space's, where it draws it. Otherwise, as outside a
     /// space, the default layout. See `design/environments.md`.
@@ -2286,6 +2287,18 @@ impl Conversation {
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
         arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
+        // Summoned, its workers go with it, gathered about whoever summoned it, or, from a server that does not say, about
+        // whoever it faces, 1.2 m before it, as a trigger leaves it.
+        if arrangement.summoned() {
+            arrangement.workers = arrangement.agent;
+            arrangement.audience = space
+                .summoner
+                .map(glam::Vec3::from_array)
+                .filter(|eyes| {
+                    eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH
+                })
+                .unwrap_or_else(|| arrangement.agent.place(glam::Vec3::new(0.0, 0.2, 1.2)));
+        }
         // The environment drawn: one this build cannot draw at the space's version is the grid.
         let environment = self.environment_of(space);
         arrangement.placement = self
@@ -2315,9 +2328,10 @@ impl Conversation {
     }
 
     /// Summon the joined space's agent to `at`, in the space's coordinates, facing along its +Z, for everyone in the
-    /// space, or, without it, send it home; it stands there at once here, as everyone else is told. Nothing where this
-    /// participant may not. See `design/environments.md`.
-    pub fn summon(&mut self, at: Option<tomori_protocol::Pose>) {
+    /// space, by this participant, whose eyes are at `eyes`, or, without it, send it home; it stands there at once here,
+    /// its workers gathering about those eyes, as everyone else is told. Nothing where this participant may not. See
+    /// `design/environments.md`.
+    pub fn summon(&mut self, at: Option<tomori_protocol::Pose>, eyes: Option<[f32; 3]>) {
         let participates = self.role.participates() && self.mode == Mode::Space;
         let Some(space) = self
             .space
@@ -2327,6 +2341,7 @@ impl Conversation {
             return;
         };
         space.summoned = at;
+        space.summoner = at.and(eyes);
         self.send(ClientMessage::PlaceAgent { at });
     }
 
@@ -7561,18 +7576,32 @@ mod tests {
         assert!(sky.placement.is_none());
         assert_eq!(sky.agent, Anchor::AGENT);
         assert_eq!(sky.workers, Anchor::from_pose(&agent).unwrap());
-        // Summoned, the agent stands there, and its home and the workers stay where they were.
+        assert_eq!(sky.audience, crate::anchors::EYES);
+        // Summoned, the agent stands there, its home where it was, and its workers go with it, gathered about whoever
+        // summoned it.
         let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
         conversation.apply(space(|state| {
             state.environment = "sky".into();
             state.anchors = Anchors::new().with_workers(agent);
             state.summoned = Some(summoned);
+            state.summoner = Some([0.2, 1.4, 0.1]);
         }));
         let away = conversation.arrangement();
         assert!(away.summoned());
         assert_eq!(away.agent, Anchor::from_pose(&summoned).unwrap());
         assert_eq!(away.home, Anchor::AGENT);
-        assert_eq!(away.workers, Anchor::from_pose(&agent).unwrap());
+        assert_eq!(away.workers, away.agent);
+        assert_eq!(away.audience, glam::Vec3::new(0.2, 1.4, 0.1));
+        // From a server that does not say whom, or says nonsense, about whoever it faces, 1.2 m before it.
+        for summoner in [None, Some([f32::NAN, 0.0, 0.0]), Some([0.0, 0.0, 90.0])] {
+            conversation.apply(space(|state| {
+                state.environment = "sky".into();
+                state.summoned = Some(summoned);
+                state.summoner = summoner;
+            }));
+            let before = away.agent.place(glam::Vec3::new(0.0, 0.2, 1.2));
+            assert!(conversation.arrangement().audience.distance(before) < 1e-5);
+        }
         // Leaving, the default layout.
         conversation.apply(space(observe));
         hold_b(&mut conversation);
@@ -7588,7 +7617,7 @@ mod tests {
         assert!(!conversation.menu_model().agent_away);
         let mut older = joined(|state| state.summoned = Some(summoned));
         assert!(!older.menu_model().agent_away);
-        older.summon(None);
+        older.summon(None, None);
         assert!(sent(&mut older).is_empty());
         // Summoned away, the Space section offers to send it home, which tells everyone and stands it there at once.
         conversation.apply(space(|state| {

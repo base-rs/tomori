@@ -2127,6 +2127,7 @@ impl SpaceModel {
             // Set by the hub, which knows the environments.
             anchors: tomori_protocol::Anchors::default(),
             summoned: None,
+            summoner: None,
             summons: false,
             // Set by the hub, which knows the backends.
             avatar: None,

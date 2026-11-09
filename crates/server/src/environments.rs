@@ -42,6 +42,9 @@ pub struct Environment {
     walls: Vec<tomori_protocol::Pose>,
     /// Those walls, carried into a space's coordinates, where home is the origin facing −Z.
     carried: Vec<tomori_protocol::Pose>,
+    /// The boxes of its scenery that nothing of Tomori's stands inside nor is seen through, in its own coordinates, each
+    /// from its least to its greatest corner. See `design/environments.md`.
+    solids: Vec<([f32; 3], [f32; 3])>,
 }
 
 impl fmt::Debug for Environment {
@@ -59,6 +62,7 @@ impl fmt::Debug for Environment {
             .field("arrival", &self.arrival)
             .field("avatar", &self.avatar)
             .field("walls", &self.walls)
+            .field("solids", &self.solids)
             .finish()
     }
 }
@@ -76,6 +80,7 @@ impl PartialEq for Environment {
             && self.arrival == other.arrival
             && self.avatar == other.avatar
             && self.walls == other.walls
+            && self.solids == other.solids
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
                 (None, None) => true,
@@ -102,6 +107,7 @@ impl Environment {
             avatar: None,
             walls: Vec::new(),
             carried: Vec::new(),
+            solids: Vec::new(),
         }
     }
 
@@ -238,8 +244,10 @@ impl Environment {
     }
 
     /// The environment, with the Tomori wall's home at `stage`, its `stage` anchor, in its own coordinates, upright and
-    /// facing along the pose's +Z: where the middle of its row stands in a space in it. It stays there: it does not
-    /// follow the agent, nor anyone else, and its edits, where a space keeps them, stand over it. Make it readable from
+    /// facing along the pose's +Z: where the middle of its row stands in a space in it. It stays there, but while a
+    /// participant has summoned the agent, when it stands before them, clear of the environment's solids, and goes home
+    /// with the agent; it does not follow the agent to its home, nor anyone else, and its edits, where a space keeps
+    /// them, stand over it. Make it readable from
     /// where participants arrive, within about 4 m of their eyes and facing them, clear of the scenery: see
     /// `tomori_environment::sightlines`. The server uses it if, carried into the space's coordinates, it is finite,
     /// within 20 m of home and has an orientation, made upright, as walls are. Without one, the wall stands at
@@ -317,7 +325,7 @@ impl Environment {
     /// The environment, with the middle of its workers' arrangement at `workers`, its `workers` anchor, in its own
     /// coordinates, the arrangement facing along the pose's +Z, towards whoever watches it, as the agent does. Without
     /// one, the arrangement's middle is the agent's home, so that workers stand about the agent's home, as they stand
-    /// about its default home by default; they stay there when the agent is summoned. A client places them about it,
+    /// about its default home by default; summoned, the agent takes them with it. A client places them about it,
     /// by the placement its build registers for the environment or the default arc. Sent and bounded as
     /// [`Self::with_agent`] is. See `design/environments.md`.
     ///
@@ -358,6 +366,68 @@ impl Environment {
     /// The avatar its agent shows as in its spaces, if it says.
     pub fn avatar(&self) -> Option<&str> {
         self.avatar.as_deref()
+    }
+
+    /// The environment, with `solids`, boxes of its scenery, in its own coordinates, each from its least to its greatest
+    /// corner, aligned with its axes, such as a building or a stack of hay: nothing of Tomori's that moves about the
+    /// space, the Tomori wall at its travel spot while the agent is summoned, stands inside one, nor is seen through
+    /// one. The same boxes its tests check its homes against with `tomori_environment::sightlines`. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_server::Environment;
+    ///
+    /// let barn = ([2.0, 0.0, -6.0], [5.0, 3.0, -3.0]);
+    /// assert_eq!(Environment::new("farm", "Farm").with_solids([barn]).solids(), [barn]);
+    /// ```
+    pub fn with_solids(mut self, solids: impl IntoIterator<Item = ([f32; 3], [f32; 3])>) -> Self {
+        self.solids = solids.into_iter().collect();
+        self
+    }
+
+    /// The boxes of its scenery, in its own coordinates.
+    pub fn solids(&self) -> &[([f32; 3], [f32; 3])] {
+        &self.solids
+    }
+
+    /// Its solids, carried into a space's coordinates, each the box about its corners carried there, those not finite
+    /// or beyond [`crate::stage::ARRIVAL_REACH`] left out.
+    fn carried_solids(&self) -> Vec<tomori_environment::sightlines::Solid> {
+        let carriage = self.carriage();
+        self.solids
+            .iter()
+            .filter(|(low, high)| {
+                low.iter()
+                    .chain(high)
+                    .all(|value| value.is_finite() && value.abs() <= crate::stage::ARRIVAL_REACH)
+            })
+            .map(|(low, high)| {
+                let corners = (0..8).map(|corner: usize| {
+                    let point = std::array::from_fn(|axis| {
+                        if corner & (1 << axis) == 0 {
+                            low[axis].min(high[axis])
+                        } else {
+                            low[axis].max(high[axis])
+                        }
+                    });
+                    match carriage {
+                        None => point,
+                        Some(carriage) => {
+                            carriage.carry(&tomori_protocol::Pose::at(point)).position
+                        }
+                    }
+                });
+                corners.fold(
+                    tomori_environment::sightlines::Solid::new([f32::MAX; 3], [f32::MIN; 3]),
+                    |solid, point| {
+                        tomori_environment::sightlines::Solid::new(
+                            std::array::from_fn(|axis| solid.low[axis].min(point[axis])),
+                            std::array::from_fn(|axis| solid.high[axis].max(point[axis])),
+                        )
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -439,6 +509,12 @@ impl Environments {
             .and_then(Environment::avatar)
             .filter(|avatar| tomori_protocol::valid_avatar(avatar))
             .map(str::to_owned)
+    }
+
+    /// The solids of the environment `id`, carried into a space's coordinates, none when it is not offered.
+    pub(crate) fn solids(&self, id: &str) -> Vec<tomori_environment::sightlines::Solid> {
+        self.get(id)
+            .map_or_else(Vec::new, Environment::carried_solids)
     }
 
     /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a
@@ -758,6 +834,37 @@ mod tests {
                 .carriage(),
             None
         );
+    }
+
+    #[test]
+    fn an_environment_s_solids_are_carried_into_a_space_and_bounded() {
+        use tomori_environment::sightlines::Solid;
+        let shed = ([1.0, 0.0, -4.0], [3.0, 2.0, -3.0]);
+        let plain = Environment::new("field", "Field")
+            .with_solids([shed, ([f32::NAN, 0.0, 0.0], [1.0; 3])]);
+        assert_eq!(plain.solids().len(), 2);
+        // Arriving at its origin, facing −Z, its solids stand where they are; one not finite is left out.
+        assert_eq!(plain.carried_solids(), [Solid::new(shed.0, shed.1)]);
+        // Arriving 2 m along +X, facing +X, they are carried, each the box about its corners.
+        let turned = plain.clone().with_arrival(
+            tomori_protocol::Pose::at([2.0, 0.0, 0.0]).facing_towards([5.0, 0.0, 0.0]),
+        );
+        let carried = turned.carried_solids();
+        let expected = Solid::new([-4.0, 0.0, -1.0], [-3.0, 2.0, 1.0]);
+        assert!(
+            (0..3).all(
+                |axis| (carried[0].low[axis] - expected.low[axis]).abs() < 1e-4
+                    && (carried[0].high[axis] - expected.high[axis]).abs() < 1e-4
+            ),
+            "{carried:?}"
+        );
+        // Beyond the arrival's reach, left out too; and an environment not offered has none.
+        let far =
+            Environment::new("far", "Far").with_solids([([2000.0, 0.0, 0.0], [2001.0, 1.0, 1.0])]);
+        assert!(far.carried_solids().is_empty());
+        let offered = tomoris().with(turned);
+        assert_eq!(offered.solids("field").len(), 1);
+        assert!(offered.solids("nowhere").is_empty());
     }
 
     #[test]

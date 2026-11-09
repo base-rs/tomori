@@ -440,7 +440,9 @@ impl Hub {
         };
         record.model.remove_workers(&ids);
         let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
+        let walls = environments
+            .walls(&record.model.environment)
+            .travelling(record.travel);
         let content = crate::stage::Content {
             title: "Workers".to_owned(),
             body: notice(removed, by.map(|by| by.name.as_str())),

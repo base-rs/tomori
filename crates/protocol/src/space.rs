@@ -309,6 +309,12 @@ pub struct SpaceState {
     /// or a participant sends it home. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summoned: Option<crate::Pose>,
+    /// While the agent is summoned, where the eyes were of whoever it was summoned to, in the space's coordinates: the
+    /// participant it faces, whom its entourage gathers about, its workers on their arc about them and the Tomori wall
+    /// at its travel spot before them. Absent while it is at home, where they gather about the eyes at home, and from
+    /// older servers, whose clients arrange the workers about the agent's home. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summoner: Option<[f32; 3]>,
     /// Whether the server keeps where the agent is summoned to, taking [`crate::ClientMessage::PlaceAgent`] from a
     /// participant. False from older servers; a client sends it only when this is set, and otherwise lets the swarm
     /// go back as the trigger is let go.
@@ -983,10 +989,12 @@ mod tests {
                 .with_workers(pose)
                 .with_arrival(pose),
             summoned: Some(pose),
+            summoner: Some([0.5, 1.5, 0.0]),
             summons: true,
             ..SpaceState::default()
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["summoner"][1], 1.5);
         assert_eq!(json["anchors"]["agent"]["position"][0], 1.0);
         assert_eq!(json["anchors"]["arrival"]["position"][1], 1.5);
         assert_eq!(json["summoned"]["position"][2], -3.0);
@@ -1001,6 +1009,7 @@ mod tests {
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
         assert!(plain.get("anchors").is_none());
         assert!(plain.get("summoned").is_none() && plain.get("summons").is_none());
+        assert!(plain.get("summoner").is_none());
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());

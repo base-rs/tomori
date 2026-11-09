@@ -38,7 +38,8 @@ pub fn builder() -> Builder {
             .with_walls([farmyard_noticeboard()])
             .with_arrival(farmyard_arrival())
             .with_agent(farmyard_agent())
-            .with_stage(farmyard_tomori_wall()),
+            .with_stage(farmyard_tomori_wall())
+            .with_solids(tomori_environment_farmyard::layout::solids()),
         );
     tomori_environment_github_server::register(builder)
 }

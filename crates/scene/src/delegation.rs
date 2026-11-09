@@ -315,10 +315,21 @@ pub struct Station {
     pub title: String,
     #[serde(default = "full_opacity")]
     pub opacity: f32,
+    /// Where the eyes are of whoever its sign faces, the agent's audience: those at home, or those of whoever summoned
+    /// it.
+    #[serde(default = "home_eyes")]
+    pub facing: [f32; 3],
 }
+
+/// Where the eyes are at home, which a station's sign faces unless the agent is summoned.
+pub const HOME_EYES: [f32; 3] = [0.0, 1.6, 0.0];
 
 fn full_opacity() -> f32 {
     1.0
+}
+
+fn home_eyes() -> [f32; 3] {
+    HOME_EYES
 }
 
 impl Station {
@@ -328,6 +339,10 @@ impl Station {
             && self.title.chars().count() <= 160
             && self
                 .position
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= 100.0)
+            && self
+                .facing
                 .iter()
                 .all(|v| v.is_finite() && v.abs() <= 100.0)
             && self.opacity.is_finite()
@@ -346,7 +361,10 @@ struct Worker {
     continuous_evidence: bool,
     #[cfg(test)]
     origin: Vec3,
+    /// Where it stands now, as it is drawn and pointed at, gliding towards its `place`.
     anchor: Vec3,
+    /// Where it was placed, which it glides to when the arrangement changes.
+    place: Vec3,
     particles: [Vec3; PARTICLES],
     particle_scales: [Vec3; PARTICLES],
     flight_start: [Vec3; PARTICLES],
@@ -403,8 +421,11 @@ pub struct Scene {
     highlighted: Option<String>,
     /// Where the headset's ray ends on the worker pointed at.
     hit_point: Option<Vec3>,
-    /// The origin of the workers' arrangement, home unless the joined space's environment says otherwise.
+    /// The origin of the workers' arrangement, home unless the joined space's environment says otherwise, or the agent
+    /// while it is summoned.
     origin: Anchor,
+    /// Where the eyes are of whoever the agent faces, whom the workers gather about.
+    audience: Vec3,
     /// How workers are placed about it: by the joined space's environment's registered placement, or the default arc.
     placement: Option<Placement>,
     /// The placements that have panicked, which this scene never calls again: at most one for each environment the
@@ -433,15 +454,17 @@ impl Scene {
             highlighted: None,
             hit_point: None,
             origin: Anchor::AGENT,
+            audience: crate::anchors::EYES,
             placement: None,
             poisoned: Vec::new(),
         }
     }
 
-    /// Arrange the workers about `origin` by `placement`, or by the default arc without one, from now on. Each live
-    /// worker is placed again, in the order of its slot, only when the arrangement changes, and glides there; otherwise
+    /// Arrange the workers about `origin`, gathered about whoever's eyes are at `audience`, by `placement`, or by the
+    /// default arc without one, from now on. Each live worker is placed again, in the order of its slot, only when the
+    /// arrangement changes, as when the agent is summoned or sent home, and glides there, its sign with it; otherwise
     /// nothing moves. See `design/environments.md`.
-    pub fn arrange(&mut self, origin: Anchor, placement: Option<Placement>) {
+    pub fn arrange(&mut self, origin: Anchor, audience: Vec3, placement: Option<Placement>) {
         // One that has panicked is never called again: its workers stand on the arc.
         let placement = placement.filter(|placement| {
             !self
@@ -450,6 +473,7 @@ impl Scene {
                 .any(|poisoned| std::sync::Arc::ptr_eq(placement, poisoned))
         });
         let same = self.origin == origin
+            && self.audience == audience
             && match (&self.placement, &placement) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -459,6 +483,7 @@ impl Scene {
             return;
         }
         self.origin = origin;
+        self.audience = audience;
         self.placement = placement;
         let root = self.root.clone();
         let mut live: Vec<(usize, &str, Option<&str>, State)> = self
@@ -481,6 +506,7 @@ impl Scene {
             placing.parent = parent;
             placing.state = state;
             placing.workers = &placed;
+            placing.audience = self.audience;
             let placement = self.placement.as_ref().filter(|_| !panicked);
             let (position, panic) = crate::anchors::place(self.origin, placement, &placing);
             panicked |= panic;
@@ -491,11 +517,12 @@ impl Scene {
             .iter()
             .map(|placed| (placed.id.to_owned(), placed.position))
             .collect();
+        // Each glides there, its flock and its sign with it.
         for (id, anchor) in anchors {
             self.workers
                 .get_mut(&id)
                 .expect("each live worker was placed")
-                .anchor = anchor;
+                .place = anchor;
         }
         self.give_up(panicked);
     }
@@ -514,8 +541,8 @@ impl Scene {
     /// puts its slot about the origin, as for a parent that is not shown.
     fn standing(&self, id: &str, slot: usize) -> Vec3 {
         self.workers.get(id).map_or_else(
-            || crate::anchors::HomeArc::at(self.origin, slot),
-            |worker| worker.anchor,
+            || crate::anchors::HomeArc::at(self.origin, self.audience, slot),
+            |worker| worker.place,
         )
     }
 
@@ -711,6 +738,10 @@ impl Scene {
             // hidden partition follows exactly, so splitting never snaps back
             // into an axis-aligned frame. No metadata refresh resets this clock.
             let was_solid = solid_completed(worker);
+            // A live worker placed elsewhere, as when the agent is summoned or sent home, glides there.
+            if dt > 0.0 && worker.retired.is_none() {
+                worker.anchor = glide(worker.anchor, worker.place, dt);
+            }
             if dt > 0.0 && worker.retired.is_none() {
                 worker.ambient_time += f64::from(dt);
                 if was_solid {
@@ -877,6 +908,7 @@ impl Scene {
                 }
             }
             let station = Station {
+                facing: self.audience.to_array(),
                 id: id.clone(),
                 position: worker.anchor.to_array(),
                 state,
@@ -1115,7 +1147,7 @@ impl Scene {
             .workers
             .iter()
             .filter(|(_, worker)| worker.retired.is_none())
-            .map(|(id, worker)| Placed::new(id, worker.slot, worker.state, worker.anchor))
+            .map(|(id, worker)| Placed::new(id, worker.slot, worker.state, worker.place))
             .collect();
         placed.sort_by_key(|placed| placed.slot);
         let mut anchors = Vec::with_capacity(arriving.len());
@@ -1125,6 +1157,7 @@ impl Scene {
             placing.parent = node.parent_id.as_deref().filter(|parent| *parent != root);
             placing.state = node.state;
             placing.workers = &placed;
+            placing.audience = self.audience;
             let placement = self.placement.as_ref().filter(|_| !panicked);
             let (position, panic) = crate::anchors::place(self.origin, placement, &placing);
             panicked |= panic;
@@ -1197,6 +1230,7 @@ impl Scene {
                     #[cfg(test)]
                     origin,
                     anchor,
+                    place: anchor,
                     particles,
                     particle_scales,
                     flight_start: particles,
@@ -1242,26 +1276,60 @@ fn stable_hash(id: &str) -> u64 {
     })
 }
 
+/// How quickly a worker placed elsewhere glides there: the rate its distance shrinks at, and its greatest speed, in
+/// metres a second, a little faster than the agent's 0.85 m/s, since its arc about whoever the agent faces is wider.
+const GLIDE_RATE: f32 = 2.5;
+const GLIDE_SPEED: f32 = 2.0;
+
+/// Where a worker at `from` stands after `dt` seconds gliding to `to`, easing in as it arrives.
+fn glide(from: Vec3, to: Vec3, dt: f32) -> Vec3 {
+    let step = ((to - from) * (1.0 - (-GLIDE_RATE * dt).exp())).clamp_length_max(GLIDE_SPEED * dt);
+    let next = from + step;
+    if next.distance(to) < 1e-4 { to } else { next }
+}
+
 /// World-anchored polar arc around the viewer's recenter home (0, 0 in XZ).
-/// Sixteen angular columns, at least 18⅔ degrees apart, and twelve 55 cm rows.
+/// Sixteen angular columns, at least 18⅔ degrees apart, and twelve rows, the
+/// first two either side of the eyes at home, 85 cm apart, so that a sign above
+/// a worker never reaches the worker above it.
 /// All 192 remembered slots have distinct sightlines, not hidden radial layers.
 /// Early slots flank the coordinator; large workspaces require looking around
 /// and up. This is fixed scene-home geometry, never a head-locked overlay.
+/// [`crate::anchors::HomeArc`] stands the same arc about whoever watches.
 pub fn slot_position(slot: usize) -> Vec3 {
-    // Fill two comfortable front columns and two rows before wrapping around
-    // the observer. Slot identity is permanent, independent of membership size.
+    let (side, column, row) = slot_lane(slot);
+    let radius = crate::anchors::ARC_RADIUS;
+    let angle = slot_angle(column);
+    Vec3::new(
+        side * radius * angle.sin(),
+        slot_height(row),
+        -radius * angle.cos(),
+    )
+}
+
+/// The side of `slot`'s column, -1 on the left and 1 on the right, its column, from the nearest the middle, and its
+/// row. Fill two comfortable front columns and two rows before wrapping around the observer. Slot identity is
+/// permanent, independent of membership size.
+pub(crate) fn slot_lane(slot: usize) -> (f32, usize, usize) {
     let lane = slot % 4 + (slot % 32) / 8 * 4;
     let side = if lane.is_multiple_of(2) { -1.0 } else { 1.0 };
-    let column = lane / 2;
-    let row = (slot / 32) * 2 + (slot % 8) / 4;
-    let radius = 3.2;
-    // Keep the entire coordinator cone clear, including the last columns.
-    // Sixteen columns span the remaining 280 degrees, including the rear gap.
-    let angle = (40.0 + column as f32 * (280.0 / 15.0)).to_radians();
-    let height = [
-        1.35, 1.90, 0.80, 2.45, 0.25, 3.0, 3.55, 4.10, 4.65, 5.20, 5.75, 6.30,
-    ][row];
-    Vec3::new(side * radius * angle.sin(), height, -radius * angle.cos())
+    (side, lane / 2, (slot / 32) * 2 + (slot % 8) / 4)
+}
+
+/// How far a column stands from straight ahead, in radians. Keep the entire coordinator cone clear, including the
+/// last columns: sixteen columns span the remaining 280 degrees, including the rear gap.
+pub(crate) fn slot_angle(column: usize) -> f32 {
+    (40.0 + column as f32 * (280.0 / 15.0)).to_radians()
+}
+
+/// How high a row stands above home's floor, with the eyes at home 1.6 m above it: the first two 0.45 m below and 0.4 m
+/// above the eyes, then one lower, then upwards, each 85 cm from the next, room for a sign of six rows of title between
+/// a worker and the worker above it. Before November 2026 they stood 55 cm apart, from 1.35 m, and a long sign, or a
+/// completed cube above it, overlapped. See `design/interaction.md`.
+pub(crate) fn slot_height(row: usize) -> f32 {
+    [
+        1.15, 2.00, 0.30, 2.85, 3.70, 4.55, 5.40, 6.25, 7.10, 7.95, 8.80, 9.65,
+    ][row]
 }
 
 fn sample(samples: &[Vec3; MAX_COORDINATOR_SAMPLES], count: usize, id: &str, i: usize) -> Vec3 {
@@ -2219,6 +2287,7 @@ mod tests {
     #[test]
     fn station_wire_roundtrip_and_validation() {
         let station = Station {
+            facing: HOME_EYES,
             id: "worker".into(),
             position: [1.0, 2.0, -3.0],
             state: State::Waiting,
@@ -2240,6 +2309,7 @@ mod tests {
         for bad in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
             assert!(
                 !Station {
+                    facing: HOME_EYES,
                     opacity: bad,
                     ..station.clone()
                 }
@@ -2248,6 +2318,7 @@ mod tests {
         }
         assert!(
             !Station {
+                facing: HOME_EYES,
                 position: [f32::NAN, 0.0, 0.0],
                 ..station.clone()
             }
@@ -2255,6 +2326,7 @@ mod tests {
         );
         assert!(
             !Station {
+                facing: HOME_EYES,
                 id: "x".repeat(161),
                 ..station.clone()
             }
@@ -2262,6 +2334,7 @@ mod tests {
         );
         assert!(
             !Station {
+                facing: HOME_EYES,
                 title: "x".repeat(161),
                 ..station
             }
@@ -2436,7 +2509,7 @@ mod tests {
         let points: Vec<_> = (0..SLOT_COUNT).map(slot_position).collect();
         for (i, p) in points.iter().enumerate() {
             assert!(p.is_finite());
-            assert!((0.2..6.4).contains(&p.y));
+            assert!((0.2..9.7).contains(&p.y));
             let radius = p.x.hypot(p.z);
             assert!((radius - 3.2).abs() < 0.0001);
             assert!(p.to_array().iter().all(|v| v.abs() <= 100.0));
@@ -2473,7 +2546,7 @@ mod tests {
                     assert_eq!(p, slot_position(i));
                     assert!((p.x.hypot(p.z) - 3.2).abs() < 0.0001);
                     assert!(p.x.abs() > 1.6 && p.z < 0.0);
-                    assert!((1.3..2.0).contains(&p.y));
+                    assert!((1.1..2.1).contains(&p.y));
                     for other in stations.iter().skip(i + 1) {
                         assert!(p.distance(Vec3::from_array(other.position)) >= 0.54);
                     }
@@ -3283,17 +3356,36 @@ mod tests {
         let origin = turned(Vec3::new(1.0, 0.0, -6.0));
         let mut scene = Scene::new();
         // Arranged the same way as by default, nothing changes.
-        scene.arrange(Anchor::AGENT, None);
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None);
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         for (id, position) in anchors(&scene) {
             assert_eq!(position, slot_position(scene.slots[&id]).to_array());
         }
-        // Moved and turned, every live worker is placed again, about the anchor, and points at it there.
-        scene.arrange(origin, None);
+        // Moved and turned, every live worker is placed again, about the anchor, glides there, its sign with it, and
+        // points at it there.
+        scene.arrange(origin, crate::anchors::EYES, None);
         scene.update(Some("root"), &w, 0.0);
+        let before = anchors(&scene);
+        for (id, position) in &before {
+            assert_eq!(*position, slot_position(scene.slots[id]).to_array());
+        }
+        scene.update(Some("root"), &w, 0.1);
         for (id, position) in anchors(&scene) {
-            let expected = crate::anchors::HomeArc::at(origin, scene.slots[&id]);
+            let expected =
+                crate::anchors::HomeArc::at(origin, crate::anchors::EYES, scene.slots[&id]);
+            let from = Vec3::from_array(before[&id]);
+            let moved = Vec3::from_array(position).distance(from);
+            // Easing out, no faster than its greatest speed.
+            assert!(moved > 0.01 && moved <= GLIDE_SPEED * 0.1 + 1e-4, "{moved}");
+            assert!(Vec3::from_array(position).distance(expected) < from.distance(expected));
+        }
+        for _ in 0..400 {
+            scene.update(Some("root"), &w, 1.0 / 60.0);
+        }
+        for (id, position) in anchors(&scene) {
+            let expected =
+                crate::anchors::HomeArc::at(origin, crate::anchors::EYES, scene.slots[&id]);
             assert_eq!(Vec3::from_array(position), expected);
             assert!(scene.targets().iter().any(|target| target.key == id
                 && target.shape
@@ -3311,7 +3403,7 @@ mod tests {
         scene.update(Some("root"), &more, 0.0);
         assert_eq!(
             scene.workers["c"].anchor,
-            crate::anchors::HomeArc::at(origin, scene.slots["c"])
+            crate::anchors::HomeArc::at(origin, crate::anchors::EYES, scene.slots["c"])
         );
     }
 
@@ -3324,7 +3416,7 @@ mod tests {
             orientation: Quat::IDENTITY,
         };
         let mut scene = Scene::new();
-        scene.arrange(origin, Some(placement.clone()));
+        scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
         let mut w = workspace(vec![node("a", "root"), node("b", "a")]);
         settle(&mut scene, &w);
         // Each was told of the workers already standing, its parent, but not the root, its state and its slot.
@@ -3345,11 +3437,11 @@ mod tests {
         w.nodes[1].state = State::Waiting;
         w.nodes.push(node("c", "root"));
         for _ in 0..3 {
-            scene.arrange(origin, Some(placement.clone()));
+            scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
             scene.update(Some("root"), &w, 1.0 / 60.0);
         }
         w.nodes.retain(|node| node.id != "b");
-        scene.arrange(origin, Some(placement.clone()));
+        scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
         scene.update(Some("root"), &w, 1.0 / 60.0);
         let after = anchors(&scene);
         assert_eq!(after["a"], before["a"]);
@@ -3373,26 +3465,26 @@ mod tests {
         // The worker leaving returns to its parent where it was placed.
         assert!(scene.workers["b"].return_end.iter().all(|p| *p == a));
         // Another arrangement places every live worker again, in the order of their slots.
-        scene.arrange(Anchor::HOME, Some(placement));
+        scene.arrange(Anchor::HOME, crate::anchors::EYES, Some(placement));
         let replaced: Vec<String> = line.told.lock().unwrap()[3..]
             .iter()
             .map(|told| told.0.clone())
             .collect();
         assert_eq!(replaced, ["a", "c"]);
         assert_eq!(
-            scene.workers["c"].anchor,
+            scene.workers["c"].place,
             Vec3::new(scene.slots["c"] as f32, 1.5, -3.0)
         );
         // Back to the default, the arc again.
-        scene.arrange(Anchor::AGENT, None);
-        assert_eq!(scene.workers["a"].anchor, slot_position(scene.slots["a"]));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None);
+        assert_eq!(scene.workers["a"].place, slot_position(scene.slots["a"]));
     }
 
     #[test]
     fn a_child_arriving_with_its_parent_launches_from_where_the_parent_is_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, Some(placement));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement));
         // Trusted twice, so that the next arrivals launch.
         let empty = workspace(Vec::new());
         scene.update(Some("root"), &empty, 0.0);
@@ -3429,7 +3521,7 @@ mod tests {
         let slots = std::sync::Arc::new(Slots::default());
         let placement: Placement = slots.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, Some(placement.clone()));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
         // Identities that sort against their slots: "z" takes slot 0, "a" slot 1, "m" slot 2.
         let first = workspace(vec![node("z", "root"), node("a", "z")]);
         scene.update(Some("root"), &first, 0.0);
@@ -3443,7 +3535,7 @@ mod tests {
         // Arriving: those standing, in slot order, with each just placed among them.
         assert_eq!(told[3].len(), 3);
         // Placed again: the same order.
-        scene.arrange(turned(Vec3::ZERO), Some(placement));
+        scene.arrange(turned(Vec3::ZERO), crate::anchors::EYES, Some(placement));
         let again = slots.0.lock().unwrap()[4..].to_vec();
         assert_eq!(again.last().unwrap().len(), 3);
         for workers in &again {
@@ -3469,7 +3561,7 @@ mod tests {
         let panics = std::sync::Arc::new(Panics::default());
         let placement: Placement = panics.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, Some(placement.clone()));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
@@ -3479,29 +3571,29 @@ mod tests {
             node("c", "root"),
         ]);
         for _ in 0..3 {
-            scene.arrange(Anchor::AGENT, Some(placement.clone()));
+            scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
             scene.update(Some("root"), &more, 0.0);
         }
         // Moved elsewhere with it, still not called.
         let away = turned(Vec3::new(0.0, 0.0, -3.0));
-        scene.arrange(away, Some(placement.clone()));
+        scene.arrange(away, crate::anchors::EYES, Some(placement.clone()));
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(
                 scene.workers[id].anchor,
-                crate::anchors::HomeArc::at(away, scene.slots[id])
+                crate::anchors::HomeArc::at(away, crate::anchors::EYES, scene.slots[id])
             );
         }
         // Placing again: the first call panics, and the rest stand on the arc.
         let again = std::sync::Arc::new(Panics::default());
         let fresh: Placement = again.clone();
-        scene.arrange(Anchor::AGENT, Some(fresh));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(fresh));
         assert_eq!(again.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(scene.workers[id].anchor, slot_position(scene.slots[id]));
         }
         // Neither is called again.
-        scene.arrange(away, Some(placement));
+        scene.arrange(away, crate::anchors::EYES, Some(placement));
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
         assert_eq!(scene.poisoned.len(), 2);
     }
@@ -3510,7 +3602,7 @@ mod tests {
     fn a_child_arriving_later_launches_from_where_its_parent_was_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, Some(placement));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement));
         let parent = workspace(vec![node("lead", "root")]);
         scene.update(Some("root"), &parent, 0.0);
         scene.update(Some("root"), &parent, 0.0);
@@ -3532,7 +3624,7 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
         };
-        scene.arrange(away, None);
+        scene.arrange(away, crate::anchors::EYES, None);
         const DT: f32 = 1.0 / 60.0;
         let mut previous: Vec<Vec3> = scene
             .cubes()
@@ -3557,7 +3649,11 @@ mod tests {
             let worker = &scene.workers[id];
             let centre = worker.particles.iter().copied().sum::<Vec3>() / PARTICLES as f32;
             assert!(
-                centre.distance(crate::anchors::HomeArc::at(away, worker.slot)) < 0.3,
+                centre.distance(crate::anchors::HomeArc::at(
+                    away,
+                    crate::anchors::EYES,
+                    worker.slot
+                )) < 0.3,
                 "{id}"
             );
         }
@@ -3574,6 +3670,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.arrange(
             Anchor::AGENT,
+            crate::anchors::EYES,
             Some(std::sync::Arc::new(At(Vec3::splat(f32::NAN)))),
         );
         let w = workspace(vec![node("a", "root")]);
@@ -3583,6 +3680,7 @@ mod tests {
         let mut above = Scene::new();
         above.arrange(
             Anchor::AGENT,
+            crate::anchors::EYES,
             Some(std::sync::Arc::new(At(Vec3::new(0.0, 2.0, 0.0)))),
         );
         let mut done = node("a", "root");
@@ -4058,7 +4156,7 @@ mod tests {
             orientation: Quat::IDENTITY,
         };
         let mut scene = Scene::new();
-        scene.arrange(origin, None);
+        scene.arrange(origin, crate::anchors::EYES, None);
         let w = workspace(vec![node("a", "root")]);
         scene.update(Some("root"), &w, 0.0);
         let anchor = scene.workers["a"].anchor;

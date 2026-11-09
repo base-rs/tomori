@@ -1020,7 +1020,7 @@ impl Step {
                         at,
                         senses.head_pose.map(|head| Vec3::from_array(head.position)),
                     );
-                    conversation.summon(Some(spot));
+                    conversation.summon(Some(spot), senses.head_pose.map(|head| head.position));
                     // It stands there at once here, as everyone else is told.
                     anchor = crate::anchors::Anchor::from_pose(&spot).unwrap_or(anchor);
                 }
@@ -1408,8 +1408,11 @@ impl Step {
         // Workers fly out from the agent and back to it, wherever it stands.
         self.delegation_scene
             .set_coordinator_samples(self.coordinator.departures());
-        self.delegation_scene
-            .arrange(arrangement.workers, arrangement.placement);
+        self.delegation_scene.arrange(
+            arrangement.workers,
+            arrangement.audience,
+            arrangement.placement,
+        );
         self.delegation_scene.update(root, workspace, dt);
         // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
         let ray = senses.ray.filter(|_| senses.beam);
@@ -2819,7 +2822,8 @@ mod tests {
                 .stations[0]
                 .position,
         );
-        senses.ray = Ray::new(arrival::HOME, worker - arrival::HOME);
+        // At the top of the sphere that points at it, nearly level.
+        senses.ray = Ray::new(arrival::HOME, worker + Vec3::Y * 0.28 - arrival::HOME);
         let attending = |conversation: &mut Conversation| {
             conversation.talk(true);
             conversation.talk(false);
@@ -2841,7 +2845,7 @@ mod tests {
         conversation.take_actions();
         step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
         assert_eq!(attending(&mut conversation), [Resource::worker("ses_a")]);
-        // Aiming, the worker is no longer pointed at. It stands above the floor, so a ray at it has nowhere to land, and is drawn plain and short of it.
+        // Aiming, the worker is no longer pointed at. The ray at it meets the floor only beyond travel's reach, so it has nowhere to land, and is drawn plain and short of it.
         stick(&mut step, &mut conversation, Vec2::Y);
         let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
         let beam = output
@@ -5089,11 +5093,10 @@ mod tests {
             }
             assert!(frame_agent.distance(spot_at) < 1.0, "{frame_agent}");
             assert!(placed(&mut conversation).is_empty());
-            // The workers stay at home.
-            assert_eq!(
-                conversation.arrangement().workers,
-                crate::anchors::Anchor::AGENT
-            );
+            // Its workers go with it, gathered about her, at once here, as everyone is told.
+            let arrangement = conversation.arrangement();
+            assert_eq!(arrangement.workers, anchor);
+            assert_eq!(arrangement.audience, head);
         }
         // A visitor's pull lets it go back, as does one in a space whose server keeps no summons.
         for (role, summons) in [

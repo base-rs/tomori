@@ -2857,3 +2857,71 @@ fn floating_a_table_grows_wider_to_show_its_columns_up_to_a_comfortable_width() 
     // On a wall it is a slot's size.
     assert_eq!(fit(&panel, Fit::SLOT), (COLUMNS, BODY_ROWS));
 }
+
+#[test]
+fn the_tomori_wall_folds_travels_and_unfolds_with_its_panels_and_takes_none_meanwhile() {
+    let shown = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on(TOMORI_WALL, 1)),
+        panel("c", on("wall-1", 0)),
+    ]);
+    let now = Instant::now();
+    let later = |seconds: f32| now + Duration::from_secs_f32(seconds);
+    let mut projector = Projector::default();
+    let ray = at(slot_centre(&shown, 0));
+    // Where it stands, its panels are pointed at as ever.
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert_eq!(output.pointed.clone().unwrap().0, "a");
+    assert!(!projector.travelling());
+    let drawn_at = |output: &Output, title: &str| {
+        output
+            .sheets
+            .iter()
+            .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with(title))
+            .map(|sheet| sheet.model.unwrap())
+    };
+    let before = drawn_at(&output, "Panel a").unwrap();
+    // The agent is summoned and the server stands its wall 3 m to the right: it folds where it stood.
+    let mut moved = shown.clone();
+    let travel_spot = Pose::upright_facing([3.0, 0.52, 0.0], [0.0, 0.52, 0.0]);
+    moved.walls[0].pose = travel_spot;
+    let output = projector.update(input(&moved, ray, 0.0, later(0.01)));
+    assert!(projector.travelling());
+    assert!(
+        drawn_at(&output, "Panel a")
+            .unwrap()
+            .abs_diff_eq(before, 1e-5)
+    );
+    let output = projector.update(input(&moved, ray, 0.0, later(0.01 + travel::FOLD / 2.0)));
+    let folding = drawn_at(&output, "Panel a").unwrap();
+    let middle = Vec3::from_array(shown.walls[0].pose.position);
+    assert!(folding.w_axis.truncate().distance(middle) < before.w_axis.truncate().distance(middle));
+    assert!(folding.x_axis.length() < before.x_axis.length());
+    // Meanwhile nothing on it is pointed at, and a panel carried is not put on it.
+    assert_eq!(output.pointed, None);
+    let other = at(model(&shown.walls[1].pose)
+        .unwrap()
+        .transform_point3(slot_offset(&shown.walls[1], 0)));
+    projector.update(input(&moved, other, 1.0, later(0.2)));
+    assert_eq!(projector.held(), Some("c"));
+    let output = projector.update(input(&moved, ray, 1.0, later(0.25)));
+    assert_ne!(
+        output.preview.map(|(wall, _)| wall),
+        Some(TOMORI_WALL.to_owned())
+    );
+    let output = projector.update(input(&moved, ray, 0.0, later(0.28)));
+    assert!(!matches!(output.placed, Some((_, Target::Wall(wall, _))) if wall == TOMORI_WALL));
+    // Folded, it travels; then it unfolds at its travel spot, and its panels are pointed at there.
+    let output = projector.update(input(&moved, None, 0.0, later(0.01 + travel::FOLD + 1.0)));
+    let travelling = drawn_at(&output, "Panel a").unwrap().w_axis.truncate();
+    assert!(travelling.x > 0.1 && travelling.x < 2.9, "{travelling}");
+    let output = projector.update(input(&moved, None, 0.0, later(10.0)));
+    assert!(!projector.travelling());
+    let arrived = drawn_at(&output, "Panel a").unwrap();
+    let there = model(&travel_spot)
+        .unwrap()
+        .transform_point3(slot_offset(&moved.walls[0], 0));
+    assert!(arrived.w_axis.truncate().distance(there) < 1e-4);
+    let output = projector.update(input(&moved, at(there), 0.0, later(10.1)));
+    assert_eq!(output.pointed.unwrap().0, "a");
+}
