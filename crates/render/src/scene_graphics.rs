@@ -1514,6 +1514,335 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_WALL_HANDLES_PREVIEW` to a PNG path to save what this renders: a wall someone added, taken hold of
+    /// with the grip, its handles around it, the knob the ray meets highlighted, and the hint of the controls above it;
+    /// then its right edge dragged out to a fourth column; then its knob drawn 20 cm towards the participant, bending it
+    /// halfway, its radius said above it, before either is let go.
+    #[test]
+    fn a_wall_taken_hold_of_shows_its_handles_and_hint_and_changes_as_they_are_dragged() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Panel, Place, Wall, WallKind};
+        use tomori_scene::projection::editing::{Handle, handle_point};
+        let middle = Vec3::new(-0.2, 1.45, -2.3);
+        let wall = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), [-0.2, 1.45, 0.0]),
+        );
+        let frame =
+            Mat4::from_rotation_translation(glam::Quat::from_array(wall.pose.orientation), middle);
+        let panels: Vec<Panel> = ["Build", "Tests", "Coverage"]
+            .iter()
+            .enumerate()
+            .map(|(slot, title)| {
+                Panel::new(
+                    format!("panel-{slot}"),
+                    *title,
+                    format!("**{title}** is green."),
+                    Place::Wall {
+                        wall: "wall-1".into(),
+                        slot: slot as u32,
+                    },
+                )
+            })
+            .collect();
+        let point = |handle: Handle| handle_point(&wall, frame, handle, arrival::HOME).0;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall handles test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let view_matrix =
+                lens * Mat4::look_at_rh(arrival::HOME, middle - Vec3::Y * 0.25, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let from = |hand: Vec3, aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(hand, aim - hand),
+                ..Default::default()
+            };
+            let senses = |aim: Vec3, grip: f32| from(arrival::HOME, aim, grip);
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![wall.clone()], panels.clone());
+            let mut step = Step::default();
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[view_matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            // Not yet taken hold of: no handles.
+            let board = middle + Vec3::Y * 0.42;
+            let plain = capture(&mut step, &mut conversation, &senses(board + Vec3::Y, 0.0));
+            // Taken hold of with a squeeze on its board, let go, and the knob pointed at.
+            capture(&mut step, &mut conversation, &senses(board, 1.0));
+            capture(&mut step, &mut conversation, &senses(board, 0.0));
+            let held = capture(
+                &mut step,
+                &mut conversation,
+                &senses(point(Handle::Bend), 0.0),
+            );
+            assert_ne!(held, plain, "its handles and hint must be drawn");
+            // The right edge dragged out to where a fourth column's edge would be.
+            let four = wall
+                .clone()
+                .with_grid(tomori_protocol::Grid::new(4, 2).unwrap());
+            let edge = frame.transform_point3(Vec3::new(four.board().unwrap().0 / 2.0, 0.0, 0.0));
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(point(Handle::Columns), 0.0),
+            );
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(point(Handle::Columns), 1.0),
+            );
+            let widened = capture(&mut step, &mut conversation, &senses(edge, 1.0));
+            capture(&mut step, &mut conversation, &senses(edge, 0.0));
+            let sent = conversation.take_actions();
+            assert!(
+                sent.iter().any(|action| matches!(
+                    action,
+                    tomori_client::connection::Action::Send(tomori_protocol::ClientMessage::SetWall { grid: Some(grid), .. })
+                        if grid.columns == 4
+                )),
+                "{sent:?}"
+            );
+            // The knob drawn 20 cm towards the participant, bending the wall halfway, as it was before the server answered.
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![wall.clone()], panels.clone());
+            let mut step = Step::default();
+            capture(&mut step, &mut conversation, &senses(board, 1.0));
+            capture(&mut step, &mut conversation, &senses(board, 0.0));
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(point(Handle::Bend), 0.0),
+            );
+            capture(
+                &mut step,
+                &mut conversation,
+                &senses(point(Handle::Bend), 1.0),
+            );
+            let drawn = arrival::HOME + frame.transform_vector3(Vec3::Z) * 0.2;
+            let bent = capture(
+                &mut step,
+                &mut conversation,
+                &from(drawn, point(Handle::Bend), 1.0),
+            );
+            assert_ne!(bent, held);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            image::imageops::replace(&mut sheet, &held, 0, 0);
+            image::imageops::replace(&mut sheet, &widened, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &bent, 0, (HEIGHT * 2).into());
+            crate::test_support::preview("TOMORI_WALL_HANDLES_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_WALL_SHAPES_PREVIEW` to a PNG path to save what this renders: a wall of three tall slots, 9:16, holding a
+    /// long list shown whole, a code panel and a short note, from home; and set `TOMORI_WALL_STEPPERS_PREVIEW` to save a
+    /// small wall, one slot at half size, and a large one, eight columns of three, each taken hold of, its steppers apart.
+    #[test]
+    fn walls_of_tall_slots_and_the_steppers_of_small_and_large_walls_are_drawn_apart() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Code, Grid, Panel, Place, Wall, WallKind};
+        use tomori_scene::projection::editing::{Handle, handle_points};
+        let wall_at = |at: Vec3| {
+            Wall::new(
+                "wall-1",
+                WallKind::Added,
+                tomori_protocol::Pose::upright_facing(at.to_array(), [at.x, at.y, 0.0]),
+            )
+        };
+        let middle = Vec3::new(0.0, 1.45, -2.6);
+        let tall = wall_at(middle)
+            .with_grid(Grid::new(3, 1).unwrap())
+            .with_scale(1.0)
+            .with_aspect(Some(9.0 / 16.0));
+        let on = |slot: u32| Place::Wall {
+            wall: "wall-1".into(),
+            slot,
+        };
+        let list = (1..=30)
+            .map(|item| format!("- [{}] Step {item}", if item < 6 { "x" } else { " " }))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let code = (1..=40)
+            .map(|line| {
+                format!("    let value_{line} = compute({line}); // step {line} of the plan")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let shown = vec![
+            Panel::new("panel-0", "Plan", list, on(0)),
+            Panel::new("panel-1", "rust", code, on(1)).with_code(Code::new("rust", 40)),
+            Panel::new("panel-2", "Note", "A short note in a tall slot.", on(2)),
+        ];
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall shapes test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses,
+                               looking: Vec3| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y)],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            // Three tall slots, their panels filling them: the list shown to its last item.
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![tall.clone()], shown.clone());
+            let mut step = Step::default();
+            let aside = senses(middle + Vec3::new(2.0, 0.0, 0.0), 0.0);
+            let shapes = capture(&mut step, &mut conversation, &aside, middle);
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![tall.clone()], Vec::new());
+            let empty = capture(&mut Step::default(), &mut conversation, &aside, middle);
+            assert_ne!(shapes, empty);
+            // The list's last item is drawn low in its tall slot, below where a standard slot ends.
+            let frame_of = |wall: &Wall| {
+                Mat4::from_rotation_translation(
+                    glam::Quat::from_array(wall.pose.orientation),
+                    Vec3::from_array(wall.pose.position),
+                )
+            };
+            let slot = tomori_scene::projection::slot_frames(&tall, frame_of(&tall))[0];
+            let (_, height) = tall.slot_size();
+            let low = slot.transform_point3(Vec3::new(0.0, -(height / 2.0 - 0.08), 0.0));
+            let clip = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y) * low.extend(1.0);
+            let (x, y) = (
+                ((clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32) as u32,
+                ((1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32) as u32,
+            );
+            let around = |image: &image::RgbaImage| -> Vec<[u8; 4]> {
+                (x.saturating_sub(40)..x + 40)
+                    .flat_map(|x| (y.saturating_sub(6)..y + 6).map(move |y| (x, y)))
+                    .map(|(x, y)| image.get_pixel(x, y).0)
+                    .collect()
+            };
+            assert_ne!(
+                around(&shapes),
+                around(&empty),
+                "the list fills its tall slot"
+            );
+            crate::test_support::preview("TOMORI_WALL_SHAPES_PREVIEW", &shapes);
+            // A small wall and a large one, each taken hold of on its board, the ray on its column steppers' middle.
+            let small = wall_at(Vec3::new(0.0, 1.45, -2.0))
+                .with_grid(Grid::new(1, 1).unwrap())
+                .with_scale(0.5);
+            let large = wall_at(Vec3::new(0.0, 1.6, -4.5))
+                .with_grid(Grid::new(8, 3).unwrap())
+                .with_scale(1.0);
+            let mut pictures = Vec::new();
+            for wall in [small, large] {
+                let mut conversation = joined();
+                show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+                let mut step = Step::default();
+                let centre = Vec3::from_array(wall.pose.position);
+                let (_, board_height) = wall.board().unwrap();
+                let board = centre + Vec3::Y * (board_height / 2.0 - 0.01);
+                capture(&mut step, &mut conversation, &senses(board, 1.0), centre);
+                capture(&mut step, &mut conversation, &senses(board, 0.0), centre);
+                let (points, _) = handle_points(&wall, frame_of(&wall), arrival::HOME);
+                let point =
+                    |handle: Handle| points.iter().find(|(shown, _)| *shown == handle).unwrap().1;
+                let more = point(Handle::Step(
+                    tomori_scene::projection::editing::Axis::Columns,
+                    1,
+                ));
+                pictures.push(capture(
+                    &mut step,
+                    &mut conversation,
+                    &senses(more, 0.0),
+                    centre,
+                ));
+            }
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            image::imageops::replace(&mut sheet, &pictures[0], 0, 0);
+            image::imageops::replace(&mut sheet, &pictures[1], 0, HEIGHT.into());
+            crate::test_support::preview("TOMORI_WALL_STEPPERS_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// What `texture`, `width` by `height`, holds once drawn.
     fn read_back(
         device: &wgpu::Device,

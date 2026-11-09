@@ -162,6 +162,58 @@ pub fn nearest<'a, K: Clone + 'a>(
     nearest
 }
 
+/// Where the ray ends on something it meets, and how far along it: on something `held`, such as a panel or a card
+/// carried, a wall carried or a handle dragged, or on something it points at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct End {
+    pub distance: f32,
+    pub point: Vec3,
+    pub held: bool,
+}
+
+impl End {
+    /// Where the ray meets something it points at, `distance` along it.
+    pub fn new(distance: f32, point: Vec3) -> Self {
+        Self {
+            distance,
+            point,
+            held: false,
+        }
+    }
+
+    /// Where the ray ends on something held, at `point`, from `origin`, where it begins.
+    pub fn held(origin: Vec3, point: Vec3) -> Self {
+        Self {
+            distance: origin.distance(point),
+            point,
+            held: true,
+        }
+    }
+}
+
+/// Where the ray ends of `ends`, one for each kind of thing it may point at, each the nearest of its kind it meets: on
+/// the first held, whatever else it meets, or else the nearest, the first of equally near. So that it ends, as it does
+/// on an environment's objects, wherever it meets anything that can be pointed at or taken hold of. See
+/// `design/interaction.md`.
+pub fn end(ends: impl IntoIterator<Item = Option<End>>) -> Option<End> {
+    let mut nearest: Option<End> = None;
+    for end in ends.into_iter().flatten() {
+        if !end.distance.is_finite() || !end.point.is_finite() {
+            continue;
+        }
+        let better = match nearest {
+            None => true,
+            Some(nearest) if nearest.held => false,
+            Some(_) if end.held => true,
+            Some(nearest) => end.distance < nearest.distance,
+        };
+        if better {
+            nearest = Some(end);
+        }
+    }
+    nearest
+}
+
 /// Who owns the current trigger pull.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Pull {
@@ -387,6 +439,29 @@ mod tests {
         let twins = [sphere("first", 0.0, -1.0), sphere("second", 0.0, -1.0)];
         assert_eq!(nearest(&forward(), &twins).unwrap().key, "first");
         assert_eq!(nearest::<&str>(&forward(), &[]), None);
+    }
+
+    #[test]
+    fn the_ray_ends_on_what_is_held_or_else_the_nearest_it_meets() {
+        let at = |z: f32| End::new(z, Vec3::new(0.0, 1.0, -z));
+        // The nearest of every kind it meets, the first of two as near.
+        assert_eq!(
+            end([Some(at(3.0)), None, Some(at(1.5)), Some(at(2.0))]),
+            Some(at(1.5))
+        );
+        let twin = End::new(1.5, Vec3::X);
+        assert_eq!(end([Some(at(1.5)), Some(twin)]), Some(at(1.5)));
+        // Something held, however far, whatever is nearer.
+        let held = End::held(Vec3::Y, Vec3::new(0.0, 1.0, -4.0));
+        assert_eq!(held.distance, 4.0);
+        assert_eq!(end([Some(at(1.0)), Some(held), Some(at(0.5))]), Some(held));
+        // Nothing, or nonsense, is no end.
+        assert_eq!(end([None, None]), None);
+        assert_eq!(
+            end([Some(End::new(f32::NAN, Vec3::ZERO)), Some(at(2.0))]),
+            Some(at(2.0))
+        );
+        assert_eq!(end([Some(End::new(1.0, Vec3::NAN))]), None);
     }
 
     #[test]

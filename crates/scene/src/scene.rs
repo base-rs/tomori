@@ -311,6 +311,9 @@ pub struct Step {
     wheel: Option<(String, f32)>,
     /// The panel the ray pointed at last frame, not one carried, which a push of the right stick or the wheel scrolls.
     pointed_panel: Option<String>,
+    /// The wall carried as B was pressed, and when: removed for everyone, or asked to confirm, if B is let go within
+    /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
+    removing: Option<(String, Instant)>,
     /// The panel carried as B was pressed, and when: thrown away for everyone if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     throwing: Option<(String, Instant)>,
@@ -359,6 +362,7 @@ impl Default for Step {
             wheel: None,
             pointed_panel: None,
             throwing: None,
+            removing: None,
             controls: crate::projection::Controls::default(),
             client: None,
         }
@@ -385,6 +389,7 @@ impl Step {
         self.scroll_stick = None;
         self.wheel = None;
         self.throwing = None;
+        self.removing = None;
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -446,8 +451,8 @@ impl Step {
         }
         // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
         let wrist_active = self.wrist.state().active();
-        // A push of the right stick is the panel carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. Otherwise, while the transcript does not show, a push that leaves the middle pointing at a panel with more than it shows scrolls it, for this participant alone, and nothing else. See `design/projection.md`.
-        let carrying = self.projector.held().is_some();
+        // A push of the right stick is the panel or wall carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. Otherwise, while the transcript does not show, a push that leaves the middle pointing at a panel with more than it shows scrolls it, for this participant alone, and nothing else. See `design/projection.md`.
+        let carrying = self.projector.carrying();
         let scrolls = self
             .pointed_panel
             .as_deref()
@@ -483,7 +488,31 @@ impl Step {
         let thrown = buttons.back && carrying;
         if thrown {
             self.throwing = self.projector.held().map(|panel| (panel.to_owned(), now));
+            self.removing = self
+                .projector
+                .carried_wall()
+                .map(|wall| (wall.to_owned(), now));
         }
+        // B pressed while carrying a wall is the wall's, as for a panel: let go soon enough, while it is still carried, it
+        // removes the wall, for an owner, asking again first when it holds panels. See `design/projection.md`.
+        if let Some((wall, since)) = self.removing.take_if(|_| !buttons.back_held) {
+            let quick = now.saturating_duration_since(since) < crate::conversation::DISMISS_PRESS;
+            if quick
+                && self.projector.carried_wall() == Some(wall.as_str())
+                && conversation.wall_rights().remove
+                && let Some(projection) = conversation.projection().cloned()
+            {
+                match self.projector.remove_wall(&projection, now) {
+                    Some(wall) => {
+                        conversation.remove_wall_by_id(wall);
+                        feedback.emit(feedback::Event::Choose, now);
+                    }
+                    None => feedback.emit(feedback::Event::Hover, now),
+                }
+            }
+        }
+        // B with a wall taken hold of, and nothing carried, lets go of it, before backing out of anything else.
+        let released_wall = buttons.back && !thrown && self.projector.stop_editing();
         if let Some((panel, since)) = self.throwing.take_if(|_| !buttons.back_held) {
             let quick = now.saturating_duration_since(since) < crate::conversation::DISMISS_PRESS;
             if quick
@@ -494,7 +523,7 @@ impl Step {
                 feedback.emit(feedback::Event::Choose, now);
             }
         }
-        let back = buttons.back && !thrown;
+        let back = buttons.back && !thrown && !released_wall;
         // B lets go of a menu pinned with Y first.
         let unpinned = back && self.hand_menu.unpin();
         let wrist_input = self.wrist.input(
@@ -670,7 +699,7 @@ impl Step {
                 menu_shown,
                 menu_pinned: self.hand_menu.pinned(),
                 // A panel carried keeps the transcript away, as pointing does, so that turning the wrist does not let it go.
-                pointing: senses.pointing || self.projector.held().is_some(),
+                pointing: senses.pointing || self.projector.carrying(),
                 grip: senses.grip,
             },
             moment,
@@ -795,9 +824,17 @@ impl Step {
             scroll: scrolled(self.scroll_stick.as_ref(), self.wheel.take(), dt)
                 .as_ref()
                 .map(|(panel, rows)| (panel.as_str(), *rows)),
+            rights: conversation.wall_rights(),
             now,
             dt,
         });
+        if let Some(change) = projected.wall.clone() {
+            feedback.emit(feedback::Event::Hover, now);
+            conversation.set_wall(change);
+        }
+        if projected.wall_ticked {
+            feedback.emit(feedback::Event::Hover, now);
+        }
         if projected.turned {
             feedback.emit(feedback::Event::Hover, now);
         }
@@ -808,7 +845,7 @@ impl Step {
             feedback.emit(feedback::Event::Hover, now);
             conversation.place_panel(panel, target);
         }
-        let carrying = self.projector.held().is_some();
+        let carrying = self.projector.carrying();
         // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them, such as a panel carried. See `design/github.md`.
         let board = self.board.update(crate::board::Input {
             cards: conversation.cards().filter(|_| !in_arrival),
@@ -882,7 +919,7 @@ impl Step {
                     .map(reach)
             })
             .unwrap_or(f32::INFINITY);
-        let object = self
+        let picked = self
             .client
             .as_ref()
             .zip(
@@ -890,8 +927,8 @@ impl Step {
                     .ray
                     .filter(|_| in_space && self.board.held().is_none()),
             )
-            .and_then(|((_, _, client), ray)| client.pick(&ray))
-            .filter(|picked| picked.distance < nearest);
+            .and_then(|((_, _, client), ray)| client.pick(&ray));
+        let object = picked.clone().filter(|picked| picked.distance < nearest);
         let (card, worker) = if object.is_some() {
             (None, None)
         } else {
@@ -927,12 +964,27 @@ impl Step {
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
-        let card_end = card.as_ref().and(board.end);
-        let panel_end = panel.as_ref().and(projected.end);
-        let object_end = object
-            .as_ref()
-            .zip(senses.ray)
-            .map(|(picked, ray)| ray.at(picked.distance));
+        // The ray ends on what it meets, of every kind it may point at, the nearest, or on what is held: a card or a
+        // panel carried, a wall carried or a handle dragged. See `design/interaction.md`.
+        let ends = senses.ray.map(|ray| {
+            let card_end = match self.board.held() {
+                Some(_) => board
+                    .end
+                    .map(|end| crate::pointing::End::held(ray.origin, end)),
+                None => board
+                    .pointed
+                    .as_ref()
+                    .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
+            };
+            let object_end = picked
+                .as_ref()
+                .map(|picked| crate::pointing::End::new(picked.distance, ray.at(picked.distance)));
+            let worker_end = self
+                .delegation_scene
+                .hit_point()
+                .map(|point| crate::pointing::End::new(point.distance(ray.origin), point));
+            crate::pointing::end([card_end, projected.hit, object_end, worker_end])
+        });
         // The label on the ray names the panel pointed at, not one carried.
         let mut projection = projected.sheets;
         if let (Some(panel), Some((_, _, point)), None) =
@@ -1046,10 +1098,7 @@ impl Step {
                 hit: travel.landing.is_some(),
             })
         } else {
-            let hit = card_end
-                .or(panel_end)
-                .or(object_end)
-                .or_else(|| self.delegation_scene.hit_point());
+            let hit = ends.flatten().map(|end| end.point);
             ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
                 origin: ray.origin,
                 end: hit.unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
@@ -1229,6 +1278,21 @@ pub mod fixtures {
                     .with_walls(shown)
                     .with_panels(panels),
             ),
+        }));
+        conversation.take_actions();
+    }
+
+    /// Show `panels` on [`tomori_wall`] and `walls` in [`SPACE`], whose server projects and takes wall changes, as the
+    /// server sends them.
+    pub fn show_editable_walls(
+        conversation: &mut Conversation,
+        walls: Vec<tomori_protocol::Wall>,
+        panels: Vec<tomori_protocol::Panel>,
+    ) {
+        show_projection(conversation, walls, panels);
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.walls = true;
         }));
         conversation.take_actions();
     }
@@ -1783,6 +1847,154 @@ mod tests {
         let left = Vec3::from_array(pose.position);
         assert!(left.distance(senses.ray.unwrap().at(2.0)) < 1e-3);
         assert!(left.distance(ahead) > 1.0);
+    }
+
+    #[test]
+    fn a_wall_is_carried_with_the_grip_put_down_where_let_go_and_removed_by_an_owner_s_b_asked_twice_with_panels()
+     {
+        use tomori_protocol::{ClientMessage, Panel, Place, Pose, Wall, WallKind};
+        let wall = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            Pose::upright_facing([0.0, 1.5, -2.0], arrival::HOME.to_array()),
+        );
+        let panel = Panel::new(
+            "panel-1",
+            "Build",
+            "Green.",
+            Place::Wall {
+                wall: "wall-1".into(),
+                slot: 2,
+            },
+        );
+        // Between the top row of slots and the label, on the board.
+        let board = Vec3::new(0.0, 1.5 + 0.42, -2.0);
+        let run = |role: ConnectionRole, editable: bool| {
+            let mut conversation = lobby(role);
+            if editable {
+                fixtures::show_editable_walls(
+                    &mut conversation,
+                    vec![wall.clone()],
+                    vec![panel.clone()],
+                );
+            } else {
+                fixtures::show_projection(
+                    &mut conversation,
+                    vec![wall.clone()],
+                    vec![panel.clone()],
+                );
+            }
+            let mut step = Step::default();
+            let start = Instant::now();
+            let mut senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, board - arrival::HOME),
+                grip: Some(0.0),
+                ..senses()
+            };
+            for _ in 0..400 {
+                step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+            }
+            senses.grip = Some(1.0);
+            let frame = step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+            let hint = frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_ref().map(crate::canvas::Canvas::plain))
+                .find(|text| text.contains("leave it here"));
+            (conversation, step, senses, hint, start)
+        };
+        let b = |step: &mut Step, conversation: &mut Conversation, at: Instant| {
+            for (back, held, after) in [(true, true, 0), (false, false, 100)] {
+                step.buttons(
+                    &press(|buttons| {
+                        buttons.back = back;
+                        buttons.back_held = held;
+                    }),
+                    true,
+                    conversation,
+                    &mut felt(),
+                    at + Duration::from_millis(after),
+                );
+            }
+        };
+        let removals = |conversation: &mut Conversation| {
+            conversation
+                .take_actions()
+                .into_iter()
+                .filter(|action| matches!(action, Action::Send(ClientMessage::RemoveWall { .. })))
+                .count()
+        };
+        // An owner carries it, and is told B removes it.
+        let (mut conversation, mut step, mut senses, hint, start) =
+            run(ConnectionRole::Owner, true);
+        assert_eq!(step.projector.carried_wall(), Some("wall-1"));
+        let hint = hint.expect("the hint shows while carrying");
+        assert!(hint.contains("remove, for all"), "{hint}");
+        // It holds a panel, so a first press of B only asks again, and a second removes it, for everyone.
+        b(&mut step, &mut conversation, start);
+        assert_eq!(removals(&mut conversation), 0);
+        b(
+            &mut step,
+            &mut conversation,
+            start + Duration::from_millis(500),
+        );
+        assert_eq!(removals(&mut conversation), 1);
+        assert_eq!(step.projector.editing_wall(), None);
+        // Carried elsewhere and let go, its new place is sent.
+        let (mut conversation, mut step, _, _, start) = run(ConnectionRole::Owner, true);
+        senses.ray = Ray::new(
+            arrival::HOME,
+            board + Vec3::new(-0.8, 0.0, 0.0) - arrival::HOME,
+        );
+        step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
+        let sent = conversation.take_actions();
+        assert!(
+            sent.iter().any(|action| matches!(
+                action,
+                Action::Send(ClientMessage::SetWall { wall, pose: Some(pose), grid: None, .. })
+                    if wall == "wall-1" && pose.position[0] < -0.5
+            )),
+            "{sent:?}"
+        );
+        // Held, not carried, B lets go of it, and backs out of nothing else.
+        assert_eq!(step.projector.editing_wall(), Some("wall-1"));
+        b(&mut step, &mut conversation, start);
+        assert_eq!(step.projector.editing_wall(), None);
+        assert!(conversation.take_actions().is_empty());
+        // A collaborator carries it, but B removes nothing, and their hint does not offer it.
+        let (mut conversation, mut step, _, hint, start) = run(ConnectionRole::Collaborator, true);
+        assert_eq!(step.projector.carried_wall(), Some("wall-1"));
+        assert!(!hint.unwrap().contains("remove"));
+        b(&mut step, &mut conversation, start);
+        b(
+            &mut step,
+            &mut conversation,
+            start + Duration::from_millis(500),
+        );
+        assert_eq!(removals(&mut conversation), 0);
+        // A visitor, and anyone where the server takes no wall changes, takes no wall.
+        let (_, step, _, _, _) = run(ConnectionRole::Visitor, true);
+        assert_eq!(step.projector.editing_wall(), None);
+        let (mut conversation, step, _, _, _) = run(ConnectionRole::Owner, false);
+        assert_eq!(step.projector.editing_wall(), None);
+        let change = crate::projection::editing::Change {
+            wall: "wall-1".into(),
+            grid: None,
+            scale: Some(1.5),
+            aspect: None,
+            shape: None,
+            pose: None,
+        };
+        assert!(!conversation.set_wall(change.clone()));
+        assert!(!conversation.remove_wall_by_id("wall-1".into()));
+        assert!(conversation.take_actions().is_empty());
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        fixtures::show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+        assert!(conversation.set_wall(change));
+        assert!(!conversation.remove_wall_by_id("wall-1".into()));
     }
 
     #[test]
@@ -2695,6 +2907,16 @@ mod tests {
         show(&mut conversation, beyond);
         frame(&mut step, &mut conversation, &senses);
         assert_eq!(attending(&mut conversation), [Resource::worker("ses_a")]);
+        // And the ray ends on the worker, the nearer.
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        let met = step.delegation_scene.hit_point().unwrap();
+        assert!(beam.hit && beam.end.distance(met) < 1e-3);
+        assert!(beam.end.distance(arrival::HOME) < beyond.distance(arrival::HOME));
         // Back between, the grip picks it up and, carried, it is what is pointed at, wherever the ray goes.
         show(&mut conversation, between);
         frame(&mut step, &mut conversation, &senses);
@@ -3992,6 +4214,119 @@ mod tests {
             Instant::now(),
         );
         assert!(earcons(&mut feedback).is_empty());
+    }
+
+    #[test]
+    fn in_a_space_the_beam_ends_on_the_nearest_wall_handle_panel_or_object_it_meets() {
+        use tomori_protocol::{Panel, Place, Pose, Wall, WallKind};
+        let beam = |frame: &Frame<'_>| {
+            frame
+                .arrival
+                .as_ref()
+                .and_then(|arrival| arrival.ray)
+                .expect("the beam")
+        };
+        // An environment's wall ahead, to the right, and a panel floating ahead, to the left, nearer.
+        let wall = Wall::new(
+            "environment-0",
+            WallKind::Environment,
+            Pose::upright_facing([1.2, 1.5, -2.5], arrival::HOME.to_array()),
+        );
+        let floating = arrival::HOME + Vec3::new(-0.8, 0.0, -1.5);
+        let panel = Panel::new(
+            "panel-1",
+            "Notes",
+            "Ahead.",
+            Place::Free {
+                pose: Pose::upright_facing(floating.to_array(), arrival::HOME.to_array()),
+            },
+        );
+        let board = Vec3::new(1.2, 1.5 + 0.42, -2.5);
+        let run = |role: ConnectionRole| {
+            let mut conversation = lobby(role);
+            fixtures::show_editable_walls(
+                &mut conversation,
+                vec![wall.clone()],
+                vec![panel.clone()],
+            );
+            (conversation, Step::default())
+        };
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            grip: Some(0.0),
+            ..senses()
+        };
+        let (mut conversation, mut step) = run(ConnectionRole::Owner);
+        // At the wall's board, which a participant may take hold of: it ends there, as it does on a panel.
+        senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let ends = beam(&frame);
+        assert!(
+            ends.hit && ends.end.distance(board) < 1e-3,
+            "{:?}",
+            ends.end
+        );
+        senses.ray = Ray::new(arrival::HOME, floating - arrival::HOME);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let ends = beam(&frame);
+        assert!(
+            ends.hit && ends.end.distance(floating) < 1e-3,
+            "{:?}",
+            ends.end
+        );
+        // Taken hold of, at a handle, at the handle, however near the board behind it.
+        senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.editing_wall(), Some("environment-0"));
+        let frame = crate::board::model(&wall.pose).unwrap();
+        let (corner, _) = crate::projection::editing::handle_point(
+            &wall,
+            frame,
+            crate::projection::editing::Handle::Corner(1, 1),
+            arrival::HOME,
+        );
+        senses.ray = Ray::new(arrival::HOME, corner - arrival::HOME);
+        let drawn = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let ends = beam(&drawn);
+        assert!(
+            ends.hit && ends.end.distance(corner) < 1e-3,
+            "{:?} {corner}",
+            ends.end
+        );
+        // A visitor takes hold of no wall: the ray passes its board and ends short of it.
+        let (mut conversation, mut step) = run(ConnectionRole::Visitor);
+        senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(!beam(&frame).hit);
+        // An environment's object a metre away, nearer than the wall, ends it there.
+        let (mut conversation, mut step) = run(ConnectionRole::Owner);
+        let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory: crate::client_side::Factory = std::sync::Arc::new(move |_: &str| {
+            Box::new(Fake {
+                frames: 0,
+                told: told.clone(),
+            }) as Box<dyn crate::client_side::ClientSide>
+        });
+        conversation.set_client_sides(vec![(crate::test_support::SKY, factory)]);
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.walls = true;
+        }));
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        }
+        let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let ends = beam(&frame);
+        let ray = senses.ray.unwrap();
+        assert!(
+            ends.hit && ends.end.distance(ray.at(1.0)) < 1e-3,
+            "{:?}",
+            ends.end
+        );
     }
 
     #[test]
