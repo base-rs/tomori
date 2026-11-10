@@ -508,6 +508,44 @@ fn a_ring_s_sweep_leaves_the_side_away_from_its_audience_clear() {
 }
 
 #[test]
+fn a_ring_s_sweep_is_centred_on_the_way_its_anchor_faces_wherever_its_audience_stands() {
+    // A home in a corner, turned out of it along +X, its audience at the arrival along +Z: its sweep, a little under half
+    // the ring, leaves the side behind it, towards −X, clear, rather than the side away from its audience.
+    let corner = Anchor::new(
+        HOME,
+        Pose::at([0.0, 1.5, -4.0]).facing_towards([4.0, 1.5, -4.0]),
+    )
+    .with_formation(Formation::Ring)
+    .with_sweep(170.0);
+    let cluster = Cluster::new(&corner);
+    let faces = cluster.faces();
+    assert!(faces[0] > 0.999 && faces[1].abs() < 1e-3, "{faces:?}");
+    let towards = cluster.towards();
+    assert!(towards[1] > 0.999, "{towards:?}");
+    // Three of the seven places in each of its two rows, within 85° of +X: at 25.7°, 77.1° and 128.6° to the right of
+    // the way to the arrival.
+    let held = cluster.arrange(1).capacity().unwrap();
+    assert_eq!(held, 6);
+    for slot in cluster.slots(held) {
+        let (_, angle) = about(slot.position);
+        let off = angle - std::f32::consts::FRAC_PI_2;
+        assert!(off.abs() <= 85f32.to_radians() + 1e-4, "{slot:?}");
+    }
+    // Still filled about its audience: the first beside the agent at their right, 77.1° from the way to them, the place
+    // nearest its side.
+    let (_, first) = about(cluster.slots(1)[0].position);
+    assert!(
+        (first.to_degrees() - 360.0 / 7.0 * 1.5).abs() < 1e-3,
+        "{first}"
+    );
+    // Facing its audience, as a home usually does, the way it faces and the way to them agree.
+    let facing = Cluster::new(&ringed().with_sweep(170.0));
+    let [x, z] = facing.faces();
+    let [tx, tz] = facing.towards();
+    assert!((x - tx).abs() < 1e-5 && (z - tz).abs() < 1e-5);
+}
+
+#[test]
 fn a_formation_is_sent_only_where_it_is_not_the_arc_and_one_unknown_is_laid_out_as_the_arc() {
     let arc = serde_json::to_value(ahead(HOME)).unwrap();
     assert!(arc.get("formation").is_none());

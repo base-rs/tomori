@@ -2,11 +2,12 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Where everything in the farmyard is, in the yard's own coordinates, metres, with the gate on the +Z side, the coop
-//! towards −Z, and the ground at 0: the fence and its gate, the coop and its ramp, the water trough, the feed and the
-//! hay; and where participants arrive, [`ARRIVAL`], and where the agent's home is, [`AGENT_HOME`], with the Tomori
-//! wall's home beneath it, as Tomori stands it by default. The scenery draws them here, the participants land where [`walkable`] says, and the flock keeps
-//! clear of them, so that all three agree; Tomori carries them all into a space's coordinates, where the arrival is
-//! home, at the origin facing −Z (see `design/environments.md`).
+//! towards −Z, and the ground at 0: the fence and its gate, the coop and its ramp, the water trough, the feed, the hay,
+//! the notice board and the workbench in the front left corner; and where participants arrive, [`ARRIVAL`], and where
+//! the agent's home is, [`AGENT_HOME`], at the heart of the workbench's curve. The scenery draws them here, the
+//! participants land where [`walkable`] says, and the flock keeps clear of them, so that all three agree; Tomori
+//! carries them all into a space's coordinates, where the arrival is home, at the origin facing −Z (see
+//! `design/environments.md`).
 use glam::{Vec2, Vec3};
 
 /// An axis-aligned box on the ground, `[x, z]` from its least to its greatest corner.
@@ -107,16 +108,99 @@ pub const NOTICEBOARD_HEIGHT: f32 = 2.05;
 pub const HAY: Footprint = Footprint::new([3.0, -10.7], [4.6, -9.5]);
 
 /// Where participants arrive in the yard, home: inside the gate, on the earth, facing [`ARRIVAL_FACING`], so that they
-/// see at once the coop, the agent beside it and the Tomori wall beneath it. Travel from there is free.
+/// see at once the coop and the yard, the agent at its workbench to their left. Travel from there is free.
 pub const ARRIVAL: Vec3 = Vec3::new(0.6, 0.0, -2.4);
 /// What participants face as they arrive: the coop's front corner, beside its ramp.
 pub const ARRIVAL_FACING: Vec3 = Vec3::new(-1.6, 0.0, -7.0);
-/// The agent's home: beside the coop's front corner, clear of the coop and its ramp, at the height of its eaves, about
-/// 3.6 m from the eyes where participants arrive, facing them. It appears here as a space opens, and stays here until a
-/// participant summons it; its workers stand about it, and the Tomori wall beneath it, as Tomori stands the wall
-/// beneath the agent's home by default, the middle of its row 0.88 m below the swarm's middle, about 3.7 m from those
-/// eyes, so that it reads from the arrival.
-pub const AGENT_HOME: Vec3 = Vec3::new(-1.0, 1.5, -5.6);
+
+/// The workbench in the yard's front left corner, where the fence by the gate meets its left side, on the coop's side of
+/// the yard: a wooden bench curving through 100° about the middle of its curve, this point on the ground, its concave
+/// side facing out of the corner towards where participants arrive ([`workbench_facing`]), with a tool rack behind it.
+/// The agent's home floats above this point, at the heart of the curve, and its workers stand in the ring about it,
+/// those behind it hovering over the bench. Placed so that the rack's back stands 8 cm inside the fence on the left,
+/// where the curve passes square to it, and at the gate's end. See the crate's `context/workbench.md`.
+pub const WORKBENCH: Vec2 = Vec2::new(-2.5, -0.84);
+/// How far the workbench curves to either side of its middle, in radians: 50°.
+pub const WORKBENCH_HALF_SPAN: f32 = 50.0 * std::f32::consts::PI / 180.0;
+/// The bench top's inner and outer radius about [`WORKBENCH`], 65 cm deep, and how high it stands.
+pub const WORKBENCH_TOP: [f32; 2] = [1.65, 2.3];
+pub const WORKBENCH_HEIGHT: f32 = 0.9;
+/// How high whatever lies on the bench top reaches, and how far the vice at its front stands proud of it: below the
+/// lowest the workers hovering above the bench reach, with their clearance.
+pub const WORKBENCH_CLUTTER: f32 = 0.97;
+pub const VICE: f32 = 0.1;
+/// The tool rack behind the bench: the inner and outer radius its boards and posts stand within, about
+/// [`WORKBENCH`], how tall it stands, and how many flat boards it is made of, each a solid of its own, so that the
+/// solids follow its curve closely enough for the workers before it to stand clear.
+pub const RACK: [f32; 2] = [2.34, 2.42];
+pub const RACK_HEIGHT: f32 = 1.9;
+pub const RACK_BOARDS: usize = 12;
+/// How many pieces the bench's solids and footprints are made of, along its curve.
+pub const WORKBENCH_PIECES: usize = 5;
+
+/// The agent's home: above the middle of the workbench's curve, at the heart of its workshop, about 3.5 m from the eyes
+/// where participants arrive, facing them and out of the corner. It appears here as a space opens, and is here
+/// whenever it is at home; its workers stand in the ring about it ([`HOME_SWEEP`]), those behind it over the bench.
+pub const AGENT_HOME: Vec3 = Vec3::new(WORKBENCH.x, 1.5, WORKBENCH.y);
+
+/// How much of the ring about the agent's home its workers stand on, in degrees, about the way the home faces, out of
+/// the corner towards the arrival, which Tomori's own server gives the farmyard's `home` cluster anchor: all but the place straight behind the agent, which
+/// the swarm would hide from there, so that six stand in each row at full size, two of them behind the agent, over the
+/// bench either side of its middle, and ten compact, four of them behind it.
+pub const HOME_SWEEP: f32 = 300.0;
+
+/// The way the workbench faces, the middle of its curve out of the corner: towards where participants arrive, as a
+/// yaw about the vertical, 0 along +Z and a quarter turn along +X, as every anchor faces, so that the agent's home above
+/// it faces the same way, and the ring's places behind the agent, as seen from the arrival, stand over the bench.
+pub fn workbench_facing() -> f32 {
+    let towards = Vec2::new(ARRIVAL.x, ARRIVAL.z) - WORKBENCH;
+    towards.x.atan2(towards.y)
+}
+
+/// The point on the ground `radius` from the workbench's middle, `turn` radians along its curve from straight behind
+/// the middle, positive towards the gate.
+pub fn on_workbench(radius: f32, turn: f32) -> Vec2 {
+    let yaw = workbench_facing() + std::f32::consts::PI + turn;
+    WORKBENCH + Vec2::new(yaw.sin(), yaw.cos()) * radius
+}
+
+/// The turn along the workbench's curve, from its middle, where piece `piece` of `pieces` begins.
+pub fn workbench_turn(piece: usize, pieces: usize) -> f32 {
+    WORKBENCH_HALF_SPAN * (2.0 * piece as f32 / pieces as f32 - 1.0)
+}
+
+/// The footprints of `pieces` flat pieces of the band from `inner` to `outer` about the workbench's middle, along the
+/// whole of its curve: each the box about its corners, which the flat pieces the scenery draws stand within.
+pub fn workbench_band(inner: f32, outer: f32, pieces: usize) -> Vec<Footprint> {
+    (0..pieces)
+        .map(|piece| {
+            let ends = [
+                workbench_turn(piece, pieces),
+                workbench_turn(piece + 1, pieces),
+            ];
+            let corners = ends
+                .into_iter()
+                .flat_map(|turn| [on_workbench(inner, turn), on_workbench(outer, turn)]);
+            let (low, high) = corners.fold(
+                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+                |(low, high), corner| (low.min(corner), high.max(corner)),
+            );
+            Footprint { low, high }
+        })
+        .collect()
+}
+
+/// The workbench's footprints on the ground, the bench, its vice and the rack behind it, which nobody lands on and the
+/// chickens walk round: [`WORKBENCH_PIECES`] pieces along its curve.
+pub fn workbench() -> Vec<Footprint> {
+    workbench_band(WORKBENCH_TOP[0] - VICE, RACK[1], WORKBENCH_PIECES)
+}
+
+/// The lantern hung on the rack's post at the gate's end of the workbench, which lights it warmly.
+pub fn workbench_lantern() -> Vec3 {
+    let at = on_workbench(RACK[0] - 0.1, WORKBENCH_HALF_SPAN - 0.06);
+    Vec3::new(at.x, 1.62, at.y)
+}
 
 /// The notice board's footprint on the ground, its posts and its back, which nobody lands on and nothing walks through.
 pub fn noticeboard() -> Footprint {
@@ -129,28 +213,42 @@ pub fn noticeboard() -> Footprint {
 }
 
 /// The solids of the yard that nothing stands inside nor is seen through, as `(least, greatest)` corners: the coop
-/// with its roof's overhang, its ramp, the trough, the feeder, the hay and the notice board, each as high as it stands.
-pub fn solids() -> [([f32; 3], [f32; 3]); 6] {
+/// with its roof's overhang, its ramp, the trough, the feeder, the hay and the notice board, each as high as it stands;
+/// then the workbench, its top and what lies on it in [`WORKBENCH_PIECES`] pieces, as high as [`WORKBENCH_CLUTTER`], and
+/// its rack in [`RACK_BOARDS`], one for each of its boards, as tall as its posts.
+pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
     let solid = |footprint: Footprint, height: f32| {
         (
             [footprint.low.x, 0.0, footprint.low.y],
             [footprint.high.x, height, footprint.high.y],
         )
     };
-    [
+    let feeder = obstacles()[3];
+    let mut solids = vec![
         solid(COOP.grown(0.18), COOP_RIDGE + 0.1),
         solid(ramp(), COOP_FLOOR),
         solid(TROUGH, TROUGH_HEIGHT),
-        solid(obstacles()[3], 0.35),
+        solid(feeder, 0.35),
         solid(HAY, 1.2),
         solid(noticeboard(), NOTICEBOARD_HEIGHT),
-    ]
+    ];
+    solids.extend(
+        workbench_band(WORKBENCH_TOP[0] - VICE, WORKBENCH_TOP[1], WORKBENCH_PIECES)
+            .into_iter()
+            .map(|piece| solid(piece, WORKBENCH_CLUTTER)),
+    );
+    solids.extend(
+        workbench_band(RACK[0], RACK[1], RACK_BOARDS)
+            .into_iter()
+            .map(|board| solid(board, RACK_HEIGHT)),
+    );
+    solids
 }
 
 /// What stands in the yard, which nobody lands on and nothing walks through: the coop and its ramp, the trough, the
-/// feeder, the hay and the notice board.
-pub fn obstacles() -> [Footprint; 6] {
-    [
+/// feeder, the hay and the notice board, then the workbench's pieces ([`workbench`]).
+pub fn obstacles() -> Vec<Footprint> {
+    let mut obstacles = vec![
         COOP,
         ramp(),
         TROUGH,
@@ -160,7 +258,9 @@ pub fn obstacles() -> [Footprint; 6] {
         ),
         HAY,
         noticeboard(),
-    ]
+    ];
+    obstacles.extend(workbench());
+    obstacles
 }
 
 /// The ramp's footprint, from the door to its foot.
@@ -171,9 +271,13 @@ pub fn ramp() -> Footprint {
 
 /// Where participants may land in the yard, inside the fence and clear of what stands in it, by a margin: the rectangles
 /// a teleport profile's surfaces are made of, at the ground's height.
-pub const WALKABLE: [Footprint; 4] = [
-    // In front of everything, from the gate to the ramp's foot, short of the notice board.
-    Footprint::new([-4.6, -5.9], [4.35, 1.2]),
+pub const WALKABLE: [Footprint; 6] = [
+    // In front of everything, from the ramp's foot, short of the notice board, to short of the workbench.
+    Footprint::new([-4.6, -5.9], [4.35, -2.0]),
+    // From there to the gate, beside the workbench, the agent's home and the ring about it included.
+    Footprint::new([-2.65, -2.0], [4.35, 1.2]),
+    // Within the workbench's curve, before its left half.
+    Footprint::new([-3.7, -2.0], [-2.65, -0.6]),
     // Between the coop and the trough and hay, past the feeder, to the back fence, and beside the coop's window.
     Footprint::new([-1.4, -10.6], [0.3, -5.9]),
     Footprint::new([1.3, -10.6], [2.6, -5.9]),
@@ -208,23 +312,113 @@ mod tests {
                 );
             }
         }
-        for obstacle in obstacles() {
+        // Everything stands well inside the fence, but the workbench, whose rack stands just inside it.
+        let obstacles = obstacles();
+        let (yard, bench) = obstacles.split_at(6);
+        for obstacle in yard {
             assert!(inside.contains(obstacle.low) && inside.contains(obstacle.high));
         }
-        // Where participants arrive is walkable, and so is the spot to peek in at the coop's window from.
+        let just = FENCE.grown(-0.05);
+        for piece in bench {
+            assert!(
+                just.contains(piece.low) && just.contains(piece.high),
+                "{piece:?}"
+            );
+        }
+        // Where participants arrive is walkable, and so is the spot to peek in at the coop's window from, and the ground
+        // beneath the agent's home.
         assert!(WALKABLE[0].contains(Vec2::new(ARRIVAL.x, ARRIVAL.z)));
         let window = Vec2::new(COOP.high.x + 0.6, (WINDOW[0][0] + WINDOW[1][0]) * 0.5);
         assert!(WALKABLE.iter().any(|footprint| footprint.contains(window)));
+        assert!(
+            WALKABLE
+                .iter()
+                .any(|footprint| footprint.contains(WORKBENCH))
+        );
         // The door is in the coop's front wall, and the ramp leads from it to the ground in front.
         assert_eq!(DOOR.z, COOP.high.y);
         assert!(COOP.contains(Vec2::new(DOOR.x, DOOR.z)));
         assert!(ramp().high.y > COOP.high.y);
         let (centre, size) = walkable()[0];
         assert!(
-            centre.distance(Vec3::new(-0.125, 0.0, -2.35)) < 1e-5
-                && size.distance(Vec2::new(8.95, 7.1)) < 1e-5
+            centre.distance(Vec3::new(-0.125, 0.0, -3.95)) < 1e-5
+                && size.distance(Vec2::new(8.95, 3.9)) < 1e-5
         );
-        assert!(!WALKABLE[0].overlaps(&WALKABLE[1].grown(-0.1)));
+        // No two of the rectangles overlap.
+        for (index, footprint) in WALKABLE.iter().enumerate() {
+            for other in &WALKABLE[index + 1..] {
+                assert!(!footprint.overlaps(other), "{footprint:?} {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_workbench_curves_in_the_front_left_corner_facing_the_arrival_its_rack_just_inside_the_fence()
+     {
+        // In the corner where the fence by the gate meets its left side: nearer it than any other corner of the yard.
+        let corner = Vec2::new(FENCE.low.x, FENCE.high.y);
+        let corners = [
+            corner,
+            Vec2::new(FENCE.high.x, FENCE.high.y),
+            Vec2::new(FENCE.low.x, FENCE.low.y),
+            Vec2::new(FENCE.high.x, FENCE.low.y),
+        ];
+        let middle = on_workbench((WORKBENCH_TOP[0] + WORKBENCH_TOP[1]) * 0.5, 0.0);
+        let nearest = corners
+            .into_iter()
+            .min_by(|a, b| a.distance(middle).total_cmp(&b.distance(middle)))
+            .unwrap();
+        assert_eq!(nearest, corner);
+        // Its concave side faces where participants arrive, the middle of its curve straight behind its middle as seen
+        // from there, and the gate's end towards the gate.
+        let towards = Vec2::new(ARRIVAL.x, ARRIVAL.z) - WORKBENCH;
+        let behind = on_workbench(1.0, 0.0) - WORKBENCH;
+        assert!((behind.normalize().dot(-towards.normalize()) - 1.0).abs() < 1e-5);
+        assert!(
+            on_workbench(2.0, WORKBENCH_HALF_SPAN).y > on_workbench(2.0, -WORKBENCH_HALF_SPAN).y
+        );
+        // The rack's back stands 8 cm inside the fence on the left, where the curve passes square to it, its flat boards
+        // a little less near, and at the gate's end; nothing of it beyond.
+        let band = workbench();
+        let low = band
+            .iter()
+            .map(|piece| piece.low.x)
+            .fold(f32::INFINITY, f32::min);
+        let high = band
+            .iter()
+            .map(|piece| piece.high.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((0.0..0.01).contains(&(low - (FENCE.low.x + 0.08))), "{low}");
+        assert!((high - (FENCE.high.y - 0.08)).abs() < 1e-2, "{high}");
+        // A third of a turn and a little more, at a workbench's height, 65 cm deep, the rack behind its back edge, taller
+        // than the bench and below the second row of workers; clear of everything else in the yard, the gate's posts
+        // and the arrival among them.
+        assert!((WORKBENCH_HALF_SPAN.to_degrees() - 50.0).abs() < 1e-4);
+        assert!((WORKBENCH_TOP[1] - WORKBENCH_TOP[0] - 0.65).abs() < 1e-5);
+        const { assert!(WORKBENCH_TOP[1] < RACK[0] && WORKBENCH_HEIGHT < WORKBENCH_CLUTTER) };
+        const { assert!(RACK_HEIGHT > WORKBENCH_HEIGHT + 0.8) };
+        for piece in &band {
+            for other in &obstacles()[..6] {
+                assert!(!piece.grown(1.0).overlaps(other), "{piece:?} {other:?}");
+            }
+            assert!(!piece.grown(0.5).contains(Vec2::new(ARRIVAL.x, ARRIVAL.z)));
+            assert!(piece.high.x < GATE[0] - 1.5);
+        }
+        // Its solids are its pieces and its rack's boards, after the yard's; and the lantern on the rack's post hangs
+        // just before the rack, above the bench, at its gate's end.
+        let solids = solids();
+        assert_eq!(solids.len(), 6 + WORKBENCH_PIECES + RACK_BOARDS);
+        for (low, high) in &solids[6..6 + WORKBENCH_PIECES] {
+            assert!(low[1] == 0.0 && high[1] == WORKBENCH_CLUTTER);
+        }
+        for (low, high) in &solids[6 + WORKBENCH_PIECES..] {
+            assert!(low[1] == 0.0 && high[1] == RACK_HEIGHT);
+        }
+        let lantern = workbench_lantern();
+        let lantern_at = Vec2::new(lantern.x, lantern.z);
+        assert!(lantern.y > WORKBENCH_HEIGHT + 0.5 && lantern.y < RACK_HEIGHT);
+        assert!((lantern_at.distance(WORKBENCH) - (RACK[0] - 0.1)).abs() < 1e-4);
+        assert!(lantern_at.distance(on_workbench(RACK[0], WORKBENCH_HALF_SPAN)) < 0.25);
     }
 
     #[test]
@@ -256,12 +450,21 @@ mod tests {
         assert!(far > 3.5 && far < READING, "{far}");
         assert!((AGENT_HOME.y - wall.position[1] - entourage::BENEATH).abs() < 1e-5);
         assert!(wall.position[1] - entourage::ROW_HALF >= ARRIVAL.y + entourage::CLEARANCE);
-        // Inside the fence, and the agent by the coop, but not inside it nor over its ramp.
+        // Inside the fence, and the agent at the workbench, above the middle of its curve, facing out of the corner
+        // as the bench does, the bench and its rack behind it, and the wall beneath it clear of the bench.
         let inside = FENCE.grown(-0.3);
-        assert!(inside.contains(Vec2::new(AGENT_HOME.x, AGENT_HOME.z)));
         let near = Vec2::new(AGENT_HOME.x, AGENT_HOME.z);
-        assert!(!COOP.grown(0.6).contains(near) && !ramp().grown(0.6).contains(near));
-        assert!(COOP.grown(2.5).contains(near), "by the coop");
+        assert!(inside.contains(near));
+        assert_eq!(near, WORKBENCH);
+        assert!((agent.yaw() - workbench_facing()).abs() < 1e-4);
+        assert!(!COOP.grown(2.5).contains(near) && !ramp().grown(2.5).contains(near));
+        for piece in workbench() {
+            assert!(!piece.contains(near));
+            let gap = (near - piece.centre()).length();
+            assert!(gap > WORKBENCH_TOP[0] - VICE, "{gap}");
+        }
+        let distance = Vec3::from_array(eyes).distance(AGENT_HOME);
+        assert!(distance > 3.4 && distance < 3.6, "{distance}");
     }
 
     #[test]
@@ -275,14 +478,17 @@ mod tests {
             .into_iter()
             .map(|(low, high)| Solid::new(low, high))
             .collect();
-        // The farmyard's home anchor stands its workers in a ring about the agent's home, gathered about the eyes at the
-        // arrival, as Tomori's own server registers it: without room, which an older client would lay the arc's steps
-        // out in, so that it keeps today's arc; the ring's rows fit the yard, which `fits` checks.
+        // The farmyard's home anchor stands its workers in a ring about the agent's home, all but straight behind it,
+        // gathered about the eyes at the arrival, as Tomori's own server registers it: without room, which an older
+        // client would lay the arc's steps out in, so that it keeps today's arc; the ring's rows fit the yard, which
+        // `fits` checks.
         let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(arrival.eyes());
-        let anchor = Anchor::new(HOME, agent).with_formation(Formation::Ring);
+        let anchor = Anchor::new(HOME, agent)
+            .with_formation(Formation::Ring)
+            .with_sweep(HOME_SWEEP);
         let home = Cluster::new(&anchor).with_audience(arrival.eyes());
         assert_eq!(home.arrange(18).step(), Step::Ring);
-        assert!(!home.arrange(14).compact() && home.arrange(15).compact());
+        assert!(!home.arrange(12).compact() && home.arrange(13).compact());
         assert_eq!(fits(&home, ARRIVAL.y, &solids), Ok(()));
         // Its signs read and are pointed at from the yard: none of eighteen above 2.5 m, and the notice board seen past
         // them from the arrival.
@@ -312,6 +518,84 @@ mod tests {
     }
 
     #[test]
+    fn the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_bench_clear_of_the_rack_and_fence()
+     {
+        use tomori_environment::sightlines::{CLEAR, Spot};
+        use tomori_protocol::Pose;
+        use tomori_protocol::cluster::{Anchor, Cluster, Formation, HOME, RING, WORKER};
+        let eyes = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array()).eyes();
+        let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(eyes);
+        let home = Cluster::new(
+            &Anchor::new(HOME, agent)
+                .with_formation(Formation::Ring)
+                .with_sweep(HOME_SWEEP),
+        )
+        .with_audience(eyes);
+        let middle = Vec2::new(AGENT_HOME.x, AGENT_HOME.z);
+        let towards = on_workbench(1.0, 0.0) - middle;
+        // Its sweep is centred on the way the home faces, out of the corner, so that its gap is over the bench's middle.
+        assert!((Vec2::from(home.faces()) + towards).length() < 1e-4);
+        // How many of `count` stand behind the agent, as seen from the arrival, and how many of those over the bench,
+        // along its curve.
+        let stand = |count: usize| {
+            let slots = home.slots(count);
+            let (mut behind, mut over) = (0, 0);
+            for (index, slot) in slots.iter().enumerate() {
+                let at = Vec2::new(slot.position[0], slot.position[2]);
+                assert!((at.distance(middle) - RING).abs() < 1e-4);
+                assert!(!slot.more, "{count}: {index}");
+                // None reaches another: a footprint's reach apart about the vertical, or a row apart.
+                let footprint = WORKER.scaled(slot.scale);
+                for other in &slots[index + 1..] {
+                    let apart = at.distance(Vec2::new(other.position[0], other.position[2]));
+                    let above = (slot.position[1] - other.position[1]).abs();
+                    assert!(
+                        apart >= footprint.width.hypot(footprint.depth) - 1e-3
+                            || above >= footprint.height - 1e-4,
+                        "{count}: {index} {apart} {above}"
+                    );
+                }
+                // Each clear of the fence and of the lantern, the box it takes, with its clearance.
+                let (low, high) = home.reach(slot);
+                let reach = Footprint::new([low[0], low[2]], [high[0], high[2]]).grown(CLEAR);
+                assert!(
+                    FENCE.grown(-0.1).contains(reach.low) && FENCE.grown(-0.1).contains(reach.high)
+                );
+                let lantern = workbench_lantern();
+                let hung =
+                    Footprint::new([lantern.x, lantern.z], [lantern.x, lantern.z]).grown(0.1);
+                let level = low[1] - CLEAR < lantern.y + 0.15 && lantern.y - 0.15 < high[1] + CLEAR;
+                assert!(
+                    !(level && reach.overlaps(&hung)),
+                    "{count}: {index} {slot:?}"
+                );
+                // Those behind the agent stand above what lies on the bench; the rest in the yard about the agent, off
+                // the bench; and none straight behind it, where the swarm would hide them from the arrival.
+                let offset = at - middle;
+                let turn = towards.perp_dot(offset).atan2(towards.dot(offset)).abs();
+                assert!(turn > 0.3, "{count}: {index} {turn}");
+                if offset.dot(towards) > 0.0 {
+                    assert!(low[1] - CLEAR >= WORKBENCH_CLUTTER, "{count}: {index}");
+                    behind += 1;
+                    if turn <= WORKBENCH_HALF_SPAN + 2f32.to_radians() {
+                        over += 1;
+                    }
+                } else {
+                    assert!(workbench().iter().all(|piece| !piece.contains(at)));
+                }
+            }
+            (behind, over)
+        };
+        // At full size, twelve, in two rows of six: of each, two behind the agent, over the bench either side of its
+        // middle.
+        assert!(!home.arrange(12).compact());
+        assert_eq!(stand(12), (4, 4));
+        // Compact, eighteen, ten to a row: of each, four behind the agent, two over the bench and two by its ends.
+        assert!(home.arrange(18).compact());
+        assert_eq!(stand(18), (8, 4));
+    }
+
+    #[test]
     fn the_notice_board_stands_against_the_fence_its_wall_on_its_back_read_from_the_earth_in_front()
     {
         use tomori_environment::sightlines::{READING, Solid, Spot, readable};
@@ -324,7 +608,7 @@ mod tests {
         assert!(FENCE.grown(-0.3).contains(board.low) && FENCE.grown(-0.3).contains(board.high));
         assert!(FENCE.high.x - board.high.x < 0.35);
         assert_eq!(NOTICEBOARD_FACING.z, NOTICEBOARD.z);
-        for obstacle in &obstacles()[..5] {
+        for obstacle in obstacles().iter().filter(|obstacle| **obstacle != board) {
             assert!(!board.grown(0.3).overlaps(obstacle), "{obstacle:?}");
         }
         // Its wall, two slots wide and about 1.3 by 0.5 m, stands just in front of its back, which frames it, below the

@@ -81,11 +81,12 @@ fn walls() -> Vec<Wall> {
     ]
 }
 
-/// Samuel's head, in the farmyard's left corner, by the fence, looking towards the gate, along +Z of the farmyard's own
-/// coordinates, far from the notice board: a head looks along its −Z.
+/// Samuel's head, in the open yard before the gate, between the workbench in the left corner and the notice board,
+/// looking towards the gate, along +Z of the farmyard's own coordinates, far from the notice board: a head looks along
+/// its −Z.
 fn head() -> Pose {
     let eyes = tomori_environment::sightlines::EYES;
-    carried(Pose::at([-3.5, eyes, -1.0]).facing_towards([-3.5, eyes, -5.0]))
+    carried(Pose::at([0.0, eyes, -1.0]).facing_towards([0.0, eyes, -5.0]))
 }
 
 /// Joined to a farmyard space, with three panels floating beside Samuel where the server places them.

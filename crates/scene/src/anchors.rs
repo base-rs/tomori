@@ -382,15 +382,15 @@ impl Arrangement {
     }
 
     /// The ring drawn on the floor at home, which stays there wherever the agent goes: the workers' ring, where they
-    /// stand in one, on its radius and as much of it as they take, about the way to whoever they gather about; or else
-    /// about the agent's home, [`FLOOR_RING`] from it, whole. See `design/environments.md`.
+    /// stand in one, on its radius and as much of it as they take, about the way their anchor faces; or else about the
+    /// agent's home, [`FLOOR_RING`] from it, whole. See `design/environments.md`.
     pub fn home_ring(&self) -> HomeRing {
         match self.formation {
             tomori_protocol::cluster::Formation::Ring => {
                 let cluster = cluster(self.workers, self.audience, self.extent)
                     .with_formation(self.formation)
                     .with_sweep(self.sweep.unwrap_or(tomori_protocol::cluster::MOST_SWEEP));
-                let [x, z] = cluster.towards();
+                let [x, z] = cluster.faces();
                 HomeRing {
                     centre: self.workers.position,
                     radius: tomori_protocol::cluster::RING,
@@ -412,9 +412,9 @@ pub const FLOOR_RING: f32 = 1.25;
 
 /// The ring drawn on the floor at home, the agent's place, which never travels with it: the middle it stands about, in
 /// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the floor beneath; its
-/// radius, in metres; and how much of the circle it takes, in radians, centred on `towards`, the way from its middle
-/// to whoever its workers gather about, about the vertical. Workers standing in a ring about the agent's home stand on
-/// it. See `design/environments.md`.
+/// radius, in metres; and how much of the circle it takes, in radians, centred on `towards`, the way its workers'
+/// anchor faces, about the vertical. Workers standing in a ring about the agent's home stand on it. See
+/// `design/environments.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeRing {
     pub centre: Vec3,
@@ -504,6 +504,24 @@ mod tests {
         let (spot, panicked) = super::place(origin, placement, worker, &home, &home.arrange(1));
         assert!(spot.scale == 1.0 && !spot.more);
         (spot.position, panicked)
+    }
+
+    #[test]
+    fn a_partial_home_ring_is_drawn_about_the_way_its_anchor_faces() {
+        use tomori_protocol::cluster::Formation;
+        // A home in a corner, turned out of it along +X, its workers gathered about the eyes at home, along +Z: its
+        // drawn ring opens the way it faces, as its workers stand, rather than towards those eyes.
+        let corner = tomori_protocol::Pose::at([0.0, 1.5, -4.0]).facing_towards([4.0, 1.5, -4.0]);
+        let arrangement = Arrangement {
+            workers: Anchor::from_pose(&corner).unwrap(),
+            formation: Formation::Ring,
+            sweep: Some(170.0),
+            ..Arrangement::default()
+        };
+        let ring = arrangement.home_ring();
+        assert!(ring.towards.x > 0.999 && ring.towards.y == 0.0, "{ring:?}");
+        assert!((ring.sweep - 170f32.to_radians()).abs() < 1e-5);
+        assert_eq!(ring.centre, Vec3::new(0.0, 1.5, -4.0));
     }
 
     #[test]
