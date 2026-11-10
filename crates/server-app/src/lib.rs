@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 3)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 4)]);
 /// ```
 pub fn builder() -> Builder {
     let builder = Server::builder()
@@ -61,18 +61,21 @@ fn farmyard_eyes() -> [f32; 3] {
     ]
 }
 
-/// The agent's home in the farmyard: beside the coop, facing where participants arrive.
+/// The agent's home in the farmyard: at the heart of its workbench's curve, in the corner by the gate, facing out of it
+/// towards where participants arrive.
 pub fn farmyard_agent() -> tomori_protocol::Pose {
     tomori_protocol::Pose::at(tomori_environment_farmyard::layout::AGENT_HOME.to_array())
         .facing_towards(farmyard_eyes())
 }
 
 /// The farmyard's `home` cluster anchor: its workers stand in a ring about the agent's home, on the ring drawn there,
-/// rather than on the arc about the arrival. It gives no room, so that an older client, which would lay the arc's steps
-/// out in it, keeps today's arc; the layout's tests check that the ring fits the yard. See `design/farmyard.md`.
+/// rather than on the arc about the arrival, all but straight behind the agent, where the swarm would hide them, those
+/// behind it over its workbench. It gives no room, so that an older client, which would lay the arc's steps out in it,
+/// keeps today's arc; the layout's tests check that the ring fits the yard. See `design/farmyard.md`.
 pub fn farmyard_home() -> tomori_protocol::cluster::Anchor {
     tomori_protocol::cluster::Anchor::new(tomori_protocol::cluster::HOME, farmyard_agent())
         .with_formation(tomori_protocol::cluster::Formation::Ring)
+        .with_sweep(tomori_environment_farmyard::layout::HOME_SWEEP)
 }
 
 /// The farmyard's notice board, a projection wall of its own, two slots wide and one high, on the board against the
@@ -102,7 +105,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 3)
+                ("farmyard", "Farmyard", 4)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
@@ -171,6 +174,10 @@ mod tests {
         let home = super::farmyard_home();
         assert_eq!(home.pose, super::farmyard_agent());
         assert_eq!(home.extent, None);
+        assert_eq!(
+            home.sweep,
+            Some(tomori_environment_farmyard::layout::HOME_SWEEP)
+        );
     }
 
     #[test]

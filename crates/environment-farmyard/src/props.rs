@@ -354,6 +354,7 @@ pub fn model() -> Model {
     feeder(&mut shapes);
     hay(&mut shapes);
     noticeboard(&mut shapes);
+    crate::workbench::build(&mut shapes, &mut glass);
     trees(&mut shapes);
     lantern(&mut shapes, &mut glass, layout::GATE_LANTERN);
     Model::built(

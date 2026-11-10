@@ -24,7 +24,7 @@ struct SkyCamera {
 }
 
 /// How the farmyard is lit: a cool moon low in the east, the sky's blue overhead and the earth's brown below, the
-/// lanterns' warm light by the coop's door and on the gate, and a dusky haze over the far meadow.
+/// lanterns' warm light by the coop's door, on the gate and over the workbench, and a dusky haze over the far meadow.
 pub fn lighting() -> Lighting {
     Lighting::new(
         Vec3::new(0.62, 0.36, -0.7).normalize(),
@@ -35,6 +35,11 @@ pub fn lighting() -> Lighting {
     .with_haze(Vec3::new(0.03, 0.033, 0.06), 0.0008)
     .with_lamp(Lamp::new(layout::LANTERN, 6.0, palette::GLOW * 1.4))
     .with_lamp(Lamp::new(layout::GATE_LANTERN, 4.5, palette::GLOW * 1.1))
+    .with_lamp(Lamp::new(
+        layout::workbench_lantern(),
+        3.5,
+        palette::GLOW * 1.2,
+    ))
 }
 
 /// Where the eye is, from its view and projection: the point every ray of the view begins from, as every scenery is

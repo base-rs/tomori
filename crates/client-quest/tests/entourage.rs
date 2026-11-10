@@ -8,8 +8,10 @@
 //! `arc-*.png`, three, six and ten workers, down the sheet, at home and summoned, across it; `signs.png`, the first four
 //! workers' signs close up, summoned; `signs-viewpoints.png`, the default arc of six, summoned, seen from in front, 45°
 //! to its left and 70° to its right, each sign turned to face whoever looks; `home.png`, the agent at home with its wall
-//! beneath it, from the arrival; and `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
-//! someone standing, 1.6 m and 1.8 m, down the sheet. See `design/projection.md`, `design/environments.md` and
+//! beneath it, from the arrival; `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
+//! someone standing, 1.6 m and 1.8 m, down the sheet; and `workbench.png`, the agent at its workbench in the yard's
+//! corner, its workers in the ring about it, from the arrival turned towards it, from the yard before it and from within
+//! the ring, down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
 //! `design/interaction.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -985,6 +987,135 @@ fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seat
             std::fs::create_dir_all(directory).unwrap();
             sheet
                 .save(directory.join("summoned.png"))
+                .expect("the preview is saved");
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// The farmyard's `home` cluster anchor, as Tomori's own server sends it, carried: its workers in a ring about the agent
+/// at its workbench, all but straight behind it.
+fn ring_home() -> tomori_protocol::cluster::Anchor {
+    tomori_protocol::cluster::Anchor::new(
+        tomori_protocol::cluster::HOME,
+        carried(layout::AGENT_HOME),
+    )
+    .with_formation(tomori_protocol::cluster::Formation::Ring)
+    .with_sweep(layout::HOME_SWEEP)
+}
+
+#[test]
+fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_bench() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut sceneries = Sceneries::empty();
+        tomori_environment_farmyard_client::register(&mut sceneries);
+        let mut feedback = Feedback::new(Settings::default());
+        // Ten workers, the farmyard's home anchor a ring, as the server sends them.
+        let mut conversation = joined(10, None);
+        let mut ringed = state(10, None);
+        ringed.anchors = ringed
+            .anchors
+            .with_workers(carried(layout::AGENT_HOME))
+            .with_cluster(ring_home());
+        conversation.apply(Event::Message(ServerMessage::Space {
+            state: Box::new(ringed),
+        }));
+        // Its status wall the notice board, across the yard, and no wall beneath the agent.
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(Projection::new(SPACE, farmyard().id()).with_walls(vec![
+                Wall::new(
+                    "environment-0",
+                    WallKind::Environment,
+                    carried(layout::NOTICEBOARD),
+                )
+                .with_status(true),
+            ])),
+        }));
+        conversation.take_actions();
+        let eyes = Vec3::from_array(SUMMONER);
+        let agent = Vec3::from_array(carried(layout::AGENT_HOME).position);
+        let towards = (agent - eyes).with_y(0.0).normalize();
+        let mut step = Step::default();
+        let mut now = Instant::now();
+        let frame = run(
+            &mut step,
+            &mut conversation,
+            &mut feedback,
+            &senses(eyes, towards),
+            8.0,
+            &mut now,
+        );
+        // The swarm at home, at the heart of the bench's curve; every worker on the ring about it, those behind it, as
+        // seen from the arrival, above what lies on the bench, along its curve, and the rest in the yard about it.
+        assert!(Vec3::from_array(frame.agent).distance(agent) < 0.05);
+        assert_eq!(frame.stations.len(), 10);
+        let carriage = carriage();
+        let into_space = |at: glam::Vec2| {
+            let at = carriage.carry(&Pose::at([at.x, 0.0, at.y])).position;
+            glam::Vec2::new(at[0], at[2])
+        };
+        let middle = into_space(layout::WORKBENCH);
+        let behind = into_space(layout::on_workbench(1.0, 0.0)) - middle;
+        let mut over = 0;
+        for station in frame.stations {
+            let at = Vec3::from_array(station.position);
+            let flat = glam::Vec2::new(at.x, at.z);
+            let radius = flat.distance(middle);
+            assert!(
+                (radius - tomori_protocol::cluster::RING).abs() < 0.05,
+                "{} at {at}, {radius} m from the agent",
+                station.id
+            );
+            if (flat - middle).dot(behind) > 0.0 {
+                assert!(
+                    at.y > layout::WORKBENCH_CLUTTER + 0.2,
+                    "{} at {at}",
+                    station.id
+                );
+                over += 1;
+            }
+        }
+        assert_eq!(over, 4, "two of each row's six");
+        // Drawn from the arrival turned towards it, from the yard before it, looking into the corner, and from within
+        // the ring, beside the agent, looking at the rack's tools.
+        let out = (eyes - agent).with_y(0.0).normalize();
+        let yard = agent + out * 2.6 + Vec3::Y * 0.1;
+        let within = agent + out * 0.9 + out.cross(Vec3::Y) * 0.5 - Vec3::Y * 0.1;
+        let views = [
+            (eyes, towards - Vec3::Y * 0.12, 1.2),
+            (yard, -out - Vec3::Y * 0.25, 1.3),
+            (within, -out - Vec3::Y * 0.3, 1.2),
+        ];
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * views.len() as u32);
+        for (row, (from, looking, fov)) in views.into_iter().enumerate() {
+            let drawn = render(&device, &queue, &sceneries, &frame, from, looking, fov);
+            // The bench's wood, lit warmly by its lantern, below the swarm: redder than it is blue.
+            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
+                * Mat4::look_to_rh(from, looking, Vec3::Y);
+            let top = layout::on_workbench(layout::WORKBENCH_TOP[1] - 0.15, 0.25);
+            let top = carriage
+                .carry(&Pose::at([top.x, layout::WORKBENCH_HEIGHT + 0.01, top.y]))
+                .position;
+            let clip = matrix * Vec3::from_array(top).extend(1.0);
+            let (x, y) = (
+                ((clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32) as u32,
+                ((1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32) as u32,
+            );
+            assert!(x < WIDTH && y < HEIGHT, "the bench is in view: {x} {y}");
+            let [red, _, blue, _] = drawn.get_pixel(x, y).0;
+            assert!(
+                red > blue,
+                "the bench is wood: {:?}",
+                drawn.get_pixel(x, y).0
+            );
+            image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
+        }
+        if let Some(directory) = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            sheet
+                .save(directory.join("workbench.png"))
                 .expect("the preview is saved");
         }
         assert!(pollster::block_on(scope.pop()).is_none());

@@ -2,19 +2,21 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Tomori's farmyard: an evening yard, fenced, with a red chicken coop raised on legs, its ramp and little door, a water
-//! trough, a feeder with grain scattered about it, hay bales, lanterns, and pines beyond under a rising moon.
+//! trough, a feeder with grain scattered about it, hay bales, a curved workbench in a corner where the agent lives,
+//! lanterns, and pines beyond under a rising moon.
 //!
 //! It is an environment built as another project would build one, from Tomori's published crates and their extension
 //! points, without anything in Tomori's own crates knowing about it. This crate is what its server and its clients
-//! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, built in code
-//! as `tomori-assets` models; the chicken, its asset, its animator's graph and its controller; what each chicken does,
-//! and where that puts it; the flock its server side owns; and the server side itself, which has nothing that must stay
-//! in the server, so that it needs no server crate of its own. Its client half, the scenery, teleport profile and client
-//! side a client registers, is `tomori-environment-farmyard-client`. See `design/farmyard.md`.
+//! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, the yard with its
+//! workbench and the coop, built in code as `tomori-assets` models; the chicken, its asset, its animator's graph and its
+//! controller; what each chicken does, and where that puts it; the flock its server side owns; and the server side
+//! itself, which has nothing that must stay in the server, so that it needs no server crate of its own. Its client half,
+//! the scenery, teleport profile and client side a client registers, is `tomori-environment-farmyard-client`. See
+//! `design/farmyard.md`.
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 3, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 4, "Farmyard"));
 //! ```
 pub mod behaviour;
 pub mod chicken;
@@ -26,14 +28,16 @@ pub mod layout;
 pub mod props;
 mod shapes;
 pub mod side;
+pub mod workbench;
 
 /// The identifier spaces name the farmyard by.
 pub const ID: &str = "farmyard";
 
 /// The farmyard's protocol version, which a server offers it at and a client presents it at. Raise it, in this crate
 /// alone, when a client of the earlier version could not present the farmyard as the server now offers it: 2 when it
-/// gained an arrival of its own, and 3 when its wall moved onto the notice board, which an earlier client does not draw.
-pub const VERSION: u32 = 3;
+/// gained an arrival of its own, 3 when its wall moved onto the notice board, which an earlier client does not draw, and 4
+/// when the agent's home moved to the workbench, which an earlier client does not draw either.
+pub const VERSION: u32 = 4;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

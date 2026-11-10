@@ -3,7 +3,8 @@
 
 //! The farmyard drawn on the shared test device, on lavapipe in CI: from home, looking into the yard at the coop, as a
 //! participant arriving sees it, and growing out of a point. `TOMORI_FARMYARD_PREVIEW`, set to a PNG path, saves the
-//! view from home and from beside the coop's window there, and the chickens beside it, with `-chickens` added to its name.
+//! view from home, from beside the coop's window and of the workbench from the yard before it there, and the chickens
+//! beside it, with `-chickens` added to its name.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -170,6 +171,19 @@ fn target(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> Farmyard 
 const HOME: (Vec3, Vec3) = (Vec3::new(0.0, 1.6, 0.0), Vec3::new(-1.2, 0.8, -8.0));
 const WINDOW: (Vec3, Vec3) = (Vec3::new(-0.9, 1.25, -8.6), Vec3::new(-2.8, 0.85, -8.6));
 
+/// From the yard 3 m before the workbench's middle, looking into its corner at the middle of its top.
+fn workbench() -> (Vec3, Vec3) {
+    let at = |point: glam::Vec2, y: f32| Vec3::new(point.x, y, point.y);
+    let middle = layout::on_workbench(
+        (layout::WORKBENCH_TOP[0] + layout::WORKBENCH_TOP[1]) * 0.5,
+        0.0,
+    );
+    (
+        at(layout::on_workbench(-1.0, 0.0), 1.6),
+        at(middle, layout::WORKBENCH_HEIGHT + 0.2),
+    )
+}
+
 #[test]
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
@@ -207,9 +221,16 @@ fn the_farmyard_is_an_evening_yard_with_a_warmly_lit_red_coop() {
         assert!(coop[0] > coop[2] * 1.2, "the coop is red: {coop:?}");
         // Seen from beside its window, its inside is darker than its sunlit, lantern-lit walls.
         let window = capture(&device, &queue, &farmyard, 4, WINDOW);
+        // The workbench in the corner, seen from the yard before it, is wood lit warmly by its lantern, against the
+        // evening beyond the fence.
+        let workbench = capture(&device, &queue, &farmyard, 4, workbench());
+        let bench = average(&workbench, (0.4, 0.55), (0.6, 0.7));
+        assert!(bench[0] > bench[2] * 1.2, "the bench is wood: {bench:?}");
+        let rack = average(&workbench, (0.45, 0.3), (0.55, 0.45));
+        assert!(rack[0] > rack[2], "the rack is wood: {rack:?}");
         if let Ok(path) = std::env::var("TOMORI_FARMYARD_PREVIEW") {
-            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
-            for (row, pixels) in [&home, &window].into_iter().enumerate() {
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            for (row, pixels) in [&home, &window, &workbench].into_iter().enumerate() {
                 let view = image::RgbaImage::from_raw(WIDTH, HEIGHT, pixels.clone()).unwrap();
                 image::imageops::replace(&mut sheet, &view, 0, i64::from(row as u32 * HEIGHT));
             }

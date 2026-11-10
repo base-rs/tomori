@@ -77,6 +77,34 @@ fn chickens_wander_clear_of_the_yard_and_each_other_and_visit_the_coop_now_and_t
 }
 
 #[test]
+fn chickens_walk_round_the_workbench_never_on_it_nor_through_it() {
+    let flock = flock("space-1");
+    // Its pieces are among what they keep clear of; their part of the yard stops short of most of it, and where it
+    // reaches the bench's end, by the left fence, they keep their clearance from it.
+    let pieces = layout::workbench();
+    assert!(
+        pieces
+            .iter()
+            .all(|piece| layout::obstacles().contains(piece))
+    );
+    for piece in &pieces {
+        for point in [piece.low, piece.high, piece.centre()] {
+            assert!(!Flock::clear(point), "{point}");
+        }
+    }
+    let end = Vec2::new(-4.3, -1.9);
+    assert!(AREA.contains(end) && !Flock::clear(end));
+    assert!(pieces[0].grown(CLEARANCE).contains(end));
+    // In the yard before it they may stand, but walk neither onto it nor through it into its corner.
+    let yard = Vec2::new(-3.8, -2.3);
+    assert!(Flock::clear(yard));
+    assert!(!flock.path_clear(0, yard, Vec2::new(-4.8, 1.4), 0));
+    assert!(!flock.path_clear(0, yard, layout::on_workbench(2.0, -0.6), 0));
+    // A chicken by it is said to be by the workbench.
+    assert_eq!(near(Vec3::new(-3.9, 0.0, -2.2)), "by the workbench");
+}
+
+#[test]
 fn a_chicken_pointed_at_is_confused_until_its_participant_looks_away() {
     let mut flock = flock("space-1");
     let notice = |chicken| Intent::Notice {

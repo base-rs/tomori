@@ -625,6 +625,7 @@ fn near(point: Vec3) -> &'static str {
         (layout::TROUGH.centre(), "by the water trough"),
         (layout::FEEDER, "by the feeder"),
         (layout::HAY.centre(), "by the hay"),
+        (crate::workbench::middle(), "by the workbench"),
         (Vec2::new(0.0, layout::FENCE.high.y), "near the gate"),
     ];
     places
