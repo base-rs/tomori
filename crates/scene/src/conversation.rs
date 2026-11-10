@@ -2410,15 +2410,25 @@ impl Conversation {
             arrangement.home = home;
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
-        // The room the home cluster may take, where the environment gives it, with the home anchor where it says.
+        // The room the home cluster may take, and how it stands, where the environment gives them, with the home anchor
+        // where it says; room out of bounds is none.
         if let Some(home) = space
             .anchors
             .cluster(tomori_protocol::cluster::HOME)
-            .filter(|home| home.extent.is_some_and(|extent| extent.valid()))
+            .filter(|home| {
+                home.extent.is_some_and(|extent| extent.valid())
+                    || home.formation == tomori_protocol::cluster::Formation::Ring
+            })
             && let Some(workers) = anchor(Some(home.pose))
         {
             arrangement.workers = workers;
-            arrangement.extent = home.extent;
+            arrangement.extent = home.extent.filter(|extent| extent.valid());
+            if home.formation == tomori_protocol::cluster::Formation::Ring {
+                arrangement.formation = tomori_protocol::cluster::Formation::Ring;
+                arrangement.sweep = home
+                    .sweep
+                    .filter(|sweep| tomori_protocol::cluster::valid_sweep(*sweep));
+            }
         }
         arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
         // Turned to whoever began speaking to it, about the vertical. See `design/environments.md`.
@@ -2459,6 +2469,8 @@ impl Conversation {
         if space.summoned.is_some() && entourage {
             arrangement.workers = arrangement.agent;
             arrangement.extent = None;
+            arrangement.formation = tomori_protocol::cluster::Formation::Arc;
+            arrangement.sweep = None;
             arrangement.audience = space
                 .summoner
                 .map(glam::Vec3::from_array)
@@ -7902,6 +7914,89 @@ mod tests {
         assert_eq!(conversation.locomotion(), teleport);
         hold_b(&mut conversation);
         assert_eq!(conversation.locomotion(), Locomotion::None);
+    }
+
+    #[test]
+    fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goes_elsewhere() {
+        use crate::anchors::{Anchor, FLOOR_RING, HomeRing};
+        use tomori_protocol::cluster::{Formation, RING};
+        use tomori_protocol::{AgentMovement, Anchors, Pose};
+        let agent = Pose::at([-1.0, 1.5, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+        let ring = tomori_protocol::cluster::Anchor::new("home", agent)
+            .with_formation(Formation::Ring)
+            .with_sweep(240.0);
+        let called = Pose::at([1.0, 1.6, -1.0]).facing_towards([0.0, 1.6, 0.0]);
+        let at_home = |state: &mut SpaceState| {
+            state.environment = "sky".into();
+            state.movement = Some(AgentMovement::default());
+            state.anchors = Anchors::new()
+                .with_agent(agent)
+                .with_workers(agent)
+                .with_cluster(ring.clone());
+        };
+        let mut conversation = joined(at_home);
+        let home = conversation.arrangement();
+        assert_eq!(
+            (home.formation, home.sweep, home.extent),
+            (Formation::Ring, Some(240.0), None)
+        );
+        let drawn = home.home_ring();
+        assert_eq!(drawn.centre, Anchor::from_pose(&agent).unwrap().position);
+        assert_eq!(drawn.radius, RING);
+        assert!((drawn.sweep - 240f32.to_radians()).abs() < 1e-5);
+        // Towards the eyes at the arrival, about the vertical.
+        assert!(drawn.towards.x > 0.0 && drawn.towards.z > 0.9 && drawn.towards.y == 0.0);
+        // Called elsewhere, the agent goes, and its workers and its ring stay home.
+        conversation.apply(space(|state| {
+            at_home(state);
+            state.summoned = Some(called);
+            state.partner = Some([0.0, 1.6, 0.0]);
+        }));
+        let away = conversation.arrangement();
+        assert!(away.away());
+        assert_eq!(away.home_ring(), drawn);
+        assert_eq!(
+            (away.workers, away.formation),
+            (home.workers, Formation::Ring)
+        );
+        // A sweep out of bounds is the whole ring; and from an older server, whose entourage gathers the workers about
+        // the agent, the arc about it, its ring on the floor still at home.
+        let mut wide = ring.clone();
+        wide.sweep = Some(400.0);
+        conversation.apply(space(|state| {
+            at_home(state);
+            state.anchors = Anchors::new().with_agent(agent).with_cluster(wide.clone());
+        }));
+        assert_eq!(conversation.arrangement().sweep, None);
+        conversation.apply(space(|state| {
+            at_home(state);
+            state.movement = None;
+            state.summoned = Some(called);
+            state.summoner = Some([0.0, 1.6, 0.0]);
+        }));
+        let entourage = conversation.arrangement();
+        assert_eq!(
+            (entourage.formation, entourage.sweep, entourage.workers),
+            (Formation::Arc, None, entourage.agent)
+        );
+        assert_eq!(
+            entourage.home_ring(),
+            HomeRing {
+                centre: entourage.home.position,
+                radius: FLOOR_RING,
+                ..HomeRing::WHOLE
+            }
+        );
+        // Sky, which says nothing, stands its workers on today's arc, its ring whole about the agent's home.
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.movement = Some(AgentMovement::default());
+            state.summoned = Some(called);
+        }));
+        let sky = conversation.arrangement();
+        assert_eq!((sky.formation, sky.extent), (Formation::Arc, None));
+        assert_eq!(sky.home_ring(), HomeRing::WHOLE);
+        assert_eq!(HomeRing::default(), HomeRing::WHOLE);
     }
 
     #[test]

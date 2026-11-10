@@ -640,3 +640,62 @@ fn a_worker_the_server_no_longer_seats_stays_where_it_stands_and_satellites_keep
     assert_eq!(scene.workers["w01"].at.as_deref(), Some("rack/a12"));
     assert_ne!(after["w01"], before["w01"]);
 }
+
+#[test]
+fn workers_stand_in_a_ring_about_the_agent_s_home_on_its_ring_the_sides_first_and_gaps_close() {
+    use tomori_protocol::cluster::{Formation, RING};
+    let ring = (Formation::Ring, None);
+    let cluster =
+        crate::anchors::cluster(Anchor::AGENT, EYES, None).with_formation(Formation::Ring);
+    let mut scene = Scene::new();
+    scene.arrange_as(Anchor::AGENT, EYES, None, ring, None);
+    let mut before = BTreeMap::new();
+    // Fourteen at full size, in two rows, the most the ring holds below the highest it rises.
+    for count in 1..=14 {
+        settle(&mut scene, &workers(count));
+        let standing = own(&scene);
+        assert_eq!(standing.len(), count);
+        let layout = cluster.arrange(count);
+        for (id, (position, scale)) in &standing {
+            // On the ring about the agent's home, at full size, in its slot; nobody who stood moved as another arrived.
+            let slot = scene.slots[id];
+            assert_eq!(*position, cluster.slot(&layout, slot).position, "{id}");
+            let away = Vec3::from_array(*position) - crate::swarm::CENTER;
+            assert!((away.x.hypot(away.z) - RING).abs() < 1e-4, "{id}");
+            assert_eq!(*scale, 1.0);
+        }
+        for (id, was) in &before {
+            assert_eq!(
+                standing.get(id),
+                Some(was),
+                "{id} moved as worker {count} arrived"
+            );
+        }
+        before = standing;
+    }
+    // The first two stand at the agent's sides, right and then left, as seen from home.
+    let first = own(&scene);
+    assert!(first["w00"].0[0] > 1.0 && first["w01"].0[0] < -1.0);
+    // In a ring, which holds only so many, gaps close as the client seats its workers itself: the last of many left
+    // stands in a slot of its own at full size, where the first stood.
+    let mut last = workers(30);
+    settle(&mut scene, &last);
+    last.nodes.retain(|node| node.id == "w29");
+    for _ in 0..30 {
+        settle(&mut scene, &last);
+    }
+    let alone = own(&scene);
+    assert_eq!(
+        alone["w29"],
+        (cluster.slot(&cluster.arrange(1), 0).position, 1.0)
+    );
+    // Laid out again as the ring goes, for the arc, each glides to its place there.
+    scene.arrange(Anchor::AGENT, EYES, None, None);
+    for _ in 0..4 {
+        settle(&mut scene, &last);
+    }
+    assert_eq!(
+        own(&scene)["w29"].0,
+        HomeArc::at(Anchor::AGENT, EYES, 0).to_array()
+    );
+}

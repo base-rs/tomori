@@ -50,6 +50,16 @@ const MAX_INSTANCES: usize = AGENT_COUNT
     } else {
         crate::arrival_graphics::MAX_CUBES
     };
+/// How many cubes make the ring on the floor at home, its colour, and the share of its brightness it keeps while the
+/// agent is away from it: most of it, since the ring marks home, where the workers stand, whether or not the agent is
+/// there, and only a little dimmer says it is away.
+pub const HOME_RING_CUBES: usize = 40;
+pub const HOME_RING_COLOUR: [f32; 3] = [0.08, 0.5, 0.65];
+pub const HOME_RING_AWAY: f32 = 0.85;
+
+/// The widest ring on the floor at home drawn, in metres; one wider is drawn beneath the swarm.
+pub const MOST_HOME_RING: f32 = 4.0;
+
 /// How many cubes make the ring drawn where a teleport being aimed would land.
 const LANDING_CUBES: usize = 16;
 /// The ring's radius, in metres.
@@ -134,6 +144,8 @@ pub struct Renderer {
     carriage: Mat4,
     /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
     landing: Option<glam::Vec3>,
+    /// The ring drawn on the floor at home, as the frame step last gave it, or none, when it is drawn beneath the swarm.
+    home_ring: Option<tomori_scene::anchors::HomeRing>,
     /// The teleport pads drawn, each a ring with a plate and chevrons above it; see `design/locomotion.md`.
     pads: Vec<tomori_scene::pads::Shown>,
     /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -358,6 +370,7 @@ impl Renderer {
             reveal: None,
             carriage: Mat4::IDENTITY,
             landing: None,
+            home_ring: None,
             pads: Vec::new(),
             blink: 0.0,
             blink_pipeline,
@@ -618,6 +631,19 @@ impl Renderer {
         }
     }
 
+    /// Draw the ring on the floor at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes:
+    /// a little dimmer while it is away, brightening as it comes back. With none, or one that is nonsense, it is drawn beneath the
+    /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
+    pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
+        self.home_ring = ring.filter(|ring| {
+            ring.centre.is_finite()
+                && ring.towards.is_finite()
+                && ring.radius > 0.0
+                && ring.radius <= MOST_HOME_RING
+                && ring.sweep.is_finite()
+        });
+    }
+
     /// Draw a ring at `landing`, where a teleport being aimed would land, from the next [`Self::update`], or none.
     pub fn set_landing(&mut self, landing: Option<glam::Vec3>) {
         self.landing = landing.filter(|landing| landing.is_finite());
@@ -661,20 +687,37 @@ impl Renderer {
         if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
-        // Keep the coordinator's orientation ring in both environments, on the floor beneath the swarm wherever it stands:
-        // on the room's floor, or, for a swarm raised above its usual height, on the floor it would stand that high over.
-        let centre = swarm.anchor().position;
+        // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, or else beneath
+        // the swarm: on the room's floor, or, for a home raised above the swarm's usual height, on the floor it would
+        // stand that high over. A little dimmer while the agent is away, it brightens as it comes back within the ring.
+        let swarm_at = swarm.anchor().position;
+        let ring = self.home_ring.unwrap_or(tomori_scene::anchors::HomeRing {
+            centre: swarm_at,
+            ..tomori_scene::anchors::HomeRing::WHOLE
+        });
+        let (centre, radius) = (ring.centre, ring.radius);
         let floor = (centre.y - crate::swarm::CENTER.y).max(0.0) + 0.015;
-        for n in 0..40 {
-            let angle = n as f32 * std::f32::consts::TAU / 40.0;
+        let away = (swarm_at.x - centre.x).hypot(swarm_at.z - centre.z);
+        let faint = ((away - radius / 2.0) / radius).clamp(0.0, 1.0);
+        let brightness = 1.0 - (1.0 - HOME_RING_AWAY) * faint;
+        // Only as much of it as its workers take, about the way to whoever they gather about.
+        let towards = glam::Vec2::new(ring.towards.x, ring.towards.z)
+            .try_normalize()
+            .unwrap_or(glam::Vec2::Y);
+        for n in 0..HOME_RING_CUBES {
+            let angle = n as f32 * std::f32::consts::TAU / HOME_RING_CUBES as f32;
+            let off = glam::Vec2::from_angle(angle).angle_to(towards).abs();
+            if off > ring.sweep / 2.0 + 1e-4 {
+                continue;
+            }
             self.scene.push(Instance {
                 position: [
-                    centre.x + angle.cos() * 1.25,
+                    centre.x + angle.cos() * radius,
                     floor,
-                    centre.z + angle.sin() * 1.25,
+                    centre.z + angle.sin() * radius,
                 ],
                 scale: [0.035, 0.015, 0.035],
-                color: [0.08, 0.5, 0.65],
+                color: HOME_RING_COLOUR.map(|channel| channel * brightness),
                 ..Default::default()
             });
         }
@@ -3122,6 +3165,110 @@ mod tests {
                     .count(),
                 40
             );
+        });
+    }
+
+    #[test]
+    fn the_ring_on_the_floor_stays_at_home_a_little_dimmer_while_the_agent_is_away() {
+        use tomori_scene::anchors::HomeRing;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            let mut swarm = Swarm::default();
+            let home = glam::Vec3::new(-1.0, 1.5, -4.0);
+            let ring = HomeRing {
+                centre: home,
+                radius: tomori_protocol::cluster::RING,
+                towards: glam::Vec3::Z,
+                sweep: std::f32::consts::TAU,
+            };
+            renderer.set_home_ring(Some(ring));
+            // The ring's cubes, on the floor beneath home, raised 0.1 m above the swarm's usual height.
+            let floor = |renderer: &Renderer| -> Vec<Instance> {
+                renderer
+                    .scene
+                    .iter()
+                    .filter(|instance| (instance.position[1] - 0.115).abs() < 1e-5)
+                    .copied()
+                    .collect()
+            };
+            let at = |anchor: glam::Vec3| tomori_scene::anchors::Anchor {
+                position: anchor,
+                orientation: glam::Quat::IDENTITY,
+            };
+            swarm.set_anchor(at(home));
+            renderer.update(&queue, &swarm, None, false);
+            let at_home = floor(&renderer);
+            assert_eq!(at_home.len(), HOME_RING_CUBES);
+            for instance in &at_home {
+                let across =
+                    glam::Vec2::new(instance.position[0] - home.x, instance.position[2] - home.z)
+                        .length();
+                assert!((across - ring.radius).abs() < 1e-4);
+                assert_eq!(instance.color, HOME_RING_COLOUR);
+            }
+            // The agent gone to someone 4 m away, the ring stays where it was, whole and still plainly seen, a little dimmer.
+            swarm.set_anchor(at(glam::Vec3::new(2.0, 1.5, -1.0)));
+            renderer.update(&queue, &swarm, None, false);
+            let away = floor(&renderer);
+            assert_eq!(
+                away.iter()
+                    .map(|instance| instance.position)
+                    .collect::<Vec<_>>(),
+                at_home
+                    .iter()
+                    .map(|instance| instance.position)
+                    .collect::<Vec<_>>()
+            );
+            let faint = HOME_RING_COLOUR.map(|channel| channel * HOME_RING_AWAY);
+            assert!(away.iter().all(|instance| {
+                (0..3).all(|channel| (instance.color[channel] - faint[channel]).abs() < 1e-6)
+            }));
+            // Home is marked whether or not the agent is there: the ring keeps most of its brightness.
+            assert_eq!(away.len(), HOME_RING_CUBES);
+            assert!(faint[1] >= 0.8 * HOME_RING_COLOUR[1], "{faint:?}");
+            // Coming back within the ring, it brightens again.
+            swarm.set_anchor(at(home + glam::Vec3::new(0.9, 0.0, 0.0)));
+            renderer.update(&queue, &swarm, None, false);
+            let nearly = floor(&renderer)[0].color[1];
+            assert!(
+                nearly > faint[1] && nearly < HOME_RING_COLOUR[1],
+                "{nearly}"
+            );
+            // Two thirds of a ring, about the way to the arrival: the side behind it is not drawn.
+            renderer.set_home_ring(Some(HomeRing {
+                sweep: 240f32.to_radians(),
+                ..ring
+            }));
+            renderer.update(&queue, &swarm, None, false);
+            let part = floor(&renderer);
+            assert!(part.len() < HOME_RING_CUBES * 3 / 4 && part.len() > HOME_RING_CUBES / 2);
+            assert!(
+                part.iter()
+                    .all(|instance| instance.position[2] - home.z > -0.71)
+            );
+            // Nonsense, or none, draws it beneath the swarm, as before there were homes.
+            for nonsense in [
+                HomeRing {
+                    radius: 9.0,
+                    ..ring
+                },
+                HomeRing {
+                    centre: glam::Vec3::NAN,
+                    ..ring
+                },
+            ] {
+                renderer.set_home_ring(Some(nonsense));
+                renderer.update(&queue, &swarm, None, false);
+                let beneath = floor(&renderer);
+                assert_eq!(beneath.len(), HOME_RING_CUBES);
+                let middle = beneath
+                    .iter()
+                    .map(|instance| glam::Vec3::from_array(instance.position))
+                    .sum::<glam::Vec3>()
+                    / beneath.len() as f32;
+                assert!((middle.x - (home.x + 0.9)).abs() < 1e-3, "{middle}");
+            }
         });
     }
 

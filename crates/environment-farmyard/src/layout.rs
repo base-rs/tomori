@@ -269,18 +269,46 @@ mod tests {
      {
         use tomori_environment::sightlines::{Solid, Spot, fits};
         use tomori_protocol::Pose;
-        use tomori_protocol::cluster::{Anchor, Cluster, HOME, Step};
+        use tomori_protocol::cluster::{Anchor, Cluster, Formation, HOME, Step};
         let arrival = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array());
         let solids: Vec<Solid> = solids()
             .into_iter()
             .map(|(low, high)| Solid::new(low, high))
             .collect();
-        // The farmyard gives no home anchor: its workers stand on today's arc about the agent's home, gathered about
-        // the eyes at the arrival.
+        // The farmyard's home anchor stands its workers in a ring about the agent's home, gathered about the eyes at the
+        // arrival, as Tomori's own server registers it: without room, which an older client would lay the arc's steps
+        // out in, so that it keeps today's arc; the ring's rows fit the yard, which `fits` checks.
         let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(arrival.eyes());
-        let home = Cluster::new(&Anchor::new(HOME, agent)).with_audience(arrival.eyes());
-        assert_eq!(home.arrange(18).step(), Step::Home);
+        let anchor = Anchor::new(HOME, agent).with_formation(Formation::Ring);
+        let home = Cluster::new(&anchor).with_audience(arrival.eyes());
+        assert_eq!(home.arrange(18).step(), Step::Ring);
+        assert!(!home.arrange(14).compact() && home.arrange(15).compact());
         assert_eq!(fits(&home, ARRIVAL.y, &solids), Ok(()));
+        // Its signs read and are pointed at from the yard: none of eighteen above 2.5 m, and the notice board seen past
+        // them from the arrival.
+        for slot in home.slots(18) {
+            assert!(
+                slot.position[1] <= tomori_protocol::cluster::RING_HIGHEST,
+                "{slot:?}"
+            );
+        }
+        let reach: Vec<Solid> = home
+            .slots(18)
+            .iter()
+            .map(|slot| {
+                let (low, high) = home.reach(slot);
+                Solid::new(low, high)
+            })
+            .collect();
+        assert!(
+            !reach
+                .iter()
+                .any(|worker| worker.blocks(arrival.eyes(), NOTICEBOARD.to_array()))
+        );
+        // Today's arc, which it stood in before and an older client still stands it in, fits too.
+        let arc = Cluster::new(&Anchor::new(HOME, agent)).with_audience(arrival.eyes());
+        assert_eq!(arc.arrange(18).step(), Step::Home);
+        assert_eq!(fits(&arc, ARRIVAL.y, &solids), Ok(()));
     }
 
     #[test]

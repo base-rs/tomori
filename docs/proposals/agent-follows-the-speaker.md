@@ -113,7 +113,7 @@ The conversation is **open** from the partner's words until it is idle. The agen
 
 Any participant's words cancel the return, as does the agent's own speech starting, for instance with a worker's report. A worker still running is **not** a reason to stay: workers take minutes, and their reports are for the space, not for whoever happened to ask last (see Workers). When the partner **leaves** the space, or their engagement goes **away** (`spaces.md`), the delay shortens to 15 s.
 
-Going home is the same glide or stream, to the environment's agent home, facing as the home faces. It is silent: no cue and no notice. The **ring on the floor** beneath the home always shows, faint while the agent is away, as the visible "this is where it lives" the maintainer asked for, and brightens as it arrives.
+Going home is the same glide or stream, to the environment's agent home, facing as the home faces. It is silent: no cue and no notice. The **ring on the floor** beneath the home always shows, faint while the agent is away, as the visible "this is where it lives" the maintainer asked for, and brightens as it arrives. *(Built after stage 5, from the headset in the farmyard: the ring is the home ring, staying at home in every mode, only a little dimmer while the agent is away, the roaming agent having nothing beneath it; and an environment may stand its home's workers in a ring on it, `Formation::Ring`, as the farmyard does, while Sky keeps the arc. See `design/environments.md`.)*
 
 ### Summoning by voice, and the trigger's summons removed
 

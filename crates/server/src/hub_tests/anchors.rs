@@ -124,6 +124,77 @@ pub(super) fn rack(name: &str, x: f32) -> Anchor {
 }
 
 #[test]
+fn a_ring_home_is_sent_to_everyone_its_workers_seated_in_it_and_the_agent_told_of_it() {
+    let (hub, _jobs) = hub_waiting();
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let home = tomori_protocol::Pose::at(crate::stage::AGENT).facing_towards([0.0, 1.6, 0.0]);
+    let ring = Anchor::new(HOME, home)
+        .with_formation(tomori_protocol::cluster::Formation::Ring)
+        .with_sweep(270.0);
+    // And a pen elsewhere, its whole ring about its point.
+    let pen = Anchor::new(
+        "pen",
+        tomori_protocol::Pose::at([3.0, 1.2, -5.0]).facing_towards([0.0, 1.2, 0.0]),
+    )
+    .with_formation(tomori_protocol::cluster::Formation::Ring)
+    .with_extent(4.0, 2.0, 4.0);
+    hub.set_environments(Environments::new([crate::environments::Environment::new(
+        "farm", "Farm",
+    )
+    .with_anchor(ring.clone())
+    .with_anchor(pen)]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "farm".to_owned();
+    let (id, _commands) = running(
+        &hub,
+        &bound,
+        Snapshot {
+            busy: Some(false),
+            workers: vec![worker("ses_00"), worker("ses_01")],
+            ..Snapshot::default()
+        },
+    );
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.send(ClientMessage::Join { space: id });
+    let joined = state(&ada).unwrap();
+    // Sent with its formation and sweep, without room, beside the workers anchor an older client keeps.
+    assert_eq!(joined.anchors.cluster(HOME), Some(&ring));
+    assert_eq!(joined.anchors.workers, Some(home));
+    // Its workers seated in it, as every client lays it out.
+    let seats = joined
+        .clusters
+        .iter()
+        .find(|layout| layout.anchor == HOME)
+        .unwrap();
+    assert_eq!(
+        (seats.slot("ses_00"), seats.slot("ses_01")),
+        (Some(0), Some(1))
+    );
+    // The agent is told it is a ring, and how much of one.
+    let presence = hub.tool_presence("session").unwrap();
+    let listed = &presence["anchors"][0];
+    assert_eq!(
+        (&listed["formation"], &listed["sweep"], &listed["extent"]),
+        (
+            &serde_json::json!("ring"),
+            &serde_json::json!(270.0),
+            &serde_json::json!("the ring about home")
+        )
+    );
+    let pen = &presence["anchors"][1];
+    assert_eq!(
+        (&pen["name"], &pen["formation"]),
+        (&serde_json::json!("pen"), &serde_json::json!("ring"))
+    );
+    assert!(pen.get("sweep").is_none());
+    assert_eq!(pen["extent"]["width"], 4.0);
+}
+
+#[test]
 fn a_side_places_anchors_everyone_sees_that_the_agent_finds_by_kind_and_label() {
     let (hub, _space, _commands, outlet, ada) = yard(0);
     // Those the environment declares are there as the space opens.

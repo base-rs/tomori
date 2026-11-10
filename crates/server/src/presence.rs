@@ -1421,8 +1421,17 @@ pub(crate) fn anchors(
                     "height": round(extent.height, 2),
                     "depth": round(extent.depth, 2),
                 }),
+                None if anchor.formation == tomori_protocol::cluster::Formation::Ring => {
+                    json!("the ring about home")
+                }
                 None => json!("the arc about home"),
             };
+            if anchor.formation == tomori_protocol::cluster::Formation::Ring {
+                listed["formation"] = json!("ring");
+                if let Some(sweep) = anchor.sweep {
+                    listed["sweep"] = json!(round(sweep, 0));
+                }
+            }
             if anchor.placed {
                 listed["placed"] = json!(true);
             }

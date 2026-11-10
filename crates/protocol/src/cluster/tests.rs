@@ -319,6 +319,219 @@ fn a_member_s_reach_holds_it_facing_whoever_it_gathers_about() {
     assert_eq!(overhead.slots(3).len(), 3);
 }
 
+/// The home anchor 4 m ahead of the arrival, facing it, standing in a ring.
+fn ringed() -> Anchor {
+    Anchor::new(
+        HOME,
+        Pose::at([0.0, 1.5, -4.0]).facing_towards([0.0, 1.6, 0.0]),
+    )
+    .with_formation(Formation::Ring)
+}
+
+/// How far `position` stands from the point of [`ringed`] about the vertical, and its angle there from the way to the
+/// arrival, round to the arrival's right.
+fn about(position: [f32; 3]) -> (f32, f32) {
+    let (x, z) = (position[0], position[2] + 4.0);
+    (x.hypot(z), x.atan2(z))
+}
+
+#[test]
+fn a_ring_stands_evenly_about_the_agent_the_sides_first_clear_of_it() {
+    let cluster = Cluster::new(&ringed());
+    assert_eq!(
+        (cluster.formation(), cluster.radius(), cluster.bounded()),
+        (Formation::Ring, Some(RING), true)
+    );
+    // The swarm's room and half a sign's reach, turned any way, fit within the ring.
+    assert!(KEPT + WORKER.width.hypot(WORKER.depth) / 2.0 <= RING);
+    let few = cluster.arrange(2);
+    assert_eq!(
+        (few.step(), few.compact(), few.more()),
+        (Step::Ring, false, None)
+    );
+    // Seven to a row, two rows below the highest a ring rises without room: fourteen at full size, each in a slot of its
+    // own.
+    assert_eq!(few.capacity(), Some(14));
+    let fourteen = cluster.slots(14);
+    assert!(fourteen.iter().all(|slot| slot.scale == 1.0 && !slot.more));
+    for slot in &fourteen {
+        let (radius, _) = about(slot.position);
+        assert!((radius - RING).abs() < 1e-4, "{slot:?}");
+    }
+    // The first two at the agent's right and left, as the arrival sees them, the same way round, nearer before further.
+    let (right, left) = (fourteen[0].position, fourteen[1].position);
+    assert!(right[0] > 1.0 && (right[0] + left[0]).abs() < 1e-4);
+    assert!((right[2] - left[2]).abs() < 1e-4 && right[2] > -4.0);
+    // Its first row, a little below the agent's middle, seven evenly about it, one straight behind and none before it.
+    let mut row: Vec<f32> = fourteen[..7]
+        .iter()
+        .map(|slot| {
+            assert!((slot.position[1] - (1.5 - ROW_BELOW)).abs() < 1e-5);
+            about(slot.position).1
+        })
+        .collect();
+    row.sort_by(f32::total_cmp);
+    let step = std::f32::consts::TAU / 7.0;
+    for pair in row.windows(2) {
+        assert!((pair[1] - pair[0] - step).abs() < 1e-4, "{row:?}");
+    }
+    assert!(row.iter().all(|angle| angle.abs() >= step / 2.0 - 1e-4));
+    assert!(
+        row.iter()
+            .any(|angle| (angle.abs() - std::f32::consts::PI).abs() < 1e-4)
+    );
+    // In order, the sides first.
+    let side = |slot: &Slot| about(slot.position).1.cos().abs();
+    for pair in fourteen[..7].windows(2) {
+        assert!(side(&pair[0]) <= side(&pair[1]) + 1e-4);
+    }
+    // The row above stands a footprint higher, each place straight above the one below, as today's arc's rows do.
+    let above = fourteen[7];
+    assert!((above.position[1] - (1.5 - ROW_BELOW + ROW_APART)).abs() < 1e-5);
+    assert!(
+        (above.position[0] - right[0]).abs() < 1e-5 && (above.position[2] - right[2]).abs() < 1e-5
+    );
+    // Each reaches as far, turned any way, as it is seen from every side.
+    let (low, high) = cluster.reach(&fourteen[0]);
+    let half = WORKER.width.hypot(WORKER.depth) / 2.0;
+    assert!(
+        (high[0] - low[0] - 2.0 * half).abs() < 1e-4
+            && (high[2] - low[2] - 2.0 * half).abs() < 1e-4
+    );
+    // Beyond its rows, compact, in three rows, none above the highest a ring rises, then the rest gathered into one
+    // sign at its last slot.
+    let compact = cluster.arrange(15);
+    assert!(compact.compact() && compact.more().is_none() && compact.step() == Step::Ring);
+    let most = compact.capacity().unwrap();
+    assert_eq!(most, 33);
+    let heights: std::collections::BTreeSet<u32> = cluster
+        .slots(most)
+        .iter()
+        .map(|slot| (slot.position[1] * 1000.0).round() as u32)
+        .collect();
+    assert_eq!(heights.len(), 3);
+    assert!(
+        heights
+            .iter()
+            .all(|&height| height as f32 / 1000.0 <= RING_HIGHEST)
+    );
+    let over = cluster.arrange(most + 4);
+    assert_eq!(over.more(), Some(most - 1));
+    assert!(cluster.slot(&over, most + 2).more);
+}
+
+#[test]
+fn a_ring_in_room_rises_as_its_height_allows_and_where_it_holds_none_the_room_s_steps_stand() {
+    // Room for one row: seven at full size, then eleven compact, then the sign.
+    let low = Cluster::new(&ringed().with_extent(4.0, 1.0, 4.0));
+    assert_eq!(low.arrange(7).capacity(), Some(7));
+    let compact = low.arrange(8);
+    assert!(compact.compact() && compact.capacity() == Some(11));
+    assert_eq!(low.arrange(12).more(), Some(10));
+    // Room for four rows: still two at full size, the highest a ring rises, fourteen.
+    let tall = Cluster::new(&ringed().with_extent(4.0, 6.0, 4.0));
+    assert_eq!(tall.arrange(14).capacity(), Some(14));
+    assert!(!tall.arrange(14).compact());
+    // A ring about a raised point stands its first row there, however high, and none above it, whatever its room.
+    let raised = Anchor::new("loft", Pose::at([0.0, 3.0, -4.0]))
+        .with_formation(Formation::Ring)
+        .with_extent(4.0, 6.0, 4.0);
+    let raised = Cluster::new(&raised);
+    assert_eq!(raised.arrange(1).capacity(), Some(7));
+    assert!((raised.slots(1)[0].position[1] - (3.0 - ROW_BELOW)).abs() < 1e-5);
+    // A slim room that holds one place, straight behind the agent, at full size and compact alike: the rest gather
+    // into the sign there, at full size.
+    let slim = Cluster::new(&ringed().with_extent(1.4, 1.0, 4.0));
+    let two = slim.arrange(2);
+    assert_eq!(
+        (two.step(), two.compact(), two.more()),
+        (Step::Ring, false, Some(0))
+    );
+    assert!((about(slim.slot(&two, 1).position).1.abs() - std::f32::consts::PI).abs() < 1e-4);
+    // A room too narrow for the ring stands its members as the room's steps do, the ring still where it is drawn.
+    let narrow = Cluster::new(&ringed().with_extent(1.0, 2.0, 8.0));
+    assert_ne!(narrow.arrange(3).step(), Step::Ring);
+    assert_eq!(narrow.radius(), Some(RING));
+    // A ring elsewhere stands about its anchor's point, kept for whatever the anchor stands by.
+    let pod = Anchor::new("pod", Pose::at([2.0, 1.2, -6.0])).with_formation(Formation::Ring);
+    let pod = Cluster::new(&pod.with_extent(4.0, 2.0, 4.0));
+    for slot in pod.slots(5) {
+        let away = (slot.position[0] - 2.0).hypot(slot.position[2] + 6.0);
+        assert!((away - RING).abs() < 1e-4, "{slot:?}");
+    }
+}
+
+#[test]
+fn a_ring_s_sweep_leaves_the_side_away_from_its_audience_clear() {
+    // Two thirds of the ring, about the way to the arrival: the side behind the agent stays clear.
+    let anchor = ringed().with_sweep(240.0);
+    assert_eq!(anchor.checked(), Ok(()));
+    let cluster = Cluster::new(&anchor);
+    assert!((cluster.sweep() - 240f32.to_radians()).abs() < 1e-6);
+    let towards = cluster.towards();
+    assert!(towards[1] > 0.99, "{towards:?}");
+    let arrangement = cluster.arrange(1);
+    let held = arrangement.capacity().unwrap();
+    // Four of the seven places in each of its two rows, those before and beside the agent, are within 120° of the way
+    // to the arrival; those behind it, and the one straight behind, are not.
+    assert_eq!(held, 8);
+    for slot in cluster.slots(held) {
+        let (_, angle) = about(slot.position);
+        assert!(angle.abs() <= 120f32.to_radians() + 1e-4, "{slot:?}");
+    }
+    // The whole ring, or one out of bounds, takes every place; a sweep is bounded.
+    assert_eq!(
+        Cluster::new(&ringed().with_sweep(360.0)),
+        Cluster::new(&ringed())
+    );
+    assert_eq!(
+        Cluster::new(&ringed().with_sweep(30.0)),
+        Cluster::new(&ringed())
+    );
+    for sweep in [30.0, 400.0, f32::NAN] {
+        let refused = ringed().with_sweep(sweep).checked().unwrap_err();
+        assert!(refused.contains("sweep"), "{sweep}");
+    }
+    assert!(valid_sweep(LEAST_SWEEP) && valid_sweep(MOST_SWEEP));
+    // Sent only where it is given.
+    assert!(
+        serde_json::to_value(ringed())
+            .unwrap()
+            .get("sweep")
+            .is_none()
+    );
+    assert_eq!(serde_json::to_value(&anchor).unwrap()["sweep"], 240.0);
+    // Gathered about a point straight above it, its sweep is about the way it faces.
+    let overhead = Cluster::new(&anchor).with_audience([0.0, 3.0, -4.0]);
+    let facing = overhead.towards();
+    assert!(facing[1] > 0.99, "{facing:?}");
+}
+
+#[test]
+fn a_formation_is_sent_only_where_it_is_not_the_arc_and_one_unknown_is_laid_out_as_the_arc() {
+    let arc = serde_json::to_value(ahead(HOME)).unwrap();
+    assert!(arc.get("formation").is_none());
+    let ring = serde_json::to_value(ringed()).unwrap();
+    assert_eq!(ring["formation"], "ring");
+    assert_eq!(serde_json::from_value::<Anchor>(ring).unwrap(), ringed());
+    // From an older server, the arc; from a newer, one this build does not know, laid out as the arc.
+    let mut newer = serde_json::to_value(ahead(HOME)).unwrap();
+    newer["formation"] = "spiral".into();
+    let newer: Anchor = serde_json::from_value(newer).unwrap();
+    assert_eq!(newer.formation, Formation::Unknown);
+    let pose = Pose::at([0.0, 1.4, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+    assert_eq!(Cluster::new(&newer), Cluster::home(pose, None));
+    assert_eq!(
+        Cluster::home(pose, None).with_formation(Formation::Unknown),
+        Cluster::home(pose, None)
+    );
+    assert!(Formation::default().is_arc() && !Formation::Ring.is_arc());
+    // The arc's home, as Sky's, is today's arc, holding any number, and no ring is drawn for it.
+    let sky = Cluster::new(&ahead(HOME));
+    assert_eq!((sky.radius(), sky.bounded()), (None, false));
+    assert_eq!(sky.arrange(18).step(), Step::Home);
+}
+
 #[test]
 fn rows_stand_at_the_point_then_alternately_above_and_below() {
     assert_eq!(
@@ -360,38 +573,65 @@ fn any(random: &mut Random) -> Cluster {
     }
 }
 
+/// A cluster as [`any`] makes, standing in a ring, about its point, half of them in part of it.
+fn any_ring(random: &mut Random) -> Cluster {
+    let cluster = any(random).with_formation(Formation::Ring);
+    if random.next() < 0.5 {
+        cluster.with_sweep(random.between(LEAST_SWEEP, MOST_SWEEP))
+    } else {
+        cluster
+    }
+}
+
+/// The clusters the properties below are checked over: of every formation, each from a seed of its own.
+type Make = fn(&mut Random) -> Cluster;
+
 #[test]
 fn every_cluster_keeps_its_members_apart_within_its_room() {
-    let mut random = Random(0x5eed_c1a5_7e12);
-    for _ in 0..300 {
-        let cluster = any(&mut random);
-        let extent = cluster.extent().unwrap();
-        for span in [1, 2, 3, 5, 8, 13, 18, 30, 64] {
-            let arrangement = cluster.arrange(span);
-            let slots: Vec<Slot> = (0..span)
-                .map(|slot| cluster.slot(&arrangement, slot))
-                .filter(|slot| !slot.more)
-                .collect();
-            // Those beyond its own slots gather into one sign, only beyond what the compact step holds.
-            assert_eq!(
-                slots.len(),
-                span.min(arrangement.capacity().unwrap_or(span))
-            );
-            for (index, slot) in slots.iter().enumerate() {
-                // Within its room, except one alone in a room too small for it.
-                assert!(
-                    cluster.within(&extent, slot.position, slot.scale) || slots.len() == 1,
-                    "{cluster:?} {span} {index}"
+    for (seed, make) in [
+        (0x5eed_c1a5_7e12, any as Make),
+        (0x5eed_c1a5_7e12 ^ 0x7269_6e67, any_ring),
+    ] {
+        let mut random = Random(seed);
+        for _ in 0..300 {
+            let cluster = make(&mut random);
+            let extent = cluster.extent().unwrap();
+            for span in [1, 2, 3, 5, 8, 13, 18, 30, 64] {
+                let arrangement = cluster.arrange(span);
+                let slots: Vec<Slot> = (0..span)
+                    .map(|slot| cluster.slot(&arrangement, slot))
+                    .filter(|slot| !slot.more)
+                    .collect();
+                // Those beyond its own slots gather into one sign, only beyond what the compact step holds.
+                assert_eq!(
+                    slots.len(),
+                    span.min(arrangement.capacity().unwrap_or(span))
                 );
-                let footprint = cluster.footprint().scaled(slot.scale);
-                for other in &slots[..index] {
-                    let level = (slot.position[0] - other.position[0])
-                        .hypot(slot.position[2] - other.position[2]);
-                    let rise = (slot.position[1] - other.position[1]).abs();
+                for (index, slot) in slots.iter().enumerate() {
+                    // Within its room, except one alone in a room too small for it.
                     assert!(
-                        level >= footprint.width - 1e-3 || rise >= footprint.height - 1e-3,
-                        "{cluster:?} {span} {index}: {level} {rise}"
+                        cluster.within(&extent, slot.position, slot.scale) || slots.len() == 1,
+                        "{cluster:?} {span} {index}"
                     );
+                    // A ring's rows above its first no higher than it rises.
+                    if arrangement.step() == Step::Ring {
+                        let first = (cluster.point[1] - ROW_BELOW).max(LOWEST);
+                        assert!(
+                            (slot.position[1] - first).abs() < 1e-4
+                                || slot.position[1] <= RING_HIGHEST + 1e-4,
+                            "{cluster:?} {span} {index}"
+                        );
+                    }
+                    let footprint = cluster.footprint().scaled(slot.scale);
+                    for other in &slots[..index] {
+                        let level = (slot.position[0] - other.position[0])
+                            .hypot(slot.position[2] - other.position[2]);
+                        let rise = (slot.position[1] - other.position[1]).abs();
+                        assert!(
+                            level >= footprint.width - 1e-3 || rise >= footprint.height - 1e-3,
+                            "{cluster:?} {span} {index}: {level} {rise}"
+                        );
+                    }
                 }
             }
         }
@@ -403,184 +643,202 @@ type Standing = Vec<(u32, [f32; 3])>;
 
 #[test]
 fn members_keep_their_slots_as_others_come_and_go_and_every_client_lays_them_out_alike() {
-    let mut random = Random(0xc0ff_ee15_600d);
-    for _ in 0..60 {
-        let cluster = any(&mut random);
-        // Arrivals take the lowest free slot; departures free theirs.
-        let mut taken: Vec<Option<u32>> = Vec::new();
-        let mut next = 0;
-        let mut before: Option<(Arrangement, Standing)> = None;
-        for _ in 0..120 {
-            if random.next() < 0.6 || taken.iter().all(Option::is_none) {
-                match taken.iter().position(Option::is_none) {
-                    Some(free) => taken[free] = Some(next),
-                    None => taken.push(Some(next)),
+    for (seed, make) in [
+        (0xc0ff_ee15_600d, any as Make),
+        (0xc0ff_ee15_600d ^ 0x7269_6e67, any_ring),
+    ] {
+        let mut random = Random(seed);
+        for _ in 0..60 {
+            let cluster = make(&mut random);
+            // Arrivals take the lowest free slot; departures free theirs.
+            let mut taken: Vec<Option<u32>> = Vec::new();
+            let mut next = 0;
+            let mut before: Option<(Arrangement, Standing)> = None;
+            for _ in 0..120 {
+                if random.next() < 0.6 || taken.iter().all(Option::is_none) {
+                    match taken.iter().position(Option::is_none) {
+                        Some(free) => taken[free] = Some(next),
+                        None => taken.push(Some(next)),
+                    }
+                    next += 1;
+                } else {
+                    let live: Vec<usize> = (0..taken.len())
+                        .filter(|slot| taken[*slot].is_some())
+                        .collect();
+                    taken[live[(random.next() * live.len() as f32) as usize % live.len()]] = None;
                 }
-                next += 1;
-            } else {
-                let live: Vec<usize> = (0..taken.len())
-                    .filter(|slot| taken[*slot].is_some())
+                let span = taken
+                    .iter()
+                    .rposition(Option::is_some)
+                    .map_or(0, |last| last + 1);
+                let arrangement = cluster.arrange(span);
+                let standing: Standing = taken
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, member)| {
+                        member.map(|member| (member, cluster.slot(&arrangement, slot).position))
+                    })
                     .collect();
-                taken[live[(random.next() * live.len() as f32) as usize % live.len()]] = None;
-            }
-            let span = taken
-                .iter()
-                .rposition(Option::is_some)
-                .map_or(0, |last| last + 1);
-            let arrangement = cluster.arrange(span);
-            let standing: Standing = taken
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, member)| {
-                    member.map(|member| (member, cluster.slot(&arrangement, slot).position))
-                })
-                .collect();
-            // Laid out again from scratch, as another client or the server would, it is the same to the bit.
-            let again = cluster.arrange(span);
-            assert_eq!(again, arrangement);
-            if let Some((previous, stood)) = &before
-                && *previous == arrangement
-            {
-                // Nobody who stayed moved.
-                for (member, position) in stood {
-                    if let Some((_, now)) = standing.iter().find(|(other, _)| other == member) {
-                        assert_eq!(now, position);
+                // Laid out again from scratch, as another client or the server would, it is the same to the bit.
+                let again = cluster.arrange(span);
+                assert_eq!(again, arrangement);
+                if let Some((previous, stood)) = &before
+                    && *previous == arrangement
+                {
+                    // Nobody who stayed moved.
+                    for (member, position) in stood {
+                        if let Some((_, now)) = standing.iter().find(|(other, _)| other == member) {
+                            assert_eq!(now, position);
+                        }
                     }
                 }
+                before = Some((arrangement, standing));
             }
-            before = Some((arrangement, standing));
         }
     }
 }
 
 #[test]
 fn gaps_close_only_where_nobody_moves_who_would_not_anyway_and_never_keep_a_cluster_compact() {
-    let mut random = Random(0x9a95_c105_e5ed);
-    for _ in 0..60 {
-        let cluster = any(&mut random);
-        let mut members: Vec<usize> = Vec::new();
-        let mut held: Vec<usize> = Vec::new();
-        let mut standing = cluster.arrange(0);
-        for _ in 0..160 {
-            // Some leave, slowly, holding their slots a while; others arrive in the lowest free slot, or, as a child
-            // beside its parent may, further along.
-            held.retain(|_| random.next() < 0.5);
-            let arrives = random.next() < 0.55 || members.is_empty();
-            if arrives {
-                let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
-                let lowest = (0..).find(free).unwrap();
-                let slot = if random.next() < 0.2 {
-                    (lowest + 1 + (random.next() * 6.0) as usize..)
-                        .find(free)
-                        .unwrap()
+    for (seed, make) in [
+        (0x9a95_c105_e5ed, any as Make),
+        (0x9a95_c105_e5ed ^ 0x7269_6e67, any_ring),
+    ] {
+        let mut random = Random(seed);
+        for _ in 0..60 {
+            let cluster = make(&mut random);
+            let mut members: Vec<usize> = Vec::new();
+            let mut held: Vec<usize> = Vec::new();
+            let mut standing = cluster.arrange(0);
+            for _ in 0..160 {
+                // Some leave, slowly, holding their slots a while; others arrive in the lowest free slot, or, as a child
+                // beside its parent may, further along.
+                held.retain(|_| random.next() < 0.5);
+                let arrives = random.next() < 0.55 || members.is_empty();
+                if arrives {
+                    let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
+                    let lowest = (0..).find(free).unwrap();
+                    let slot = if random.next() < 0.2 {
+                        (lowest + 1 + (random.next() * 6.0) as usize..)
+                            .find(free)
+                            .unwrap()
+                    } else {
+                        lowest
+                    };
+                    members.push(slot);
                 } else {
-                    lowest
-                };
-                members.push(slot);
-            } else {
-                let index = (random.next() * members.len() as f32) as usize % members.len();
-                held.push(members.swap_remove(index));
-            }
-            let before = members.clone();
-            let changed = cluster.reslot(&mut members, &held, &standing);
-            assert_eq!(changed, before != members);
-            // Each in a slot of its own, none of them one still held.
-            for (index, slot) in members.iter().enumerate() {
-                assert!(!held.contains(slot) && !members[..index].contains(slot));
-            }
-            let span = members.iter().max().map_or(0, |slot| slot + 1);
-            let now = cluster.arrange(span);
-            // It stands as its members would in the lowest free slots, so that gaps never keep it compact.
-            let lowest: Vec<usize> = (0..)
-                .filter(|slot| !held.contains(slot))
-                .take(members.len())
-                .collect();
-            assert_eq!(
-                now,
-                cluster.arrange(lowest.last().map_or(0, |slot| slot + 1))
-            );
-            // Nobody is gathered into the sign beside a slot of its own that is free.
-            if let Some(more) = now.more()
-                && members.iter().any(|slot| *slot >= more)
-            {
-                assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
-            }
-            // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
-            if now == standing {
-                let stayed = before.len() - usize::from(arrives);
-                for (was, is) in before[..stayed].iter().zip(&members) {
-                    assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                    let index = (random.next() * members.len() as f32) as usize % members.len();
+                    held.push(members.swap_remove(index));
                 }
+                let before = members.clone();
+                let changed = cluster.reslot(&mut members, &held, &standing);
+                assert_eq!(changed, before != members);
+                // Each in a slot of its own, none of them one still held.
+                for (index, slot) in members.iter().enumerate() {
+                    assert!(!held.contains(slot) && !members[..index].contains(slot));
+                }
+                let span = members.iter().max().map_or(0, |slot| slot + 1);
+                let now = cluster.arrange(span);
+                // It stands as its members would in the lowest free slots, so that gaps never keep it compact.
+                let lowest: Vec<usize> = (0..)
+                    .filter(|slot| !held.contains(slot))
+                    .take(members.len())
+                    .collect();
+                assert_eq!(
+                    now,
+                    cluster.arrange(lowest.last().map_or(0, |slot| slot + 1))
+                );
+                // Nobody is gathered into the sign beside a slot of its own that is free.
+                if let Some(more) = now.more()
+                    && members.iter().any(|slot| *slot >= more)
+                {
+                    assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
+                }
+                // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
+                if now == standing {
+                    let stayed = before.len() - usize::from(arrives);
+                    for (was, is) in before[..stayed].iter().zip(&members) {
+                        assert!(
+                            was == is || standing.more().is_some_and(|more| *was >= more),
+                            "{cluster:?} {before:?} {members:?} {held:?} {standing:?}"
+                        );
+                    }
+                }
+                standing = now;
             }
-            standing = now;
         }
     }
 }
 
 #[test]
 fn seated_with_hysteresis_gaps_close_only_as_the_cluster_passes_a_step_it_would_pass_anyway() {
-    let mut random = Random(0x5ea7_ed0f_f1ce);
-    for _ in 0..60 {
-        let cluster = any(&mut random);
-        let mut members: Vec<usize> = Vec::new();
-        let mut held: Vec<usize> = Vec::new();
-        let mut laid = 0;
-        let mut layouts = 0;
-        for _ in 0..160 {
-            held.retain(|_| random.next() < 0.5);
-            let arrives = random.next() < 0.55 || members.is_empty();
-            if arrives {
-                let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
-                let lowest = (0..).find(free).unwrap();
-                let slot = if random.next() < 0.2 {
-                    (lowest + 1 + (random.next() * 6.0) as usize..)
-                        .find(free)
-                        .unwrap()
+    for (seed, make) in [
+        (0x5ea7_ed0f_f1ce, any as Make),
+        (0x5ea7_ed0f_f1ce ^ 0x7269_6e67, any_ring),
+    ] {
+        let mut random = Random(seed);
+        for _ in 0..60 {
+            let cluster = make(&mut random);
+            let mut members: Vec<usize> = Vec::new();
+            let mut held: Vec<usize> = Vec::new();
+            let mut laid = 0;
+            let mut layouts = 0;
+            for _ in 0..160 {
+                held.retain(|_| random.next() < 0.5);
+                let arrives = random.next() < 0.55 || members.is_empty();
+                if arrives {
+                    let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
+                    let lowest = (0..).find(free).unwrap();
+                    let slot = if random.next() < 0.2 {
+                        (lowest + 1 + (random.next() * 6.0) as usize..)
+                            .find(free)
+                            .unwrap()
+                    } else {
+                        lowest
+                    };
+                    members.push(slot);
                 } else {
-                    lowest
-                };
-                members.push(slot);
-            } else {
-                let index = (random.next() * members.len() as f32) as usize % members.len();
-                held.push(members.swap_remove(index));
-            }
-            let standing = cluster.arrange(laid);
-            let before = members.clone();
-            let next = cluster.reseat(&mut members, &held, laid);
-            // Each in a slot of its own, none of them one still held, all within what it is laid out for.
-            for (index, slot) in members.iter().enumerate() {
-                assert!(!held.contains(slot) && !members[..index].contains(slot));
-                assert!(*slot < next);
-            }
-            let now = cluster.arrange(next);
-            // It stands as it stood, or as its members would in the lowest free slots, with its hysteresis.
-            let packed = (0..)
-                .filter(|slot| !held.contains(slot))
-                .take(members.len())
-                .last()
-                .map_or(0, |slot| slot + 1);
-            assert!(
-                now == standing || now == cluster.arrange(Cluster::settle(laid, packed)),
-                "{laid} {next} {packed}"
-            );
-            // Nobody is gathered into the sign beside a slot of its own that is free.
-            if let Some(more) = now.more()
-                && members.iter().any(|slot| *slot >= more)
-            {
-                assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
-            }
-            // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
-            if now == standing {
-                let stayed = before.len() - usize::from(arrives);
-                for (was, is) in before[..stayed].iter().zip(&members) {
-                    assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                    let index = (random.next() * members.len() as f32) as usize % members.len();
+                    held.push(members.swap_remove(index));
                 }
-            } else {
-                layouts += 1;
+                let standing = cluster.arrange(laid);
+                let before = members.clone();
+                let next = cluster.reseat(&mut members, &held, laid);
+                // Each in a slot of its own, none of them one still held, all within what it is laid out for.
+                for (index, slot) in members.iter().enumerate() {
+                    assert!(!held.contains(slot) && !members[..index].contains(slot));
+                    assert!(*slot < next);
+                }
+                let now = cluster.arrange(next);
+                // It stands as it stood, or as its members would in the lowest free slots, with its hysteresis.
+                let packed = (0..)
+                    .filter(|slot| !held.contains(slot))
+                    .take(members.len())
+                    .last()
+                    .map_or(0, |slot| slot + 1);
+                assert!(
+                    now == standing || now == cluster.arrange(Cluster::settle(laid, packed)),
+                    "{laid} {next} {packed}"
+                );
+                // Nobody is gathered into the sign beside a slot of its own that is free.
+                if let Some(more) = now.more()
+                    && members.iter().any(|slot| *slot >= more)
+                {
+                    assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
+                }
+                // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
+                if now == standing {
+                    let stayed = before.len() - usize::from(arrives);
+                    for (was, is) in before[..stayed].iter().zip(&members) {
+                        assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                    }
+                } else {
+                    layouts += 1;
+                }
+                laid = next;
             }
-            laid = next;
+            // It is laid out again far less often than members come and go.
+            assert!(layouts < 80, "{layouts}");
         }
-        // It is laid out again far less often than members come and go.
-        assert!(layouts < 80, "{layouts}");
     }
 }

@@ -793,7 +793,9 @@ impl Environment {
     /// `tomori_protocol::cluster`. The anchor named `home` is where its workers stand by default: about the agent's
     /// home, gathered about the eyes at the arrival, with the agent at its point; given an extent, fitted to it, today's
     /// arc while it fits, then an arc, a grid, compact and a "+N more" sign; without one, on today's arc, as
-    /// [`Self::with_workers`] declares it. Others, such as `aisle-3`, are places the agent may put workers, panels and
+    /// [`Self::with_workers`] declares it; or, with `tomori_protocol::cluster::Formation::Ring`, evenly about the agent's
+    /// home on the ring drawn there, in rows, then compact, as the farmyard's does, where the arc is the default, as in
+    /// Sky. Others, such as `aisle-3`, are places the agent may put workers, panels and
     /// itself, which it finds by their kind and label in `presence`, each laid out the same way about its audience,
     /// 2.3 m before it. Check their room with `tomori_environment::sightlines::fits`. One whose name, extent, kind or
     /// object `tomori_protocol::cluster::Anchor::checked` refuses, whose name another before it has, or beyond
@@ -1054,9 +1056,9 @@ impl Environments {
         if let Some(environment) = self.get(id) {
             anchors.agent = environment.carried(environment.agent.as_ref());
             anchors.workers = environment.carried(environment.workers().as_ref());
-            // The home anchor's room, where it gives one, beside the workers anchor an older client keeps.
+            // The home anchor's room or formation, where it gives one, beside the workers anchor an older client keeps.
             if let Some(home) = environment.home()
-                && home.extent.is_some()
+                && (home.extent.is_some() || !home.formation.is_arc())
                 && let Some(pose) = anchors.workers
             {
                 let mut carried = home.clone();
@@ -1535,6 +1537,15 @@ mod tests {
             (compatible.workers, compatible.clusters),
             (Some(yard), vec![])
         );
+        // A home anchor that stands its workers in a ring is sent, with or without room, its sweep with it; one that
+        // stands them on the arc, without room, is not, as `with_workers` declares it.
+        use tomori_protocol::cluster::Formation;
+        let ring = Anchor::new(HOME, yard)
+            .with_formation(Formation::Ring)
+            .with_sweep(240.0);
+        let ringed = tomoris().with(Environment::new("ringed", "Ringed").with_anchor(ring.clone()));
+        assert_eq!(ringed.anchors("ringed").clusters, [ring]);
+        assert_eq!(ringed.anchors("ringed").workers, Some(yard));
         let street = offered.anchors("street");
         let home = street.cluster(HOME).unwrap();
         assert_eq!(Some(home.pose), street.workers);

@@ -20,6 +20,10 @@
 //! 5. and beyond what the compact step that holds more holds, the members from its last slot on gather into one
 //!    **"+N more"** sign there.
 //!
+//! An anchor may choose its [`Formation`] instead: a **ring**, its members evenly about the point on a circle
+//! [`RING`] from it, the agent's at `home`, the sides first as seen from its audience, in rows up from a little below
+//! the point to [`RING_HIGHEST`], then compact, then the "+N more" sign ([`Step::Ring`]). The arc is the default.
+//!
 //! At `home`, the point is the agent's own, kept for it while it is away, so that workers stand either side of it. The
 //! steps depend only on the anchor, its audience and the span it is laid out for, the highest slot taken, kept a slot
 //! higher for a while as members leave ([`Cluster::settle`]), so every client and the server lay a cluster out alike,
@@ -106,6 +110,20 @@ pub const LOWEST: f32 = 0.3;
 /// How many columns today's arc has on each side of the agent.
 pub const COLUMNS: usize = 8;
 
+/// How far from its point a ring's members stand, about the vertical, in metres: as far as the agent's own room,
+/// [`KEPT`], and half a worker's reach turned any way, so that neither the swarm nor any sign, however it turns to whoever
+/// looks at it, reaches another; the radius of the home ring drawn on the floor where the home anchor is a ring.
+pub const RING: f32 = 1.4;
+
+/// The highest a ring's rows above its first stand, their middles above the floor, in metres: so that every sign is read
+/// and pointed at from the floor about it, not over a head, and stands below a coop's roof or a notice board's top
+/// rather than over them; two rows at full size and three compact about a home at the swarm's usual height.
+pub const RING_HIGHEST: f32 = 2.5;
+
+/// The least and the most of its ring an anchor's ring may take, in degrees, about the way to its audience.
+pub const LEAST_SWEEP: f32 = 90.0;
+pub const MOST_SWEEP: f32 = 360.0;
+
 /// The room an anchor's cluster may take, a box centred on its point, in its own frame: across, its X; up; and along
 /// the way it faces, its Z; in metres.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,6 +148,52 @@ impl Extent {
         [self.width, self.height, self.depth]
             .iter()
             .all(|side| (LEAST_EXTENT..=MOST_EXTENT).contains(side))
+    }
+}
+
+/// How an anchor's cluster stands about its point, the environment's choice for each anchor, `home` above all.
+///
+/// - [`Formation::Arc`], the default: at `home`, today's arc about the eyes at the arrival, a theatre about whoever
+///   sits with the agent, as in Sky; elsewhere, one member at the point, then an arc about the anchor's audience.
+/// - [`Formation::Ring`]: evenly about the point, on a circle [`RING`] from it, the point itself kept, for the agent
+///   at `home`, so that workers hang about the agent's home, on the perimeter of the ring drawn there, as in the
+///   farmyard. Its slots fill the sides first as seen from its audience, alternately right and left, nearer before
+///   further, so that the first neither hide the agent nor stand behind it; then rows above, each place straight above
+///   the one below, as today's arc's rows stand, no higher than [`RING_HIGHEST`]; then compact; then the "+N more"
+///   sign.
+///
+/// A newer formation this build does not know is read as [`Formation::Unknown`], laid out as the arc.
+///
+/// ```
+/// use tomori_protocol::Pose;
+/// use tomori_protocol::cluster::{Anchor, Cluster, Formation, RING, Step};
+///
+/// let pose = Pose::at([0.0, 1.5, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+/// let home = Anchor::new("home", pose).with_formation(Formation::Ring);
+/// let cluster = Cluster::new(&home);
+/// assert_eq!(cluster.arrange(3).step(), Step::Ring);
+/// assert_eq!(cluster.radius(), Some(RING));
+/// // The first stands at the agent's right, as seen from the arrival, the second at its left.
+/// let [right, left] = [0, 1].map(|slot| cluster.slots(2)[slot].position);
+/// assert!(right[0] > 1.0 && left[0] < -1.0);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Formation {
+    /// Today's arc about the eyes at the arrival at `home`, or an arc through the point about the audience elsewhere.
+    #[default]
+    Arc,
+    /// Evenly about the point, on a ring [`RING`] from it.
+    Ring,
+    /// One a newer build sends that this build does not know: laid out as the arc.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Formation {
+    /// Whether it is the default arc, which is not sent.
+    pub fn is_arc(&self) -> bool {
+        *self == Self::Arc
     }
 }
 
@@ -170,6 +234,15 @@ pub struct Anchor {
     /// by the server, as it sends it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub placed: bool,
+    /// How its cluster stands about its point: the arc, by default, or a ring. An older client ignores it, and lays the
+    /// cluster out as the arc.
+    #[serde(default, skip_serializing_if = "Formation::is_arc")]
+    pub formation: Formation,
+    /// How much of its ring its members stand on, in degrees, from [`LEAST_SWEEP`] to [`MOST_SWEEP`], centred on the
+    /// way from its point to its audience, so that a ring by a wall or in a corner leaves the side towards it clear: the
+    /// whole ring without one. Only a ring takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<f32>,
 }
 
 /// The most bytes in an anchor's kind.
@@ -193,7 +266,22 @@ impl Anchor {
             label: None,
             object: None,
             placed: false,
+            formation: Formation::Arc,
+            sweep: None,
         }
+    }
+
+    /// This anchor, whose cluster stands in `formation` about its point, such as a ring about the agent's home.
+    pub fn with_formation(mut self, formation: Formation) -> Self {
+        self.formation = formation;
+        self
+    }
+
+    /// This anchor, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, such
+    /// as 240° for a ring by a wall, which its back leaves clear.
+    pub fn with_sweep(mut self, degrees: f32) -> Self {
+        self.sweep = Some(degrees);
+        self
     }
 
     /// This anchor, whose cluster may take `width` across, `height` up and `depth` along the way it faces, in metres.
@@ -239,6 +327,9 @@ impl Anchor {
         }
         if self.extent.is_some_and(|extent| !extent.valid()) {
             return Err("its extent is not from 0.3 to 12 m on each side");
+        }
+        if self.sweep.is_some_and(|sweep| !valid_sweep(sweep)) {
+            return Err("its sweep is not from 90° to 360°");
         }
         if self.kind.as_deref().is_some_and(|kind| {
             !(1..=KIND_BYTES).contains(&kind.len())
@@ -316,6 +407,11 @@ pub struct Seat {
     pub slot: u32,
 }
 
+/// Whether `degrees` is a sweep a ring may take: from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
+pub fn valid_sweep(degrees: f32) -> bool {
+    (LEAST_SWEEP..=MOST_SWEEP).contains(&degrees)
+}
+
 /// Whether `name` is one an anchor may have: 1 to [`NAME_BYTES`] bytes of ASCII letters, digits, `-`, `_`, `.` and `/`,
 /// the rule an object's reference keeps.
 pub fn valid_name(name: &str) -> bool {
@@ -371,6 +467,8 @@ pub const AGENT: Footprint = Footprint::new(0.7, 0.52, 0.42, 0.26);
 pub enum Step {
     /// Today's arc about the eyes at the arrival, at `home`.
     Home,
+    /// A ring about the point, in rows, as [`Formation::Ring`] stands.
+    Ring,
     /// An arc through the point, curving about the anchor's audience.
     Arc,
     /// A grid in the extent's face, then further back along its depth.
@@ -431,6 +529,9 @@ pub struct Cluster {
     audience: [f32; 3],
     footprint: Footprint,
     kept: bool,
+    formation: Formation,
+    /// How much of its ring it takes, in radians, about the way to its audience.
+    sweep: f32,
 }
 
 /// A row's offset from the point, in rows: the point's own, then alternately above and below it.
@@ -450,8 +551,15 @@ impl Cluster {
         let pose = anchor.pose;
         let yaw = pose.yaw();
         let point = pose.position;
+        let formation = match anchor.formation {
+            Formation::Ring => Formation::Ring,
+            Formation::Arc | Formation::Unknown => Formation::Arc,
+        };
+        let sweep = anchor.sweep.unwrap_or(MOST_SWEEP);
         if anchor.is_home() {
             Self::home(pose, anchor.extent)
+                .with_formation(formation)
+                .with_sweep(sweep)
         } else {
             let (sin, cos) = yaw.sin_cos();
             Self {
@@ -465,7 +573,10 @@ impl Cluster {
                 ],
                 footprint: WORKER,
                 kept: false,
+                formation,
+                sweep: std::f32::consts::TAU,
             }
+            .with_sweep(sweep)
         }
     }
 
@@ -479,7 +590,66 @@ impl Cluster {
             audience: EYES,
             footprint: WORKER,
             kept: true,
+            formation: Formation::Arc,
+            sweep: std::f32::consts::TAU,
         }
+    }
+
+    /// This cluster, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, or
+    /// the whole circle for a sweep that is not from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
+    pub fn with_sweep(mut self, degrees: f32) -> Self {
+        self.sweep = if valid_sweep(degrees) && degrees < MOST_SWEEP {
+            degrees.to_radians()
+        } else {
+            std::f32::consts::TAU
+        };
+        self
+    }
+
+    /// How much of its ring it takes, in radians, centred on the way from its point to its audience.
+    pub fn sweep(&self) -> f32 {
+        self.sweep
+    }
+
+    /// The way from its point to its audience, about the vertical, as `[x, z]`, which its ring's sweep is centred on:
+    /// or, with its audience straight above or below it, the way it faces.
+    pub fn towards(&self) -> [f32; 2] {
+        let (ax, az) = (
+            self.audience[0] - self.point[0],
+            self.audience[2] - self.point[2],
+        );
+        let distance = ax.hypot(az);
+        if distance > 1e-4 {
+            [ax / distance, az / distance]
+        } else {
+            let [x, _, z] = self.facing();
+            [x, z]
+        }
+    }
+
+    /// This cluster, standing in `formation` about its point.
+    pub fn with_formation(mut self, formation: Formation) -> Self {
+        self.formation = match formation {
+            Formation::Unknown => Formation::Arc,
+            formation => formation,
+        };
+        self
+    }
+
+    /// How it stands about its point.
+    pub fn formation(&self) -> Formation {
+        self.formation
+    }
+
+    /// The radius of its ring, [`RING`], where it stands in one.
+    pub fn radius(&self) -> Option<f32> {
+        (self.formation == Formation::Ring).then_some(RING)
+    }
+
+    /// Whether it holds only so many in slots of their own, gathering the rest into its "+N more" sign: in room, or in a
+    /// ring; without either, today's arc holds any number.
+    pub fn bounded(&self) -> bool {
+        self.extent.is_some() || self.formation == Formation::Ring
     }
 
     /// This cluster, gathered about whoever's eyes are at `audience`.
@@ -513,6 +683,9 @@ impl Cluster {
     /// or compact, the members from its last slot on gathered into the "+N more" sign there.
     pub fn arrange(&self, span: usize) -> Arrangement {
         let span = span.max(1);
+        if let Some(ringed) = self.ringed(span) {
+            return ringed;
+        }
         let Some(extent) = self.extent else {
             return Arrangement {
                 step: Step::Home,
@@ -687,12 +860,14 @@ impl Cluster {
             beyond
         };
         let mut changed = false;
-        if let Some(more) = arrange(span(members)).more() {
-            let open = gaps(members, more);
-            for (index, slot) in beyond(members, more).into_iter().rev().zip(open) {
-                members[index] = slot;
-                changed = true;
-            }
+        // The last gathered first, one at a time, until nobody is gathered beside a free slot: so that one standing in
+        // the sign's own slot, which a member arriving far along gathers, stays where it stood once that one has moved.
+        while let Some(more) = arrange(span(members)).more()
+            && let Some(slot) = gaps(members, more).first().copied()
+            && let Some(index) = beyond(members, more).last().copied()
+        {
+            members[index] = slot;
+            changed = true;
         }
         // The lowest slots as many members take, and how the cluster would stand in them.
         let packed = (0..)
@@ -720,6 +895,7 @@ impl Cluster {
     }
 
     /// The box, aligned with the axes, that the member in `slot` takes, facing whoever it gathers about.
+    /// In a ring, whose members are seen from every side, it is the box it takes turned any way about its upright.
     pub fn reach(&self, slot: &Slot) -> ([f32; 3], [f32; 3]) {
         let footprint = self.footprint.scaled(slot.scale);
         let [x, y, z] = slot.position;
@@ -730,8 +906,15 @@ impl Cluster {
         } else {
             (0.0, 1.0)
         };
-        let across = footprint.width / 2.0 * cos.abs() + footprint.depth / 2.0 * sin.abs();
-        let along = footprint.width / 2.0 * sin.abs() + footprint.depth / 2.0 * cos.abs();
+        let (across, along) = if self.formation == Formation::Ring {
+            let half = footprint.width.hypot(footprint.depth) / 2.0;
+            (half, half)
+        } else {
+            (
+                footprint.width / 2.0 * cos.abs() + footprint.depth / 2.0 * sin.abs(),
+                footprint.width / 2.0 * sin.abs() + footprint.depth / 2.0 * cos.abs(),
+            )
+        };
         (
             [x - across, y - footprint.base, z - along],
             [x + across, y - footprint.base + footprint.height, z + along],
@@ -779,8 +962,16 @@ impl Cluster {
             dx.atan2(dz) - self.yaw
         };
         let (sin, cos) = (turn.sin().abs(), turn.cos().abs());
-        let across = footprint.width / 2.0 * cos + footprint.depth / 2.0 * sin;
-        let along = footprint.width / 2.0 * sin + footprint.depth / 2.0 * cos;
+        let (across, along) = if self.formation == Formation::Ring {
+            // Seen from every side, it reaches as far whichever way it turns.
+            let half = footprint.width.hypot(footprint.depth) / 2.0;
+            (half, half)
+        } else {
+            (
+                footprint.width / 2.0 * cos + footprint.depth / 2.0 * sin,
+                footprint.width / 2.0 * sin + footprint.depth / 2.0 * cos,
+            )
+        };
         let fits =
             |low: f32, high: f32, side: f32| low >= -side / 2.0 - 1e-4 && high <= side / 2.0 + 1e-4;
         fits(x - across, x + across, extent.width)
@@ -809,6 +1000,103 @@ impl Cluster {
         } else {
             self.point
         }
+    }
+
+    /// How it stands in its ring with slots up to `span` taken, where it stands in one that holds any member: at full
+    /// size while that holds them, or else compact, the rest gathered into the "+N more" sign at its last slot; none
+    /// where it stands in no ring, or its room and sweep hold none of it, when the other steps lay it out.
+    fn ringed(&self, span: usize) -> Option<Arrangement> {
+        if self.formation != Formation::Ring {
+            return None;
+        }
+        let full = self.ring(1.0);
+        if full.is_empty() {
+            return None;
+        }
+        if span <= full.len() {
+            return Some(Arrangement {
+                step: Step::Ring,
+                scale: 1.0,
+                places: full,
+                more: None,
+            });
+        }
+        let compact = self.ring(COMPACT);
+        let (scale, places) = if compact.len() > full.len() {
+            (COMPACT, compact)
+        } else {
+            (1.0, full)
+        };
+        let more = (span > places.len()).then(|| places.len() - 1);
+        Some(Arrangement {
+            step: Step::Ring,
+            scale,
+            places,
+            more,
+        })
+    }
+
+    /// The slots of its ring at `scale`, in order: on the circle [`RING`] about the point, as many as stand a
+    /// footprint's reach, turned any way, apart along it, evenly; in rows up from [`ROW_BELOW`] below the point, never
+    /// nearer the floor than [`LOWEST`], a footprint's height apart, each place straight above the one below, so that a
+    /// room clear about the first row is clear about every row, as many as its room's height holds, those above the
+    /// first no higher than [`RING_HIGHEST`]; and in each row, those within its sweep, the sides first as seen from its audience, then nearer
+    /// before further, right before left, each within its room.
+    fn ring(&self, scale: f32) -> Vec<[f32; 3]> {
+        let footprint = self.footprint.scaled(scale);
+        let reach = footprint.width.hypot(footprint.depth);
+        let count = (std::f32::consts::TAU / (2.0 * (reach / (2.0 * RING)).min(1.0).asin()))
+            .floor()
+            .max(1.0) as usize;
+        // Towards the audience, about the vertical, or else the way it faces; and their right, as they look at it.
+        let towards = self.towards();
+        let right = [towards[1], -towards[0]];
+        // Each place's angle from the audience in quarter places, from 0, before the point, round to its right: a place
+        // straight behind the point for an odd count, and none before or behind it for an even one. The sides stand at
+        // `count` and `3 count`.
+        let quarters = 4 * count;
+        let offset = 2 * usize::from(count.is_multiple_of(2));
+        let mut order: Vec<usize> = (0..count)
+            .map(|place| (2 * count + 4 * place + offset) % quarters)
+            .collect();
+        // Only those within its sweep, about the way to its audience.
+        let swept = self.sweep / std::f32::consts::TAU * quarters as f32 / 2.0 + 1e-3;
+        order.retain(|quarter| (*quarter).min(quarters - quarter) as f32 <= swept);
+        order.sort_by_key(|quarter| {
+            let side = quarter.abs_diff(count).min(quarter.abs_diff(3 * count));
+            let before = (*quarter).min(quarters - quarter);
+            (side, before, *quarter >= 2 * count)
+        });
+        let lowest = (self.point[1] - ROW_BELOW).max(crate::entourage::FLOOR + LOWEST);
+        let mut places = Vec::new();
+        for row in 0..TRIES {
+            let lift = lowest - self.point[1] + row as f32 * footprint.height;
+            let low_enough =
+                row == 0 || self.point[1] + lift <= crate::entourage::FLOOR + RING_HIGHEST + 1e-4;
+            let rises = low_enough
+                && self.extent.is_none_or(|extent| {
+                    lift - footprint.base + footprint.height <= extent.height / 2.0 + 1e-4
+                });
+            if !rises {
+                break;
+            }
+            for &quarter in &order {
+                let angle = quarter as f32 * std::f32::consts::TAU / quarters as f32;
+                let (sin, cos) = angle.sin_cos();
+                let position = [
+                    self.point[0] + (towards[0] * cos + right[0] * sin) * RING,
+                    self.point[1] + lift,
+                    self.point[2] + (towards[1] * cos + right[1] * sin) * RING,
+                ];
+                let within = self
+                    .extent
+                    .is_none_or(|extent| self.within(&extent, position, scale));
+                if within && places.len() < PLACES {
+                    places.push(position);
+                }
+            }
+        }
+        places
     }
 
     /// The compact arc, if it holds `span` slots, or else the compact grid, if it does, or else whichever holds more,
