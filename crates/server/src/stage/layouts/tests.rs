@@ -11,6 +11,7 @@ const SKY: Walls<'static> = Walls {
         orientation: [0.0, 0.0, 0.0, 1.0],
     },
     declared: &[],
+    status: crate::stage::Status::Beneath,
 };
 
 /// Eyes at home, looking along -Z.

@@ -334,8 +334,9 @@ pub fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>
 /// whoever it turned to, or else at its `home`, going there by `via` or streaming, as `stream` says; the workers about
 /// `workers`, the agent itself while its entourage goes with it, or else the workers anchor, by default its home, by
 /// `placement`, or by [`HomeArc`] without one, gathered about `audience`, the eyes of whoever it went to with its
-/// entourage, or else those at home; and the `carriage` that takes the environment's own coordinates, its scenery's,
-/// walkable surfaces' and client side's, into the space's.
+/// entourage, or else those at home; the eyes of whoever it stands for, its `partner`, while it is away, near whom the
+/// swarm draws in; and the `carriage` that takes the environment's own coordinates, its scenery's, walkable surfaces' and
+/// client side's, into the space's.
 #[derive(Clone)]
 pub struct Arrangement {
     pub agent: Anchor,
@@ -346,9 +347,19 @@ pub struct Arrangement {
     pub carriage: Anchor,
     pub via: Option<Vec3>,
     pub stream: bool,
+    pub partner: Option<Vec3>,
 }
 
 impl Arrangement {
+    /// How far the agent stands from whoever it stands for, about the vertical, where it does: the swarm draws in near
+    /// them. See `design/avatars.md`.
+    pub fn nearness(&self) -> Option<f32> {
+        self.partner.map(|eyes| {
+            let at = self.agent.position;
+            (eyes.x - at.x).hypot(eyes.z - at.z)
+        })
+    }
+
     /// Whether the agent stands away from its home, or turned from the way its home faces.
     pub fn summoned(&self) -> bool {
         self.agent != self.home
@@ -367,6 +378,7 @@ impl Default for Arrangement {
             carriage: Anchor::HOME,
             via: None,
             stream: false,
+            partner: None,
         }
     }
 }
@@ -381,6 +393,7 @@ impl std::fmt::Debug for Arrangement {
             .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)
+            .field("partner", &self.partner)
             .finish()
     }
 }

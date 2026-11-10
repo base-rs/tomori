@@ -250,9 +250,7 @@ impl Hub {
         let title = state
             .space_mut(space)
             .map(|record| {
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 let content = crate::stage::Content {
                     title: "Pairing".to_owned(),
                     body: match by {

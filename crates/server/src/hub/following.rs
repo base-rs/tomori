@@ -222,7 +222,7 @@ impl Hub {
             .map(|head| ("", "", *head))
             .collect();
         let point = |ray: &Pose| {
-            let ahead = crate::stage::travel::rotate(ray.orientation, [0.0, 0.0, -1.0]);
+            let ahead = crate::stage::geometry::rotate(ray.orientation, [0.0, 0.0, -1.0]);
             crate::presence::meet(ray.position, ahead, &projection, &others).map(|(_, along)| {
                 std::array::from_fn(|axis| ray.position[axis] + ahead[axis] * along)
             })
@@ -245,9 +245,9 @@ impl Hub {
 
 impl Hub {
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
-    /// does: beside them, as following stands it, where it follows the speaker, its entourage staying home; else in
-    /// front of them, as a summons stood it, its entourage with it. Refused where the space keeps it home, or before
-    /// they report where they are.
+    /// does: beside them, as following stands it, or, with nowhere clear there, in front of them, as a summons stood it,
+    /// its status wall and workers staying home. Refused where the space keeps it home, or before they report where
+    /// they are.
     pub(super) fn call_agent(
         &self,
         state: &mut HubState,
@@ -273,18 +273,11 @@ impl Hub {
             .at(record.summoned, captured.home, now)
             .position;
         let head = captured.speaker.head;
-        let (at, summoner, travel) = if movement.mode == Movement::Follow {
-            let at = follow::spot(&captured.speaker, &captured.scene)
-                .unwrap_or_else(|| crate::presence::before(&head));
-            (at, None, None)
-        } else {
-            let at = crate::presence::before(&head);
-            let travel = self.travel_spot(record, &at, Some(head.position));
-            (at, Some(head.position), travel)
-        };
+        let at = follow::spot(&captured.speaker, &captured.scene)
+            .unwrap_or_else(|| crate::presence::before(&head));
         let route = follow::route(from, at.position, &captured.scene);
         let was = record.summoned;
-        state.summon(space, Some(at), summoner, travel);
+        state.summon(space, Some(at), Some(head.position));
         state.agent_moved(space, (from, was), at, route, now);
         state.agent_pin(space, now);
         let name = &state.participants[participant].name;
@@ -293,7 +286,7 @@ impl Hub {
     }
 
     /// Move the agent of `space` to `at`, before someone whose eyes are at `eyes`, as its own `move_agent` asked, at
-    /// `now`: its entourage with it, unless it follows the speaker, when its entourage stays home. Whether it moved.
+    /// `now`, its status wall and workers staying home. Whether it moved.
     pub(super) fn agent_goes(
         &self,
         state: &mut HubState,
@@ -305,14 +298,9 @@ impl Hub {
         let record = state.space(space).expect("the caller found it");
         let (scene, _, home) = self.scene(state, space);
         let from = record.following.at(record.summoned, home, now).position;
-        let (summoner, travel) = if record.model.movement().mode == Movement::Follow {
-            (None, None)
-        } else {
-            (Some(eyes), self.travel_spot(record, &at, Some(eyes)))
-        };
         let route = follow::route(from, at.position, &scene);
         let was = record.summoned;
-        let moved = state.summon(space, Some(at), summoner, travel);
+        let moved = state.summon(space, Some(at), Some(eyes));
         if moved {
             state.agent_moved(space, (from, was), at, route, now);
         }
@@ -325,7 +313,7 @@ impl Hub {
         let record = state.space(space).expect("the caller found it");
         let environments = self.environments();
         let environment = &record.model.environment;
-        let walls = environments.walls(environment).travelling(record.travel);
+        let walls = environments.walls(environment);
         let projection = record.stage.view(space, &walls, crate::cards::unix_now());
         let panels = projection
             .panels
@@ -485,6 +473,9 @@ impl HubState {
                 ..summoned
             })
         };
+        if record.summoned.is_none() {
+            record.partner = None;
+        }
         log::info!("The agent of space {space} stopped where it was, as nothing was said.");
         self.touch_space(space);
     }
@@ -592,8 +583,7 @@ impl HubState {
         following.moved = Some((arrives, participant.to_owned()));
         following.poll.get_or_insert(now + POLL);
         record.summoned = Some(spot);
-        record.summoner = None;
-        let travelled = record.travel.take().is_some();
+        record.partner = Some(eyes);
         let with = if huddle {
             format!("{name} and those with them")
         } else {
@@ -601,13 +591,10 @@ impl HubState {
         };
         log::info!("The agent of space {space} followed {with}, as {reason}.");
         self.touch_space(space);
-        if travelled {
-            self.touch_projection(space);
-        }
         self.woken.notify(usize::MAX);
     }
 
-    /// Send the agent of `space` home, unpinned and facing as its home faces, its entourage with it, for `reason`,
+    /// Send the agent of `space` home, unpinned and facing as its home faces, for `reason`,
     /// logged if it moved; whether it moved.
     pub(super) fn agent_home(&mut self, space: &str, reason: &str) -> bool {
         let record = self.space_mut(space).expect("the caller found it");
@@ -620,7 +607,7 @@ impl HubState {
             speaking: record.following.speaking,
             ..Following::default()
         };
-        let moved = self.summon(space, None, None, None);
+        let moved = self.summon(space, None, None);
         if moved {
             log::info!("The agent of space {space} went home, as {reason}.");
         } else if turned {

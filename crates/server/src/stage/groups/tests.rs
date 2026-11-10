@@ -16,6 +16,7 @@ const SKY: Walls<'static> = Walls {
         position: [-4.0, 1.5, -4.0],
         orientation: [0.0, 0.0, 0.0, 1.0],
     })],
+    status: crate::stage::Status::Beneath,
 };
 
 /// Facing home from 2.4 m ahead, at `x`.

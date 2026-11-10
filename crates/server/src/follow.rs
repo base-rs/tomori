@@ -8,7 +8,7 @@
 use tomori_environment::sightlines::Solid;
 use tomori_protocol::{Pose, Wall, entourage};
 
-use crate::stage::travel::{boxes, rotate};
+use crate::stage::geometry::{boxes, rotate};
 
 /// How far from the speaker's eyes, horizontally, the agent stands, in metres, tried in this order: a comfortable
 /// conversational distance, between a person's 1.2 m social bubble and the 1.8 m at which a group forms.

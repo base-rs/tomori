@@ -1,11 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Whether participants arriving in an environment can read its Tomori wall and see its agent: the rule every
+//! Whether participants arriving in an environment can read its status wall and see its agent: the rule every
 //! environment's tests check of the homes it gives them, in its own coordinates, with every anchor facing along its +Z.
-//! The Tomori wall's home stands within comfortable reading distance of the eyes at the arrival, [`READING`], as the
-//! agent's panels are put only on a wall that near (see `design/projection.md`), faces them and stands clear of the
-//! scenery's solids; and the agent's home does the same, with nothing in the way of seeing it. See
+//! The status wall's home, where the space's own stands, beneath the agent's home or where the environment stands it,
+//! stands within comfortable reading distance of the eyes at the arrival, [`READING`], as the agent's panels are put
+//! only on a wall that near (see `design/projection.md`), faces them and stands clear of the scenery's solids; one of
+//! the environment's own walls in the role is read by walking up to it, and seen from the arrival ([`noticed`]); and the
+//! agent's home stands within reach of the eyes too, with nothing in the way of seeing it. See
 //! `design/environments.md`.
 //!
 //! ```
@@ -31,6 +33,10 @@ pub const FACING: f32 = std::f32::consts::FRAC_PI_6;
 
 /// How far to either side of its middle the Tomori wall's row of slots reaches, in metres, which must stand clear too.
 pub const WALL_REACH: f32 = 1.3;
+
+/// How far in front of an environment's own wall in the status role someone reads it from, in metres, having walked up
+/// to it.
+pub const BEFORE: f32 = 2.0;
 
 /// A place and the way it faces about the vertical, its +Z, as every anchor faces: `yaw` is 0 along +Z and a quarter
 /// turn along +X.
@@ -167,17 +173,56 @@ fn check(
     Ok(())
 }
 
-/// Whether the Tomori wall's home, `wall`, the middle of its row facing along its +Z, can be read from `arrival`:
+/// Whether the status wall's home, where the space's own stands, `wall`, the middle of its row facing along its +Z,
+/// can be read from `arrival`:
 /// within [`READING`] of the eyes there, facing them within [`FACING`], its middle and both ends of its row, within
 /// [`WALL_REACH`], clear of `solids`, and nothing of them between the eyes and its middle.
 pub fn readable(arrival: &Spot, wall: &Spot, solids: &[Solid]) -> Result<(), String> {
     check(
-        "The Tomori wall",
+        "The status wall",
         arrival,
         wall,
         &[[0.0; 3], [-WALL_REACH, 0.0, 0.0], [WALL_REACH, 0.0, 0.0]],
         solids,
     )
+}
+
+/// Whether one of an environment's own walls in the status role, `wall`, the middle of its slots facing along its +Z,
+/// can be read by walking up to it, and is seen from `arrival`, though perhaps too far to read from there: read, as
+/// [`readable`] reads the Tomori wall, by someone standing on the floor at `floor`, [`BEFORE`] in front of it, outside
+/// `solids`; and, from the eyes at the arrival, nothing of `solids` between them and its middle, its face turned
+/// towards them rather than its back.
+pub fn noticed(arrival: &Spot, wall: &Spot, floor: f32, solids: &[Solid]) -> Result<(), String> {
+    let mut before = wall.place([0.0, 0.0, BEFORE]);
+    before[1] = floor;
+    let reader = Spot::facing(before, wall.position);
+    if let Some(solid) = solids
+        .iter()
+        .find(|solid| solid.contains(before) || solid.contains(reader.eyes()))
+    {
+        return Err(format!(
+            "The ground before the status wall stands inside {solid:?}."
+        ));
+    }
+    readable(&reader, wall, solids)?;
+    let eyes = arrival.eyes();
+    let towards = Spot::facing(wall.position, eyes).yaw;
+    let off = (wall.yaw - towards)
+        .sin()
+        .atan2((wall.yaw - towards).cos())
+        .abs();
+    if off >= std::f32::consts::FRAC_PI_2 {
+        return Err("The status wall turns its back on where participants arrive.".to_owned());
+    }
+    if let Some(solid) = solids
+        .iter()
+        .find(|solid| solid.blocks(eyes, wall.position))
+    {
+        return Err(format!(
+            "{solid:?} stands between where participants arrive and the status wall."
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the agent's home, `agent`, the middle of the swarm facing along its +Z, can be seen from `arrival`: within
@@ -232,6 +277,36 @@ mod tests {
         );
         // Facing itself, it is not turned.
         assert_eq!(Spot::facing([1.0, 0.0, 1.0], [1.0, 5.0, 1.0]).yaw, 0.0);
+        // A board of an environment's own, far along a fence and facing into the yard, is read by walking up to it, and
+        // seen from the arrival; not with its back to it, nor with a shed in the way, nor with the ground before it
+        // inside one.
+        let board = Spot::facing([6.0, 1.45, -4.0], [0.0, 1.45, -4.0]);
+        assert_eq!(noticed(&arrival, &board, 0.0, &[]), Ok(()));
+        let back = Spot::facing([6.0, 1.45, -4.0], [9.0, 1.45, -4.0]);
+        assert!(
+            noticed(&arrival, &back, 0.0, &[])
+                .unwrap_err()
+                .contains("back")
+        );
+        let barn = Solid::new([2.0, 0.0, -3.0], [3.0, 3.0, -2.0]);
+        assert!(
+            noticed(&arrival, &board, 0.0, &[barn])
+                .unwrap_err()
+                .contains("between")
+        );
+        let trough = Solid::new([3.5, 0.0, -4.5], [4.5, 1.0, -3.5]);
+        assert!(
+            noticed(&arrival, &board, 0.0, &[trough])
+                .unwrap_err()
+                .contains("ground")
+        );
+        // A post between where someone stands before it and its middle hides it.
+        let post = Solid::new([4.8, 1.0, -4.1], [5.2, 2.0, -3.9]);
+        assert!(
+            noticed(&arrival, &board, 0.0, &[post])
+                .unwrap_err()
+                .contains("status wall")
+        );
         // A turned arrival carries its eyes with it.
         let turned = Spot::facing([2.0, 0.5, 0.0], [0.0, 0.5, 0.0]);
         assert_eq!(turned.eyes(), [2.0, 2.1, 0.0]);

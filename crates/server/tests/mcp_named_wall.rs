@@ -84,7 +84,14 @@ fn the_agent_puts_panels_on_a_declared_locked_wall_by_the_name_its_environment_g
             .collect();
         (names.len() == 3).then_some(names)
     });
-    assert_eq!(names, ["Tomori wall", "Details", "environment wall 2"]);
+    assert_eq!(
+        names,
+        [
+            "status wall (the Tomori wall)",
+            "Details",
+            "environment wall 2"
+        ]
+    );
     let listed = walls()[1].clone();
     assert_eq!(listed["locked"], true);
     assert_eq!(

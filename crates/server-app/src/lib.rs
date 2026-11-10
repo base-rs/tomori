@@ -7,7 +7,7 @@ use tomori_server::{Builder, Environment, Server};
 /// The label clients show for the Minimal grid.
 pub const GRID_LABEL: &str = "Grid";
 
-/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock, its noticeboard, a projection wall of its own, and where participants arrive in it and where the agent's home is, the Tomori wall's home beneath it, as by default, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
+/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock, its noticeboard, a projection wall of its own and its status wall, and where participants arrive in it and where the agent's home is, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
 ///
 /// ```
 /// let builder = tomori_server_app::builder();
@@ -36,6 +36,7 @@ pub fn builder() -> Builder {
             .with_version(tomori_environment_farmyard::VERSION)
             .with_server_side(tomori_environment_farmyard::side::FarmyardSide)
             .with_walls([farmyard_noticeboard()])
+            .with_status_wall(tomori_server::StatusWall::own(0))
             .with_arrival(farmyard_arrival())
             .with_agent(farmyard_agent())
             .with_solids(tomori_environment_farmyard::layout::solids()),
@@ -102,8 +103,8 @@ mod tests {
             .map(|environment| environment.server_side().is_some())
             .collect();
         assert_eq!(sides, [false, false, true]);
-        // The farmyard alone has a projection wall of its own, and says where participants arrive and where the agent's
-        // home is, its Tomori wall's home beneath it by default; Sky and the grid keep the default layout.
+        // The farmyard alone has a projection wall of its own, its status wall, and says where participants arrive and
+        // where the agent's home is; Sky and the grid keep the default layout, the status wall beneath the agent.
         let walls: Vec<usize> = builder
             .environments()
             .iter()
@@ -117,6 +118,15 @@ mod tests {
         // Facing along −X: a quarter turn the other way from +X.
         let yaw = board.pose.yaw();
         assert!((yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{yaw}");
+        let status: Vec<Option<tomori_server::StatusWall>> = builder
+            .environments()
+            .iter()
+            .map(tomori_server::Environment::status_wall)
+            .collect();
+        assert_eq!(
+            status,
+            [None, None, Some(tomori_server::StatusWall::own(0))]
+        );
         let homes: Vec<(bool, bool, bool, bool)> = builder
             .environments()
             .iter()
@@ -140,9 +150,9 @@ mod tests {
     }
 
     #[test]
-    fn every_environment_s_tomori_wall_stands_beneath_its_agent_read_from_where_participants_arrive()
+    fn every_environment_s_status_wall_is_read_beneath_its_agent_from_where_participants_arrive_or_walked_up_to()
      {
-        use tomori_environment::sightlines::{Solid, Spot, readable, seen};
+        use tomori_environment::sightlines::{Solid, Spot, noticed, readable, seen};
         use tomori_protocol::{Pose, TOMORI_WALL, Wall, WallKind, WallShape, entourage, wall};
         let spot = |pose: Pose| Spot::new(pose.position, pose.yaw());
         let solids: Vec<Solid> = tomori_environment_farmyard::layout::solids()
@@ -161,21 +171,33 @@ mod tests {
             // In its own coordinates; Sky's and the grid's are Tomori's default layout, about home.
             let arrival = environment.arrival().unwrap_or(Pose::HOME);
             let agent = environment.agent().unwrap_or(default_agent);
-            // Its wall's home is beneath its agent's, on the floor where participants arrive, unless it says otherwise.
-            let wall = environment
-                .stage()
-                .unwrap_or_else(|| entourage::wall_beneath(&agent, arrival.position[1]));
             let solids = if id == tomori_environment_farmyard::ID {
                 &solids[..]
             } else {
                 &[]
             };
+            assert_eq!(seen(&spot(arrival), &spot(agent), solids), Ok(()), "{id}");
+            // One of its own walls in the role, as the farmyard's notice board, of at least two slots, is read by walking
+            // up to it, and seen from where participants arrive.
+            if let Some(index) = environment.status_wall().and_then(|status| status.index()) {
+                let own = environment.walls()[index];
+                assert!(own.grid().slots() >= tomori_server::STATUS_SLOTS, "{id}");
+                assert_eq!(
+                    noticed(&spot(arrival), &spot(own.pose), arrival.position[1], solids),
+                    Ok(()),
+                    "{id}"
+                );
+                continue;
+            }
+            // Its wall's home is beneath its agent's, on the floor where participants arrive, unless it says otherwise.
+            let wall = environment
+                .stage()
+                .unwrap_or_else(|| entourage::wall_beneath(&agent, arrival.position[1]));
             assert_eq!(
                 readable(&spot(arrival), &spot(wall), solids),
                 Ok(()),
                 "{id}"
             );
-            assert_eq!(seen(&spot(arrival), &spot(agent), solids), Ok(()), "{id}");
             // In the space's coordinates, as the server stands it: beneath the agent, with the gap between them, clear of
             // the floor, and seen beneath the swarm from where participants arrive, never behind it.
             let home = environment

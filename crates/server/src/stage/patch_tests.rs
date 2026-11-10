@@ -29,6 +29,7 @@ const SKY: Walls<'static> = Walls {
         orientation: [0.0, 0.0, 0.0, 1.0],
     },
     declared: &[],
+    status: crate::stage::Status::Beneath,
 };
 
 /// A text panel as an agent writes one, of a few sentences of prose and a list.
@@ -223,15 +224,9 @@ fn each_change_to_a_stage_is_its_patch() {
     assert_eq!(kinds(&patch), ["remove_wall", "place"]);
     // A participant dismisses a panel.
     let patch = change(&mut stage, &walls, |stage| {
-        stage.dismiss("sky", &notes).unwrap();
+        stage.dismiss(&walls, &notes).unwrap();
     });
     assert_eq!(kinds(&patch), ["remove_panel"]);
-    // The Tomori wall travels with the agent, its panels with it.
-    let travelling = walls.travelling(Some(pose(4.0, 4.0)));
-    let before = view(&stage, &walls, 1);
-    let after = view(&stage, &travelling, 2);
-    let patch = ProjectionPatch::between(&before, &after);
-    assert_eq!(kinds(&patch), ["wall"]);
 }
 
 /// A small, fast generator of numbers, seeded, so that each run tries the same sequences.
@@ -288,7 +283,7 @@ fn a_stage_s_changes_patched_in_turn_are_what_it_shows() {
                         stage.place(&walls, &panel, Target::Slot(wall, random.below(6) as u32))
                     }),
                     4 => panel.map_or(Ok(false), |panel| {
-                        stage.dismiss("sky", &panel).map(|()| true)
+                        stage.dismiss(&walls, &panel).map(|()| true)
                     }),
                     5 => stage
                         .add_wall(&walls, &pose(random.below(10) as f32, -5.0), None)

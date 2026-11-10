@@ -2166,6 +2166,7 @@ impl SpaceModel {
             // Set by the hub, which knows where the agent stands.
             pinned: false,
             facing: None,
+            partner: None,
             via: None,
             stream: false,
             // Set by the hub, which knows the backends.

@@ -115,11 +115,18 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         }
     };
     assert!(called.pinned);
-    assert!(close(called.summoned.unwrap().position, [1.0, 1.9, -2.3]));
+    // Beside her, 1.5 m from her eyes, to her left, a little above them, as following stands it.
+    let at = called.summoned.unwrap().position;
+    assert!(((at[0] - 1.0).hypot(at[2]) - 1.5).abs() < 1e-3, "{at:?}");
+    assert!(at[0] < 1.0 && (at[1] - 1.7).abs() < 1e-4, "{at:?}");
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
     assert_eq!(presence["agent"]["at_home"], false);
     assert_eq!(presence["agent"]["mode"], "pinned");
-    assert_eq!(presence["agent"]["position"], json!([1.0, 1.9, -2.3]));
+    let reported: Vec<f32> = serde_json::from_value(presence["agent"]["position"].clone()).unwrap();
+    assert!(
+        reported.iter().zip(at).all(|(a, b)| (a - b).abs() < 0.01),
+        "{reported:?}"
+    );
     assert_eq!(presence["agent"]["home"], json!([0.0, 1.4, -2.3]));
 
     // Nothing moves it of its own accord: it is still there a while later.
@@ -172,22 +179,12 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     assert_eq!(content(&to_ada)["moved"], true);
     let state = ada.space(|state: &SpaceState| state.summoned.is_some());
     let at = state.summoned.unwrap();
-    // 2.3 m in front of her, a little above her eyes, with room for its wall beneath it.
+    // 2.3 m in front of her, a little above her eyes.
     assert!(close(at.position, [1.0, 1.9, -2.3]), "{at:?}");
     // It faces her.
     assert!(at.yaw().abs() < 1e-3, "{}", at.yaw());
-    // Its entourage gathers about her: its Tomori wall goes beneath it, before her, as its home stands beneath the
-    // agent's home, for everyone.
-    assert_eq!(state.summoner, Some([1.0, 1.6, 0.0]));
-    let wall = ada.wait_for(|message| match message {
-        tomori_protocol::ServerMessage::Projection { projection }
-            if projection.walls[0].pose.position != [0.0, 0.52, -2.3] =>
-        {
-            Some(projection.walls[0].pose)
-        }
-        _ => None,
-    });
-    assert!(close(wall.position, [1.0, 1.9 - 0.88, -2.3]), "{wall:?}");
+    // Nothing goes with it: its status wall and its workers stay home.
+    assert_eq!(state.summoner, None);
 
     // Somewhere it cannot go, or someone not here, is refused, saying why.
     assert!(

@@ -1548,7 +1548,7 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
     notice("Tomori moved 'Build status' to float in the space.");
     let back = &move_panel(&build, "wall Tomori wall")["structuredContent"];
     assert_eq!(back["moved"], true, "{back}");
-    notice("Tomori moved 'Build status' to the Tomori wall.");
+    notice("Tomori moved 'Build status' to the status wall.");
     let pinned = eventually(|| {
         walls(&session)[0]["used"]
             .as_array()?
@@ -1959,7 +1959,7 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
         call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
             .clone()
     };
-    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    eventually(|| (walls()[0]["name"] == "status wall (the Tomori wall)").then_some(()));
     // Ada's report reaches the hub over her own connection, so wait until the agent is told where she is before placing anything in front of her.
     eventually(|| {
         let presence = call(&server, &token, Some(&session), "presence", json!({}));
@@ -2079,7 +2079,7 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
         ),
         (
             json!({"wall": "Tomori wall", "place": "front Ada"}),
-            "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
+            "The status wall stands where its environment puts it, so it cannot be moved.",
         ),
         (
             json!({"wall": "near Zed"}),
@@ -2165,7 +2165,7 @@ fn the_agent_snaps_a_wall_beside_another_into_a_group_and_takes_it_out_again() {
         call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
             .clone()
     };
-    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    eventually(|| (walls()[0]["name"] == "status wall (the Tomori wall)").then_some(()));
     // Ada's report reaches the hub over her own connection, so wait until the agent is told where she is before placing anything in front of her.
     eventually(|| {
         let presence = call(&server, &token, Some(&session), "presence", json!({}));
@@ -2304,7 +2304,7 @@ fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_d
         call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
             .clone()
     };
-    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    eventually(|| (walls()[0]["name"] == "status wall (the Tomori wall)").then_some(()));
     // Ada's report reaches the hub over her own connection, so wait until the agent is told where she looks before building where she is looking.
     eventually(|| {
         let presence = call(&server, &token, Some(&session), "presence", json!({}));
@@ -2754,7 +2754,7 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
         call(&server, &token, Some(&session), "presence", json!({}))["structuredContent"]["walls"]
             .clone()
     };
-    eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    eventually(|| (walls()[0]["name"] == "status wall (the Tomori wall)").then_some(()));
     eventually(|| {
         let presence = call(&server, &token, Some(&session), "presence", json!({}));
         presence["structuredContent"]["people"][0]

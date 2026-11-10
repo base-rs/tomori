@@ -34,7 +34,8 @@ mod placement;
 mod published;
 pub(crate) use beside::spot as beside_spot;
 pub(crate) use beside::{SIZE as BESIDE_SIZE, level_ahead};
-pub(crate) mod travel;
+pub(crate) mod geometry;
+mod status;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
 pub use code::Source;
@@ -546,23 +547,44 @@ impl Projecting {
     }
 }
 
-/// Where the walls of a space stand in its current environment: the environment, the Tomori wall's pose there, and
-/// the walls the environment declares, as its registration gives them, carried into the space's coordinates.
+/// Where the walls of a space stand in its current environment: the environment, the home there of the space's own
+/// status wall, the Tomori wall, the walls the environment declares, as its registration gives them, carried into the
+/// space's coordinates, and which is the status wall.
 #[derive(Clone, Copy, Debug)]
 pub struct Walls<'a> {
     pub environment: &'a str,
     pub tomori: Pose,
     pub declared: &'a [crate::EnvironmentWall],
+    pub status: Status,
+}
+
+/// Which wall is the space's status wall in an environment, where Tomori's notices, what the agent projects unasked and
+/// every placement's last fallback go. See `design/projection.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Status {
+    /// The space's own, the Tomori wall, at its home beneath the agent's, laid out within its own limits.
+    Beneath,
+    /// The space's own, at the home its environment gives it, laid out by default as this says.
+    At(Layout),
+    /// The environment's own wall, by its place among those it declares: the Tomori wall is not shown.
+    Own(usize),
 }
 
 impl Walls<'_> {
-    /// The walls, the Tomori wall at `travel` while it is away from its home, at its travel spot while the agent is
-    /// summoned, or else at its home. See [`travel`].
-    pub fn travelling(self, travel: Option<Pose>) -> Self {
-        Self {
-            tomori: travel.unwrap_or(self.tomori),
-            ..self
+    /// The identity of the status wall shown: the Tomori wall, or the environment's own wall in the role.
+    pub(crate) fn status_wall(&self) -> String {
+        match self.status {
+            Status::Own(index) if index < self.declared.len().min(DECLARED_WALLS) => {
+                format!("environment-{index}")
+            }
+            _ => TOMORI_WALL.to_owned(),
         }
+    }
+
+    /// Whether the status wall is one of the environment's own, whose slots its panels and the space's status panels
+    /// share.
+    pub(crate) fn shared(&self) -> bool {
+        self.status_wall() != TOMORI_WALL
     }
 }
 /// What is refused of a locked wall, by participants and the agent alike.
@@ -586,6 +608,8 @@ pub enum Target {
 /// is free, or floating.
 enum Spot {
     Wall(String, Option<u32>),
+    /// Onto the status wall, as a status panel, in this slot if it is free.
+    Status(Option<u32>),
     Free(Pose),
 }
 
@@ -801,7 +825,8 @@ pub struct Stage {
     /// The last number given, to panels, walls and the stage's own order.
     #[serde(default)]
     next: u64,
-    /// The panels on the Tomori wall.
+    /// The space's status panels, on the Tomori wall, or on an environment's own wall in the role, or waiting for a slot
+    /// on the status wall where they are on neither.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tomori: Vec<Kept>,
     /// What is kept for each environment, by its identifier.
@@ -913,12 +938,16 @@ impl Stage {
     /// its owners added.
     fn walls(&self, walls: &Walls<'_>) -> Vec<Wall> {
         let room = self.rooms.get(walls.environment);
-        let mut shown = vec![
-            self.tomori_layout
-                .unwrap_or(Layout::TOMORI)
-                .apply(Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori))
-                .with_locked(self.tomori_locked),
-        ];
+        let status = walls.status_wall();
+        let mut shown = Vec::new();
+        if !walls.shared() {
+            shown.push(
+                self.tomori_layout(walls)
+                    .apply(Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori))
+                    .with_locked(self.tomori_locked)
+                    .with_status(true),
+            );
+        }
         shown.extend(walls.declared.iter().take(DECLARED_WALLS).enumerate().map(
             |(index, declared)| {
                 let id = format!("environment-{index}");
@@ -931,10 +960,12 @@ impl Stage {
                     .copied()
                     .unwrap_or(declared.pose);
                 let locked = !room.is_some_and(|room| room.unlocked.contains(&id));
+                let role = id == status;
                 layout
                     .apply(Wall::new(id, WallKind::Environment, pose))
                     .with_name(declared.name().map(str::to_owned))
                     .with_locked(locked)
+                    .with_status(role)
             },
         ));
         if let Some(room) = room {
@@ -949,23 +980,6 @@ impl Stage {
             }));
         }
         shown
-    }
-
-    /// Where the Tomori wall, as the space has laid it out, stands in `walls`' environment while the agent stands at
-    /// `agent`, summoned to someone whose eyes are at `eyes`: its travel spot, clear of `solids` and every other wall
-    /// shown, or none where no spot is clear. See [`travel::spot`].
-    pub(crate) fn travel_spot(
-        &self,
-        walls: &Walls<'_>,
-        eyes: Option<[f32; 3]>,
-        agent: &Pose,
-        solids: &[tomori_environment::sightlines::Solid],
-    ) -> Option<Pose> {
-        let shown = self.walls(walls);
-        let (tomori, others) = shown
-            .split_first()
-            .expect("the Tomori wall is always shown");
-        travel::spot(eyes, agent, tomori, others, solids)
     }
 
     /// The wall `wall` shown in `walls`' environment, if it is.
@@ -1122,15 +1136,6 @@ impl Stage {
         Some(room.panels.remove(index))
     }
 
-    /// The most prominent of the `slots` slots of the wall `wall` that none of `list` is in.
-    fn free_slot(list: &[Kept], wall: &str, slots: u32) -> Option<u32> {
-        let taken: Vec<u32> = list
-            .iter()
-            .filter_map(|other| other.slot_on(wall))
-            .collect();
-        (0..slots).find(|slot| !taken.contains(slot))
-    }
-
     /// Whether every slot of the wall `wall`, of `slots` slots, in `environment` holds a panel its environment
     /// published, so that it takes no other: an environment's panel is never given up for a newcomer.
     fn crowded(&self, environment: &str, wall: &str, slots: u32) -> bool {
@@ -1140,24 +1145,35 @@ impl Stage {
         published.count() as u32 >= slots
     }
 
-    /// Put `kept` on the wall `wall`, of `slots` slots, in `environment`, `arranged` by a participant or not, in its most
-    /// prominent free slot, or else in the slot of the panel that has been on it longest of those not arranged, or, when
-    /// all are, of them all, which leaves; but never of a panel its environment published, which stays. The wall is not
-    /// [`Stage::crowded`], which the caller sees to.
+    /// Put `kept` on the wall `wall` in `walls`' environment, `arranged` by a participant or not, as a status panel or
+    /// not, in its most prominent free slot, or else in the slot of the panel that has been on it longest of those not
+    /// arranged, or, when all are, of them all, which leaves, but never of a panel its environment published, which
+    /// stays; on an environment's own wall in the status role, as [`Stage::make_room`] makes room, or else floating
+    /// before its right end. The wall is not [`Stage::crowded`], which the caller sees to.
     fn put_on(
         &mut self,
-        environment: &str,
+        walls: &Walls<'_>,
         mut kept: Kept,
         wall: &str,
-        slots: u32,
         arranged: bool,
+        status: bool,
     ) {
+        let environment = walls.environment;
         kept.placed = self.tick();
         kept.arranged = arranged;
-        let list = self.list(environment, Some(wall));
-        let slot = match Self::free_slot(list, wall, slots) {
+        let slot = match self.free_in(walls, wall) {
             Some(slot) => slot,
+            None if walls.shared() && wall == walls.status_wall() => {
+                match self.make_room(walls, status) {
+                    Some(slot) => slot,
+                    None => {
+                        let pose = self.before_end(walls, wall);
+                        return self.float(walls, kept, pose);
+                    }
+                }
+            }
             None => {
+                let list = self.list(environment, Some(wall));
                 let (index, slot) = list
                     .iter()
                     .enumerate()
@@ -1178,20 +1194,24 @@ impl Stage {
             wall: wall.to_owned(),
             slot,
         };
-        self.list(environment, Some(wall)).push(kept);
+        self.list_for(walls, Some(wall), status).push(kept);
+        self.settle(walls);
     }
 
-    /// Put `kept`, which came from `from`, in the slot `slot` of the wall `wall` in `environment`, arranged. A panel
-    /// already there changes places with it: into the slot it came from on the same wall, or else into the wall's most
-    /// prominent free slot, or else where it came from, on another wall or floating.
+    /// Put `kept`, which came from `from`, in the slot `slot` of the wall `wall` in `walls`' environment, arranged, as a
+    /// status panel or not. A panel already there changes places with it, keeping its kind: into the slot it came from on
+    /// the same wall, or else into the wall's most prominent free slot, or else where it came from, on another wall or
+    /// floating.
     fn put_in(
         &mut self,
-        environment: &str,
+        walls: &Walls<'_>,
         mut kept: Kept,
         from: Placed,
-        (wall, slots): (&str, u32),
+        wall: &str,
         slot: u32,
+        status: bool,
     ) {
+        let environment = walls.environment;
         kept.placed = self.tick();
         kept.arranged = true;
         kept.place = Placed::Wall {
@@ -1199,13 +1219,25 @@ impl Stage {
             slot,
         };
         let placed = self.tick();
-        let list = self.list(environment, Some(wall));
-        let occupant = list
+        // The panel there, a status panel or not.
+        let shared = wall == walls.status_wall();
+        let status_occupant = self
+            .tomori
             .iter()
-            .position(|other| other.slot_on(wall) == Some(slot))
-            .map(|index| list.remove(index));
-        list.push(kept);
-        let free = Self::free_slot(list, wall, slots);
+            .position(|other| shared && other.slot_on(wall) == Some(slot));
+        let (occupant, was_status) = match status_occupant {
+            Some(index) => (Some(self.tomori.remove(index)), true),
+            None => {
+                let list = self.list(environment, Some(wall));
+                let occupant = list
+                    .iter()
+                    .position(|other| other.slot_on(wall) == Some(slot))
+                    .map(|index| list.remove(index));
+                (occupant, wall == TOMORI_WALL)
+            }
+        };
+        self.list_for(walls, Some(wall), status).push(kept);
+        let free = self.free_in(walls, wall);
         let Some(mut occupant) = occupant else {
             return;
         };
@@ -1221,11 +1253,17 @@ impl Stage {
             },
             (from, None) => from.clone(),
         };
-        let to = match &occupant.place {
-            Placed::Wall { wall, .. } => Some(wall.clone()),
-            Placed::Free { .. } => None,
+        let list = match &occupant.place {
+            Placed::Wall { wall: to, .. } if to == wall => {
+                self.list_for(walls, Some(to), was_status)
+            }
+            Placed::Wall { wall: to, .. } => {
+                let to = to.clone();
+                self.list(environment, Some(&to))
+            }
+            Placed::Free { .. } => self.list(environment, None),
         };
-        self.list(environment, to.as_deref()).push(occupant);
+        list.push(occupant);
     }
 
     /// What participants see of the space `space` in `walls`' environment at `now`, in seconds since the epoch: every
@@ -1255,9 +1293,12 @@ impl Stage {
             .get(walls.environment)
             .map(|room| room.panels.as_slice())
             .unwrap_or_default();
+        let status = walls.status_wall();
+        let seats = self.slots_of(walls, &status);
         let kept: Vec<&Kept> = self
             .tomori
             .iter()
+            .filter(|kept| kept.slot_on(&status).is_some_and(|slot| slot < seats))
             .chain(room)
             .filter(|kept| match &kept.place {
                 Placed::Wall { wall, .. } => shown.iter().any(|shown| shown.id == *wall),
@@ -1326,10 +1367,20 @@ impl Stage {
     /// at a pose. A wall not shown there, and a pose that is not one or is beyond reach, are the Tomori wall.
     fn resolve(&self, walls: &Walls<'_>, to: &Destination) -> Spot {
         let shown = self.walls(walls);
-        let tomori = Spot::Wall(TOMORI_WALL.to_owned(), None);
+        let tomori = Spot::Status(None);
         match to {
-            Destination::Nearest(origin) => crate::presence::nearest_wall(&shown, *origin)
-                .map_or(tomori, |(wall, _)| Spot::Wall(wall.id.clone(), None)),
+            Destination::Nearest(origin) => crate::presence::nearest_wall(&shown, *origin).map_or(
+                tomori,
+                |(wall, _)| match wall.id.as_str() {
+                    TOMORI_WALL => Spot::Status(None),
+                    _ => Spot::Wall(wall.id.clone(), None),
+                },
+            ),
+            // The Tomori wall names the status role, wherever the status wall stands.
+            Destination::Wall { wall, slot } if wall == TOMORI_WALL => {
+                let slots = self.slots_of(walls, &walls.status_wall());
+                Spot::Status(slot.filter(|slot| *slot < slots))
+            }
             Destination::Wall { wall, slot } if shown.iter().any(|shown| shown.id == *wall) => {
                 let slots = self.slots_of(walls, wall);
                 Spot::Wall(wall.clone(), slot.filter(|slot| *slot < slots))
@@ -1382,7 +1433,7 @@ impl Stage {
     }
 
     /// Project `content`, one of Tomori's own notices of `kind`, such as that workers were removed, at `now` onto the
-    /// Tomori wall, as [`Stage::project_to`] does when nobody asked. The previous notice of the same kind is taken off
+    /// status wall, as [`Stage::project_to`] does when nobody asked. The previous notice of the same kind is taken off
     /// first, unless a participant has put it where it is, so that repeated notices take one slot rather than push the
     /// agent's panels off the wall. Returns its identity.
     pub(crate) fn project_notice(
@@ -1407,25 +1458,30 @@ impl Stage {
     /// Put the agent's panel `kept` where `to` says in `walls`' environment, not arranged.
     fn put(&mut self, walls: &Walls<'_>, kept: Kept, to: &Destination) {
         match self.resolve(walls, to) {
-            Spot::Wall(wall, slot) => self.put_at(walls, kept, &wall, slot),
+            Spot::Wall(wall, slot) => self.put_at(walls, kept, &wall, slot, false),
+            Spot::Status(slot) => self.put_at(walls, kept, &walls.status_wall(), slot, true),
             Spot::Free(pose) => self.float(walls, kept, pose),
         }
     }
 
-    /// Put the agent's panel `kept` on the wall `wall` in `walls`' environment, in `slot` if it is free, and otherwise as
-    /// [`Stage::put_on`] puts it; or, where every slot of the wall holds a panel its environment published, onto the
-    /// Tomori wall instead, as when nobody asked, since an environment's panel is never given up for it.
-    fn put_at(&mut self, walls: &Walls<'_>, mut kept: Kept, wall: &str, slot: Option<u32>) {
-        let slots = self.slots_of(walls, wall);
-        let environment = walls.environment;
-        let list = self.list(environment, Some(wall));
-        let free = slot.filter(|slot| !list.iter().any(|other| other.slot_on(wall) == Some(*slot)));
-        let Some(slot) = free else {
-            if self.crowded(environment, wall, slots) {
-                let slots = self.slots_of(walls, TOMORI_WALL);
-                return self.put_on(environment, kept, TOMORI_WALL, slots, false);
+    /// Put the agent's panel `kept` on the wall `wall` in `walls`' environment, as a status panel or not, in `slot` if
+    /// it is free, and otherwise as [`Stage::put_on`] puts it; or, where every slot of the wall holds a panel its
+    /// environment published, onto the status wall instead, as when nobody asked, since an environment's panel is never
+    /// given up for it.
+    fn put_at(
+        &mut self,
+        walls: &Walls<'_>,
+        mut kept: Kept,
+        wall: &str,
+        slot: Option<u32>,
+        status: bool,
+    ) {
+        let taken = self.taken(walls, wall);
+        let Some(slot) = slot.filter(|slot| !taken.contains(slot)) else {
+            if self.crowded(walls.environment, wall, self.slots_of(walls, wall)) {
+                return self.put_on(walls, kept, &walls.status_wall(), false, true);
             }
-            return self.put_on(environment, kept, wall, slots, false);
+            return self.put_on(walls, kept, wall, false, status);
         };
         kept.placed = self.tick();
         kept.arranged = false;
@@ -1433,7 +1489,8 @@ impl Stage {
             wall: wall.to_owned(),
             slot,
         };
-        self.list(environment, Some(wall)).push(kept);
+        self.list_for(walls, Some(wall), status).push(kept);
+        self.settle(walls);
     }
 
     /// Leave `kept` floating at `pose` in `walls`' environment, not arranged; more than [`FLOATING`] floating, the one
@@ -1651,9 +1708,13 @@ impl Stage {
         let Some(current) = shown.panel(panel) else {
             return Err("That panel is not here.");
         };
+        let status = walls.status_wall();
         let unchanged = match (self.resolve(walls, to), &current.place) {
             (Spot::Wall(wall, slot), Place::Wall { wall: on, slot: at }) => {
                 wall == *on && slot.is_none_or(|slot| slot == *at)
+            }
+            (Spot::Status(slot), Place::Wall { wall: on, slot: at }) => {
+                status == *on && slot.is_none_or(|slot| slot == *at)
             }
             _ => false,
         };
@@ -1663,7 +1724,7 @@ impl Stage {
         if self.leaves_environment(
             walls,
             panel,
-            matches!(self.resolve(walls, to), Spot::Wall(wall, _) if wall == TOMORI_WALL),
+            matches!(self.resolve(walls, to), Spot::Status(_)),
         ) {
             return Err(STAYS);
         }
@@ -1832,11 +1893,12 @@ impl Stage {
             }
             (Some(_), _) => {
                 return Err(
-                    "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
+                    "The status wall stands where its environment puts it, so it cannot be moved.",
                 );
             }
         };
-        if kind == WallKind::Tomori {
+        // Beneath the agent's home, it stays within its own limits; where its environment stands it, within a wall's.
+        if kind == WallKind::Tomori && walls.status == Status::Beneath {
             if new.grid.rows != 1 || new.grid.columns > TOMORI_COLUMNS {
                 return Err(
                     "The Tomori wall stays one row of at most 6 slots, so that it stays clear of the swarm and the workers.",
@@ -1862,7 +1924,11 @@ impl Stage {
         // wall's own.
         match kind {
             WallKind::Tomori => {
-                self.tomori_layout = (new != Layout::TOMORI).then_some(new);
+                let default = match walls.status {
+                    Status::At(layout) => layout,
+                    _ => Layout::TOMORI,
+                };
+                self.tomori_layout = (new != default).then_some(new);
             }
             WallKind::Environment => {
                 let declared =
@@ -1937,6 +2003,31 @@ impl Stage {
     /// longer has, in its nearest free slot, those a participant put where they are first and then the newest, or else
     /// floating where its slot was, facing as it faced.
     fn rearrange(&mut self, walls: &Walls<'_>, before: &Wall, after: &Wall) {
+        // On an environment's own wall in the status role, the status panels there keep their column and row as its own
+        // panels do, and go into its nearest free slot or float as they do; floating, they are the environment's.
+        let status: Vec<String> = if walls.shared() && before.id == walls.status_wall() {
+            let (on, rest): (Vec<Kept>, Vec<Kept>) = std::mem::take(&mut self.tomori)
+                .into_iter()
+                .partition(|kept| kept.slot_on(&before.id).is_some());
+            self.tomori = rest;
+            let ids = on.iter().map(|kept| kept.id.clone()).collect();
+            self.room(walls.environment).panels.extend(on);
+            ids
+        } else {
+            Vec::new()
+        };
+        self.rearranged(walls, before, after);
+        if !status.is_empty() {
+            let room = self.room(walls.environment);
+            let (back, rest): (Vec<Kept>, Vec<Kept>) = std::mem::take(&mut room.panels)
+                .into_iter()
+                .partition(|kept| status.contains(&kept.id) && kept.slot_on(&before.id).is_some());
+            room.panels = rest;
+            self.tomori.extend(back);
+        }
+    }
+
+    fn rearranged(&mut self, walls: &Walls<'_>, before: &Wall, after: &Wall) {
         let (old, new) = (before.grid(), after.grid());
         let environment = walls.environment;
         let list = self.list(environment, Some(&before.id));
@@ -2067,8 +2158,8 @@ impl Stage {
             let mut floating = 0;
             for id in beyond {
                 moved = true;
-                let list = self.list(environment, Some(&wall.id));
-                if let Some(slot) = Self::free_slot(list, &wall.id, slots) {
+                if let Some(slot) = self.free_in(walls, &wall.id) {
+                    let list = self.list(environment, Some(&wall.id));
                     let kept = list
                         .iter_mut()
                         .find(|kept| kept.id == id)
@@ -2242,9 +2333,18 @@ impl Stage {
                 return Err(STAYS);
             }
         }
+        let was_status = self.tomori.iter().any(|kept| kept.id == panel);
         let mut kept = self
             .take(walls.environment, panel)
             .ok_or("That panel is not here.")?;
+        // Onto the Tomori wall, it is a status panel; moved between the status wall's slots, it keeps its kind; put on
+        // an environment's own wall in the role by hand, it is the environment's.
+        let status = match &target {
+            Target::Wall(wall) | Target::Slot(wall, _) => {
+                wall == TOMORI_WALL || (was_status && kept.slot_on(wall).is_some())
+            }
+            Target::Free(_) => false,
+        };
         // Put somewhere by a participant, it is pinned there, and the agent's next code panels do not replace it.
         let pinned = !kept.pinned;
         kept.pinned = true;
@@ -2252,28 +2352,28 @@ impl Stage {
             // Put back on the wall it is on, or in the slot it is in, it keeps its slot, now arranged.
             Target::Wall(wall) if kept.slot_on(&wall).is_some() => {
                 let changed = !std::mem::replace(&mut kept.arranged, true);
-                self.list(walls.environment, Some(&wall)).push(kept);
+                self.list_for(walls, Some(&wall), status).push(kept);
                 Ok(pinned || changed)
             }
             Target::Slot(wall, slot) if kept.slot_on(&wall) == Some(slot) => {
                 let changed = !std::mem::replace(&mut kept.arranged, true);
-                self.list(walls.environment, Some(&wall)).push(kept);
+                self.list_for(walls, Some(&wall), status).push(kept);
                 Ok(pinned || changed)
             }
             Target::Wall(wall) => {
-                let slots = self.slots_of(walls, &wall);
-                self.put_on(walls.environment, kept, &wall, slots, true);
+                self.put_on(walls, kept, &wall, true, status);
                 Ok(true)
             }
             Target::Slot(wall, slot) => {
                 let from = kept.place.clone();
-                let slots = self.slots_of(walls, &wall);
-                self.put_in(walls.environment, kept, from, (&wall, slots), slot);
+                self.put_in(walls, kept, from, &wall, slot, status);
+                self.settle(walls);
                 Ok(true)
             }
             Target::Free(pose) => {
                 let changed = pinned || kept.place != Placed::Free { pose };
                 self.float(walls, kept, pose);
+                self.settle(walls);
                 Ok(changed)
             }
         }
@@ -2282,13 +2382,15 @@ impl Stage {
     /// Dismiss the panel `panel` in `environment`, or say why not.
     /// One its environment published stays away until the environment retracts it, or the space comes back to the
     /// environment.
-    pub(crate) fn dismiss(&mut self, environment: &str, panel: &str) -> Result<(), &'static str> {
+    pub(crate) fn dismiss(&mut self, walls: &Walls<'_>, panel: &str) -> Result<(), &'static str> {
+        let environment = walls.environment;
         let kept = self
             .take(environment, panel)
             .ok_or("That panel is not here.")?;
         if let Some(published) = kept.published {
             self.room(environment).dismissed.insert(published.id);
         }
+        self.settle(walls);
         Ok(())
     }
 
@@ -2302,7 +2404,7 @@ impl Stage {
     }
 
     /// The panel `panel`, as the agent is told about one a participant points at in `walls`' environment at `now`, such
-    /// as `panel "Build status" (on the Tomori wall, projected 2 minutes ago; source: "CI")`, with its id, and, pointed
+    /// as `panel "Build status" (on the status wall, projected 2 minutes ago; source: "CI")`, with its id, and, pointed
     /// at on the list item that begins on `line` of its body, which item, such as `panel "Agenda" (id agenda, on the
     /// Tomori wall, projected 5 minutes ago, updated just now; item 3 of 5, not ticked: "Decide the pairing window")`:
     /// everything in it cleaned onto one line, without double quotes or square brackets, so that it cannot end the
@@ -2356,7 +2458,7 @@ impl Stage {
             )
         };
         let place = match &panel.place {
-            Place::Wall { wall, .. } if wall == TOMORI_WALL => "on the Tomori wall",
+            Place::Wall { wall, .. } if *wall == walls.status_wall() => "on the status wall",
             Place::Wall { .. } => "on a wall",
             _ => "floating",
         };
@@ -2659,6 +2761,7 @@ mod tests {
             orientation: [0.0, 0.0, 0.0, 1.0],
         },
         declared: &[],
+        status: crate::stage::Status::Beneath,
     };
 
     #[test]
@@ -3291,10 +3394,16 @@ mod tests {
             Place::Free { pose: free }
         );
         // Dismissed, from a wall or floating, it is gone.
-        assert_eq!(stage.dismiss("sky", &one), Ok(()));
-        assert_eq!(stage.dismiss("sky", &two), Ok(()));
-        assert_eq!(stage.dismiss("sky", &two), Err("That panel is not here."));
-        assert_eq!(stage.dismiss("grid", &two), Err("That panel is not here."));
+        assert_eq!(stage.dismiss(&room("sky"), &one), Ok(()));
+        assert_eq!(stage.dismiss(&room("sky"), &two), Ok(()));
+        assert_eq!(
+            stage.dismiss(&room("sky"), &two),
+            Err("That panel is not here.")
+        );
+        assert_eq!(
+            stage.dismiss(&room("grid"), &two),
+            Err("That panel is not here.")
+        );
         assert!(stage.view("s", &SKY, 0).panels.is_empty());
     }
 
@@ -3323,6 +3432,7 @@ mod tests {
             environment: "farmyard",
             tomori: pose(1.0, -1.0),
             declared: &[],
+            status: crate::stage::Status::Beneath,
         };
         let mut stage = Stage::default();
         let on_tomori = stage.project(&SKY, content("tomori"), None, 0);
@@ -3345,7 +3455,7 @@ mod tests {
             Err("That panel is not here.")
         );
         assert_eq!(
-            stage.dismiss("farmyard", &floating),
+            stage.dismiss(&room("farmyard"), &floating),
             Err("That panel is not here.")
         );
         assert_eq!(
@@ -3837,7 +3947,7 @@ mod tests {
         let short = stage.project(&SKY, code("rust", 2), None, 0);
         assert_eq!(
             stage.describe(&SKY, &short, None, 0).unwrap(),
-            "code panel \"rust\" (on the Tomori wall, projected just now; language: \"rust\"; 2 lines)"
+            "code panel \"rust\" (on the status wall, projected just now; language: \"rust\"; 2 lines)"
         );
         let long = stage.project(&SKY, code("ruby", 40), None, 0);
         assert!(
@@ -3852,7 +3962,7 @@ mod tests {
         let plain = stage.project(&SKY, plain, None, 0);
         assert_eq!(
             stage.describe(&SKY, &plain, None, 0).unwrap(),
-            "code panel \"code\" (on the Tomori wall, projected just now; 2 lines)"
+            "code panel \"code\" (on the status wall, projected just now; 2 lines)"
         );
         let hostile = stage.project(&SKY, code("\"]x[\"", 2), None, 0);
         let described = stage.describe(&SKY, &hostile, None, 0).unwrap();
@@ -4207,7 +4317,7 @@ mod tests {
         let id = stage.project(&SKY, content("Build status"), None, 1_000);
         assert_eq!(
             stage.describe(&SKY, &id, None, 1_130).unwrap(),
-            "panel \"Build status\" (on the Tomori wall, projected 2 minutes ago; source: \"CI\")"
+            "panel \"Build status\" (on the status wall, projected 2 minutes ago; source: \"CI\")"
         );
         let wall = stage.add_wall(&room("sky"), &pose(0.0, 3.0), None).unwrap();
         stage.place(&SKY, &id, Target::Wall(wall)).unwrap();
@@ -4242,7 +4352,7 @@ mod tests {
         );
         assert_eq!(
             stage.describe(&SKY, &untitled, None, 0).unwrap(),
-            "panel beginning \"Run 'cargo test' (now)\" (on the Tomori wall, projected just now; note): \"say 'hi'\")"
+            "panel beginning \"Run 'cargo test' (now)\" (on the status wall, projected just now; note): \"say 'hi'\")"
         );
         assert!(stage.describe(&SKY, "panel-99", None, 0).is_none());
         let hostile = stage.project(
@@ -4367,7 +4477,7 @@ mod tests {
         assert_eq!(panel.age, 120);
         assert_eq!(
             stage.describe(&SKY, &agenda, None, 120).unwrap(),
-            "panel \"Agenda (revised)\" (id agenda, on the Tomori wall, projected 2 minutes ago, updated a minute ago; source: \"Notes\")"
+            "panel \"Agenda (revised)\" (id agenda, on the status wall, projected 2 minutes ago, updated a minute ago; source: \"Notes\")"
         );
         // It is not a new panel for making room: the full wall still gives it up first, as the one there longest.
         let newcomer = stage.project(&SKY, content("newcomer"), None, 180);
@@ -4480,7 +4590,7 @@ mod tests {
             0,
         );
         stage.project(&SKY, content("other"), None, 0);
-        stage.dismiss("sky", &first).unwrap();
+        stage.dismiss(&room("sky"), &first).unwrap();
         // Dismissed, the id projects a new panel, placed as any new one is: the Tomori wall's first free slot.
         let (second, updated) = reply(
             &mut stage,
@@ -4538,7 +4648,7 @@ mod tests {
         let describe = |line| stage.describe(&SKY, &agenda, Some(line), 0).unwrap();
         assert_eq!(
             describe(3),
-            "panel \"Agenda\" (id agenda, on the Tomori wall, projected just now; item 2 of 3, not ticked: \"Decide the 'pairing' (window)\")"
+            "panel \"Agenda\" (id agenda, on the status wall, projected just now; item 2 of 3, not ticked: \"Decide the 'pairing' (window)\")"
         );
         assert!(describe(2).ends_with("; item 1 of 3, ticked: \"Panels\")"));
         assert!(describe(4).ends_with("; item 3 of 3: \"plain nested\")"));
@@ -4759,7 +4869,7 @@ mod tests {
         );
         // Two columns, with a dismissed: b and d lose theirs, b, which a participant put where it is, first, into the
         // only free slot, though d is newer, and d floats where its slot was, facing as it faced.
-        stage.dismiss("sky", &ids["a"]).unwrap();
+        stage.dismiss(&room("sky"), &ids["a"]).unwrap();
         let before = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
         stage.set_wall(&SKY, &wall, grid(2, 1)).unwrap();
         let after = by_title(&stage, &SKY);
@@ -4831,7 +4941,7 @@ mod tests {
             .filter(|panel| matches!(panel.place, Place::Free { .. }))
             .map(|panel| panel.id)
             .collect();
-        stage.dismiss("sky", &floating[0]).unwrap();
+        stage.dismiss(&room("sky"), &floating[0]).unwrap();
         assert_eq!(stage.set_wall(&SKY, &walls[0], grid(2, 1)), Ok(true));
         let shown = stage.view("s", &SKY, 0);
         let slots: u32 = shown.walls.iter().map(Wall::slots).sum();
@@ -4894,7 +5004,7 @@ mod tests {
                     pose: Some(pose(0.0, 1.0)),
                     ..WallChange::default()
                 },
-                "The Tomori wall stands at its home, or with the agent while it is summoned, so it cannot be moved.",
+                "The status wall stands where its environment puts it, so it cannot be moved.",
             ),
         ] {
             assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, change), Err(error));

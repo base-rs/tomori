@@ -768,12 +768,9 @@ struct SpaceRecord {
     /// for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
     summoned: Option<tomori_protocol::Pose>,
-    /// While the agent is summoned, where the eyes were of whoever it was summoned to, which its workers' arc and its
-    /// Tomori wall gather about; and where the Tomori wall stands meanwhile, its travel spot, while one is clear. Kept
-    /// as the summons is, for this run and this environment only, so the wall is at home whenever the space opens.
-    /// See `design/projection.md`.
-    summoner: Option<[f32; 3]>,
-    travel: Option<tomori_protocol::Pose>,
+    /// While the agent is away, the eyes of whoever it stands for, as it was placed from them, so that clients draw the
+    /// swarm in near them. See `design/avatars.md`.
+    partner: Option<[f32; 3]>,
     /// How the agent follows whoever it is talking with, and whether it is pinned, for this run and this environment
     /// only. See `design/environments.md`.
     following: following::Following,
@@ -822,9 +819,7 @@ impl SpaceRecord {
         environments: &crate::environments::Environments,
         now: u64,
     ) -> tomori_protocol::Projection {
-        let walls = environments
-            .walls(&self.model.environment)
-            .travelling(self.travel);
+        let walls = environments.walls(&self.model.environment);
         let mut projection = self.stage.view(&self.model.id, &walls, now);
         self.versions
             .borrow_mut()
@@ -861,9 +856,7 @@ impl SpaceRecord {
         if let Some((_, projection)) = built.within.iter().find(|(kept, _)| kept == limits) {
             return projection.clone();
         }
-        let walls = environments
-            .walls(&self.model.environment)
-            .travelling(self.travel);
+        let walls = environments.walls(&self.model.environment);
         let mut projection = self.stage.view_within(&self.model.id, &walls, now, limits);
         crate::versions::Versions::label(&built.whole, &mut projection);
         let projection = Arc::new(projection.with_revision(revision));
@@ -1312,38 +1305,25 @@ impl HubState {
         changed
     }
 
-    /// Summon the agent of the space `id` to `at`, or send it home without it, for everyone in the space; whether that
-    /// changed where it stands. See `design/environments.md`.
-    ///
-    /// Its entourage goes with it: its workers gather about `summoner`, whose eyes they were, and its Tomori wall stands
-    /// at `travel`, its travel spot, or, without one, at home; sent home, they go home with it. See
-    /// `design/projection.md`.
+    /// Summon the agent of the space `id` to `at`, for whoever's eyes are at `partner`, or send it home without it, for
+    /// everyone in the space; whether that changed where it stands. Nothing goes with it: its status wall and its
+    /// workers stay at home. See `design/environments.md`.
     fn summon(
         &mut self,
         id: &str,
         at: Option<tomori_protocol::Pose>,
-        summoner: Option<[f32; 3]>,
-        travel: Option<tomori_protocol::Pose>,
+        partner: Option<[f32; 3]>,
     ) -> bool {
-        let (summoner, travel) = if at.is_some() {
-            (summoner, travel)
-        } else {
-            (None, None)
-        };
-        let (changed, moved) = self.space_mut(id).map_or((false, false), |record| {
-            let changed = record.summoned != at || record.summoner != summoner;
-            let moved = record.travel != travel;
+        let partner = partner.filter(|_| at.is_some());
+        let changed = self.space_mut(id).is_some_and(|record| {
+            let changed = record.summoned != at;
+            let told = changed || record.partner != partner;
             record.summoned = at;
-            record.summoner = summoner;
-            record.travel = travel;
-            (changed || moved, moved)
+            record.partner = partner;
+            told
         });
         if changed {
             self.touch_space(id);
-        }
-        // The Tomori wall moves with its panels, for everyone.
-        if moved {
-            self.touch_projection(id);
         }
         changed
     }
@@ -2410,6 +2390,10 @@ impl Hub {
             if !record.stage.retract(&outlet.environment, id) {
                 return Ok(());
             }
+            // A status panel waiting for the slot it freed takes it.
+            record
+                .stage
+                .settle(&self.environments().walls(&outlet.environment));
             let channel = record.channel.as_mut().expect("found above");
             channel
                 .publishes
@@ -2487,11 +2471,9 @@ impl Hub {
         }
         // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
         record.stage.leave(&left);
-        // The agent appears at the new environment's home for it, wherever it was summoned to in the last, its Tomori
-        // wall and workers with it.
+        // The agent appears at the new environment's home for it, wherever it was summoned to in the last.
         record.summoned = None;
-        record.summoner = None;
-        record.travel = None;
+        record.partner = None;
         // Nor does it follow anyone there, nor stay pinned.
         record.following = following::Following::default();
         // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
@@ -2500,7 +2482,13 @@ impl Hub {
         self.reconcile_server_sides(state);
         // Everyone in the space, and the lobby's listing, see the change.
         state.touch_space(space);
-        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
+        // The status wall is where the new environment puts it, and that environment's walls show, the status panels
+        // taking the status wall's free slots there.
+        let environments = self.environments();
+        let record = state.space_mut(space).expect("the caller found it");
+        let walls = environments.walls(&record.model.environment);
+        record.stage.settle(&walls);
+        drop(environments);
         state.touch_projection(space);
         Ok(true)
     }
@@ -2540,6 +2528,10 @@ impl Hub {
         // What the side published is no longer current, so it is shown no more until a side publishes it again.
         let environment = record.model.environment.clone();
         if record.stage.rest(&environment) {
+            // A status panel waiting for a slot it freed takes it.
+            record
+                .stage
+                .settle(&self.environments().walls(&environment));
             state.touch_projection(&failure.space);
         }
         state.touch_space(&failure.space);
@@ -2565,26 +2557,6 @@ impl Hub {
     /// The environments offered for spaces, in order.
     pub(crate) fn environments_offered(&self) -> Vec<crate::Environment> {
         self.environments().as_slice().to_vec()
-    }
-
-    /// The environments offered for spaces.
-    /// Where the Tomori wall of the space `record` stands while its agent is summoned to `at`, before whoever's eyes are
-    /// at `eyes`: its travel spot, clear of the environment's solids and the space's other walls, or none where no spot
-    /// is clear. See `design/projection.md`.
-    fn travel_spot(
-        &self,
-        record: &SpaceRecord,
-        at: &tomori_protocol::Pose,
-        eyes: Option<[f32; 3]>,
-    ) -> Option<tomori_protocol::Pose> {
-        let environments = self.environments();
-        let walls = environments.walls(&record.model.environment);
-        record.stage.travel_spot(
-            &walls,
-            eyes,
-            at,
-            &environments.solids(&record.model.environment),
-        )
     }
 
     fn environments(&self) -> std::sync::RwLockReadGuard<'_, Environments> {
@@ -3762,9 +3734,7 @@ impl Hub {
                 let attention = match state.space(&space) {
                     Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
-                        let walls = environments
-                            .walls(&record.model.environment)
-                            .travelling(record.travel);
+                        let walls = environments.walls(&record.model.environment);
                         let now = crate::cards::unix_now();
                         record.model.resolve_with(
                             &attention,
@@ -3873,9 +3843,7 @@ impl Hub {
                         .and_then(|record| {
                             state.space(&record.space).map(|space| {
                                 let environments = self.environments();
-                                let walls = environments
-                                    .walls(&space.model.environment)
-                                    .travelling(space.travel);
+                                let walls = environments.walls(&space.model.environment);
                                 let now = crate::cards::unix_now();
                                 space.model.resolve_with(
                                     &[resource],
@@ -4476,9 +4444,7 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 match record.stage.add_wall(&walls, &pose, None) {
                     Ok(_) => {
                         state.touch_projection(&space);
@@ -4536,9 +4502,7 @@ impl Hub {
                     state.touch_projection(&space);
                     return;
                 }
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 match record.stage.set_wall(&walls, &wall, change) {
                     Ok(true) => {
                         state.touch_projection(&space);
@@ -4602,9 +4566,7 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 match record.stage.lock_wall(&walls, &wall, locked, reset) {
                     Ok(true) => {
                         log::info!(
@@ -4635,9 +4597,7 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 match record.stage.remove_wall(&walls, &wall) {
                     Ok(()) => {
                         state.touch_projection(&space);
@@ -4676,9 +4636,7 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 match record.stage.place(&walls, &panel, target) {
                     Ok(true) => {
                         state.touch_projection(&space);
@@ -4714,9 +4672,7 @@ impl Hub {
                     space
                         .and_then(|space| state.space(space))
                         .is_some_and(|record| {
-                            let walls = environments
-                                .walls(&record.model.environment)
-                                .travelling(record.travel);
+                            let walls = environments.walls(&record.model.environment);
                             record.stage.shows_image(&walls, &image)
                         })
                 });
@@ -4736,7 +4692,11 @@ impl Hub {
                     return;
                 };
                 let record = state.space_mut(&space).expect("checked above");
-                match record.stage.dismiss(&record.model.environment, &panel) {
+                let environments = self.environments();
+                let walls = environments.walls(&record.model.environment);
+                let dismissed = record.stage.dismiss(&walls, &panel);
+                drop(environments);
+                match dismissed {
                     Ok(()) => {
                         state.touch_projection(&space);
                         deferred.push(Deferred::Keep);
@@ -4831,9 +4791,7 @@ impl Hub {
                     .versioned(&environments, crate::cards::unix_now())
                     .panel(&panel)
                     .map(|shown| shown.version);
-                let walls = environments
-                    .walls(&record.model.environment)
-                    .travelling(record.travel);
+                let walls = environments.walls(&record.model.environment);
                 let chosen = record.stage.chosen(&walls, &panel, &row).map(|(id, row)| {
                     // Chosen from the panel as it is now, unless it changed since the version they saw; a client
                     // that says none is taken at its word.
@@ -5583,9 +5541,8 @@ impl Hub {
             stopped: None,
             stage: crate::stage::Stage::default(),
             summoned: None,
-            summoner: None,
+            partner: None,
             following: following::Following::default(),
-            travel: None,
             active: None,
         });
         // Created now, it is active from now.
@@ -5715,6 +5672,9 @@ impl Hub {
                     for environment in stage.environments() {
                         stage.fit_slots(&environments.walls(&environment));
                     }
+                    // The space's status panels take the status wall's free slots where it is now, as a space kept
+                    // before environments had status walls of their own does on first opening in one.
+                    stage.settle(&environments.walls(&model.environment));
                 }
                 state.spaces.push(SpaceRecord {
                     model,
@@ -5739,9 +5699,8 @@ impl Hub {
                     stopped: None,
                     stage,
                     summoned: None,
-                    summoner: None,
+                    partner: None,
                     following: following::Following::default(),
-                    travel: None,
                     active: kept.active,
                 });
             }
@@ -5984,9 +5943,7 @@ impl Hub {
             return;
         };
         let environments = self.environments();
-        let walls = environments
-            .walls(&record.model.environment)
-            .travelling(record.travel);
+        let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let solids = environments.solids(&record.model.environment);
         for (contents, origin) in replies {
@@ -6478,12 +6435,12 @@ impl Hub {
                 // agent was summoned to, for everyone in it. See `design/environments.md`.
                 state.anchors = environments.anchors(&space.model.environment);
                 state.summoned = space.summoned;
-                state.summoner = space.summoner;
                 // The trigger summons it nowhere: it follows, and is called with the hand menu. See
                 // `design/environments.md`.
                 state.summons = false;
                 state.pinned = space.following.pinned;
                 state.facing = space.following.faces();
+                state.partner = space.partner;
                 state.via = space.following.via;
                 state.stream = space.following.stream;
                 // The avatar its environment names, or else its backend's, for everyone in it. See `design/avatars.md`.

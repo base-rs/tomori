@@ -16,7 +16,7 @@ use tomori_client::{
 };
 use tomori_protocol::{
     Anchors, ConnectionRole, EnvironmentInfo, Panel, Participant, Place, Pose, Projection,
-    ServerMessage, SpaceState, TOMORI_WALL, Wall, WallKind, WallShape,
+    ServerMessage, SpaceState, Wall, WallKind,
 };
 use tomori_render::{
     graphics::Renderer,
@@ -70,30 +70,19 @@ fn solids() -> Vec<([f32; 3], [f32; 3])> {
         .collect()
 }
 
-/// The walls of a farmyard space, as the server sends them: the Tomori wall at its home, beneath the agent, and the
-/// notice board.
+/// The walls of a farmyard space, as the server sends them: the notice board, its status wall.
 fn walls() -> Vec<Wall> {
     let board = tomori_server_app::farmyard_noticeboard();
     vec![
-        Wall::new(
-            TOMORI_WALL,
-            WallKind::Tomori,
-            tomori_server_app::builder()
-                .environments()
-                .iter()
-                .find(|environment| environment.id() == tomori_environment_farmyard::ID)
-                .and_then(|environment| environment.tomori_wall_home())
-                .unwrap(),
-        )
-        .with_shape(WallShape::Arc { radius: 2.3 }),
         Wall::new("environment-0", WallKind::Environment, carried(board.pose))
             .with_grid(board.grid())
-            .with_locked(true),
+            .with_locked(true)
+            .with_status(true),
     ]
 }
 
 /// Samuel's head, in the farmyard's left corner, by the fence, looking towards the gate, along +Z of the farmyard's own
-/// coordinates, about 6 m from the Tomori wall and further from the notice board: a head looks along its −Z.
+/// coordinates, far from the notice board: a head looks along its −Z.
 fn head() -> Pose {
     let eyes = tomori_environment::sightlines::EYES;
     carried(Pose::at([-3.5, eyes, -1.0]).facing_towards([-3.5, eyes, -5.0]))
