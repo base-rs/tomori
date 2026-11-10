@@ -425,6 +425,10 @@ struct Captured {
     failure: Option<String>,
     /// What the microphone heard since last taken, for the echo test.
     heard: Heard,
+    /// What the capture opened last heard before its mode, live or an utterance, was set on the microphone, which
+    /// [`Voice::release`] passes on once it is, so that the first words said as the microphone opens are kept rather
+    /// than dropped by a microphone not yet made or still gated off.
+    early: Option<Vec<f32>>,
 }
 
 /// The energy of captured samples, from −1 to 1, and how many there were.
@@ -569,6 +573,8 @@ impl Voice {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Open the capture for `generation`'s connection, unless it is open, holding what it hears until
+    /// [`Self::release`], which the caller calls once it has set the microphone to what it opened it for.
     fn open(&mut self, client: &Client, live: bool, generation: u64) -> Result<(), String> {
         // Never rearm a new connection while an old capture callback could
         // still be in flight. Its recording must be stopped and joined first.
@@ -600,6 +606,9 @@ impl Voice {
             if let Some(microphone) = captured.microphone.as_mut() {
                 microphone.bind_connection(generation);
             }
+            // Its first samples may come before the microphone is made or
+            // set to what this capture is for: keep them until it is.
+            captured.early = Some(Vec::new());
         }
         let shared = self.shared.clone();
         let samples = Box::new(move |samples: &[f32]| {
@@ -611,6 +620,10 @@ impl Voice {
                     .sum(),
                 samples: samples.len() as u64,
             });
+            if let Some(early) = captured.early.as_mut() {
+                early.extend_from_slice(samples);
+                return;
+            }
             // A capture only feeds a microphone bound to its own connection;
             // the outbox drops its frames once that connection has ended.
             if let Some(microphone) = captured.microphone.as_mut()
@@ -649,6 +662,18 @@ impl Voice {
         Ok(())
     }
 
+    /// Pass on what the capture opened last heard before the microphone was set to what it was opened for, as it
+    /// now is, and what it hears after as it comes.
+    fn release(&mut self) {
+        let mut captured = self.lock();
+        let early = captured.early.take().unwrap_or_default();
+        // Only fails once the client is closed, when nothing more can be sent.
+        let _ = captured
+            .microphone
+            .as_mut()
+            .map(|microphone| microphone.push_float(&early));
+    }
+
     /// Ask for the microphone ahead of its first use, so that the platform's
     /// request does not interrupt the first recording. Opening the microphone
     /// still checks, and explains how to allow it if it was refused.
@@ -669,6 +694,7 @@ impl Voice {
             return Err(format!("Cannot send: {error}"));
         }
         self.live = true;
+        self.release();
         Ok(())
     }
 
@@ -732,6 +758,7 @@ impl Voice {
             let _ = self.lock().microphone.as_mut().map(Microphone::cancel);
             return Err(error);
         }
+        self.release();
         Ok(())
     }
 
@@ -766,6 +793,7 @@ impl Voice {
                 .zip(generation)
                 .ok_or_else(|| Finish::Live("Connection lost; live microphone stopped.".into()))?;
             self.open(client, true, generation).map_err(Finish::Live)?;
+            self.release();
         }
         Ok(())
     }
