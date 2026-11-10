@@ -32,8 +32,9 @@ pub struct Environment {
     status: Option<StatusWall>,
     /// The agent's home in it, its `agent` anchor, if it says, in its own coordinates. See `design/environments.md`.
     agent: Option<tomori_protocol::Pose>,
-    /// The middle of its workers' arrangement, its `workers` anchor, if it says, in its own coordinates.
-    workers: Option<tomori_protocol::Pose>,
+    /// Its cluster anchors, `home` among them for where its workers stand, each valid and of a name of its own, in its
+    /// own coordinates. See `design/environments.md`.
+    anchors: Vec<tomori_protocol::cluster::Anchor>,
     /// Where participants arrive in it, its `arrival` anchor, if it says, in its own coordinates.
     arrival: Option<tomori_protocol::Pose>,
     /// The avatar its agent shows as in its spaces, if it says, in place of the one the space's backend names.
@@ -342,7 +343,7 @@ impl fmt::Debug for Environment {
             .field("server_side", &self.side.is_some())
             .field("status", &self.status)
             .field("agent", &self.agent)
-            .field("workers", &self.workers)
+            .field("anchors", &self.anchors)
             .field("arrival", &self.arrival)
             .field("avatar", &self.avatar)
             .field("walls", &self.walls)
@@ -360,7 +361,7 @@ impl PartialEq for Environment {
             && self.instructions == other.instructions
             && self.status == other.status
             && self.agent == other.agent
-            && self.workers == other.workers
+            && self.anchors == other.anchors
             && self.arrival == other.arrival
             && self.avatar == other.avatar
             && self.walls == other.walls
@@ -386,7 +387,7 @@ impl Environment {
             side: None,
             status: None,
             agent: None,
-            workers: None,
+            anchors: Vec::new(),
             arrival: None,
             avatar: None,
             walls: Vec::new(),
@@ -740,11 +741,12 @@ impl Environment {
     }
 
     /// The environment, with the middle of its workers' arrangement at `workers`, its `workers` anchor, in its own
-    /// coordinates, the arrangement facing along the pose's +Z, towards whoever watches it, as the agent does. Without
-    /// one, the arrangement's middle is the agent's home, so that workers stand about the agent's home, as they stand
-    /// about its default home by default; they stay there wherever the agent goes. A client places them about it,
-    /// by the placement its build registers for the environment or the default arc. Sent and bounded as
-    /// [`Self::with_agent`] is. See `design/environments.md`.
+    /// coordinates, the arrangement facing along the pose's +Z, towards whoever watches it, as the agent does: the
+    /// compatible form of [`Self::with_anchor`] for its `home` anchor, taking the room today's arc takes, in place of
+    /// any `home` anchor given before. Without one, the arrangement's middle is the agent's home, so that workers stand
+    /// about the agent's home, as they stand about its default home by default; they stay there wherever the agent goes.
+    /// A client places them about it, by the placement its build registers for the environment or the default arc.
+    /// Sent and bounded as [`Self::with_agent`] is. See `design/environments.md`.
     ///
     /// ```
     /// use tomori_protocol::Pose;
@@ -755,13 +757,66 @@ impl Environment {
     /// assert_eq!(Environment::new("observe", "Observe").workers(), None);
     /// ```
     pub fn with_workers(mut self, workers: tomori_protocol::Pose) -> Self {
-        self.workers = Some(workers);
+        self.anchors.retain(|anchor| !anchor.is_home());
+        self.anchors.push(tomori_protocol::cluster::Anchor::new(
+            tomori_protocol::cluster::HOME,
+            workers,
+        ));
         self
     }
 
-    /// Where the middle of its workers' arrangement is, if it says, in its own coordinates.
+    /// Where the middle of its workers' arrangement is, its `home` anchor's pose, if it says, in its own coordinates.
     pub fn workers(&self) -> Option<tomori_protocol::Pose> {
-        self.workers
+        self.home().map(|home| home.pose)
+    }
+
+    /// The environment, with the cluster anchor `anchor`, in its own coordinates, its point facing along its +Z towards
+    /// whoever watches it: a named place that workers, panels and the agent gather at, laid out by
+    /// `tomori_protocol::cluster`. The anchor named `home` is where its workers stand by default: about the agent's
+    /// home, gathered about the eyes at the arrival, with the agent at its point; given an extent, fitted to it, today's
+    /// arc while it fits, then an arc, a grid, compact and a "+N more" sign; without one, on today's arc, as
+    /// [`Self::with_workers`] declares it. Check its room with `tomori_environment::sightlines::fits`. One whose name or
+    /// extent `tomori_protocol::cluster::Anchor::checked` refuses, or whose name another before it has, is left out
+    /// with a warning; its pose is sent and bounded as [`Self::with_agent`]'s is. Anchors other than `home` are kept
+    /// for a later release, which places workers and panels at them. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::cluster::Anchor;
+    /// use tomori_server::Environment;
+    ///
+    /// let yard = Pose::at([0.0, 1.4, -5.0]).facing_towards([0.0, 1.6, 0.0]);
+    /// let home = Anchor::new("home", yard).with_extent(6.0, 2.5, 3.0);
+    /// let farm = Environment::new("farm", "Farm").with_anchor(home.clone());
+    /// assert_eq!(farm.anchors(), [home]);
+    /// assert_eq!(farm.workers(), Some(yard));
+    /// ```
+    pub fn with_anchor(mut self, anchor: tomori_protocol::cluster::Anchor) -> Self {
+        let refused = anchor.checked().err().or_else(|| {
+            self.anchors
+                .iter()
+                .any(|kept| kept.name == anchor.name)
+                .then_some("another of its name comes before it")
+        });
+        match refused {
+            Some(why) => log::warn!(
+                "Environment {}'s anchor {:?} is left out: {why}.",
+                self.id,
+                anchor.name
+            ),
+            None => self.anchors.push(anchor),
+        }
+        self
+    }
+
+    /// Its cluster anchors, in its own coordinates.
+    pub fn anchors(&self) -> &[tomori_protocol::cluster::Anchor] {
+        &self.anchors
+    }
+
+    /// Its `home` anchor, if it gives one.
+    fn home(&self) -> Option<&tomori_protocol::cluster::Anchor> {
+        self.anchors.iter().find(|anchor| anchor.is_home())
     }
 
     /// The environment, with the agent showing as the avatar `avatar` in its spaces, by identifier, in place of the one
@@ -939,13 +994,22 @@ impl Environments {
     /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a
     /// space's state carries them: its arrival, in its own coordinates, when it gives a valid one; and the agent and
     /// workers anchors it gives, carried into the space's coordinates, those then finite, within
-    /// [`crate::stage::REACH`] of home and with an orientation, each made upright; none when it is not offered. See
-    /// `design/environments.md`.
+    /// [`crate::stage::REACH`] of home and with an orientation, each made upright, with its `home` cluster anchor
+    /// carried there too where it gives its room; none when it is not offered. See `design/environments.md`.
     pub fn anchors(&self, id: &str) -> tomori_protocol::Anchors {
         let mut anchors = tomori_protocol::Anchors::new();
         if let Some(environment) = self.get(id) {
             anchors.agent = environment.carried(environment.agent.as_ref());
-            anchors.workers = environment.carried(environment.workers.as_ref());
+            anchors.workers = environment.carried(environment.workers().as_ref());
+            // The home anchor's room, where it gives one, beside the workers anchor an older client keeps.
+            if let Some(home) = environment.home()
+                && home.extent.is_some()
+                && let Some(pose) = anchors.workers
+            {
+                let mut carried = home.clone();
+                carried.pose = pose;
+                anchors.clusters.push(carried);
+            }
             anchors.arrival = environment
                 .arrival
                 .as_ref()
@@ -1370,6 +1434,67 @@ mod tests {
         let plain = Environment::new("observe", "Observe");
         assert_ne!(plain, plain.clone().with_agent(pod));
         assert_ne!(plain, plain.clone().with_workers(pod));
+    }
+
+    #[test]
+    fn the_home_anchor_gives_the_workers_room_and_with_workers_is_its_compatible_form() {
+        use tomori_protocol::Pose;
+        use tomori_protocol::cluster::{Anchor, Extent, HOME};
+        let yard = Pose::at([0.0, 1.4, -5.0]).facing_towards([0.0, 1.6, 0.0]);
+        let room = Anchor::new(HOME, yard).with_extent(6.0, 2.5, 3.0);
+        // `with_workers` declares a home anchor of today's arc's room, in place of one before; the home anchor's room
+        // is sent beside the workers anchor, carried as it is.
+        let arrival = Pose::at([0.0, 0.0, 8.0]).facing_towards([0.0, 0.0, 0.0]);
+        let offered = tomoris()
+            .with(Environment::new("roomy", "Roomy").with_anchor(room.clone()))
+            .with(
+                Environment::new("compatible", "Compatible")
+                    .with_anchor(room.clone())
+                    .with_workers(yard),
+            )
+            .with(
+                Environment::new("street", "Street")
+                    .with_arrival(arrival)
+                    .with_anchor(room.clone()),
+            );
+        let roomy = offered.anchors("roomy");
+        assert_eq!(roomy.workers, Some(yard));
+        assert_eq!(roomy.clusters, std::slice::from_ref(&room));
+        let compatible = offered.get("compatible").unwrap();
+        assert_eq!(compatible.anchors(), [Anchor::new(HOME, yard)]);
+        assert_eq!(compatible.workers(), Some(yard));
+        let compatible = offered.anchors("compatible");
+        assert_eq!(
+            (compatible.workers, compatible.clusters),
+            (Some(yard), vec![])
+        );
+        let street = offered.anchors("street");
+        let home = street.cluster(HOME).unwrap();
+        assert_eq!(Some(home.pose), street.workers);
+        assert!((home.pose.position[2] + 13.0).abs() < 1e-4, "{home:?}");
+        assert_eq!(home.extent, Some(Extent::new(6.0, 2.5, 3.0)));
+        // One of a name already given, or of a name or room it may not have, is left out; another anchor is kept for
+        // later, and not sent.
+        let aisle = Anchor::new("aisle-3", yard).with_extent(4.0, 2.5, 1.5);
+        let checked = Environment::new("checked", "Checked")
+            .with_anchor(room.clone())
+            .with_anchor(Anchor::new(HOME, Pose::HOME))
+            .with_anchor(Anchor::new("rack a12", yard))
+            .with_anchor(Anchor::new("cupboard", yard).with_extent(0.1, 1.0, 1.0))
+            .with_anchor(aisle.clone());
+        assert_eq!(checked.anchors(), [room.clone(), aisle]);
+        assert!(format!("{checked:?}").contains("aisle-3"));
+        let offered = offered.with(checked);
+        assert_eq!(
+            offered.anchors("checked").clusters,
+            std::slice::from_ref(&room)
+        );
+        // Beyond reach, it is left out, as the workers anchor is.
+        let far = Anchor::new(HOME, Pose::at([0.0, 0.0, -25.0])).with_extent(6.0, 2.5, 3.0);
+        let offered = offered.with(Environment::new("far", "Far").with_anchor(far));
+        assert_eq!(offered.anchors("far"), tomori_protocol::Anchors::new());
+        let plain = Environment::new("roomy", "Roomy");
+        assert_ne!(plain, plain.clone().with_anchor(room));
     }
 
     #[test]

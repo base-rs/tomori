@@ -21,6 +21,9 @@ pub const REACH: f32 = 20.0;
 /// is not finite, the worker stands where the default arc would put it.
 pub const PLACEMENT_REACH: f32 = 90.0;
 
+/// How far from its home the agent stands at least to be away from it, in metres, as its satellites show.
+pub const AWAY: f32 = 0.05;
+
 /// A place and an upright facing, turned only about the vertical, in the space's coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Anchor {
@@ -208,7 +211,7 @@ impl<'a> Placing<'a> {
 /// worker never moves when the workers' titles, states, order or membership change, whatever it answers. It is the
 /// build's own code, trusted as its scenery is, and runs on the frame step's thread, at most once for each of at most
 /// 64 live workers in a frame, so it must be quick; one that panics, or answers a place that is not finite or beyond
-/// [`PLACEMENT_REACH`], has its worker stand where [`HomeArc`] puts it. It may stand workers together: their signs then
+/// [`PLACEMENT_REACH`], has its worker stand where the home cluster puts it, by default [`HomeArc`]. It may stand workers together: their signs then
 /// stand beside or above one another. See `design/environments.md`.
 pub trait WorkerPlacement: Send + Sync {
     /// Where `worker` stands, in the space's coordinates.
@@ -222,90 +225,37 @@ pub type Placement = Arc<dyn WorkerPlacement>;
 /// them to be.
 pub const EYES: Vec3 = Vec3::new(0.0, 1.6, 0.0);
 
-/// How far from whoever watches the arc stands at which its columns stand at their own angles, 40° from the agent and
-/// 18⅔° apart, and its rows 85 cm apart, in metres; nearer, its columns stand as far apart along the arc as they do here,
-/// so that their signs keep clear of one another and of the swarm, and further, its columns stand at those angles, its
-/// rows spread in proportion, as its signs are drawn larger there.
-pub const ARC_RADIUS: f32 = 3.2;
+/// How far from whoever watches the arc stands at which its columns stand at their own angles, as
+/// [`tomori_protocol::cluster::ARC_RADIUS`] says.
+pub const ARC_RADIUS: f32 = tomori_protocol::cluster::ARC_RADIUS;
 
-/// How near whoever watches the arc stands at least, horizontally, in metres: as near as the agent's default home, and
-/// a summoned agent, stand (`tomori_protocol::entourage::SUMMONED`), so that its first columns stand in front of them.
-pub const NEAREST_ARC: f32 = tomori_protocol::entourage::SUMMONED;
+/// How near whoever watches the arc stands at least, horizontally, in metres, as
+/// [`tomori_protocol::cluster::NEAREST_ARC`] says.
+pub const NEAREST_ARC: f32 = tomori_protocol::cluster::NEAREST_ARC;
 
-/// How far below the agent's middle the arc's first row stands, and how far apart its rows stand, in metres, at
-/// [`ARC_RADIUS`] or nearer: the first row a little below the agent's middle, the second above it, so that the agent
-/// stands within the band they make, then each row above the last, every one above the Tomori wall beneath the agent.
-pub const ROW_BELOW: f32 = 0.25;
-pub const ROW_APART: f32 = 0.85;
+/// How far below the agent's middle the arc's first row stands, and how far apart its rows stand, in metres, as
+/// [`tomori_protocol::cluster::ROW_BELOW`] and [`tomori_protocol::cluster::ROW_APART`] say.
+pub const ROW_BELOW: f32 = tomori_protocol::cluster::ROW_BELOW;
+pub const ROW_APART: f32 = tomori_protocol::cluster::ROW_APART;
 
-/// The lowest any worker stands above the floor, in metres.
-const LOWEST: f32 = 0.3;
-
-/// The default placement: one curved band about whoever watches, the `audience`, on which the arrangement's middle, the
-/// agent, itself stands, in the middle of its gap: its radius is the horizontal distance between them, but at least
-/// [`NEAREST_ARC`], and its workers stand along it to either side of the agent, alternately left and right, two rows to
-/// each pair of columns, from 40° of the agent's bearing from their eyes, 18⅔° apart, or as far apart along the arc
-/// where it stands nearer than [`ARC_RADIUS`], at about the agent's height: the first row [`ROW_BELOW`] below its
-/// middle, the rest [`ROW_APART`] above one another, spread in proportion where it stands further than [`ARC_RADIUS`],
-/// as its signs are drawn larger there, so that the Tomori wall stands beneath the band. Nearer than [`ARC_RADIUS`], the
-/// band holds the first two rows of the columns that fit before where the last stands at [`ARC_RADIUS`], five at the
-/// default home's 2.3 m, eighteen workers; the rest stand on the arc [`ARC_RADIUS`] from whoever watches, at their
-/// columns' own angles, above and behind the band, the columns that do not fit from two rows up, so that as many
-/// workers as there are look around and up. So the
-/// workers stand about the agent, all about as far from whoever watches as it is, facing them, nothing behind it, as
-/// they stood before environments placed the agent, at home and summoned alike; and at [`Anchor::AGENT`], watched from
-/// [`EYES`], where [`crate::delegation::slot_position`] puts them.
+/// The default placement: today's arc, [`tomori_protocol::cluster::home_arc`], one curved band about whoever watches,
+/// the `audience`, on which the arrangement's middle, the agent, itself stands, in the middle of its gap, its workers
+/// along it to either side, the rule the server and every client share. At [`Anchor::AGENT`], watched from [`EYES`],
+/// it is where [`crate::delegation::slot_position`] puts them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HomeArc;
 
 impl HomeArc {
     /// Where the default arc stands `slot` about whoever's eyes are at `audience`, through `origin`.
     pub fn at(origin: Anchor, audience: Vec3, slot: usize) -> Vec3 {
-        let (side, column, row) = crate::delegation::slot_lane(slot);
-        let across = Vec3::new(
-            origin.position.x - audience.x,
-            0.0,
-            origin.position.z - audience.z,
-        );
-        // Towards the middle, or else, as from its very place, the way it faces them from.
-        let ahead = across.try_normalize().unwrap_or_else(|| {
-            let facing = origin.orientation * Vec3::Z;
-            Vec3::new(-facing.x, 0.0, -facing.z)
-                .try_normalize()
-                .unwrap_or(Vec3::NEG_Z)
-        });
-        let right = Vec3::new(-ahead.z, 0.0, ahead.x);
-        let radius = across.length().max(NEAREST_ARC);
-        // Nearer than the arc's own radius, its columns stand as far apart along it as there, as many as fit before the
-        // last column there; their rows above the first two, and the rest of the columns, two rows up, stand on the
-        // arc's own radius, at their own angles, above and behind the band.
-        let widen = (ARC_RADIUS / radius).max(1.0);
-        let last = crate::delegation::slot_angle(COLUMNS - 1);
-        let fit = (0..COLUMNS)
-            .take_while(|column| crate::delegation::slot_angle(*column) * widen <= last + 1e-4)
-            .count();
-        let (radius, angle, level) = if fit < COLUMNS && (column >= fit || row >= 2) {
-            let lift = if column >= fit { 2 } else { 0 };
-            (
-                radius.max(ARC_RADIUS),
-                crate::delegation::slot_angle(column),
-                row + lift,
-            )
-        } else {
-            (radius, crate::delegation::slot_angle(column) * widen, row)
-        };
-        let direction = ahead * angle.cos() + right * (side * angle.sin());
-        // Further than the arc's own radius, its rows spread in proportion, as its signs are drawn larger, so that no
-        // sign reaches the worker above it.
-        let spread = (radius / ARC_RADIUS).max(1.0);
-        let y = (origin.position.y + (level as f32 * ROW_APART - ROW_BELOW) * spread)
-            .max(tomori_protocol::entourage::FLOOR + LOWEST);
-        Vec3::new(audience.x, y, audience.z) + direction * radius
+        Vec3::from_array(tomori_protocol::cluster::home_arc(
+            origin.position.to_array(),
+            (origin.orientation * Vec3::Z).to_array(),
+            audience.to_array(),
+            slot,
+        ))
     }
 }
-
-/// How many columns the arc has on each side of the agent.
-const COLUMNS: usize = 8;
 
 impl WorkerPlacement for HomeArc {
     fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
@@ -313,27 +263,75 @@ impl WorkerPlacement for HomeArc {
     }
 }
 
+/// The home's cluster of workers about `origin`, gathered about whoever's eyes are at `audience`, in `extent`, or on
+/// today's arc without one: the rule of `tomori_protocol::cluster`, which the server and every client share.
+pub fn cluster(
+    origin: Anchor,
+    audience: Vec3,
+    extent: Option<tomori_protocol::cluster::Extent>,
+) -> tomori_protocol::cluster::Cluster {
+    let pose = Pose {
+        position: origin.position.to_array(),
+        orientation: origin.orientation.to_array(),
+    };
+    tomori_protocol::cluster::Cluster::home(pose, extent).with_audience(audience.to_array())
+}
+
+/// Where a worker stands, and how its sign is drawn: in the space's coordinates; as a share of its full size, smaller
+/// in a compact cluster; and whether it is gathered into the cluster's "+N more" sign.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spot {
+    pub position: Vec3,
+    pub scale: f32,
+    pub more: bool,
+}
+
+impl Spot {
+    /// At `position`, at full size, in a slot of its own.
+    pub fn at(position: Vec3) -> Self {
+        Self {
+            position,
+            scale: 1.0,
+            more: false,
+        }
+    }
+}
+
 /// Where `worker` stands about `origin`: as `placement` says, if it is given one, that does not panic, and its answer
-/// is finite and within [`PLACEMENT_REACH`], or else where [`HomeArc`] puts it; and whether the placement panicked, so
-/// that it is not called again.
-pub fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>) -> (Vec3, bool) {
+/// is finite and within [`PLACEMENT_REACH`], at full size; or else in its slot of `arrangement`, the home cluster's,
+/// `cluster`; and whether the placement panicked, so that it is not called again.
+pub fn place(
+    origin: Anchor,
+    placement: Option<&Placement>,
+    worker: &Placing<'_>,
+    cluster: &tomori_protocol::cluster::Cluster,
+    arrangement: &tomori_protocol::cluster::Arrangement,
+) -> (Spot, bool) {
     let answer = placement.map(|placement| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             placement.place(origin, worker)
         }))
     });
     let panicked = matches!(answer, Some(Err(_)));
-    let position = answer
+    let spot = answer
         .and_then(Result::ok)
         .filter(|position| position.is_finite() && position.abs().max_element() <= PLACEMENT_REACH)
-        .unwrap_or_else(|| HomeArc.place(origin, worker));
-    (position, panicked)
+        .map(Spot::at)
+        .unwrap_or_else(|| {
+            let slot = cluster.slot(arrangement, worker.slot);
+            Spot {
+                position: Vec3::from_array(slot.position),
+                scale: slot.scale,
+                more: slot.more,
+            }
+        });
+    (spot, panicked)
 }
 
 /// Where the agent and the workers stand in the joined space: the swarm at `agent`, where it went or was called, facing
 /// whoever it turned to, or else at its `home`, going there by `via` or streaming, as `stream` says; the workers about
-/// `workers`, the agent itself while its entourage goes with it, or else the workers anchor, by default its home, by
-/// `placement`, or by [`HomeArc`] without one, gathered about `audience`, the eyes of whoever it went to with its
+/// `workers`, the agent itself while its entourage goes with it, or else the home cluster anchor, by default its home,
+/// by `placement`, or in the home cluster, fitted to its `extent`, or on [`HomeArc`] without one, gathered about `audience`, the eyes of whoever it went to with its
 /// entourage, or else those at home; the eyes of whoever it stands for, its `partner`, while it is away, near whom the
 /// swarm draws in; and the `carriage` that takes the environment's own coordinates, its scenery's, walkable surfaces' and
 /// client side's, into the space's.
@@ -342,6 +340,9 @@ pub struct Arrangement {
     pub agent: Anchor,
     pub home: Anchor,
     pub workers: Anchor,
+    /// The room the workers' arrangement may take, as the environment's `home` cluster anchor gives it, laid out by
+    /// `tomori_protocol::cluster`; none for today's arc.
+    pub extent: Option<tomori_protocol::cluster::Extent>,
     pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
@@ -364,6 +365,11 @@ impl Arrangement {
     pub fn summoned(&self) -> bool {
         self.agent != self.home
     }
+
+    /// Whether the agent stands away from its home, not only turned there: more than [`AWAY`] from it.
+    pub fn away(&self) -> bool {
+        self.agent.position.distance(self.home.position) > AWAY
+    }
 }
 
 impl Default for Arrangement {
@@ -373,6 +379,7 @@ impl Default for Arrangement {
             agent: Anchor::AGENT,
             home: Anchor::AGENT,
             workers: Anchor::AGENT,
+            extent: None,
             audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
@@ -390,6 +397,7 @@ impl std::fmt::Debug for Arrangement {
             .field("agent", &self.agent)
             .field("home", &self.home)
             .field("workers", &self.workers)
+            .field("extent", &self.extent)
             .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)
@@ -412,6 +420,14 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3) -> bool {
         a.distance(b) < 1e-5
+    }
+
+    /// Where `worker` stands about `origin` by `placement`, or on today's arc about the eyes at home.
+    fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>) -> (Vec3, bool) {
+        let home = cluster(origin, worker.audience, None);
+        let (spot, panicked) = super::place(origin, placement, worker, &home, &home.arrange(1));
+        assert!(spot.scale == 1.0 && !spot.more);
+        (spot.position, panicked)
     }
 
     #[test]
@@ -571,9 +587,47 @@ mod tests {
             (arrangement.agent, arrangement.home, arrangement.workers),
             (Anchor::AGENT, Anchor::AGENT, Anchor::AGENT)
         );
+        assert_eq!(arrangement.extent, None);
         assert!(format!("{arrangement:?}").contains("placement: false"));
         assert!(!arrangement.summoned());
         assert_eq!(arrangement.carriage, Anchor::HOME);
+    }
+
+    #[test]
+    fn without_a_placement_workers_stand_in_the_home_cluster_fitted_to_its_room() {
+        let extent = tomori_protocol::cluster::Extent::new(4.0, 1.2, 1.0);
+        let home = cluster(Anchor::AGENT, EYES, Some(extent));
+        let arrangement = home.arrange(40);
+        assert!(arrangement.compact() && arrangement.more().is_some());
+        let (spot, panicked) = super::place(
+            Anchor::AGENT,
+            None,
+            &Placing::new("ses_1", 39),
+            &home,
+            &arrangement,
+        );
+        assert!(!panicked && spot.more && spot.scale == tomori_protocol::cluster::COMPACT);
+        let first = Placing::new("ses_0", 0);
+        let (spot, _) = super::place(Anchor::AGENT, None, &first, &home, &arrangement);
+        assert!(!spot.more && spot.position.x.abs() < 2.0);
+        assert_eq!(
+            Spot::at(Vec3::ONE),
+            Spot {
+                position: Vec3::ONE,
+                scale: 1.0,
+                more: false
+            }
+        );
+        // Today's arc, as a placement, is the home cluster without room.
+        assert_eq!(
+            HomeArc.place(Anchor::AGENT, &Placing::new("ses_2", 5)),
+            slot_position(5)
+        );
+        // A placement answers at full size, wherever the cluster would stand it.
+        let fixed: Placement = Arc::new(Fixed(Vec3::ZERO));
+        let (spot, _) = super::place(Anchor::AGENT, Some(&fixed), &first, &home, &arrangement);
+        assert_eq!(spot, Spot::at(crate::swarm::CENTER));
+        assert!(format!("{:?}", Arrangement::default()).contains("extent: None"));
     }
 
     #[test]

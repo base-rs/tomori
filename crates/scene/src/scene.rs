@@ -1789,9 +1789,14 @@ impl Step {
         // Workers fly out from the agent and back to it, wherever it stands.
         self.delegation_scene
             .set_coordinator_samples(self.coordinator.departures());
+        // While the agent is away from home, its satellites orbit it, where it stood as of the last frame.
+        let bounds = self.coordinator.bounds();
+        self.delegation_scene
+            .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
         self.delegation_scene.arrange(
             arrangement.workers,
             arrangement.audience,
+            arrangement.extent,
             arrangement.placement,
         );
         self.delegation_scene.update(root, workspace, dt);

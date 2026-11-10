@@ -418,9 +418,14 @@ impl Feed {
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
         self.scene
             .set_coordinator_samples(self.swarm.coordinator.departures());
+        // Its satellites orbit the agent while it is away, as on the headset.
+        let bounds = self.swarm.coordinator.bounds();
+        self.scene
+            .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
         self.scene.arrange(
             arrangement.workers,
             arrangement.audience,
+            arrangement.extent,
             arrangement.placement,
         );
         self.scene.update(root, workspace, dt);
