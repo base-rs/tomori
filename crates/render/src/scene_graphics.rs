@@ -86,7 +86,7 @@ impl Panels {
         let before = std::mem::take(&mut self.drawn);
         let sheets: Vec<(&Arc<tomori_scene::canvas::Canvas>, Mat4)> = sheets
             .into_iter()
-            .filter_map(|sheet| Some((sheet.canvas.as_ref()?, sheet.model?)))
+            .filter_map(|sheet| sheet.canvas.as_ref().zip(sheet.model))
             .collect();
         // Faces kept, first, so that nothing else takes their cards.
         let mut chosen: Vec<Option<usize>> = sheets

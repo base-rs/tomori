@@ -155,8 +155,12 @@ fn cards_no_longer_drawn_are_freed_beyond_a_few_spare() {
         panels.set_cards(&device, &queue, &renderer, &sheets(&[spare]));
         let (card, _) = panels.drawn[0];
         assert_eq!(panels.cards[card].panel.builds, (1, 0));
-        let none: [Sheet; 0] = [];
-        panels.set_cards(&device, &queue, &renderer, &none);
+        // A face with nowhere to stand is not drawn.
+        let unplaced = [Sheet {
+            canvas: Some(face("unplaced")),
+            model: None,
+        }];
+        panels.set_cards(&device, &queue, &renderer, &unplaced);
         assert!(panels.list(Mat4::IDENTITY).is_empty());
         assert_eq!(panels.cards.len(), SPARE_CARDS);
     });
