@@ -2948,49 +2948,25 @@ mod served {
         }
     }
 
-    /// A microphone that hears `samples`, once, each time it opens, then nothing until it is closed; live or for push-to-talk alike.
+    /// A microphone that hears `samples`, once, each time it opens, then nothing until it is closed; live or for
+    /// push-to-talk alike. It hears them all before opening returns, as a platform may call back with the first samples
+    /// at once, so that they are heard only if they are kept until the microphone is set to what it was opened for.
     struct Talker {
         samples: Vec<i16>,
     }
 
-    /// A capture thread, stopped and joined when dropped.
-    struct Talking {
-        stop: Arc<AtomicBool>,
-        thread: Option<JoinHandle<()>>,
-    }
-
-    impl Drop for Talking {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
-            let _ = self.thread.take().map(JoinHandle::join);
-        }
-    }
-
     impl Capture for Talker {
         fn open(&mut self, mut samples: Samples, _failed: Failed) -> Result<Recording, String> {
-            let stop = Arc::new(AtomicBool::new(false));
             // Halfway between samples, so that converting back to 16 bits gives each sample exactly.
             let speech: Vec<f32> = self
                 .samples
                 .iter()
                 .map(|sample| (f32::from(*sample) + 0.5) / f32::from(i16::MAX))
                 .collect();
-            let stopped = stop.clone();
-            let thread = std::thread::spawn(move || {
-                for chunk in speech.chunks(320) {
-                    samples(chunk);
-                }
-                while !stopped.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            });
-            Ok(Recording::new(
-                16_000,
-                Talking {
-                    stop,
-                    thread: Some(thread),
-                },
-            ))
+            for chunk in speech.chunks(320) {
+                samples(chunk);
+            }
+            Ok(Recording::new(16_000, ()))
         }
 
         fn open_live(

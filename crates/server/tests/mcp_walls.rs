@@ -457,6 +457,15 @@ fn a_change_to_a_wall_from_a_version_since_changed_is_refused_and_redone_from_th
     assert_eq!(changed["changed"], true);
     let widened = changed["version"].as_u64().unwrap();
     assert!(widened > tilted);
+    // Ada is sent it, at that version, before she tilts, so that the projection sent again after her refusal is the one
+    // waited for below, rather than this one, which a projection still waiting to be sent would take the place of.
+    ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .wall("tomori")
+            .filter(|wall| wall.version == widened)
+            .map(|_| ()),
+        _ => None,
+    });
     // Ada, still holding the wall as it was before the agent widened it, tilts it again: refused, naming the wall, so
     // that her client cues it, and the projection sent again shows the wall as it is, the agent's change kept.
     ada.send(&tilt(20.0, tilted));

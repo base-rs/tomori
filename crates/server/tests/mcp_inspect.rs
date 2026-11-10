@@ -222,11 +222,21 @@ fn what_is_pointed_at_carries_its_id_only_when_the_environment_gives_one() {
         ("u2", "plain-1", "and this"),
     ] {
         ada.say_attending(utterance, words, vec![Resource::object(object)], None);
+        // The next words wait for the agent's answer, which the fake agent gives only after taking these, so that they
+        // follow the conversation and carry no note of which message they answer (see `design/interaction.md`). The
+        // space's state may say both at once, as changes before it is sent are sent together.
+        let mut delivered = false;
         ada.space(|state| {
-            state
+            delivered |= state
                 .queue
                 .iter()
-                .any(|entry| entry.text == words && entry.state == QueueState::Delivered)
+                .any(|entry| entry.text == words && entry.state == QueueState::Delivered);
+            delivered
+                && state.messages.iter().any(|message| {
+                    message.completed
+                        && message.text.starts_with("You said: ")
+                        && message.text.ends_with(words)
+                })
         });
     }
     assert_eq!(

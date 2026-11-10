@@ -2166,6 +2166,14 @@ fn the_agent_snaps_a_wall_beside_another_into_a_group_and_takes_it_out_again() {
             .clone()
     };
     eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    // Ada's report reaches the hub over her own connection, so wait until the agent is told where she is before placing anything in front of her.
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
     let first = tool(
         "add_wall",
         json!({"place": "front Ada", "columns": 2, "rows": 2, "scale": 0.95}),
@@ -2297,6 +2305,14 @@ fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_d
             .clone()
     };
     eventually(|| (walls()[0]["name"] == "Tomori wall").then_some(()));
+    // Ada's report reaches the hub over her own connection, so wait until the agent is told where she looks before building where she is looking.
+    eventually(|| {
+        let presence = call(&server, &token, Some(&session), "presence", json!({}));
+        presence["structuredContent"]["people"][0]
+            .get("head")
+            .is_some()
+            .then_some(())
+    });
     // A two by two and a big one beside it, as tall, where Ada is looking, in one step.
     let built = tool(
         "create_layout",
