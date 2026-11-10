@@ -39,7 +39,7 @@ fn quads(wall: &Wall, walls: &[&Wall], colour: [f32; 4]) -> Vec<[f32; 4]> {
     let sheets = sheets(wall, Mat4::IDENTITY, walls);
     sheets[0]
         .canvas
-        .as_ref()
+        .as_deref()
         .unwrap()
         .shapes
         .iter()

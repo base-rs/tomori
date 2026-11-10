@@ -273,7 +273,18 @@ pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3)
     if panel.code.is_some() {
         return None;
     }
-    let (columns, body_count) = self::fit(panel, fit);
+    let (columns, body_count, lines) = fitted(panel, fit);
+    item_in(&lines, (columns, body_count), model, scroll, point)
+}
+
+/// As [`item_at`] says, of a text panel whose body is `lines` on a face of `columns` and `body_count` rows of body.
+fn item_in(
+    lines: &[Line],
+    (columns, body_count): (usize, usize),
+    model: Mat4,
+    scroll: usize,
+    point: Vec3,
+) -> Option<u32> {
     let (_, height) = sized(columns, body_count);
     let local = model.inverse().transform_point3(point);
     let from_top = (height / 2.0 - local.y) / PIXEL - PADDING.1 as f32;
@@ -283,8 +294,7 @@ pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3)
     // Below the title, the metadata and the rule.
     let row = (from_top / CELL_HEIGHT as f32) as usize;
     let body = row.checked_sub(3).filter(|body| *body < body_count)?;
-    let lines = body_lines(panel, columns);
-    let line = shown(&lines, scroll, body_count).into_iter().nth(body)?;
+    let line = shown(lines, scroll, body_count).into_iter().nth(body)?;
     line.item.and_then(|line| u32::try_from(line).ok())
 }
 
@@ -303,6 +313,24 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
     match fit {
         Fit::Slot(cells) => (cells.columns, cells.body),
         Fit::Text => {
+            let (columns, rows, _) = fitted(panel, fit);
+            (columns, rows)
+        }
+    }
+}
+
+/// As [`fit`] says, with the rows of `panel`'s body at the columns its face has, as [`body_lines`] lays them out.
+fn fitted(panel: &Panel, fit: Fit) -> (usize, usize, Vec<Line>) {
+    let sized = |(columns, rows): (usize, usize)| (columns, rows, body_lines(panel, columns));
+    if panel.chart.is_some() {
+        return sized(chart::fit(fit));
+    }
+    if let Some(image) = &panel.image {
+        return sized(image::fit(panel, image, fit));
+    }
+    match fit {
+        Fit::Slot(cells) => sized((cells.columns, cells.body)),
+        Fit::Text => {
             // A table may make it wider, to show more of its columns side by side.
             let mut lines = body_lines(panel, FIT_COLUMNS.1);
             let most = if lines.iter().any(|line| line.table.is_some()) {
@@ -318,10 +346,12 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
                 .max()
                 .unwrap_or_default();
             let columns = widest.clamp(FIT_COLUMNS.0, most);
-            let rows = body_lines(panel, columns)
-                .len()
-                .clamp(FIT_ROWS.0, FIT_ROWS.1);
-            (columns, rows)
+            // Laid out at its widest, it is laid out already.
+            if columns != most {
+                lines = body_lines(panel, columns);
+            }
+            let rows = lines.len().clamp(FIT_ROWS.0, FIT_ROWS.1);
+            (columns, rows, lines)
         }
     }
 }
@@ -365,18 +395,6 @@ fn size_of(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> (f32, f32) {
         _ => {
             let (columns, body) = self::fit(panel, fit);
             sized(columns, body)
-        }
-    }
-}
-
-/// How many rows down `panel`'s body scrolls at most, sized as `fit` says, its code laid out as `layout`: as many as it
-/// has that its face does not show at once.
-fn most_scroll(panel: &Panel, fit: Fit, layout: Option<&CodeLayout>) -> usize {
-    match layout {
-        Some(layout) => layout.most_scroll(fit),
-        None => {
-            let (columns, count) = self::fit(panel, fit);
-            body_lines(panel, columns).len().saturating_sub(count)
         }
     }
 }
@@ -483,13 +501,7 @@ fn scrolled_face(
     scroll: usize,
     layout: Option<&CodeLayout>,
 ) -> Canvas {
-    let border = Some(if highlighted {
-        HIGHLIGHT
-    } else if newest {
-        NEWEST
-    } else {
-        FRAME
-    });
+    let border = Some(frame(highlighted, newest));
     if let Some(layout) = layout {
         let mut canvas = code_face(panel, layout, fit, scroll);
         canvas.border = border;
@@ -501,7 +513,31 @@ fn scrolled_face(
     if let Some(image) = &panel.image {
         return image::face(panel, image, fit, border);
     }
-    let (columns, body_count) = self::fit(panel, fit);
+    let (columns, body_count, lines) = fitted(panel, fit);
+    text_face(panel, (columns, body_count), &lines, scroll, border)
+}
+
+/// The colour a panel's face is framed in: brightly where it is `highlighted`, pointed at or carried, in blue where it
+/// is the `newest` on its wall, and otherwise faintly.
+fn frame(highlighted: bool, newest: bool) -> [f32; 4] {
+    if highlighted {
+        HIGHLIGHT
+    } else if newest {
+        NEWEST
+    } else {
+        FRAME
+    }
+}
+
+/// A text panel's face, as [`scrolled_face`] says, of `columns` and `body_count` rows of body, its body laid out as
+/// `lines`, scrolled `scroll` rows down and framed by `border`.
+fn text_face(
+    panel: &Panel,
+    (columns, body_count): (usize, usize),
+    lines: &[Line],
+    scroll: usize,
+    border: Option<[f32; 4]>,
+) -> Canvas {
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
     canvas.background = [0.02, 0.035, 0.06, 0.94];
@@ -511,10 +547,9 @@ fn scrolled_face(
         Row::text(&about(panel), Style::plain(DIM), columns),
         Mark::Rule.row(columns, Style::plain(DIM)),
     ];
-    let lines = body_lines(panel, columns);
     let total = lines.len();
     let scroll = scroll.min(total.saturating_sub(body_count));
-    let mut body = shown(&lines, scroll, body_count);
+    let mut body = shown(lines, scroll, body_count);
     if total > scroll + body_count
         && let Some(last) = body.last_mut()
         && last.table.is_none()
@@ -1024,7 +1059,7 @@ pub fn label(
             viewer,
             1.0,
         )),
-        canvas: Some(canvas),
+        canvas: Some(std::sync::Arc::new(canvas)),
     }
 }
 
@@ -1126,7 +1161,7 @@ fn hint_sheet(mut canvas: Canvas, model: Mat4, (_, height): (f32, f32), viewer: 
     };
     Sheet {
         model: Some(facing(at, viewer, 1.0)),
-        canvas: Some(canvas),
+        canvas: Some(std::sync::Arc::new(canvas)),
     }
 }
 
@@ -1388,23 +1423,14 @@ pub struct Projector {
     /// How far down each panel is scrolled, in rows, this participant's own, kept while it is projected: in a slot again
     /// after floating, it is as it was.
     scrolls: HashMap<String, f32>,
-    /// Each code panel's code laid out, and the code it was laid out from, laid out again only when that changes.
-    layouts: HashMap<String, Laid>,
-    /// How far down each panel shown this frame scrolls at most, in rows, as it is sized.
-    limits: HashMap<String, usize>,
+    /// Each panel's faces laid out, and how far it scrolls as it stands this frame, laid out again only when what it
+    /// shows changes, as the server's patch upserts it, or its size does. See `design/rendering.md`.
+    faces: HashMap<String, faces::Faces>,
     /// The wall taken hold of, its handles, and a wall carried.
     editor: editing::Editor,
     /// The Tomori wall travelling with the agent, and how far folded it is this frame, from 0, unfolded, to 1.
     travel: travel::Travel,
     fold: f32,
-}
-
-/// A code panel's code laid out, at each width its faces have had, and the body and code it was laid out from.
-#[derive(Clone, Debug)]
-struct Laid {
-    body: String,
-    code: Code,
-    layouts: Vec<Arc<CodeLayout>>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -1422,8 +1448,7 @@ impl Projector {
             self.pending = None;
             self.thrown = None;
             self.scrolls.clear();
-            self.layouts.clear();
-            self.limits.clear();
+            self.faces.clear();
             self.editor.stop();
             return Output::default();
         };
@@ -1511,22 +1536,13 @@ impl Projector {
                     .map(|(model, fit)| (panel, model, fit))
             })
             .collect();
-        self.lay_out_standing(&standing);
-        // How far each panel shown scrolls, as it is sized now, and the one scrolled, within that.
-        self.limits = standing
-            .iter()
-            .map(|(panel, _, fit)| {
-                (
-                    panel.id.clone(),
-                    most_scroll(panel, *fit, self.layout(&panel.id, *fit)),
-                )
-            })
-            .collect();
+        // How large each panel shown is, and how far it scrolls, as it is sized now, and the one scrolled, within that.
+        let sizes = self.lay_out_standing(&standing, true);
         if let Some((panel, rows)) = input.scroll
-            && let Some(limit) = self.limits.get(panel)
+            && let Some(limit) = self.faces.get(panel).and_then(|faces| faces.limit)
             && rows.is_finite()
         {
-            let limit = *limit as f32;
+            let limit = limit as f32;
             let scroll = self.scrolls.entry(panel.to_owned()).or_default();
             *scroll = (scroll.min(limit) + rows).clamp(0.0, limit);
         }
@@ -1538,20 +1554,22 @@ impl Projector {
             .and_then(|ray| {
                 standing
                     .iter()
-                    .filter(|(panel, ..)| Some(panel.id.as_str()) != carried.as_deref())
+                    .zip(&sizes)
+                    .filter(|((panel, ..), _)| Some(panel.id.as_str()) != carried.as_deref())
                     // Nothing on the Tomori wall is pointed at while it travels.
-                    .filter(|(panel, ..)| {
+                    .filter(|((panel, ..), _)| {
                         travelling.is_none()
                             || !matches!(&panel.place, Place::Wall { wall, .. } if wall == TOMORI_WALL)
                     })
-                    .filter_map(|(panel, model, fit)| {
-                        hit(*model, self.size(panel, *fit), &ray)
+                    .filter_map(|((panel, model, fit), size)| {
+                        hit(*model, *size, &ray)
                             .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
                     })
                     .min_by(|a, b| a.3.total_cmp(&b.3))
             });
         output.item = pointed.and_then(|(panel, model, fit, _, point)| {
-            item_at(panel, model, fit, self.scroll(&panel.id), point)
+            let scroll = self.scroll(&panel.id);
+            self.laid(panel, fit).item(model, scroll, point)
         });
         output.pointed =
             pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
@@ -1602,7 +1620,7 @@ impl Projector {
                     .map(|(model, fit)| (panel, model, fit))
             })
             .collect();
-        self.lay_out_standing(&standing);
+        self.lay_out_standing(&standing, false);
         // A handle the ray meets is pointed at rather than a panel behind it.
         if edited.reach.is_some_and(|reach| {
             output
@@ -1661,30 +1679,34 @@ impl Projector {
                     .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
             ]),
         };
-        output.sheets = self.sheets(
+        let faces = self.faces_of(
             projection,
-            &walls,
             &standing,
-            viewer,
             output.pointed.as_ref().map(|(id, ..)| id.as_str()),
         );
+        output.sheets = self.sheets(&walls, &standing, &faces, viewer);
         // The handles of the wall taken hold of, and the hint below it, over the walls.
         output.sheets.extend(edited.sheets);
         // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,
         // from the frame after it is pulled off, once where it would go is known.
+        // The panel carried is always shown, as one no longer shown is no longer carried.
         let carried = self
             .held
             .as_ref()
-            .filter(|_| input.active && !output.picked);
-        // The panel carried is always shown, as one no longer shown is no longer carried.
+            .filter(|_| input.active && !output.picked)
+            .and_then(|held| {
+                projection
+                    .panel(&held.panel)
+                    .map(|panel| (panel, held.model))
+            });
         output.hint = carried
-            .and_then(|held| projection.panel(&held.panel).map(|panel| (held, panel)))
-            .map(|(held, panel)| {
+            .map(|(panel, model)| (panel, model, self.laid(panel, Fit::Text).size))
+            .map(|(panel, model, size)| {
                 let release = match &self.aim {
                     None => Release::Float,
                     Some(aim) => {
                         let taken = projection.panels.iter().any(|other| {
-                            other.id != held.panel
+                            other.id != panel.id
                                 && matches!(&other.place, Place::Wall { wall, slot } if *wall == aim.wall && *slot == aim.slot)
                         });
                         if taken { Release::Swap } else { Release::Slot }
@@ -1692,8 +1714,8 @@ impl Projector {
                 };
                 hint_sheet(
                     hint(input.controls, release),
-                    held.model,
-                    self.size(panel, Fit::Text),
+                    model,
+                    size,
                     viewer,
                 )
             });
@@ -1709,40 +1731,46 @@ impl Projector {
         Some(held.panel)
     }
 
+    /// The face of each of `standing`'s panels this frame, as it is laid out, sized and scrolled: framed brightly where it
+    /// is carried or `pointed` at, and in blue where it is the newest on its wall. Each is the face drawn last frame
+    /// unless one of those changed, or what the panel shows did.
+    fn faces_of(
+        &mut self,
+        projection: &Projection,
+        standing: &[Standing],
+        pointed: Option<&str>,
+    ) -> Vec<Arc<Canvas>> {
+        let highlighted = self.held().or(pointed).map(str::to_owned);
+        let newest = newest(projection);
+        standing
+            .iter()
+            .map(|(panel, _, fit)| {
+                let newest = match &panel.place {
+                    Place::Wall { wall, .. } => {
+                        newest.get(wall.as_str()) == Some(&panel.id.as_str())
+                    }
+                    _ => false,
+                };
+                let border = frame(highlighted.as_deref() == Some(panel.id.as_str()), newest);
+                let scroll = self.scroll(&panel.id);
+                self.laid(panel, *fit).face(panel, scroll, border)
+            })
+            .collect()
+    }
+
     /// What to draw: each wall with the panels in its layout, and the outline of the slot a panel carried would take,
     /// and each panel floating or carried, the groups farthest from `viewer` first, since panels blend over what is drawn
     /// before them and write depth only once drawn, so that a nearer one covers one behind it, and a wall's panels cover
-    /// the wall.
+    /// the wall. Each of `standing` shows its face of `faces`.
     fn sheets(
         &self,
-        projection: &Projection,
         walls: &[(&Wall, Mat4)],
         standing: &[Standing],
+        faces: &[Arc<Canvas>],
         viewer: Vec3,
-        pointed: Option<&str>,
     ) -> Vec<Sheet> {
-        let highlighted = self.held().or(pointed);
-        // The newest panel on each wall, by age, then by its place in the list.
-        let newest = |panel: &Panel| match &panel.place {
-            Place::Wall { wall, .. } => projection
-                .panels
-                .iter()
-                .filter(|other| matches!(&other.place, Place::Wall { wall: on, .. } if on == wall))
-                // Of those projected together, the last the server lists, as it lists them in the order it put them.
-                .rev()
-                .min_by_key(|other| other.age)
-                .is_some_and(|other| other.id == panel.id),
-            _ => false,
-        };
-        let sheet = |panel: &Panel, model: Mat4, fit: Fit| Sheet {
-            canvas: Some(scrolled_face(
-                panel,
-                highlighted == Some(panel.id.as_str()),
-                newest(panel),
-                fit,
-                self.scroll(&panel.id),
-                self.layout(&panel.id, fit),
-            )),
+        let sheet = |face: &Arc<Canvas>, model: Mat4| Sheet {
+            canvas: Some(face.clone()),
             model: Some(model),
         };
         // A panel drawn in a wall's slot belongs to that wall's group.
@@ -1764,7 +1792,7 @@ impl Projector {
                 let mut sheets = match arc(wall) {
                     None if wall.group.is_some() => boards::sheets(wall, *frame, &drawn),
                     None => vec![Sheet {
-                        canvas: Some(wall_face(wall)),
+                        canvas: Some(std::sync::Arc::new(wall_face(wall))),
                         model: Some(
                             *frame
                                 * Mat4::from_scale(Vec3::splat(wall.scale() * self.folded(wall))),
@@ -1776,7 +1804,10 @@ impl Projector {
                             .frames(wall, *frame)
                             .into_iter()
                             .map(|model| Sheet {
-                                canvas: Some(slot_board(wall_border(wall), Cells::of(wall))),
+                                canvas: Some(std::sync::Arc::new(slot_board(
+                                    wall_border(wall),
+                                    Cells::of(wall),
+                                ))),
                                 model: Some(model),
                             })
                             .collect();
@@ -1784,7 +1815,7 @@ impl Projector {
                         // while it is folded.
                         if boards::labelled(wall, &drawn) && self.folded(wall) == 1.0 {
                             boards.push(Sheet {
-                                canvas: Some(arc_label(wall)),
+                                canvas: Some(std::sync::Arc::new(arc_label(wall))),
                                 model: Some(
                                     *frame
                                         * Mat4::from_translation(
@@ -1799,13 +1830,16 @@ impl Projector {
                 sheets.extend(
                     standing
                         .iter()
-                        .filter(|(panel, ..)| in_layout(panel, moved) == Some(wall.id.as_str()))
-                        .map(|(panel, model, fit)| sheet(panel, *model, *fit)),
+                        .zip(faces)
+                        .filter(|((panel, ..), _)| {
+                            in_layout(panel, moved) == Some(wall.id.as_str())
+                        })
+                        .map(|((_, model, _), face)| sheet(face, *model)),
                 );
                 // The outline of the slot a panel carried would take, over any panel in it.
                 if let Some(aim) = self.aim.as_ref().filter(|aim| aim.wall == wall.id) {
                     sheets.push(Sheet {
-                        canvas: Some(ghost(Cells::of(wall))),
+                        canvas: Some(std::sync::Arc::new(ghost(Cells::of(wall)))),
                         model: Some(aim.model * Mat4::from_translation(Vec3::Z * LIFT)),
                     });
                 }
@@ -1815,11 +1849,12 @@ impl Projector {
         groups.extend(
             standing
                 .iter()
-                .filter(|(panel, ..)| in_layout(panel, moved).is_none())
-                .map(|(panel, model, fit)| {
+                .zip(faces)
+                .filter(|((panel, ..), _)| in_layout(panel, moved).is_none())
+                .map(|((_, model, _), face)| {
                     (
                         model.w_axis.truncate().distance(viewer),
-                        vec![sheet(panel, *model, *fit)],
+                        vec![sheet(face, *model)],
                     )
                 }),
         );
@@ -1899,71 +1934,69 @@ impl Projector {
 
     /// Whether `panel`, shown last frame, has more than its face shows at once, so that it scrolls.
     pub fn scrollable(&self, panel: &str) -> bool {
-        self.limits.get(panel).is_some_and(|limit| *limit > 0)
+        self.limit(panel).is_some_and(|limit| limit > 0)
     }
 
     /// How many rows down `panel` is scrolled, this participant's own, as far as it goes as it was last sized.
     pub fn scroll(&self, panel: &str) -> usize {
-        let limit = self.limits.get(panel).copied().unwrap_or_default();
+        let limit = self.limit(panel).unwrap_or_default();
         let scroll = self.scrolls.get(panel).copied().unwrap_or_default();
         (scroll.round() as usize).min(limit)
     }
 
-    /// Lay out the code of each of `standing`'s code panels at the width its face has, where it is not already.
-    fn lay_out_standing(&mut self, standing: &[Standing]) {
-        for (panel, _, fit) in standing {
-            let columns = code_columns(*fit);
-            if let (Some(code), Some(laid)) = (&panel.code, self.layouts.get_mut(&panel.id))
-                && !laid.layouts.iter().any(|layout| layout.columns == columns)
-            {
-                laid.layouts
-                    .push(Arc::new(CodeLayout::new(panel, code, columns)));
-            }
-        }
+    /// How far down `panel` scrolls at most, as it was sized when it last stood, this frame or the last.
+    fn limit(&self, panel: &str) -> Option<usize> {
+        self.faces.get(panel).and_then(|faces| faces.limit)
     }
 
-    /// Lay out the code of each of `projection`'s code panels whose code has changed, or is new, and forget those of
-    /// panels, and how far they are scrolled, no longer projected.
-    fn lay_out(&mut self, projection: &Projection) {
-        self.layouts.retain(|id, _| {
-            projection
-                .panel(id)
-                .is_some_and(|panel| panel.code.is_some())
-        });
-        self.scrolls.retain(|id, _| projection.panel(id).is_some());
-        for panel in &projection.panels {
-            let Some(code) = &panel.code else {
-                continue;
-            };
-            let current = self
-                .layouts
-                .get(&panel.id)
-                .is_some_and(|laid| laid.body == panel.body && laid.code == *code);
-            if !current {
-                let laid = Laid {
-                    body: panel.body.clone(),
-                    code: code.clone(),
-                    layouts: vec![Arc::new(CodeLayout::new(panel, code, CODE_COLUMNS))],
-                };
-                self.layouts.insert(panel.id.clone(), laid);
-            }
-        }
-    }
-
-    /// The layout of `panel`'s code, if it is a code panel, as its face sized as `fit` says lays it out.
-    fn layout(&self, panel: &str, fit: Fit) -> Option<&CodeLayout> {
-        let columns = code_columns(fit);
-        let laid = self.layouts.get(panel)?;
-        laid.layouts
+    /// Lay out each of `standing`'s panels as it is sized, where it is not already, and say how large each is; with
+    /// `limits`, keep how far each scrolls at most, as it is sized now, for [`Self::scroll`].
+    fn lay_out_standing(&mut self, standing: &[Standing], limits: bool) -> Vec<(f32, f32)> {
+        standing
             .iter()
-            .find(|layout| layout.columns == columns)
-            .or(laid.layouts.first())
-            .map(Arc::as_ref)
+            .map(|(panel, _, fit)| {
+                let faces = self.faces_for(panel);
+                let layout = faces.at(panel, *fit);
+                let (size, most) = (layout.size, layout.most_scroll);
+                if limits {
+                    faces.limit = Some(most);
+                }
+                size
+            })
+            .collect()
     }
 
-    /// The size of `panel`, in metres, sized as `fit` says, as it is drawn.
-    fn size(&self, panel: &Panel, fit: Fit) -> (f32, f32) {
-        size_of(panel, fit, self.layout(&panel.id, fit))
+    /// Follow what each of `projection`'s panels shows, laying out again those whose content changed, and forget the
+    /// faces of panels, and how far they are scrolled, no longer projected, and how far every panel scrolls, until it
+    /// is known again as it stands this frame.
+    fn lay_out(&mut self, projection: &Projection) {
+        let shown: HashMap<&str, &Panel> = projection
+            .panels
+            .iter()
+            .map(|panel| (panel.id.as_str(), panel))
+            .collect();
+        self.faces.retain(|id, faces| {
+            shown.get(id.as_str()).is_some_and(|panel| {
+                faces.follow(panel);
+                faces.limit = None;
+                true
+            })
+        });
+        self.scrolls.retain(|id, _| shown.contains_key(id.as_str()));
+    }
+
+    /// `panel`'s faces, made now if it has none yet.
+    fn faces_for(&mut self, panel: &Panel) -> &mut faces::Faces {
+        if !self.faces.contains_key(&panel.id) {
+            self.faces
+                .insert(panel.id.clone(), faces::Faces::new(panel));
+        }
+        self.faces.get_mut(&panel.id).expect("made just now")
+    }
+
+    /// `panel`'s layout sized as `fit` says, laid out now if it was not already.
+    fn laid(&mut self, panel: &Panel, fit: Fit) -> &mut faces::Layout {
+        self.faces_for(panel).at(panel, fit)
     }
 
     /// The wall taken hold of, whose handles show, by identity.
@@ -1999,9 +2032,30 @@ impl Projector {
     }
 }
 
+/// The newest panel on each wall of `projection`, by age, and of those projected together, the last the server lists,
+/// as it lists them in the order it put them.
+fn newest(projection: &Projection) -> HashMap<&str, &str> {
+    let mut newest: HashMap<&str, (&str, u64)> = HashMap::new();
+    for panel in &projection.panels {
+        if let Place::Wall { wall, .. } = &panel.place {
+            let entry = newest
+                .entry(wall.as_str())
+                .or_insert((&panel.id, panel.age));
+            if panel.age <= entry.1 {
+                *entry = (&panel.id, panel.age);
+            }
+        }
+    }
+    newest
+        .into_iter()
+        .map(|(wall, (panel, _))| (wall, panel))
+        .collect()
+}
+
 mod boards;
 mod chart;
 pub mod editing;
+mod faces;
 mod image;
 pub mod travel;
 

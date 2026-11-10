@@ -2,6 +2,9 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Drawing what the frame step decided: [`draw`] applies a [`Frame`] to the renderer, and [`Panels`] holds the shared panels' GPU buffers, for both the headset and the desktop window.
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use glam::Mat4;
 
 use crate::{
@@ -22,11 +25,27 @@ pub struct Panels {
     pill_model: Option<Mat4>,
     /// The card's, the badge's and the transcript's models in the scene, while they are drawn.
     models: [Option<Mat4>; 3],
-    /// The space's projection walls and panels, then the GitHub environment's inbox and cards, one panel each, kept as
-    /// their number falls so that they need not be made again, with the models of those drawn now.
-    cards: Vec<Panel>,
-    card_models: Vec<Mat4>,
+    /// The space's projection walls and panels, then the GitHub environment's inbox and cards, one panel each, kept with
+    /// its mesh for as long as the frame step hands over the same face, wherever it is drawn among the others, and then
+    /// a few more, the latest shown, so that their buffers need not be made again; see `design/rendering.md`.
+    cards: Vec<Card>,
+    /// Which of them shows each face, by its canvas's address, which it holds, so that no other has it.
+    faces: HashMap<usize, usize>,
+    /// Those drawn now, in order, with their models.
+    drawn: Vec<(usize, Mat4)>,
+    /// How many times cards have been set, the current one's number.
+    frame: u64,
 }
+
+/// A projection's panel on the GPU, and the last time it was drawn.
+struct Card {
+    panel: Panel,
+    shown: u64,
+}
+
+/// How many cards not drawn now are kept, the latest drawn first, for faces to come; beyond them, the GPU's buffers of
+/// panels removed are freed.
+pub const SPARE_CARDS: usize = 8;
 
 /// The most vertices one card's face takes, about three times what a full face of text does: every wall's and floating
 /// panel's, a chart panel's at its largest included (see `design/projection.md`).
@@ -42,12 +61,19 @@ impl Panels {
             pill_model: None,
             models: [None; 3],
             cards: Vec::new(),
-            card_models: Vec::new(),
+            faces: HashMap::new(),
+            drawn: Vec::new(),
+            frame: 0,
         }
     }
 
     /// Upload the projection's walls and panels and the inbox and cards, `sheets`, in the order to draw them, making
     /// panels for them as needed.
+    ///
+    /// A face handed over again, the very canvas, is drawn by the card that showed it, its mesh as it was, wherever it
+    /// now is in the order. Any other is shown by the card drawn where it is in the order last frame, if that card is
+    /// free, which keeps its mesh if the face is the same, rewrites only its frame if that is all that changed, and
+    /// otherwise builds it again; or else by the free card drawn longest ago, or a new one.
     pub fn set_cards<'a>(
         &mut self,
         device: &wgpu::Device,
@@ -55,17 +81,93 @@ impl Panels {
         renderer: &Renderer,
         sheets: impl IntoIterator<Item = &'a Sheet>,
     ) {
-        self.card_models.clear();
-        for sheet in sheets {
-            let (Some(canvas), Some(model)) = (&sheet.canvas, sheet.model) else {
+        self.frame += 1;
+        let frame = self.frame;
+        let before = std::mem::take(&mut self.drawn);
+        let sheets: Vec<(&Arc<tomori_scene::canvas::Canvas>, Mat4)> = sheets
+            .into_iter()
+            .filter_map(|sheet| Some((sheet.canvas.as_ref()?, sheet.model?)))
+            .collect();
+        // Faces kept, first, so that nothing else takes their cards.
+        let mut chosen: Vec<Option<usize>> = sheets
+            .iter()
+            .map(|(canvas, _)| {
+                let card = *self.faces.get(&address(canvas))?;
+                let card = (self.cards[card].shown != frame).then_some(card)?;
+                // Built while glyphs it needs waited for the atlas, it is built again until it has them.
+                self.cards[card].panel.show(queue, canvas);
+                self.cards[card].shown = frame;
+                Some(card)
+            })
+            .collect();
+        for (place, (canvas, _)) in sheets.iter().enumerate() {
+            if chosen[place].is_some() {
                 continue;
-            };
-            let index = self.card_models.len();
-            if index == self.cards.len() {
-                self.cards.push(renderer.panel(device, CARD_CAPACITY));
             }
-            self.cards[index].set(queue, canvas);
-            self.card_models.push(model);
+            let card = before
+                .get(place)
+                .map(|(card, _)| *card)
+                .filter(|card| self.cards[*card].shown != frame)
+                .or_else(|| {
+                    (0..self.cards.len())
+                        .filter(|card| self.cards[*card].shown != frame)
+                        .min_by_key(|card| self.cards[*card].shown)
+                })
+                .unwrap_or_else(|| {
+                    self.cards.push(Card {
+                        panel: renderer.panel(device, CARD_CAPACITY),
+                        shown: 0,
+                    });
+                    self.cards.len() - 1
+                });
+            self.faces.retain(|_, shown| *shown != card);
+            self.faces.insert(address(canvas), card);
+            self.cards[card].panel.show(queue, canvas);
+            self.cards[card].shown = frame;
+            chosen[place] = Some(card);
+        }
+        self.drawn = chosen
+            .into_iter()
+            .zip(&sheets)
+            .map(|(card, (_, model))| (card.expect("each sheet has a card"), *model))
+            .collect();
+        self.spare();
+    }
+
+    /// Free the cards not drawn now beyond [`SPARE_CARDS`], those drawn longest ago, and the faces they showed.
+    fn spare(&mut self) {
+        let frame = self.frame;
+        let mut free: Vec<usize> = (0..self.cards.len())
+            .filter(|card| self.cards[*card].shown != frame)
+            .collect();
+        if free.len() <= SPARE_CARDS {
+            return;
+        }
+        free.sort_by_key(|card| std::cmp::Reverse(self.cards[*card].shown));
+        let freed: std::collections::HashSet<usize> =
+            free.split_off(SPARE_CARDS).into_iter().collect();
+        // What each card kept is now, as the others close up behind them.
+        let mut index = 0;
+        let kept: Vec<Option<usize>> = (0..self.cards.len())
+            .map(|card| {
+                (!freed.contains(&card)).then(|| {
+                    index += 1;
+                    index - 1
+                })
+            })
+            .collect();
+        let mut card = 0;
+        self.cards.retain(|_| {
+            card += 1;
+            kept[card - 1].is_some()
+        });
+        self.faces = self
+            .faces
+            .drain()
+            .filter_map(|(face, card)| Some((face, kept[card]?)))
+            .collect();
+        for (card, _) in &mut self.drawn {
+            *card = kept[*card].expect("a card drawn now is kept");
         }
     }
 
@@ -92,10 +194,9 @@ impl Panels {
     /// the pill, card, badge and transcript.
     pub fn list(&self, scene_to_space: Mat4) -> Vec<(&Panel, Mat4)> {
         let cards = self
-            .cards
+            .drawn
             .iter()
-            .zip(&self.card_models)
-            .map(|(panel, model)| (panel, scene_to_space * *model));
+            .map(|(card, model)| (&self.cards[*card].panel, scene_to_space * *model));
         let scene = [&self.card, &self.badge, &self.wrist]
             .into_iter()
             .zip(self.models)
@@ -105,6 +206,11 @@ impl Panels {
             .chain(scene)
             .collect()
     }
+}
+
+/// The address of `canvas`, by which the card that shows it knows it while it holds it.
+fn address(canvas: &Arc<tomori_scene::canvas::Canvas>) -> usize {
+    Arc::as_ptr(canvas) as usize
 }
 
 /// Apply `frame` to `renderer` and `panels`, ready to render.
@@ -171,6 +277,7 @@ mod tests {
     use glam::Vec3;
     use std::time::Instant;
 
+    mod cards;
     mod image_sharpness;
 
     #[test]
@@ -318,10 +425,10 @@ mod tests {
             );
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             assert_eq!(panels.cards.len(), 4);
-            assert_eq!(panels.card_models.len(), 2);
+            assert_eq!(panels.drawn.len(), 2);
             // A sheet without a canvas is not drawn.
             panels.set_cards(&device, &queue, &renderer, &[Sheet::default()]);
-            assert!(panels.card_models.is_empty());
+            assert!(panels.drawn.is_empty());
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
@@ -1018,11 +1125,11 @@ mod tests {
             .find(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .is_some_and(|canvas| canvas.image.is_some())
             })
             .expect("the image panel is drawn");
-        let (canvas, model) = (sheet.canvas.as_ref().unwrap(), sheet.model.unwrap());
+        let (canvas, model) = (sheet.canvas.as_deref().unwrap(), sheet.model.unwrap());
         let (_, [left, bottom, right, top]) = canvas.image_rect().unwrap();
         // Square on, from far enough in front of the image's middle that it fills three quarters of the eye.
         let middle =
@@ -2649,7 +2756,7 @@ mod tests {
             };
             step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
             let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
-            let hint = frame.projection.last().unwrap().canvas.as_ref().unwrap();
+            let hint = frame.projection.last().unwrap().canvas.as_deref().unwrap();
             let text = |canvas: &tomori_scene::canvas::Canvas| {
                 canvas
                     .rows
@@ -2701,7 +2808,7 @@ mod tests {
                 ..carried
             };
             let frame = step.update(&over, &mut conversation, &mut felt(), now, 0.01);
-            let hint = frame.projection.last().unwrap().canvas.as_ref().unwrap();
+            let hint = frame.projection.last().unwrap().canvas.as_deref().unwrap();
             let said = text(hint);
             assert!(said.ends_with("swap with that one"), "{said}");
             draw(&mut renderer, &device, &queue, &mut panels, &frame);

@@ -137,12 +137,47 @@ impl Canvas {
             .join("\n")
     }
 
-    /// The quads that draw the canvas, centred on its origin.
-    pub fn mesh(&self) -> Vec<Vertex> {
+    /// Whether it is `other` but for the colour of its frame, both framed, so that its mesh is `other`'s with only its
+    /// frame's vertices recoloured, as [`Self::frame_mesh`] draws them.
+    pub fn reframes(&self, other: &Canvas) -> bool {
+        let Canvas {
+            columns,
+            rows,
+            pixel,
+            background,
+            padding,
+            border,
+            shapes,
+            image,
+            labels,
+        } = self;
+        border.is_some()
+            && other.border.is_some()
+            && *columns == other.columns
+            && *pixel == other.pixel
+            && *background == other.background
+            && *padding == other.padding
+            && *rows == other.rows
+            && *shapes == other.shapes
+            && *image == other.image
+            && *labels == other.labels
+    }
+
+    /// The vertices that draw its frame, and where in its [`Self::mesh`] they start, so that a frame of another colour is
+    /// written over them alone, as the newest panel's and the one pointed at are; none if it has no frame.
+    pub fn frame_mesh(&self) -> Option<(usize, Vec<Vertex>)> {
+        self.border?;
+        let (mut mesh, start) = self.framed();
+        Some((start, mesh.vertices.split_off(start)))
+    }
+
+    /// Its backing and its frame, the first of its mesh, and where its frame starts.
+    fn framed(&self) -> (Mesh, usize) {
         let mut mesh = Mesh::new(self);
         let (width, height) = self.size_in_pixels();
         let (width, height) = (width as f32, height as f32);
         mesh.quad(0.0, 0.0, width, height, self.background);
+        let start = mesh.vertices.len();
         if let Some(border) = self.border {
             mesh.shape(
                 &Shape::frame(0.0, 0.0, [width, height], 1.0, border),
@@ -150,6 +185,12 @@ impl Canvas {
                 0.0,
             );
         }
+        (mesh, start)
+    }
+
+    /// The quads that draw the canvas, centred on its origin.
+    pub fn mesh(&self) -> Vec<Vertex> {
+        let (mut mesh, _) = self.framed();
         let (left, top) = (self.padding.0 as f32, self.padding.1 as f32);
         let text_width = (self.columns * CELL_WIDTH) as f32;
         for (index, row) in self.rows.iter().enumerate() {
@@ -661,6 +702,59 @@ mod tests {
             ),
             [(0..1, ('─', faint)), (2..3, ('─', faint))]
         );
+    }
+
+    #[test]
+    fn a_frame_of_another_colour_is_its_mesh_s_frame_recoloured() {
+        let mut canvas = Canvas::new(6, 0.001);
+        canvas.rows = vec![Row::text("framed", Style::plain([1.0; 4]), 6)];
+        assert!(canvas.frame_mesh().is_none());
+        canvas.border = Some([0.3, 0.4, 0.5, 0.9]);
+        let mut bright = canvas.clone();
+        bright.border = Some([0.35, 0.95, 1.0, 1.0]);
+        assert!(bright.reframes(&canvas) && canvas.reframes(&bright));
+        // Written over the first mesh, its frame alone, it is the second's.
+        let (start, frame) = bright.frame_mesh().unwrap();
+        let mut mesh = canvas.mesh();
+        assert_eq!(start, 6, "after the backing");
+        mesh[start..start + frame.len()].copy_from_slice(&frame);
+        assert_eq!(mesh, bright.mesh());
+        // Without a backing, from the first vertex.
+        let mut bare = bright.clone();
+        bare.background = [0.0; 4];
+        assert_eq!(bare.frame_mesh().unwrap().0, 0);
+        // Another canvas, or one unframed, is not reframed.
+        let mut other = bright.clone();
+        other.rows[0].cells[0].0 = 'F';
+        assert!(!other.reframes(&canvas));
+        let mut unframed = bright.clone();
+        unframed.border = None;
+        assert!(!unframed.reframes(&canvas) && !canvas.reframes(&unframed));
+        for change in [
+            |canvas: &mut Canvas| canvas.columns += 1,
+            |canvas: &mut Canvas| canvas.pixel *= 2.0,
+            |canvas: &mut Canvas| canvas.background[0] = 1.0,
+            |canvas: &mut Canvas| canvas.padding.0 += 1,
+            |canvas: &mut Canvas| {
+                canvas
+                    .shapes
+                    .push(Shape::rect(0.0, 0.0, 1.0, 1.0, [1.0; 4]))
+            },
+            |canvas: &mut Canvas| {
+                canvas.image = Some(CanvasImage {
+                    hash: "h".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                })
+            },
+            |canvas: &mut Canvas| canvas.labels.push(Label::new(0.0, 0.0, Vec::new())),
+        ] {
+            let mut changed = bright.clone();
+            change(&mut changed);
+            assert!(!changed.reframes(&canvas));
+        }
     }
 
     #[test]

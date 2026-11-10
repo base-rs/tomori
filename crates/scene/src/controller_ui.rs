@@ -26,10 +26,12 @@ pub struct Moment {
 /// Each panel's most vertices.
 pub const CAPACITY: usize = 24_000;
 
-/// One panel this frame: what it shows now, to upload, and its model, while it is drawn.
+/// One panel this frame: what it shows now, to upload, and its model, while it is drawn. Its canvas is shared, so that a
+/// face laid out once is handed to the renderer every frame without being copied, and the renderer knows it by its
+/// pointer for the mesh it keeps for it (see `design/rendering.md`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sheet {
-    pub canvas: Option<Canvas>,
+    pub canvas: Option<std::sync::Arc<Canvas>>,
     pub model: Option<Mat4>,
 }
 
@@ -58,7 +60,7 @@ impl Indicator {
                 let canvas = recording::canvas(phase, conversation.utterance_limit(), pulse);
                 let (position, scale) = self.anchor.update(target, dt);
                 Sheet {
-                    canvas: Some(canvas),
+                    canvas: Some(std::sync::Arc::new(canvas)),
                     model: Some(recording::facing(position, head, scale)),
                 }
             }
@@ -75,7 +77,7 @@ impl Indicator {
             Some(target) if conversation.live() && card.model.is_none() => {
                 let (position, scale) = self.badge_anchor.update(target, dt);
                 Sheet {
-                    canvas: Some(recording::badge(pulse)),
+                    canvas: Some(std::sync::Arc::new(recording::badge(pulse))),
                     model: Some(recording::facing(position, head, scale)),
                 }
             }
@@ -107,7 +109,7 @@ pub fn pill(conversation: &mut Conversation, now: Instant, hidden: bool, pose: M
     canvas.background = [0.008, 0.018, 0.035, 0.82];
     let height = canvas.size().1;
     Sheet {
-        canvas: Some(canvas),
+        canvas: Some(std::sync::Arc::new(canvas)),
         model: Some(pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0))),
     }
 }
@@ -397,7 +399,7 @@ impl Wrist {
         (
             opened,
             Sheet {
-                canvas: Some(canvas),
+                canvas: Some(std::sync::Arc::new(canvas)),
                 model: self.model,
             },
         )
