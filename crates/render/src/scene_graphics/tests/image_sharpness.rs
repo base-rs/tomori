@@ -160,11 +160,11 @@ fn see(
         .find(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .is_some_and(|canvas| canvas.image.is_some())
         })
         .expect("the image panel is drawn");
-    let (canvas, model) = (sheet.canvas.as_ref().unwrap(), sheet.model.unwrap());
+    let (canvas, model) = (sheet.canvas.as_deref().unwrap(), sheet.model.unwrap());
     let (_, [left, bottom, right, top]) = canvas.image_rect().unwrap();
     let middle = model.transform_point3(Vec3::new((left + right) / 2.0, (bottom + top) / 2.0, 0.0));
     let up = model.y_axis.truncate().normalize();

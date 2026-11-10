@@ -3,7 +3,9 @@
 
 //! Panels of styled text in their own local space, drawn in the scene pass with depth testing and alpha blending, so that a hand or controller in front of one covers it, and then, where a panel's backing is opaque enough, its backing again into depth alone, so that whatever is behind it is hidden though drawn after it (see [`occlusion`](crate::occlusion)).
 //!
-//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas, its shapes from the atlas's shape tiles and its filled quads from its solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
+//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas, its shapes from the atlas's shape tiles and its filled quads from its solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame: handed the same shared canvas again, it compares nothing, and handed one that differs only in its frame's colour, it rewrites only its frame's vertices.
+use std::sync::Arc;
+
 use glam::Mat4;
 
 pub use tomori_scene::canvas::{Canvas, Vertex};
@@ -143,7 +145,7 @@ pub struct Panel {
     count: u32,
     cameras: [wgpu::Buffer; 2],
     bindings: [wgpu::BindGroup; 2],
-    canvas: Option<Canvas>,
+    canvas: Option<Arc<Canvas>>,
     /// Whether the mesh has every glyph, rather than lacking some that waited for a later frame's budget.
     complete: bool,
     /// Whether the mesh last shown was cut to the buffer, so that a face too large is warned of once, not every time
@@ -155,6 +157,9 @@ pub struct Panel {
     image: Option<String>,
     /// The image's quad, in the panel's plane, with where in the image each corner is.
     image_quad: wgpu::Buffer,
+    /// How many times its mesh was built, and its frame alone recoloured, for the tests.
+    #[cfg(test)]
+    pub(crate) builds: (usize, usize),
 }
 
 impl Panel {
@@ -202,13 +207,63 @@ impl Panel {
             occludes: false,
             image: None,
             image_quad,
+            #[cfg(test)]
+            builds: (0, 0),
         }
     }
 
     /// Show `canvas`, rebuilding the mesh only if it changed, or if glyphs it needs were waiting for the atlas when it was last built.
     pub fn set(&mut self, queue: &wgpu::Queue, canvas: &Canvas) {
-        if self.complete && self.canvas.as_ref() == Some(canvas) {
+        if self.complete && self.canvas.as_deref() == Some(canvas) {
             return;
+        }
+        self.show(queue, &Arc::new(canvas.clone()));
+    }
+
+    /// Show `canvas`, shared with whoever drew it: as [`Self::set`] does, but knowing it at once, without comparing it,
+    /// when it is the very canvas shown already, and only recolouring its frame where that is all that changed.
+    pub fn show(&mut self, queue: &wgpu::Queue, canvas: &Arc<Canvas>) {
+        if let Some(shown) = self.canvas.as_ref().filter(|_| self.complete) {
+            if Arc::ptr_eq(shown, canvas) {
+                return;
+            }
+            if **shown == **canvas || self.reframe(queue, canvas) {
+                self.canvas = Some(canvas.clone());
+                return;
+            }
+        }
+        self.build(queue, canvas);
+        self.canvas = Some(canvas.clone());
+    }
+
+    /// Recolour its frame as `canvas`'s, if that is all `canvas` changes of what it shows, and say whether it did.
+    fn reframe(&mut self, queue: &wgpu::Queue, canvas: &Canvas) -> bool {
+        let shown = self.canvas.as_deref().expect("shows a canvas");
+        if !canvas.reframes(shown) {
+            return false;
+        }
+        let (start, frame) = canvas.frame_mesh().expect("framed");
+        // A mesh cut short of its frame is built again.
+        if start + frame.len() > self.count as usize {
+            return false;
+        }
+        queue.write_buffer(
+            &self.vertices,
+            (start * size_of::<Vertex>()) as u64,
+            bytemuck::cast_slice(&frame),
+        );
+        #[cfg(test)]
+        {
+            self.builds.1 += 1;
+        }
+        true
+    }
+
+    /// Build `canvas`'s mesh and write it, with its image's quad.
+    fn build(&mut self, queue: &wgpu::Queue, canvas: &Canvas) {
+        #[cfg(test)]
+        {
+            self.builds.0 += 1;
         }
         let waited = tomori_text::atlas::waited();
         let mut mesh = canvas.mesh();
@@ -246,7 +301,12 @@ impl Panel {
                 queue.write_buffer(&self.image_quad, 0, bytemuck::cast_slice(&quad));
                 hash.to_owned()
             });
-        self.canvas = Some(canvas.clone());
+    }
+
+    /// The canvas it shows, for the tests.
+    #[cfg(test)]
+    pub(crate) fn shown(&self) -> Option<&Arc<Canvas>> {
+        self.canvas.as_ref()
     }
 
     /// The image its canvas shows, by hash, if any.
@@ -486,6 +546,28 @@ mod tests {
     ) -> image::RgbaImage {
         let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
         let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+        let panels: Vec<Panel> = transforms
+            .iter()
+            .map(|&transform| {
+                let mut panel = Panel::new(&gpu.device, &pipeline, capacity);
+                panel.set(&gpu.queue, canvas);
+                panel.prepare(&gpu.queue, 0, transform);
+                panel
+            })
+            .collect();
+        drawing(gpu, &glyphs, &pipeline, &panels, (width, height), format)
+    }
+
+    /// `panels`, already set and prepared, drawn with `pipeline` from `glyphs` onto an image of `format` `width` by
+    /// `height`, with depth.
+    fn drawing(
+        gpu: &crate::test_gpu::Gpu,
+        glyphs: &crate::glyphs::Glyphs,
+        pipeline: &Pipeline,
+        panels: &[Panel],
+        (width, height): (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> image::RgbaImage {
         let size = wgpu::Extent3d {
             width,
             height,
@@ -513,15 +595,6 @@ mod tests {
             wgpu::TextureUsages::RENDER_ATTACHMENT,
             "drawn depth",
         );
-        let panels: Vec<Panel> = transforms
-            .iter()
-            .map(|&transform| {
-                let mut panel = Panel::new(&gpu.device, &pipeline, capacity);
-                panel.set(&gpu.queue, canvas);
-                panel.prepare(&gpu.queue, 0, transform);
-                panel
-            })
-            .collect();
         glyphs.sync(&gpu.device, &gpu.queue);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
@@ -547,12 +620,78 @@ mod tests {
                 ..Default::default()
             });
             pipeline.set(&mut pass, &glyphs.binding());
-            for panel in &panels {
-                panel.draw(&mut pass, &pipeline, 0);
+            for panel in panels {
+                panel.draw(&mut pass, pipeline, 0);
             }
         }
         gpu.queue.submit([encoder.finish()]);
         crate::test_support::read_back(&gpu.device, &gpu.queue, &texture, (width, height))
+    }
+
+    /// A panel's frame recoloured, as the one pointed at is, draws exactly what its face built afresh in that colour
+    /// does, and the same face handed over again, shared, is not compared, nor built again.
+    #[test]
+    fn a_frame_recoloured_draws_what_its_face_built_afresh_does() {
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            let panel = tomori_protocol::Panel::new(
+                "panel-1",
+                "Steps",
+                "- [x] Lay it out once\n- [ ] Draw it every frame\n\nThen **nothing** else.",
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: 0,
+                },
+            );
+            let fit = tomori_scene::projection::Fit::SLOT;
+            let plain = Arc::new(tomori_scene::projection::face(&panel, false, false, fit));
+            let pointed = Arc::new(tomori_scene::projection::face(&panel, true, false, fit));
+            assert_ne!(plain.border, pointed.border);
+            let (columns, rows) = plain.size_in_pixels();
+            let (width, height) = ((columns as u32 * 2).next_multiple_of(64), rows as u32 * 2);
+            let transform = Mat4::from_scale(glam::Vec3::new(
+                2.0 * 2.0 / plain.pixel / width as f32,
+                2.0 * 2.0 / plain.pixel / height as f32,
+                1.0,
+            ));
+            let mut recoloured = Panel::new(&gpu.device, &pipeline, 100_000);
+            recoloured.show(&gpu.queue, &plain);
+            recoloured.show(&gpu.queue, &plain);
+            recoloured.show(&gpu.queue, &pointed);
+            assert_eq!(recoloured.builds, (1, 1));
+            let mut afresh = Panel::new(&gpu.device, &pipeline, 100_000);
+            afresh.show(&gpu.queue, &pointed);
+            for panel in [&recoloured, &afresh] {
+                panel.prepare(&gpu.queue, 0, transform);
+            }
+            let size = (width, height);
+            let recoloured = drawing(&gpu, &glyphs, &pipeline, &[recoloured], size, format);
+            let afresh = drawing(&gpu, &glyphs, &pipeline, &[afresh], size, format);
+            assert!(
+                recoloured.pixels().any(|pixel| pixel.0[1] > 200),
+                "the frame shows"
+            );
+            assert_eq!(recoloured, afresh);
+        });
+    }
+
+    #[test]
+    fn a_mesh_cut_short_of_its_frame_is_built_again_rather_than_recoloured() {
+        crate::test_support::log_everything();
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            let mut panel = Panel::new(&gpu.device, &pipeline, 12);
+            let mut canvas = Canvas::new(4, 0.001);
+            canvas.border = Some([0.3, 0.4, 0.5, 0.9]);
+            panel.show(&gpu.queue, &Arc::new(canvas.clone()));
+            canvas.border = Some([0.35, 0.95, 1.0, 1.0]);
+            panel.show(&gpu.queue, &Arc::new(canvas));
+            assert_eq!(panel.builds, (2, 0));
+        });
     }
 
     /// How bright `image` is at `(x, y)`, the sum of its channels.

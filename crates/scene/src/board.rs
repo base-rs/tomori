@@ -433,7 +433,11 @@ impl Board {
             .held()
             .or(output.pointed.as_ref().map(|(card, _, _)| card.as_str()));
         output.sheets.push(Sheet {
-            canvas: Some(tray(&cards.source, inboxed, cards.status.as_deref())),
+            canvas: Some(std::sync::Arc::new(tray(
+                &cards.source,
+                inboxed,
+                cards.status.as_deref(),
+            ))),
             model: Some(frame),
         });
         // Panels blend over what is drawn before them, and write depth only once drawn, so the cards are drawn farthest
@@ -445,7 +449,11 @@ impl Board {
             let (card, (model, covered)) = (&cards.cards[index], &models[index]);
             let highlighted = highlighted == Some(card.id.as_str());
             Sheet {
-                canvas: Some(face(card, *covered && !highlighted, highlighted)),
+                canvas: Some(std::sync::Arc::new(face(
+                    card,
+                    *covered && !highlighted,
+                    highlighted,
+                ))),
                 model: Some(*model),
             }
         }));
@@ -534,7 +542,7 @@ mod tests {
         let header = format!("#{number} ");
         output.sheets[1..]
             .iter()
-            .find(|sheet| text(sheet.canvas.as_ref().unwrap())[0].starts_with(&header))
+            .find(|sheet| text(sheet.canvas.as_deref().unwrap())[0].starts_with(&header))
             .unwrap()
     }
 
@@ -628,7 +636,7 @@ mod tests {
         let cards = cards(14);
         let output = board.update(input(&cards, None, 0.0, now));
         assert_eq!(output.sheets.len(), 15);
-        let tray = output.sheets[0].canvas.as_ref().unwrap();
+        let tray = output.sheets[0].canvas.as_deref().unwrap();
         assert_eq!(text(tray)[0].trim_end(), "INBOX o/r (14)");
         let frame = inbox_frame();
         let local = |index: usize| {
@@ -657,7 +665,7 @@ mod tests {
         }
         // Only the last card of each column shows in full.
         let covered = |index: usize| {
-            text(sheet(&output, index as u64 + 1).canvas.as_ref().unwrap())[4].is_empty()
+            text(sheet(&output, index as u64 + 1).canvas.as_deref().unwrap())[4].is_empty()
         };
         assert!(covered(0) && covered(10) && !covered(11) && covered(12) && !covered(13));
         // The status shows on the inbox while there is one.
@@ -665,7 +673,7 @@ mod tests {
         stale.status = Some("Could not refresh o/r".into());
         let output = board.update(input(&stale, None, 0.0, now));
         assert_eq!(
-            text(output.sheets[0].canvas.as_ref().unwrap())[0].trim_end(),
+            text(output.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
             "INBOX o/r: Could not refresh o/r"
         );
         // An empty inbox still stands.
@@ -695,7 +703,7 @@ mod tests {
         assert_eq!(pointed, cards.cards[1].id);
         assert!(point.distance(HOME + header(models[1]).direction * distance) < 1e-4);
         // The pointed card is highlighted.
-        let highlighted = sheet(&output, 2).canvas.as_ref().unwrap();
+        let highlighted = sheet(&output, 2).canvas.as_deref().unwrap();
         assert_eq!(highlighted.border, Some(HIGHLIGHT));
         let output = board.update(input(&cards, Some(at(models[1])), 0.0, now));
         assert_eq!(output.pointed.unwrap().0, cards.cards[2].id);
@@ -767,7 +775,7 @@ mod tests {
         let right = Ray::new(HOME, Vec3::new(0.6, -0.3, -1.0)).unwrap();
         let carried = board.update(input(&cards, Some(right), 0.7, now));
         assert_eq!(
-            text(carried.sheets[0].canvas.as_ref().unwrap())[0].trim_end(),
+            text(carried.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
             "INBOX o/r (2)"
         );
         let model = sheet(&carried, 2).model.unwrap();
@@ -780,7 +788,7 @@ mod tests {
                 > 0.999
         );
         assert_eq!(
-            sheet(&carried, 2).canvas.as_ref().unwrap().border,
+            sheet(&carried, 2).canvas.as_deref().unwrap().border,
             Some(HIGHLIGHT)
         );
         assert_eq!(carried.placed, None);
@@ -829,7 +837,7 @@ mod tests {
         assert_eq!(back.placed, Some((id.clone(), None)));
         let shown = board.update(input(&cards, None, 0.0, now));
         assert_eq!(
-            text(shown.sheets[0].canvas.as_ref().unwrap())[0].trim_end(),
+            text(shown.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
             "INBOX o/r (3)"
         );
         // The server never agreeing, it shows as the server has it once the pending time passes.
@@ -902,7 +910,7 @@ mod tests {
         });
         let output = board.update(input(&odd, None, f32::NAN, now));
         assert_eq!(
-            text(output.sheets[0].canvas.as_ref().unwrap())[0].trim_end(),
+            text(output.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
             "INBOX o/r (2)"
         );
     }

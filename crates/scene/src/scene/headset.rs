@@ -1475,14 +1475,14 @@ mod tests {
     fn shown(drawn: &Drawn) -> (Option<String>, Option<String>, Option<bool>) {
         let card = drawn.frame.panels.indicator[0]
             .canvas
-            .as_ref()
+            .as_deref()
             .map(|canvas| canvas.plain());
         let need = drawn
             .frame
             .panels
             .pill
             .canvas
-            .as_ref()
+            .as_deref()
             .and_then(|canvas| canvas.rows.get(1))
             .map(|row| row.plain());
         let cue = drawn.frame.arrival.as_ref().and_then(|arrival| {

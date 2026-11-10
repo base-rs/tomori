@@ -96,7 +96,7 @@ fn hint(output: &crate::projection::Output) -> String {
     output
         .sheets
         .last()
-        .and_then(|sheet| sheet.canvas.as_ref())
+        .and_then(|sheet| sheet.canvas.as_deref())
         .unwrap()
         .plain()
 }
@@ -129,7 +129,7 @@ fn a_wall_carried_near_another_s_edge_outlines_where_it_snaps_and_let_go_snaps_t
         .filter(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .is_some_and(|canvas| canvas.background == super::super::GHOST)
         })
         .count();
@@ -296,7 +296,7 @@ fn ghosts(output: &crate::projection::Output) -> Vec<Mat4> {
         .filter(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .is_some_and(|canvas| canvas.background == super::super::GHOST)
         })
         .filter_map(|sheet| sheet.model)

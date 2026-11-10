@@ -120,6 +120,16 @@ fn panel(id: &str, place: Place) -> Panel {
     .with_age(120)
 }
 
+/// How many rows down `panel` scrolls at most, sized as `fit` says, as its layout says.
+fn most_scroll(panel: &Panel, fit: Fit) -> usize {
+    Projector::default().laid(panel, fit).most_scroll
+}
+
+/// How many layouts this thread has laid out, and how many faces it has drawn from them.
+fn counts() -> (usize, usize) {
+    faces::COUNTS.with(std::cell::Cell::get)
+}
+
 fn projection(panels: Vec<Panel>) -> Projection {
     Projection::new("s", "sky")
         .with_walls(vec![
@@ -418,14 +428,18 @@ fn a_panel_in_a_tall_or_wide_slot_shows_more_rows_or_columns_at_its_text_s_size_
         .with_panels(vec![code.clone()]);
     let mut projector = Projector::default();
     projector.update(input(&projection, None, 0.0, Instant::now()));
-    let laid = projector.layout("c", Fit::Slot(wide)).unwrap();
-    assert_eq!(laid.columns, wide.code_columns);
+    let laid = |projector: &mut Projector, fit| {
+        let layout = projector.laid(&code, fit).code.as_ref();
+        layout.map(|layout| layout.columns)
+    };
     assert_eq!(
-        projector.layout("c", Fit::Text).unwrap().columns,
-        CODE_COLUMNS
+        laid(&mut projector, Fit::Slot(wide)),
+        Some(wide.code_columns)
     );
+    // Floating, at a standard slot's.
+    assert_eq!(laid(&mut projector, Fit::Text), Some(CODE_COLUMNS));
     projector.update(input(&projection, None, 0.0, Instant::now()));
-    assert_eq!(projector.layouts["c"].layouts.len(), 2);
+    assert_eq!(projector.faces["c"].sizes.len(), 2);
 }
 
 fn checklist(id: &str, place: Place) -> Panel {
@@ -1150,7 +1164,7 @@ fn panels_are_drawn_in_their_slots_wall_by_wall_and_floating_ones_where_they_flo
         .sheets
         .iter()
         .map(|sheet| {
-            let canvas = sheet.canvas.as_ref().unwrap();
+            let canvas = sheet.canvas.as_deref().unwrap();
             (
                 canvas.plain().lines().next().unwrap().trim().to_owned(),
                 sheet.model.unwrap().w_axis.truncate(),
@@ -1168,7 +1182,7 @@ fn panels_are_drawn_in_their_slots_wall_by_wall_and_floating_ones_where_they_flo
     assert!(drawn[4].1.distance(slot_centre(&shown, 4)) < 1e-5);
     assert!(drawn[5].1.distance(Vec3::from_array(free.position)) < 1e-5);
     // The newest on the Tomori wall is framed in blue.
-    let border = |index: usize| output.sheets[index].canvas.as_ref().unwrap().border;
+    let border = |index: usize| output.sheets[index].canvas.as_deref().unwrap().border;
     assert_eq!((border(3), border(4)), (Some(FRAME), Some(NEWEST)));
     // Of panels projected together, the last listed, the last the server put there, is the newest.
     let together = projection(vec![
@@ -1179,7 +1193,7 @@ fn panels_are_drawn_in_their_slots_wall_by_wall_and_floating_ones_where_they_flo
     let borders: Vec<_> = output
         .sheets
         .iter()
-        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter_map(|sheet| sheet.canvas.as_deref())
         .filter(|canvas| canvas.plain().starts_with("Panel"))
         .map(|canvas| canvas.border)
         .collect();
@@ -1210,7 +1224,7 @@ fn a_panel_is_pointed_at_pulled_off_carried_and_left_floating() {
     let highlighted = output
         .sheets
         .iter()
-        .filter(|sheet| sheet.canvas.as_ref().unwrap().border == Some(HIGHLIGHT))
+        .filter(|sheet| sheet.canvas.as_deref().unwrap().border == Some(HIGHLIGHT))
         .count();
     assert_eq!(highlighted, 1);
     // Squeezed, it is pulled off and follows the ray.
@@ -1234,7 +1248,7 @@ fn a_panel_is_pointed_at_pulled_off_carried_and_left_floating() {
         output
             .sheets
             .iter()
-            .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with(title))
+            .find(|sheet| sheet.canvas.as_deref().unwrap().plain().starts_with(title))
             .map(|sheet| sheet.model.unwrap().w_axis.truncate())
     };
     let output = projector.update(input(&shown, None, 0.0, now));
@@ -1395,7 +1409,7 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
             .find(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .unwrap()
                     .plain()
                     .starts_with("Panel a")
@@ -1425,7 +1439,7 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
             .find(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .unwrap()
                     .plain()
                     .starts_with("Panel a")
@@ -1715,17 +1729,17 @@ fn a_curved_wall_draws_a_board_for_each_slot_its_label_and_its_panels_in_them() 
     let slots = slot_frames(&wall, model(&wall.pose).unwrap());
     for (sheet, slot) in output.sheets.iter().zip(&slots) {
         assert_eq!(sheet.model, Some(*slot));
-        assert_eq!(sheet.canvas.as_ref().unwrap().size(), panel_size());
+        assert_eq!(sheet.canvas.as_deref().unwrap().size(), panel_size());
     }
     let label = &output.sheets[WALL_SLOTS as usize];
-    assert_eq!(label.canvas.as_ref().unwrap().plain().trim(), "TOMORI");
+    assert_eq!(label.canvas.as_deref().unwrap().plain().trim(), "TOMORI");
     let below = label.model.unwrap().w_axis.truncate();
     assert!(below.x.abs() < 1e-5 && below.y < slots[2].w_axis.y - panel_size().1 * ARC_SCALE / 2.0);
     let drawn = output.sheets.last().unwrap();
     assert!(
         drawn
             .canvas
-            .as_ref()
+            .as_deref()
             .unwrap()
             .plain()
             .starts_with("Panel a")
@@ -1790,7 +1804,7 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
         output
             .sheets
             .iter()
-            .filter(|sheet| sheet.canvas.as_ref().unwrap().background == GHOST)
+            .filter(|sheet| sheet.canvas.as_deref().unwrap().background == GHOST)
             .map(|sheet| sheet.model.unwrap())
             .collect::<Vec<_>>()
     };
@@ -1812,7 +1826,7 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
         .sheets
         .iter()
         .map(|sheet| {
-            let canvas = sheet.canvas.as_ref().unwrap();
+            let canvas = sheet.canvas.as_deref().unwrap();
             if canvas.background == GHOST {
                 "ghost".to_owned()
             } else {
@@ -1837,14 +1851,14 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
         .find(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .unwrap()
                 .plain()
                 .starts_with("Panel a")
         })
         .unwrap();
     assert_eq!(
-        carried.canvas.as_ref().unwrap().size(),
+        carried.canvas.as_deref().unwrap().size(),
         fitted_size(&shown.panels[0], Fit::Text)
     );
     // Turned and pushed, it still goes where the ray points: let go, it is put in that slot, and shown there at once,
@@ -1866,14 +1880,14 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
         .find(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .unwrap()
                 .plain()
                 .starts_with("Panel a")
         })
         .unwrap();
     assert_eq!(placed.model, Some(target));
-    assert_eq!(placed.canvas.as_ref().unwrap().size(), panel_size());
+    assert_eq!(placed.canvas.as_deref().unwrap().size(), panel_size());
     assert!(ghosts(&output).is_empty());
     // The server swaps them: then it agrees, and what it says is drawn.
     let swapped = projection(vec![
@@ -1966,7 +1980,7 @@ fn a_floating_panel_fits_its_text_within_bounds_and_takes_a_slot_s_size_on_a_wal
     let output = Projector::default().update(input(&shown, at(edge), 0.0, Instant::now()));
     assert_eq!(output.pointed.unwrap().0, "w");
     assert_eq!(
-        output.sheets[0].canvas.as_ref().unwrap().size(),
+        output.sheets[0].canvas.as_deref().unwrap().size(),
         fitted_size(&shown.panels[0], Fit::Text)
     );
 }
@@ -2050,7 +2064,7 @@ fn the_hint_shows_only_while_a_panel_is_carried_beside_it_and_legible_at_any_dis
             .as_ref()
             .unwrap()
             .canvas
-            .as_ref()
+            .as_deref()
             .unwrap()
             .plain()
     };
@@ -2082,7 +2096,7 @@ fn the_hint_shows_only_while_a_panel_is_carried_beside_it_and_legible_at_any_dis
         assert!(text(&output).ends_with("leave it floating"));
         let hint = output.hint.as_ref().unwrap();
         let model = hint.model.unwrap();
-        let canvas = hint.canvas.as_ref().unwrap();
+        let canvas = hint.canvas.as_deref().unwrap();
         let centre = held(&projector).w_axis.truncate();
         let at = model.w_axis.truncate();
         let far = centre.distance(HOME);
@@ -2165,7 +2179,7 @@ fn a_panel_thrown_away_is_no_longer_carried_put_down_or_drawn_while_the_server_a
             .filter(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .unwrap()
                     .plain()
                     .starts_with("Panel b")
@@ -2424,7 +2438,7 @@ fn a_code_panel_says_how_many_lines_it_was_not_sent_below_the_last_it_holds() {
 fn a_text_panel_longer_than_its_face_scrolls_too() {
     let body: Vec<String> = (1..=20).map(|line| format!("- step {line}")).collect();
     let panel = Panel::new("t", "Steps", body.join("\n"), on(TOMORI_WALL, 0));
-    let most = most_scroll(&panel, Fit::SLOT, None);
+    let most = most_scroll(&panel, Fit::SLOT);
     assert_eq!(most, 20 - BODY_ROWS);
     // At the top, cut with "…", with a bar beside the body; at the end, its last row shown whole.
     let top = scrolled(&panel, Fit::SLOT, 0);
@@ -2452,7 +2466,7 @@ fn a_text_panel_longer_than_its_face_scrolls_too() {
     assert_eq!(row_text(&end.rows[3 + BODY_ROWS - 1]).trim(), "• step 20");
     assert_eq!(end.rows.len(), 3 + BODY_ROWS);
     // Floating, it fits, and has nothing to scroll.
-    assert_eq!(most_scroll(&panel, Fit::Text, None), 0);
+    assert_eq!(most_scroll(&panel, Fit::Text), 0);
     assert!(scrolled(&panel, Fit::Text, 4).shapes.is_empty());
 }
 
@@ -2461,7 +2475,7 @@ fn faces(output: &Output) -> Vec<String> {
     output
         .sheets
         .iter()
-        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter_map(|sheet| sheet.canvas.as_deref())
         .map(Canvas::plain)
         .collect()
 }
@@ -2502,7 +2516,7 @@ fn each_participant_scrolls_a_panel_for_themselves_alone() {
     assert_eq!(faces(&theirs.update(input(&shown, None, 0.0, now))), before);
     assert_eq!(theirs.scroll("c"), 0);
     // It stops at either end, however far it is asked to go, and scrolls back from there at once.
-    let most = mine.limits["c"];
+    let most = mine.limit("c").unwrap();
     mine.update(scroll(1_000.0));
     assert_eq!(mine.scroll("c"), most);
     mine.update(scroll(-1.0));
@@ -2518,23 +2532,23 @@ fn each_participant_scrolls_a_panel_for_themselves_alone() {
     });
     assert_eq!(mine.scroll("t"), 0);
     // Its code is laid out once, and again only when it changes.
-    let laid = Arc::clone(&mine.layouts["c"].layouts[0]);
+    let (laid, _) = counts();
     mine.update(input(&shown, None, 0.0, now));
-    assert!(Arc::ptr_eq(&laid, &mine.layouts["c"].layouts[0]));
+    assert_eq!(counts().0, laid);
     let mut changed = shown.clone();
     changed.panels[0].body.push_str("\n  done();");
     mine.update(input(&changed, None, 0.0, now));
-    assert!(!Arc::ptr_eq(&laid, &mine.layouts["c"].layouts[0]));
+    assert_eq!(counts().0, laid + 1);
     // Gone, it is forgotten, as is everything once nothing is projected.
     mine.update(scroll(3.0));
     let gone = projection(vec![panel("t", on(TOMORI_WALL, 1))]);
     mine.update(input(&gone, None, 0.0, now));
-    assert!(!mine.scrolls.contains_key("c") && mine.layouts.is_empty());
+    assert!(!mine.scrolls.contains_key("c") && !mine.faces.contains_key("c"));
     mine.update(Input {
         projection: None,
         ..input(&shown, None, 0.0, now)
     });
-    assert!(mine.limits.is_empty());
+    assert!(mine.faces.is_empty());
 }
 
 #[test]
@@ -2562,13 +2576,13 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
         .find(|sheet| {
             sheet
                 .canvas
-                .as_ref()
+                .as_deref()
                 .unwrap()
                 .plain()
                 .starts_with("javascript")
         })
         .unwrap();
-    let canvas = carried.canvas.as_ref().unwrap();
+    let canvas = carried.canvas.as_deref().unwrap();
     assert!(canvas.size().1 > panel_size().1);
     assert_eq!(canvas.size(), fitted_size(&on_wall, Fit::Text));
     assert!(!projector.scrollable("c"));
@@ -2595,7 +2609,7 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
     let canvas = output
         .sheets
         .iter()
-        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter_map(|sheet| sheet.canvas.as_deref())
         .find(|canvas| canvas.plain().starts_with("javascript"))
         .unwrap();
     assert_eq!(canvas.rows.len(), CODE_ROWS);
@@ -2704,7 +2718,7 @@ fn a_table_on_a_wall_is_a_grid_its_cells_wrapped_within_their_columns_never_cut(
     assert!(face.rows.iter().all(|row| row.cells.len() <= COLUMNS));
     assert!(rows.iter().all(|row| !row.contains('…')), "{rows:#?}");
     // It scrolls, with its bar.
-    assert!(most_scroll(&panel, Fit::SLOT, None) > 0);
+    assert!(most_scroll(&panel, Fit::SLOT) > 0);
     assert!(scroll_bar_of(&face.shapes).is_some());
 }
 
@@ -2744,7 +2758,7 @@ fn scrolled_into_a_table_its_header_stays_at_the_top_until_its_last_row_passes()
         );
     }
     // At the end, the header still names the columns and the last row shows whole.
-    let most = most_scroll(&panel, Fit::SLOT, None);
+    let most = most_scroll(&panel, Fit::SLOT);
     let end = body(most);
     assert_eq!(end[..2], header[..]);
     assert_eq!(
@@ -2877,7 +2891,7 @@ fn the_tomori_wall_folds_travels_and_unfolds_with_its_panels_and_takes_none_mean
         output
             .sheets
             .iter()
-            .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with(title))
+            .find(|sheet| sheet.canvas.as_deref().unwrap().plain().starts_with(title))
             .map(|sheet| sheet.model.unwrap())
     };
     let before = drawn_at(&output, "Panel a").unwrap();

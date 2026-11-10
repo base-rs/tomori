@@ -136,7 +136,7 @@ fn a_squeeze_on_a_wall_s_board_takes_hold_of_it_and_an_added_wall_is_carried_and
     let hint = output
         .sheets
         .last()
-        .and_then(|sheet| sheet.canvas.as_ref())
+        .and_then(|sheet| sheet.canvas.as_deref())
         .unwrap()
         .plain();
     assert!(
@@ -229,7 +229,7 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
         .iter()
         .rev()
         .take(13)
-        .filter_map(|sheet| sheet.canvas.as_ref().map(Canvas::plain))
+        .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
         .collect();
     let hint = &faces[0];
     for row in [
@@ -1086,7 +1086,7 @@ fn b_removes_a_wall_carried_for_an_owner_asking_again_first_when_it_holds_panels
         .update(frame(&projection, ray, 1.0, OWNER, now))
         .sheets
         .last()
-        .and_then(|sheet| sheet.canvas.as_ref())
+        .and_then(|sheet| sheet.canvas.as_deref())
         .unwrap()
         .plain();
     assert!(
@@ -1649,7 +1649,7 @@ fn bars(output: &crate::projection::Output) -> Vec<&Canvas> {
     output
         .sheets
         .iter()
-        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter_map(|sheet| sheet.canvas.as_deref())
         .filter(|canvas| canvas.columns == 0 && canvas.rows.is_empty())
         .collect()
 }
@@ -1837,7 +1837,7 @@ fn a_full_curved_wall_is_taken_hold_of_and_carried_again_by_its_bar_while_its_pa
             .last()
             .unwrap()
             .canvas
-            .as_ref()
+            .as_deref()
             .unwrap()
             .plain();
         assert!(
@@ -1974,7 +1974,7 @@ fn bars_show_only_to_those_who_may_adjust_walls_highlighted_with_what_the_grip_d
             .filter_map(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .map(|canvas| (sheet.model, canvas.plain()))
             })
             .find(|(_, text)| text.contains("edit this wall"))
@@ -2085,7 +2085,7 @@ fn faces(output: &crate::projection::Output, handles: usize) -> Vec<String> {
         .iter()
         .rev()
         .take(handles + 1)
-        .filter_map(|sheet| sheet.canvas.as_ref().map(Canvas::plain))
+        .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
         .collect()
 }
 

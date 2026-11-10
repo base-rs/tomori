@@ -229,7 +229,7 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
         )
     }));
     let mut sheets = vec![Sheet {
-        canvas: Some(canvas),
+        canvas: Some(std::sync::Arc::new(canvas)),
         model: Some(frame * Mat4::from_scale(Vec3::splat(scale))),
     }];
     if labelled(wall, walls) {
@@ -245,7 +245,7 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
         let top = own.top - WALL_PADDING.1 as f32 * pixel;
         let middle = Vec3::new(left + width / 2.0, top - height / 2.0, 0.0);
         sheets.push(Sheet {
-            canvas: Some(label),
+            canvas: Some(std::sync::Arc::new(label)),
             model: Some(frame * Mat4::from_translation(middle)),
         });
     }

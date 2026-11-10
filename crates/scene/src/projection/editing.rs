@@ -2207,7 +2207,7 @@ impl Editor {
                 let on = self.bar.as_deref() == Some(wall.id.as_str());
                 sheets.push(Sheet {
                     model: Some(bar.model),
-                    canvas: Some(bar_face(&bar, on || carried)),
+                    canvas: Some(std::sync::Arc::new(bar_face(&bar, on || carried))),
                 });
                 if on && self.editing() != Some(wall.id.as_str()) {
                     let up = frame.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
@@ -2271,7 +2271,7 @@ impl Editor {
                 .into_iter()
                 .flat_map(|at| super::slot_frames(snapped, at));
             sheets.extend(slots.map(|slot| Sheet {
-                canvas: Some(ghost(cells)),
+                canvas: Some(std::sync::Arc::new(ghost(cells))),
                 model: Some(slot * Mat4::from_translation(Vec3::Z * LIFT)),
             }));
         }
@@ -2283,12 +2283,12 @@ impl Editor {
             for (handle, at) in &points {
                 sheets.push(Sheet {
                     model: Some(facing(*at, input.viewer, 1.0)),
-                    canvas: Some(handle_face(
+                    canvas: Some(std::sync::Arc::new(handle_face(
                         *handle,
                         size,
                         self.hovered == Some(*handle),
                         wall.is_locked(),
-                    )),
+                    ))),
                 });
             }
         }
@@ -2460,7 +2460,7 @@ fn hint_above(mut canvas: Canvas, above: Vec3, viewer: Vec3) -> Sheet {
     let (_, tall) = canvas.size();
     Sheet {
         model: Some(facing(above + Vec3::Y * tall / 2.0, viewer, 1.0)),
-        canvas: Some(canvas),
+        canvas: Some(std::sync::Arc::new(canvas)),
     }
 }
 

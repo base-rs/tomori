@@ -1341,7 +1341,7 @@ impl Step {
             .filter_map(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .and_then(|canvas| canvas.image.as_ref())
             })
             .filter_map(|image| {
@@ -1691,7 +1691,7 @@ pub mod fixtures {
     pub fn label_hint(projection: &[crate::controller_ui::Sheet]) -> Option<String> {
         projection
             .iter()
-            .filter_map(|sheet| sheet.canvas.as_ref())
+            .filter_map(|sheet| sheet.canvas.as_deref())
             .find(|canvas| canvas.plain().starts_with("Agenda") && canvas.rows.len() <= 4)
             .and_then(|canvas| {
                 canvas
@@ -2969,7 +2969,14 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build"))
+                .find(|sheet| {
+                    sheet
+                        .canvas
+                        .as_deref()
+                        .unwrap()
+                        .plain()
+                        .starts_with("Build")
+                })
                 .map(|sheet| sheet.model.unwrap().w_axis.truncate())
                 .unwrap()
         };
@@ -3071,7 +3078,7 @@ mod tests {
             assert!(frame.projection.iter().any(|sheet| {
                 sheet
                     .canvas
-                    .as_ref()
+                    .as_deref()
                     .is_some_and(|canvas| canvas.plain().contains("leave it here"))
             }));
         }
@@ -3138,7 +3145,7 @@ mod tests {
             let hint = frame
                 .projection
                 .iter()
-                .filter_map(|sheet| sheet.canvas.as_ref().map(crate::canvas::Canvas::plain))
+                .filter_map(|sheet| sheet.canvas.as_deref().map(crate::canvas::Canvas::plain))
                 .find(|text| text.contains("leave it here"));
             (conversation, step, senses, hint, start)
         };
@@ -3341,7 +3348,9 @@ mod tests {
                     frame
                         .projection
                         .iter()
-                        .filter_map(|sheet| sheet.canvas.as_ref().map(crate::canvas::Canvas::plain))
+                        .filter_map(|sheet| {
+                            sheet.canvas.as_deref().map(crate::canvas::Canvas::plain)
+                        })
                         .find(|text| text.contains("done"))
                 });
             }
@@ -3423,17 +3432,21 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .map(|sheet| sheet.canvas.as_ref().unwrap().plain())
+                .map(|sheet| sheet.canvas.as_deref().unwrap().plain())
                 .find(|text| text.contains("throw away"))
         };
         let frame = |step: &mut Step, conversation: &mut Conversation, senses: &Senses, at| {
             let frame = step.update(senses, conversation, &mut felt(), at, FRAME);
             (
                 hint(&frame),
-                frame
-                    .projection
-                    .iter()
-                    .any(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build")),
+                frame.projection.iter().any(|sheet| {
+                    sheet
+                        .canvas
+                        .as_deref()
+                        .unwrap()
+                        .plain()
+                        .starts_with("Build")
+                }),
             )
         };
         let b = |step: &mut Step, conversation: &mut Conversation, back: bool, held: bool, at| {
@@ -3644,7 +3657,14 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build"))
+                .find(|sheet| {
+                    sheet
+                        .canvas
+                        .as_deref()
+                        .unwrap()
+                        .plain()
+                        .starts_with("Build")
+                })
                 .map(|sheet| sheet.model.unwrap())
                 .unwrap()
         };
@@ -3805,7 +3825,7 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .filter_map(|sheet| sheet.canvas.as_ref())
+                .filter_map(|sheet| sheet.canvas.as_deref())
                 .find(|canvas| canvas.plain().starts_with("rust"))
                 .map(|canvas| canvas.plain().lines().last().unwrap().trim_end().to_owned())
                 .unwrap()
@@ -3820,7 +3840,7 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .filter_map(|sheet| sheet.canvas.as_ref())
+                .filter_map(|sheet| sheet.canvas.as_deref())
                 .any(|canvas| canvas.plain().contains("Stick ↕  scroll"))
         );
         conversation.take_actions();
@@ -3893,7 +3913,7 @@ mod tests {
             frame
                 .projection
                 .iter()
-                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("rust"))
+                .find(|sheet| sheet.canvas.as_deref().unwrap().plain().starts_with("rust"))
                 .map(|sheet| sheet.model.unwrap().w_axis.truncate())
                 .unwrap()
         };
@@ -4339,7 +4359,11 @@ mod tests {
         // The Tomori wall's six slots and its label, the panel, and the label on the ray naming it.
         let wall = tomori_protocol::WALL_SLOTS as usize + 1;
         assert_eq!(output.projection.len(), wall + 2);
-        let label = output.projection[wall + 1].canvas.as_ref().unwrap().plain();
+        let label = output.projection[wall + 1]
+            .canvas
+            .as_deref()
+            .unwrap()
+            .plain();
         assert!(label.starts_with("Build status"), "{label}");
         let beam = output
             .arrival
@@ -4375,7 +4399,11 @@ mod tests {
         let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         // No label on a panel carried, but the hint beside it, last, over everything else.
         assert_eq!(output.projection.len(), wall + 2);
-        let hint = output.projection[wall + 1].canvas.as_ref().unwrap().plain();
+        let hint = output.projection[wall + 1]
+            .canvas
+            .as_deref()
+            .unwrap()
+            .plain();
         assert!(hint.contains("throw away, for all"), "{hint}");
         senses.grip = Some(0.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
