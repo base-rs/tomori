@@ -516,6 +516,23 @@ pub struct Step {
     /// begun on nothing of Tomori's nor the environment's, so that letting go of such a pull after [`SUMMON_HOLD`]
     /// summons the agent there.
     summoning: Option<(f32, Vec3, bool)>,
+    /// The rig the platform placed this frame's poses with, as [`Self::rig`] last settled it.
+    placed: Rig,
+    /// Where the space's environment and its agent stood in the participant's room on the last frame in a space, and,
+    /// once it is left, while its environment shrinks back into its object: they stay there until it has gone. See
+    /// `design/arrival.md`.
+    standing: Option<Standing>,
+    departing: bool,
+}
+
+/// Where a space's environment and its agent stand in the participant's room: the environment drawn, its carriage and
+/// the agent's anchor, each in the room, and the rig they were last placed in the scene with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Standing {
+    environment: crate::environment::Environment,
+    carriage: crate::anchors::Anchor,
+    agent: crate::anchors::Anchor,
+    rig: Rig,
 }
 
 impl Default for Step {
@@ -570,6 +587,9 @@ impl Default for Step {
             pad_selector: crate::client_side::Selector::default(),
             pointed_pad: None,
             summoning: None,
+            placed: Rig::default(),
+            standing: None,
+            departing: false,
         }
     }
 }
@@ -627,8 +647,10 @@ impl Step {
 
     /// Where the participant's room is in the space's scene, in the space `conversation` is in: the transform the frame's poses are given in, which each platform applies to its head, eyes, controllers and hands before [`Self::update`]. Anywhere else, or in another space, the room is back home. See `design/locomotion.md`.
     pub fn rig(&mut self, conversation: &Conversation) -> Rig {
-        self.travel
-            .settle(place(conversation), &conversation.locomotion())
+        self.placed = self
+            .travel
+            .settle(place(conversation), &conversation.locomotion());
+        self.placed
     }
 
     /// The participant recentred: the floating panel stands in front of them again.
@@ -1216,9 +1238,42 @@ impl Step {
         // The agent appears at its home as a space opens, or changes environment, and otherwise glides to where it is
         // summoned and back home; the workers stand about its home. See `design/environments.md`.
         let arrangement = conversation.arrangement();
-        let appear = arrangement.home != self.agent_home;
+        // Leaving a space, the rig goes home and the space's state is cleared at once, while its environment still
+        // shrinks back into the space's object: the environment and the agent stay where the participant saw them, in
+        // their room, until it has gone, and only then does the agent appear back at its place, so that nothing jumps
+        // as the space is left. See `design/arrival.md`.
+        let placed = self.placed;
+        let in_a_space = conversation.joined_space().is_some();
+        let departing = !in_a_space
+            && self
+                .standing
+                .is_some_and(|standing| standing.environment == scenery.environment);
+        let departed = self.departing && !departing;
+        self.departing = departing;
+        if !in_a_space && !departing {
+            self.standing = None;
+        }
+        let departure = self
+            .standing
+            .as_mut()
+            .filter(|_| departing)
+            .map(|standing| {
+                // The rig going home moves the scene under the participant: they are carried with it at once.
+                let moved = standing.rig != placed;
+                standing.rig = placed;
+                (
+                    placed.place(standing.carriage),
+                    placed.place(standing.agent),
+                    moved,
+                )
+            });
+        let carriage = departure.map_or(arrangement.carriage, |(carriage, _, _)| carriage);
+        let appear = match departure {
+            Some((_, _, moved)) => moved,
+            None => departed || arrangement.home != self.agent_home,
+        };
         self.agent_home = arrangement.home;
-        let mut anchor = arrangement.agent;
+        let mut anchor = departure.map_or(arrangement.agent, |(_, agent, _)| agent);
         if appear {
             // A pull begun before the space opened or changed environment draws the swarm until it is let go, but
             // summons it nowhere, so that the agent stays at the new home, as everyone else sees it.
@@ -1251,6 +1306,19 @@ impl Step {
                     anchor = crate::anchors::Anchor::from_pose(&spot).unwrap_or(anchor);
                 }
             }
+        }
+        // In a space whose environment is drawn, where it and the agent stand in the participant's room, for as long
+        // as it shrinks away should the space be left.
+        if in_a_space {
+            self.standing =
+                (scenery.environment != crate::environment::Environment::MINIMAL).then(|| {
+                    Standing {
+                        environment: scenery.environment,
+                        carriage: placed.unplace(arrangement.carriage),
+                        agent: placed.unplace(anchor),
+                        rig: placed,
+                    }
+                });
         }
         // The agent stands there as the avatar the space's backend, or its environment, names, where this build
         // registers it, or the swarm. See `design/avatars.md`.
@@ -1822,7 +1890,7 @@ impl Step {
                 Vec::new()
             },
             environment: drawn,
-            carriage: arrangement.carriage,
+            carriage,
             avatar: self.coordinator.shown(),
         }
     }
@@ -7286,6 +7354,145 @@ mod tests {
             conversation.arrangement().carriage,
             crate::anchors::Anchor::HOME
         );
+    }
+
+    #[test]
+    fn leaving_a_space_keeps_its_environment_and_agent_where_they_were_seen_until_it_has_gone() {
+        use crate::locomotion::{Locomotion, Surface};
+        // Participants arrive 8 m along +X, facing the environment's origin, as the farmyard's arrive inside its gate;
+        // the agent's home is its own; and travel teleports.
+        let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        let home = tomori_protocol::Pose::at([1.0, 1.4, -3.0]).facing_towards([0.0, 1.6, 0.0]);
+        let middle = |step: &Step| {
+            step.coordinator
+                .swarm()
+                .agents
+                .iter()
+                .map(|agent| agent.position)
+                .sum::<Vec3>()
+                / crate::swarm::AGENT_COUNT as f32
+        };
+        let close = |a: crate::anchors::Anchor, b: crate::anchors::Anchor| {
+            a.position.distance(b.position) < 1e-4
+                && a.orientation.dot(b.orientation).abs() > 1.0 - 1e-6
+        };
+        // Left with B held, as the frame's buttons are read before the platform places its poses, or within a frame
+        // after it placed them, as the hand menu leaves.
+        for within in [false, true] {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.set_locomotion(vec![(
+                crate::test_support::SKY,
+                Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+            )]);
+            conversation.apply(space(|state| {
+                state.anchors = tomori_protocol::Anchors::new()
+                    .with_arrival(street)
+                    .with_agent(home);
+            }));
+            let arrangement = conversation.arrangement();
+            assert_ne!(arrangement.carriage, crate::anchors::Anchor::HOME);
+            let mut step = Step::default();
+            let now = Instant::now();
+            // The platform places the frame's poses with the rig, as it was settled before the frame.
+            let placed = |step: &mut Step, conversation: &Conversation, ray: Vec3| {
+                let rig = step.rig(conversation).matrix();
+                let head = rig * Mat4::from_translation(arrival::HOME);
+                Senses {
+                    head: Some(head),
+                    head_pose: Pose::from_transform(head),
+                    viewer: Some(head.w_axis.truncate()),
+                    ray: Ray::new(
+                        rig.transform_point3(arrival::HOME),
+                        rig.transform_vector3(ray),
+                    ),
+                    ..senses()
+                }
+            };
+            let stick = |step: &mut Step, conversation: &mut Conversation, stick: Vec2| {
+                step.buttons(
+                    &press(|buttons| buttons.left_stick = stick),
+                    true,
+                    conversation,
+                    &mut felt(),
+                    now,
+                );
+            };
+            // Entering is as it was: the environment is carried, and the agent stands at its home, from the first frame.
+            for _ in 0..400 {
+                let senses = placed(&mut step, &conversation, -Vec3::Z);
+                let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                assert_eq!(frame.carriage, arrangement.carriage);
+                assert_eq!(frame.swarm.anchor(), arrangement.agent);
+            }
+            // Teleported down the yard, the space is drawn from there.
+            stick(&mut step, &mut conversation, Vec2::Y);
+            let senses = placed(&mut step, &conversation, Vec3::new(0.3, -0.5, -1.0));
+            assert!(
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                    .landing
+                    .is_some()
+            );
+            stick(&mut step, &mut conversation, Vec2::ZERO);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            let rig = step.rig(&conversation);
+            assert_ne!(rig, Rig::default());
+            let senses = placed(&mut step, &conversation, -Vec3::Z);
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(frame.carriage, arrangement.carriage);
+            // Where the environment and the agent stand in the participant's room.
+            let carriage = rig.unplace(arrangement.carriage);
+            let agent = rig.unplace(arrangement.agent);
+            let mut swarm = rig.matrix().inverse().transform_point3(middle(&step));
+            // Leaving, the rig goes home at once, while the environment shrinks back into the space's object.
+            let mut senses = if within {
+                let senses = placed(&mut step, &conversation, -Vec3::Z);
+                assert!(conversation.hold_back(Some(LEAVE_HOLD)));
+                senses
+            } else {
+                assert!(conversation.hold_back(Some(LEAVE_HOLD)));
+                let senses = placed(&mut step, &conversation, -Vec3::Z);
+                assert_eq!(
+                    step.placed,
+                    Rig::default(),
+                    "home before the frame is placed"
+                );
+                senses
+            };
+            let mut shrinking = 0;
+            loop {
+                let rig = step.placed;
+                let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                if frame.scenery.environment == crate::environment::Environment::MINIMAL {
+                    // Once it has gone, the agent appears back at its place, and nothing is carried.
+                    assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
+                    assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
+                    break;
+                }
+                shrinking += 1;
+                // While it is drawn, it and the agent stay where the participant saw them, in their room.
+                assert!(
+                    close(rig.unplace(frame.carriage), carriage),
+                    "{within} {shrinking}"
+                );
+                assert!(
+                    close(rig.unplace(frame.swarm.anchor()), agent),
+                    "{within} {shrinking}"
+                );
+                let seen = rig.matrix().inverse().transform_point3(middle(&step));
+                assert!(
+                    seen.distance(swarm) < 0.05,
+                    "{within} {shrinking}: {seen} {swarm}"
+                );
+                swarm = seen;
+                senses = placed(&mut step, &conversation, -Vec3::Z);
+                assert_eq!(step.placed, Rig::default());
+            }
+            assert!(shrinking > 10, "it shrinks away over frames: {shrinking}");
+            // And it stays there.
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
+            assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
+        }
     }
 
     #[test]
