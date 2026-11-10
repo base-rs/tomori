@@ -151,3 +151,28 @@ fn a_tick_shown_at_once_is_undone_by_whatever_the_server_sends_next() {
     held.whole(ticked.clone(), now);
     assert_eq!(held.projection(), Some(&ticked));
 }
+
+#[test]
+fn what_no_server_sends_never_fails_the_client() {
+    let now = Instant::now();
+    let mut held = Held::default();
+    let first = projection(1, 60);
+    held.whole(first.clone(), now);
+    // A tick kept of a panel no longer held, and a panel held whose projection was never noted, which a server cannot
+    // bring about: the patch still applies, the panel keeps the age it was sent with, and the other is counted on.
+    held.ticked.insert("gone".into(), "Gone.".into());
+    held.projected.remove("agenda");
+    let second = first.clone().with_revision(2);
+    assert_eq!(
+        held.patch(&patch(&first, &second), now + Duration::from_secs(5)),
+        None
+    );
+    let ages: Vec<u64> = held
+        .projection()
+        .unwrap()
+        .panels
+        .iter()
+        .map(|panel| panel.age)
+        .collect();
+    assert_eq!(ages, [60, 5]);
+}
