@@ -6,7 +6,7 @@
 
 `Client::builder(endpoint)` takes `https://HOST[:PORT][/PATH]`, or `http://` only to a loopback host, such as a test's fake. Before `build()`:
 
-- `token_source(source)` authenticates with bearer tokens. A `Token` is a fixed source, and any `Fn() -> Result<Token, String>` is one, such as a closure that runs a command. The client keeps a token for `token_lifetime` (40 minutes by default), and asks again after it has passed, or once after the endpoint refuses a request with HTTP 401, which it then retries once.
+- `token_source(source)` authenticates with bearer tokens. A `Token` is a fixed source, and any `Fn() -> Result<Token, String>` is one, such as a closure that runs a command. The client keeps a token for `token_lifetime` (40 minutes by default), and asks again after it has passed, or once after the endpoint refuses a request with HTTP 401, which it then retries once. Another client of the application's can send the same token: call the source's `token()` and send `Token::expose()` as `Bearer TOKEN` in its `authorization` field, replacing it in its own errors, never logging, printing or storing it; a `Token`'s `Debug` hides it, and it has no `Display`.
 - `timeout` (30 seconds, at most a day) bounds each request, from when it is queued until its answer is read, and is sent as Prometheus's evaluation `timeout`. A call refused with HTTP 401 sends a second request, with a time-out of its own, after asking the token source, whose time is not bounded here.
 - `max_response_bytes` (8 MiB) and `max_query_bytes` (16 KiB) bound answers and expressions.
 - `api_prefix` (`/api/v1`) is where the API is beneath the endpoint, for a gateway that serves it elsewhere.

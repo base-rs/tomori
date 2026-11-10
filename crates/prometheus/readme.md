@@ -44,6 +44,18 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+Another client of the application's, such as one for another API of the same gateway, sends the token the same source makes with `Token::expose`, the one way to read it, only in its `authorization` field, never logging or printing it. Calling `token()` may run a command each time, and that client gets none of this one's care, so it keeps the token for its lifetime and asks again only when it expires or is refused with HTTP 401:
+
+```rust
+use tomori_prometheus::{Token, TokenSource};
+
+fn authorization(source: &dyn TokenSource) -> Result<String, String> {
+    Ok(format!("Bearer {}", source.token()?.expose()))
+}
+
+assert_eq!(authorization(&Token::new("a-token").unwrap()).unwrap(), "Bearer a-token");
+```
+
 [Using the Prometheus Source](context/usage.md) describes the client's configuration, its errors and the PromQL helpers. Its requirements are in Tomori's [`design/data-sources.md`](https://github.com/ioquatix/tomori/blob/main/design/data-sources.md). The interface is 0.x, and grows with Tomori's data sources ([#83](https://github.com/ioquatix/tomori/issues/83)).
 
 ## See Also
