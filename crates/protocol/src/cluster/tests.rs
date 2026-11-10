@@ -421,7 +421,7 @@ fn a_ring_in_room_rises_as_its_height_allows_and_where_it_holds_none_the_room_s_
     assert!(!tall.arrange(28).compact());
     // A slim room that holds one place, straight behind the agent, at full size and compact alike: the rest gather
     // into the sign there, at full size.
-    let slim = Cluster::new(&ringed().with_extent(1.6, 1.0, 4.0));
+    let slim = Cluster::new(&ringed().with_extent(1.4, 1.0, 4.0));
     let two = slim.arrange(2);
     assert_eq!(
         (two.step(), two.compact(), two.more()),
