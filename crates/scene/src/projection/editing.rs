@@ -69,6 +69,10 @@ const FLAT_BEND: f32 = 0.06;
 /// How near upright a wall tilts, in degrees, before it snaps upright.
 pub const UPRIGHT_SNAP: f32 = 3.0;
 
+/// The step the text handle scales a wall's content by, as a proportion of the text its slots give it: a tenth, so that
+/// its readout is a round number and a face is laid out again only as the step changes.
+pub const CONTENT_STEP: f32 = 0.1;
+
 /// How large a handle is drawn, as the angle it takes from the eyes at the far side of its wall, whatever its distance,
 /// so that it is as easy to hold with the ray near and far: about 1.7°.
 pub const HANDLE_ANGLE: f32 = 0.03;
@@ -135,6 +139,11 @@ pub enum Handle {
     /// of, it tilts the wall's top towards the participant, so that it faces down, and up, tilts it back, upright near
     /// where it tilts least; moving across does nothing.
     Tilt,
+    /// The text handle, `aA`, along its bottom edge towards its left corner, or, on the Tomori wall, beside its hinge:
+    /// moved to the right, as the participant sees it, from where it was taken hold of, it draws the content of the
+    /// panels in its slots larger, and back to the left, smaller, so that each slot shows more and longer lines, like a
+    /// slider, its slots as they were; moving up or down does nothing.
+    Text,
     /// The padlock beyond its top left corner, closed while the wall is locked and open while it is not: squeezed by an
     /// owner, it locks or unlocks the wall, for everyone.
     Lock,
@@ -221,6 +230,9 @@ pub struct Change {
     pub join: Option<Joining>,
     /// How far it tilts from upright, in degrees, `0` for upright.
     pub tilt: Option<f32>,
+    /// How large its panels' content is drawn within its slots, as a proportion of the text they give it, `1` for as
+    /// large.
+    pub content_scale: Option<f32>,
     /// The wall's version as it was taken hold of, for a change made against how it was, as by a handle, so that the
     /// server refuses it where the wall changed since; `None` for a change that is the participant's own whatever the
     /// wall was, as carrying it, or snapping it.
@@ -411,6 +423,7 @@ fn handles(wall: &Wall, controls: LockControls) -> Vec<Handle> {
         Handle::Step(Axis::Columns, -1),
         Handle::Step(Axis::Columns, 1),
         Handle::Bend,
+        Handle::Text,
     ];
     if wall.group.is_none() {
         handles.push(Handle::Tilt);
@@ -816,13 +829,22 @@ fn lay_out_handles(
     } else {
         at(xl - pu, centre)
     };
+    // The text handle along the bottom, between its left corner and the handle of its rows, or a row below that corner
+    // where there is no room between them; the Tomori wall, which has neither, a column beyond its hinge.
+    let text = if tomori {
+        at(xl - pu, centre)
+    } else if room >= 4.0 * pu - 1e-6 {
+        at(xl + pu, yb)
+    } else {
+        at(xl, yb - pv)
+    };
     // The grab bar, at the middle of its top edge, or, for the Tomori wall, whose top the status pill stands just above
     // from home, below its label: a third of the wall long, within bounds, as long as it may be and stand a handle's
     // spacing, as seen, from the handles beside it, or else a row further out, where it has room.
     let middle = frame.transform_point3(Vec3::ZERO);
     let ahead = (middle - viewer).normalize_or(Vec3::NEG_Z);
     let fixed: Vec<(f32, f32)> = if tomori {
-        vec![columns, hinge]
+        vec![columns, hinge, text]
     } else {
         let corners = [(-1, 1), (1, 1), (-1, -1), (1, -1)]
             .into_iter()
@@ -834,6 +856,7 @@ fn lay_out_handles(
         corners
             .chain(right)
             .chain((bottom_side == Some(false)).then_some(rows))
+            .chain((bottom_side == Some(false)).then_some(text))
             .chain(tilts.then_some(hinge))
             .collect()
     };
@@ -950,13 +973,15 @@ fn lay_out_handles(
                 }
                 Handle::Bend => (knob, top_side?),
                 Handle::Tilt => (hinge, false),
+                // The Tomori wall is joined to no other, so its stands where it is.
+                Handle::Text => (text, bottom_side?),
                 Handle::Lock => lock(yk),
                 Handle::Reset => lock(yk + pv),
             };
             let point = match handle {
                 _ if !opposite => point,
                 Handle::Bend | Handle::Step(Axis::Columns, _) => (point.0, -point.1 - pv),
-                Handle::Rows => (point.0, yk + pv),
+                Handle::Rows | Handle::Text => (point.0, yk + pv),
                 Handle::Lock | Handle::Reset => point,
                 _ => mirrored(point),
             };
@@ -978,7 +1003,8 @@ fn lay_out_handles(
         let spacing = SPACING * size;
         match handle {
             Handle::Bend | Handle::Step(Axis::Columns, _) => above(at) * spacing * away,
-            Handle::Rows => -above(at) * spacing * away,
+            // Below the bottom, or above the top where it stands there.
+            Handle::Rows | Handle::Text => -above(at) * spacing * away,
             Handle::Tilt => beside(-1.0) * pu,
             // Beyond the left edge, or the right where it stands there.
             Handle::Lock | Handle::Reset => beside(-away) * pu,
@@ -989,7 +1015,7 @@ fn lay_out_handles(
         Handle::Corner(..) => 0,
         Handle::Columns | Handle::Rows | Handle::Tilt => 1,
         Handle::Bend => 2,
-        Handle::Step(..) => 3,
+        Handle::Step(..) | Handle::Text => 3,
         Handle::Lock => 4,
         Handle::Reset => 5,
     };
@@ -1046,7 +1072,9 @@ fn lay_out_handles(
         .iter()
         .zip(&away)
         .zip(&top)
-        .map(|(((handle, _), away), top)| *top || (*handle == Handle::Rows && *away < 0.0))
+        .map(|(((handle, _), away), top)| {
+            *top || (matches!(handle, Handle::Rows | Handle::Text) && *away < 0.0)
+        })
         .collect();
     for _ in (0..BAR_ROWS).filter(|_| !below) {
         let beyond: Vec<Vec3> = points
@@ -1203,6 +1231,7 @@ fn symbol(handle: Handle, locked: bool, behind: [f32; 4]) -> Vec<crate::shapes::
             rule(Vec2::new(0.0, -3.0), Vec2::new(0.0, 3.0)),
         ],
         Handle::Tilt => hinge_shapes(),
+        Handle::Text => text_shapes(rule),
         Handle::Lock => padlock(locked, behind),
         // A ring, its quarter at the top right left out, and a head at its right end, pointing up, the way it turns.
         // Its ring a little left of the middle, so that with its head it centres.
@@ -1230,6 +1259,33 @@ fn symbol(handle: Handle, locked: bool, behind: [f32; 4]) -> Vec<crate::shapes::
         }
         Handle::Corner(..) | Handle::Bend => Vec::new(),
     }
+}
+
+/// The text handle's face, in font pixels from its cell's middle, drawn with `rule`: a small `A` and a large one beside
+/// it, `aA`, as text sizes are shown, so that it reads as the size of the text, centred on its handle.
+fn text_shapes(rule: impl Fn(Vec2, Vec2) -> crate::shapes::Shape) -> Vec<crate::shapes::Shape> {
+    // Each `A` from its apex to its feet, with its bar across at `bar` of the way down.
+    let letter = |apex: Vec2, left: Vec2, right: Vec2, bar: f32| {
+        [
+            rule(apex, left),
+            rule(apex, right),
+            rule(apex.lerp(left, bar), apex.lerp(right, bar)),
+        ]
+    };
+    letter(
+        Vec2::new(-3.75, 0.5),
+        Vec2::new(-5.5, 4.5),
+        Vec2::new(-2.0, 4.5),
+        0.62,
+    )
+    .into_iter()
+    .chain(letter(
+        Vec2::new(2.25, -4.5),
+        Vec2::new(-1.0, 4.5),
+        Vec2::new(5.5, 4.5),
+        0.66,
+    ))
+    .collect()
 }
 
 /// The colour of a padlock closed, warm, so that a locked wall's is told from an open one's at a glance.
@@ -1505,6 +1561,31 @@ pub fn tilted(wall: &Wall, moved: f32) -> f32 {
     }
 }
 
+/// How large `wall`, as it was when its text handle was taken hold of, draws its panels' content within its slots when
+/// the hand has moved `moved` metres to the right, as the participant sees it, from where it took hold of it: as it
+/// was, larger as the hand moves right and smaller as it moves left, by as many times over [`TRAVEL`] as the whole of
+/// [`layout::CONTENT_SCALES`] spans, alike either way, so that one movement of 25 cm takes it from half to twice, in
+/// steps of [`CONTENT_STEP`], never below its [`Wall::least_content_scale`] nor beyond the most. Within [`DEAD_ZONE`]
+/// of where it was taken, it is as it was.
+pub fn content_scaled(wall: &Wall, moved: f32) -> f32 {
+    let start = wall.content_scale();
+    let moved = moved_by(moved);
+    if moved == 0.0 {
+        return start;
+    }
+    let (least, most) = (wall.least_content_scale(), layout::CONTENT_SCALES.1);
+    let span = layout::CONTENT_SCALES.1 / layout::CONTENT_SCALES.0;
+    let scaled = start * span.powf(moved);
+    let steps = (scaled / CONTENT_STEP).round();
+    (steps / (1.0 / CONTENT_STEP)).clamp(least, most)
+}
+
+/// `wall` with its panels' content drawn `scale` times the size its slots give it, saying none where that is 1.
+fn content_at(wall: &Wall, scale: f32) -> Wall {
+    wall.clone()
+        .with_content_scale(((scale - 1.0).abs() > 1e-4).then_some(scale))
+}
+
 /// The grid whose right edge, or bottom edge, of `wall` stands nearest `at`, in its own frame, along `axis`.
 fn nearest_grid(wall: &Wall, axis: Axis, at: Vec3) -> Grid {
     let grid = wall.grid();
@@ -1630,6 +1711,7 @@ impl Editor {
                     && wall.radius().map(|radius| (radius * 100.0).round())
                         == sent.radius().map(|radius| (radius * 100.0).round())
                     && (wall.tilt() - sent.tilt()).abs() < 0.05
+                    && (wall.content_scale() - sent.content_scale()).abs() < 1e-3
                     && Vec3::from_array(wall.pose.position)
                         .distance(Vec3::from_array(sent.pose.position))
                         < 0.01
@@ -1764,6 +1846,7 @@ impl Editor {
                                 pose: None,
                                 join: None,
                                 tilt: None,
+                                content_scale: None,
                                 version: Some(wall.version),
                             });
                             self.pending = Some((changed, input.now));
@@ -1902,6 +1985,9 @@ impl Editor {
                     let tilt = tilted(start, down);
                     Some(start.clone().with_tilt((tilt != 0.0).then_some(tilt)))
                 }
+                // The text handle draws its content as much larger as the hand has moved to the right, and smaller to
+                // the left, its slots as they were.
+                Handle::Text => Some(content_at(start, content_scaled(start, right))),
                 // The knob, the last handle dragged: a stepper changes the wall at once, as it is squeezed. It bends as
                 // far as the hand has moved to the right from where it took hold of it.
                 _ => Some(laid_out(
@@ -1921,6 +2007,13 @@ impl Editor {
                     Handle::Tilt => {
                         let tilt = changed.tilt();
                         tilt == 0.0 || tilt.abs() >= layout::MOST_TILT
+                    }
+                    // As its slots give it, and at either end, the text handle stops.
+                    Handle::Text => {
+                        let scale = changed.content_scale();
+                        (scale - 1.0).abs() < 1e-4
+                            || scale <= changed.least_content_scale() + 1e-4
+                            || scale >= layout::CONTENT_SCALES.1 - 1e-4
                     }
                     _ => false,
                 };
@@ -2096,6 +2189,7 @@ impl Editor {
                     shape: None,
                     pose: None,
                     tilt: None,
+                    content_scale: None,
                     join: Some(Joining::Attach {
                         attach: Attach::new(snapping.to, snapping.snap.edge, snapping.snap.align),
                         alone: detached,
@@ -2119,6 +2213,8 @@ impl Editor {
                             .map_or(WallShape::Grid, |radius| WallShape::Arc { radius })
                     }),
                     tilt: ((after.tilt() - before.tilt()).abs() > 0.05).then(|| after.tilt()),
+                    content_scale: ((after.content_scale() - before.content_scale()).abs() > 1e-4)
+                        .then(|| after.content_scale()),
                     pose: (carried
                         && (Vec3::from_array(after.pose.position)
                             .distance(Vec3::from_array(before.pose.position))
@@ -2148,6 +2244,7 @@ impl Editor {
                     || change.shape.is_some()
                     || change.pose.is_some()
                     || change.tilt.is_some()
+                    || change.content_scale.is_some()
                 {
                     output.change = Some(change);
                     self.pending = Some((after, input.now));
@@ -2443,7 +2540,9 @@ pub fn bar_label_for(controls: Controls, wall: &Wall, rights: Rights) -> Canvas 
 
 /// What a handle dragged makes of `wall`, as it would be let go now: for a corner, its slots' size and shape, such as
 /// `60 × 107 cm · 9:16`; for the knob, its curve, such as `◠ radius 2.4 m`, or `flat`; for the hinge, its tilt, such
-/// as `tilted 12° down`, or `upright`; for an edge, its grid, such as `4 × 2 slots`.
+/// as `tilted 12° down`, or `upright`; for the text handle, the size of its content and how many columns and rows of a
+/// panel's body each slot then shows, such as `Text 80% · 42 columns × 15 rows`; for an edge, its grid, such as
+/// `4 × 2 slots`.
 pub fn readout(handle: Handle, wall: &Wall) -> Canvas {
     let text = match handle {
         Handle::Corner(..) => {
@@ -2463,6 +2562,15 @@ pub fn readout(handle: Handle, wall: &Wall) -> Canvas {
             tilt if tilt < 0.0 => format!("tilted {:.0}° up", -tilt),
             _ => "upright".to_owned(),
         },
+        Handle::Text => {
+            let cells = Cells::of(wall);
+            format!(
+                "Text {:.0}% · {} columns × {} rows",
+                wall.content_scale() * 100.0,
+                cells.columns,
+                cells.body
+            )
+        }
         _ => {
             let grid = wall.grid();
             format!("{} × {} slots", grid.columns, grid.rows)
@@ -2644,6 +2752,7 @@ pub fn hint_for(
         // The knob moved across bends, and the hinge moved up or down tilts.
         rows.push((format!("{grip} knob"), "↔ bend".to_owned(), false));
         rows.push((format!("{grip} hinge"), "↕ tilt".to_owned(), false));
+        rows.push((format!("{grip} aA"), "↔ text size".to_owned(), false));
         if wall.kind == WallKind::Added || (rights.locks && self::carried(wall, rights)) {
             rows.push((format!("{grip} bar"), "carry it".to_owned(), false));
         }

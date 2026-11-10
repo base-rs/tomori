@@ -635,7 +635,8 @@ pub enum ClientMessage {
         wall: String,
     },
     /// Change the wall `wall` for everyone in the space: its `grid` of slots, how large its slots are, `scale` times a
-    /// flat wall's, its `shape`, flat or curved, its `tilt`, and, for a wall an owner added or, where the server locks
+    /// flat wall's, its `shape`, flat or curved, its `tilt`, how large its panels' content is within its slots, its
+    /// `content_scale`, and, for a wall an owner added or, where the server locks
     /// walls, an environment's own wall that is unlocked, its `pose`. Each left out stays as it is. A locked wall is
     /// refused. Panels in slots it no longer has go into its nearest free slots, or else float where they were. Participants
     /// only, and only to a server whose [`crate::SpaceState::walls`] is set. See `design/projection.md`.
@@ -657,6 +658,11 @@ pub enum ClientMessage {
         /// positive with its top towards the front: `0` for upright. An older server ignores it, leaving it upright.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tilt: Option<f32>,
+        /// How large its panels' content is drawn within its slots, as a proportion of the text its slots give them,
+        /// within [`crate::wall::CONTENT_SCALES`] and no smaller than [`crate::Wall::least_content_scale`]: `1` for as
+        /// large. Its slots stay as they are. An older server ignores it, drawing its content as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_scale: Option<f32>,
         /// The wall's [`crate::Wall::version`] the client saw as the participant took hold of it, for a change made
         /// against what it showed, as by its handles: where the wall has changed since, as when another participant
         /// changed it, the server refuses the change, naming the wall in its [`ServerMessage::Error`], and sends the

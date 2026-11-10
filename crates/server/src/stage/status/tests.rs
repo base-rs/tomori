@@ -521,6 +521,7 @@ fn the_tomori_wall_s_edits_stand_over_a_status_wall_its_environment_stands_and_a
         aspect: None,
         radius: None,
         tilt: None,
+        content_scale: None,
     };
     let door = Walls {
         environment: "hall",
@@ -556,6 +557,7 @@ fn the_tomori_wall_s_edits_stand_over_a_status_wall_its_environment_stands_and_a
         aspect: Some(2.0),
         radius: Some(1.0),
         tilt: Some(10.0),
+        content_scale: None,
     };
     let beneath = wide.beneath();
     assert_eq!(

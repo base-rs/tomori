@@ -283,8 +283,9 @@ fn shorten(
 
 /// How a wall's slots are laid out, as the stage keeps it: its grid, how large its slots are, as a proportion of a flat
 /// wall's, the size of their text, their shape, as their width over their height, if it is not a standard slot's, and
-/// the radius of the arc it is curved along, if it is curved, and how far it tilts from upright, in degrees, if it does.
-/// A stage kept before walls tilted reads as upright.
+/// the radius of the arc it is curved along, if it is curved, how far it tilts from upright, in degrees, if it does,
+/// and how large its panels' content is within its slots, if it is not as large as they give it. A stage kept before
+/// walls tilted reads as upright, and one kept before content was scaled as drawn as it was.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub grid: Grid,
@@ -295,6 +296,8 @@ pub struct Layout {
     pub radius: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tilt: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_scale: Option<f32>,
 }
 
 impl Layout {
@@ -305,6 +308,7 @@ impl Layout {
         aspect: None,
         radius: Some(ARC_RADIUS),
         tilt: None,
+        content_scale: None,
     };
 
     /// Every other wall's unless it is changed: three columns of two rows, flat.
@@ -314,10 +318,12 @@ impl Layout {
         aspect: None,
         radius: None,
         tilt: None,
+        content_scale: None,
     };
 
     /// `wall`, laid out so, saying its grid and scale only where they are not its shape's, as an older client reads it,
-    /// its slots' aspect only where it is not a standard slot's, and its tilt only where it tilts.
+    /// its slots' aspect only where it is not a standard slot's, its tilt only where it tilts, and its content scale
+    /// only where it is not 1.
     pub(crate) fn apply(&self, wall: Wall) -> Wall {
         let shape = self
             .radius
@@ -325,7 +331,8 @@ impl Layout {
         let wall = wall
             .with_shape(shape)
             .with_aspect(self.aspect)
-            .with_tilt(self.tilt);
+            .with_tilt(self.tilt)
+            .with_content_scale(self.content_scale);
         if wall.grid() == self.grid && wall.scale() == self.scale {
             wall
         } else {
@@ -353,7 +360,8 @@ fn json_size(value: &impl Serialize) -> usize {
 }
 
 /// What a participant or the agent changes of a wall: each left out stays as it is. `radius` is `Some(None)` to flatten
-/// it, `aspect` `Some(None)` to give it standard slots, and `tilt`, in degrees, `Some(None)` to stand it upright.
+/// it, `aspect` `Some(None)` to give it standard slots, `tilt`, in degrees, `Some(None)` to stand it upright, and
+/// `content_scale` `Some(None)` to draw its content as large as its slots give it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WallChange {
     pub grid: Option<Grid>,
@@ -362,11 +370,12 @@ pub struct WallChange {
     pub radius: Option<Option<f32>>,
     pub pose: Option<Pose>,
     pub tilt: Option<Option<f32>>,
+    pub content_scale: Option<Option<f32>>,
 }
 
 impl WallChange {
     /// The change `SetWall` asks for, or why it cannot be one: a shape a server does not know is refused, an `aspect`
-    /// of 0 is a standard slot's, and a `tilt` of 0 upright.
+    /// of 0 is a standard slot's, a `tilt` of 0 upright, and a `content_scale` of 1 as large as its slots give it.
     pub fn new(
         grid: Option<Grid>,
         scale: Option<f32>,
@@ -374,6 +383,7 @@ impl WallChange {
         shape: Option<WallShape>,
         pose: Option<Pose>,
         tilt: Option<f32>,
+        content_scale: Option<f32>,
     ) -> Result<Self, &'static str> {
         let radius = match shape {
             None => None,
@@ -388,6 +398,7 @@ impl WallChange {
             radius,
             pose,
             tilt: tilt.map(|tilt| (tilt != 0.0).then_some(tilt)),
+            content_scale: content_scale.map(|scale| (scale != 1.0).then_some(scale)),
         })
     }
 }
@@ -595,6 +606,9 @@ pub const LOCKED: &str = "That wall is locked: ask an owner to unlock it.";
 
 /// What is refused of a change that would move or reshape a locked wall of the group of the wall changed.
 pub const GROUP_LOCKED: &str = "A wall of its group is locked, and would move with it: ask an owner to unlock it, or take this wall out of the group first.";
+
+/// What is refused of a content scale a wall cannot have.
+pub const CONTENT_SCALE: &str = "A wall's text is drawn from half to twice the size its slots give it, and never smaller than half a standard slot's: give it larger slots to make its text smaller still.";
 
 /// Where a participant puts a panel.
 #[derive(Clone, Debug, PartialEq)]
@@ -1901,6 +1915,13 @@ impl Stage {
         {
             return Err("A wall tilts at most 45° from upright, either way.");
         }
+        if let Some(content) = layout.content_scale
+            && !(content.is_finite()
+                && (wall.least_content_scale() - 1e-4..=layout::CONTENT_SCALES.1 + 1e-4)
+                    .contains(&content))
+        {
+            return Err(CONTENT_SCALE);
+        }
         let (width, height) = wall.size();
         if width > WALL_SIZE.0 + 1e-3 || height > WALL_SIZE.1 + 1e-3 {
             return Err(
@@ -1936,6 +1957,7 @@ impl Stage {
             aspect: before.aspect,
             radius: before.radius(),
             tilt: before.tilt,
+            content_scale: before.content_scale,
         };
         // A standard slot's shape, said, is none.
         let aspect = change
@@ -1953,6 +1975,23 @@ impl Stage {
                 .map(|tilt| (tilt * 10.0).round() / 10.0)
                 .filter(|tilt| tilt.is_nan() || *tilt != 0.0),
             radius: change.radius.unwrap_or(old.radius),
+            content_scale: None,
+        };
+        // As large as its slots give it, said, is none, and a content scale is kept to a hundredth, as its least is;
+        // one kept, of slots made so small that it would draw their text below the least, is kept at the least.
+        let least = Layout {
+            content_scale: None,
+            ..new
+        }
+        .apply(Wall::new(wall, kind, before.pose))
+        .least_content_scale();
+        let content = match change.content_scale {
+            Some(asked) => asked.map(|scale| (scale * 100.0).round() / 100.0),
+            None => old.content_scale.map(|kept| kept.max(least)),
+        };
+        let new = Layout {
+            content_scale: content.filter(|scale| scale.is_nan() || *scale != 1.0),
+            ..new
         };
         let pose = match (change.pose, kind) {
             (None, _) => before.pose,
@@ -5113,6 +5152,7 @@ mod tests {
             radius: Some(Some(4.0)),
             pose: None,
             tilt: None,
+            content_scale: None,
         };
         // Locked, as the environment has it, until an owner unlocks it, for the space in that environment.
         assert!(stage.view("s", &walls, 0).walls[1].is_locked());
@@ -5155,6 +5195,7 @@ mod tests {
             radius: Some(None),
             pose: None,
             tilt: None,
+            content_scale: None,
         };
         assert_eq!(stage.set_wall(&walls, "environment-0", back), Ok(true));
         assert!(stage.rooms["sky"].layouts.is_empty());
@@ -5468,6 +5509,10 @@ mod tests {
                 pose: Some(pose(1.0, 3.0)),
                 ..WallChange::default()
             },
+            WallChange {
+                content_scale: Some(Some(0.7)),
+                ..WallChange::default()
+            },
             WallChange::default(),
         ];
         for wall in [TOMORI_WALL, added.as_str()] {
@@ -5528,7 +5573,7 @@ mod tests {
             Some(-12.3)
         );
         assert_eq!(
-            WallChange::new(None, None, None, None, None, Some(0.0)).unwrap(),
+            WallChange::new(None, None, None, None, None, Some(0.0), None).unwrap(),
             tilted(None)
         );
         assert_eq!(stage.set_wall(&SKY, &wall, tilted(None)), Ok(true));
@@ -5568,6 +5613,143 @@ mod tests {
         let older: Layout =
             serde_json::from_value(serde_json::json!({"grid": [4, 1], "scale": 1.0})).unwrap();
         assert_eq!(older.tilt, None);
+    }
+
+    #[test]
+    fn a_wall_s_content_scale_is_kept_with_the_space_its_slots_and_panels_as_they_were_within_bounds()
+     {
+        let mut stage = Stage::default();
+        let wall = stage.add_wall(&SKY, &pose(0.0, 3.0), None).unwrap();
+        let id = stage.project(&SKY, content("on it"), Some([0.0, 1.5, 3.0]), 0);
+        let scaled = |scale: Option<f32>| WallChange {
+            content_scale: Some(scale),
+            ..WallChange::default()
+        };
+        let before = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
+        // Its text drawn smaller, its slots, their number and its panels stay as they were.
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(0.7))), Ok(true));
+        let view = stage.view("s", &SKY, 0);
+        let shown = view.wall(&wall).unwrap();
+        assert_eq!(shown.content_scale(), 0.7);
+        assert_eq!((shown.grid(), shown.size()), (before.grid(), before.size()));
+        assert_eq!(shown.slot_pose(0), before.slot_pose(0));
+        assert_eq!(view.panel(&id).unwrap().place, on(&wall, 0));
+        // Kept across a restart, and sent only where it is not 1.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept.view("s", &SKY, 0).walls, view.walls);
+        let json = serde_json::to_value(&view.walls).unwrap();
+        assert!((json[1]["content_scale"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+        assert!(json[0].get("content_scale").is_none(), "{json}");
+        // The same again changes nothing; it is kept to a hundredth, and 1, said, is none, keeping nothing.
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(0.7))), Ok(false));
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(1.234))), Ok(true));
+        assert_eq!(
+            stage.view("s", &SKY, 0).wall(&wall).unwrap().content_scale,
+            Some(1.23)
+        );
+        assert_eq!(
+            WallChange::new(None, None, None, None, None, None, Some(1.0)).unwrap(),
+            scaled(None)
+        );
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(None)), Ok(true));
+        assert_eq!(stage.rooms["sky"].walls[0].layout, None);
+        // Beyond half or twice, or nonsense, it is refused and nothing changes.
+        for refused in [0.49, 2.01, f32::NAN, f32::INFINITY, -1.0] {
+            assert_eq!(
+                stage.set_wall(&SKY, &wall, scaled(Some(refused))),
+                Err(CONTENT_SCALE),
+                "{refused}"
+            );
+        }
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(0.5))), Ok(true));
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(2.0))), Ok(true));
+        // Never smaller than half a standard slot's text: on slots of 0.7, at least 0.72, and on the smallest, 1.
+        let small = WallChange {
+            scale: Some(0.7),
+            content_scale: Some(Some(0.6)),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, small), Err(CONTENT_SCALE));
+        let small = WallChange {
+            content_scale: Some(Some(0.72)),
+            ..small
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, small), Ok(true));
+        // Its slots made smaller still, it keeps its text at the least they allow, rather than refuse them.
+        let smallest = WallChange {
+            scale: Some(0.5),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, smallest), Ok(true));
+        let shown = stage.view("s", &SKY, 0).wall(&wall).unwrap().clone();
+        assert_eq!((shown.scale(), shown.content_scale), (0.5, None));
+        // Grown again, its content scale stays as it was kept.
+        assert_eq!(
+            stage.set_wall(&SKY, &wall, scaled(Some(0.8))),
+            Err(CONTENT_SCALE)
+        );
+        let grown = WallChange {
+            scale: Some(2.0),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, grown), Ok(true));
+        assert_eq!(stage.set_wall(&SKY, &wall, scaled(Some(0.6))), Ok(true));
+        let resized = WallChange {
+            scale: Some(3.0),
+            grid: Some(Grid::new(4, 1).unwrap()),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&SKY, &wall, resized), Ok(true));
+        assert_eq!(
+            stage
+                .view("s", &SKY, 0)
+                .wall(&wall)
+                .unwrap()
+                .content_scale(),
+            0.6
+        );
+        // The Tomori wall, beneath the agent's home, keeps its slots' size but scales its content, kept for the space.
+        assert_eq!(
+            stage.set_wall(&SKY, TOMORI_WALL, scaled(Some(0.8))),
+            Ok(true)
+        );
+        let tomori = stage.view("s", &SKY, 0).wall(TOMORI_WALL).unwrap().clone();
+        assert_eq!(
+            (tomori.content_scale(), tomori.scale()),
+            (0.8, layout::ARC_SCALE)
+        );
+        assert_eq!(
+            stage.set_wall(&SKY, TOMORI_WALL, scaled(Some(0.7))),
+            Err(CONTENT_SCALE)
+        );
+        assert_eq!(stage.set_wall(&SKY, TOMORI_WALL, scaled(None)), Ok(true));
+        assert_eq!(stage.tomori_layout, None);
+        // An environment's own wall, unlocked, keeps it for the space in that environment, and put back, has none.
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        assert_eq!(
+            stage.set_wall(&walls, "environment-0", scaled(Some(0.6))),
+            Err(LOCKED)
+        );
+        assert!(
+            stage
+                .lock_wall(&walls, "environment-0", false, false)
+                .is_ok()
+        );
+        assert_eq!(
+            stage.set_wall(&walls, "environment-0", scaled(Some(0.6))),
+            Ok(true)
+        );
+        assert_eq!(stage.view("s", &walls, 0).walls[1].content_scale(), 0.6);
+        assert!(stage.lock_wall(&walls, "environment-0", true, true).is_ok());
+        assert_eq!(stage.view("s", &walls, 0).walls[1].content_scale, None);
+        // A layout kept before content was scaled draws it as large as its slots give it.
+        let older: Layout =
+            serde_json::from_value(serde_json::json!({"grid": [4, 1], "scale": 1.0})).unwrap();
+        assert_eq!(older.content_scale, None);
     }
 
     #[test]
@@ -5661,7 +5843,7 @@ mod tests {
         );
         // A standard slot's shape, said or as 0, is kept as none.
         assert_eq!(
-            WallChange::new(None, None, Some(0.0), None, None, None).unwrap(),
+            WallChange::new(None, None, Some(0.0), None, None, None, None).unwrap(),
             shaped(Some(None))
         );
         assert_eq!(stage.set_wall(&SKY, &wall, shaped(Some(None))), Ok(true));
@@ -5722,6 +5904,7 @@ mod tests {
                 radius,
                 pose: None,
                 tilt: None,
+                content_scale: None,
             }
         };
         for (change, error) in [
@@ -5783,7 +5966,7 @@ mod tests {
             Err("That wall is not here.")
         );
         assert_eq!(
-            WallChange::new(None, None, None, Some(WallShape::Unknown), None, None),
+            WallChange::new(None, None, None, Some(WallShape::Unknown), None, None, None),
             Err("Tomori does not know that shape of wall.")
         );
         assert_eq!(
@@ -5792,6 +5975,7 @@ mod tests {
                 Some(1.5),
                 Some(0.0),
                 Some(WallShape::Grid),
+                None,
                 None,
                 None
             ),
@@ -5855,6 +6039,7 @@ mod tests {
             aspect: None,
             radius: Some(3.0),
             tilt: None,
+            content_scale: None,
         };
         let wall = laid.add_wall(&SKY, &pose(0.0, 3.0), Some(layout)).unwrap();
         let view = laid.view("s", &SKY, 0);

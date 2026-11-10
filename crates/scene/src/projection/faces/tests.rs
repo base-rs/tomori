@@ -12,7 +12,7 @@ use tomori_protocol::{
 };
 
 use super::super::{
-    Controls, FRAME, HIGHLIGHT, Input, NEWEST, Projector, code_columns, editing, model,
+    Cells, Controls, FRAME, HIGHLIGHT, Input, NEWEST, Projector, code_columns, editing, model,
     scrolled_face, slot_frames,
 };
 use super::*;
@@ -327,6 +327,69 @@ fn what_a_panel_shows_or_its_size_changing_lays_it_out_again() {
     plotted.walls[1] = plotted.walls[1].clone().with_aspect(Some(0.5));
     projector.update(input(&plotted, HOME, None));
     assert_eq!(counts(), (laid + 8, drawn + 9));
+}
+
+#[test]
+fn a_wall_s_content_scale_lays_its_panels_out_again_at_their_cells_drawn_at_its_text_s_size_and_kept()
+ {
+    let mut shown = projection(panels());
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let standard = face(&projector, "text");
+    let (laid, drawn) = counts();
+    let model_of = |output: &crate::projection::Output, face: &Arc<Canvas>| {
+        output
+            .sheets
+            .iter()
+            .find(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|canvas| Arc::ptr_eq(canvas, face))
+            })
+            .and_then(|sheet| sheet.model)
+            .expect("drawn")
+    };
+    // Its text drawn at half, each of the wall's six panels is laid out again, once, at twice as many columns and
+    // rows, and drawn at half the size, filling the same slot.
+    shown.walls[1] = shown.walls[1].clone().with_content_scale(Some(0.5));
+    let output = projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 6, drawn + 6));
+    let cells = Cells::of(&shown.walls[1]);
+    assert_eq!(projector.faces["text"].sizes[0].fit, Fit::Slot(cells));
+    assert!(cells.columns >= 2 * Cells::STANDARD.columns, "{cells:?}");
+    assert!(
+        cells.code_columns >= 2 * Cells::STANDARD.code_columns,
+        "{cells:?}"
+    );
+    let smaller = face(&projector, "text");
+    let model = model_of(&output, &smaller);
+    assert!((model.x_axis.truncate().length() - 0.5).abs() < 1e-4);
+    let (slot_width, slot_height) = shown.walls[1].slot_size();
+    let (width, height) = smaller.size();
+    assert!(
+        width * 0.5 <= slot_width + 1e-4 && height * 0.5 <= slot_height + 1e-4,
+        "{width} {height}"
+    );
+    assert!(
+        width * 0.5 > slot_width * 0.95,
+        "it fills its slot: {width}"
+    );
+    // The same again lays out and draws nothing, and back as large as its slots give it, its faces at that size,
+    // kept, are shown again as they were.
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 6, drawn + 6));
+    shown.walls[1] = shown.walls[1].clone().with_content_scale(None);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 6, drawn + 6));
+    assert!(Arc::ptr_eq(&face(&projector, "text"), &standard));
+    // Drawn larger, at twice, each slot holds fewer cells than a standard one, but always a few words and some code.
+    shown.walls[1] = shown.walls[1].clone().with_content_scale(Some(2.0));
+    projector.update(input(&shown, HOME, None));
+    let larger = Cells::of(&shown.walls[1]);
+    assert_eq!(projector.faces["text"].sizes[0].fit, Fit::Slot(larger));
+    assert!(larger.columns < Cells::STANDARD.columns && larger.body < Cells::STANDARD.body);
+    assert!(larger.code_columns > super::super::GUTTER + super::super::CODE_ROOM - 1);
 }
 
 /// A patch counts on the age of every panel held, in seconds, but a panel shows its age in minutes, hours or days: one

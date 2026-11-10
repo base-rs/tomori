@@ -415,6 +415,7 @@ fn a_change_to_a_wall_from_a_version_since_changed_is_refused_and_redone_from_th
         shape: None,
         pose: None,
         tilt: Some(tilt),
+        content_scale: None,
         revision: Some(revision),
     };
     ada.send(&tilt(10.0, read));
@@ -492,6 +493,7 @@ fn a_change_to_a_wall_from_a_version_since_changed_is_refused_and_redone_from_th
         shape: None,
         pose: None,
         tilt: Some(20.0),
+        content_scale: None,
         revision: None,
     });
     ada.wait_for(|message| match message {
@@ -501,4 +503,123 @@ fn a_change_to_a_wall_from_a_version_since_changed_is_refused_and_redone_from_th
             .map(|_| ()),
         _ => None,
     });
+}
+
+/// The wall `message`, if it is an error, names as refused.
+fn refused_wall(message: &ServerMessage) -> Option<String> {
+    match message {
+        ServerMessage::Error { wall, .. } => wall.clone(),
+        _ => None,
+    }
+}
+
+/// The Tomori wall as `message`, if it is a projection, shows it.
+fn tomori_shown(message: &ServerMessage) -> Option<tomori_protocol::Wall> {
+    match message {
+        ServerMessage::Projection { projection } => projection.wall("tomori").cloned(),
+        _ => None,
+    }
+}
+
+#[test]
+fn the_agent_and_a_participant_scale_a_wall_s_content_within_its_slots_from_the_version_they_read()
+{
+    let server = TestServer::with_tokens_and_tools(false, |server| server);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
+    let mut ada = TestClient::open_with(
+        server.address,
+        &[("Authorization", &format!("Bearer {owner}"))],
+    );
+    ada.hello_projected("ada", "Ada");
+    ada.create_space("Studio");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&server.backend.started()[0]);
+    let tool = |name: &str, arguments: Value| call(&server, &token, &session, name, arguments);
+    let tomori = || {
+        eventually(|| {
+            let walls = tool("presence", json!({}))["structuredContent"]["walls"].clone();
+            walls[0].get("version").is_some().then(|| walls[0].clone())
+        })
+    };
+    // A message other than a projection shows no wall, and one other than an error refuses none.
+    assert!(tomori_shown(&ServerMessage::PairWaiting).is_none());
+    assert!(refused_wall(&ServerMessage::PairWaiting).is_none());
+    // As large as its slots give it, unless it says otherwise.
+    let read = tomori();
+    assert_eq!(read["content_scale"], 1.0);
+    assert_eq!(read["text_scale"], 0.7);
+    let read = read["version"].as_u64().unwrap();
+    // "Fit more on this wall": its text drawn smaller, its slots as they were, said in what it now is.
+    let changed = tool(
+        "set_wall",
+        json!({"wall": "Tomori wall", "content_scale": 0.8, "version": read}),
+    );
+    assert_ne!(changed["isError"], true, "{changed}");
+    let now = changed["structuredContent"]["now"].as_str().unwrap();
+    assert!(now.ends_with(", its text at 80%"), "{now}");
+    let wall = tomori();
+    assert_eq!(
+        (wall["content_scale"].as_f64(), wall["text_scale"].as_f64()),
+        (Some(0.8), Some(0.56))
+    );
+    assert_eq!(
+        (wall["columns"].as_u64(), wall["rows"].as_u64()),
+        (Some(6), Some(1))
+    );
+    let shown =
+        ada.wait_for(|message| tomori_shown(message).filter(|wall| wall.content_scale.is_some()));
+    assert_eq!((shown.content_scale(), shown.grid().columns), (0.8, 6));
+    // Never smaller than half a standard slot's text, nor beyond twice, nor anything but a number.
+    for refused in [0.6, 2.5] {
+        assert_eq!(
+            failure(&tool(
+                "set_wall",
+                json!({"wall": "Tomori wall", "content_scale": refused})
+            )),
+            "A wall's text is drawn from half to twice the size its slots give it, and never smaller than half a standard slot's: give it larger slots to make its text smaller still."
+        );
+    }
+    assert_eq!(
+        failure(&tool(
+            "set_wall",
+            json!({"wall": "Tomori wall", "content_scale": "small"})
+        )),
+        "content_scale is a number."
+    );
+    assert_eq!(
+        failure(&tool(
+            "set_wall",
+            json!({"wall": "Tomori wall", "content_scale": 1e300})
+        )),
+        "content_scale is a number, from 0.5 to 2."
+    );
+    // Ada's slider, let go from the version before the agent's change, is refused, naming the wall, and changes
+    // nothing.
+    let slider = |content_scale: f32, revision: u64| ClientMessage::SetWall {
+        wall: "tomori".into(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: None,
+        content_scale: Some(content_scale),
+        revision: Some(revision),
+    };
+    ada.send(&slider(1.2, read));
+    assert_eq!(ada.wait_for(refused_wall), "tomori");
+    // From the version she sees, it applies, for everyone.
+    let seen = tomori()["version"].as_u64().unwrap();
+    assert_eq!(seen, shown.version);
+    ada.send(&slider(1.2, seen));
+    ada.wait_for(|message| tomori_shown(message).filter(|wall| wall.content_scale == Some(1.2)));
+    assert_eq!(tomori()["content_scale"], 1.2);
+    // 1 is as large as its slots give it again, and says nothing of its text.
+    let back = tool(
+        "set_wall",
+        json!({"wall": "Tomori wall", "content_scale": 1}),
+    );
+    let now = back["structuredContent"]["now"].as_str().unwrap();
+    assert!(!now.contains("its text"), "{now}");
+    assert_eq!(tomori()["content_scale"], 1.0);
 }

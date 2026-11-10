@@ -162,6 +162,13 @@ pub struct Wall {
     /// draws standard slots at that scale, and so each panel at its text's size, smaller than its slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect: Option<f32>,
+    /// How large its panels' content is drawn within its slots, as a proportion of the text its `scale` gives them:
+    /// 1, unless it says otherwise, within [`layout::CONTENT_SCALES`] and never below [`Wall::least_content_scale`].
+    /// Smaller, each slot shows more and longer lines, as a big wall that holds more; larger, fewer, to read from
+    /// further. Its slots, their size and their number are the same whatever it is. An older client draws each panel at
+    /// 1, as it was. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_scale: Option<f32>,
     /// The group it is snapped into, if it is in one, named by the identity of the group's first wall: carrying any of
     /// its walls carries them all. An older client draws each wall alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +221,7 @@ impl Wall {
             grid: None,
             scale: None,
             aspect: None,
+            content_scale: None,
             group: None,
             joined: Vec::new(),
             locked: false,
@@ -297,6 +305,12 @@ impl Wall {
     /// positive tilt, or upright with `None`.
     pub fn with_tilt(mut self, tilt: Option<f32>) -> Self {
         self.tilt = tilt;
+        self
+    }
+
+    /// The wall, its panels' content drawn `content_scale` times the size its slots give it, or as large with `None`.
+    pub fn with_content_scale(mut self, content_scale: Option<f32>) -> Self {
+        self.content_scale = content_scale;
         self
     }
 }
@@ -1232,6 +1246,7 @@ mod tests {
                     shape: Some(WallShape::Arc { radius: 3.0 }),
                     pose: None,
                     tilt: None,
+                    content_scale: None,
                     revision: None,
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "grid": [4, 1],
@@ -1246,6 +1261,7 @@ mod tests {
                     shape: Some(WallShape::Grid),
                     pose: Some(pose),
                     tilt: Some(-12.0),
+                    content_scale: None,
                     revision: None,
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "scale": 1.5,
@@ -1541,6 +1557,7 @@ mod tests {
             shape: None,
             pose: None,
             tilt: Some(10.0),
+            content_scale: None,
             revision: Some(7),
         };
         let json = serde_json::to_value(&change).unwrap();

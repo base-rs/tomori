@@ -4086,6 +4086,7 @@ impl Conversation {
             shape: change.shape,
             pose: change.pose,
             tilt: change.tilt,
+            content_scale: change.content_scale,
             // The version of the wall as it was taken hold of, so that a change made against it never undoes another
             // made meanwhile; an older server keeps none.
             revision: change.version.filter(|version| *version > 0),

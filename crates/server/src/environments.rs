@@ -238,6 +238,7 @@ impl EnvironmentWall {
                 ),
             ),
             tilt: within(self.tilt, tomori_protocol::wall::TILTS).filter(|tilt| *tilt != 0.0),
+            content_scale: None,
         };
         let fits = |layout: crate::stage::Layout| {
             let wall = layout.apply(tomori_protocol::Wall::new(

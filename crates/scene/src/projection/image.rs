@@ -21,9 +21,10 @@ const IMAGE_ROWS: usize = 6;
 /// Where the image is, before it arrives: a little lighter than the face, so that its shape is seen.
 const WAITING: [f32; 4] = [0.09, 0.11, 0.15, 0.9];
 
-/// The caption, wrapped at `columns`, on at most `most` rows, the last ending with "…" where it is longer.
+/// The caption, wrapped at `columns`, on at most `most` rows, the last ending with "…" where it is longer: none on
+/// none, as in a slot whose text is drawn so large that it has no rows to spare beside its image.
 fn caption(panel: &Panel, columns: usize, most: usize) -> Vec<Vec<crate::ui_text::Cell>> {
-    if panel.body.trim().is_empty() {
+    if panel.body.trim().is_empty() || most == 0 {
         return Vec::new();
     }
     let mut rows = wrap(

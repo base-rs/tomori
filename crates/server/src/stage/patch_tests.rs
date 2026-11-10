@@ -204,7 +204,8 @@ fn each_change_to_a_stage_is_its_patch() {
     assert_eq!(kinds(&patch), ["place"]);
     // A participant changes the wall's grid: only the wall is sent, its panel keeping its column and row.
     let patch = change(&mut stage, &walls, |stage| {
-        let change = WallChange::new(Grid::new(4, 2), None, None, None, None, Some(10.0)).unwrap();
+        let change =
+            WallChange::new(Grid::new(4, 2), None, None, None, None, Some(10.0), None).unwrap();
         assert!(stage.set_wall(&walls, &wall, change).unwrap());
     });
     assert_eq!(kinds(&patch), ["wall", "place"], "{:?}", patch.ops);
@@ -292,7 +293,8 @@ fn a_stage_s_changes_patched_in_turn_are_what_it_shows() {
                     7 => {
                         let grid =
                             Grid::new(1 + random.below(4) as u32, 1 + random.below(2) as u32);
-                        let change = WallChange::new(grid, None, None, None, None, None).unwrap();
+                        let change =
+                            WallChange::new(grid, None, None, None, None, None, None).unwrap();
                         stage.set_wall(&walls, &wall, change)
                     }
                     8 => panel.map_or(Ok(false), |panel| {
@@ -406,7 +408,7 @@ fn patches_are_far_smaller_than_the_projection_whole() {
             stage.revise(&walls, &listed, updated, None, 5).unwrap();
         });
         let edit = change(stage, &walls, |stage| {
-            let change = WallChange::new(None, None, None, None, None, Some(8.0)).unwrap();
+            let change = WallChange::new(None, None, None, None, None, Some(8.0), None).unwrap();
             stage.set_wall(&walls, &wall, change).unwrap();
         });
         let mut shown = view(stage, &walls, FIRST);
