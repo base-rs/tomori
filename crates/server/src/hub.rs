@@ -796,9 +796,12 @@ struct SpaceRecord {
     seating: std::cell::RefCell<crate::seating::Seating>,
     /// Where its workers were placed, at the anchors of each environment, by environment, kept with the space.
     places: crate::places::Kept,
-    /// When the space was last bound to its environment, from which a placement at an anchor its environment's side
-    /// has not placed again waits [`crate::places::GRACE`].
+    /// When the space was last bound to its environment, or its side began a binding, from which a placement at an
+    /// anchor its environment's side has not placed again waits [`crate::places::GRACE`].
     anchored: Instant,
+    /// The binding its environment's side last ran for, if one did, so that a side begun anew, as the space reopens,
+    /// starts the grace again.
+    bound: Option<u64>,
     /// The anchor the agent went to of its own accord, by name, and where it stands there, while it still stands there.
     agent_at: Option<(String, tomori_protocol::Pose)>,
     /// How often the agent has placed workers and moved itself of its own accord, for this run only.
@@ -2479,10 +2482,18 @@ impl Hub {
         }
         // What a side kept is forgotten with its binding, so that nobody joining is sent another environment's state, or an earlier run's.
         for record in &mut state.spaces {
-            if record.channel.as_ref().is_some_and(|channel| {
-                self.server_sides.binding(&record.model.id) != Some(channel.binding)
-            }) {
+            let binding = self.server_sides.binding(&record.model.id);
+            if record
+                .channel
+                .as_ref()
+                .is_some_and(|channel| binding != Some(channel.binding))
+            {
                 record.channel = None;
+            }
+            // A side begun anew, as the space reopens, places its anchors again, so placements wait for them from now.
+            if binding != record.bound {
+                record.bound = binding;
+                record.anchored = Instant::now();
             }
         }
     }
@@ -5583,6 +5594,7 @@ impl Hub {
             seating: Default::default(),
             places: Default::default(),
             anchored: Instant::now(),
+            bound: None,
             agent_at: None,
             rates: Default::default(),
             active: None,
@@ -5746,6 +5758,7 @@ impl Hub {
                     seating: Default::default(),
                     places: kept.places,
                     anchored: Instant::now(),
+                    bound: None,
                     agent_at: None,
                     rates: Default::default(),
                     active: kept.active,

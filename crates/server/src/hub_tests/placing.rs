@@ -523,6 +523,33 @@ fn placements_are_kept_by_anchor_name_and_wait_for_the_side_to_place_its_anchors
 }
 
 #[test]
+fn placements_wait_while_the_space_runs_no_side_and_from_when_a_side_begins_anew() {
+    let (hub, space, _commands, outlet, _ada) = yard(1);
+    assert_eq!(outlet.place_anchor(rack("rack/a12", 4.0)), Ok(()));
+    hub.agent_place_worker("session", "ses_00", "anchor rack/a12", None)
+        .unwrap();
+    let (placed, bound) = {
+        let state = hub.lock();
+        let record = state.space(&space).unwrap();
+        (record.anchored, record.bound)
+    };
+    // Its side's binding is the one the grace counts from.
+    assert_eq!(bound, Some(outlet.binding));
+    // Closed, its side stops, which is not a removal: however long it stays closed, the placement waits.
+    hub.space_ended(&space, None);
+    let record = |hub: &Hub| {
+        let state = hub.lock();
+        let record = state.space(&space).unwrap();
+        (record.anchored, record.bound, record.placements().len())
+    };
+    let (closed, bound, kept) = record(&hub);
+    assert!(closed >= placed);
+    assert_eq!((bound, kept), (None, 1));
+    hub.sweep_places(closed + crate::places::GRACE * 10);
+    assert_eq!(record(&hub).2, 1);
+}
+
+#[test]
 fn the_agent_at_an_anchor_that_goes_stays_where_it_is_and_the_home_anchor_is_home() {
     let (hub, space, _commands, outlet, _ada) = yard(0);
     let start = Instant::now();

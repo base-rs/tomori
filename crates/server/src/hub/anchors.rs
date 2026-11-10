@@ -507,7 +507,10 @@ impl Hub {
                     .into_iter()
                     .map(|anchor| anchor.name)
                     .collect();
-                let waited = now.saturating_duration_since(record.anchored) >= crate::places::GRACE;
+                // A closed space, or one restoring, runs no side, which is not a removal: its placements wait.
+                let waited = !record.model.is_closed()
+                    && !record.restoring
+                    && now.saturating_duration_since(record.anchored) >= crate::places::GRACE;
                 let before = record.placements().to_vec();
                 let mut gone = Vec::new();
                 record.placements_mut().retain(|placement| {

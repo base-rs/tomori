@@ -314,7 +314,6 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
 /// What `requested_by` is, as each tool that needs it describes it. See `design/security.md`.
 const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\", or, where someone else in the space shares their name, their id from presence, such as Ada#23. Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
 
-/// Every tool, as `tools/list` describes it.
 /// The `place_worker` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
 fn place_worker_tool(change: &Value) -> Value {
     json!({
@@ -325,7 +324,7 @@ fn place_worker_tool(change: &Value) -> Value {
             "properties": {
                 "worker": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
                 "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
-                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed to move a worker a participant placed, and frees a placement from the limits on your own. {REQUESTED_BY}") },
+                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Only when someone's words asked for this placement: needed to move a worker a participant placed, and frees it from the limits on your own. Leave it out when you place a worker of your own accord. {REQUESTED_BY}") },
             },
             "required": ["worker", "place"],
         },
@@ -333,6 +332,7 @@ fn place_worker_tool(change: &Value) -> Value {
     })
 }
 
+/// Every tool, as `tools/list` describes it.
 fn tools() -> Value {
     let read = json!({ "readOnlyHint": true, "openWorldHint": false });
     let change = json!({
@@ -505,12 +505,12 @@ fn tools() -> Value {
         layouts[1],
         {
             "name": "move_agent",
-            "description": "Move yourself, the agent, in your space, for everyone in it: place is home, back to the home the space's environment gives you; stay, staying where you stand, following nobody and not going home on your own until someone sends you home; near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked; or anchor NAME, into the cluster at one of the anchors presence lists, facing whoever watches it, as when someone asks you to go to a rack. Where the space has you follow the speaker, you already go to whoever you answer, so don't call this for that: call it when someone asks you to stay, to go home, to come to someone or to go to a place, and say where you go. Of your own accord, you move to an anchor at most once every 20 seconds and six times in ten minutes; requested_by, naming whoever asked, frees it. Your voice comes from where you stand. presence says where you are and how you move.",
+            "description": "Move yourself, the agent, in your space, for everyone in it: place is home, back to the home the space's environment gives you; stay, staying where you stand, following nobody and not going home on your own until someone sends you home; near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked; or anchor NAME, into the cluster at one of the anchors presence lists, facing whoever watches it, as when someone asks you to go to a rack. Where the space has you follow the speaker, you already go to whoever you answer, so don't call this for that: call it when someone asks you to stay, to go home, to come to someone or to go to a place, and say where you go. Of your own accord, you move to an anchor at most once every 20 seconds and six times in ten minutes; requested_by, naming whoever asked you to go, frees one they asked for. Your voice comes from where you stand. presence says where you are and how you move.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
-                    "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES },
+                    "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Only when someone's words asked you to go there: frees the move from the limits on your own. Leave it out otherwise. {REQUESTED_BY}") },
                 },
                 "required": ["place"],
             },
