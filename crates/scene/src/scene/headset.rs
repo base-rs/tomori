@@ -1665,7 +1665,8 @@ mod tests {
 
     #[test]
     fn without_a_right_controller_the_attractor_is_drawn_where_the_trigger_pulls() {
-        let mut rig = Rig::new(joined());
+        // Outside a space, where the trigger still draws the swarm.
+        let mut rig = Rig::new(lobby(ConnectionRole::Owner));
         let position = Vec3::new(0.2, 1.0, -0.4);
         let controls = Controls {
             controller: Some(position),

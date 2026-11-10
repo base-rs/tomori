@@ -503,6 +503,15 @@ impl Retention {
         }
     }
 
+    /// Whether nobody hears speech played again or caught up on, nor has speech held for them: what the agent said has
+    /// been heard, as far as what is kept goes. See `design/environments.md`.
+    pub fn quiet(&self) -> bool {
+        !self
+            .listeners
+            .values()
+            .any(|listener| matches!(listener.state, State::Held { .. } | State::Streaming(_)))
+    }
+
     /// Whether speech has become held for any listener, or stopped being held, since they were last told, so that the
     /// pacer must be woken to tell them.
     pub fn held_changed(&self) -> bool {

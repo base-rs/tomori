@@ -480,7 +480,7 @@ fn tools() -> Value {
         layouts[1],
         {
             "name": "move_agent",
-            "description": "Move yourself, the agent, in your space, for everyone in it, as a participant summons you with their controller's trigger: place is home, back to the home the space's environment gives you, or near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked. Your voice comes from where you stand. Go only when someone asks, such as \"come here\" or \"go back to your home spot\", and stay where you are summoned until someone sends you home; your workers and the Tomori wall, with its panels, come with you, and go home with you. presence says where you are.",
+            "description": "Move yourself, the agent, in your space, for everyone in it: place is home, back to the home the space's environment gives you; stay, staying where you stand, following nobody and not going home on your own until someone sends you home; or near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked. Where the space has you follow the speaker, you already go to whoever you answer, so don't call this for that: call it when someone asks you to stay, to go home or to come to someone, and say where you go. Your voice comes from where you stand. presence says where you are and how you move.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -30,9 +30,9 @@ pub struct Input {
     pub visual: Visual,
     /// Agent speech is playing on this device.
     pub speaking: bool,
-    /// Where the agent stands and which way it faces: where a participant summoned it, or else its home, the joined
-    /// space's agent anchor, or the default. It may change at once, and an avatar follows it without jumping, unless
-    /// it is `appearing`.
+    /// Where the agent stands and which way it faces: where it went, or was called, or else its home, the joined
+    /// space's agent anchor, or the default. It may change at once; the coordinator glides an avatar's anchor there, by
+    /// `via` or streaming, so that it never jumps, unless it is `appearing`. See `crate::glide`.
     pub anchor: Anchor,
     /// Whether the agent appears at `anchor` at once this frame, rather than moving there, as when a space opens with
     /// it at its home, or the space changes environment. See `design/environments.md`.
@@ -44,6 +44,10 @@ pub struct Input {
     pub attention: Option<Vec3>,
     /// The point the trigger pulls towards, while it attracts, which the swarm is attracted to and a model may turn to.
     pub attractor: Option<Vec3>,
+    /// The point the agent passes through on its way to `anchor`, where the server gives one.
+    pub via: Option<Vec3>,
+    /// Whether the agent streams to `anchor` as a flock, faster than it glides, as far away.
+    pub stream: bool,
     /// The seconds since the last frame.
     pub dt: f32,
 }
@@ -59,8 +63,17 @@ impl Input {
             head: None,
             attention: None,
             attractor: None,
+            via: None,
+            stream: false,
             dt,
         }
+    }
+
+    /// This input, going to its anchor by `via`, and streaming there where `stream` says.
+    pub fn going(mut self, via: Option<Vec3>, stream: bool) -> Self {
+        self.via = via;
+        self.stream = stream;
+        self
     }
 
     /// This input, with the agent appearing at its anchor at once, or not.
@@ -241,6 +254,8 @@ pub struct Coordinator {
     still: Swarm,
     voices: Vec<[f32; 3]>,
     departures: Vec<[f32; 3]>,
+    /// Where the agent's place is as it glides to where it is to stand. See `crate::glide`.
+    glide: crate::glide::Glide,
     /// What the avatar shown showed and the sphere it stood within, as of the last frame.
     drawn: Option<Drawn>,
     bounds: Sphere,
@@ -259,6 +274,7 @@ impl Default for Coordinator {
             still,
             voices: Vec::with_capacity(crate::swarm::AGENT_COUNT),
             departures: Vec::with_capacity(crate::swarm::AGENT_COUNT),
+            glide: crate::glide::Glide::default(),
             drawn: None,
         }
     }
@@ -313,6 +329,15 @@ impl Coordinator {
     /// A frame: the swarm and the avatar shown move on as `input` says, and say where the agent is heard from and
     /// workers fly from.
     pub fn update(&mut self, input: &Input) {
+        // Every avatar is given its place as it glides there, never where it is to stand at once.
+        let anchor = self.glide.step(
+            input.anchor,
+            input.via,
+            input.stream,
+            input.appearing,
+            input.dt,
+        );
+        let input = &Input { anchor, ..*input };
         // Unseen, the swarm is not attracted by the trigger, so that it glides to the anchor, to show there again.
         let unseen = Input {
             attractor: None,
@@ -487,12 +512,25 @@ mod tests {
     fn the_coordinator_shows_the_swarm_exactly_by_default() {
         let mut coordinator = Coordinator::default();
         let mut swarm = Swarm::default();
+        // Its place glides where it is to stand, as every avatar's does.
+        let mut glide = crate::glide::Glide::default();
         assert!(coordinator.shown().is_none());
         for input in frames() {
             coordinator.choose(None);
             coordinator.update(&input);
             swarm.set_visual(input.visual, input.dt);
-            swarm.set_anchor(input.anchor);
+            let anchor = glide.step(
+                input.anchor,
+                input.via,
+                input.stream,
+                input.appearing,
+                input.dt,
+            );
+            if input.appearing {
+                swarm.appear_at(anchor);
+            } else {
+                swarm.set_anchor(anchor);
+            }
             swarm.step(input.dt, input.attractor);
             let agents: Vec<[f32; 3]> = swarm
                 .agents

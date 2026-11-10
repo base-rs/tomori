@@ -357,6 +357,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         environment: "sky".into(),
         attribution: true,
         brief: false,
+        movement: None,
         instructions: "Mind the docs.".into(),
         closed: None,
         closed_order: None,

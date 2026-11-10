@@ -321,11 +321,36 @@ pub struct SpaceState {
     /// older servers, whose clients arrange the workers about the agent's home. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summoner: Option<[f32; 3]>,
-    /// Whether the server keeps where the agent is summoned to, taking [`crate::ClientMessage::PlaceAgent`] from a
-    /// participant. False from older servers; a client sends it only when this is set, and otherwise lets the swarm
-    /// go back as the trigger is let go.
+    /// Whether the server keeps where a participant's trigger summons the agent to, taking
+    /// [`crate::ClientMessage::PlaceAgent`] with a place from a participant. Set only by older servers: since the agent
+    /// follows whoever speaks to it, a server no longer keeps summons, and a client sends none. See
+    /// `design/environments.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub summons: bool,
+    /// How the space's agent moves, an owner's setting, kept with the space: following whoever speaks to it, only
+    /// when asked, or staying home, and how long after a conversation goes quiet it goes home. A server that sends it
+    /// accepts [`crate::ClientMessage::CallAgent`], [`crate::ClientMessage::SetAgentMovement`] from an owner, and
+    /// [`crate::ClientMessage::PlaceAgent`] without a place to send the agent home; a client sends those only to such a
+    /// server. None from older servers. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement: Option<AgentMovement>,
+    /// Whether the agent is pinned where it stands, by a participant's **Call Tomori here** or the agent's own
+    /// `move_agent stay`: it follows nobody and does not go home on its own until it is sent home. See
+    /// `design/environments.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Where the agent turns to face, in the space's coordinates, while it does, rather than the way it stands facing:
+    /// the eyes of whoever began speaking to it. Turned only about the vertical. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facing: Option<[f32; 3]>,
+    /// A point the agent passes through on its way to where it stands, in the space's coordinates, where the straight
+    /// way there passes through someone, a wall or the environment's scenery. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<[f32; 3]>,
+    /// Whether the agent streams to where it stands as a flock, at a worker's flight speed, rather than gliding: far
+    /// away, or where no way there is clear. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
     /// The avatar that represents the space's agent, as its backend names it, by identifier: none for the swarm, from
     /// older servers, and when the server no longer offers the backend. A client shows the swarm for one its build
     /// lacks, and says so. See `design/avatars.md`.
@@ -441,6 +466,105 @@ pub enum SpeechSetting {
     #[default]
     #[serde(other)]
     Unknown,
+}
+
+/// How a space's agent moves about the space, an owner's setting. See `design/environments.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Movement {
+    /// It comes to whoever it is talking with, standing beside them, and goes home once the conversation is quiet.
+    Follow,
+    /// It moves only when someone asks it, by voice or with **Call Tomori here**, and stays where it goes until it is
+    /// sent home. The default.
+    #[default]
+    Asked,
+    /// It never leaves its home, as for a presentation or a cramped environment.
+    Home,
+    /// A setting a newer server sends that this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a space's agent moves, and when it goes home on its own: [`SpaceState::movement`]. See
+/// `design/environments.md`.
+///
+/// ```
+/// use tomori_protocol::{AgentMovement, Movement};
+///
+/// let movement = AgentMovement::default();
+/// assert_eq!(movement.mode, Movement::Asked);
+/// assert_eq!(movement.return_after, Some(90));
+/// // Out of bounds, the delay is brought within them.
+/// assert_eq!(AgentMovement::new(Movement::Follow, Some(5)).return_after, Some(30));
+/// assert_eq!(AgentMovement::new(Movement::Follow, None).next_return().return_after, Some(30));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AgentMovement {
+    #[serde(default)]
+    pub mode: Movement,
+    /// How long, in seconds, a conversation stays quiet before a following agent goes home, from
+    /// [`RETURN_SHORTEST`] to [`RETURN_LONGEST`], or never. Absent means never.
+    #[serde(default)]
+    pub return_after: Option<u32>,
+}
+
+/// The shortest delay after which a following agent goes home, in seconds.
+pub const RETURN_SHORTEST: u32 = 30;
+
+/// The longest delay after which a following agent goes home, in seconds, short of never.
+pub const RETURN_LONGEST: u32 = 600;
+
+/// The delay after which a following agent goes home by default, in seconds.
+pub const RETURN_AFTER: u32 = 90;
+
+/// The delays a client steps through, in seconds, before never.
+pub const RETURN_CHOICES: [u32; 6] = [30, 60, 90, 120, 300, 600];
+
+impl Default for AgentMovement {
+    fn default() -> Self {
+        Self {
+            mode: Movement::default(),
+            return_after: Some(RETURN_AFTER),
+        }
+    }
+}
+
+impl AgentMovement {
+    /// Moving as `mode` says, going home after `return_after` seconds, brought within its bounds, or never.
+    pub fn new(mode: Movement, return_after: Option<u32>) -> Self {
+        Self {
+            mode,
+            return_after: return_after.map(|delay| delay.clamp(RETURN_SHORTEST, RETURN_LONGEST)),
+        }
+    }
+
+    /// This setting, with the next mode a client steps to: following, only when asked, staying home, then following
+    /// again.
+    pub fn next_mode(self) -> Self {
+        let mode = match self.mode {
+            Movement::Follow => Movement::Asked,
+            Movement::Asked => Movement::Home,
+            Movement::Home | Movement::Unknown => Movement::Follow,
+        };
+        Self { mode, ..self }
+    }
+
+    /// This setting, with the next delay a client steps to, of [`RETURN_CHOICES`] and then never, and then the first
+    /// again.
+    pub fn next_return(self) -> Self {
+        let return_after = match self.return_after {
+            None => Some(RETURN_CHOICES[0]),
+            Some(delay) => RETURN_CHOICES
+                .iter()
+                .copied()
+                .find(|choice| *choice > delay),
+        };
+        Self {
+            return_after,
+            ..self
+        }
+    }
 }
 
 /// Whether a participant is wearing their device and attending to Tomori, as their client reports it. See

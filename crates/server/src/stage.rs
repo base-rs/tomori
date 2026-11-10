@@ -33,6 +33,7 @@ mod layouts;
 mod placement;
 mod published;
 pub(crate) use beside::spot as beside_spot;
+pub(crate) use beside::{SIZE as BESIDE_SIZE, level_ahead};
 pub(crate) mod travel;
 
 pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};

@@ -1179,66 +1179,42 @@ pub(crate) fn before(head: &Pose) -> Pose {
     )
 }
 
-/// How far from where `tomori_protocol::entourage::summoned` would stand it a summons a client stood may be, in metres,
-/// and stand where the client stood it: as far as their eyes move between the presence the server last had and the
-/// client's own.
-const SUMMONED_WITHIN: f32 = 0.15;
-
-/// Where the agent a participant summoned to `at` stands, for everyone: where their client stood it, if that is within
-/// [`SUMMONED_WITHIN`] of where `tomori_protocol::entourage::summoned` stands it about their eyes, `eyes`, as the server
-/// last knew them, and otherwise there, so that a client from before it, which left it nearer or lower, sees it with
-/// room for its wall beneath it; or, where the server does not know their eyes, where they left it, no lower than
-/// `entourage::LOWEST_AGENT` above the floor. See `design/environments.md`.
-pub(crate) fn summoned(at: &Pose, eyes: Option<[f32; 3]>) -> Pose {
-    match eyes.filter(|eyes| eyes.iter().all(|value| value.is_finite())) {
-        Some(eyes) => {
-            let rule = tomori_protocol::entourage::summoned(
-                at.position,
-                eyes,
-                tomori_protocol::entourage::FLOOR,
-            );
-            let off = (0..3)
-                .map(|axis| (rule.position[axis] - at.position[axis]).powi(2))
-                .sum::<f32>()
-                .sqrt();
-            if off <= SUMMONED_WITHIN { *at } else { rule }
-        }
-        None => {
-            let [x, y, z] = at.position;
-            Pose {
-                position: [
-                    x,
-                    y.max(
-                        tomori_protocol::entourage::FLOOR
-                            + tomori_protocol::entourage::LOWEST_AGENT,
-                    ),
-                    z,
-                ],
-                ..*at
-            }
-        }
-    }
-}
-
 /// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, which way it faces, whether it is
-/// at its home, and where that is. See `design/environments.md`.
-pub(crate) fn agent(anchors: &tomori_protocol::Anchors, summoned: Option<Pose>) -> Value {
-    let home = anchors.agent.unwrap_or_else(|| {
-        Pose::at(crate::stage::AGENT).facing_towards([0.0, crate::stage::AGENT[1], 0.0])
-    });
+/// at its home, and where that is; whether it is at home, following someone, pinned or away where it was asked to go;
+/// and how the space lets it move. See `design/environments.md`.
+pub(crate) fn agent(
+    anchors: &tomori_protocol::Anchors,
+    summoned: Option<Pose>,
+    pinned: bool,
+    movement: tomori_protocol::AgentMovement,
+) -> Value {
+    let home = crate::hub::agent_home(anchors);
     let at = summoned.unwrap_or(home);
     // The way it faces, its +Z, clockwise from −Z.
     let facing = rotate(at.orientation, [0.0, 0.0, 1.0]);
+    let mode = match (pinned, summoned, movement.mode) {
+        (true, _, _) => "pinned",
+        (false, None, _) => "home",
+        (false, Some(_), tomori_protocol::Movement::Follow) => "following",
+        (false, Some(_), _) => "away",
+    };
+    let movement = match movement.mode {
+        tomori_protocol::Movement::Follow => "follows the speaker",
+        tomori_protocol::Movement::Home => "stays home",
+        _ => "moves only when asked",
+    };
     json!({
         "position": position(at.position),
         "facing_yaw": round(angles(facing).0, 0),
         "at_home": summoned.is_none(),
         "home": position(home.position),
+        "mode": mode,
+        "movement": movement,
     })
 }
 
 /// How the `presence` tool's numbers are to be read.
-pub(crate) const COORDINATES: &str = "Positions are in the space's scene coordinates, in metres: y is up, and home, where everyone arrives, wherever the environment has them arrive, is at the origin, facing -z. The agent stands at its own home, which the environment chooses, unless someone summoned it elsewhere. Yaw is in degrees clockwise from -z as seen from above, so 90 faces +x; pitch is in degrees above the horizontal. A wall's facing_yaw is the way its face looks. Panels hold their wall's slots, numbered from its top left as seen from in front, left to right then down.";
+pub(crate) const COORDINATES: &str = "Positions are in the space's scene coordinates, in metres: y is up, and home, where everyone arrives, wherever the environment has them arrive, is at the origin, facing -z. The agent stands at its own home, which the environment chooses, unless it went to someone or was called elsewhere. Yaw is in degrees clockwise from -z as seen from above, so 90 faces +x; pitch is in degrees above the horizontal. A wall's facing_yaw is the way its face looks. Panels hold their wall's slots, numbered from its top left as seen from in front, left to right then down.";
 
 #[cfg(test)]
 mod tests;

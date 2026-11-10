@@ -223,8 +223,14 @@ pub enum MenuKey {
     Pill,
     /// Turn travel off on this headset, staying room scale, or on again.
     Travel,
-    /// Send the agent, summoned away from its home, back home, for everyone.
+    /// Send the agent, away from its home, back home, for everyone.
     AgentHome,
+    /// Bring the agent to the participant and pin it there, for everyone.
+    CallAgent,
+    /// Step how the agent moves, for everyone, as an owner.
+    AgentMovement,
+    /// Step how long the agent waits, quiet, before going home, for everyone, as an owner.
+    AgentReturn,
     /// Add a projection wall where the participant stands, for everyone, as an owner.
     AddWall,
     /// Remove the added projection wall nearest the participant, for everyone, as an owner.
@@ -305,9 +311,14 @@ pub struct Model {
     pub pill: bool,
     /// Whether the participant travels on this headset, where the space's environment allows travel; `None` where it does not, which offers no setting. See `design/locomotion.md`.
     pub travel: Option<bool>,
-    /// Whether the agent stands away from its home, where a participant summoned it, and this participant may send it
-    /// home, which offers sending it home. See `design/environments.md`.
+    /// Whether the agent stands away from its home, or is pinned, and this participant may send it home, which offers
+    /// sending it home. See `design/environments.md`.
     pub agent_away: bool,
+    /// Whether this participant may call the agent to them, which offers **Call Tomori here**: where the space lets it
+    /// move, unless it is pinned near them already. See `design/hand-menu.md`.
+    pub calls: bool,
+    /// How the agent moves, on a server that says, and whether this participant, an owner, may change it.
+    pub movement: Option<(tomori_protocol::AgentMovement, bool)>,
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
@@ -396,6 +407,12 @@ pub enum Choice {
     Travel,
     /// Send the agent home, for everyone.
     AgentHome,
+    /// Bring the agent here and pin it, for everyone.
+    CallAgent,
+    /// Step how the agent moves to the next way, for everyone.
+    AgentMovement,
+    /// Step how long the agent waits before going home to the next delay, for everyone.
+    AgentReturn,
     /// Add a projection wall here, for everyone.
     AddWall,
     /// Remove the added wall nearest here, for everyone.
@@ -706,7 +723,29 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         );
                     }
                 }
-                // Only while a participant has summoned the agent away from its home.
+                // How the agent moves, which only an owner changes; calling it, and sending it home while it is away.
+                if model.movement.is_some() || model.agent_away {
+                    text(&mut items, MenuKind::Heading, "Tomori, for everyone".into());
+                }
+                if let Some((movement, owner)) = model.movement {
+                    let moves = movement_label(movement.mode);
+                    if owner {
+                        button(&mut items, MenuKey::AgentMovement, moves.into());
+                    } else {
+                        text(&mut items, MenuKind::Text, moves.into());
+                    }
+                    if movement.mode == tomori_protocol::Movement::Follow {
+                        let returns = return_label(movement.return_after);
+                        if owner {
+                            button(&mut items, MenuKey::AgentReturn, returns);
+                        } else {
+                            text(&mut items, MenuKind::Text, returns);
+                        }
+                    }
+                }
+                if model.calls {
+                    button(&mut items, MenuKey::CallAgent, "Call Tomori here".into());
+                }
                 if model.agent_away {
                     button(&mut items, MenuKey::AgentHome, "Send Tomori home".into());
                 }
@@ -1135,6 +1174,9 @@ impl HandMenu {
             MenuKey::Pill => Some(Choice::Pill),
             MenuKey::Travel => Some(Choice::Travel),
             MenuKey::AgentHome => Some(Choice::AgentHome),
+            MenuKey::CallAgent => Some(Choice::CallAgent),
+            MenuKey::AgentMovement => Some(Choice::AgentMovement),
+            MenuKey::AgentReturn => Some(Choice::AgentReturn),
             MenuKey::AddWall => Some(Choice::AddWall),
             MenuKey::RemoveWall => Some(Choice::RemoveWall),
             MenuKey::Layer(layer) => {
@@ -1247,6 +1289,24 @@ pub fn wrist_cue(palm: &Palm, problem: bool) -> Object {
         cue.kind = Kind::Menu(MenuKind::ProblemCue);
     }
     cue
+}
+
+/// How the agent moves, as its row in the Space section says it.
+fn movement_label(mode: tomori_protocol::Movement) -> &'static str {
+    match mode {
+        tomori_protocol::Movement::Follow => "Moves: follows the speaker",
+        tomori_protocol::Movement::Home => "Moves: stays home",
+        _ => "Moves: only when asked",
+    }
+}
+
+/// How long a following agent waits, quiet, before going home, as its row in the Space section says it.
+fn return_label(seconds: Option<u32>) -> String {
+    match seconds {
+        None => "Goes home: never".into(),
+        Some(seconds) if seconds < 120 => format!("Goes home after {seconds} s quiet"),
+        Some(seconds) => format!("Goes home after {} min quiet", seconds / 60),
+    }
 }
 
 #[cfg(test)]

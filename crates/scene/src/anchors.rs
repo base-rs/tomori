@@ -330,11 +330,12 @@ pub fn place(origin: Anchor, placement: Option<&Placement>, worker: &Placing<'_>
     (position, panicked)
 }
 
-/// Where the agent and the workers stand in the joined space: the swarm at `agent`, where a participant summoned it or
-/// else at its `home`; the workers about `workers`, the agent itself while it is summoned, or else the workers anchor,
-/// by default its home, by `placement`, or by [`HomeArc`] without one, gathered about `audience`, the eyes of whoever
-/// summoned it, or else those at home; and the `carriage` that takes the environment's own coordinates, its
-/// scenery's, walkable surfaces' and client side's, into the space's.
+/// Where the agent and the workers stand in the joined space: the swarm at `agent`, where it went or was called, facing
+/// whoever it turned to, or else at its `home`, going there by `via` or streaming, as `stream` says; the workers about
+/// `workers`, the agent itself while its entourage goes with it, or else the workers anchor, by default its home, by
+/// `placement`, or by [`HomeArc`] without one, gathered about `audience`, the eyes of whoever it went to with its
+/// entourage, or else those at home; and the `carriage` that takes the environment's own coordinates, its scenery's,
+/// walkable surfaces' and client side's, into the space's.
 #[derive(Clone)]
 pub struct Arrangement {
     pub agent: Anchor,
@@ -343,10 +344,12 @@ pub struct Arrangement {
     pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
+    pub via: Option<Vec3>,
+    pub stream: bool,
 }
 
 impl Arrangement {
-    /// Whether a participant summoned the agent away from its home.
+    /// Whether the agent stands away from its home, or turned from the way its home faces.
     pub fn summoned(&self) -> bool {
         self.agent != self.home
     }
@@ -362,6 +365,8 @@ impl Default for Arrangement {
             audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
+            via: None,
+            stream: false,
         }
     }
 }

@@ -882,9 +882,13 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                         other.is_some_and(|wall| hub.agent_remove_layout("session", &wall).is_ok())
                     }
                     16 => {
-                        // The agent summoned to someone, or sent home, its Tomori wall travelling with it.
-                        let at = (random.below(2) == 0).then(|| upright([1.0, 0.0, 1.0]));
-                        ada.send(ClientMessage::PlaceAgent { at });
+                        // The agent called to someone, or sent home, its Tomori wall travelling with it.
+                        if random.below(2) == 0 {
+                            ada.send(super::looking([1.0, 1.6, 1.0], [1.0, 1.6, -2.0]));
+                            ada.send(ClientMessage::CallAgent);
+                        } else {
+                            ada.send(ClientMessage::PlaceAgent { at: None });
+                        }
                         true
                     }
                     _ => {
