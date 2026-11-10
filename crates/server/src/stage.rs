@@ -3533,6 +3533,11 @@ mod tests {
             (16, 150, 180)
         );
         assert_eq!(shown.panels.iter().filter(free).count(), 30);
+        // Taking more panels than its walls and floating panels hold, it is sent no more floating.
+        let more = headset.with_projection(13, 78, 12, 900);
+        let shown = stage.view_within("s", &walls, u64::MAX, &more);
+        assert_eq!(shown.panels.len(), 90);
+        assert_eq!(shown.panels.iter().filter(free).count(), 12);
         // Fewer panels than that, the newest are sent, here all on walls, none floating.
         let few = headset.with_projection(67, 780, 120, 100);
         let shown = stage.view_within("s", &walls, u64::MAX, &few);

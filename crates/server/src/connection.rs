@@ -556,7 +556,7 @@ mod tests {
                         }
                     }
                     Ok(BodyFrame::End) => return (bytes, sizes, true),
-                    other => unreachable!("data until the response ends, not {other:?}"),
+                    _ => unreachable!("data until the response ends"),
                 }
             }
         };
@@ -593,6 +593,8 @@ mod tests {
         let Ok(BodyFrame::End) = read(&mut body) else {
             unreachable!("ended");
         };
+        // Closing the response closes the request.
+        body.close(None);
     }
 
     /// A request body that says Hello, stating the most, and then nothing, as a client that is listening.

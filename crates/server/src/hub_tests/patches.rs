@@ -558,8 +558,9 @@ fn speech_queued_goes_before_the_projection_and_a_patch_is_far_smaller_than_it_w
     // patch, far smaller than the projection whole an older client is sent.
     let ahead = |client: &Client| {
         client.outbox.agent_audio(vec![0; 64]);
-        let popped = client.outbox.pop();
-        assert!(matches!(popped, Popped::Audio(_)), "{popped:?}");
+        let Popped::Audio(_) = client.outbox.pop() else {
+            unreachable!("the speech first");
+        };
         let Popped::Control(item) = client.outbox.pop() else {
             unreachable!("the projection is sent next");
         };
@@ -601,7 +602,8 @@ fn in_a_space_of_more_walls_than_today_s_each_client_is_sent_what_it_takes() {
     held.read(&desktop);
     let all = held.shown();
     let older = without_ages(old.projections().pop().expect("sent the projection"));
-    assert!(all.walls.len() >= 21, "{}", all.walls.len());
+    let walls = all.walls.len();
+    assert!(walls >= 21, "{walls}");
     // The older client is sent today's walls, the first of them, as before; the desktop window every one.
     assert_eq!(older.walls.len(), Limits::TODAY.walls as usize);
     assert_eq!(older.walls[..], all.walls[..older.walls.len()]);

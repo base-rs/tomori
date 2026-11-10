@@ -549,7 +549,7 @@ mod tests {
             Popped::Audio(frame) if frame == [1] => "agent",
             Popped::Audio(frame) if frame == [2] => "participant",
             Popped::Empty => "empty",
-            other => unreachable!("{other:?}"),
+            _ => unreachable!("only what the test queued"),
         };
         // Agent speech and participant audio queued, then the projection and a message: the projection, which may be
         // one long frame, goes after the audio, and what was queued after it after it, in order.

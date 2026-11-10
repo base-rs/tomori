@@ -360,7 +360,9 @@ impl FrameDecoder {
                 length: direct.length,
             });
         }
-        let (kind, length) = self.header().ok()??;
+        let Ok(Some((kind, length))) = self.header() else {
+            return None;
+        };
         let received = self.buffer.len() - self.offset - HEADER_BYTES;
         (received < length).then_some(Progress {
             kind,

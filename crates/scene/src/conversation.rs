@@ -3239,12 +3239,11 @@ impl Conversation {
                 retry_in.as_secs_f32().ceil()
             )),
             Some(ConnectionState::Closed) => Some("Disconnected.".into()),
-            // Connected, saying how much has arrived of a long frame arriving, as the projection whole on joining.
-            Some(ConnectionState::Connected { .. }) => self
+            // Connected, or in a state a later client knows of, saying only how much has arrived of a long frame
+            // arriving, as the projection whole on joining, which is forgotten whenever the connection is not connected.
+            Some(_) => self
                 .receiving
                 .map(|(received, length)| format!("Syncing space... {}%", received * 100 / length)),
-            // In a state a later client knows of, which has nothing to say.
-            Some(_) => None,
         };
         let leaving = self
             .leave_hold
