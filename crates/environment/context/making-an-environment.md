@@ -106,6 +106,28 @@ pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
 
 A placement is asked only as a worker arrives, or when the arrangement changes, told of the workers already standing in the order of their slots, so live workers never move as others come and go; without one, the workers stand on Tomori's default arc about the anchor, which faces whoever watches it as the agent does. It runs on the frame step's thread, so keep it quick; one that panics, or answers a place that is not finite or beyond 90 m, leaves its worker on the arc. It may stand workers together: their signs then stack above one another, and beside within 30°. See [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md).
 
+Its client crate may let participants travel beyond the room, declaring a locomotion profile beside its scenery, in its own coordinates (see `design/locomotion.md`): walkable surfaces to teleport onto, a ceiling to fly up to, and pairs of teleport pads between floors, which Tomori draws, highlights and interprets itself, so that a participant who steps onto one, or points at it and pulls the trigger or presses A, is taken to the other, both ways:
+
+```rust
+// NAME-client: a main floor and racks 4.5 m below it, with a pad on each.
+use tomori_scene::locomotion::{Locomotion, Pad, Surface};
+
+pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
+    sceneries.register_versioned(observe::ID, observe::VERSION, my_scenery);
+    let floor = Surface::rectangle(glam::Vec3::ZERO, glam::Vec2::new(20.0, 20.0));
+    let racks = Surface::rectangle(glam::Vec3::new(0.0, -4.5, 0.0), glam::Vec2::new(20.0, 20.0));
+    sceneries.set_locomotion(
+        observe::ID,
+        Locomotion::fly(vec![floor, racks], 6.0).with_pads([[
+            Pad::at(glam::Vec3::new(3.0, 0.0, -2.0)).named("Main floor"),
+            Pad::at(glam::Vec3::new(3.0, -4.5, -2.0)).named("Racks").facing(glam::Vec3::NEG_X),
+        ]]),
+    );
+}
+```
+
+Each pad must stand on one of the profile's surfaces, within 20 m of home, as the anchors are; a pair with a pad that does not is ignored. A pad is 0.5 m across from its centre unless `with_radius` says otherwise, its name is what the label on the other pad says, as `Racks ↓`, and `facing` turns whoever arrives on it, who otherwise keeps facing the way they faced.
+
 The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 
 ## The dependency rule

@@ -44,6 +44,7 @@ impl Default for Instance {
 const MAX_INSTANCES: usize = AGENT_COUNT
     + 210
     + LANDING_CUBES
+    + PAD_CUBES * MOST_PADS
     + if crate::delegation::MAX_CUBES > crate::arrival_graphics::MAX_CUBES {
         crate::delegation::MAX_CUBES
     } else {
@@ -53,6 +54,17 @@ const MAX_INSTANCES: usize = AGENT_COUNT
 const LANDING_CUBES: usize = 16;
 /// The ring's radius, in metres.
 const LANDING_RADIUS: f32 = 0.3;
+/// The most teleport pads drawn: two for each pair a profile uses.
+const MOST_PADS: usize = 2 * tomori_scene::locomotion::MOST_PAIRS;
+/// How many bars make a pad's ring, and its highlight's.
+const PAD_RING: usize = 24;
+/// How many squares, each turned a little more, make the plate inside a pad's ring.
+const PAD_PLATE: usize = 6;
+/// How many bars make each chevron above a pad, and how many chevrons there are.
+const PAD_CHEVRON: usize = 4;
+const PAD_CHEVRONS: usize = 2;
+/// The most cubes one pad is drawn with: its ring, its plate, its chevrons and, pointed at, its highlight's ring.
+const PAD_CUBES: usize = 2 * PAD_RING + PAD_PLATE + PAD_CHEVRON * PAD_CHEVRONS;
 
 /// The usage of attachments that live only within one eye's scene pass, cleared at its start and discarded at its end; see [`Renderer::multisampled_views`].
 const TRANSIENT: wgpu::TextureUsages =
@@ -122,6 +134,8 @@ pub struct Renderer {
     carriage: Mat4,
     /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
     landing: Option<glam::Vec3>,
+    /// The teleport pads drawn, each a ring with a plate and chevrons above it; see `design/locomotion.md`.
+    pads: Vec<tomori_scene::pads::Shown>,
     /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
     blink: f32,
     /// Darkens the whole view by `blink`, drawn last in each eye.
@@ -344,6 +358,7 @@ impl Renderer {
             reveal: None,
             carriage: Mat4::IDENTITY,
             landing: None,
+            pads: Vec::new(),
             blink: 0.0,
             blink_pipeline,
             sceneries: sceneries.create(&target),
@@ -608,6 +623,21 @@ impl Renderer {
         self.landing = landing.filter(|landing| landing.is_finite());
     }
 
+    /// Draw `pads`, the teleport pads of the space's profile, from the next [`Self::update`]: the first [`MOST_PADS`]
+    /// that are finite and no wider than a pad may be.
+    pub fn set_pads(&mut self, pads: &[tomori_scene::pads::Shown]) {
+        self.pads = pads
+            .iter()
+            .filter(|pad| {
+                pad.centre.is_finite()
+                    && pad.radius > 0.0
+                    && pad.radius <= tomori_scene::locomotion::WIDEST_PAD
+            })
+            .take(MOST_PADS)
+            .copied()
+            .collect();
+    }
+
     /// Darken the whole view by `blink`, from 0, not at all, to 1, black, from the next [`Self::render`]: a teleport's blink. Nonsense draws nothing.
     pub fn set_blink(&mut self, blink: f32) {
         self.blink = if blink.is_finite() {
@@ -650,6 +680,9 @@ impl Renderer {
         }
         if let Some(landing) = self.landing {
             landing_ring(landing, &mut self.scene);
+        }
+        for pad in &self.pads {
+            pad_cubes(pad, &mut self.scene);
         }
         if let Some(position) = controller {
             self.scene.push(Instance {
@@ -1005,6 +1038,81 @@ fn landing_ring(landing: glam::Vec3, scene: &mut Vec<Instance>) {
             color: [0.45, 0.95, 1.0],
             ..Default::default()
         });
+    }
+}
+
+/// A teleport pad as Tomori draws it for every environment: a ring of bars flat on the floor, about a dim plate, and,
+/// over it, two chevrons pointing up or down where the pad paired with it stands a storey higher or lower, or a
+/// diamond where it is level; pointed at, the ring brightens to the hover highlight's colour and a second ring stands
+/// about it, as the ring where a teleport would land does.
+fn pad_cubes(pad: &tomori_scene::pads::Shown, scene: &mut Vec<Instance>) {
+    use glam::{Mat3, Quat, Vec3};
+    let (centre, radius) = (pad.centre, pad.radius);
+    let (ring, plate, chevron) = if pad.highlighted {
+        ([0.45, 0.95, 1.0], [0.05, 0.22, 0.28], [0.6, 1.0, 1.0])
+    } else {
+        ([0.12, 0.6, 0.75], [0.025, 0.1, 0.14], [0.25, 0.75, 0.9])
+    };
+    let turned = |angle: f32| Mat3::from_quat(Quat::from_rotation_y(angle)).to_cols_array_2d();
+    // A ring of bars, each along the circle, `across` thick.
+    let mut circle = |radius: f32, across: f32, color: [f32; 3]| {
+        let chord = std::f32::consts::TAU * radius / PAD_RING as f32;
+        for n in 0..PAD_RING {
+            let angle = n as f32 * std::f32::consts::TAU / PAD_RING as f32;
+            scene.push(Instance {
+                position: (centre + Vec3::new(angle.cos() * radius, 0.012, angle.sin() * radius))
+                    .to_array(),
+                scale: [across, 0.012, chord * 0.8],
+                color,
+                basis: turned(-angle),
+            });
+        }
+    };
+    circle(radius, 0.04, ring);
+    if pad.highlighted {
+        circle(radius + 0.08, 0.025, ring);
+    }
+    // Squares turned in steps make a plate within the ring whose corners reach just inside it.
+    for n in 0..PAD_PLATE {
+        let side = radius * 0.96 * std::f32::consts::SQRT_2;
+        scene.push(Instance {
+            position: (centre + Vec3::Y * 0.004).to_array(),
+            scale: [side, 0.006, side],
+            color: plate,
+            basis: turned(n as f32 * std::f32::consts::FRAC_PI_2 / PAD_PLATE as f32),
+        });
+    }
+    // Chevrons pointing the way the pad paired with it goes, each of four bars rising, or falling, in to its middle from
+    // four sides, so that it reads from anywhere around it; or, level, a diamond.
+    let size = radius.min(0.5) * 0.5;
+    let Some(up) = pad.up else {
+        scene.push(Instance {
+            position: (centre + Vec3::Y * 0.4).to_array(),
+            scale: [0.1; 3],
+            color: chevron,
+            basis: Mat3::from_quat(
+                Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)
+                    * Quat::from_rotation_x(std::f32::consts::FRAC_PI_4),
+            )
+            .to_cols_array_2d(),
+        });
+        return;
+    };
+    // Turned about its length's middle, a bar along +X rises at its outer end for a positive lean.
+    let lean = if up { -0.75_f32 } else { 0.75 };
+    for step in 0..PAD_CHEVRONS {
+        let height = 0.3 + step as f32 * 0.2;
+        for side in 0..PAD_CHEVRON {
+            let around =
+                Quat::from_rotation_y(side as f32 * std::f32::consts::TAU / PAD_CHEVRON as f32);
+            let outward = around * Vec3::X * (size * 0.5 * lean.cos());
+            scene.push(Instance {
+                position: (centre + Vec3::Y * height + outward).to_array(),
+                scale: [size, 0.035, 0.035],
+                color: chevron,
+                basis: Mat3::from_quat(around * Quat::from_rotation_z(lean)).to_cols_array_2d(),
+            });
+        }
     }
 }
 
@@ -2791,6 +2899,176 @@ mod tests {
             renderer.set_landing(None);
             renderer.update(&queue, &Swarm::default(), None, false);
             assert_eq!(renderer.scene.len(), without);
+        });
+    }
+
+    #[test]
+    fn a_pad_is_drawn_where_it_is_with_its_highlight_and_which_way_it_goes() {
+        use tomori_scene::pads::Shown;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            renderer.update(&queue, &Swarm::default(), None, false);
+            let without = renderer.scene.len();
+            let pad =
+                |up, highlighted| Shown::new(glam::Vec3::new(1.0, -4.5, 2.0), 0.5, up, highlighted);
+            let count = |renderer: &mut Renderer, pads: &[Shown]| {
+                renderer.set_pads(pads);
+                renderer.update(&queue, &Swarm::default(), None, false);
+                renderer.scene.len() - without
+            };
+            // A ring, a plate and two chevrons; pointed at, a second ring; level, a diamond in place of the chevrons.
+            let plain = PAD_RING + PAD_PLATE + PAD_CHEVRON * PAD_CHEVRONS;
+            assert_eq!(count(&mut renderer, &[pad(Some(false), false)]), plain);
+            assert_eq!(
+                count(&mut renderer, &[pad(Some(true), true)]),
+                plain + PAD_RING
+            );
+            assert_eq!(
+                count(&mut renderer, &[pad(None, false)]),
+                PAD_RING + PAD_PLATE + 1
+            );
+            // Every cube stands over the pad, within its ring and the highlight's.
+            let top = |renderer: &Renderer| {
+                renderer.scene[without..]
+                    .iter()
+                    .map(|instance| {
+                        let at =
+                            glam::Vec3::from_array(instance.position) - pad(None, false).centre;
+                        assert!(
+                            glam::Vec2::new(at.x, at.z).length() <= 0.5 + 0.08 + 1e-4,
+                            "{at}"
+                        );
+                        // How high the cube reaches, turned as it is.
+                        let half: f32 = (0..3)
+                            .map(|axis| 0.5 * instance.basis[axis][1].abs() * instance.scale[axis])
+                            .sum();
+                        assert!(at.y - half >= -1e-4, "{at}");
+                        at.y + half
+                    })
+                    .fold(0.0, f32::max)
+            };
+            // The column the ray points at is no taller than what is drawn, and as tall, to a centimetre, wherever the
+            // pad's partner stands.
+            for up in [Some(true), Some(false)] {
+                count(&mut renderer, &[pad(up, true)]);
+                let drawn = top(&renderer);
+                assert!(
+                    (drawn - tomori_scene::pads::COLUMN).abs() < 0.01,
+                    "{up:?} {drawn}"
+                );
+            }
+            count(&mut renderer, &[pad(None, true)]);
+            assert!(top(&renderer) <= tomori_scene::pads::COLUMN);
+            // Nonsense, too wide, or more than a profile uses, is not drawn.
+            let mut nonsense = pad(None, false);
+            nonsense.centre = glam::Vec3::NAN;
+            let mut wide = pad(None, false);
+            wide.radius = 3.0;
+            assert_eq!(count(&mut renderer, &[nonsense, wide]), 0);
+            let many = vec![pad(Some(true), true); MOST_PADS + 3];
+            assert_eq!(count(&mut renderer, &many), MOST_PADS * PAD_CUBES);
+            assert_eq!(count(&mut renderer, &[]), 0);
+        });
+    }
+
+    /// Set `TOMORI_PADS_PREVIEW` to a PNG path to save what this draws: teleport pads on the grid, seen from home, one
+    /// pointed at, whose partner is below, one whose partner is above and one level with its partner, and, beside it,
+    /// the one pointed at from nearer.
+    #[test]
+    fn pads_read_on_the_floor_from_where_participants_arrive() {
+        use tomori_scene::pads::Shown;
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 320;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pads test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let pads = [
+                Shown::new(glam::Vec3::new(1.6, 0.0, -2.4), 0.5, Some(false), true),
+                Shown::new(glam::Vec3::new(3.4, 0.0, -3.2), 0.5, Some(true), false),
+                Shown::new(glam::Vec3::new(2.2, 0.0, -4.6), 0.5, None, false),
+            ];
+            let mut renderer = Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, 4);
+            let draw =
+                |renderer: &mut Renderer, eye: glam::Vec3, at: glam::Vec3, shown: &[Shown]| {
+                    renderer.set_pads(shown);
+                    renderer.update(&queue, &Swarm::default(), None, false);
+                    let matrix =
+                        Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                            * Mat4::look_at_rh(eye, at, glam::Vec3::Y);
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[matrix],
+                        Mat4::IDENTITY,
+                        &[],
+                    );
+                    (
+                        crate::test_support::read_back(&device, &queue, &texture, (WIDTH, HEIGHT)),
+                        matrix,
+                    )
+                };
+            let home = glam::Vec3::new(0.0, 1.6, 0.0);
+            let towards = glam::Vec3::new(2.4, 0.4, -3.4);
+            let (bare, _) = draw(&mut renderer, home, towards, &[]);
+            let (seen, matrix) = draw(&mut renderer, home, towards, &pads);
+            let near = glam::Vec3::new(1.0, 1.6, -0.6);
+            let (close, _) = draw(
+                &mut renderer,
+                near,
+                pads[0].centre + glam::Vec3::Y * 0.4,
+                &pads,
+            );
+            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT);
+            image::imageops::replace(&mut sheet, &seen, 0, 0);
+            image::imageops::replace(&mut sheet, &close, WIDTH.into(), 0);
+            crate::test_support::preview("TOMORI_PADS_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+            // Where each pad's ring passes nearest home, it is drawn cyan over the grid, brighter for the one pointed at.
+            let brightest = |image: &image::RgbaImage, point: glam::Vec3| {
+                let clip = matrix * point.extend(1.0);
+                let (x, y) = (
+                    ((clip.x / clip.w + 1.0) * 0.5 * WIDTH as f32) as i64,
+                    ((1.0 - clip.y / clip.w) * 0.5 * HEIGHT as f32) as i64,
+                );
+                (-3..=3)
+                    .flat_map(|dx| (-3..=3).map(move |dy| (x + dx, y + dy)))
+                    .map(|(x, y)| image.get_pixel(x as u32, y as u32).0)
+                    .max_by_key(|pixel| u32::from(pixel[1]) + u32::from(pixel[2]))
+                    .unwrap()
+            };
+            let rings: Vec<_> = pads
+                .iter()
+                .map(|pad| {
+                    let towards_home = (home - pad.centre).with_y(0.0).normalize() * pad.radius;
+                    let point = pad.centre + towards_home + glam::Vec3::Y * 0.012;
+                    (brightest(&bare, point), brightest(&seen, point))
+                })
+                .collect();
+            for (bare, seen) in &rings {
+                assert!(seen[2] > seen[0] && seen[1] > seen[0], "{seen:?}");
+                assert!(
+                    u32::from(seen[2]) > u32::from(bare[2]) + 40,
+                    "{bare:?} {seen:?}"
+                );
+            }
+            assert!(rings[0].1[0] > rings[1].1[0], "{rings:?}");
         });
     }
 

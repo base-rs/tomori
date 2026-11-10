@@ -94,8 +94,8 @@ pub const WALL_DISTANCE: f32 = 1.8;
 const WALL_DROP: f32 = 0.1;
 
 /// The label on the ray that names a panel pointed at.
-const LABEL_COLUMNS: usize = 32;
-const LABEL_PIXEL: f32 = 0.0017;
+pub(crate) const LABEL_COLUMNS: usize = 32;
+pub(crate) const LABEL_PIXEL: f32 = 0.0017;
 
 /// How large the hint beside a panel carried is drawn, as the angle a font pixel takes from the participant's eyes,
 /// whatever its distance: an x-height of about 0.48°, comfortably above the 0.45° text reads at (see `design/text.md`).
@@ -136,7 +136,7 @@ const CONTINUED_COLOR: [f32; 4] = [0.42, 0.47, 0.55, 0.8];
 
 const FRAME: [f32; 4] = [0.32, 0.38, 0.46, 0.9];
 const NEWEST: [f32; 4] = [0.3, 0.75, 0.95, 1.0];
-const HIGHLIGHT: [f32; 4] = [0.35, 0.95, 1.0, 1.0];
+pub(crate) const HIGHLIGHT: [f32; 4] = [0.35, 0.95, 1.0, 1.0];
 const SLOT: [f32; 4] = [0.0, 0.0, 0.0, 0.3];
 const GHOST: [f32; 4] = [0.35, 0.95, 1.0, 0.16];
 /// The scroll bar's gap from the text and its width, and its thumb's least height, in font pixels, and its colours.

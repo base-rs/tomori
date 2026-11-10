@@ -35,6 +35,7 @@ pub mod log_cadence;
 pub mod manipulation;
 mod markdown_lite;
 pub mod microphone_request;
+pub mod pads;
 pub mod panel;
 mod panel_anchor;
 mod patched;

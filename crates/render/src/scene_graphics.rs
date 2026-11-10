@@ -229,6 +229,7 @@ pub fn draw(
     // The avatar the space's backend names, while the swarm does not show; see `design/avatars.md`.
     renderer.set_avatar(device, queue, frame.avatar.as_ref());
     renderer.set_landing(frame.landing);
+    renderer.set_pads(&frame.pads);
     renderer.set_blink(frame.blink);
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
     renderer.set_presentation_page(frame.card);

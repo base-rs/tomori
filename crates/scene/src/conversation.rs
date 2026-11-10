@@ -392,6 +392,10 @@ pub struct Conversation {
     /// The checklist item the participant points at now, by its panel and the line of the body it begins on, which A
     /// ticks or unticks, as the frame step last reported. See `design/projection.md`.
     pointed_item: Option<(String, u32)>,
+    /// Whether the participant points at a teleport pad now, which A chooses, as the frame step last reported, and
+    /// whether A chose it since the frame step last asked. See `design/locomotion.md`.
+    pointed_pad: bool,
+    pad_chosen: bool,
     /// What each object of an environment's that the participant pointed at is called, by its identity, to name it as
     /// a worker or card is named. See `design/environments.md`.
     object_labels: std::collections::HashMap<String, String>,
@@ -553,6 +557,8 @@ impl Conversation {
             talk: None,
             pointing_at: None,
             pointed_item: None,
+            pointed_pad: false,
+            pad_chosen: false,
             object_labels: std::collections::HashMap::new(),
             cards: None,
             projection: crate::patched::Held::default(),
@@ -2984,7 +2990,7 @@ impl Conversation {
                 }
                 // Removing queued entries is on the right wrist.
                 if self.decide_on_wrist {
-                    return true;
+                    return !self.choose_pad();
                 }
                 // A decision on its way still owns the button.
                 if self
@@ -3011,10 +3017,18 @@ impl Conversation {
                     self.notice = None;
                     false
                 } else {
-                    true
+                    !self.choose_pad()
                 }
             }
         }
+    }
+
+    /// Pointing at a teleport pad, A chooses it, as the trigger does, which the frame step takes the participant to the
+    /// pad paired with: the last of A's meanings, after everything that decides something, such as a request, so that
+    /// a prompt is never answered by teleporting. Returns whether it chose one. See `design/locomotion.md`.
+    fn choose_pad(&mut self) -> bool {
+        self.pad_chosen |= self.pointed_pad;
+        self.pointed_pad
     }
 
     /// Send the decision for the chosen choice of the pending approval.
@@ -3573,6 +3587,18 @@ impl Conversation {
     /// ticks or unticks it. See `design/projection.md`.
     pub fn point_item(&mut self, item: Option<(String, u32)>) {
         self.pointed_item = item;
+    }
+
+    /// Whether the participant points at a teleport pad now, from the headset's ray or the desktop's mouse each frame,
+    /// which A chooses. See `design/locomotion.md`.
+    pub fn point_pad(&mut self, pointed: bool) {
+        self.pointed_pad = pointed;
+    }
+
+    /// Whether A chose the teleport pad pointed at since this was last asked, which the frame step then takes the
+    /// participant from.
+    pub fn take_pad_choice(&mut self) -> bool {
+        std::mem::take(&mut self.pad_chosen)
     }
 
     /// Whether the checklist item that begins on `line` of the panel `panel`, which the joined space shows, is ticked, as
@@ -13597,5 +13623,60 @@ mod tests {
         conversation.choose_menu(crate::hand_menu::Choice::AddWall);
         conversation.choose_menu(crate::hand_menu::Choice::RemoveWall);
         assert!(sent(&mut conversation).is_empty());
+    }
+
+    #[test]
+    fn a_on_a_teleport_pad_is_the_last_of_a_s_meanings_and_never_answers_a_request() {
+        let approval = || tomori_protocol::Approval {
+            id: "request-1".into(),
+            title: "Bash".into(),
+            text: "cargo test".into(),
+            options: Vec::new(),
+        };
+        let waiting = || {
+            let mut conversation = joined(|state| state.approval = Some(approval()));
+            conversation.point_pad(true);
+            conversation
+        };
+        // Where A decides, as in the desktop window, a request pending is decided, and no pad is chosen.
+        let mut conversation = waiting();
+        assert!(!conversation.accept());
+        assert!(!conversation.take_pad_choice());
+        assert!(matches!(
+            sent(&mut conversation)[..],
+            [ClientMessage::Decide { .. }]
+        ));
+        // Where it is decided on the right wrist, A says so, and chooses no pad.
+        let mut conversation = waiting();
+        conversation.decide_on_wrist();
+        assert!(!conversation.accept());
+        assert!(conversation.a_refused() && !conversation.take_pad_choice());
+        assert!(sent(&mut conversation).is_empty());
+        // Just after the request appeared, it is refused, and chooses no pad.
+        let mut conversation = waiting();
+        conversation.request_at = Some(Instant::now());
+        assert!(!conversation.accept());
+        assert!(conversation.a_refused() && !conversation.take_pad_choice());
+        // A selected queue entry is cancelled before a pad is chosen.
+        let mut conversation = joined(|_| {});
+        conversation.point_pad(true);
+        conversation.queue_selected = Some("entry".into());
+        assert!(!conversation.accept());
+        assert!(conversation.cancelling.is_some() && !conversation.take_pad_choice());
+        // Otherwise, pointing at a pad, it is chosen, once, wherever the request is decided; and pointing at none, A
+        // has nothing to do.
+        for wrist in [false, true] {
+            let mut conversation = joined(|_| {});
+            if wrist {
+                conversation.decide_on_wrist();
+            }
+            assert!(conversation.accept(), "{wrist}");
+            assert!(!conversation.take_pad_choice());
+            conversation.point_pad(true);
+            assert!(!conversation.accept(), "{wrist}");
+            assert!(!conversation.a_refused());
+            assert!(conversation.take_pad_choice());
+            assert!(!conversation.take_pad_choice());
+        }
     }
 }
