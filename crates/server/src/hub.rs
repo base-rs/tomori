@@ -36,6 +36,7 @@ pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
+mod anchors;
 mod following;
 mod layouts;
 mod pairing_window;
@@ -442,6 +443,21 @@ impl tomori_environment::Outlet for SpaceOutlet {
             .upgrade()
             .map_or(Ok(()), |hub| hub.channel_retract(self, id))
     }
+
+    fn place_anchor(
+        &self,
+        anchor: tomori_protocol::cluster::Anchor,
+    ) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_place_anchor(self, anchor))
+    }
+
+    fn remove_anchor(&self, name: &str) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_remove_anchor(self, name))
+    }
 }
 
 pub struct Hub {
@@ -774,6 +790,9 @@ struct SpaceRecord {
     /// How the agent follows whoever it is talking with, and whether it is pinned, for this run and this environment
     /// only. See `design/environments.md`.
     following: following::Following,
+    /// Where whatever stands at the space's cluster anchors stands: each member's slot, and the span each cluster is
+    /// laid out for, seated afresh as it is sent, for this run only. See `design/environments.md`.
+    seating: std::cell::RefCell<crate::seating::Seating>,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -3135,8 +3154,9 @@ impl Hub {
             self.disconnect(id);
             cancellation.cancel();
         }
-        // Panel updates an environment's side made too soon, now that they may be made.
+        // Panel updates an environment's side made too soon, now that they may be made, and its anchors' changes.
         self.flush_publishes(now);
+        self.flush_anchors(now);
         // Such as after a closed space was forgotten.
         self.keep();
     }
@@ -3743,6 +3763,7 @@ impl Hub {
                             &|panel, line, row| {
                                 record.stage.describe_at(&walls, panel, line, row, now)
                             },
+                            &|anchor| record.gathered(&environments, anchor),
                         )
                     }
                     _ => Vec::new(),
@@ -3852,6 +3873,7 @@ impl Hub {
                                     &|panel, line, row| {
                                         space.stage.describe_at(&walls, panel, line, row, now)
                                     },
+                                    &|anchor| space.gathered(&environments, anchor),
                                 )
                             })
                         })
@@ -5543,6 +5565,7 @@ impl Hub {
             summoned: None,
             partner: None,
             following: following::Following::default(),
+            seating: Default::default(),
             active: None,
         });
         // Created now, it is active from now.
@@ -5701,6 +5724,7 @@ impl Hub {
                     summoned: None,
                     partner: None,
                     following: following::Following::default(),
+                    seating: Default::default(),
                     active: kept.active,
                 });
             }
@@ -6433,7 +6457,9 @@ impl Hub {
                 state.environment_version = environments.version(&space.model.environment);
                 // Where the environment has participants arrive and puts the agent's home and the workers, and where the
                 // agent was summoned to, for everyone in it. See `design/environments.md`.
-                state.anchors = environments.anchors(&space.model.environment);
+                state.anchors = space.anchors(&environments);
+                // Where each worker stands, so that every client lays every cluster out alike.
+                state.clusters = space.seated(&environments).layouts();
                 state.summoned = space.summoned;
                 // The trigger summons it nowhere: it follows, and is called with the hand menu. See
                 // `design/environments.md`.

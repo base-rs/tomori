@@ -349,6 +349,11 @@ pub struct Arrangement {
     pub via: Option<Vec3>,
     pub stream: bool,
     pub partner: Option<Vec3>,
+    /// The joined space's cluster anchors other than `home`, in the space's coordinates, and how the server lays out
+    /// each cluster a worker stands in, by `tomori_protocol::cluster`: empty from an older server, whose workers stand
+    /// at home in slots this client gives them. See `design/environments.md`.
+    pub clusters: Vec<tomori_protocol::cluster::Anchor>,
+    pub layouts: Vec<tomori_protocol::cluster::Layout>,
 }
 
 impl Arrangement {
@@ -386,6 +391,8 @@ impl Default for Arrangement {
             via: None,
             stream: false,
             partner: None,
+            clusters: Vec::new(),
+            layouts: Vec::new(),
         }
     }
 }
@@ -402,6 +409,8 @@ impl std::fmt::Debug for Arrangement {
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)
             .field("partner", &self.partner)
+            .field("clusters", &self.clusters.len())
+            .field("layouts", &self.layouts.len())
             .finish()
     }
 }

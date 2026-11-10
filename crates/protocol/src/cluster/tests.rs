@@ -47,6 +47,100 @@ fn an_anchor_s_name_and_extent_are_bounded() {
     }
     assert!(Extent::new(LEAST_EXTENT, MOST_EXTENT, 1.0).valid());
     assert!(ahead(HOME).is_home() && !ahead("aisle").is_home());
+    // A kind is a short slug, an object a reference, and Tomori's own names are its own; a label is cut, not refused.
+    let rack = ahead("rack/a12")
+        .with_kind("rack")
+        .with_label("Rack A12, alerting: CPU throttled")
+        .with_object("rack/a12");
+    assert_eq!(rack.checked(), Ok(()));
+    assert_eq!(
+        (rack.kind.as_deref(), rack.object.as_deref(), rack.placed),
+        (Some("rack"), Some("rack/a12"), false)
+    );
+    for kind in ["", "a rack", "rack/a", &"k".repeat(KIND_BYTES + 1)] {
+        let refused = ahead("aisle").with_kind(kind).checked().unwrap_err();
+        assert!(refused.contains("kind"), "{kind:?}");
+    }
+    assert!(
+        ahead("aisle")
+            .with_kind("k".repeat(KIND_BYTES))
+            .checked()
+            .is_ok()
+    );
+    let object = ahead("aisle").with_object("hen marigold").checked();
+    assert!(object.unwrap_err().contains("object"));
+    assert!(
+        ahead("tomori/wall/1")
+            .checked()
+            .unwrap_err()
+            .contains("Tomori's own")
+    );
+    assert!(ahead("aisle").with_label("x".repeat(500)).checked().is_ok());
+    // Sent without what it does not say, and read so from an older server.
+    let bare = serde_json::to_value(ahead("aisle")).unwrap();
+    for absent in ["kind", "label", "object", "placed"] {
+        assert!(bare.get(absent).is_none(), "{absent}");
+    }
+    let mut placed = rack.clone();
+    placed.placed = true;
+    let json = serde_json::to_value(&placed).unwrap();
+    assert_eq!(
+        (json["kind"].as_str(), json["placed"].as_bool()),
+        (Some("rack"), Some(true))
+    );
+    assert_eq!(serde_json::from_value::<Anchor>(json).unwrap(), placed);
+}
+
+#[test]
+fn a_cluster_steps_back_only_once_more_than_its_hysteresis_have_left() {
+    let cluster = Cluster::new(&ahead(HOME).with_extent(4.2, 1.6, 2.0));
+    let compact = (1..64)
+        .find(|span| cluster.arrange(*span).compact())
+        .unwrap();
+    // Laid out for more at once.
+    assert_eq!(Cluster::settle(0, 3), 3);
+    assert_eq!(Cluster::settle(compact - 1, compact), compact);
+    // One coming and going at the step's bound lays it out again only once.
+    let mut laid = compact - 1;
+    let mut changes = 0;
+    for span in [compact, compact - 1, compact, compact - 1, compact] {
+        let next = Cluster::settle(laid, span);
+        if cluster.arrange(next) != cluster.arrange(laid) {
+            changes += 1;
+        }
+        laid = next;
+    }
+    assert_eq!(changes, 1);
+    // Leaving by more than it keeps room for, it steps back, laid out for one more than stand.
+    let back = Cluster::settle(laid, compact - HYSTERESIS - 1);
+    assert_eq!(back, compact - 1);
+    assert!(!cluster.arrange(back).compact());
+    // Emptied, laid out for nobody but what it keeps room for.
+    assert_eq!(Cluster::settle(back, 0), HYSTERESIS);
+}
+
+#[test]
+fn a_layout_names_each_worker_s_slot_and_is_read_alike_both_ways() {
+    let layout = Layout::new("rack/a12", 4)
+        .with_seat("ses_1", 0)
+        .with_seat("ses_2", 3);
+    assert_eq!(
+        (layout.slot("ses_1"), layout.slot("ses_2")),
+        (Some(0), Some(3))
+    );
+    assert_eq!(layout.slot("ses_9"), None);
+    let json = serde_json::to_value(&layout).unwrap();
+    assert_eq!(json["seats"][1]["worker"], "ses_2");
+    assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), layout);
+    // Nobody seated, none is written, and a layout of a newer server's with more is still read.
+    let empty = serde_json::to_value(Layout::new("home", 0)).unwrap();
+    assert!(empty.get("seats").is_none());
+    let newer: Layout = serde_json::from_value(
+        serde_json::json!({"anchor": "home", "span": 2, "seats": [], "also": true}),
+    )
+    .unwrap();
+    assert_eq!(newer, Layout::new("home", 2));
+    assert_eq!(Layout::default().anchor, "");
 }
 
 #[test]
@@ -420,5 +514,73 @@ fn gaps_close_only_where_nobody_moves_who_would_not_anyway_and_never_keep_a_clus
             }
             standing = now;
         }
+    }
+}
+
+#[test]
+fn seated_with_hysteresis_gaps_close_only_as_the_cluster_passes_a_step_it_would_pass_anyway() {
+    let mut random = Random(0x5ea7_ed0f_f1ce);
+    for _ in 0..60 {
+        let cluster = any(&mut random);
+        let mut members: Vec<usize> = Vec::new();
+        let mut held: Vec<usize> = Vec::new();
+        let mut laid = 0;
+        let mut layouts = 0;
+        for _ in 0..160 {
+            held.retain(|_| random.next() < 0.5);
+            let arrives = random.next() < 0.55 || members.is_empty();
+            if arrives {
+                let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
+                let lowest = (0..).find(free).unwrap();
+                let slot = if random.next() < 0.2 {
+                    (lowest + 1 + (random.next() * 6.0) as usize..)
+                        .find(free)
+                        .unwrap()
+                } else {
+                    lowest
+                };
+                members.push(slot);
+            } else {
+                let index = (random.next() * members.len() as f32) as usize % members.len();
+                held.push(members.swap_remove(index));
+            }
+            let standing = cluster.arrange(laid);
+            let before = members.clone();
+            let next = cluster.reseat(&mut members, &held, laid);
+            // Each in a slot of its own, none of them one still held, all within what it is laid out for.
+            for (index, slot) in members.iter().enumerate() {
+                assert!(!held.contains(slot) && !members[..index].contains(slot));
+                assert!(*slot < next);
+            }
+            let now = cluster.arrange(next);
+            // It stands as it stood, or as its members would in the lowest free slots, with its hysteresis.
+            let packed = (0..)
+                .filter(|slot| !held.contains(slot))
+                .take(members.len())
+                .last()
+                .map_or(0, |slot| slot + 1);
+            assert!(
+                now == standing || now == cluster.arrange(Cluster::settle(laid, packed)),
+                "{laid} {next} {packed}"
+            );
+            // Nobody is gathered into the sign beside a slot of its own that is free.
+            if let Some(more) = now.more()
+                && members.iter().any(|slot| *slot >= more)
+            {
+                assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
+            }
+            // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
+            if now == standing {
+                let stayed = before.len() - usize::from(arrives);
+                for (was, is) in before[..stayed].iter().zip(&members) {
+                    assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                }
+            } else {
+                layouts += 1;
+            }
+            laid = next;
+        }
+        // It is laid out again far less often than members come and go.
+        assert!(layouts < 80, "{layouts}");
     }
 }

@@ -200,11 +200,32 @@ pub enum Resource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         row: Option<String>,
     },
+    /// The "+N more" sign of a cluster anchor's cluster, by the anchor's name, which stands for the workers gathered
+    /// into it: the server names them, their titles and sessions, from its own layout of the cluster. An older server
+    /// skips it, as a kind it does not know. See `design/interaction.md`.
+    #[non_exhaustive]
+    Gathered { gathered: String },
     #[serde(other)]
     Unknown,
 }
 
 impl Resource {
+    /// The "+N more" sign of the cluster at the anchor `anchor`, such as `home`.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::gathered("home")).unwrap(),
+    ///     serde_json::json!({"kind": "gathered", "gathered": "home"})
+    /// );
+    /// ```
+    pub fn gathered(anchor: impl Into<String>) -> Self {
+        Self::Gathered {
+            gathered: anchor.into(),
+        }
+    }
+
     /// The delegated worker whose [`crate::Worker::id`] is `worker`.
     pub fn worker(worker: impl Into<String>) -> Self {
         Self::Worker {
@@ -1242,6 +1263,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(newer, begin(vec![Resource::worker("ses_1")]));
+        // A cluster's "+N more" sign, by its anchor, which an older server skips as it skips the window above.
+        let gathered: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "utterance_begin", "utterance": "u", "attention": [{"kind": "gathered", "gathered": "home"}]
+        }))
+        .unwrap();
+        assert_eq!(gathered, begin(vec![Resource::gathered("home")]));
     }
 
     #[test]

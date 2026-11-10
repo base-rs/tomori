@@ -403,6 +403,8 @@ struct Worker {
     scale: f32,
     /// Whether it is gathered into its cluster's "+N more" sign, rather than standing in a slot of its own.
     more: bool,
+    /// The cluster anchor it stands at, by name, as the server seats it, or `None` for home.
+    at: Option<String>,
     particles: [Vec3; PARTICLES],
     particle_scales: [Vec3; PARTICLES],
     flight_start: [Vec3; PARTICLES],
@@ -471,8 +473,22 @@ pub struct Scene {
     /// How the home cluster stands for the slots its live workers take: it changes only as the highest slot taken
     /// crosses what one of its steps holds, when every live worker is placed again.
     layout: tomori_protocol::cluster::Arrangement,
-    /// Whether the ray points at the workers gathered into the "+N more" sign.
-    pointed_more: bool,
+    /// The cluster whose "+N more" sign the ray points at, by its anchor's name, `None` within it for home.
+    pointed_more: Option<Option<String>>,
+    /// The joined space's cluster anchors other than home, by name, each with its cluster and how the server lays it
+    /// out. See `design/environments.md`.
+    named: BTreeMap<
+        String,
+        (
+            tomori_protocol::cluster::Cluster,
+            tomori_protocol::cluster::Arrangement,
+        ),
+    >,
+    /// Where the server seats each worker, by identity: at which anchor, `None` for home, and in which slot; empty
+    /// from an older server, whose workers this client gives slots at home itself.
+    seats: BTreeMap<String, (Option<String>, usize)>,
+    /// The span the server lays the home cluster out for, where it seats the workers.
+    home_laid: Option<usize>,
     /// Where the agent stands while it is away from home, and how far it reaches, which its satellites orbit.
     away: Option<(Vec3, f32)>,
     /// The satellites orbiting the agent while it is away, one for each worker still working, by identity.
@@ -514,7 +530,10 @@ impl Scene {
             extent: None,
             cluster: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None),
             layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
-            pointed_more: false,
+            pointed_more: None,
+            named: BTreeMap::new(),
+            seats: BTreeMap::new(),
+            home_laid: None,
             away: None,
             motes: Vec::new(),
             satellites: Vec::with_capacity(MOTES),
@@ -558,9 +577,155 @@ impl Scene {
         self.extent = extent;
         self.placement = placement;
         self.cluster = crate::anchors::cluster(origin, audience, extent);
-        self.layout = self.cluster.arrange(self.span(&[]));
+        self.layout = self
+            .cluster
+            .arrange(self.home_laid.unwrap_or_else(|| self.span(&[])));
         self.reslotted = None;
         self.place_live();
+    }
+
+    /// Lay out the joined space's cluster anchors other than home, `anchors`, in the space's coordinates, and seat its
+    /// workers as the server's `layouts` say, from now on: each worker at its anchor, in its slot, each cluster laid out
+    /// for the span the server keeps, so that every client lays them out alike. Without layouts, as from an older
+    /// server, this client gives its workers slots at home itself. An anchor whose name, extent or pose is out of
+    /// bounds is left out, and its workers stand at home, as are seats beyond the slots a client keeps. A worker whose
+    /// seat or cluster changes glides to its new place; nothing else moves. Call before [`Self::update`]. See
+    /// `design/environments.md`.
+    pub fn seat(
+        &mut self,
+        anchors: &[tomori_protocol::cluster::Anchor],
+        layouts: &[tomori_protocol::cluster::Layout],
+    ) {
+        use tomori_protocol::cluster::{Cluster, HOME, valid_name};
+        let usable = |anchor: &&tomori_protocol::cluster::Anchor| {
+            !anchor.is_home()
+                && valid_name(&anchor.name)
+                && anchor.extent.is_none_or(|extent| extent.valid())
+                && Anchor::from_pose(&anchor.pose).is_some()
+        };
+        let clusters: BTreeMap<&str, Cluster> = anchors
+            .iter()
+            .filter(usable)
+            .map(|anchor| (anchor.name.as_str(), Cluster::new(anchor)))
+            .collect();
+        let mut named = BTreeMap::new();
+        let mut seats = BTreeMap::new();
+        let mut home_laid = None;
+        for layout in layouts {
+            let span = (layout.span as usize).min(SLOT_COUNT);
+            let at = if layout.anchor == HOME {
+                home_laid = Some(span);
+                None
+            } else if let Some(cluster) = clusters.get(layout.anchor.as_str()) {
+                named.insert(layout.anchor.clone(), (*cluster, cluster.arrange(span)));
+                Some(layout.anchor.clone())
+            } else {
+                continue;
+            };
+            for seat in &layout.seats {
+                if (seat.slot as usize) < SLOT_COUNT && valid_id(&seat.worker) {
+                    seats.insert(seat.worker.clone(), (at.clone(), seat.slot as usize));
+                }
+            }
+        }
+        if named == self.named && seats == self.seats && home_laid == self.home_laid {
+            return;
+        }
+        let named_before = std::mem::replace(&mut self.named, named);
+        self.seats = seats;
+        self.home_laid = home_laid;
+        let layout_before = self.layout.clone();
+        if let Some(laid) = home_laid {
+            self.layout = self.cluster.arrange(laid);
+        }
+        // Each live worker whose seat or cluster changed is placed again, and glides there.
+        let mut placed_again = Vec::new();
+        let mut again_at_home = false;
+        for (id, worker) in self
+            .workers
+            .iter()
+            .filter(|(_, worker)| worker.retired.is_none())
+        {
+            let (at, slot) = self
+                .seats
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| (worker.at.clone(), worker.slot));
+            let moved = at != worker.at || slot != worker.slot;
+            let relaid = match &at {
+                Some(name) => named_before.get(name) != self.named.get(name),
+                None => self.placement.is_none() && layout_before != self.layout,
+            };
+            if moved || relaid {
+                again_at_home |= at.is_none() && self.placement.is_some();
+                placed_again.push((id.clone(), at, slot));
+            }
+        }
+        for (id, at, slot) in &placed_again {
+            let worker = self.workers.get_mut(id).expect("a live worker");
+            worker.at.clone_from(at);
+            worker.slot = *slot;
+            self.slots.insert(id.clone(), *slot);
+        }
+        for mote in &mut self.motes {
+            mote.slot = self.slots.get(&mote.id).copied().unwrap_or(mote.slot);
+        }
+        if again_at_home {
+            // A registered placement is told of everyone, in the order of their slots.
+            self.place_live();
+            return;
+        }
+        for (id, at, slot) in placed_again {
+            let placing = Placing::new(&id, slot);
+            let (spot, _) = self.spot(at.as_deref(), &placing, false);
+            let worker = self.workers.get_mut(&id).expect("a live worker");
+            worker.place = spot.position;
+            worker.scale = spot.scale;
+            worker.more = spot.more;
+        }
+    }
+
+    /// Whether the server seats the workers, rather than this client giving them slots at home itself.
+    fn seated(&self) -> bool {
+        self.home_laid.is_some() || !self.seats.is_empty()
+    }
+
+    /// Where the worker `placing` names stands, in its slot of the cluster at the anchor `at`, or, for home, by the
+    /// registered placement, unless it `panicked`, or in the home cluster; and whether the placement panicked.
+    fn spot(
+        &self,
+        at: Option<&str>,
+        placing: &Placing<'_>,
+        panicked: bool,
+    ) -> (crate::anchors::Spot, bool) {
+        match at.and_then(|name| self.named.get(name)) {
+            Some((cluster, arrangement)) => {
+                let slot = cluster.slot(arrangement, placing.slot);
+                (
+                    crate::anchors::Spot {
+                        position: Vec3::from_array(slot.position),
+                        scale: slot.scale,
+                        more: slot.more,
+                    },
+                    false,
+                )
+            }
+            None => crate::anchors::place(
+                self.origin,
+                self.placement.as_ref().filter(|_| !panicked),
+                placing,
+                &self.cluster,
+                &self.layout,
+            ),
+        }
+    }
+
+    /// The anchor whose cluster's "+N more" sign the last [`Self::point`] met, by name, `home` for home's, which stands
+    /// for the workers gathered into it; or `None` where it met none. See `design/interaction.md`.
+    pub fn pointed_gathered(&self) -> Option<&str> {
+        self.pointed_more
+            .as_ref()
+            .map(|at| at.as_deref().unwrap_or(tomori_protocol::cluster::HOME))
     }
 
     /// Close the gaps among the home cluster's slots, given room and no placement, as
@@ -568,6 +733,10 @@ impl Scene {
     /// the slots of those leaving and of the `absent` parents it remembers, and lay it out for the slots then taken, only
     /// as its workers come and go.
     fn reslot(&mut self, arriving: &mut [(usize, &str, &Node)], absent: &[usize]) {
+        // Where the server seats them, it closes the gaps, and lays the clusters out.
+        if self.seated() {
+            return;
+        }
         let live = |worker: &&Worker| worker.retired.is_none();
         let mut members: Vec<usize> = self
             .workers
@@ -646,7 +815,9 @@ impl Scene {
     /// Place every live worker again, in the order of its slot, each told of those placed before it.
     fn place_live(&mut self) {
         let root = self.root.clone();
-        let mut live: Vec<(usize, &str, Option<&str>, State)> = self
+        // Each live worker's slot, identity, parent, state and the anchor it stands at.
+        type Live<'a> = (usize, &'a str, Option<&'a str>, State, Option<&'a str>);
+        let mut live: Vec<Live<'_>> = self
             .workers
             .iter()
             .filter(|(_, worker)| worker.retired.is_none())
@@ -655,27 +826,26 @@ impl Scene {
                     .parent_id
                     .as_deref()
                     .filter(|parent| Some(*parent) != root.as_deref());
-                (worker.slot, id.as_str(), parent, worker.state)
+                (
+                    worker.slot,
+                    id.as_str(),
+                    parent,
+                    worker.state,
+                    worker.at.as_deref(),
+                )
             })
             .collect();
         live.sort_by_key(|(slot, ..)| *slot);
         let mut placed: Vec<Placed<'_>> = Vec::with_capacity(live.len());
         let mut spots = Vec::with_capacity(live.len());
         let mut panicked = false;
-        for (slot, id, parent, state) in live {
+        for (slot, id, parent, state, at) in live {
             let mut placing = Placing::new(id, slot);
             placing.parent = parent;
             placing.state = state;
             placing.workers = &placed;
             placing.audience = self.audience;
-            let placement = self.placement.as_ref().filter(|_| !panicked);
-            let (spot, panic) = crate::anchors::place(
-                self.origin,
-                placement,
-                &placing,
-                &self.cluster,
-                &self.layout,
-            );
+            let (spot, panic) = self.spot(at, &placing, panicked);
             panicked |= panic;
             // Placed in the order of their slots, so those placed stay in that order.
             placed.push(Placed::new(id, slot, state, spot.position));
@@ -756,10 +926,12 @@ impl Scene {
         self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
             ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
         });
-        // One gathered into the "+N more" sign is pointed at as the sign, which names none of them.
-        let more =
-            hit.is_some_and(|(_, id, _)| self.workers.get(id).is_some_and(|worker| worker.more));
-        self.pointed_more = more;
+        // One gathered into a "+N more" sign is pointed at as the sign, which stands for all of them.
+        self.pointed_more = hit
+            .and_then(|(_, id, _)| self.workers.get(id))
+            .filter(|worker| worker.more)
+            .map(|worker| worker.at.clone());
+        let more = self.pointed_more.is_some();
         let hit = hit.map(|(_, id, _)| id).filter(|_| !more);
         if self.highlighted.as_deref() != hit {
             self.highlighted = hit.map(str::to_owned);
@@ -997,7 +1169,7 @@ impl Scene {
         // partial hierarchy cannot remove workers, but can report their states.
         let time = self.time;
         let mut retiring_stations = Vec::new();
-        let mut gathered: Vec<(usize, Station)> = Vec::new();
+        let mut gathered: BTreeMap<Option<String>, Vec<(usize, Station)>> = BTreeMap::new();
         for (id, worker) in &mut self.workers {
             // Only a fully fitted completed form rotates as a rigid body. Its
             // hidden partition follows exactly, so splitting never snaps back
@@ -1139,7 +1311,7 @@ impl Scene {
             // The worker pointed at glows paler and a little larger, so the participant sees what they would ask about.
             let pointed = worker.retired.is_none()
                 && (self.highlighted.as_deref() == Some(id.as_str())
-                    || (worker.more && self.pointed_more));
+                    || (worker.more && self.pointed_more.as_ref() == Some(&worker.at)));
             let (color, emphasis) = if pointed {
                 (color.lerp(Vec3::ONE, HIGHLIGHT_WHITENING), HIGHLIGHT_SCALE)
             } else {
@@ -1186,7 +1358,10 @@ impl Scene {
             if worker.more {
                 // Gathered into the "+N more" sign, it has none of its own.
                 if worker.retired.is_none() {
-                    gathered.push((worker.slot, station));
+                    gathered
+                        .entry(worker.at.clone())
+                        .or_default()
+                        .push((worker.slot, station));
                 }
             } else if worker.retired.is_none() {
                 self.stations.push(station);
@@ -1194,12 +1369,13 @@ impl Scene {
                 retiring_stations.push(station);
             }
         }
-        // One sign for those gathered, where the first of them stands, listing them while it is pointed at.
-        gathered.sort_by_key(|(slot, _)| *slot);
-        if let Some((_, first)) = gathered.first() {
-            let mut sign = first.clone();
+        // One sign for those gathered in each cluster, where the first of them stands, listing them while it is pointed
+        // at.
+        for (at, mut gathered) in gathered {
+            gathered.sort_by_key(|(slot, _)| *slot);
+            let mut sign = gathered[0].1.clone();
             sign.more = gathered.len();
-            sign.title = if self.pointed_more {
+            sign.title = if self.pointed_more.as_ref() == Some(&at) {
                 let titles: Vec<&str> = gathered
                     .iter()
                     .map(|(_, station)| station.title.as_str())
@@ -1390,6 +1566,11 @@ impl Scene {
             if self.workers.contains_key(id) {
                 continue;
             }
+            // Where the server seats it, there.
+            if let Some((_, slot)) = self.seats.get(id) {
+                self.slots.insert(id.to_owned(), *slot);
+                continue;
+            }
             let remembered = self.slots.get(id).copied().filter(|slot| !occupied[*slot]);
             let parent = nodes
                 .get(id)
@@ -1461,14 +1642,8 @@ impl Scene {
             placing.state = node.state;
             placing.workers = &placed;
             placing.audience = self.audience;
-            let placement = self.placement.as_ref().filter(|_| !panicked);
-            let (spot, panic) = crate::anchors::place(
-                self.origin,
-                placement,
-                &placing,
-                &self.cluster,
-                &self.layout,
-            );
+            let at = self.seats.get(id).and_then(|(at, _)| at.as_deref());
+            let (spot, panic) = self.spot(at, &placing, panicked);
             panicked |= panic;
             let at = placed.partition_point(|placed| placed.slot < slot);
             placed.insert(at, Placed::new(id, slot, node.state, spot.position));
@@ -1543,6 +1718,7 @@ impl Scene {
                     place: anchor,
                     scale: spot.scale,
                     more: spot.more,
+                    at: self.seats.get(id).and_then(|(at, _)| at.clone()),
                     particles,
                     particle_scales,
                     flight_start: particles,

@@ -1439,6 +1439,12 @@ impl Step {
                 .map(|(card, _, _)| card.clone())
         });
         let worker = worker.filter(|_| card.is_none());
+        // Or the "+N more" sign of a cluster, which stands for the workers gathered into it.
+        let gathered = self
+            .delegation_scene
+            .pointed_gathered()
+            .filter(|_| card.is_none())
+            .map(str::to_owned);
         // The environment's client side, in a space whose scenery has grown in, made for the space and environment it
         // is in. It points at what the environment shows only where nothing else is nearer, and not while a card is
         // carried.
@@ -1723,6 +1729,9 @@ impl Step {
             (None, Some(worker), _) => {
                 conversation.point(Some(tomori_protocol::Resource::worker(worker)))
             }
+            (None, None, _) if gathered.is_some() => {
+                conversation.point(gathered.map(tomori_protocol::Resource::gathered))
+            }
             (None, None, Some(picked)) => {
                 conversation.point_at_object(&picked.object, &picked.label)
             }
@@ -1793,6 +1802,8 @@ impl Step {
         let bounds = self.coordinator.bounds();
         self.delegation_scene
             .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
+        self.delegation_scene
+            .seat(&arrangement.clusters, &arrangement.layouts);
         self.delegation_scene.arrange(
             arrangement.workers,
             arrangement.audience,
@@ -4171,6 +4182,61 @@ mod tests {
                 .landing;
         }
         assert!(landing.is_some(), "once it has grown in");
+    }
+
+    #[test]
+    fn pointing_at_a_more_sign_as_words_begin_attends_to_the_workers_it_stands_for() {
+        use tomori_protocol::Resource;
+        use tomori_protocol::cluster::{Anchor as Named, HOME, Layout};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        // A home of little room, and more workers than it holds even compact, seated by the server.
+        let home = tomori_protocol::Pose::at(crate::swarm::CENTER.to_array())
+            .facing_towards([0.0, 1.6, 0.0]);
+        let count = 16;
+        conversation.apply(space(|state| {
+            state.workers = (0..count)
+                .map(|index| tomori_protocol::Worker {
+                    id: format!("ses_{index:02}"),
+                    parent: None,
+                    title: format!("Look at {index}"),
+                    state: tomori_protocol::WorkerState::Running,
+                })
+                .collect();
+            state.anchors = tomori_protocol::Anchors::new()
+                .with_workers(home)
+                .with_cluster(Named::new(HOME, home).with_extent(4.2, 1.6, 2.0));
+            state.clusters = vec![(0..count).fold(Layout::new(HOME, count), |layout, slot| {
+                layout.with_seat(format!("ses_{slot:02}"), slot)
+            })];
+        }));
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ..senses()
+        };
+        let mut sign = None;
+        for _ in 0..400 {
+            let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            sign = output
+                .stations
+                .iter()
+                .find(|station| station.more > 0)
+                .cloned();
+        }
+        let sign = Vec3::from_array(sign.expect("a sign for those it does not hold").position);
+        // From beneath it, where no other worker stands.
+        senses.ray = Ray::new(sign - Vec3::Y * 0.8, Vec3::Y);
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        conversation.take_actions();
+        conversation.talk(true);
+        conversation.talk(false);
+        let actions = conversation.take_actions();
+        let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+            unreachable!("recording begins, not {actions:?}")
+        };
+        assert_eq!(utterance.attention, [Resource::gathered(HOME)]);
     }
 
     #[test]

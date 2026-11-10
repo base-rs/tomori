@@ -21,9 +21,10 @@
 //!    **"+N more"** sign there.
 //!
 //! At `home`, the point is the agent's own, kept for it while it is away, so that workers stand either side of it. The
-//! steps depend only on the anchor, its audience and the highest slot taken, so every client and the server lay a
-//! cluster out alike, and a cluster lays out again only as that slot crosses what a step holds. See
-//! `design/environments.md`.
+//! steps depend only on the anchor, its audience and the span it is laid out for, the highest slot taken, kept a slot
+//! higher for a while as members leave ([`Cluster::settle`]), so every client and the server lay a cluster out alike,
+//! and a cluster lays out again only as that span crosses what a step holds. The server assigns each member its slot
+//! and sends it, with the span, in the space's state ([`Layout`]). See `design/environments.md`.
 //!
 //! ```
 //! use tomori_protocol::Pose;
@@ -78,6 +79,10 @@ pub const ROOM: Extent = Extent {
 
 /// The most slots an arrangement lays out: as many as a client keeps for workers.
 pub const PLACES: usize = 192;
+
+/// How many slots more than are taken a cluster stays laid out for as its members leave, so that one coming and
+/// going at a step's bound does not lay it out again each time: see [`Cluster::settle`].
+pub const HYSTERESIS: usize = 1;
 
 /// How far from whoever watches today's arc stands at which its columns stand at their own angles, 40° from the agent
 /// and 18⅔° apart, and its rows 85 cm apart, in metres; nearer, its columns stand as far apart along the arc as they do
@@ -152,7 +157,30 @@ pub struct Anchor {
     /// The room its cluster may take; none for today's arc at `home`, or [`ROOM`] elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extent: Option<Extent>,
+    /// What kind of place it is, a slug of at most [`KIND_BYTES`], such as `rack`, `area` or `console`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// What the agent is told it is, one line of at most [`LABEL_CHARS`] characters, such as `Rack A12, alerting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The reference of the object its environment describes that it stands by, such as `rack/a12`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// Whether the environment's server side placed it as it runs, rather than declaring it in its registration; set
+    /// by the server, as it sends it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placed: bool,
 }
+
+/// The most bytes in an anchor's kind.
+pub const KIND_BYTES: usize = 32;
+
+/// The most characters in an anchor's label, after which the server cuts it.
+pub const LABEL_CHARS: usize = 80;
+
+/// The prefix of the names the server gives the clusters it makes itself, as beside a wall or a person, which no
+/// environment's anchor may take.
+pub const OWN: &str = "tomori/";
 
 impl Anchor {
     /// The anchor `name` at `pose`, taking the room it is given by default.
@@ -161,6 +189,10 @@ impl Anchor {
             name: name.into(),
             pose,
             extent: None,
+            kind: None,
+            label: None,
+            object: None,
+            placed: false,
         }
     }
 
@@ -170,23 +202,118 @@ impl Anchor {
         self
     }
 
+    /// This anchor, a place of the kind `kind`, such as `rack`.
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    /// This anchor, which the agent is told is `label`, such as `Rack A12, alerting: CPU throttled`.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// This anchor, standing by the object its environment describes with the reference `object`, so that naming the
+    /// object names it.
+    pub fn with_object(mut self, object: impl Into<String>) -> Self {
+        self.object = Some(object.into());
+        self
+    }
+
     /// Whether it is the home's: the anchor whose cluster the workers stand in by default.
     pub fn is_home(&self) -> bool {
         self.name == HOME
     }
 
-    /// Whether its name and its extent are ones the server takes, or why not. Its pose is bounded as every anchor's is.
+    /// Whether its name, extent, kind and object are ones the server takes, or why not. Its pose is bounded as every
+    /// anchor's is, and its label cleaned and cut rather than refused.
     pub fn checked(&self) -> Result<(), &'static str> {
         if !valid_name(&self.name) {
             return Err(
                 "its name is not 1 to 64 bytes of ASCII letters, digits, '-', '_', '.' and '/'",
             );
         }
+        if self.name.starts_with(OWN) {
+            return Err("names beginning tomori/ are Tomori's own");
+        }
         if self.extent.is_some_and(|extent| !extent.valid()) {
             return Err("its extent is not from 0.3 to 12 m on each side");
         }
+        if self.kind.as_deref().is_some_and(|kind| {
+            !(1..=KIND_BYTES).contains(&kind.len())
+                || !kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        }) {
+            return Err("its kind is not 1 to 32 bytes of ASCII letters, digits, '-' and '_'");
+        }
+        if self
+            .object
+            .as_deref()
+            .is_some_and(|object| !valid_name(object))
+        {
+            return Err("its object is not a reference an environment's object may have");
+        }
         Ok(())
     }
+}
+
+/// How the server lays out one anchor's cluster, as it sends it in the space's state so that every client lays it out
+/// alike: the anchor, by name; the span it is laid out for, as [`Cluster::settle`] keeps it; and the slot each worker
+/// standing there takes, by session. A worker no layout names stands at `home`, in a slot its client gives it, as from
+/// an older server. See `design/environments.md`.
+///
+/// ```
+/// use tomori_protocol::cluster::{Layout, Seat};
+///
+/// let layout = Layout::new("rack/a12", 3).with_seat("ses_1", 0).with_seat("ses_2", 2);
+/// assert_eq!(layout.slot("ses_2"), Some(2));
+/// assert_eq!(layout.slot("ses_3"), None);
+/// assert_eq!(layout.seats[0], Seat { worker: "ses_1".into(), slot: 0 });
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Layout {
+    pub anchor: String,
+    pub span: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seats: Vec<Seat>,
+}
+
+impl Layout {
+    /// The layout of `anchor`'s cluster for `span` slots, nobody seated yet.
+    pub fn new(anchor: impl Into<String>, span: u32) -> Self {
+        Self {
+            anchor: anchor.into(),
+            span,
+            seats: Vec::new(),
+        }
+    }
+
+    /// This layout, with the worker `worker` in `slot`.
+    pub fn with_seat(mut self, worker: impl Into<String>, slot: u32) -> Self {
+        self.seats.push(Seat {
+            worker: worker.into(),
+            slot,
+        });
+        self
+    }
+
+    /// The slot the worker `worker` takes in it, if it stands there.
+    pub fn slot(&self, worker: &str) -> Option<u32> {
+        self.seats
+            .iter()
+            .find(|seat| seat.worker == worker)
+            .map(|seat| seat.slot)
+    }
+}
+
+/// A worker in a cluster's slot, by its session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seat {
+    pub worker: String,
+    pub slot: u32,
 }
 
 /// Whether `name` is one an anchor may have: 1 to [`NAME_BYTES`] bytes of ASCII letters, digits, `-`, `_`, `.` and `/`,
@@ -435,6 +562,29 @@ impl Cluster {
         }
     }
 
+    /// The span to lay it out for, with slots up to `span` taken, as it was laid out for `laid`: at once for more than
+    /// `laid`, so that every member has its slot; but for fewer, for [`HYSTERESIS`] more than are taken, so that a
+    /// member coming and going at one of its steps' bounds lays it out again only once, not each time, and it steps
+    /// back only once more than [`HYSTERESIS`] fewer stand. It depends only on `laid` and `span`, so the server, which
+    /// keeps `laid` and sends it, and every client lay a cluster out alike. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::cluster::{Anchor, Cluster, HYSTERESIS};
+    ///
+    /// let home = Anchor::new("home", Pose::at([0.0, 1.4, -4.0]).facing_towards([0.0, 1.6, 0.0]));
+    /// let cluster = Cluster::new(&home.with_extent(4.2, 1.6, 2.0));
+    /// let compact = (1..64).find(|span| cluster.arrange(*span).compact()).unwrap();
+    /// // One more than it holds compacts it; one leaving again keeps it compact, until fewer stand.
+    /// let laid = Cluster::settle(compact - 1, compact);
+    /// assert_eq!(laid, compact);
+    /// assert!(cluster.arrange(Cluster::settle(laid, compact - HYSTERESIS)).compact());
+    /// assert!(!cluster.arrange(Cluster::settle(laid, compact - HYSTERESIS - 1)).compact());
+    /// ```
+    pub fn settle(laid: usize, span: usize) -> usize {
+        laid.min(span + HYSTERESIS).max(span)
+    }
+
     /// Where the member in `slot` stands, as `arrangement`, this cluster's, lays it out.
     pub fn slot(&self, arrangement: &Arrangement, slot: usize) -> Slot {
         if arrangement.step == Step::Home {
@@ -484,6 +634,43 @@ impl Cluster {
     /// assert_eq!(members, [0]);
     /// ```
     pub fn reslot(&self, members: &mut [usize], held: &[usize], standing: &Arrangement) -> bool {
+        self.reslot_by(members, held, standing, |span| self.arrange(span))
+    }
+
+    /// Close the gaps among `members` as [`Self::reslot`] does, of a cluster laid out for `laid` slots, as it would
+    /// stand laid out as [`Self::settle`] keeps it, so that no gap closes for a step that the hysteresis keeps it from
+    /// passing; and the span it is laid out for then. The server seats a cluster's members by this. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::cluster::{Anchor, Cluster};
+    ///
+    /// let home = Anchor::new("home", Pose::at([0.0, 1.4, -4.0]).facing_towards([0.0, 1.6, 0.0]));
+    /// let cluster = Cluster::new(&home.with_extent(4.2, 1.6, 2.0));
+    /// let compact = (1..64).find(|span| cluster.arrange(*span).compact()).unwrap();
+    /// // One more than it holds compacted it; the second leaves, and nobody moves, its gap kept by the hysteresis.
+    /// let mut members: Vec<usize> = (0..compact).filter(|slot| *slot != 1).collect();
+    /// let before = members.clone();
+    /// assert_eq!(cluster.reseat(&mut members, &[], compact), compact);
+    /// assert_eq!(members, before);
+    /// ```
+    pub fn reseat(&self, members: &mut [usize], held: &[usize], laid: usize) -> usize {
+        let standing = self.arrange(laid);
+        self.reslot_by(members, held, &standing, |span| {
+            self.arrange(Self::settle(laid, span))
+        });
+        Self::settle(laid, members.iter().max().map_or(0, |slot| slot + 1))
+    }
+
+    /// [`Self::reslot`], with `arrange` saying how it would stand for so many slots.
+    fn reslot_by(
+        &self,
+        members: &mut [usize],
+        held: &[usize],
+        standing: &Arrangement,
+        arrange: impl Fn(usize) -> Arrangement,
+    ) -> bool {
         let span = |members: &[usize]| members.iter().max().map_or(0, |slot| slot + 1);
         // The free slots before `end`, in order.
         let gaps = |members: &[usize], end: usize| -> Vec<usize> {
@@ -500,7 +687,7 @@ impl Cluster {
             beyond
         };
         let mut changed = false;
-        if let Some(more) = self.arrange(span(members)).more() {
+        if let Some(more) = arrange(span(members)).more() {
             let open = gaps(members, more);
             for (index, slot) in beyond(members, more).into_iter().rev().zip(open) {
                 members[index] = slot;
@@ -515,14 +702,14 @@ impl Cluster {
             .map_or(0, |slot| slot + 1);
         let open = gaps(members, packed);
         let moving = beyond(members, packed);
-        if self.arrange(packed) != *standing {
+        if arrange(packed) != *standing {
             for (index, slot) in moving.into_iter().zip(open) {
                 members[index] = slot;
                 changed = true;
             }
         } else {
             for (index, slot) in moving.into_iter().rev().zip(open) {
-                if self.arrange(span(members)) == *standing {
+                if arrange(span(members)) == *standing {
                     break;
                 }
                 members[index] = slot;

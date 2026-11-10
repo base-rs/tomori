@@ -332,6 +332,23 @@ impl StatusWall {
 /// The fewest slots a status wall has, so that two notices can stand together.
 pub const STATUS_SLOTS: u32 = 2;
 
+/// `anchor`, its label cleaned onto one line and cut after `tomori_environment::ANCHOR_LABEL_LIMIT` characters, as an
+/// object's description is, and not said to be placed at run time, whatever it says.
+pub(crate) fn cleaned(
+    mut anchor: tomori_protocol::cluster::Anchor,
+) -> tomori_protocol::cluster::Anchor {
+    anchor.label = anchor
+        .label
+        .map(|label| {
+            crate::space::one_line(&label, tomori_environment::ANCHOR_LABEL_LIMIT)
+                .trim()
+                .to_owned()
+        })
+        .filter(|label| !label.is_empty());
+    anchor.placed = false;
+    anchor
+}
+
 impl fmt::Debug for Environment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -775,10 +792,13 @@ impl Environment {
     /// `tomori_protocol::cluster`. The anchor named `home` is where its workers stand by default: about the agent's
     /// home, gathered about the eyes at the arrival, with the agent at its point; given an extent, fitted to it, today's
     /// arc while it fits, then an arc, a grid, compact and a "+N more" sign; without one, on today's arc, as
-    /// [`Self::with_workers`] declares it. Check its room with `tomori_environment::sightlines::fits`. One whose name or
-    /// extent `tomori_protocol::cluster::Anchor::checked` refuses, or whose name another before it has, is left out
-    /// with a warning; its pose is sent and bounded as [`Self::with_agent`]'s is. Anchors other than `home` are kept
-    /// for a later release, which places workers and panels at them. See `design/environments.md`.
+    /// [`Self::with_workers`] declares it. Others, such as `aisle-3`, are places the agent may put workers, panels and
+    /// itself, which it finds by their kind and label in `presence`, each laid out the same way about its audience,
+    /// 2.3 m before it. Check their room with `tomori_environment::sightlines::fits`. One whose name, extent, kind or
+    /// object `tomori_protocol::cluster::Anchor::checked` refuses, whose name another before it has, or beyond
+    /// `tomori_environment::ANCHOR_LIMIT`, is left out with a warning; its label is cleaned onto one line and cut after
+    /// `tomori_environment::ANCHOR_LABEL_LIMIT` characters; its pose is sent and bounded as [`Self::with_agent`]'s is.
+    /// See `design/environments.md`.
     ///
     /// ```
     /// use tomori_protocol::Pose;
@@ -792,19 +812,26 @@ impl Environment {
     /// assert_eq!(farm.workers(), Some(yard));
     /// ```
     pub fn with_anchor(mut self, anchor: tomori_protocol::cluster::Anchor) -> Self {
-        let refused = anchor.checked().err().or_else(|| {
-            self.anchors
-                .iter()
-                .any(|kept| kept.name == anchor.name)
-                .then_some("another of its name comes before it")
-        });
+        let refused = anchor
+            .checked()
+            .err()
+            .or_else(|| {
+                self.anchors
+                    .iter()
+                    .any(|kept| kept.name == anchor.name)
+                    .then_some("another of its name comes before it")
+            })
+            .or_else(|| {
+                (self.anchors.len() >= tomori_environment::ANCHOR_LIMIT)
+                    .then_some("it declares 64 anchors before it")
+            });
         match refused {
             Some(why) => log::warn!(
                 "Environment {}'s anchor {:?} is left out: {why}.",
                 self.id,
                 anchor.name
             ),
-            None => self.anchors.push(anchor),
+            None => self.anchors.push(cleaned(anchor)),
         }
         self
     }
@@ -991,11 +1018,36 @@ impl Environments {
             .map_or_else(Vec::new, Environment::carried_solids)
     }
 
+    /// `pose`, in the environment `id`'s own coordinates, carried into a space's, as its anchors are: finite, within
+    /// [`crate::stage::REACH`] of home and with an orientation, made upright; or none, as for one it does not offer.
+    pub(crate) fn carry(
+        &self,
+        id: &str,
+        pose: &tomori_protocol::Pose,
+    ) -> Option<tomori_protocol::Pose> {
+        self.get(id)?.carried(Some(pose))
+    }
+
+    /// The names of the cluster anchors the environment `id` declares, `home` always among them, since the place is
+    /// the environment's whether or not it gives it.
+    pub(crate) fn declared(&self, id: &str) -> Vec<String> {
+        let mut names = vec![tomori_protocol::cluster::HOME.to_owned()];
+        names.extend(
+            self.get(id)
+                .into_iter()
+                .flat_map(|environment| &environment.anchors)
+                .filter(|anchor| !anchor.is_home())
+                .map(|anchor| anchor.name.clone()),
+        );
+        names
+    }
+
     /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a
     /// space's state carries them: its arrival, in its own coordinates, when it gives a valid one; and the agent and
     /// workers anchors it gives, carried into the space's coordinates, those then finite, within
     /// [`crate::stage::REACH`] of home and with an orientation, each made upright, with its `home` cluster anchor
-    /// carried there too where it gives its room; none when it is not offered. See `design/environments.md`.
+    /// carried there too where it gives its room, and its other cluster anchors, carried and bounded alike; none when it
+    /// is not offered. See `design/environments.md`.
     pub fn anchors(&self, id: &str) -> tomori_protocol::Anchors {
         let mut anchors = tomori_protocol::Anchors::new();
         if let Some(environment) = self.get(id) {
@@ -1009,6 +1061,18 @@ impl Environments {
                 let mut carried = home.clone();
                 carried.pose = pose;
                 anchors.clusters.push(carried);
+            }
+            // Its other anchors, each carried and bounded as the agent's home is, or left out.
+            for anchor in environment
+                .anchors
+                .iter()
+                .filter(|anchor| !anchor.is_home())
+            {
+                if let Some(pose) = environment.carried(Some(&anchor.pose)) {
+                    let mut carried = anchor.clone();
+                    carried.pose = pose;
+                    anchors.clusters.push(carried);
+                }
             }
             anchors.arrival = environment
                 .arrival
@@ -1475,22 +1539,68 @@ mod tests {
         assert_eq!(Some(home.pose), street.workers);
         assert!((home.pose.position[2] + 13.0).abs() < 1e-4, "{home:?}");
         assert_eq!(home.extent, Some(Extent::new(6.0, 2.5, 3.0)));
-        // One of a name already given, or of a name or room it may not have, is left out; another anchor is kept for
-        // later, and not sent.
+        // One of a name already given, or of a name or room it may not have, is left out; another anchor is sent, carried
+        // and bounded as home is, its label cleaned and cut, never said to be placed as it runs.
         let aisle = Anchor::new("aisle-3", yard).with_extent(4.0, 2.5, 1.5);
+        let mut claimed = Anchor::new("rack/a12", yard)
+            .with_kind("rack")
+            .with_label(format!("Rack A12,\nalerting {}", "!".repeat(200)));
+        claimed.placed = true;
         let checked = Environment::new("checked", "Checked")
             .with_anchor(room.clone())
             .with_anchor(Anchor::new(HOME, Pose::HOME))
             .with_anchor(Anchor::new("rack a12", yard))
             .with_anchor(Anchor::new("cupboard", yard).with_extent(0.1, 1.0, 1.0))
-            .with_anchor(aisle.clone());
-        assert_eq!(checked.anchors(), [room.clone(), aisle]);
+            .with_anchor(Anchor::new("tomori/near/1", yard))
+            .with_anchor(aisle.clone())
+            .with_anchor(claimed)
+            .with_anchor(Anchor::new("beyond", Pose::at([0.0, 0.0, -25.0])));
+        let rack = &checked.anchors()[2];
+        let label = rack.label.as_deref().unwrap();
+        assert!(
+            label.starts_with("Rack A12, alerting") && !label.contains('\n'),
+            "{label}"
+        );
+        // Cut after its limit, marked cut.
+        assert!(label.ends_with('…'));
+        assert_eq!(
+            label.chars().count(),
+            tomori_environment::ANCHOR_LABEL_LIMIT + 1
+        );
+        assert!(!rack.placed);
+        let rack = rack.clone();
+        assert_eq!(checked.anchors()[..2], [room.clone(), aisle.clone()]);
         assert!(format!("{checked:?}").contains("aisle-3"));
         let offered = offered.with(checked);
         assert_eq!(
             offered.anchors("checked").clusters,
-            std::slice::from_ref(&room)
+            [room.clone(), aisle, rack]
         );
+        // The names it declares, home always among them, even where it gives none.
+        assert_eq!(
+            offered.declared("checked"),
+            ["home", "aisle-3", "rack/a12", "beyond"]
+        );
+        assert_eq!(offered.declared("roomy"), ["home"]);
+        assert_eq!(offered.declared("unknown"), ["home"]);
+        // A label of nothing but space is none.
+        let blank = Environment::new("blank", "Blank")
+            .with_anchor(Anchor::new("a", yard).with_label(" \n "));
+        assert_eq!(blank.anchors()[0].label, None);
+        // At most 64.
+        let many = (0..70).fold(Environment::new("many", "Many"), |many, index| {
+            many.with_anchor(Anchor::new(format!("rack/{index}"), yard))
+        });
+        assert_eq!(many.anchors().len(), tomori_environment::ANCHOR_LIMIT);
+        // A pose a side gives is carried as the environment's are, or none beyond reach, or for one not offered.
+        assert_eq!(
+            offered
+                .carry("street", &Pose::at([0.0, 1.0, -5.0]))
+                .map(|pose| pose.position[2]),
+            Some(-13.0)
+        );
+        assert_eq!(offered.carry("street", &Pose::at([0.0, 1.0, -40.0])), None);
+        assert_eq!(offered.carry("unknown", &Pose::HOME), None);
         // Beyond reach, it is left out, as the workers anchor is.
         let far = Anchor::new(HOME, Pose::at([0.0, 0.0, -25.0])).with_extent(6.0, 2.5, 3.0);
         let offered = offered.with(Environment::new("far", "Far").with_anchor(far));

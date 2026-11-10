@@ -2444,6 +2444,15 @@ impl Conversation {
         // whoever it faces, 1.2 m before it, as a trigger leaves it; but not from a server that has it follow the
         // speaker, which says so by sending how it moves and nobody they gather about: they stay home.
         let entourage = space.summoner.is_some() || space.movement.is_none();
+        // The space's other anchors, and where the server seats its workers, so that every client lays them out alike.
+        arrangement.clusters = space
+            .anchors
+            .clusters
+            .iter()
+            .filter(|anchor| !anchor.is_home())
+            .cloned()
+            .collect();
+        arrangement.layouts.clone_from(&space.clusters);
         if space.summoned.is_some() && entourage {
             arrangement.workers = arrangement.agent;
             arrangement.extent = None;
@@ -3909,6 +3918,10 @@ impl Conversation {
                 .projection()
                 .and_then(|projection| projection.panel(panel))
                 .map(crate::projection::name),
+            // A cluster's "+N more" sign, by the anchor it stands at.
+            Resource::Gathered { gathered, .. } => self
+                .joined_space()
+                .map(|_| format!("the workers gathered at {gathered}")),
             _ => None,
         }
     }
@@ -7961,6 +7974,21 @@ mod tests {
         }));
         let roomy = conversation.arrangement();
         assert_eq!(roomy.workers, Anchor::from_pose(&yard).unwrap());
+        assert!(roomy.clusters.is_empty() && roomy.layouts.is_empty());
+        // Its other anchors, and the server's seats, are taken as they are sent, for the scene to lay out.
+        let rack = tomori_protocol::cluster::Anchor::new("rack/a12", yard);
+        let seats =
+            vec![tomori_protocol::cluster::Layout::new("rack/a12", 1).with_seat("ses_1", 0)];
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new()
+                .with_workers(agent)
+                .with_cluster(room.clone())
+                .with_cluster(rack.clone());
+            state.clusters = seats.clone();
+        }));
+        let placed = conversation.arrangement();
+        assert_eq!((placed.clusters, placed.layouts), (vec![rack], seats));
         assert_eq!(
             roomy.extent,
             Some(tomori_protocol::cluster::Extent::new(6.0, 2.5, 3.0))

@@ -36,6 +36,8 @@ pub struct Channel {
     /// The panels an update of which, waiting, the stage refused once it could be made, the latest last, at most
     /// [`REFUSED`], each said once until it is taken or retracted. See [`Channel::refuse`].
     pub refused: std::collections::VecDeque<String>,
+    /// The cluster anchors the side placed, and its changes of them waiting, once it has placed one.
+    pub places: Option<Places>,
 }
 
 /// An object a side described, as the server keeps it.
@@ -82,7 +84,15 @@ impl Channel {
             publishes: None,
             pending: Vec::new(),
             refused: std::collections::VecDeque::new(),
+            places: None,
         }
+    }
+
+    /// The cluster anchors the side placed, in the space's coordinates.
+    pub fn anchors(&self) -> &[tomori_protocol::cluster::Anchor] {
+        self.places
+            .as_ref()
+            .map_or(&[], |places| places.anchors.as_slice())
     }
 
     /// The object `id`, if the side described it.
@@ -293,6 +303,177 @@ impl Publishes {
     /// Forget when `panel` was last changed, as it is retracted, so that it may be published again at once.
     pub fn forget(&mut self, panel: &str) {
         self.last.retain(|(id, _)| id != panel);
+    }
+}
+
+/// How many times a side may place or remove anchors in a space at once, and how many more each second after, whether
+/// or not each changes anything, so that a side calling as fast as it can never keeps the hub busy: eight times the
+/// changes it may make.
+pub const PLACE_BURST: f32 = tomori_environment::ANCHOR_BURST as f32 * 8.0;
+pub const PLACES_PER_SECOND: f32 = tomori_environment::ANCHOR_CHANGES_PER_SECOND as f32 * 8.0;
+
+/// A change a side asked of its anchors that waits for its rate: placing the anchor, or removing the one of its name.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    Place(tomori_protocol::cluster::Anchor),
+    Remove(String),
+}
+
+impl Change {
+    /// The name of the anchor it changes.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Place(anchor) => &anchor.name,
+            Self::Remove(name) => name,
+        }
+    }
+}
+
+/// The anchors a side placed in a space, in the space's coordinates, and what it may still change of them: a bucket of
+/// changes, [`tomori_environment::ANCHOR_BURST`] at once and [`tomori_environment::ANCHOR_CHANGES_PER_SECOND`] after,
+/// one of calls, and when it last changed each anchor, so that each changes at most once every
+/// [`tomori_environment::ANCHOR_INTERVAL`]; and the changes waiting for them, the latest of each anchor's. Every change
+/// lays a cluster out again and moves what stands there, so a flapping alert must not shake workers about. See
+/// `design/environments.md`.
+#[derive(Debug)]
+pub struct Places {
+    /// The anchors placed, in the order they were first placed.
+    pub anchors: Vec<tomori_protocol::cluster::Anchor>,
+    /// The changes waiting, in the order they were first asked for.
+    pub waiting: Vec<Change>,
+    changes: f32,
+    calls: f32,
+    at: Instant,
+    last: Vec<(String, Instant)>,
+}
+
+impl Places {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            anchors: Vec::new(),
+            waiting: Vec::new(),
+            changes: tomori_environment::ANCHOR_BURST as f32,
+            calls: PLACE_BURST,
+            at: now,
+            last: Vec::new(),
+        }
+    }
+
+    /// Refill the buckets for the time since they were last, up to `now`.
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now
+            .saturating_duration_since(self.at)
+            .min(Duration::from_secs(60))
+            .as_secs_f32();
+        self.at = self.at.max(now);
+        let burst = tomori_environment::ANCHOR_BURST as f32;
+        let rate = tomori_environment::ANCHOR_CHANGES_PER_SECOND as f32;
+        self.changes = (self.changes + elapsed * rate).min(burst);
+        self.calls = (self.calls + elapsed * PLACES_PER_SECOND).min(PLACE_BURST);
+        self.last.retain(|(_, at)| {
+            now.saturating_duration_since(*at) < tomori_environment::ANCHOR_INTERVAL
+        });
+    }
+
+    /// Whether a side may place or remove an anchor at `now` at all, taking it from the calls' bucket if so, or why not.
+    pub fn call(&mut self, now: Instant) -> Result<(), &'static str> {
+        self.refill(now);
+        if self.calls < 1.0 {
+            return Err("The environment is placing anchors faster than Tomori takes them.");
+        }
+        self.calls -= 1.0;
+        Ok(())
+    }
+
+    /// Whether the anchor `name` may change at `now`: not changed within [`tomori_environment::ANCHOR_INTERVAL`], with
+    /// a change left in the space's bucket.
+    pub fn ready(&mut self, now: Instant, name: &str) -> bool {
+        self.refill(now);
+        self.changes >= 1.0 && !self.last.iter().any(|(changed, _)| changed == name)
+    }
+
+    /// Take a change of the anchor `name` made at `now`, as [`Self::ready`] allowed.
+    pub fn charge(&mut self, now: Instant, name: &str) {
+        self.changes -= 1.0;
+        self.last.push((name.to_owned(), now));
+    }
+
+    /// Let `change` wait, in place of any change of its anchor waiting before it; a removal of an anchor not placed
+    /// cancels its placement waiting, and waits for nothing.
+    pub fn wait(&mut self, change: Change) {
+        let placed = self
+            .anchors
+            .iter()
+            .any(|anchor| anchor.name == change.name());
+        match self
+            .waiting
+            .iter()
+            .position(|waiting| waiting.name() == change.name())
+        {
+            Some(at) if matches!(change, Change::Remove(_)) && !placed => {
+                self.waiting.remove(at);
+            }
+            Some(at) => self.waiting[at] = change,
+            None if matches!(change, Change::Remove(_)) && !placed => {}
+            None => self.waiting.push(change),
+        }
+    }
+
+    /// Whether an anchor of `name` is placed, or waits to be.
+    pub fn has(&self, name: &str) -> bool {
+        self.anchors.iter().any(|anchor| anchor.name == name)
+            || self
+                .waiting
+                .iter()
+                .any(|waiting| matches!(waiting, Change::Place(anchor) if anchor.name == name))
+    }
+
+    /// How many anchors are placed, or wait to be, but not to be removed.
+    pub fn count(&self) -> usize {
+        let removing = |name: &str| {
+            self.waiting
+                .iter()
+                .any(|waiting| matches!(waiting, Change::Remove(removed) if removed == name))
+        };
+        self.anchors
+            .iter()
+            .filter(|anchor| !removing(&anchor.name))
+            .count()
+            + self
+                .waiting
+                .iter()
+                .filter(|waiting| {
+                    matches!(waiting, Change::Place(anchor)
+                        if !self.anchors.iter().any(|placed| placed.name == anchor.name))
+                })
+                .count()
+    }
+
+    /// Make `change` to the anchors placed: placing one, in place of one of its name, or removing it. Returns whether it
+    /// changed them.
+    pub fn make(&mut self, change: Change) -> bool {
+        match change {
+            Change::Place(anchor) => match self
+                .anchors
+                .iter_mut()
+                .find(|placed| placed.name == anchor.name)
+            {
+                Some(placed) if *placed == anchor => false,
+                Some(placed) => {
+                    *placed = anchor;
+                    true
+                }
+                None => {
+                    self.anchors.push(anchor);
+                    true
+                }
+            },
+            Change::Remove(name) => {
+                let before = self.anchors.len();
+                self.anchors.retain(|anchor| anchor.name != name);
+                self.anchors.len() != before
+            }
+        }
     }
 }
 
@@ -522,5 +703,57 @@ mod tests {
             assert!(intents.take(much_later));
         }
         assert!(!intents.take(much_later));
+    }
+
+    fn rack(name: &str, x: f32) -> tomori_protocol::cluster::Anchor {
+        tomori_protocol::cluster::Anchor::new(name, tomori_protocol::Pose::at([x, 1.4, -5.0]))
+    }
+
+    #[test]
+    fn a_side_s_anchor_changes_are_held_to_their_rates_the_latest_of_each_waiting() {
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let mut places = Places::new(start);
+        // Each anchor changes at most once in its interval, and the space eight at once, then four a second.
+        assert!(places.ready(start, "a"));
+        assert!(places.make(Change::Place(rack("a", 0.0))));
+        places.charge(start, "a");
+        for index in 1..8 {
+            let name = format!("r{index}");
+            assert!(places.ready(start, &name));
+            places.charge(start, &name);
+        }
+        assert!(!places.ready(start, "r9"));
+        assert!(places.ready(at(250), "r9"));
+        assert!(!places.ready(at(500), "a"));
+        assert!(places.ready(at(900), "a"));
+        // The same again changes nothing; moved, it does.
+        assert!(!places.make(Change::Place(rack("a", 0.0))));
+        assert!(places.make(Change::Place(rack("a", 1.0))));
+        // A change waiting gives way to a later one of its anchor, and a removal of one not placed cancels its
+        // placement, waiting for nothing.
+        places.wait(Change::Place(rack("b", 0.0)));
+        places.wait(Change::Place(rack("b", 2.0)));
+        assert_eq!(places.waiting, [Change::Place(rack("b", 2.0))]);
+        assert!(places.has("b") && places.has("a") && !places.has("c"));
+        assert_eq!(places.count(), 2);
+        places.wait(Change::Remove("b".into()));
+        places.wait(Change::Remove("c".into()));
+        assert!(places.waiting.is_empty());
+        // A removal of one placed waits, and no longer counts it.
+        places.wait(Change::Remove("a".into()));
+        assert_eq!(places.count(), 0);
+        assert_eq!(places.waiting[0].name(), "a");
+        assert!(places.make(Change::Remove("a".into())));
+        assert!(!places.make(Change::Remove("a".into())));
+        // Calls, whatever they change, are held to a rate too.
+        let mut calls = Places::new(start);
+        for _ in 0..PLACE_BURST as usize {
+            assert_eq!(calls.call(start), Ok(()));
+        }
+        assert!(calls.call(start).unwrap_err().contains("faster"));
+        assert_eq!(calls.call(at(100)), Ok(()));
+        // A channel without anchors placed has none.
+        assert!(Channel::new(1, "yard", 1).anchors().is_empty());
     }
 }
