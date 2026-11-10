@@ -1298,7 +1298,8 @@ impl Step {
                 .speaking(conversation.speech().playing)
                 .head(senses.head_pose.map(|pose| Vec3::from_array(pose.position)))
                 .attracted(attractor)
-                .going(arrangement.via, arrangement.stream),
+                .going(arrangement.via, arrangement.stream)
+                .near(arrangement.nearness()),
         );
         let marker = match senses.marker {
             Marker::Always => senses.attractor,

@@ -2424,6 +2424,12 @@ impl Conversation {
             .map(glam::Vec3::from_array)
             .filter(|via| via.is_finite() && via.abs().max_element() <= crate::anchors::REACH);
         arrangement.stream = space.stream;
+        // Away, it draws in near whoever it stands for, or whoever it turned to.
+        arrangement.partner = space
+            .summoned
+            .and(space.partner.or(space.facing))
+            .map(glam::Vec3::from_array)
+            .filter(|eyes| eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH);
         // Away, its workers go with it, gathered about whoever it went to, or, from a server that does not say, about
         // whoever it faces, 1.2 m before it, as a trigger leaves it; but not from a server that has it follow the
         // speaker, which says so by sending how it moves and nobody they gather about: they stay home.
@@ -2487,6 +2493,7 @@ impl Conversation {
         space.summoned = None;
         space.summoner = None;
         space.facing = None;
+        space.partner = None;
         self.send(ClientMessage::PlaceAgent { at: None });
     }
 
@@ -8061,6 +8068,33 @@ mod tests {
         });
         let arrangement = conversation.arrangement();
         assert_eq!(arrangement.workers, arrangement.agent);
+        // Away, it knows how far it stands from whoever it stands for, or else whoever it turned to; at home, or from
+        // a server that says neither, or nonsense, nothing.
+        let near = |partner: Option<[f32; 3]>, facing: Option<[f32; 3]>, summoned| {
+            joined(|state| {
+                state.summoned = summoned;
+                state.partner = partner;
+                state.facing = facing;
+            })
+            .arrangement()
+            .nearness()
+        };
+        let beside = Some([1.0, 1.6, 0.5]);
+        let close =
+            |near: Option<f32>, want: f32| near.is_some_and(|near| (near - want).abs() < 1e-4);
+        assert!(close(near(beside, None, Some(away)), 1.5));
+        assert!(close(near(None, Some([1.0, 1.6, 2.0]), Some(away)), 3.0));
+        assert_eq!(near(beside, None, None), None);
+        assert_eq!(near(None, None, Some(away)), None);
+        assert_eq!(near(Some([f32::NAN, 0.0, 0.0]), None, Some(away)), None);
+        // Sent home, it is home for whoever sent it, standing for nobody.
+        let mut conversation = joined(|state| {
+            state.movement = Some(tomori_protocol::AgentMovement::default());
+            state.summoned = Some(away);
+            state.partner = beside;
+        });
+        conversation.send_agent_home();
+        assert_eq!(conversation.arrangement().nearness(), None);
     }
 
     #[test]

@@ -93,6 +93,7 @@ mod tests {
             environment: "sky",
             tomori: Pose::default(),
             declared: &[],
+            status: crate::stage::Status::Beneath,
         };
         let mut stage = Stage::default();
         let id = stage.project(&walls, content, None, 0);
@@ -106,7 +107,7 @@ mod tests {
         let described = stage.describe(&walls, &id, None, 60).unwrap();
         assert!(
             described.starts_with(
-                "image panel \"Layout render\" (on the Tomori wall, projected a minute ago; 1600 × 900 pixels; caption: \"The session browser, very"
+                "image panel \"Layout render\" (on the status wall, projected a minute ago; 1600 × 900 pixels; caption: \"The session browser, very"
             ),
             "{described}"
         );
@@ -127,7 +128,7 @@ mod tests {
         stage.project_reply(&walls, vec![code], None, 0);
         assert!(stage.shows_image(&walls, &"a".repeat(64)));
         // Dismissed, it is no longer shown, nor its image kept.
-        stage.dismiss("sky", &id).unwrap();
+        stage.dismiss(&walls, &id).unwrap();
         assert!(stage.images().is_empty());
         assert!(!stage.shows_image(&walls, &"a".repeat(64)));
         // Hidden in another environment, its image is kept, but not shown there.
@@ -135,6 +136,7 @@ mod tests {
             environment: "farm",
             tomori: Pose::default(),
             declared: &[],
+            status: crate::stage::Status::Beneath,
         };
         let floating = stage.project(&farm, Content::image("", "", image('c')), None, 0);
         stage

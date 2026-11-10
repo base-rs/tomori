@@ -9,7 +9,7 @@
 use tomori_environment::sightlines::Solid;
 use tomori_protocol::{Pose, Wall};
 
-use super::travel::{boxes, rotate};
+use super::geometry::{boxes, rotate};
 
 /// How far from someone's eyes, horizontally, a panel floating beside them stands, in metres: within reach, and near
 /// enough that a floating panel's text, at its 1.9 mm font pixel, reads comfortably, as `design/text.md` measures it.

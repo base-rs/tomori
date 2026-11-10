@@ -190,6 +190,11 @@ pub struct Wall {
     /// 1`. Only an environment's own wall has one, and only if it declares one; an older client draws `WALL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Whether it is the space's status wall, where Tomori's notices and what it projects unasked go: the Tomori wall,
+    /// or an environment's own wall that its environment gives the role, such as the farmyard's notice board. Sent only
+    /// where it is; an older client ignores it. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status: bool,
     /// Its version: the space's projection revision, [`Projection::revision`], at which it last changed in anything it
     /// says, so that a change a client asks for, as by a wall's handles, says the version it saw, and the server refuses
     /// it where the wall changed since. Sent as `revision`, as a panel's is; 0, and absent, from older servers. See
@@ -214,6 +219,7 @@ impl Wall {
             locked: false,
             tilt: None,
             name: None,
+            status: false,
             version: 0,
         }
     }
@@ -221,6 +227,12 @@ impl Wall {
     /// The wall, called `name` by its environment, or nothing with `None`.
     pub fn with_name(mut self, name: Option<String>) -> Self {
         self.name = name;
+        self
+    }
+
+    /// The wall, the space's status wall or not.
+    pub fn with_status(mut self, status: bool) -> Self {
+        self.status = status;
         self
     }
 

@@ -348,6 +348,12 @@ pub struct SpaceState {
     /// the eyes of whoever began speaking to it. Turned only about the vertical. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facing: Option<[f32; 3]>,
+    /// The eyes of whoever the agent stands for while it is away from home, in the space's coordinates: whoever it
+    /// followed, whoever called it, or whoever it went to as it asked. A client draws the swarm in within
+    /// `avatar`'s near distance of them, so that it never fills their view. Absent at home, and from older servers.
+    /// See `design/avatars.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner: Option<[f32; 3]>,
     /// A point the agent passes through on its way to where it stands, in the space's coordinates, where the straight
     /// way there passes through someone, a wall or the environment's scenery. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

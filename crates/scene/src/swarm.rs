@@ -27,6 +27,8 @@ pub struct Swarm {
     anchor: Anchor,
     /// How far its middle moved since the last step, so that its agents keep up with it as it glides or streams.
     moved: f32,
+    /// How large it is drawn, as a share of its full size: smaller near whoever it stands for.
+    size: f32,
 }
 
 impl Default for Swarm {
@@ -51,6 +53,7 @@ impl Default for Swarm {
             time: 0.0,
             anchor: Anchor::AGENT,
             moved: 0.0,
+            size: 1.0,
         }
     }
 }
@@ -67,6 +70,18 @@ impl Swarm {
         visual.level = self.visual.level
             + (visual.level - self.visual.level) * (1.0 - (-rate * dt.clamp(0.0, 0.1)).exp());
         self.visual = visual;
+    }
+
+    /// Draw in towards `size`, a share of its full size, over about a second, as a flock gathers to listen or spreads
+    /// out again.
+    pub fn draw_in(&mut self, size: f32, dt: f32) {
+        let size = size.clamp(0.1, 1.0);
+        self.size += (size - self.size) * (1.0 - (-3.0 * dt.clamp(0.0, 0.1)).exp());
+    }
+
+    /// How large it is drawn, as a share of its full size.
+    pub fn size(&self) -> f32 {
+        self.size
     }
 
     /// Stand at `anchor` from now on: the agents glide there, as they move between shapes, as when the agent goes to
@@ -115,8 +130,9 @@ impl Swarm {
         let dt = dt.clamp(0.0, 1.0 / 30.0);
         self.time += dt;
         let fastest = self.fastest(dt);
+        let size = self.size;
         let target = attractor
-            .unwrap_or_else(|| self.at(Vec3::new((self.time * 0.3).sin() * 0.35, 0.0, 0.0)));
+            .unwrap_or_else(|| self.at(Vec3::new((self.time * 0.3).sin() * 0.35 * size, 0.0, 0.0)));
         if self.visual.mode != Mode::Neutral && attractor.is_none() {
             // A damped spring keeps state changes gentle and world-anchored.
             // Shape and motion, not color alone, distinguish the main states.
@@ -138,11 +154,13 @@ impl Swarm {
                 } else {
                     0.0
                 };
-                let goal = self.anchor.place(Vec3::new(
-                    angle.cos() * radius * ring,
-                    angle.sin() * height * ring + ripple,
-                    (angle * 3.0 + i as f32).sin() * depth,
-                ));
+                let goal = self.anchor.place(
+                    Vec3::new(
+                        angle.cos() * radius * ring,
+                        angle.sin() * height * ring + ripple,
+                        (angle * 3.0 + i as f32).sin() * depth,
+                    ) * size,
+                );
                 let force = (goal - agent.position) * 5.0 - agent.velocity * 3.8;
                 agent.velocity =
                     (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(fastest);
@@ -161,10 +179,10 @@ impl Swarm {
                 }
                 let delta = agent.position - other.position;
                 let d2 = delta.length_squared();
-                if d2 < 0.22 * 0.22 {
+                if d2 < (0.22 * size).powi(2) {
                     separation += delta / d2.max(0.0025);
                 }
-                if d2 < 0.65 * 0.65 {
+                if d2 < (0.65 * size).powi(2) {
                     alignment += other.velocity;
                     cohesion += other.position;
                     neighbors += 1.0;
@@ -206,6 +224,53 @@ mod tests {
         swarm.step(0.1, None);
         assert!(swarm.agents[0].position.is_finite());
         assert_ne!(swarm.agents[0].position, before);
+    }
+
+    #[test]
+    fn it_draws_in_near_whoever_it_stands_for_and_spreads_out_again() {
+        // How far across its agents reach, about the vertical.
+        let across = |swarm: &Swarm| {
+            swarm
+                .agents
+                .iter()
+                .map(|agent| (agent.position.x - CENTER.x).hypot(agent.position.z - CENTER.z))
+                .fold(0.0f32, f32::max)
+                * 2.0
+        };
+        for mode in [Mode::Ready, Mode::Speaking, Mode::Neutral] {
+            let mut swarm = Swarm::default();
+            let settle = |swarm: &mut Swarm, size: f32| {
+                for _ in 0..720 {
+                    swarm.set_visual(
+                        Visual {
+                            mode,
+                            ..Default::default()
+                        },
+                        1.0 / 72.0,
+                    );
+                    swarm.draw_in(size, 1.0 / 72.0);
+                    swarm.step(1.0 / 72.0, None);
+                }
+            };
+            settle(&mut swarm, 1.0);
+            let full = across(&swarm);
+            assert_eq!(swarm.size(), 1.0);
+            settle(&mut swarm, crate::avatar::DRAWN);
+            let drawn = across(&swarm);
+            assert!(
+                (swarm.size() - crate::avatar::DRAWN).abs() < 1e-3,
+                "{mode:?}"
+            );
+            assert!(drawn < full * 0.7, "{mode:?}: {drawn} of {full}");
+            settle(&mut swarm, 1.0);
+            assert!(across(&swarm) > full * 0.85, "{mode:?}");
+        }
+        // Never smaller than a tenth, however it is asked.
+        let mut swarm = Swarm::default();
+        for _ in 0..720 {
+            swarm.draw_in(0.0, 1.0 / 72.0);
+        }
+        assert!((swarm.size() - 0.1).abs() < 1e-3);
     }
 
     #[test]

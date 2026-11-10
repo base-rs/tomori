@@ -133,7 +133,8 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
         (state.summoner, state.via, state.stream),
         (None, None, false)
     );
-    assert_eq!(hub.lock().space(&space).unwrap().travel, None);
+    // It stands for her, as clients are told.
+    assert_eq!(state.partner, Some(ADA));
     // Arrived, a follow-up from where she stands only turns it.
     hub.flush_snapshots(held + Duration::from_secs(10));
     press(&ada, "u3");
@@ -245,7 +246,7 @@ fn a_huddle_who_spoke_to_it_lately_is_served_from_one_spot() {
     let nearest = level(spot.position, at_ada).min(level(spot.position, at_bob));
     assert!((1.5..1.7).contains(&nearest), "{spot:?}");
     // And it faces the middle of them.
-    let ahead = crate::stage::travel::rotate(spot.orientation, [0.0, 0.0, 1.0]);
+    let ahead = crate::stage::geometry::rotate(spot.orientation, [0.0, 0.0, 1.0]);
     let towards = [-spot.position[0], 0.0, 2.0 - spot.position[2]];
     assert!((ahead[0].atan2(ahead[2]) - towards[0].atan2(towards[2])).abs() < 1e-3);
 }
@@ -383,7 +384,7 @@ fn moving_only_when_asked_again_it_stays_where_it_followed_to() {
 }
 
 #[test]
-fn following_from_where_it_was_asked_to_go_brings_its_wall_home() {
+fn moving_only_when_asked_its_own_move_leaves_its_wall_and_workers_home() {
     let (hub, _jobs) = hub_waiting();
     hub.serve_tools(tomori_backend::ToolServer::new(
         "tomori",
@@ -393,19 +394,13 @@ fn following_from_where_it_was_asked_to_go_brings_its_wall_home() {
     let ada = Client::projecting(&hub, Access::open(), "ada");
     ada.join(&space);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
-    // Moving only when asked, it goes before her with its wall.
-    hub.agent_move_agent("session", "front ada").unwrap();
-    assert!(hub.lock().space(&space).unwrap().travel.is_some());
-    // Following, it comes beside her as she speaks, and its wall goes home, for everyone.
-    ada.send(ClientMessage::SetAgentMovement {
-        movement: AgentMovement::new(Movement::Follow, Some(90)),
-    });
     ada.read();
-    press(&ada, "u1");
-    hub.flush_snapshots(Instant::now() + COMMIT);
-    assert_eq!(hub.lock().space(&space).unwrap().travel, None);
-    let projection = ada.projections().pop().expect("its wall went home");
-    assert_eq!(projection.walls[0].pose, crate::stage::default_stage());
+    // It goes before her, and nothing goes with it: the projection is not sent again.
+    hub.agent_move_agent("session", "front ada").unwrap();
+    let state = last_state(&ada).expect("told");
+    assert!(state.summoned.is_some());
+    assert_eq!(state.summoner, None);
+    assert!(ada.projections().is_empty());
 }
 
 #[test]
@@ -620,6 +615,41 @@ fn called_it_comes_beside_them_and_stays_pinned_turning_only_until_sent_home_or_
 }
 
 #[test]
+fn moving_only_when_asked_a_pinned_agent_still_turns_to_whoever_speaks_and_glances_while_busy() {
+    let (hub, _jobs) = hub();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&space);
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    ada.send(ClientMessage::CallAgent);
+    let (at, _, pinned) = agent(&hub, &space);
+    assert!(pinned && at.is_some());
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    let at_bob = [5.0, 1.6, 5.0];
+    bob.send(looking(at_bob, [5.0, 1.6, 0.0]));
+    // Pinned, it turns to Bob as he presses X, for everyone, and moves nothing.
+    press(&bob, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    assert_eq!(agent(&hub, &space), (at, Some(at_bob), true));
+    assert_eq!(last_state(&ada).expect("told").facing, Some(at_bob));
+    cancel(&bob, "u1");
+    // Busy, it glances at Ada, then turns back to Bob.
+    hub.drive_event(&space, Event::Busy);
+    press(&ada, "u2");
+    let pressed = Instant::now();
+    assert_eq!(agent(&hub, &space).1, Some(ADA));
+    hub.flush_snapshots(pressed + GLANCE);
+    assert_eq!(agent(&hub, &space), (at, Some(at_bob), true));
+    cancel(&ada, "u2");
+    // Sent home, its pin ends, and a press turns it no more.
+    hub.lock().agent_home(&space, "a test sent it");
+    press(&bob, "u3");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    assert_eq!(agent(&hub, &space), (None, None, false));
+}
+
+#[test]
 fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pin() {
     let (hub, _jobs) = hub();
     let (space, _commands) = idle(&hub);
@@ -637,11 +667,12 @@ fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pi
     ada.send(ClientMessage::UtteranceCancel {
         utterance: "u1".to_owned(),
     });
-    // Called, it stands before her with its entourage, as a summons did, pinned.
+    // Called, it stands beside her, as following would, nothing with it, pinned.
     ada.send(ClientMessage::CallAgent);
     let state = last_state(&ada).expect("told");
-    assert_eq!(state.summoner, Some(ADA));
+    assert_eq!(state.summoner, None);
     assert!(state.pinned);
+    assert!((level(state.summoned.expect("called").position, ADA) - 1.5).abs() < 1e-3);
     // A way it does not know is refused; the same again changes nothing.
     ada.send(ClientMessage::SetAgentMovement {
         movement: AgentMovement::new(Movement::Unknown, None),
@@ -740,13 +771,15 @@ fn its_own_tool_pins_it_or_takes_it_to_someone_its_entourage_home_while_it_follo
     let state = last_state(&ada).expect("told");
     assert!(state.summoned.is_some() && !state.pinned);
     assert_eq!(state.summoner, None);
+    assert_eq!(state.partner, Some(ADA));
     // Asked to stay, it is pinned.
     let stayed = hub.agent_move_agent("session", "stay").unwrap();
     assert_eq!(stayed["agent"]["mode"], "pinned");
     assert!(agent(&hub, &space).2);
-    // Home, its pin ends.
+    // Home, its pin ends, and it stands for nobody.
     hub.agent_move_agent("session", "home").unwrap();
     assert_eq!(agent(&hub, &space), (None, None, false));
+    assert_eq!(last_state(&ada).expect("told").partner, None);
     // Pinned at home, changing environment ends the pin too.
     hub.agent_move_agent("session", "stay").unwrap();
     assert!(agent(&hub, &space).2);

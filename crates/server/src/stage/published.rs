@@ -410,16 +410,19 @@ impl Stage {
                     return Ok(Change::Added);
                 }
                 Placed::Wall { wall: rested, slot } => {
-                    let list = self.list(walls.environment, Some(&rested));
-                    let free = !list
-                        .iter()
-                        .any(|other| other.slot_on(&rested) == Some(slot));
+                    // On its own wall in the status role, a status panel seated there meanwhile gives its slot back.
+                    let gave =
+                        slot < self.slots_of(walls, &rested) && self.give_way(walls, &rested, slot);
+                    let free = !self.taken(walls, &rested).contains(&slot);
                     if rested != super::TOMORI_WALL && free && slot < self.slots_of(walls, &rested)
                     {
                         kept.placed = self.tick();
                         kept.arranged = resting.arranged;
                         kept.place = Placed::Wall { wall: rested, slot };
                         self.room(walls.environment).panels.push(kept);
+                        if gave {
+                            self.settle(walls);
+                        }
                         return Ok(Change::Added);
                     }
                 }
@@ -439,7 +442,7 @@ impl Stage {
             return Err("That wall is full.");
         }
         let identity = kept.id.clone();
-        self.put_at(walls, kept, &wall, slot);
+        self.put_at(walls, kept, &wall, slot, false);
         self.here_mut(walls.environment, &identity)
             .expect("a panel just put on its wall is kept")
             .arranged = true;

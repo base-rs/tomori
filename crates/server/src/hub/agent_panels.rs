@@ -146,13 +146,13 @@ pub(crate) fn sent(value: &Value) -> usize {
 const EXCERPT_CHARS: usize = 80;
 
 /// What `panels` says of every panel, listed or read: its identity and id, its title, whether it is text, code or a
-/// chart, where it is, its age and its version, and, for an environment's panel, its environment's id for it and the
-/// id the agent may inspect it by.
+/// chart, where it is, its age and its version, whether it is one of the space's status panels, and, for an
+/// environment's panel, its environment's id for it and the id the agent may inspect it by.
 fn summarized(
     projection: &Projection,
     panel: &Panel,
     updated: Option<u64>,
-    published: Option<(&str, Option<&str>)>,
+    (published, status): (Option<(&str, Option<&str>)>, bool),
 ) -> Value {
     let kind = if panel.code.is_some() {
         "code"
@@ -169,6 +169,10 @@ fn summarized(
         "projected_seconds_ago": panel.age,
         "version": panel.version,
     });
+    // A status panel says so: it goes with the space to the next environment's status wall.
+    if status {
+        described["status"] = json!(true);
+    }
     // An environment's panel says so, with its environment's id for it and the id the agent may inspect it by.
     if let Some((id, reference)) = published {
         described["environment_panel"] = json!(id);
@@ -209,7 +213,7 @@ fn listed(
     projection: &Projection,
     panel: &Panel,
     updated: Option<u64>,
-    published: Option<(&str, Option<&str>)>,
+    published: (Option<(&str, Option<&str>)>, bool),
     rows: Option<usize>,
     excerpt: bool,
 ) -> Value {
@@ -238,7 +242,7 @@ fn detailed(
     projection: &Projection,
     panel: &Panel,
     updated: Option<u64>,
-    published: Option<(&str, Option<&str>)>,
+    published: (Option<(&str, Option<&str>)>, bool),
     rows: Option<(&[crate::stage::Row], Option<&str>)>,
 ) -> Value {
     let mut described = summarized(projection, panel, updated, published);
@@ -286,16 +290,19 @@ impl Hub {
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments
-            .walls(&record.model.environment)
-            .travelling(record.travel);
+        let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.versioned(&environments, now);
         let updated = |panel: &Panel| {
             let updated = record.stage.updated(walls.environment, &panel.id);
             updated.map(|updated| now.saturating_sub(updated))
         };
-        let published = |panel: &Panel| record.stage.published(walls.environment, &panel.id);
+        let published = |panel: &Panel| {
+            (
+                record.stage.published(walls.environment, &panel.id),
+                record.stage.is_status(&panel.id),
+            )
+        };
         let rows = |panel: &Panel| record.stage.rows(walls.environment, &panel.id);
         let mut told = json!({
             "space": space,
@@ -350,6 +357,16 @@ impl Hub {
         told["panels"] = json!(panels);
         told["total"] = json!(total);
         told["offset"] = json!(offset);
+        // Status panels the status wall has no slot for wait, kept, and take slots as they free.
+        let waiting: Vec<Value> = record
+            .stage
+            .waiting(&walls)
+            .into_iter()
+            .map(|(panel, title)| json!({ "panel": panel, "title": title, "status": true }))
+            .collect();
+        if !waiting.is_empty() {
+            told["waiting_for_a_slot"] = json!(waiting);
+        }
         if offset + fit < total {
             let next = offset + fit;
             told["next"] = json!(next);
@@ -393,9 +410,7 @@ impl Hub {
         let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments
-            .walls(&record.model.environment)
-            .travelling(record.travel);
+        let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.versioned(&environments, now);
         let id = find(&projection, &update.panel)?;

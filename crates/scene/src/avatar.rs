@@ -21,6 +21,13 @@ pub const SWARM: &str = "swarm";
 /// The radius of the sphere about the agent anchor that the swarm's rings and halo stand within, in metres.
 pub const SWARM_RADIUS: f32 = 1.2;
 
+/// How near whoever it stands for, in metres, about the vertical, the agent draws in.
+pub const NEAR: f32 = 2.0;
+
+/// How large the swarm draws in to, near whoever it stands for, as a share of its size: about 0.7 m across where it
+/// reaches 1.35 m, as a flock gathering to listen.
+pub const DRAWN: f32 = 0.52;
+
 /// What an avatar is told each frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -48,6 +55,10 @@ pub struct Input {
     pub via: Option<Vec3>,
     /// Whether the agent streams to `anchor` as a flock, faster than it glides, as far away.
     pub stream: bool,
+    /// How far the agent stands from whoever it stands for, about the vertical, while it is away, where it is known: an
+    /// avatar draws in within [`NEAR`] of them, as the swarm does to [`DRAWN`] of its size, so that it never fills
+    /// their view, and spreads out again at home.
+    pub near: Option<f32>,
     /// The seconds since the last frame.
     pub dt: f32,
 }
@@ -65,8 +76,15 @@ impl Input {
             attractor: None,
             via: None,
             stream: false,
+            near: None,
             dt,
         }
+    }
+
+    /// This input, standing `near` from whoever it stands for, or not away.
+    pub fn near(mut self, near: Option<f32>) -> Self {
+        self.near = near;
+        self
     }
 
     /// This input, going to its anchor by `via`, and streaming there where `stream` says.
@@ -154,6 +172,12 @@ impl SwarmAvatar {
 impl Avatar for SwarmAvatar {
     fn update(&mut self, input: &Input) {
         self.swarm.set_visual(input.visual, input.dt);
+        let size = if input.near.is_some_and(|near| near <= NEAR) {
+            DRAWN
+        } else {
+            1.0
+        };
+        self.swarm.draw_in(size, input.dt);
         if input.appearing {
             self.swarm.appear_at(input.anchor);
         } else {
@@ -428,6 +452,21 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_swarm_draws_in_within_reach_of_whoever_it_stands_for_and_spreads_out_again() {
+        let mut swarm = SwarmAvatar::default();
+        let frames = |swarm: &mut SwarmAvatar, near: Option<f32>| {
+            for _ in 0..360 {
+                swarm.update(&Input::new(Visual::default(), Anchor::AGENT, 1.0 / 72.0).near(near));
+            }
+            swarm.swarm.size()
+        };
+        assert!((frames(&mut swarm, Some(1.5)) - DRAWN).abs() < 1e-3);
+        assert!((frames(&mut swarm, Some(NEAR + 0.5)) - 1.0).abs() < 1e-3);
+        assert!((frames(&mut swarm, Some(NEAR)) - DRAWN).abs() < 1e-3);
+        assert!((frames(&mut swarm, None) - 1.0).abs() < 1e-3);
+    }
     use crate::interaction::Mode;
     use std::sync::Mutex;
 

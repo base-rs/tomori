@@ -54,6 +54,7 @@ fn yard() -> Walls<'static> {
         environment: "yard",
         tomori: crate::stage::default_stage(),
         declared: &DECLARED,
+        status: crate::stage::Status::Beneath,
     }
 }
 
@@ -439,7 +440,7 @@ fn a_full_wall_gives_up_only_the_agent_s_panels_and_never_its_environment_s() {
         if kept.starts_with("Note ") {
             let id = stage.view("s", &walls, 0);
             let id = id.panels.iter().find(|panel| panel.title == *kept).unwrap();
-            stage.dismiss("yard", &id.id.clone()).unwrap();
+            stage.dismiss(&yard(), &id.id.clone()).unwrap();
         }
     }
     for id in ["c", "d", "e", "f"] {
@@ -521,14 +522,14 @@ fn a_dismissed_panel_stays_away_until_retracted_or_the_space_comes_back() {
     let rota = |body: &str| publishing(Panel::text("rota", "Rota", body));
     stage.publish(&walls, rota("one"), 0).unwrap();
     let id = stage.view("s", &walls, 0).panels[0].id.clone();
-    stage.dismiss("yard", &id).unwrap();
+    stage.dismiss(&yard(), &id).unwrap();
     assert_eq!(stage.publish(&walls, rota("two"), 0), Ok(Change::Unchanged));
     assert!(shown(&stage, &walls).is_empty());
     // Retracted and published again, it is back.
     assert!(!stage.retract("yard", "rota"));
     assert_eq!(stage.publish(&walls, rota("three"), 0), Ok(Change::Added));
     let id = stage.view("s", &walls, 0).panels[0].id.clone();
-    stage.dismiss("yard", &id).unwrap();
+    stage.dismiss(&yard(), &id).unwrap();
     // Leaving the environment forgets it was dismissed; on returning, its side publishes it again.
     stage.leave("yard");
     assert_eq!(stage.publish(&walls, rota("four"), 0), Ok(Change::Added));
@@ -540,8 +541,8 @@ fn a_dismissed_panel_stays_away_until_retracted_or_the_space_comes_back() {
         None,
         0,
     );
-    stage.dismiss("yard", &notes).unwrap();
-    assert!(stage.dismiss("yard", &notes).is_err());
+    stage.dismiss(&yard(), &notes).unwrap();
+    assert!(stage.dismiss(&yard(), &notes).is_err());
 }
 
 #[test]
@@ -608,7 +609,7 @@ fn what_a_run_that_ended_published_rests_where_it_was_holding_no_slot_until_publ
     );
     assert!(stage.referenced("yard", "chart/other").is_none());
     assert!(stage.referenced("elsewhere", "chart/pressure").is_none());
-    stage.dismiss("yard", &agent).unwrap();
+    stage.dismiss(&yard(), &agent).unwrap();
     // Its side failing rests it again, once; back in its own slot, now free; floating, it floats again.
     assert!(stage.rest("yard"));
     assert!(!stage.rest("yard"));
@@ -762,7 +763,7 @@ fn a_panel_dismissed_stays_away_through_its_side_failing_and_one_floated_away_to
         .publish(&walls, publishing(Panel::text("rota", "Rota", "x")), 0)
         .unwrap();
     let id = stage.view("s", &walls, 0).panels[0].id.clone();
-    stage.dismiss("yard", &id).unwrap();
+    stage.dismiss(&yard(), &id).unwrap();
     stage.rest("yard");
     assert_eq!(
         stage.publish(&walls, publishing(Panel::text("rota", "Rota", "y")), 0),
@@ -1174,7 +1175,7 @@ fn a_locked_wall_takes_its_environment_s_panels_their_updates_and_participants_m
         on("environment-0", 2)
     );
     assert!(locked(&stage, &walls, "environment-0"));
-    stage.dismiss("yard", &id).unwrap();
+    stage.dismiss(&yard(), &id).unwrap();
     assert_eq!(stage.publish(&walls, chart(1.5), 40), Ok(Change::Unchanged));
     assert!(shown(&stage, &walls).is_empty());
     // Retracted on the locked wall, it goes.
@@ -1251,7 +1252,7 @@ fn an_agent_s_panel_floated_beside_someone_stands_clear_of_an_environment_s_and_
         |title: &str| crate::stage::Content::parse(&format!("title: {title}\n---\nx")).unwrap();
     let first = stage.project_to(&walls, note("First"), &beside, 0);
     let spot = floating(&stage, &first);
-    stage.dismiss("yard", &first).unwrap();
+    stage.dismiss(&yard(), &first).unwrap();
     stage
         .publish(&walls, publishing(Panel::text("rota", "Rota", "x")), 0)
         .unwrap();

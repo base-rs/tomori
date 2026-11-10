@@ -28,8 +28,8 @@ pub struct Environment {
     version: u32,
     instructions: String,
     side: Option<Arc<dyn ServerSide>>,
-    /// The Tomori wall's home in it, its `stage` anchor, if it says, in its own coordinates. See `design/projection.md`.
-    stage: Option<tomori_protocol::Pose>,
+    /// Which wall is the space's status wall in it, if it says. See `design/projection.md`.
+    status: Option<StatusWall>,
     /// The agent's home in it, its `agent` anchor, if it says, in its own coordinates. See `design/environments.md`.
     agent: Option<tomori_protocol::Pose>,
     /// The middle of its workers' arrangement, its `workers` anchor, if it says, in its own coordinates.
@@ -85,8 +85,8 @@ pub const WALL_NAME_BYTES: usize = 24;
 /// Whether `name` is one an environment may call its own wall, which its label shows in capitals and the agent names it
 /// by, as `place: wall Details slot 2`: from 1 to [`WALL_NAME_BYTES`] ASCII letters, digits, spaces and `-`, with no
 /// space at either end or two together, that does not begin with `the `, and holds no word `slot`, which would end a
-/// wall's name where a slot's number begins, nor begins as a wall is already called, `Tomori`, `environment` or
-/// `added`, or as a wall's identity begins, `wall-`, nor whose first word is one a place begins with, `near`,
+/// wall's name where a slot's number begins, nor begins as a wall is already called, `Tomori`, `status wall`,
+/// `environment` or `added`, or as a wall's identity begins, `wall-`, nor whose first word is one a place begins with, `near`,
 /// `nearest`, `look`, `looking`, `front`, `beside` or `wall`, in any case, which `set_wall` would read as that form.
 ///
 /// ```
@@ -109,7 +109,7 @@ pub fn valid_wall_name(name: &str) -> bool {
         && !name.contains("  ")
         && !lower.starts_with("the ")
         && !lower.split(' ').any(|word| word == "slot")
-        && ["tomori", "environment", "added", "wall-"]
+        && ["tomori", "status wall", "environment", "added", "wall-"]
             .iter()
             .all(|taken| !lower.starts_with(taken))
         && !lower.split(' ').next().is_some_and(|first| {
@@ -273,6 +273,64 @@ impl PartialEq<tomori_protocol::Pose> for EnvironmentWall {
     }
 }
 
+/// Which wall is a space's status wall in an environment, where Tomori's notices, what the agent projects unasked and
+/// every placement's last fallback go: one of the environment's own walls, as a farm's notice board, or a wall of the
+/// space's own that it stands and lays out. Without one, the space's own status wall stands beneath the agent's home.
+/// It never travels with the agent. See `design/projection.md`.
+///
+/// ```
+/// use tomori_protocol::{Grid, Pose};
+/// use tomori_server::{EnvironmentWall, StatusWall};
+///
+/// assert_eq!(StatusWall::own(0).index(), Some(0));
+/// let strip = EnvironmentWall::new(Pose::at([0.0, 1.2, -2.5])).with_grid(Grid::from((3, 1)));
+/// assert_eq!(StatusWall::at(strip).wall(), Some(strip));
+/// assert_eq!(StatusWall::own(0).wall(), None);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StatusWall(Role);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Role {
+    Own(usize),
+    At(EnvironmentWall),
+}
+
+impl StatusWall {
+    /// The environment's own wall `index`, by its place among those it declares with [`Environment::with_walls`],
+    /// from 0, as a side's `Panel::on_wall` names one: that wall is the status wall, its pose, grid, lock and scenery
+    /// the environment's, and the space's own status wall is not shown there.
+    pub const fn own(index: usize) -> Self {
+        Self(Role::Own(index))
+    }
+
+    /// The space's own status wall, standing and laid out as `wall` says, in the environment's own coordinates, carried
+    /// into the space's as every anchor is: the middle of it there, facing along its +Z, its grid, slots, curve and
+    /// tilt the default the space's edits stand over.
+    pub fn at(wall: impl Into<EnvironmentWall>) -> Self {
+        Self(Role::At(wall.into()))
+    }
+
+    /// The environment's own wall it names, by its place among them, if it names one.
+    pub fn index(&self) -> Option<usize> {
+        match self.0 {
+            Role::Own(index) => Some(index),
+            Role::At(_) => None,
+        }
+    }
+
+    /// The wall it stands and lays out, if it gives one.
+    pub fn wall(&self) -> Option<EnvironmentWall> {
+        match self.0 {
+            Role::At(wall) => Some(wall),
+            Role::Own(_) => None,
+        }
+    }
+}
+
+/// The fewest slots a status wall has, so that two notices can stand together.
+pub const STATUS_SLOTS: u32 = 2;
+
 impl fmt::Debug for Environment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -282,7 +340,7 @@ impl fmt::Debug for Environment {
             .field("version", &self.version)
             .field("instructions", &self.instructions)
             .field("server_side", &self.side.is_some())
-            .field("stage", &self.stage)
+            .field("status", &self.status)
             .field("agent", &self.agent)
             .field("workers", &self.workers)
             .field("arrival", &self.arrival)
@@ -300,7 +358,7 @@ impl PartialEq for Environment {
             && self.label == other.label
             && self.version == other.version
             && self.instructions == other.instructions
-            && self.stage == other.stage
+            && self.status == other.status
             && self.agent == other.agent
             && self.workers == other.workers
             && self.arrival == other.arrival
@@ -326,7 +384,7 @@ impl Environment {
             version: 1,
             instructions: String::new(),
             side: None,
-            stage: None,
+            status: None,
             agent: None,
             workers: None,
             arrival: None,
@@ -471,20 +529,38 @@ impl Environment {
                 .collect();
     }
 
-    /// The environment, with the Tomori wall's home at `stage`, its `stage` anchor, in its own coordinates, upright and
-    /// facing along the pose's +Z: where the middle of its row stands in a space in it, overriding the default, beneath
-    /// the agent's home. Without one, the wall's home is beneath the agent's home, wherever the environment puts it:
-    /// the middle of its row `tomori_protocol::entourage::BENEATH` directly below the swarm's middle, facing the way the
-    /// agent faces, never lower than `entourage::LOWEST_WALL` above the floor where participants arrive
-    /// (`entourage::wall_beneath`), or, for an environment that gives no agent anchor either, at
-    /// [`crate::stage::default_stage`], 2.3 m ahead of home, below the agent's default home. Give one only where the
-    /// wall must stand elsewhere, as beneath an agent too high or far to read it there. It stays at its home, but while
-    /// a participant has summoned the agent, when it stands beneath the agent, before them, clear of the environment's
-    /// solids, and goes home with the agent; and its edits, where a space keeps them, stand over it. Make it readable
-    /// from where participants arrive, within about 4 m of their eyes and facing them, clear of the scenery: see
-    /// `tomori_environment::sightlines`. The server uses it if, carried into the space's coordinates, it is finite,
-    /// within 20 m of home and has an orientation, made upright, as walls are. The wall and what is on it belong to the
-    /// space, so they move here with the space. See `design/projection.md`.
+    /// The environment, with the space's status wall where `status` says: one of its own walls, as a notice board the
+    /// place already has, or a wall of the space's own it stands and lays out, such as a compact strip by a door. Without
+    /// one, the space's status wall stands beneath the agent's home (see [`Self::tomori_wall_home`]). One of its own
+    /// walls must be one it declares, and either must have at least [`STATUS_SLOTS`] slots: one that is not is left out,
+    /// with a warning, and the default stands. Make the wall readable: one it stands from where participants arrive,
+    /// and one of its own from the ground in front of it, and seen from where they arrive (see
+    /// `tomori_environment::sightlines`). What is on the status wall belongs to the space and moves with it. See
+    /// `design/projection.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::{Grid, Pose};
+    /// use tomori_server::{Environment, EnvironmentWall, StatusWall};
+    ///
+    /// let board = EnvironmentWall::new(Pose::at([3.0, 1.4, -4.0])).with_grid(Grid::from((2, 1)));
+    /// let farm = Environment::new("farm", "Farm").with_walls([board]).with_status_wall(StatusWall::own(0));
+    /// assert_eq!(farm.status_wall(), Some(StatusWall::own(0)));
+    /// assert_eq!(Environment::new("plain", "Plain").status_wall(), None);
+    /// ```
+    pub fn with_status_wall(mut self, status: StatusWall) -> Self {
+        self.status = Some(status);
+        self.check_status();
+        self
+    }
+
+    /// Which wall is the space's status wall in it, if it says.
+    pub fn status_wall(&self) -> Option<StatusWall> {
+        self.status
+    }
+
+    /// The environment, with the space's status wall standing at `stage`, its `stage` anchor, in its own coordinates,
+    /// upright and facing along the pose's +Z, laid out as the default status wall is, six slots in a curved row: as
+    /// [`Self::with_status_wall`] with [`StatusWall::at`], which also lays it out, and which it is kept for.
     ///
     /// ```
     /// use tomori_protocol::Pose;
@@ -494,20 +570,72 @@ impl Environment {
     /// assert_eq!(Environment::new("observe", "Observe").with_stage(stage).stage(), Some(stage));
     /// assert_eq!(Environment::new("observe", "Observe").stage(), None);
     /// ```
-    pub fn with_stage(mut self, stage: tomori_protocol::Pose) -> Self {
-        self.stage = Some(stage);
-        self
+    pub fn with_stage(self, stage: tomori_protocol::Pose) -> Self {
+        let layout = crate::stage::Layout::TOMORI;
+        let wall = EnvironmentWall::new(stage)
+            .with_grid(layout.grid)
+            .with_scale(layout.scale)
+            .with_curve(crate::stage::ARC_RADIUS);
+        self.with_status_wall(StatusWall::at(wall))
     }
 
-    /// Where the Tomori wall's home is in it, if it says, in its own coordinates.
+    /// Where the space's status wall stands in it, if it stands one there, in its own coordinates.
     pub fn stage(&self) -> Option<tomori_protocol::Pose> {
-        self.stage
+        self.status
+            .and_then(|status| status.wall())
+            .map(|wall| wall.pose)
     }
 
-    /// Where the Tomori wall's home stands in a space in it, in the space's coordinates: its `stage` carried, if it
-    /// gives a valid one, or else beneath its agent's home carried, if it gives a valid one, as
-    /// `tomori_protocol::entourage::wall_beneath` stands it on the floor where participants arrive; or none, for the
-    /// default, [`crate::stage::default_stage`], beneath the agent's default home. See [`Self::with_stage`].
+    /// Warn of a status wall it names that is left out: one of its own walls it does not declare, or a wall of fewer
+    /// than [`STATUS_SLOTS`].
+    fn check_status(&self) {
+        if let Some(status) = self.status
+            && let Err(why) = self.checked_status(status)
+        {
+            log::warn!(
+                "Environment {}'s status wall is left out, and the default stands: {why}",
+                self.id
+            );
+        }
+    }
+
+    /// `status`, if the server uses it here, or why not.
+    fn checked_status(&self, status: StatusWall) -> Result<(), &'static str> {
+        let layout = match status.0 {
+            Role::Own(index) => self
+                .walls
+                .get(index)
+                .filter(|_| index < crate::stage::DECLARED_WALLS)
+                .ok_or("it names a wall the environment does not declare")?
+                .layout(),
+            Role::At(wall) => wall.layout(),
+        };
+        if layout.grid.slots() < STATUS_SLOTS {
+            return Err("it has fewer than two slots");
+        }
+        Ok(())
+    }
+
+    /// Which wall is the space's status wall in a space in it: one of its own, by its place among them; or the space's
+    /// own, at [`Self::tomori_wall_home`] and laid out as it says, or by default; or, beyond reach, by default.
+    pub(crate) fn status(&self) -> crate::stage::Status {
+        match self
+            .status
+            .filter(|status| self.checked_status(*status).is_ok())
+        {
+            Some(StatusWall(Role::Own(index))) => crate::stage::Status::Own(index),
+            Some(StatusWall(Role::At(wall))) if self.carried(Some(&wall.pose)).is_some() => {
+                crate::stage::Status::At(wall.layout())
+            }
+            _ => crate::stage::Status::Beneath,
+        }
+    }
+
+    /// Where the space's own status wall's home stands in a space in it, in the space's coordinates: the wall its
+    /// [`StatusWall::at`] stands, carried, if it gives a valid one, or else beneath its agent's home carried, if it gives
+    /// a valid one, as `tomori_protocol::entourage::wall_beneath` stands it on the floor where participants arrive; or
+    /// none, for the default, [`crate::stage::default_stage`], beneath the agent's default home. Where its status wall is
+    /// one of its own, the space's own is not shown, and this is where it would stand. It never travels with the agent.
     ///
     /// ```
     /// use tomori_protocol::{Pose, entourage};
@@ -521,7 +649,7 @@ impl Environment {
     /// assert_eq!(Environment::new("plain", "Plain").tomori_wall_home(), None);
     /// ```
     pub fn tomori_wall_home(&self) -> Option<tomori_protocol::Pose> {
-        self.carried(self.stage.as_ref()).or_else(|| {
+        self.carried(self.stage().as_ref()).or_else(|| {
             let agent = self.carried(self.agent.as_ref())?;
             crate::stage::valid(&tomori_protocol::entourage::wall_beneath(
                 &agent,
@@ -573,6 +701,7 @@ impl Environment {
         }
         self.walls = walls;
         self.carry_walls();
+        self.check_status();
         self
     }
 
@@ -584,12 +713,11 @@ impl Environment {
     /// The environment, with the agent's home at `agent`, its `agent` anchor, in its own coordinates: the swarm's middle
     /// there, its eye facing along the pose's +Z, for everyone in a space in it, such as a balcony looking down at
     /// where participants arrive, `Pose::at(balcony).facing_towards(arrival)`. The agent appears there as the space
-    /// opens, and stays there, until a participant summons it elsewhere, and goes back when sent home; it never moves
-    /// of its own accord. Without one, the swarm stands 1.4 m up and 2.3 m straight ahead of home, facing home. The
-    /// Tomori wall's home is beneath it, unless [`Self::with_stage`] says otherwise, so keep it at least
-    /// `tomori_protocol::entourage::LOWEST_AGENT`, 1.4 m, above the floor, for the wall to stand beneath it with a gap.
-    /// Make it seen from where participants arrive, and the wall beneath it read: see `tomori_environment::sightlines`.
-    /// The server sends it in the space's
+    /// opens, and returns there when sent home or once a conversation it followed is quiet. Without one, the swarm
+    /// stands 1.4 m up and 2.3 m straight ahead of home, facing home. The status wall's home is beneath it, unless
+    /// [`Self::with_status_wall`] says otherwise; only then keep it at least `tomori_protocol::entourage::LOWEST_AGENT`,
+    /// 1.4 m, above the floor, for the wall to stand beneath it with a gap. Make it seen from where participants
+    /// arrive, and a wall beneath it read: see `tomori_environment::sightlines`. The server sends it in the space's
     /// state, carried into the space's coordinates, if it is then finite, within 20 m of home and has an orientation,
     /// made upright, and leaves it out otherwise. See `design/environments.md`.
     ///
@@ -614,7 +742,7 @@ impl Environment {
     /// The environment, with the middle of its workers' arrangement at `workers`, its `workers` anchor, in its own
     /// coordinates, the arrangement facing along the pose's +Z, towards whoever watches it, as the agent does. Without
     /// one, the arrangement's middle is the agent's home, so that workers stand about the agent's home, as they stand
-    /// about its default home by default; summoned, the agent takes them with it. A client places them about it,
+    /// about its default home by default; they stay there wherever the agent goes. A client places them about it,
     /// by the placement its build registers for the environment or the default arc. Sent and bounded as
     /// [`Self::with_agent`] is. See `design/environments.md`.
     ///
@@ -659,7 +787,7 @@ impl Environment {
 
     /// The environment, with `solids`, boxes of its scenery, in its own coordinates, each from its least to its greatest
     /// corner, aligned with its axes, such as a building or a stack of hay: nothing of Tomori's that moves about the
-    /// space, the Tomori wall at its travel spot while the agent is summoned, stands inside one, nor is seen through
+    /// space, the agent where it goes and the panels floating beside someone, stands inside one, nor is seen through
     /// one. The same boxes its tests check its homes against with `tomori_environment::sightlines`. See
     /// `design/environments.md`.
     ///
@@ -789,6 +917,7 @@ impl Environments {
                 .and_then(Environment::tomori_wall_home)
                 .unwrap_or_else(crate::stage::default_stage),
             declared: environment.map_or(&[], |environment| &environment.carried),
+            status: environment.map_or(crate::stage::Status::Beneath, Environment::status),
         }
     }
 
@@ -1391,6 +1520,73 @@ mod tests {
                 .stage(),
             Some(stage)
         );
+    }
+
+    #[test]
+    fn an_environment_names_its_status_wall_one_of_its_own_or_one_it_stands_or_else_the_default_stands()
+     {
+        use crate::stage::{Layout, Status};
+        use tomori_protocol::{Grid, Pose};
+        let board = EnvironmentWall::new(Pose::at([3.0, 1.4, -4.0])).with_grid(Grid::from((2, 1)));
+        let single =
+            EnvironmentWall::new(Pose::at([-3.0, 1.4, -4.0])).with_grid(Grid::from((1, 1)));
+        let farm = Environment::new("farm", "Farm")
+            .with_status_wall(StatusWall::own(0))
+            .with_walls([board, single]);
+        assert_eq!(farm.status(), Status::Own(0));
+        assert!(format!("{farm:?}").contains("Own(0)"));
+        assert_ne!(
+            farm,
+            Environment::new("farm", "Farm").with_walls([board, single])
+        );
+        let offered = Environments::new([
+            farm.clone(),
+            // A wall of one slot, or one it does not declare, is left out, and the default stands.
+            farm.clone().with_status_wall(StatusWall::own(1)),
+            farm.clone().with_status_wall(StatusWall::own(2)),
+            Environment::new("strip", "Strip").with_status_wall(StatusWall::at(board)),
+            Environment::new("tiny", "Tiny").with_status_wall(StatusWall::at(single)),
+            Environment::new("far", "Far")
+                .with_status_wall(StatusWall::at(Pose::at([0.0, 1.4, -30.0]))),
+        ]);
+        let walls = offered.walls("farm");
+        assert_eq!(
+            (walls.status, walls.status_wall()),
+            (Status::Own(0), "environment-0".to_owned())
+        );
+        assert_eq!(
+            Environment::new("farm", "Farm")
+                .with_walls([board, single])
+                .with_status_wall(StatusWall::own(1))
+                .status(),
+            Status::Beneath
+        );
+        assert_eq!(
+            farm.clone().with_status_wall(StatusWall::own(2)).status(),
+            Status::Beneath
+        );
+        // One it stands, laid out as it says, at its pose; beyond reach, the default.
+        let strip = offered.get("strip").unwrap();
+        assert_eq!(strip.status(), Status::At(board.layout()));
+        assert_eq!(strip.stage(), Some(board.pose));
+        assert_eq!(StatusWall::at(board).index(), None);
+        assert_eq!(StatusWall::own(1).index(), Some(1));
+        assert_eq!(offered.walls("strip").tomori, board.pose);
+        assert_eq!(offered.get("tiny").unwrap().status(), Status::Beneath);
+        assert_eq!(offered.get("far").unwrap().status(), Status::Beneath);
+        assert_eq!(offered.walls("far").tomori, crate::stage::default_stage());
+        // A stage is a status wall it stands, six slots in a curved row, as the default is laid out.
+        let staged = Environment::new("staged", "Staged").with_stage(board.pose);
+        assert_eq!(staged.status(), Status::At(Layout::TOMORI));
+        assert_eq!(
+            staged
+                .status_wall()
+                .and_then(|status| status.wall())
+                .map(|wall| wall.grid()),
+            Some(Layout::TOMORI.grid)
+        );
+        // Not offered, it is the default.
+        assert_eq!(offered.walls("gone").status, Status::Beneath);
     }
 
     #[test]

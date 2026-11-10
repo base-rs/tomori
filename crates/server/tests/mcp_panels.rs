@@ -177,7 +177,7 @@ fn the_agent_updates_a_checklist_in_place_by_its_id_and_ticks_its_items_through_
     assert_eq!(described["panel"], agenda.id);
     assert_eq!(described["id"], "agenda");
     assert_eq!(described["kind"], "text");
-    assert_eq!(described["wall_name"], "Tomori wall");
+    assert_eq!(described["wall_name"], "status wall (the Tomori wall)");
     assert_eq!(described["body"], agenda.body);
     assert_eq!(
         items(described),

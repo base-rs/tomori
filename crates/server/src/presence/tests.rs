@@ -404,7 +404,7 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     assert_eq!(report["head"]["position"], json!([0.0, 1.6, 0.0]));
     assert_eq!(
         report["looking_at"],
-        json!({"kind": "wall", "wall": "tomori", "wall_name": "Tomori wall", "slot": 4, "distance": report["looking_at"]["distance"]})
+        json!({"kind": "wall", "wall": "tomori", "wall_name": "status wall (the Tomori wall)", "slot": 4, "distance": report["looking_at"]["distance"]})
     );
     assert_eq!(report["pointing_at"]["kind"], "panel");
     assert_eq!(report["pointing_at"]["panel"], "panel-1");
@@ -414,7 +414,10 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     assert_eq!(report["left_hand"]["yaw"], 0.0);
     assert_eq!(report["right_hand"]["position"], json!([0.2, 1.1, -0.3]));
     assert_eq!(report["nearest_wall"]["wall"], "tomori");
-    assert_eq!(report["nearest_wall"]["wall_name"], "Tomori wall");
+    assert_eq!(
+        report["nearest_wall"]["wall_name"],
+        "status wall (the Tomori wall)"
+    );
     assert_eq!(report["walls_in_view"], json!(["tomori"]));
 
     // Tracked hands without controllers are at their palms, and point at nothing; a lost hand is nothing.
@@ -562,7 +565,7 @@ fn walls_are_described_with_where_they_stand_their_size_and_their_free_and_used_
     assert_eq!(walls.len(), 3);
     let tomori = &walls[0];
     assert_eq!(tomori["id"], "tomori");
-    assert_eq!(tomori["name"], "Tomori wall");
+    assert_eq!(tomori["name"], "status wall (the Tomori wall)");
     assert_eq!(tomori["kind"], "tomori");
     assert_eq!(tomori["shape"], json!({"arc": 2.3}));
     assert_eq!(tomori["position"], json!([0.0, 0.52, -2.3]));
@@ -897,7 +900,7 @@ fn an_environment_s_wall_is_called_by_the_name_its_environment_gave_it_and_place
     // A sentence names it as a name, the others as kinds of wall.
     assert_eq!(the_wall(&projection, &named), "the wall \"Details\"");
     assert_eq!(the_wall(&projection, &other), "the environment wall 2");
-    assert_eq!(the_wall(&projection, &tomori()), "the Tomori wall");
+    assert_eq!(the_wall(&projection, &tomori()), "the status wall");
     assert_eq!(capitalised("the wall \"Details\""), "The wall \"Details\"");
     assert_eq!(capitalised(""), "");
     // An added wall is never called by a name a server says.
@@ -933,6 +936,87 @@ fn an_environment_s_wall_is_called_by_the_name_its_environment_gave_it_and_place
     assert_eq!(
         onto("environment wall 1", None),
         Err("There is no wall called \"environment wall 1\" here.".to_owned())
+    );
+}
+
+#[test]
+fn the_status_wall_is_called_so_and_by_its_old_name_and_an_environment_s_wall_in_the_role_by_both_names()
+ {
+    let tomori = tomori().with_status(true);
+    let sky = Projection::new("space-1", "sky").with_walls(vec![tomori.clone()]);
+    assert_eq!(wall_name(&sky, &tomori), "status wall (the Tomori wall)");
+    let onto = |projection: &Projection, named: &str, slot| {
+        destination(
+            &Placement::Wall(named.into(), slot),
+            None,
+            &[],
+            projection,
+            &[],
+        )
+    };
+    let status = |slot| {
+        Ok(Destination::Wall {
+            wall: TOMORI_WALL.into(),
+            slot,
+        })
+    };
+    // Every name, in any case, with or without `the`.
+    for named in [
+        "status wall",
+        "the Status Wall",
+        "Tomori wall",
+        "the tomori wall",
+        "status wall (the Tomori wall)",
+        "tomori",
+    ] {
+        assert_eq!(onto(&sky, named, None), status(None), "{named}");
+    }
+    // The farm's notice board, in the role: called both, and named either way.
+    let board = wall_at("environment-0", [3.0, 1.45, -4.8])
+        .with_grid(Grid::from((2, 1)))
+        .with_status(true);
+    let farm = Projection::new("space-1", "farmyard").with_walls(vec![board.clone()]);
+    assert_eq!(
+        wall_name(&farm, &board),
+        "environment wall 1 (the status wall)"
+    );
+    assert_eq!(
+        the_wall(&farm, &board),
+        "the environment wall 1 (the status wall)"
+    );
+    // As the status wall, a panel goes there as a status panel; by its own name, as the board's.
+    assert_eq!(onto(&farm, "the status wall", Some(1)), status(Some(1)));
+    assert_eq!(onto(&farm, "Tomori wall", None), status(None));
+    let own = |slot| {
+        Ok(Destination::Wall {
+            wall: "environment-0".into(),
+            slot,
+        })
+    };
+    assert_eq!(onto(&farm, "environment wall 1", None), own(None));
+    assert_eq!(
+        onto(&farm, "environment wall 1 (the status wall)", Some(0)),
+        own(Some(0))
+    );
+    assert_eq!(
+        onto(&farm, "status wall", Some(2)),
+        Err("The environment wall 1 (the status wall) has no slot 2: its slots are numbered from 0 to 1.".to_owned())
+    );
+    // The wall tools name the board itself, by any of its names.
+    for named in ["status wall", "Tomori wall", "environment wall 1"] {
+        assert_eq!(
+            which_wall(named, None, &[], &farm),
+            Ok("environment-0".to_owned()),
+            "{named}"
+        );
+    }
+    // A wall of an environment's that is not the status wall is not called so.
+    let plain = wall_at("environment-0", [3.0, 1.45, -4.8]);
+    let field = Projection::new("space-1", "field").with_walls(vec![tomori.clone(), plain.clone()]);
+    assert_eq!(wall_name(&field, &plain), "environment wall 1");
+    assert_eq!(
+        which_wall("status wall", None, &[], &field),
+        Ok(TOMORI_WALL.to_owned())
     );
 }
 

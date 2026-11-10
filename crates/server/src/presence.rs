@@ -336,10 +336,20 @@ pub fn slot_centres(wall: &Wall) -> Vec<[f32; 3]> {
     slots(wall).iter().map(|slot| slot.middle).collect()
 }
 
-/// What `wall` of `projection` is called, as the agent is told and may name it: the Tomori wall, an environment's wall
-/// by the name its environment gave it, if it did, or else, and an added wall, by its number among those of its kind,
-/// from 1.
+/// What `wall` of `projection` is called, as the agent is told and may name it: the space's own status wall, `status
+/// wall (the Tomori wall)`, as it was called; an environment's wall by the name its environment gave it, if it did, or
+/// else, and an added wall, by its number among those of its kind, from 1; and an environment's wall in the status role
+/// as both, `environment wall 1 (the status wall)`.
 pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
+    let own = own_name(projection, wall);
+    match wall.kind {
+        WallKind::Environment if wall.status => format!("{own} (the status wall)"),
+        _ => own,
+    }
+}
+
+/// What `wall` of `projection` is called, but for an environment's wall's status role.
+fn own_name(projection: &Projection, wall: &Wall) -> String {
     if let (WallKind::Environment, Some(name)) = (&wall.kind, &wall.name) {
         return name.clone();
     }
@@ -350,17 +360,34 @@ pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
         .position(|other| other.id == wall.id)
         .map_or(1, |index| index + 1);
     match wall.kind {
-        WallKind::Tomori => "Tomori wall".to_owned(),
+        WallKind::Tomori => "status wall (the Tomori wall)".to_owned(),
         WallKind::Environment => format!("environment wall {number}"),
         _ => format!("added wall {number}"),
     }
 }
 
-/// `wall` of `projection` as a sentence names it, after "the": "the Tomori wall", "the environment wall 1" or "the
+/// The names that name the status role, wherever the status wall stands, in any case.
+const STATUS_NAMES: [&str; 2] = ["status wall", "Tomori wall"];
+
+/// Whether `named`, without `the`, names `wall` of `projection`: by its identity, its name, or, for an environment's
+/// wall in the status role, its own name; and whether it names the status role, as `status wall` or `Tomori wall` do.
+fn names(projection: &Projection, wall: &Wall, named: &str) -> Option<bool> {
+    let alias = (wall.status || wall.kind == WallKind::Tomori)
+        && STATUS_NAMES
+            .iter()
+            .any(|status| status.eq_ignore_ascii_case(named));
+    let own = wall.id.eq_ignore_ascii_case(named)
+        || wall_name(projection, wall).eq_ignore_ascii_case(named)
+        || own_name(projection, wall).eq_ignore_ascii_case(named);
+    (alias || own).then_some(alias || wall.kind == WallKind::Tomori)
+}
+
+/// `wall` of `projection` as a sentence names it, after "the": "the status wall", "the environment wall 1" or "the
 /// added wall 2", and a wall its environment named by its name in quotes, as "the wall "Details"", which reads as a
 /// name rather than a kind of wall.
 pub(crate) fn the_wall(projection: &Projection, wall: &Wall) -> String {
     match (&wall.kind, &wall.name) {
+        (WallKind::Tomori, _) => "the status wall".to_owned(),
         (WallKind::Environment, Some(name)) => format!("the wall \"{name}\""),
         _ => format!("the {}", wall_name(projection, wall)),
     }
@@ -1055,7 +1082,12 @@ pub(crate) fn which_wall(
     if let Ok(Destination::Wall { wall, .. }) =
         destination(&by_name, asker, people, projection, &[])
     {
-        return Ok(wall);
+        // The status role is the wall in it.
+        return Ok(projection
+            .walls
+            .iter()
+            .find(|shown| shown.id == wall || wall == tomori_protocol::TOMORI_WALL && shown.status)
+            .map_or(wall, |shown| shown.id.clone()));
     }
     let place = Placement::parse(named).ok_or_else(|| {
         format!(
@@ -1082,7 +1114,7 @@ pub(crate) fn which_wall(
         }
     };
     let head = head_of(name.as_deref(), asker, people)?;
-    // The wall they are looking at, if they are, or else the one nearest them; there is always the Tomori wall.
+    // The wall they are looking at, if they are, or else the one nearest them; there is always the status wall.
     let seen = looking.then(|| looking_at(&head, projection, &[]));
     Ok(match seen {
         Some(Destination::Wall { wall, .. }) => wall,
@@ -1136,13 +1168,10 @@ pub(crate) fn destination(
                 .get(..4)
                 .filter(|the| the.eq_ignore_ascii_case("the "))
                 .map_or(named, |_| &named[4..]);
-            let wall = projection
+            let (wall, role) = projection
                 .walls
                 .iter()
-                .find(|wall| {
-                    wall.id.eq_ignore_ascii_case(named)
-                        || wall_name(projection, wall).eq_ignore_ascii_case(named)
-                })
+                .find_map(|wall| names(projection, wall, named).map(|role| (wall, role)))
                 .ok_or_else(|| format!("There is no wall called {named:?} here."))?;
             // A slot it does not have is refused, rather than taken as its most prominent free one.
             if let Some(slot) = slot.filter(|slot| *slot >= wall.slots()) {
@@ -1152,8 +1181,13 @@ pub(crate) fn destination(
                     wall.slots() - 1
                 ));
             }
+            // Named as the status wall, a panel goes there as a status panel, wherever that stands.
             Destination::Wall {
-                wall: wall.id.clone(),
+                wall: if role {
+                    tomori_protocol::TOMORI_WALL.to_owned()
+                } else {
+                    wall.id.clone()
+                },
                 slot: *slot,
             }
         }
