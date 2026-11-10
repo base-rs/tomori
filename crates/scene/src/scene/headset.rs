@@ -2042,6 +2042,126 @@ mod tests {
     }
 
     #[test]
+    fn leaving_after_travelling_by_stick_and_pad_returns_to_the_lobby_from_home() {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        // Participants arrive 8 m along +X, facing the environment's origin, as the farmyard's arrive inside its gate,
+        // and a pad 1.5 m ahead of home, where the stick lands, is paired with one on a floor below.
+        let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        let arrived = |conversation: &mut Conversation| {
+            conversation.apply(space(|state| {
+                state.anchors = tomori_protocol::Anchors::new().with_arrival(street);
+            }));
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        arrived(&mut conversation);
+        let carriage = conversation.arrangement().carriage;
+        assert_ne!(carriage, crate::anchors::Anchor::HOME);
+        let carriage = Mat4::from_rotation_translation(carriage.orientation, carriage.position);
+        // Declared in the environment's own coordinates, carried into the space's.
+        let local = |at: Vec3| carriage.inverse().transform_point3(at);
+        let (pad, below) = (Vec3::new(0.2, 0.0, -1.5), Vec3::new(0.2, -4.5, -1.5));
+        conversation.set_locomotion(vec![(
+            crate::test_support::SKY,
+            Locomotion::teleport(vec![
+                Surface::rectangle(local(Vec3::ZERO), glam::Vec2::splat(30.0)),
+                Surface::rectangle(local(Vec3::new(0.0, -4.5, 0.0)), glam::Vec2::splat(30.0)),
+            ])
+            .with_pads([[Pad::at(local(pad)), Pad::at(local(below))]]),
+        )]);
+        conversation.take_actions();
+        // A fresh lobby, as on first launch, for comparison.
+        let mut fresh = Rig::new(lobby(ConnectionRole::Owner));
+        let mut fresh_drawn = None;
+        for _ in 0..400 {
+            fresh_drawn = Some(
+                fresh
+                    .frame(&Controls::default(), [None, None], Duration::ZERO)
+                    .scene_to_space,
+            );
+        }
+        let mut rig = Rig::new(conversation);
+        let mut at = Duration::ZERO;
+        let mut frame = |rig: &mut Rig, controls: &Controls| {
+            at += Duration::from_secs_f32(FRAME);
+            let drawn = rig.frame(controls, [None, None], at);
+            (
+                drawn.scene_to_space,
+                drawn.frame.carriage,
+                drawn.frame.swarm.anchor(),
+                drawn.frame.scenery.environment,
+                drawn.frame.presence.map(|presence| presence.head),
+            )
+        };
+        for _ in 0..400 {
+            frame(&mut rig, &Controls::default());
+        }
+        // The stick lands on the pad ahead, and standing on it takes the participant to the floor below.
+        let aim = Pose {
+            position: [0.2, 1.2, -0.3],
+            orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
+        };
+        let pointing = |stick: glam::Vec2| Controls {
+            aim: Some(aim),
+            navigation: stick,
+            navigation_active: true,
+            trigger: Some(0.0),
+            ..Controls::default()
+        };
+        frame(&mut rig, &pointing(glam::Vec2::Y));
+        frame(&mut rig, &pointing(glam::Vec2::ZERO));
+        for _ in 0..60 {
+            frame(&mut rig, &Controls::default());
+        }
+        let (_, _, _, _, head) = frame(&mut rig, &Controls::default());
+        let head = Vec3::from_array(head.unwrap().position);
+        assert!(
+            head.distance(below + Vec3::Y * 1.6) < 1e-3,
+            "travelled by stick and pad: {head}"
+        );
+        // A step taken in the room is the participant's own, and is kept.
+        let stepped = Vec3::new(0.5, 1.6, -0.4);
+        rig.views = stereo(stepped, Quat::IDENTITY);
+        // Holding B leaves; the environment shrinks away, and once it has gone the lobby is drawn from home, as it is
+        // on first launch, with the participant where they stand in their room.
+        let back = |pressed: bool| Controls {
+            back: pressed,
+            back_held: true,
+            ..Controls::default()
+        };
+        let mut left = None;
+        for count in 0..400 {
+            let controls = if rig.conversation.joined_space().is_some() {
+                back(count == 0)
+            } else {
+                left.get_or_insert(count);
+                Controls::default()
+            };
+            frame(&mut rig, &controls);
+        }
+        assert!(left.is_some(), "left the space");
+        let (scene_to_space, carriage, agent, environment, _) =
+            frame(&mut rig, &Controls::default());
+        assert_eq!(environment, crate::environment::Environment::MINIMAL);
+        assert_eq!(
+            rig.headset.step.rig(&rig.conversation),
+            crate::locomotion::Rig::default()
+        );
+        assert_eq!(carriage, crate::anchors::Anchor::HOME);
+        assert_eq!(agent, crate::anchors::Anchor::AGENT);
+        assert!(
+            scene_to_space.abs_diff_eq(fresh_drawn.unwrap(), 1e-5),
+            "{scene_to_space} {fresh_drawn:?}"
+        );
+        assert!(
+            scene_to_space
+                .inverse()
+                .transform_point3(stepped)
+                .distance(stepped)
+                < 1e-5
+        );
+    }
+
+    #[test]
     fn without_a_declared_locomotion_the_left_stick_changes_nothing() {
         let mut rig = Rig::new(joined());
         let controls = |stick: glam::Vec2| Controls {
