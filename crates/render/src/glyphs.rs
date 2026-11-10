@@ -903,13 +903,20 @@ mod tests {
                 }
                 glyphs.sync(&gpu.device, &gpu.queue);
             }
-            let grown = atlas::with(|atlas| atlas.height());
+            // The atlas is the process's, which other tests running alongside add glyphs to at any time, so it is held
+            // while the texture is compared with it: synced, the texture is at the atlas's height, and a sync with
+            // nothing new does nothing.
+            let mut state = glyphs.state.lock().unwrap();
+            let grown = atlas::with(|atlas| {
+                glyphs.upload(&gpu.device, &gpu.queue, &mut state, atlas);
+                assert_eq!(state.height, atlas.height());
+                let revision = state.revision;
+                glyphs.upload(&gpu.device, &gpu.queue, &mut state, atlas);
+                assert_eq!(state.revision, revision);
+                atlas.height()
+            });
+            drop(state);
             assert!(grown > start, "{grown}");
-            assert_eq!(glyphs.state.lock().unwrap().height, grown);
-            // A sync with nothing new does nothing.
-            let revision = glyphs.state.lock().unwrap().revision;
-            glyphs.sync(&gpu.device, &gpu.queue);
-            assert_eq!(glyphs.state.lock().unwrap().revision, revision);
             let drawn = draw(&gpu, &[(&kanji[kanji.len() - 30..], false)]);
             assert!(ink(&drawn) > 100.0);
         });
