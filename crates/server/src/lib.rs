@@ -44,6 +44,7 @@ mod queue;
 #[cfg(feature = "speech")]
 mod recognition;
 mod retention;
+mod seating;
 mod server;
 mod space;
 mod stage;

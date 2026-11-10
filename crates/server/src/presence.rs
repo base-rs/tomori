@@ -1247,6 +1247,80 @@ pub(crate) fn agent(
     })
 }
 
+/// The space's cluster anchors, `home` first, as the `presence` tool tells its agent of them, so that it finds the
+/// place it means by its kind and label rather than by coordinates: each one's name, kind and label, where its point
+/// is and the way it faces, the room its cluster takes, whether the environment placed it as it runs, the id the agent
+/// may inspect the object it stands by by, among the objects of `environment`, and the workers standing there, by
+/// session and title, in the order of their slots, those gathered into its "+N more" sign saying so. See
+/// `design/mcp.md`.
+pub(crate) fn anchors(
+    anchors: &[tomori_protocol::cluster::Anchor],
+    seating: &crate::seating::Seating,
+    workers: &[tomori_protocol::Worker],
+    environment: &str,
+) -> Value {
+    let listed: Vec<Value> = anchors
+        .iter()
+        .map(|anchor| {
+            let gathered = seating.gathered(anchor);
+            let mut members: Vec<&(crate::seating::Member, usize)> =
+                seating.members(&anchor.name).iter().collect();
+            members.sort_by_key(|(_, slot)| *slot);
+            let standing: Vec<Value> = members
+                .into_iter()
+                .map(|(member, _)| match member {
+                    crate::seating::Member::Worker(session) => {
+                        let title = workers
+                            .iter()
+                            .find(|worker| &worker.id == session)
+                            .map_or("", |worker| worker.title.as_str());
+                        let mut listed = json!({
+                            "session": session,
+                            "title": crate::space::one_line(title, 160),
+                        });
+                        if gathered.contains(&member) {
+                            listed["gathered"] = json!(true);
+                        }
+                        listed
+                    }
+                })
+                .collect();
+            let facing = rotate(anchor.pose.orientation, [0.0, 0.0, 1.0]);
+            let mut listed = json!({
+                "name": anchor.name,
+                "position": position(anchor.pose.position),
+                "facing_yaw": round(angles(facing).0, 0),
+                "workers": standing,
+            });
+            if let Some(kind) = &anchor.kind {
+                listed["kind"] = json!(kind);
+            }
+            if let Some(label) = &anchor.label {
+                listed["label"] = json!(label);
+            }
+            listed["extent"] = match anchor
+                .extent
+                .or((!anchor.is_home()).then_some(tomori_protocol::cluster::ROOM))
+            {
+                Some(extent) => json!({
+                    "width": round(extent.width, 2),
+                    "height": round(extent.height, 2),
+                    "depth": round(extent.depth, 2),
+                }),
+                None => json!("the arc about home"),
+            };
+            if anchor.placed {
+                listed["placed"] = json!(true);
+            }
+            if let Some(object) = &anchor.object {
+                listed["object"] = json!(crate::space::inspectable(environment, object));
+            }
+            listed
+        })
+        .collect();
+    json!(listed)
+}
+
 /// How the `presence` tool's numbers are to be read.
 pub(crate) const COORDINATES: &str = "Positions are in the space's scene coordinates, in metres: y is up, and home, where everyone arrives, wherever the environment has them arrive, is at the origin, facing -z. The agent stands at its own home, which the environment chooses, unless it went to someone or was called elsewhere. Yaw is in degrees clockwise from -z as seen from above, so 90 faces +x; pitch is in degrees above the horizontal. A wall's facing_yaw is the way its face looks. Panels hold their wall's slots, numbered from its top left as seen from in front, left to right then down.";
 

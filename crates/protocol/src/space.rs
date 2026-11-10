@@ -367,6 +367,12 @@ pub struct SpaceState {
     /// lacks, and says so. See `design/avatars.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    /// How the server lays out each cluster anchor's cluster that a worker stands at: the span each is laid out for,
+    /// and the slot each worker takes there, so that every client lays them out alike. Empty from older servers, whose
+    /// clients give their workers slots at home themselves; an older client ignores it, and keeps every worker at home.
+    /// See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<crate::cluster::Layout>,
 }
 
 /// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
@@ -414,10 +420,11 @@ pub struct Anchors {
     /// environment that arrives elsewhere than its own origin facing −Z.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrival: Option<crate::Pose>,
-    /// The environment's cluster anchors that a client lays out, in the space's coordinates: for now, its `home`
-    /// anchor, where it gives the room the workers' arrangement may take, at [`Self::workers`] too, which an older
-    /// client keeps today's arc about. A client lays the workers out in that room by `tomori_protocol::cluster`. See
-    /// `design/environments.md`.
+    /// The space's cluster anchors that a client lays out, in the space's coordinates: its environment's `home` anchor,
+    /// where it gives the room the workers' arrangement may take, at [`Self::workers`] too, which an older client
+    /// keeps today's arc about; its environment's other anchors, declared or placed by its server side as it runs; and
+    /// those the server makes for workers placed beside a wall or a person, named from [`crate::cluster::OWN`]. A
+    /// client lays out what stands at each by `tomori_protocol::cluster`. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<crate::cluster::Anchor>,
 }
@@ -1175,6 +1182,49 @@ mod tests {
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());
+    }
+
+    #[test]
+    fn the_server_s_layout_of_clusters_is_sent_beside_the_workers_and_an_older_client_ignores_it() {
+        use crate::cluster::Layout;
+        let state = SpaceState {
+            workers: vec![Worker {
+                id: "ses_1".into(),
+                parent: None,
+                title: "Rack A12".into(),
+                state: WorkerState::Running,
+            }],
+            clusters: vec![Layout::new("rack/a12", 1).with_seat("ses_1", 0)],
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["clusters"][0]["seats"][0]["worker"], "ses_1");
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(json.clone()).unwrap(),
+            state
+        );
+        // From an older server, none: its clients give their workers slots themselves.
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("clusters");
+        assert!(
+            serde_json::from_value::<SpaceState>(older)
+                .unwrap()
+                .clusters
+                .is_empty()
+        );
+        assert!(
+            serde_json::to_value(SpaceState::default())
+                .unwrap()
+                .get("clusters")
+                .is_none()
+        );
+        // An older client, reading only what it knows, keeps its workers.
+        #[derive(Deserialize)]
+        struct Older {
+            workers: Vec<Worker>,
+        }
+        let older: Older = serde_json::from_value(json).unwrap();
+        assert_eq!(older.workers, state.workers);
     }
 
     #[test]

@@ -177,7 +177,10 @@ impl Attended {
             (Resolved::Worker { id, .. }, Resolved::Worker { id: other, .. })
             | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. })
             | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. })
-            | (Resolved::Panel { id, .. }, Resolved::Panel { id: other, .. }) => id == other,
+            | (Resolved::Panel { id, .. }, Resolved::Panel { id: other, .. })
+            | (Resolved::Gathered { anchor: id, .. }, Resolved::Gathered { anchor: other, .. }) => {
+                id == other
+            }
             _ => false,
         }
     }
@@ -201,6 +204,13 @@ enum Resolved {
     },
     /// A panel projected in the space, as the stage described it as the utterance began. See `design/projection.md`.
     Panel { id: String, description: String },
+    /// A cluster anchor's "+N more" sign, by the anchor's name, and the workers gathered into it as the utterance
+    /// began, each by session and title, described as the space knows them when the words are delivered. See
+    /// `design/interaction.md`.
+    Gathered {
+        anchor: String,
+        workers: Vec<(String, String)>,
+    },
 }
 
 /// The longest worker title told to the agent, in characters.
@@ -213,6 +223,13 @@ pub const CONTEXT_CHARS: usize = 1_000;
 /// How a panel attended to is described: by its identity, the line of its body pointed at and the row's id, as the
 /// client named them, from the stage's own store, or `None` where the space does not show it.
 pub type DescribePanel<'a> = dyn Fn(&str, Option<u32>, Option<&str>) -> Option<String> + 'a;
+
+/// Which workers a cluster anchor's "+N more" sign gathers, by the anchor's name, each by session, in the order of their
+/// slots, as the space lays its clusters out, or `None` where it has no such anchor or the sign gathers none.
+pub type Gathered<'a> = dyn Fn(&str) -> Option<Vec<String>> + 'a;
+
+/// The most characters of the workers a "+N more" sign gathers told to the agent, after which the rest are counted.
+const GATHERED_CHARS: usize = 800;
 
 /// `text` on one line of at most `limit` characters, as [`tomori_protocol::text::one_line`] makes all text others choose, with the context block's delimiters, double quotes and square brackets, made single quotes and parentheses, so that nothing in it can end the quotation or the block early, or begin another.
 pub(crate) fn one_line(text: &str, limit: usize) -> String {
@@ -241,9 +258,35 @@ pub(crate) fn inspectable(environment: &str, reference: &str) -> String {
 /// or as the space last knew it and no longer present, such as `worker "Tests" (opencode session ses_1, running)`; a
 /// card as the board described it as the words began.
 fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Worker]) -> String {
-    use tomori_protocol::WorkerState;
     let (id, title) = match attended {
         Attended(Resolved::Worker { id, title }) => (id, title),
+        // Each worker it gathers, as many as fit, and how many more.
+        Attended(Resolved::Gathered {
+            anchor,
+            workers: gathered,
+        }) => {
+            let mut listed: Vec<String> = Vec::new();
+            let mut length = 0;
+            for (id, title) in gathered {
+                let worker = describe_worker(backend, id, title, workers);
+                if !listed.is_empty() && length + worker.chars().count() > GATHERED_CHARS {
+                    break;
+                }
+                length += worker.chars().count() + 2;
+                listed.push(worker);
+            }
+            let rest = gathered.len() - listed.len();
+            let mut said = format!(
+                "the \"+{} more\" sign at {}, which stands for {}",
+                gathered.len(),
+                one_line(anchor, tomori_protocol::cluster::NAME_BYTES),
+                listed.join(", ")
+            );
+            if rest > 0 {
+                said.push_str(&format!(" and {rest} more"));
+            }
+            return said;
+        }
         Attended(Resolved::Card { description, .. }) => return description.clone(),
         // Cleaned as the side described it; its identity, which a client gave, is not told, but the id the agent may
         // inspect it by is, if the side gave one.
@@ -260,11 +303,23 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
         // As the stage described it, from its own store.
         Attended(Resolved::Panel { description, .. }) => return description.clone(),
     };
+    describe_worker(backend, id, title, workers)
+}
+
+/// The worker `id`, titled `title` as the space last knew it, described from `workers`, the space's workers when the
+/// words are delivered: `worker "Tests" (opencode session ses_1, running)`.
+fn describe_worker(
+    backend: &str,
+    id: &str,
+    title: &str,
+    workers: &[tomori_protocol::Worker],
+) -> String {
+    use tomori_protocol::WorkerState;
     let session = one_line(id, limits::SESSION_BYTES);
     let backend = one_line(backend, limits::NAME_BYTES);
-    let (title, state) = match workers.iter().find(|worker| &worker.id == id) {
+    let (title, state) = match workers.iter().find(|worker| worker.id == id) {
         Some(worker) => (
-            &worker.title,
+            worker.title.as_str(),
             match worker.state {
                 WorkerState::Running => "running",
                 WorkerState::Waiting => "waiting",
@@ -1600,17 +1655,19 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
-        self.attended_with(resource, cards, objects, &|_, _, _| None)
+        self.attended_with(resource, cards, objects, &|_, _, _| None, &|_| None)
     }
 
     /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
-    /// description of the panel it has with that identity, if any.
+    /// description of the panel it has with that identity, if any, and a cluster's "+N more" sign by the workers
+    /// `gathered` says it gathers.
     pub fn attended_with(
         &self,
         resource: &tomori_protocol::Resource,
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
         panels: &DescribePanel<'_>,
+        gathered: &Gathered<'_>,
     ) -> Option<Attended> {
         match resource {
             tomori_protocol::Resource::Worker { worker, .. }
@@ -1664,6 +1721,26 @@ impl SpaceModel {
                     description: panels(panel, *line, row)?,
                 }))
             }
+            // Its workers are those the space's own layout gathers into it, each as the space knows it now.
+            tomori_protocol::Resource::Gathered {
+                gathered: anchor, ..
+            } if anchor.len() <= tomori_protocol::cluster::NAME_BYTES => {
+                let workers = gathered(anchor)?
+                    .into_iter()
+                    .filter_map(|session| {
+                        self.workers
+                            .iter()
+                            .find(|known| known.id == session)
+                            .map(|known| (known.id.clone(), known.title.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                (!workers.is_empty()).then(|| {
+                    Attended(Resolved::Gathered {
+                        anchor: anchor.clone(),
+                        workers,
+                    })
+                })
+            }
             _ => None,
         }
     }
@@ -1678,23 +1755,24 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
-        self.resolve_with(attention, cards, objects, &|_, _, _| None)
+        self.resolve_with(attention, cards, objects, &|_, _, _| None, &|_| None)
     }
 
-    /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, as in
-    /// [`Self::attended_with`].
+    /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, and "+N more" signs
+    /// by what `gathered` says they gather, as in [`Self::attended_with`].
     pub fn resolve_with(
         &self,
         attention: &[tomori_protocol::Resource],
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
         panels: &DescribePanel<'_>,
+        gathered: &Gathered<'_>,
     ) -> Vec<Attended> {
         let mut resolved: Vec<Attended> = Vec::new();
         for attended in attention
             .iter()
             .take(tomori_protocol::ATTENTION_LIMIT)
-            .filter_map(|resource| self.attended_with(resource, cards, objects, panels))
+            .filter_map(|resource| self.attended_with(resource, cards, objects, panels, gathered))
         {
             if !resolved.iter().any(|known| known.is(&attended)) {
                 resolved.push(attended);
@@ -2171,6 +2249,7 @@ impl SpaceModel {
             stream: false,
             // Set by the hub, which knows the backends.
             avatar: None,
+            clusters: Vec::new(),
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]
@@ -3482,6 +3561,73 @@ mod tests {
     }
 
     #[test]
+    fn a_more_sign_attended_to_names_the_workers_it_gathers_as_many_as_fit_once() {
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: (0..30)
+                .map(|index| {
+                    backend_worker(
+                        &format!("ses_{index:02}"),
+                        tomori_backend::WorkerState::Running,
+                    )
+                })
+                .collect(),
+        });
+        let gathered = |anchor: &str| match anchor {
+            "home" => Some((0..30).map(|index| format!("ses_{index:02}")).collect()),
+            "rack/a12" => Some(vec!["ses_gone".to_owned()]),
+            _ => None,
+        };
+        let sign = tomori_protocol::Resource::gathered("home");
+        let attention = space.resolve_with(
+            &[
+                sign.clone(),
+                sign,
+                // Gathering only workers the space no longer has, or none, or at an anchor of no name there can be.
+                tomori_protocol::Resource::gathered("rack/a12"),
+                tomori_protocol::Resource::gathered("aisle-3"),
+                tomori_protocol::Resource::gathered("a".repeat(65)),
+            ],
+            None,
+            None,
+            &|_, _, _| None,
+            &gathered,
+        );
+        assert_eq!(attention.len(), 1);
+        let block = context("fake", &attention, space.workers()).unwrap();
+        assert!(
+            block.starts_with(
+                "[Pointing at the \"+30 more\" sign at home, which stands for worker \"ses_00\" (fake session ses_00, running), worker \"ses_01\""
+            ),
+            "{block}"
+        );
+        // As many as fit, then how many more.
+        assert!(block.ends_with(" more]"), "{block}");
+        assert!(
+            block.contains("ses_10") && !block.contains("ses_29"),
+            "{block}"
+        );
+        assert!(block.chars().count() <= CONTEXT_CHARS);
+        // Those gone by the time the words are given are said to be.
+        let attention = space.resolve_with(
+            &[tomori_protocol::Resource::gathered("home")],
+            None,
+            None,
+            &|_, _, _| None,
+            &|_| Some(vec!["ses_00".to_owned()]),
+        );
+        space.apply(Event::WorkersChanged {
+            workers: Vec::new(),
+        });
+        assert_eq!(
+            context("fake", &attention, space.workers()).as_deref(),
+            Some(
+                "[Pointing at the \"+1 more\" sign at home, which stands for worker \"ses_00\" (fake session ses_00, no longer present)]"
+            )
+        );
+    }
+
+    #[test]
     fn what_a_speaker_attended_to_comes_before_their_words_as_the_space_describes_it() {
         let mut space = model();
         space.apply(Event::WorkersChanged {
@@ -4565,6 +4711,7 @@ mod tests {
             None,
             None,
             &describe,
+            &|_| None,
         );
         assert_eq!(attention.len(), 1);
         assert_eq!(
@@ -4579,6 +4726,7 @@ mod tests {
                     None,
                     None,
                     &describe,
+                    &|_| None,
                 )
                 .map(|attended| context("fake", &[attended], &[]).unwrap())
         };

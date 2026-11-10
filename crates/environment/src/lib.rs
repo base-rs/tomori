@@ -9,9 +9,11 @@
 //!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
 //!
+//! A side may place cluster anchors as its state changes, named places that workers, panels and the agent gather at, such as a rack that starts alerting, and remove them again: see [`Space::place_anchor`].
+//!
 //! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`]. A participant's choice of a row it marks [choosable](Row::choosable) reaches it as an [`Intent`] whose [`Intent::chosen`] names the row.
 //!
-//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], and what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
+//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`], and the cluster anchors it places by [`ANCHOR_LIMIT`], [`ANCHOR_NAME_BYTES`], [`ANCHOR_LABEL_LIMIT`], [`ANCHOR_INTERVAL`], [`ANCHOR_CHANGES_PER_SECOND`] and [`ANCHOR_BURST`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -28,6 +30,28 @@ pub use panel::{
 };
 /// A chart panel's native chart, as [`Panel::chart`] takes it.
 pub use tomori_protocol::chart;
+/// A cluster anchor, as [`Space::place_anchor`] takes it.
+pub use tomori_protocol::cluster::Anchor;
+
+/// The most cluster anchors in a space's binding, those its environment declares counted first: one placed beyond it
+/// is refused.
+pub const ANCHOR_LIMIT: usize = 64;
+
+/// The longest name of an anchor, in bytes: as long as an object's reference.
+pub const ANCHOR_NAME_BYTES: usize = REFERENCE_BYTES;
+
+/// The longest label of an anchor told to the agent, in characters, once the server has cleaned it onto one line: a
+/// longer one is cut to this many, followed by the `…` that marks it cut.
+pub const ANCHOR_LABEL_LIMIT: usize = tomori_protocol::cluster::LABEL_CHARS;
+
+/// How often the server makes one anchor's changes at most: a change that comes sooner waits.
+pub const ANCHOR_INTERVAL: Duration = Duration::from_millis(900);
+
+/// How many anchor changes the server makes in a space each second, after a burst of [`ANCHOR_BURST`].
+pub const ANCHOR_CHANGES_PER_SECOND: u32 = 4;
+
+/// How many anchor changes the server makes in a space at once before [`ANCHOR_CHANGES_PER_SECOND`] holds.
+pub const ANCHOR_BURST: u32 = 8;
 
 /// Why a server side stopped before its space was done with it, as the space shows it.
 ///
@@ -379,6 +403,17 @@ pub trait Outlet: Send + Sync {
         let _ = id;
         Ok(())
     }
+    /// Place the cluster anchor `anchor`, or move, resize or relabel the one the side placed with its name in place. An
+    /// outlet that takes no anchors, as one made before anchors were, keeps nothing.
+    fn place_anchor(&self, anchor: Anchor) -> Result<()> {
+        let _ = anchor;
+        Ok(())
+    }
+    /// Remove the cluster anchor the side placed as `name`, if it is there.
+    fn remove_anchor(&self, name: &str) -> Result<()> {
+        let _ = name;
+        Ok(())
+    }
 }
 
 /// An outlet that keeps nothing and sends nothing, for a space made without one.
@@ -610,6 +645,44 @@ impl Space {
         self.outlet.retract(id)
     }
 
+    /// Place `anchor`, a named place in the environment that workers, panels and the agent gather at, in the
+    /// environment's own coordinates, as its state changes, such as a rack that starts alerting: or, given the name of
+    /// one the side placed before, move, resize or relabel that one in place, what stands there gliding with it. Choose
+    /// names that stay the same for as long as the place is, so that what the space keeps there by name finds it again.
+    /// What the side places belongs to its binding, as everything it keeps does, so a side places its anchors again as
+    /// it starts. See `design/environments.md`.
+    ///
+    /// The server refuses, saying why: a name, extent, kind or object [`Anchor::checked`] refuses; the name of one the
+    /// environment declares, `home` among them; a pose not finite, without an orientation, or more than 20 m from home
+    /// on any axis; and a new one beyond [`ANCHOR_LIMIT`], 64, in the space, those it declares counted first. It cleans
+    /// the label onto one line and cuts it after [`ANCHOR_LABEL_LIMIT`] characters. It makes each anchor's changes at
+    /// most about once every [`ANCHOR_INTERVAL`], and [`ANCHOR_CHANGES_PER_SECOND`] in the space after a burst of
+    /// [`ANCHOR_BURST`]: a change that comes too soon waits, the latest replacing the one before, and a removal cancels
+    /// a placement still waiting. A side that debounces its own state, so that a flapping alert does not move what
+    /// stands there to and fro, is the better fix.
+    ///
+    /// ```
+    /// use tomori_environment::{Anchor, Space};
+    /// use tomori_protocol::Pose;
+    ///
+    /// let space = Space::new("space-1-1", "Fleet", "/");
+    /// let rack = Anchor::new("rack/a12", Pose::at([4.0, 1.4, -6.0]))
+    ///     .with_extent(2.0, 2.5, 1.0)
+    ///     .with_kind("rack")
+    ///     .with_label("Rack A12, alerting: CPU throttled");
+    /// space.place_anchor(rack).unwrap();
+    /// space.remove_anchor("rack/a12").unwrap();
+    /// ```
+    pub fn place_anchor(&self, anchor: Anchor) -> Result<()> {
+        self.outlet.place_anchor(anchor)
+    }
+
+    /// Remove the anchor the side placed as `name`: its workers go home, its panels stay floating where they stand, and
+    /// a notice on the status wall says so. One not there changes nothing.
+    pub fn remove_anchor(&self, name: &str) -> Result<()> {
+        self.outlet.remove_anchor(name)
+    }
+
     /// Answer the space's agent with `inspector` when it inspects what this side described with a reference, replacing
     /// any inspector given before. A side that gives none has nothing more to say of what it describes. It answers for
     /// as long as the side's binding lasts, and the server forgets it with the binding.
@@ -713,6 +786,9 @@ mod tests {
         assert_eq!(space.describe(vec![Object::new("a", "b")]), Ok(()));
         assert_eq!(space.publish(Panel::text("a", "b", "c")), Ok(()));
         assert_eq!(space.retract("a"), Ok(()));
+        let rack = Anchor::new("rack/a12", tomori_protocol::Pose::HOME);
+        assert_eq!(space.place_anchor(rack), Ok(()));
+        assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
     }
 
     #[test]
@@ -735,6 +811,10 @@ mod tests {
         assert_eq!(space.describe(Vec::new()), Ok(()));
         assert_eq!(space.publish(Panel::text("a", "b", "c")), Ok(()));
         assert_eq!(space.retract("a"), Ok(()));
+        // Nor anchors, made before them.
+        let rack = Anchor::new("rack/a12", tomori_protocol::Pose::HOME);
+        assert_eq!(space.place_anchor(rack), Ok(()));
+        assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
     }
 
     #[test]
@@ -812,6 +892,11 @@ mod tests {
         assert_eq!(DESCRIPTION_LIMIT, 200);
         assert_eq!(REFERENCE_BYTES, 64);
         assert_eq!(INSPECTION_LIMIT, 16 * 1024);
+        assert_eq!(ANCHOR_LIMIT, 64);
+        assert_eq!(ANCHOR_NAME_BYTES, tomori_protocol::cluster::NAME_BYTES);
+        assert_eq!(ANCHOR_LABEL_LIMIT, 80);
+        assert_eq!(ANCHOR_INTERVAL, Duration::from_millis(900));
+        assert_eq!((ANCHOR_CHANGES_PER_SECOND, ANCHOR_BURST), (4, 8));
     }
 
     #[test]

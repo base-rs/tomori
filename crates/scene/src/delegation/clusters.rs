@@ -3,6 +3,7 @@
 
 //! The home cluster fitted to its room, its "+N more" sign, and the satellites that orbit the agent while it is away.
 use super::*;
+use crate::anchors::HomeArc;
 use tomori_protocol::cluster::{COMPACT, Extent};
 
 const EYES: Vec3 = crate::anchors::EYES;
@@ -401,4 +402,241 @@ fn one_arriving_far_along_takes_a_gap_rather_than_compact_the_cluster() {
     scene.reslot(&mut arriving, &[]);
     assert_eq!((arriving[0].0, scene.slots["late"]), (1, 1));
     assert!(!scene.layout.compact());
+}
+
+/// A rack 5 m off to the right, facing home.
+fn rack() -> tomori_protocol::cluster::Anchor {
+    tomori_protocol::cluster::Anchor::new(
+        "rack/a12",
+        tomori_protocol::Pose::at([5.0, 1.4, -4.0]).facing_towards([0.0, 1.4, 0.0]),
+    )
+    .with_extent(3.0, 2.5, 1.0)
+}
+
+/// The server's layouts: `home` at home, from slot 0, `there` at the rack, from slot 0, each laid out for `span`.
+fn layouts(home: &[&str], there: &[&str], span: u32) -> Vec<tomori_protocol::cluster::Layout> {
+    use tomori_protocol::cluster::Layout;
+    let seat = |name: &str, ids: &[&str]| {
+        ids.iter()
+            .enumerate()
+            .fold(Layout::new(name, span), |layout, (slot, id)| {
+                layout.with_seat(*id, slot as u32)
+            })
+    };
+    vec![seat("home", home), seat("rack/a12", there)]
+}
+
+#[test]
+fn workers_stand_where_the_server_seats_them_alike_on_every_client_and_glide_as_it_reseats_them() {
+    use tomori_protocol::cluster::Cluster;
+    let w = workers(4);
+    let seats = layouts(&["w00", "w01"], &["w02", "w03"], 2);
+    // Two clients, one seeing the workers arrive one by one and the other all at once, stand them alike.
+    let mut one = Scene::new();
+    let mut other = Scene::new();
+    for count in 1..=4 {
+        one.seat(&[rack()], &seats);
+        settle(
+            &mut one,
+            &Workspace {
+                nodes: w.nodes[..count].to_vec(),
+                ..Default::default()
+            },
+        );
+    }
+    other.seat(&[rack()], &seats);
+    settle(&mut other, &w);
+    assert_eq!(own(&one), own(&other));
+    // Those at the rack stand in its cluster's slots, laid out for the span the server keeps.
+    let cluster = Cluster::new(&rack());
+    let laid = cluster.arrange(2);
+    for (id, slot) in [("w02", 0), ("w03", 1)] {
+        assert_eq!(own(&one)[id].0, cluster.slot(&laid, slot).position, "{id}");
+    }
+    assert_eq!(one.slots["w03"], 1);
+    // Reseated, only the worker whose seat changed moves, and it glides there.
+    let before = own(&one);
+    one.seat(&[rack()], &layouts(&["w00", "w01", "w03"], &["w02"], 2));
+    one.update(Some("root"), &w, 1.0 / 60.0);
+    let moving = own(&one);
+    assert_ne!(moving["w03"].0, before["w03"].0);
+    assert_ne!(
+        moving["w03"].0,
+        HomeArc::at(Anchor::AGENT, EYES, 2).to_array()
+    );
+    settle(&mut one, &w);
+    settle(&mut one, &w);
+    let after = own(&one);
+    assert_eq!(
+        after["w03"].0,
+        HomeArc::at(Anchor::AGENT, EYES, 2).to_array()
+    );
+    for id in ["w00", "w01", "w02"] {
+        assert_eq!(after[id], before[id], "{id}");
+    }
+    // Seated the same again, nothing changes.
+    one.seat(&[rack()], &layouts(&["w00", "w01", "w03"], &["w02"], 2));
+    settle(&mut one, &w);
+    assert_eq!(own(&one), after);
+    // The rack laid out for more, those there move to its new slots; nobody at home does.
+    one.seat(&[rack()], &layouts(&["w00", "w01", "w03"], &["w02"], 12));
+    settle(&mut one, &w);
+    settle(&mut one, &w);
+    let relaid = own(&one);
+    assert_eq!(
+        relaid["w02"].0,
+        cluster.slot(&cluster.arrange(12), 0).position
+    );
+    for id in ["w00", "w01", "w03"] {
+        assert_eq!(relaid[id], after[id], "{id}");
+    }
+}
+
+#[test]
+fn an_anchor_or_a_seat_out_of_bounds_is_left_out_and_its_workers_stand_at_home() {
+    use tomori_protocol::cluster::{Anchor as Named, Layout};
+    let w = workers(3);
+    let far = Named::new("far", tomori_protocol::Pose::at([0.0, 1.4, -40.0]));
+    let named = Named::new("bad name", tomori_protocol::Pose::at([0.0, 1.4, -4.0]));
+    let cramped = Named::new("cramped", tomori_protocol::Pose::at([0.0, 1.4, -4.0]))
+        .with_extent(0.1, 1.0, 1.0);
+    let mut scene = Scene::new();
+    scene.seat(
+        &[far, named, cramped],
+        &[
+            Layout::new("home", 3)
+                .with_seat("w00", 0)
+                .with_seat("w01", 2)
+                .with_seat("w02", 9999),
+            Layout::new("far", 1).with_seat("w01", 0),
+            Layout::new("nowhere", 1).with_seat("w02", 0),
+        ],
+    );
+    settle(&mut scene, &w);
+    let standing = own(&scene);
+    // Home's seats stand; those at an anchor left out, or of a slot beyond what a client keeps, stand at home, in
+    // slots this client gives them as no seat says otherwise.
+    assert_eq!(
+        standing["w00"].0,
+        HomeArc::at(Anchor::AGENT, EYES, 0).to_array()
+    );
+    assert_eq!(scene.workers["w00"].at, None);
+    assert_eq!(scene.workers["w01"].at, None);
+    assert_eq!(scene.workers["w02"].at, None);
+    assert!(standing.values().all(|(position, _)| position[2] > -10.0));
+}
+
+#[test]
+fn each_cluster_gathers_its_own_more_sign_and_pointing_at_one_names_its_anchor() {
+    use tomori_protocol::cluster::Cluster;
+    let cluster = Cluster::new(&rack());
+    let more = (1..64)
+        .find(|span| cluster.arrange(*span).more().is_some())
+        .unwrap();
+    let count = more + 2;
+    let w = workers(count);
+    let ids: Vec<String> = w.nodes.iter().map(|node| node.id.clone()).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut scene = Scene::new();
+    scene.seat(&[rack()], &layouts(&[], &ids, count as u32));
+    settle(&mut scene, &w);
+    let signs: Vec<Station> = scene
+        .stations()
+        .iter()
+        .filter(|station| station.more > 0)
+        .cloned()
+        .collect();
+    assert_eq!(signs.len(), 1);
+    let first = cluster.arrange(count).more().unwrap();
+    assert_eq!(signs[0].more, count - first);
+    assert_eq!(
+        signs[0].position,
+        cluster.slot(&cluster.arrange(count), first).position
+    );
+    // Pointed at from beneath, it names its anchor, lists its workers and highlights them, naming none of them.
+    let ray = Ray {
+        origin: Vec3::from_array(signs[0].position) - Vec3::Y * 0.8,
+        direction: Vec3::Y,
+    };
+    assert_eq!(scene.point(Some(ray)), None);
+    assert_eq!(scene.pointed_gathered(), Some("rack/a12"));
+    scene.update(Some("root"), &w, 1.0 / 60.0);
+    let listed = scene.stations().iter().find(|s| s.more > 0).unwrap();
+    assert!(listed.title.contains(&format!("Title {}", ids[count - 1])));
+    // Home's sign, pointed at, is named home; pointing away names none.
+    assert_eq!(scene.point(None), None);
+    assert_eq!(scene.pointed_gathered(), None);
+    let (_, home_more) = thresholds();
+    let w = workers(home_more + 2);
+    let mut home = Scene::new();
+    home.arrange(Anchor::AGENT, EYES, Some(ROOM), None);
+    settle(&mut home, &w);
+    let sign = home
+        .stations()
+        .iter()
+        .find(|station| station.more > 0)
+        .unwrap()
+        .clone();
+    home.point(Some(Ray {
+        origin: Vec3::from_array(sign.position) - Vec3::Y * 0.8,
+        direction: Vec3::Y,
+    }));
+    assert_eq!(home.pointed_gathered(), Some("home"));
+}
+
+#[test]
+fn a_registered_placement_is_asked_again_only_for_a_worker_the_server_seats_anew_at_home() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counted(AtomicUsize);
+    impl crate::anchors::WorkerPlacement for Counted {
+        fn place(&self, _origin: Anchor, worker: &Placing<'_>) -> Vec3 {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Vec3::new(worker.slot as f32 * 0.4, 1.4, -3.0)
+        }
+    }
+    let counted = std::sync::Arc::new(Counted(AtomicUsize::new(0)));
+    let w = workers(3);
+    let mut scene = Scene::new();
+    scene.arrange(Anchor::AGENT, EYES, None, Some(counted.clone()));
+    scene.seat(&[rack()], &layouts(&["w00", "w01"], &["w02"], 2));
+    settle(&mut scene, &w);
+    let asked = counted.0.load(Ordering::Relaxed);
+    assert_eq!(asked, 2);
+    // The one at the rack coming home is placed by it, with those already there.
+    scene.seat(&[rack()], &layouts(&["w00", "w01", "w02"], &[], 3));
+    settle(&mut scene, &w);
+    settle(&mut scene, &w);
+    assert_eq!(own(&scene)["w02"].0, [0.8, 1.4, -3.0]);
+    assert!(counted.0.load(Ordering::Relaxed) > asked);
+    // The rack's layout changing with nobody there asks nothing more.
+    let asked = counted.0.load(Ordering::Relaxed);
+    scene.seat(&[rack()], &layouts(&["w00", "w01", "w02"], &[], 4));
+    settle(&mut scene, &w);
+    assert_eq!(counted.0.load(Ordering::Relaxed), asked);
+}
+
+#[test]
+fn a_worker_the_server_no_longer_seats_stays_where_it_stands_and_satellites_keep_to_their_slots() {
+    let w = workers(3);
+    let mut scene = Scene::new();
+    scene.seat(&[rack()], &layouts(&["w00", "w01"], &["w02"], 2));
+    settle(&mut scene, &w);
+    // With the agent away, each satellite keeps to its worker's slot as the server seats it again.
+    scene.set_agent(Some((Vec3::new(3.0, 1.5, -1.0), 0.4)));
+    scene.update(Some("root"), &w, 1.0 / 60.0);
+    assert_eq!(scene.satellites().len(), 3);
+    let before = own(&scene);
+    scene.seat(&[rack()], &[layouts(&[], &["w02", "w01"], 2).remove(1)]);
+    settle(&mut scene, &w);
+    assert!(
+        scene
+            .motes
+            .iter()
+            .all(|mote| mote.slot == scene.slots[&mote.id])
+    );
+    // The one no longer seated stays where it stood; the one seated at the rack goes there.
+    let after = own(&scene);
+    assert_eq!(after["w00"], before["w00"]);
+    assert_eq!(scene.workers["w01"].at.as_deref(), Some("rack/a12"));
+    assert_ne!(after["w01"], before["w01"]);
 }

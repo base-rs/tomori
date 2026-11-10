@@ -422,6 +422,7 @@ impl Feed {
         let bounds = self.swarm.coordinator.bounds();
         self.scene
             .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
+        self.scene.seat(&arrangement.clusters, &arrangement.layouts);
         self.scene.arrange(
             arrangement.workers,
             arrangement.audience,
