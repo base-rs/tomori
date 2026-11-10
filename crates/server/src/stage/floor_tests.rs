@@ -333,7 +333,7 @@ const SUNK: &str = r#"{"version":1,"next":20,"rooms":{"sky":{"used":20,
  {"id":"wall-2","pose":{"position":[4.0,-0.5,-2.0],"orientation":[0.0,0.0,0.0,1.0]}},
  {"id":"wall-3","pose":{"position":[4.0,-1.29,-2.0],"orientation":[0.0,0.0,0.0,1.0]},"attach":{"to":"wall-2","edge":"bottom","align":"start"}},
  {"id":"wall-4","pose":{"position":[-4.0,2.0,-2.0],"orientation":[0.0,0.0,0.0,1.0]}}],
-"moved":{"environment-0":{"position":[-4.0,-2.0,-4.0],"orientation":[0.0,0.0,0.0,1.0]}},
+"moved":{"environment-0":{"position":[-4.0,-2.0,-4.0],"orientation":[0.0,0.0,0.0,1.0]},"environment-3":{"position":[-4.0,-2.0,-8.0],"orientation":[0.0,0.0,0.0,1.0]}},
 "unlocked":["environment-0"],
 "panels":[
  {"id":"panel-5","title":"Sunk","body":"","created":1,"placed":5,"place":{"kind":"free","pose":{"position":[1.0,-3.0,-1.0],"orientation":[0.0,0.0,0.0,1.0]}},"pinned":true},
@@ -354,6 +354,11 @@ fn what_was_kept_through_the_floor_is_raised_above_it_once_on_reading_it() {
         assert!(on_the_floor(wall(id)), "{id}: {}", wall(id).lowest());
     }
     assert!(wall("wall-1").is_locked());
+    // Where the space moved a wall its environment no longer declares, it is kept as it was, as nothing shows it.
+    assert_eq!(
+        stage.rooms["sky"].moved["environment-3"].position,
+        [-4.0, -2.0, -8.0]
+    );
     assert!(wall("wall-2").lowest() > wall("wall-3").lowest());
     // The group is raised as a whole, staying joined; a wall above the floor stays where it stood.
     let lift = |id: &str| wall(id).pose.position[1] - before.wall(id).unwrap().pose.position[1];

@@ -250,6 +250,21 @@ fn a_wall_given_a_row_by_its_handle_near_the_floor_rises_above_it_as_the_server_
     assert_eq!(drawn[0].grid(), Grid::from((3, 3)));
     assert!(on_the_floor(&drawn[0]), "{}", drawn[0].lowest());
     assert!(drawn[0].pose.position[1] > wall.pose.position[1]);
+    // The status wall stands where its environment puts it: tilted by its hinge, it is drawn there.
+    let tomori = tomori();
+    let projection = shown(vec![tomori.clone()], Vec::new());
+    let mut projector = holding(&projection, &tomori, ADJUST, now);
+    let (drawn, _, _) = move_hand(
+        &mut projector,
+        &projection,
+        &tomori,
+        Handle::Tilt,
+        &[-Vec3::Y * 0.1],
+        Controls::Controllers,
+        now,
+    );
+    assert!(drawn[0].tilt() > 10.0);
+    assert_eq!(drawn[0].pose, tomori.pose);
 }
 
 #[test]
