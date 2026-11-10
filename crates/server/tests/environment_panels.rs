@@ -143,11 +143,14 @@ fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: 
     result["structuredContent"].clone()
 }
 
-/// The next projection `client` is sent with a chart panel on it.
-fn charted(client: &TestClient) -> Projection {
+/// The next projection `client` is sent whose chart panel shows other than `shown`: the first chart, or an update of
+/// it, never the same chart sent again with some other change to the space. Panics after the helpers' timeout.
+fn charted(client: &TestClient, shown: Option<&tomori_protocol::Panel>) -> Projection {
     client.wait_for(|message| match message {
         ServerMessage::Projection { projection }
-            if projection.panels.iter().any(|panel| panel.chart.is_some()) =>
+            if projection.panels.iter().any(|panel| {
+                panel.chart.is_some() && shown.is_none_or(|shown| panel.chart != shown.chart)
+            }) =>
         {
             Some((**projection).clone())
         }
@@ -171,7 +174,7 @@ fn an_environment_s_live_chart_is_on_its_wall_for_everyone_and_the_agent_reads_i
     });
     let space = ada.space(|state| state.title == "Gauges").id;
     // On the environment's wall, in the slot it prefers, a chart of every point, its body a summary for older clients.
-    let first = charted(&ada);
+    let first = charted(&ada, None);
     assert_eq!(first.space, space);
     let panel = first.panels[0].clone();
     assert_eq!(
@@ -189,23 +192,26 @@ fn an_environment_s_live_chart_is_on_its_wall_for_everyone_and_the_agent_reads_i
         "{}",
         panel.body
     );
-    // Each update is the same panel, in place, a point newer, no sooner than a second after the last.
-    let started = std::time::Instant::now();
-    let second = charted(&ada);
-    let updated = second.panels[0].clone();
-    assert!(started.elapsed() >= Duration::from_millis(500));
-    assert_eq!(
-        (updated.id.as_str(), &updated.place),
-        (panel.id.as_str(), &panel.place)
-    );
+    // Each update is the same panel, in place, a point newer, no sooner than a second after the last: timed from the
+    // moment one update arrives to the next, as the first chart may have been sent again just before its update.
     let values =
         |panel: &tomori_protocol::Panel| panel.chart.clone().unwrap().series[0].values.clone();
-    // A point or more newer: one a tick, unless a tick waited and the next replaced it.
-    let (before, after) = (values(&panel), values(&updated));
-    assert!(
-        (1..=3).any(|shift| after[..POINTS - shift] == before[shift..]),
-        "the window moves on by a point or so"
-    );
+    let second = charted(&ada, Some(&panel)).panels[0].clone();
+    let started = std::time::Instant::now();
+    let third = charted(&ada, Some(&second)).panels[0].clone();
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    for (earlier, later) in [(&panel, &second), (&second, &third)] {
+        assert_eq!(
+            (later.id.as_str(), &later.place),
+            (panel.id.as_str(), &panel.place)
+        );
+        // A point or more newer: one a tick, unless a tick waited and the next replaced it.
+        let (earlier, later) = (values(earlier), values(later));
+        assert!(
+            (1..=3).any(|shift| later[..POINTS - shift] == earlier[shift..]),
+            "the window moves on by a point or so"
+        );
+    }
     // The agent reads it back as its environment's chart, and inspects it through the side.
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let token = token(&backend);
