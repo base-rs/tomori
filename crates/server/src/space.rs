@@ -48,6 +48,9 @@ pub enum Superseded {
     Input,
     /// Tomori's connection to the agent's session was lost, so it may have missed input the session was given.
     Reconnected,
+    /// Tomori gave the agent a prompt of its own notes alone, such as a timer firing, which no participant asked for.
+    /// See `design/timers.md`.
+    Event,
 }
 
 /// How many of the keys of entries it gave its agent a space remembers, to tell its own deliveries from input that
@@ -155,6 +158,12 @@ pub struct SpaceModel {
     /// checklist item ticked or unticked, by its panel and line, as [`SpaceModel::note_tick`] keeps it. See
     /// `design/projection.md`.
     notes: VecDeque<(String, u32, String)>,
+    /// The space's timers, kept with it. See `design/timers.md`.
+    timers: crate::timers::Timers,
+    /// Notes from Tomori's own sources, such as its timers, waiting to be told to the agent. See `design/timers.md`.
+    events: crate::events::EventQueue,
+    /// When the agent's turn last ended, after which a prompt of notes alone waits a quiet moment.
+    quiet_since: Option<std::time::Instant>,
 }
 
 /// The most notes of what participants did that the space keeps for the agent until the next words, the oldest left
@@ -178,7 +187,8 @@ impl Attended {
             | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. })
             | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. })
             | (Resolved::Panel { id, .. }, Resolved::Panel { id: other, .. })
-            | (Resolved::Gathered { anchor: id, .. }, Resolved::Gathered { anchor: other, .. }) => {
+            | (Resolved::Gathered { anchor: id, .. }, Resolved::Gathered { anchor: other, .. })
+            | (Resolved::Timer { name: id, .. }, Resolved::Timer { name: other, .. }) => {
                 id == other
             }
             _ => false,
@@ -211,6 +221,9 @@ enum Resolved {
         anchor: String,
         workers: Vec<(String, String)>,
     },
+    /// One of the space's timers, by its name, as the space described it as the utterance began. See
+    /// `design/timers.md`.
+    Timer { name: String, description: String },
 }
 
 /// The longest worker title told to the agent, in characters.
@@ -300,8 +313,10 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
                 None => description.clone(),
             };
         }
-        // As the stage described it, from its own store.
-        Attended(Resolved::Panel { description, .. }) => return description.clone(),
+        // As the stage described it, from its own store, and a timer as the space did.
+        Attended(Resolved::Panel { description, .. } | Resolved::Timer { description, .. }) => {
+            return description.clone();
+        }
     };
     describe_worker(backend, id, title, workers)
 }
@@ -826,6 +841,9 @@ impl SpaceModel {
             projected: Vec::new(),
             projected_replies: VecDeque::new(),
             notes: VecDeque::new(),
+            timers: crate::timers::Timers::default(),
+            events: crate::events::EventQueue::default(),
+            quiet_since: None,
         };
         model.load_messages(snapshot.messages);
         for permission in snapshot.permissions {
@@ -1048,6 +1066,7 @@ impl SpaceModel {
 
     /// The agent's turn ended; it counts as a reply nobody heard if it completed one while nobody was in the space.
     fn turn_ended(&mut self) {
+        self.quiet_since = Some(std::time::Instant::now());
         if std::mem::take(&mut self.unheard) && self.unattended.is_none() {
             self.unattended = Some(Attention::Reply);
         }
@@ -1741,6 +1760,15 @@ impl SpaceModel {
                     })
                 })
             }
+            // A timer, by its name, as the space's own timers describe it now.
+            tomori_protocol::Resource::Timer { timer, .. } => {
+                self.timers.describe(timer).map(|description| {
+                    Attended(Resolved::Timer {
+                        name: timer.clone(),
+                        description,
+                    })
+                })
+            }
             _ => None,
         }
     }
@@ -1935,7 +1963,15 @@ impl SpaceModel {
     }
 
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
+    #[cfg(test)]
     pub fn next_prompt(&mut self) -> Option<Prompt> {
+        self.next_prompt_at(std::time::Instant::now(), false)
+    }
+
+    /// The next prompt to deliver at `now`, as [`Self::next_prompt`] says: queued input first, with Tomori's notes
+    /// waiting before it, or else a prompt of the notes alone, once the event queue says it may be given and unless
+    /// `hold`, as while someone in the space is speaking, whose words will take them. See `design/timers.md`.
+    pub fn next_prompt_at(&mut self, now: std::time::Instant, hold: bool) -> Option<Prompt> {
         if self.closed
             || self.reconnecting.is_some()
             || self.activity() != Activity::Idle
@@ -1944,7 +1980,17 @@ impl SpaceModel {
             return None;
         }
         let attribution = self.attribution;
-        let entry = self.queue.begin_next()?;
+        if !self
+            .queue
+            .entries()
+            .iter()
+            .any(|entry| entry.state == QueueState::Queued)
+        {
+            return self.event_prompt(now, hold);
+        }
+        let events = self.events.block();
+        // An entry is sending only while it is in flight, which nothing is.
+        let entry = self.queue.begin_next().expect("an entry is queued");
         let key = entry.id.clone();
         let (source, speaker) = (entry.source, entry.speaker.clone());
         // What the speaker attended to comes before their words, described as the space knows it now.
@@ -1964,6 +2010,11 @@ impl SpaceModel {
         // What participants did since the words before, such as ticking a checklist's item, comes before both.
         let notes = noted(self.notes.iter().map(|(_, _, note)| note.as_str()));
         self.notes.clear();
+        // And Tomori's own notes waiting, such as a timer that fired, before those.
+        let notes = match (events, notes) {
+            (Some(events), Some(notes)) => Some(format!("{events} {notes}")),
+            (events, notes) => events.or(notes),
+        };
         let text = contextual(&entry.speaker, notes, context, &entry.text, attribution);
         // What the agent projects in its turn goes onto the wall nearest where they stood, or the Tomori wall.
         self.origin = self.origins.remove(&key);
@@ -1979,10 +2030,7 @@ impl SpaceModel {
             .retain(|key, _| waiting.contains(key.as_str()));
         self.origins.retain(|key, _| waiting.contains(key.as_str()));
         self.seen.retain(|key, _| waiting.contains(key.as_str()));
-        if self.given_keys.len() == GIVEN_KEYS {
-            self.given_keys.pop_front();
-        }
-        self.given_keys.push_back(delivery_key(&key).to_owned());
+        self.remember_given(delivery_key(&key).to_owned());
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
         // Who began the turn, from the moment it is given, since the agent may call a tool before delivery is confirmed.
@@ -1995,6 +2043,63 @@ impl SpaceModel {
             superseded: None,
         });
         Some(prompt)
+    }
+
+    /// A prompt of Tomori's notes alone, if they may be given at `now` and are not held: the notes, each in its
+    /// brackets, with no speaker. No participant asked for it, so the words given last no longer stand behind what the
+    /// agent does next. See `design/timers.md`.
+    fn event_prompt(&mut self, now: std::time::Instant, hold: bool) -> Option<Prompt> {
+        if hold || !self.events.ready(now, self.quiet_since) {
+            return None;
+        }
+        let (key, text) = self.events.prompt(now).expect("ready says notes wait");
+        self.supersede(Superseded::Event);
+        self.remember_given(key.clone());
+        self.origin = None;
+        let prompt = Prompt { key, text };
+        self.in_flight = Some(prompt.clone());
+        Some(prompt)
+    }
+
+    /// Remember `key` as one Tomori gave the agent, among the latest [`GIVEN_KEYS`], so that its delivery is not taken
+    /// for input from elsewhere.
+    fn remember_given(&mut self, key: String) {
+        if self.given_keys.len() == GIVEN_KEYS {
+            self.given_keys.pop_front();
+        }
+        self.given_keys.push_back(key);
+    }
+
+    /// Have the agent's last turn have ended a quiet moment ago, as a test does rather than wait.
+    #[cfg(test)]
+    pub fn quieten(&mut self) {
+        self.quiet_since = self.quiet_since.map(|since| since - crate::events::QUIET);
+    }
+
+    /// Whether Tomori's notes wait for the agent.
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// The space's timers.
+    pub fn timers(&self) -> &crate::timers::Timers {
+        &self.timers
+    }
+
+    /// The space's timers, to change.
+    pub fn timers_mut(&mut self) -> &mut crate::timers::Timers {
+        &mut self.timers
+    }
+
+    /// Look at the space's timers at `now`, with `present` the participants present, queueing what fires for the
+    /// agent. Returns whether how they look changed.
+    pub fn tick_timers(&mut self, now: jiff::Timestamp, present: &[String]) -> bool {
+        let before = self.timers.views();
+        for firing in self.timers.tick(now, present) {
+            self.events
+                .push(crate::events::Source::Timer, &firing.name, firing.text);
+        }
+        self.timers.views() != before
     }
 
     /// The entry given to the agent last, which began its current turn, if it has not failed to be delivered. See
@@ -2251,6 +2356,7 @@ impl SpaceModel {
             // Set by the hub, which knows the backends.
             avatar: None,
             clusters: Vec::new(),
+            timers: self.timers.views(),
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]
@@ -2313,6 +2419,79 @@ mod tests {
                 ..Snapshot::default()
             },
         )
+    }
+
+    #[test]
+    fn tomori_s_notes_wait_for_the_turn_a_quiet_moment_and_words_being_spoken() {
+        let mut space = model();
+        let at = |text: &str| -> jiff::Timestamp { text.parse().unwrap() };
+        space
+            .timers_mut()
+            .set(
+                crate::timers::Request {
+                    name: Some("status".into()),
+                    note: "Check".into(),
+                    every_minutes: Some(60),
+                    ..Default::default()
+                },
+                at("2026-11-11T09:17:00Z"),
+                "UTC",
+            )
+            .unwrap();
+        assert!(!space.has_events());
+        assert!(space.tick_timers(at("2026-11-11T10:00:00Z"), &["Ada".to_owned()]));
+        // Nothing changes as it is looked at again at once.
+        assert!(!space.tick_timers(at("2026-11-11T10:00:10Z"), &["Ada".to_owned()]));
+        assert!(space.has_events());
+        space.give(1, "Ada", std::time::Instant::now());
+        let now = std::time::Instant::now();
+        assert!(
+            space.next_prompt_at(now, true).is_none(),
+            "held while someone speaks"
+        );
+        space.apply(Event::Busy);
+        assert!(space.next_prompt_at(now, false).is_none(), "mid-turn");
+        space.apply(Event::Idle);
+        assert!(
+            space
+                .next_prompt_at(std::time::Instant::now(), false)
+                .is_none(),
+            "just spoke"
+        );
+        let later = std::time::Instant::now() + crate::events::QUIET;
+        let prompt = space.next_prompt_at(later, false).unwrap();
+        assert!(
+            prompt
+                .text
+                .starts_with("[Timer \"status\" (every hour, when present): fired 10:00;")
+        );
+        // Delivered, it is Tomori's own, not input from elsewhere, and no participant's words stand behind the turn.
+        space.apply(Event::Delivered { key: prompt.key });
+        assert_eq!(space.given().unwrap().superseded, Some(Superseded::Event));
+        assert!(!space.has_events());
+        // Words take Tomori's notes before the notes of what participants did.
+        space.apply(Event::Idle);
+        space.tick_timers(at("2026-11-11T11:00:00Z"), &["Ada".to_owned()]);
+        space.note_tick("agenda", 1, "Ada ticked item 1".to_owned());
+        space.enqueue("words".into(), 1, "Ada".into(), "hello".into());
+        let words = space
+            .next_prompt_at(std::time::Instant::now(), false)
+            .unwrap();
+        assert!(
+            words.text.starts_with("Ada: [Timer \"status\""),
+            "{}",
+            words.text
+        );
+        assert!(
+            words.text.ends_with("] [Ada ticked item 1] hello"),
+            "{}",
+            words.text
+        );
+        // A timer the space does not have is not described.
+        assert_eq!(
+            space.attended(&tomori_protocol::Resource::timer("none"), None, None),
+            None
+        );
     }
 
     #[test]

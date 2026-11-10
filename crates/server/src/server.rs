@@ -995,6 +995,8 @@ impl Server {
                 Ok(()) => {
                     let now = scheduler.now();
                     self.admission.sweep(now, self.request_timeout);
+                    // The agents' timers go by the clock, looked at each sweep. See `design/timers.md`.
+                    self.hub.tick_timers(jiff::Timestamp::now());
                     self.hub.sweep(now, &self.keepalive, self.request_timeout);
                     self.hub.forget_departed(now, self.retention);
                     self.revoke_withdrawn();
@@ -2997,6 +2999,7 @@ mod tests {
                         stage: Default::default(),
                         places: Default::default(),
                         active: None,
+                        timers: Default::default(),
                     }])
                 })
                 .unwrap();

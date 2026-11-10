@@ -18,6 +18,7 @@ mod command;
 mod connection;
 mod door;
 mod environments;
+mod events;
 #[cfg(unix)]
 mod exit;
 mod follow;
@@ -50,6 +51,7 @@ mod server;
 mod space;
 mod stage;
 mod system;
+pub mod timers;
 mod transcriber;
 mod versions;
 mod voice;

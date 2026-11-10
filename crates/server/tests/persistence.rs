@@ -365,6 +365,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         stage: Default::default(),
         places: Default::default(),
         active: None,
+        timers: Default::default(),
     };
     std::fs::write(
         state.0.join(SPACES_FILE),

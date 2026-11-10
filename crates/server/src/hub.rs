@@ -36,6 +36,7 @@ pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 mod agent_places;
+mod agent_timers;
 pub(crate) mod agent_workers;
 mod anchors;
 mod following;
@@ -504,6 +505,10 @@ pub struct Hub {
     tools: tools::Tools,
     /// What highlights the agent's code panels, outside the lock; see [`crate::highlighting`].
     highlighter: RwLock<crate::highlighting::Highlighter>,
+    /// The time a test sets for the agent's timers, in place of the clock's. See `design/timers.md`.
+    clock: RwLock<Option<jiff::Timestamp>>,
+    /// The zone a timer's times of day are in unless the agent names one: this machine's. See `design/timers.md`.
+    zone: RwLock<String>,
     this: Weak<Hub>,
 }
 
@@ -1005,6 +1010,9 @@ struct UtteranceRecord {
     origin: Option<tomori_protocol::Pose>,
     /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
     progress: Option<ConnectionId>,
+    /// When it began, after which it holds Tomori's notes back for at most [`crate::events::HOLD`]. See
+    /// `design/timers.md`.
+    begun: Instant,
     /// When its end arrived, and with it the last of its audio, from which the time it takes to transcribe is logged.
     ended: Option<Instant>,
     /// Since when it has waited behind another utterance, if it waits now, and how long it waited before.
@@ -1432,6 +1440,7 @@ impl HubState {
                     stage: space.stage.clone(),
                     places: space.places.clone(),
                     active: space.active,
+                    timers: model.timers().kept(),
                 }
             })
             .collect()
@@ -1496,17 +1505,30 @@ impl HubState {
 
     /// Hand the next queued input to the driver, if the space can accept it.
     fn pump(&mut self, id: &str) {
+        // Tomori's own notes wait while anyone in the space is speaking, since their words will take them, but not for
+        // words begun longer ago than anyone speaks: a client gone takes its open words with it, and one that never
+        // ends them holds nothing back for long.
+        let now = Instant::now();
+        let hold = self.utterances.values().any(|utterance| {
+            utterance.space == id
+                && now.saturating_duration_since(utterance.begun) < crate::events::HOLD
+        });
         let Some(space) = self.space_mut(id) else {
             return;
         };
-        if let Some(prompt) = space.model.next_prompt() {
+        if let Some(prompt) = space.model.next_prompt_at(now, hold) {
             let key = prompt.key.clone();
-            let source = space.model.given().expect("given as it was taken").source;
+            // Nobody's words began a prompt of Tomori's notes alone, so the agent goes to nobody for it.
+            let source = space
+                .model
+                .given()
+                .filter(|_| !crate::events::is_prompt(&key))
+                .map(|given| given.source);
             if space.commands.try_send(SpaceCommand::Send(prompt)).is_err() {
                 space
                     .model
                     .sent(&key, Err("the agent session has stopped".to_owned()));
-            } else {
+            } else if let Some(source) = source {
                 // A following agent goes to whoever it begins answering.
                 self.agent_given(id, source, Instant::now());
             }
@@ -2138,6 +2160,8 @@ impl Hub {
             inspect_timeout: RwLock::new(agent_inspect::INSPECT_TIMEOUT),
             tools: tools::Tools::default(),
             highlighter: RwLock::new(crate::highlighting::highlighter()),
+            clock: RwLock::new(None),
+            zone: RwLock::new(crate::timers::system_zone()),
             this: this.clone(),
         });
         let this = Arc::downgrade(&hub);
@@ -3830,6 +3854,7 @@ impl Hub {
                         seen,
                         origin,
                         progress: progress.then_some(connection),
+                        begun: Instant::now(),
                         ended: None,
                         waiting: None,
                         waited: Duration::ZERO,
@@ -5723,6 +5748,7 @@ impl Hub {
                 }
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
+                *model.timers_mut() = crate::timers::Timers::restore(&kept.timers, &kept.id);
                 let (commands, receiver) = async_channel::unbounded();
                 let closed = match kept.closed {
                     Some(reason) => {

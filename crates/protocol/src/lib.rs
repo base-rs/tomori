@@ -53,7 +53,7 @@ pub use space::{
     Attention, BackendInfo, ConnectionRole, Engagement, EnvironmentInfo, EnvironmentVersion,
     KnockRequest, KnockState, Message, Mode, Movement, Participant, Presentation, PresentationKind,
     Question, QueueEntry, QueueState, Renamer, Role, SessionSummary, SpaceState, SpaceSummary,
-    SpeechSetting, Worker, WorkerState, WorkspaceRoot, valid_avatar,
+    SpeechSetting, Timer, TimerState, Worker, WorkerState, WorkspaceRoot, valid_avatar,
 };
 pub use space::{RETURN_AFTER, RETURN_CHOICES, RETURN_LONGEST, RETURN_SHORTEST};
 

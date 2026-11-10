@@ -464,7 +464,10 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "decline_pairing",
             "workers",
             "remove_workers",
-            "show_image"
+            "show_image",
+            "set_timer",
+            "timers",
+            "cancel_timer"
         ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {

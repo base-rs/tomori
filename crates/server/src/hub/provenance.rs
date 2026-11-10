@@ -130,6 +130,12 @@ impl HubState {
                         .to_owned(),
                 );
             }
+            Some(Superseded::Event) => {
+                return Err(
+                    "Tomori gave you its own notes after the words you were given last in this space, such as a timer firing, which no participant asked for, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                );
+            }
             Some(Superseded::Reconnected) => {
                 return Err(
                     "Tomori lost its connection to your session after the words you were given last in this space, so it cannot tell that nothing else reached you since. Ask whoever wants this to say it again, and wait for their words before you act."

@@ -7185,3 +7185,5 @@ mod moving;
 mod patches;
 #[path = "hub_tests/placing.rs"]
 mod placing;
+#[path = "hub_tests/timers.rs"]
+mod timers;

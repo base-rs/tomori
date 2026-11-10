@@ -60,6 +60,11 @@ pub struct KeptSpace {
     /// `design/arrival.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<u64>,
+    /// Its timers, in a format of their own with its version, [`crate::timers::Kept`], kept as JSON and read leniently,
+    /// so that a record this server cannot read, as of a newer version or edited by hand, never stops the spaces from
+    /// loading. See `design/timers.md`.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub timers: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -210,6 +215,7 @@ mod tests {
             stage: Stage::default(),
             places: Default::default(),
             active: None,
+            timers: Default::default(),
         }
     }
 
@@ -241,6 +247,28 @@ mod tests {
         drop(store);
         let store = SpaceStore::open(&directory).unwrap();
         assert_eq!(store.spaces(), [space("space-a-1"), closed]);
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn timers_this_server_cannot_read_never_stop_the_spaces_loading() {
+        let directory = directory("timers");
+        tomori_security::create_private_directory(&directory).unwrap();
+        let mut record = serde_json::to_value(space("space-t-1")).unwrap();
+        record["timers"] = serde_json::json!({
+            "version": 2,
+            "timers": [{ "name": "x", "schedule": { "kind": "lunar" }, "cron": "0 9 L * *" }],
+        });
+        fs::write(
+            directory.join(SPACES_FILE),
+            serde_json::json!({ "spaces": [record] }).to_string(),
+        )
+        .unwrap();
+        let store = SpaceStore::open(&directory).unwrap();
+        let spaces = store.spaces();
+        assert_eq!(spaces[0].id, "space-t-1");
+        assert_eq!(spaces[0].timers["version"], 2);
         drop(store);
         fs::remove_dir_all(directory).unwrap();
     }

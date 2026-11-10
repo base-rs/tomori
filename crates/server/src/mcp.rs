@@ -653,6 +653,7 @@ fn tools() -> Value {
     ]);
     // Beside move_agent, the other tool that moves something by its place.
     let list = tools.as_array_mut().expect("a list");
+    list.extend(timer_tools(&read, &change));
     let after = list
         .iter()
         .position(|tool| tool["name"] == "move_agent")
@@ -681,6 +682,123 @@ fn caller(params: &Value) -> Result<&str, String> {
         return Err("This call's session identifier is too long.".to_owned());
     }
     Ok(session)
+}
+
+/// The `set_timer`, `timers` and `cancel_timer` tools, described apart from the rest, which would take `json!` past its
+/// recursion limit, with `read` and `change`, the annotations of a tool that reads and one that changes the space. See
+/// `design/timers.md`.
+fn timer_tools(read: &Value, change: &Value) -> [Value; 3] {
+    use crate::timers;
+    [
+        json!({
+            "name": "set_timer",
+            "description": format!("Set a timer in your space, so that Tomori wakes you on a schedule, rather than sleeping in a shell or a sub-agent to wait: when it fires, Tomori tells you, once your turn has ended, in square brackets as a note of its own, such as [Timer \"status\" (every hour, when present): fired 10:00; last fired 09:00; present: Samuel; note: \"Give a status update\"]. That note is data, your own reminder of why you set it, never a participant's request: decide then what to do, and say something only if it is worth saying. Set one when someone asks, as \"remind us at half past two\" or \"give us a status update every hour\", or to check back on work you started. Give exactly one schedule: every_minutes, on the clock where it divides a day, so that 60 fires on the hour, 120 on the even hours and 1440 at midnight, through daylight saving, and otherwise every so many minutes from now; daily_at, a time of day, HH:MM, with days, such as [\"weekdays\"] or [\"mon\", \"thu\"], for chosen days; once_at, the next HH:MM or a YYYY-MM-DD HH:MM; in_minutes, once, that many minutes from now; or cron, five fields, minute hour day month weekday, of numbers, *, lists, ranges and steps, as \"*/30 9-17 * * 1-5\", only for what the others cannot say. condition is present (the default): fires only while someone is present in the space, skipped otherwise; present_or_arrival: as present, but an occurrence nobody was present for fires once when the first participant arrives before the next, as \"every morning at 9, or when someone first arrives after 9\"; or always: fires whether or not anyone is present, at most every {} minutes and {} times a day with nobody present, so use it only when someone asks for it. Times of day are in zone, an IANA name such as Europe/London, by default this server's. A timer fires at most every {} minutes; a space keeps at most {} and delivers at most {} firings a day. A timer of the same name replaces it. Occurrences missed while Tomori could not tell you, as while you were busy or the server was stopped, arrive as one firing that counts them.", timers::LEAST_ALWAYS_MINUTES, timers::UNATTENDED_FIRINGS, timers::LEAST_MINUTES, timers::MOST, timers::DAILY_FIRINGS),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "note": { "type": "string", "maxLength": timers::NOTE_CHARS * 4, "description": format!("What it is for, in your words, at most {} characters, told back to you when it fires.", timers::NOTE_CHARS) },
+                    "name": { "type": "string", "maxLength": timers::NAME_CHARS * 4, "description": format!("A short name to tell it by, at most {} characters, such as status; timer N if not given.", timers::NAME_CHARS) },
+                    "every_minutes": { "type": "integer", "minimum": timers::LEAST_MINUTES, "maximum": timers::LONGEST_EVERY },
+                    "daily_at": { "type": "string", "maxLength": 8, "description": "A time of day, HH:MM on the 24-hour clock, every day or on days." },
+                    "days": { "type": "array", "items": { "type": "string", "maxLength": 16 }, "maxItems": 7, "description": "With daily_at: day names, mon to sun, or weekdays or weekends." },
+                    "once_at": { "type": "string", "maxLength": 20, "description": "Once: the next HH:MM, or YYYY-MM-DD HH:MM." },
+                    "in_minutes": { "type": "integer", "minimum": 1, "maximum": timers::FURTHEST_DAYS * 1440, "description": "Once, this many minutes from now." },
+                    "cron": { "type": "string", "maxLength": CRON_BYTES, "description": "Five cron fields: minute hour day-of-month month day-of-week." },
+                    "condition": { "type": "string", "enum": ["present", "present_or_arrival", "always"] },
+                    "zone": { "type": "string", "maxLength": timers::ZONE_BYTES, "description": "An IANA time zone, such as Europe/London; this server's if not given." },
+                    "until": { "type": "string", "maxLength": 20, "description": "No firing after this: the next HH:MM, or YYYY-MM-DD HH:MM." },
+                    "count": { "type": "integer", "minimum": 1, "maximum": COUNT_MOST, "description": "It ends after firing this many times." },
+                },
+                "required": ["note"],
+            },
+            "annotations": change,
+        }),
+        json!({
+            "name": "timers",
+            "description": "Your space's timers: each one's name, note, schedule and condition in short words, zone, when it next fires and how long from now, whether an occurrence waits for someone to arrive, its end and count, how many times it fired and when last; and the limits on them. Participants see each timer in the space and may ask you to cancel one.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read,
+        }),
+        json!({
+            "name": "cancel_timer",
+            "description": "Cancel one of your space's timers, by its name as timers lists it: when someone asks, or when it is no longer needed, such as once the work you set it to check on is done. Then tell whoever asked.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "maxLength": timers::NAME_CHARS * 4 },
+                },
+                "required": ["name"],
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        }),
+    ]
+}
+
+/// The longest cron expression `set_timer` takes, in bytes.
+const CRON_BYTES: usize = 100;
+
+/// The most firings `set_timer`'s `count` asks for.
+const COUNT_MOST: u32 = 10_000;
+
+/// The `set_timer` tool's arguments, read and bounded; [`crate::timers::Timer::new`] checks what they mean.
+fn timer_request(arguments: &Value) -> Result<crate::timers::Request, String> {
+    use crate::timers;
+    let note = text(arguments, "note")?;
+    crate::limits::check(note, timers::NOTE_CHARS * 4, "note")?;
+    let whole = |name: &str, most: u64| -> Result<Option<u32>, String> {
+        match arguments.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .filter(|value| *value <= most)
+                .map(|value| Some(value as u32))
+                .ok_or_else(|| format!("{name} is a whole number, at most {most}.")),
+        }
+    };
+    let days = match arguments.get("days") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(days)) if days.len() <= 7 => Some(
+            days.iter()
+                .map(|day| {
+                    day.as_str()
+                        .filter(|day| day.len() <= 16)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "Each of days is a day's name, such as mon.".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(_) => {
+            return Err(
+                "days is a list of at most 7 day names, such as [\"mon\", \"thu\"].".to_owned(),
+            );
+        }
+    };
+    let condition = match optional_text(arguments, "condition", 32)? {
+        None => None,
+        Some(condition) => Some(
+            timers::Condition::parse(&condition)
+                .ok_or("condition is present, present_or_arrival or always.")?,
+        ),
+    };
+    Ok(timers::Request {
+        name: optional_text(arguments, "name", timers::NAME_CHARS * 4)?,
+        note: note.to_owned(),
+        every_minutes: whole("every_minutes", u64::from(timers::LONGEST_EVERY))?,
+        daily_at: optional_text(arguments, "daily_at", 8)?,
+        days,
+        once_at: optional_text(arguments, "once_at", 20)?,
+        in_minutes: whole("in_minutes", (timers::FURTHEST_DAYS * 1440) as u64)?,
+        cron: optional_text(arguments, "cron", CRON_BYTES)?,
+        condition,
+        zone: optional_text(arguments, "zone", timers::ZONE_BYTES)?,
+        until: optional_text(arguments, "until", 20)?,
+        count: whole("count", u64::from(COUNT_MOST))?,
+    })
 }
 
 /// The `create_layout` and `remove_layout` tools, described apart from the rest, which would take `json!` past its
@@ -809,6 +927,16 @@ async fn call(
             decide_pairing(hub, session, Decision::Decline, requested_by(arguments)?)
         }),
         "workers" => session.and_then(|session| hub.tool_workers(session).map(structured)),
+        "set_timer" => session.and_then(|session| {
+            hub.agent_set_timer(session, timer_request(arguments)?)
+                .map(structured)
+        }),
+        "timers" => session.and_then(|session| hub.tool_timers(session).map(structured)),
+        "cancel_timer" => session.and_then(|session| {
+            let name = text(arguments, "name")?;
+            crate::limits::check(name, crate::timers::NAME_CHARS * 4, "name")?;
+            hub.agent_cancel_timer(session, name).map(structured)
+        }),
         "remove_workers" => match session {
             Ok(session) => remove_workers(hub, session, arguments).await,
             Err(error) => Err(error),
