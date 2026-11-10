@@ -620,6 +620,41 @@ fn called_it_comes_beside_them_and_stays_pinned_turning_only_until_sent_home_or_
 }
 
 #[test]
+fn moving_only_when_asked_a_pinned_agent_still_turns_to_whoever_speaks_and_glances_while_busy() {
+    let (hub, _jobs) = hub();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&space);
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    ada.send(ClientMessage::CallAgent);
+    let (at, _, pinned) = agent(&hub, &space);
+    assert!(pinned && at.is_some());
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    let at_bob = [5.0, 1.6, 5.0];
+    bob.send(looking(at_bob, [5.0, 1.6, 0.0]));
+    // Pinned, it turns to Bob as he presses X, for everyone, and moves nothing.
+    press(&bob, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    assert_eq!(agent(&hub, &space), (at, Some(at_bob), true));
+    assert_eq!(last_state(&ada).expect("told").facing, Some(at_bob));
+    cancel(&bob, "u1");
+    // Busy, it glances at Ada, then turns back to Bob.
+    hub.drive_event(&space, Event::Busy);
+    press(&ada, "u2");
+    let pressed = Instant::now();
+    assert_eq!(agent(&hub, &space).1, Some(ADA));
+    hub.flush_snapshots(pressed + GLANCE);
+    assert_eq!(agent(&hub, &space), (at, Some(at_bob), true));
+    cancel(&ada, "u2");
+    // Sent home, its pin ends, and a press turns it no more.
+    hub.lock().agent_home(&space, "a test sent it");
+    press(&bob, "u3");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    assert_eq!(agent(&hub, &space), (None, None, false));
+}
+
+#[test]
 fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pin() {
     let (hub, _jobs) = hub();
     let (space, _commands) = idle(&hub);

@@ -372,8 +372,9 @@ impl HubState {
 
     /// `participant`, in `space`, began words for its agent at `now`, as `captured` found them: in a space whose agent
     /// follows the speaker, it turns to them at once and, if it is free, goes to them once they have held X for
-    /// [`COMMIT`]; while it answers someone else, or is pinned, it glances at them only. Visitors, whose words go
-    /// nowhere, and words that answer, name or title, never come here.
+    /// [`COMMIT`]; while it answers someone else, or is pinned, it glances at them only. Pinned where it moves only
+    /// when asked, it still turns to them, as a pinned agent does wherever it follows; unpinned there, or kept home, it
+    /// neither turns nor moves. Visitors, whose words go nowhere, and words that answer, name or title, never come here.
     pub(super) fn agent_pressed(
         &mut self,
         space: &str,
@@ -388,7 +389,8 @@ impl HubState {
         let record = self
             .space_mut(space)
             .expect("words begin in a listed space");
-        if record.model.movement().mode != Movement::Follow {
+        let mode = record.model.movement().mode;
+        if mode != Movement::Follow && !(mode == Movement::Asked && record.following.pinned) {
             return;
         }
         let busy = others_speaking
