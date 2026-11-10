@@ -5723,8 +5723,11 @@ impl Hub {
                 let mut stage = kept.stage;
                 {
                     let environments = self.environments();
+                    // What was kept reaching through the floor, as before walls and panels were kept above it, is raised.
                     for environment in stage.environments() {
-                        stage.fit_slots(&environments.walls(&environment));
+                        let walls = environments.walls(&environment);
+                        stage.fit_slots(&walls);
+                        stage.ground(&walls);
                     }
                     // The space's status panels take the status wall's free slots where it is now, as a space kept
                     // before environments had status walls of their own does on first opening in one.

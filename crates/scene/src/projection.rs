@@ -44,6 +44,9 @@ pub const FIT_ROWS: (usize, usize) = (3, 30);
 /// The widest a floating panel's face grows to show a table, in cells: about a metre, 38° from 1.5 m, so that a row of
 /// the table is still read by moving the eyes, not the head.
 pub const TABLE_COLUMNS: usize = 60;
+/// The floor walls and panels carried stop above, in a space's coordinates, as the server keeps them above it: the
+/// floor where participants arrive. See `design/projection.md`.
+pub const FLOOR: f32 = tomori_protocol::entourage::FLOOR;
 /// The furthest along the ray a slot is aimed at to put a panel carried in it, in metres.
 const AIM_REACH: f32 = 8.0;
 /// How far beyond a slot's edges the ray still aims at it, so that the gaps between slots aim at one, in metres.
@@ -1596,8 +1599,10 @@ impl Projector {
                 output.turned = true;
             }
             if let Some(ray) = input.ray {
-                // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
+                // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps. Carried
+                // down to the floor, it stops there, above it, as the server keeps it, rather than going through.
                 let at = ray.at(held.manipulation.distance());
+                let at = at.with_y(at.y.max(FLOOR + layout::PANEL_LOWEST));
                 held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
                     * Mat4::from_rotation_y(held.manipulation.yaw());
             }

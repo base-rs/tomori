@@ -89,6 +89,54 @@ pub const ASPECTS: (f32, f32) = (0.25, 4.0);
 pub const LEAST_RADIUS: f32 = 1.0;
 pub const MOST_ARC: f32 = std::f32::consts::PI;
 
+/// How far above the floor a wall's lowest edge, and a floating panel's, stand at least, in metres: the floor where
+/// participants arrive, [`crate::entourage::FLOOR`], so that nothing goes through it, out of reach. See
+/// `design/projection.md`.
+pub const FLOOR_CLEARANCE: f32 = 0.05;
+
+/// How far below a curved wall's rows its label reaches, as clients draw it there, in metres.
+pub const ARC_LABEL_REACH: f32 = 0.06;
+
+/// Half the height of the tallest panel that floats, in metres: a text panel of 30 rows of body, or a code panel of 40
+/// rows of code, each about 78 cm tall.
+pub const PANEL_REACH: f32 = 0.4;
+
+/// The lowest a floating panel's middle stands above the floor, in metres, so that however tall it is drawn, its lowest
+/// edge stands [`FLOOR_CLEARANCE`] above it: a client sizes a floating panel to its text, which the server does not
+/// lay out, so the one bound both keep is the tallest's.
+pub const PANEL_LOWEST: f32 = PANEL_REACH + FLOOR_CLEARANCE;
+
+/// `pose`, of a panel floating, raised where its middle stands lower than [`PANEL_LOWEST`] above the floor at `floor`,
+/// so that it never goes through the floor; as it is otherwise.
+///
+/// ```
+/// use tomori_protocol::{Pose, entourage::FLOOR, wall};
+///
+/// let sunk = Pose::upright([0.0, -1.26, -2.0], 0.0);
+/// assert_eq!(wall::panel_above_floor(sunk, FLOOR).position[1], wall::PANEL_LOWEST);
+/// let held = Pose::upright([0.0, 1.4, -2.0], 0.0);
+/// assert_eq!(wall::panel_above_floor(held, FLOOR), held);
+/// ```
+pub fn panel_above_floor(mut pose: Pose, floor: f32) -> Pose {
+    let least = floor + PANEL_LOWEST;
+    if pose.position[1] < least {
+        pose.position[1] = least;
+    }
+    pose
+}
+
+/// How far `walls`, together, are to be raised for the lowest edge of each to stand [`FLOOR_CLEARANCE`] above the floor
+/// at `floor`, in metres: 0 where every one already does, within a tenth of a millimetre, so that one raised once is
+/// not raised again by rounding, and a group raised by it stays as it is laid out.
+pub fn lift<'a>(walls: impl IntoIterator<Item = &'a Wall>, floor: f32) -> f32 {
+    let lift = walls
+        .into_iter()
+        .map(|wall| floor + FLOOR_CLEARANCE - wall.lowest())
+        .filter(|lift| lift.is_finite())
+        .fold(0.0, f32::max);
+    if lift > 1e-4 { lift } else { 0.0 }
+}
+
 /// A wall's slots: so many columns of so many rows, numbered from the top left as seen from in front, left to right
 /// and then down. Sent as `[columns, rows]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -472,6 +520,52 @@ impl Wall {
         self.slot_frames()
             .get(slot as usize)
             .map(|slot| slot.pose(&frame))
+    }
+
+    /// The height of its lowest edge in the space, in metres, as it stands, tilted and curved: of a flat wall's board,
+    /// or of a curved wall's slots and the label below them.
+    pub fn lowest(&self) -> f32 {
+        let frame = self.frame();
+        let below = |pose: &Pose, (width, height): (f32, f32)| {
+            [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+                .into_iter()
+                .map(|(x, y)| {
+                    pose.position[1]
+                        + rotate(pose.orientation, [x * width / 2.0, y * height / 2.0, 0.0])[1]
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
+        if let Some(board) = self.board() {
+            return below(&frame, board);
+        }
+        let (_, height) = self.size();
+        let label = frame.position[1]
+            + rotate(
+                frame.orientation,
+                [0.0, -(height / 2.0 + ARC_LABEL_REACH), 0.0],
+            )[1];
+        self.slot_frames()
+            .iter()
+            .map(|slot| below(&slot.pose(&frame), (slot.size[0], slot.size[1])))
+            .fold(label, f32::min)
+    }
+
+    /// Its pose, raised where its lowest edge would stand less than [`FLOOR_CLEARANCE`] above the floor at `floor`, so
+    /// that it never goes through it; as it is otherwise. See [`lift`].
+    ///
+    /// ```
+    /// use tomori_protocol::{Pose, Wall, WallKind, entourage::FLOOR, wall};
+    ///
+    /// // Pushed through the floor while carried, its middle 1.26 m below it.
+    /// let sunk = Wall::new("wall-1", WallKind::Added, Pose::upright([0.0, -1.26, -2.0], 0.0));
+    /// let raised = Wall::new("wall-1", WallKind::Added, sunk.above_floor(FLOOR));
+    /// assert!((raised.lowest() - wall::FLOOR_CLEARANCE).abs() < 1e-4);
+    /// assert_eq!(raised.above_floor(FLOOR), raised.pose);
+    /// ```
+    pub fn above_floor(&self, floor: f32) -> Pose {
+        let mut pose = self.pose;
+        pose.position[1] += lift([self], floor);
+        pose
     }
 }
 
@@ -857,5 +951,60 @@ mod tests {
             "{width} {height}"
         );
         assert!(big.slot_frames().iter().all(|frame| frame.scale == 5.0));
+    }
+
+    #[test]
+    fn a_wall_s_lowest_edge_is_its_board_s_or_its_slots_and_label_s_as_it_tilts_and_curves() {
+        let at = |y: f32| Pose::upright_facing([0.0, y, -2.0], [0.0, y, 0.0]);
+        // Flat and upright: its board's bottom edge.
+        let flat = Wall::new("w", WallKind::Added, at(1.5));
+        let (_, height) = flat.board().unwrap();
+        assert!((flat.lowest() - (1.5 - height / 2.0)).abs() < 1e-5);
+        // Tilted either way about its middle line, its bottom edge comes up and forward or back.
+        for tilt in [-45.0, 30.0] {
+            let tilted = flat.clone().with_tilt(Some(tilt));
+            let expected = 1.5 - height / 2.0 * f32::to_radians(tilt).cos();
+            assert!((tilted.lowest() - expected).abs() < 1e-4, "{tilt}");
+        }
+        // Curved: its slots' bottom edges, and the label below them.
+        let curved = Wall::new("w", WallKind::Added, at(1.5))
+            .with_shape(WallShape::Arc { radius: 2.0 })
+            .with_grid(Grid::from((4, 2)));
+        let (_, rows) = curved.size();
+        assert!((curved.lowest() - (1.5 - rows / 2.0 - ARC_LABEL_REACH)).abs() < 1e-4);
+        // Tilted forward, a curved wall's outer slots swing lower than its middle.
+        let leaning = curved.clone().with_tilt(Some(45.0));
+        let middle = 1.5 - (rows / 2.0 + ARC_LABEL_REACH) * f32::to_radians(45.0).cos();
+        assert!(leaning.lowest() < middle - 1e-3);
+    }
+
+    #[test]
+    fn walls_and_panels_are_raised_above_the_floor_together_and_never_lowered() {
+        let floor = crate::entourage::FLOOR;
+        let at = |y: f32| Pose::upright_facing([0.0, y, -2.0], [0.0, y, 0.0]);
+        // Pushed through the floor while carried, as on the headset in the farmyard.
+        let sunk = Wall::new("w", WallKind::Added, at(-1.26)).with_grid(Grid::from((2, 2)));
+        let raised =
+            Wall::new("w", WallKind::Added, sunk.above_floor(floor)).with_grid(Grid::from((2, 2)));
+        assert!((raised.lowest() - floor - FLOOR_CLEARANCE).abs() < 1e-4);
+        assert_eq!(raised.pose.position[0], sunk.pose.position[0]);
+        assert_eq!(raised.pose.orientation, sunk.pose.orientation);
+        // Raised once, it is not raised again by rounding; above the floor, nothing moves.
+        assert_eq!(lift([&raised], floor), 0.0);
+        assert_eq!(flat_at(&at(3.0)).above_floor(floor), at(3.0));
+        // Two walls together are raised by what the lower needs, so that they stay as they stood from each other.
+        let other = flat_at(&at(0.1));
+        let needed = floor + FLOOR_CLEARANCE - sunk.lowest();
+        assert!((lift([&other, &sunk], floor) - needed).abs() < 1e-5);
+        assert_eq!(lift(std::iter::empty(), floor), 0.0);
+        // On a raised floor, it stands above that.
+        assert!(lift([&flat_at(&at(1.5))], 2.0) > 0.5);
+        // A panel's middle stands high enough for the tallest floating panel's lowest edge to clear the floor.
+        assert_eq!(panel_above_floor(at(-3.0), floor).position[1], PANEL_LOWEST);
+        assert_eq!(panel_above_floor(at(1.2), floor), at(1.2));
+    }
+
+    fn flat_at(pose: &Pose) -> Wall {
+        Wall::new("w", WallKind::Added, *pose)
     }
 }

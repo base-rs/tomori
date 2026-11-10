@@ -6163,6 +6163,73 @@ fn a_record_of_spaces_kept_before_status_walls_loads_its_tomori_wall_s_panels_on
 }
 
 #[test]
+fn a_wall_and_a_panel_kept_through_the_floor_are_raised_above_it_as_the_space_loads() {
+    let directory =
+        std::env::temp_dir().join(format!("tomori-hub-sunk-wall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let sunk = |y: f32| serde_json::json!({ "position": [0.0, y, -2.0], "orientation": [0.0, 0.0, 0.0, 1.0] });
+    // As on the headset in the farmyard: a wall carried through the floor, centred 1.26 m under it, kept for another
+    // environment than the one the space is in, and a panel floating below it.
+    std::fs::write(
+        directory.join(crate::kept::SPACES_FILE),
+        serde_json::json!({
+            "spaces": [{
+                "id": "sunk",
+                "title": "Space",
+                "backend": "fake",
+                "directory": "/tmp",
+                "session": "session-sunk",
+                "environment": "farm",
+                "attribution": false,
+                "stage": {
+                    "version": 1,
+                    "next": 10,
+                    "rooms": {
+                        "sky": {
+                            "used": 10,
+                            "walls": [{ "id": "wall-1", "pose": sunk(-1.26) }],
+                            "panels": [{
+                                "id": "panel-2", "title": "Sunk", "body": "x", "created": 100, "placed": 2,
+                                "place": { "kind": "free", "pose": sunk(-0.5) },
+                            }],
+                        },
+                    },
+                },
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let (hub, _jobs) = hub();
+    hub.set_environments(farm_and_sky());
+    assert_eq!(hub.restore(store).len(), 1);
+    let state = hub.lock();
+    let record = state.space("sunk").unwrap();
+    let environments = hub.environments();
+    let sky = record.stage.view("sunk", &environments.walls("sky"), 0);
+    let wall = sky.wall("wall-1").unwrap();
+    assert!(
+        (wall.lowest() - tomori_protocol::wall::FLOOR_CLEARANCE).abs() < 1e-3,
+        "{}",
+        wall.lowest()
+    );
+    assert_eq!(
+        sky.panel("panel-2").unwrap().place,
+        tomori_protocol::Place::Free {
+            pose: tomori_protocol::Pose {
+                position: [0.0, tomori_protocol::wall::PANEL_LOWEST, -2.0],
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            }
+        }
+    );
+    drop(environments);
+    drop(state);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn a_space_names_the_avatar_its_backend_names_to_everyone_in_it() {
     let backend = FakeBackend::new();
     backend.name_avatar("river");

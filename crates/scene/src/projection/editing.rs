@@ -1926,6 +1926,12 @@ impl Editor {
                 };
                 output.ticked |= stopped && !drag.stopped;
                 drag.stopped = stopped;
+                // Grown or tilted down to the floor, it rises above it, as the server stands it; the status wall stands
+                // where its environment puts it.
+                let mut changed = changed;
+                if changed.kind != WallKind::Tomori {
+                    changed.pose = changed.above_floor(super::FLOOR);
+                }
                 self.preview = Some(changed);
             }
         }
@@ -1987,6 +1993,15 @@ impl Editor {
                     })
                     .collect()
             };
+            // Carried down to the floor, it stops there with the walls carried with it, rather than going through, as
+            // the server keeps every wall above it.
+            let lift = layout::lift(self.preview.iter().chain(&self.moved), super::FLOOR);
+            if lift > 0.0 {
+                carry.model = Mat4::from_translation(Vec3::Y * lift) * carry.model;
+                for wall in self.preview.iter_mut().chain(&mut self.moved) {
+                    wall.pose.position[1] += lift;
+                }
+            }
             // Brought near enough another wall, of those not carried, the snap of any wall carried that ranks first,
             // unless the trigger is held. The snap already shown is held a little wider, and ranks a little nearer, so
             // that it neither flickers at the edge of reach nor between two neighbours.
@@ -2102,8 +2117,15 @@ impl Editor {
                     }),
                     version: None,
                 });
-                self.pending = Some((placed(&after), input.now));
-                self.moved_pending = moved.iter().map(placed).collect();
+                // Snapped, its group stands above the floor as a whole, as the server stands it.
+                let mut walls: Vec<Wall> =
+                    std::iter::once(&after).chain(&moved).map(placed).collect();
+                let lift = layout::lift(&walls, super::FLOOR);
+                for wall in &mut walls {
+                    wall.pose.position[1] += lift;
+                }
+                self.moved_pending = walls.split_off(1);
+                self.pending = walls.pop().map(|wall| (wall, input.now));
             } else if let (Some(after), Some(before), true) =
                 (self.preview.take(), before, carried || dragged)
             {

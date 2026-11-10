@@ -206,7 +206,7 @@ impl Stage {
                 ],
                 orientation: shown.pose.orientation,
             };
-            super::valid(&pose).unwrap_or(shown.pose)
+            super::raised(super::valid(&pose).unwrap_or(shown.pose))
         };
         let floating: Vec<[f32; 3]> = self
             .rooms

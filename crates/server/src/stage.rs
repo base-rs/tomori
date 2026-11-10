@@ -27,6 +27,8 @@ mod blocks;
 pub(crate) use tomori_protocol::checklist;
 mod beside;
 mod code;
+#[cfg(test)]
+mod floor_tests;
 mod groups;
 mod image;
 mod layouts;
@@ -883,6 +885,21 @@ pub(crate) fn valid(pose: &Pose) -> Option<Pose> {
     valid_within(pose, REACH)
 }
 
+/// The floor walls and floating panels stand above, in a space's coordinates: the floor where participants arrive,
+/// home's, in every environment, since none declares a ground of its own. See `design/projection.md`.
+pub const FLOOR: f32 = tomori_protocol::entourage::FLOOR;
+
+/// `pose`, of a panel left floating, as [`valid`] makes it, raised where it would reach through the floor, as
+/// `tomori_protocol::wall::panel_above_floor` raises it for every client too.
+pub(crate) fn afloat(pose: &Pose) -> Option<Pose> {
+    valid(pose).map(|pose| layout::panel_above_floor(pose, FLOOR))
+}
+
+/// `pose`, of a panel left floating, raised where it would reach through the floor.
+fn raised(pose: Pose) -> Pose {
+    layout::panel_above_floor(pose, FLOOR)
+}
+
 /// `pose`, as [`valid`] makes it, but within [`ARRIVAL_REACH`]: an environment's arrival, or an anchor or wall in its
 /// own coordinates before it is carried into a space's.
 pub(crate) fn valid_arrival(pose: &Pose) -> Option<Pose> {
@@ -1401,7 +1418,7 @@ impl Stage {
                 Spot::Wall(wall.clone(), slot.filter(|slot| *slot < slots))
             }
             Destination::Free(pose) | Destination::Anchor { pose, .. } => {
-                valid(pose).map_or(tomori, Spot::Free)
+                afloat(pose).map_or(tomori, Spot::Free)
             }
             Destination::Beside { head, solids } => {
                 let floating: Vec<Pose> = self
@@ -1416,7 +1433,7 @@ impl Stage {
                     .collect();
                 let pose = beside::spot(head, &shown, &floating, solids)
                     .unwrap_or_else(|| crate::presence::front_of(head));
-                valid(&pose).map_or(tomori, Spot::Free)
+                afloat(&pose).map_or(tomori, Spot::Free)
             }
             Destination::Wall { .. } | Destination::Tomori => tomori,
         }
@@ -1566,7 +1583,7 @@ impl Stage {
     /// newest to float, so the last to go.
     fn float(&mut self, walls: &Walls<'_>, mut kept: Kept, pose: Pose) {
         let room = FLOATING;
-        kept.place = Placed::Free { pose };
+        kept.place = Placed::Free { pose: raised(pose) };
         kept.arranged = false;
         kept.placed = self.tick();
         let list = self.list(walls.environment, None);
@@ -1837,6 +1854,8 @@ impl Stage {
         let wall = layout.apply(Wall::new("", WallKind::Added, pose));
         Self::fits(&wall, layout)?;
         self.has_room(walls, wall.slots() as usize)?;
+        // Added where it would reach through the floor, it stands on it.
+        let pose = wall.above_floor(FLOOR);
         let id = format!("wall-{}", self.tick());
         self.room(walls.environment).walls.push(AddedWall {
             id: id.clone(),
@@ -1978,8 +1997,15 @@ impl Stage {
                 );
             }
         }
-        let after = new.apply(Wall::new(wall, kind, pose));
+        let mut after = new.apply(Wall::new(wall, kind, pose));
         Self::fits(&after, new)?;
+        // A wall the space places stands above the floor, however it was carried, tilted, bent or resized, even as an
+        // older client sends it; a group, as a whole, below. The status wall stands where its environment puts it.
+        let pose = match kind {
+            WallKind::Added | WallKind::Environment => after.above_floor(FLOOR),
+            _ => pose,
+        };
+        after.pose = pose;
         if new == old && pose == before.pose {
             return Ok(false);
         }
@@ -2158,7 +2184,7 @@ impl Stage {
         for (id, pose) in floating {
             let mut panel = self.take(environment, &id).expect("a panel on the wall");
             panel.place = Placed::Free {
-                pose: pose.and_then(|pose| valid(&pose)).unwrap_or(before.pose),
+                pose: raised(pose.and_then(|pose| valid(&pose)).unwrap_or(before.pose)),
             };
             panel.arranged = false;
             panel.placed = self.tick();
@@ -2196,10 +2222,12 @@ impl Stage {
         for panel in &mut room.panels {
             if let Some(slot) = panel.slot_on(wall) {
                 panel.place = Placed::Free {
-                    pose: shown
-                        .slot_pose(slot)
-                        .and_then(|pose| valid(&pose))
-                        .unwrap_or(shown.pose),
+                    pose: raised(
+                        shown
+                            .slot_pose(slot)
+                            .and_then(|pose| valid(&pose))
+                            .unwrap_or(shown.pose),
+                    ),
                 };
                 panel.arranged = false;
                 panel.placed = tick;
@@ -2259,7 +2287,7 @@ impl Stage {
                 floating += 1;
                 let mut kept = self.take(environment, &id).expect("a panel on the wall");
                 kept.place = Placed::Free {
-                    pose: valid(&pose).unwrap_or(wall.pose),
+                    pose: raised(valid(&pose).unwrap_or(wall.pose)),
                 };
                 kept.arranged = false;
                 kept.placed = self.tick();
@@ -2267,6 +2295,40 @@ impl Stage {
             }
         }
         moved
+    }
+
+    /// Raise what the space keeps in `walls`' environment that reaches through the floor, as one kept before walls and
+    /// panels were kept above it may: each group of walls someone added, together, each of the environment's own walls
+    /// the space moved, and each panel floating there, at an anchor still of it. Returns whether it raised any. See
+    /// `design/projection.md`.
+    pub(crate) fn ground(&mut self, walls: &Walls<'_>) -> bool {
+        let shown = self.walls(walls);
+        let Some(room) = self.rooms.get_mut(walls.environment) else {
+            return false;
+        };
+        let mut raised = room.ground();
+        for (id, pose) in &mut room.moved {
+            if let Some(wall) = shown.iter().find(|wall| wall.id == *id) {
+                let lifted = wall.above_floor(FLOOR);
+                raised |= lifted != *pose;
+                *pose = lifted;
+            }
+        }
+        for kept in &mut room.panels {
+            let Placed::Free { pose } = &mut kept.place else {
+                continue;
+            };
+            let lifted = self::raised(*pose);
+            if lifted == *pose {
+                continue;
+            }
+            if let Some((_, at)) = kept.anchor.as_mut().filter(|(_, at)| at == pose) {
+                *at = lifted;
+            }
+            *pose = lifted;
+            raised = true;
+        }
+        raised
     }
 
     /// The environment's own wall `wall` as `walls`' environment declares it, if it is one.
@@ -2368,8 +2430,9 @@ impl Stage {
             }
             Target::Slot(wall, _) if shown(&wall) => return Err("That wall has no such slot."),
             Target::Wall(_) | Target::Slot(..) => return Err("That wall is not here."),
+            // Left below the floor, as an older client may leave it, it floats above it.
             Target::Free(pose) => Target::Free(
-                valid(&pose).ok_or("A panel must float within 20 m of the space's middle.")?,
+                afloat(&pose).ok_or("A panel must float within 20 m of the space's middle.")?,
             ),
         };
         let onto_tomori =

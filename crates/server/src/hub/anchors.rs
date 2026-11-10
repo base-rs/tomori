@@ -155,7 +155,7 @@ impl SpaceRecord {
                         .position(&anchors, &crate::seating::Member::Panel(panel.clone()))?;
                     // As the stage keeps it, so that one already there is left there.
                     let pose = Pose::upright_facing(at, [eyes[0], at[1], eyes[2]]);
-                    let pose = crate::stage::valid(&pose).unwrap_or(pose);
+                    let pose = crate::stage::afloat(&pose).unwrap_or(pose);
                     (pose != was).then_some((panel, anchor, pose))
                 })
                 .collect()

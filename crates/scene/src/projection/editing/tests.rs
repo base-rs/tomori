@@ -177,6 +177,81 @@ fn a_squeeze_on_a_wall_s_board_takes_hold_of_it_and_an_added_wall_is_carried_and
     assert_eq!(projector.editor.walls(&projection)[0], wall);
 }
 
+/// Whether `wall`'s lowest edge stands just its clearance above the floor, as the server stands it.
+fn on_the_floor(wall: &Wall) -> bool {
+    (wall.lowest() - super::super::FLOOR - layout::FLOOR_CLEARANCE).abs() < 1e-3
+}
+
+#[test]
+fn a_wall_carried_down_to_the_floor_stops_on_it_with_its_group_and_is_let_go_there() {
+    let wall = added().with_group(Some("wall-1".into()), Vec::new());
+    // Another wall of its group, standing below it.
+    let (_, height) = wall.board().unwrap();
+    let mut under = Wall::new("wall-2", WallKind::Added, wall.pose)
+        .with_group(Some("wall-1".into()), Vec::new());
+    under.pose.position[1] -= height + 0.05;
+    let projection = shown(vec![wall.clone(), under.clone()], Vec::new());
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(on(&wall, 0.0, 0.42));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, now));
+    assert_eq!(projector.carried_wall(), Some("wall-1"));
+    // Aimed down through the floor, the group stops where its lower wall stands on it, rather than sinking.
+    let down = Ray::new(HOME, Vec3::new(0.0, -1.0, -0.4));
+    projector.update(frame(&projection, down, 1.0, ADJUST, now));
+    let drawn = projector.editor.walls(&projection);
+    assert!(on_the_floor(&drawn[1]), "{}", drawn[1].lowest());
+    assert!(drawn[0].lowest() > drawn[1].lowest());
+    // Still standing from each other as they stood.
+    let apart = drawn[0].pose.position[1] - drawn[1].pose.position[1];
+    assert!((apart - (height + 0.05)).abs() < 1e-4);
+    // Let go there, it is sent standing where it was drawn, above the floor.
+    let output = projector.update(frame(&projection, down, 0.0, ADJUST, now));
+    let pose = output.wall.and_then(|change| change.pose).expect("moved");
+    assert_eq!(pose, drawn[0].pose);
+    // Alone, it stops on the floor itself.
+    let alone = added();
+    let projection = shown(vec![alone.clone()], Vec::new());
+    let mut projector = Projector::default();
+    projector.update(frame(
+        &projection,
+        at(on(&alone, 0.0, 0.42)),
+        1.0,
+        ADJUST,
+        now,
+    ));
+    projector.update(frame(&projection, down, 1.0, ADJUST, now));
+    assert!(on_the_floor(&projector.editor.walls(&projection)[0]));
+}
+
+#[test]
+fn a_wall_given_a_row_by_its_handle_near_the_floor_rises_above_it_as_the_server_stands_it() {
+    let mut wall = added();
+    wall.pose.position[1] = 0.0;
+    wall.pose = wall.above_floor(super::super::FLOOR);
+    assert!(on_the_floor(&wall));
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let three = Wall::new("w", WallKind::Added, wall.pose).with_grid(Grid::new(3, 3).unwrap());
+    let (_, height) = three.board().unwrap();
+    let change = drag(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Rows,
+        on(&wall, 0.0, -height / 2.0),
+        now,
+    )
+    .expect("more rows");
+    assert_eq!(change.grid, Grid::new(3, 3));
+    // Grown about its middle, it would reach through the floor: it is drawn raised, as the server will raise it.
+    let drawn = projector.editor.walls(&projection);
+    assert_eq!(drawn[0].grid(), Grid::from((3, 3)));
+    assert!(on_the_floor(&drawn[0]), "{}", drawn[0].lowest());
+    assert!(drawn[0].pose.position[1] > wall.pose.position[1]);
+}
+
 #[test]
 fn a_panel_on_a_wall_is_taken_before_the_wall_and_a_participant_who_may_not_adjust_walls_takes_none()
  {
@@ -389,8 +464,11 @@ fn edges_give_a_wall_whole_columns_and_rows_and_corners_size_its_slots_in_steps(
         now,
     );
     assert!(change.is_none_or(|change| change.scale.is_none_or(|scale| scale <= layout::SCALES.1)));
-    // And back from the largest to a standard slot in one drag back.
-    let large = wall.clone().with_scale(layout::SCALES.1);
+    // And back from the largest to a standard slot in one drag back, the largest standing above the floor, as the
+    // server stands it.
+    let mut large = wall.clone().with_scale(layout::SCALES.1);
+    large.pose = large.above_floor(super::super::FLOOR);
+    let middle = Vec3::from_array(large.pose.position);
     let large_projection = shown(vec![large.clone()], Vec::new());
     let mut projector = holding(&large_projection, &large, ADJUST, now);
     let corner = met(&large, handle(&large, Handle::Corner(1, 1)));

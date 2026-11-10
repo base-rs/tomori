@@ -1372,7 +1372,9 @@ fn a_panel_carried_stays_in_the_hand_while_a_teleport_is_aimed() {
     projector.update(input(&shown, ray, 1.0, now));
     assert_eq!(projector.held(), Some("a"));
     let distance = HOME.distance(slot_centre(&shown, 0));
-    let travelled = Ray::new(HOME + Vec3::new(3.0, 0.0, -4.0), Vec3::new(0.3, -0.5, -1.0));
+    // Aimed down, but not so far that it would stop above the floor.
+    let travelled = Ray::new(HOME + Vec3::new(3.0, 0.0, -4.0), Vec3::new(0.3, -0.3, -1.0));
+    assert!(travelled.unwrap().at(distance).y > super::FLOOR + layout::PANEL_LOWEST);
     let output = projector.update(aiming(travelled, 1.0));
     assert_eq!(output.placed, None);
     assert_eq!(projector.held(), Some("a"));
@@ -1385,6 +1387,34 @@ fn a_panel_carried_stays_in_the_hand_while_a_teleport_is_aimed() {
     // Let go while aiming, it floats where it is.
     let output = projector.update(aiming(travelled, 0.0));
     assert!(matches!(output.placed, Some((ref panel, Target::Free(_))) if panel == "a"));
+}
+
+#[test]
+fn a_panel_carried_down_to_the_floor_stops_above_it_and_is_let_go_there() {
+    let shown = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
+    let now = Instant::now();
+    let ray = at(slot_centre(&shown, 0));
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(projector.held(), Some("a"));
+    // Aimed down through the floor, it stops with its middle as high as the server keeps it, rather than sinking.
+    let down = Ray::new(HOME, Vec3::new(0.0, -1.0, -0.3));
+    let lowest = FLOOR + layout::PANEL_LOWEST;
+    assert!(down.unwrap().at(HOME.distance(slot_centre(&shown, 0))).y < lowest - 0.5);
+    let output = projector.update(input(&shown, down, 1.0, now));
+    assert!((output.end.unwrap().y - lowest).abs() < 1e-4);
+    // Raised again, it follows the ray as ever.
+    let level = Ray::new(HOME, Vec3::new(0.0, -0.2, -1.0));
+    let output = projector.update(input(&shown, level, 1.0, now));
+    assert!(output.end.unwrap().y > lowest + 0.5);
+    // Let go aimed through the floor, it is sent floating above it, where it was drawn.
+    projector.update(input(&shown, down, 1.0, now));
+    let output = projector.update(input(&shown, down, 0.0, now));
+    let Some((_, Target::Free(pose))) = output.placed else {
+        panic!("floating: {:?}", output.placed);
+    };
+    assert_eq!(pose.position[1], lowest);
 }
 
 #[test]

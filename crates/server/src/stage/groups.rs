@@ -264,6 +264,8 @@ impl Room {
                 }
             }
         }
+        // Each group stands above the floor as a whole, raised together, so that it stays as it is laid out.
+        self.ground();
         // No two walls overlap, where either has changed.
         let shown_walls: Vec<Wall> = self.walls.iter().map(shown).collect();
         let changed = |wall: &Wall| {
@@ -282,6 +284,37 @@ impl Room {
             }
         }
         Ok(())
+    }
+
+    /// Raise each group of walls, or wall alone, whose lowest edge would reach through the floor, together, until the
+    /// lowest of them stands above it, as `tomori_protocol::wall::lift` says. Returns whether any moved.
+    pub(super) fn ground(&mut self) -> bool {
+        let roots: Vec<String> = self
+            .walls
+            .iter()
+            .map(|added| added.id.clone())
+            .filter(|id| self.root(id) == *id)
+            .collect();
+        let mut moved = false;
+        for root in roots {
+            let members = self.group(&root);
+            let shown: Vec<Wall> = members
+                .iter()
+                .filter_map(|member| self.added(member))
+                .map(shown)
+                .collect();
+            let lift = tomori_protocol::wall::lift(&shown, super::FLOOR);
+            if lift > 0.0 {
+                moved = true;
+                for member in &members {
+                    self.added_mut(member)
+                        .expect("a wall of the group")
+                        .pose
+                        .position[1] += lift;
+                }
+            }
+        }
+        moved
     }
 
     /// Whether every locked wall stands and is laid out as it was in `before`, so that a group carried, bent or settled

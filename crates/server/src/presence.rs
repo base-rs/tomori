@@ -1031,6 +1031,7 @@ const WALL_FRONT: (f32, f32) = (1.8, 0.1);
 /// larger than [`BIG_SCALE`] stands as many times further as it is larger, so that its text looks as large as that
 /// one's does there, rather than a big wall towering over them; and a wall so tall that it would reach below the floor
 /// where people arrive, for someone standing above it, stands raised until its bottom is [`WALL_CLEARANCE`] above it.
+/// Wherever it is put, the stage then stands it above the floor, as it stands every wall (`Wall::above_floor`).
 pub(crate) fn wall_in_front(head: &Pose, scale: f32, height: f32) -> Pose {
     let (distance, drop) = WALL_FRONT;
     let mut pose = ahead_of(head, (distance * (scale / BIG_SCALE).max(1.0), drop));
