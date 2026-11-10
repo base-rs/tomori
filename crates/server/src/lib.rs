@@ -64,7 +64,7 @@ pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use builder::Builder;
 pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
-pub use environments::{Environment, EnvironmentWall};
+pub use environments::{Environment, EnvironmentWall, WALL_NAME_BYTES, valid_wall_name};
 pub use hub::CLOSED_SPACES;
 pub use hub::agent_inspect::{INSPECT_TIMEOUT, INSPECTION_BYTES};
 pub use hub::{

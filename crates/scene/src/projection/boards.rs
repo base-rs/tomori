@@ -236,10 +236,14 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
         // Indented as a wall alone indents it, from its board's top left, at its group's largest scale.
         let (text, color) = wall_label(wall);
         let pixel = thick;
-        let mut label = Canvas::new(text.len(), pixel);
+        let mut label = Canvas::new(crate::ui_text::width(&text), pixel);
         label.padding = (0, 0);
         label.background = [0.0; 4];
-        label.rows = vec![Row::text(text, Style::bold(color), text.len())];
+        label.rows = vec![Row::text(
+            &text,
+            Style::bold(color),
+            crate::ui_text::width(&text),
+        )];
         let (width, height) = label.size();
         let left = own.left + (LABEL_INDENT + WALL_PADDING.0) as f32 * pixel;
         let top = own.top - WALL_PADDING.1 as f32 * pixel;

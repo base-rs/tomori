@@ -29,17 +29,16 @@ fn moved_notice(
 ) -> String {
     let title = crate::space::one_line(&crate::presence::title(panel), 48);
     let to = match &panel.place {
-        tomori_protocol::Place::Wall { wall, .. } => {
-            let name = projection
-                .wall(wall)
-                .map(|wall| crate::presence::wall_name(projection, wall))
-                .unwrap_or_default();
-            if name == "Tomori wall" {
-                "to the Tomori wall".to_owned()
-            } else {
-                format!("to {name}")
+        tomori_protocol::Place::Wall { wall, .. } => match projection.wall(wall) {
+            // The Tomori wall and a wall its environment named are "the" wall, others by their number alone.
+            Some(shown)
+                if shown.kind == tomori_protocol::WallKind::Tomori || shown.name.is_some() =>
+            {
+                format!("to {}", crate::presence::the_wall(projection, shown))
             }
-        }
+            Some(shown) => format!("to {}", crate::presence::wall_name(projection, shown)),
+            None => "to".to_owned(),
+        },
         _ => "to float in the space".to_owned(),
     };
     format!("Tomori moved '{title}' {to}.")
@@ -512,14 +511,15 @@ impl Hub {
         let origin = record.model.origin();
         let id = crate::presence::which_wall(wall, origin.as_ref(), &people, &projection)?;
         let before = projection.wall(&id).expect("a wall named is shown").clone();
-        let name = crate::presence::wall_name(&projection, &before);
+        let the = crate::presence::the_wall(&projection, &before);
+        let the_cap = crate::presence::capitalised(&the);
         // Changed since the version the agent read, as by a participant's handles, the change is refused, rather than
         // undo theirs.
         if let Some(read) = version
             && read != before.version
         {
             return Err(format!(
-                "The {name} has changed since version {read}, as someone changed it; it is at version {} now. Read it again with presence, and redo the change from how it is, with version {} if it still applies.",
+                "{the_cap} has changed since version {read}, as someone changed it; it is at version {} now. Read it again with presence, and redo the change from how it is, with version {} if it still applies.",
                 before.version, before.version
             ));
         }
@@ -596,7 +596,7 @@ impl Hub {
         let refused = |error: &'static str| {
             if error == crate::stage::LOCKED {
                 format!(
-                    "The {name} is locked: ask an owner in the space to unlock it, on their headset or by asking you, with locked false and requested_by them."
+                    "{the_cap} is locked: ask an owner in the space to unlock it, on their headset or by asking you, with locked false and requested_by them."
                 )
             } else {
                 error.to_owned()
@@ -656,6 +656,7 @@ impl Hub {
         let after = record.versioned(&environments, now);
         let shown = after.wall(&id).expect("a wall changed is shown").clone();
         let name = crate::presence::wall_name(&after, &shown);
+        let the = crate::presence::the_wall(&after, &shown);
         let mut described = describe_wall(&shown);
         if let Some(beside) = attached(&after, &shown) {
             described.push_str(&format!(", {beside}"));
@@ -671,10 +672,10 @@ impl Hub {
             };
             let content = notice(if lock.reset {
                 format!(
-                    "The agent put the {name} back where and as the environment has it: {described}."
+                    "The agent put {the} back where and as the environment has it: {described}."
                 )
             } else {
-                format!("The agent {what} the {name}: {described}.")
+                format!("The agent {what} {the}: {described}.")
             });
             let panel = record.stage.project_notice(&walls, NOTICE, content, now);
             let asked = requester
@@ -697,7 +698,7 @@ impl Hub {
             "version": shown.version,
             "now": described,
             "next": if changed {
-                format!("Tell everyone in the space that you changed the {name}: {described}.")
+                format!("Tell everyone in the space that you changed {the}: {described}.")
             } else {
                 "It was already so, so nothing changed and there is nothing to tell.".to_owned()
             },
@@ -733,8 +734,9 @@ impl Hub {
         let after = record.stage.view(&space, &walls, now);
         let shown = after.wall(&id).expect("a wall added is shown").clone();
         let name = crate::presence::wall_name(&after, &shown);
+        let the = crate::presence::the_wall(&after, &shown);
         let described = describe_wall(&shown);
-        let content = notice(format!("The agent added the {name}: {described}."));
+        let content = notice(format!("The agent added {the}: {described}."));
         let panel = record.stage.project_notice(&walls, NOTICE, content, now);
         log::info!("The agent of space {space} added {id}: {described}; projected {panel}.");
         state.touch_projection(&space);
@@ -746,7 +748,7 @@ impl Hub {
             "wall": id,
             "name": name,
             "now": described,
-            "next": format!("Tell everyone in the space that you added the {name}, {described}."),
+            "next": format!("Tell everyone in the space that you added {the}, {described}."),
         }))
     }
 
@@ -767,7 +769,8 @@ impl Hub {
         let origin = record.model.origin();
         let id = crate::presence::which_wall(wall, origin.as_ref(), &people, &projection)?;
         let shown = projection.wall(&id).expect("a wall named is shown");
-        let name = crate::presence::wall_name(&projection, shown);
+        let the = crate::presence::the_wall(&projection, shown);
+        let the_cap = crate::presence::capitalised(&the);
         let held = projection
             .panels
             .iter()
@@ -775,7 +778,7 @@ impl Hub {
             .count();
         record.stage.remove_wall(&walls, &id).map_err(|error| {
             if error == crate::stage::LOCKED {
-                format!("The {name} is locked: ask an owner in the space to unlock it, on their headset or by asking you to with set_wall, before it can be removed.")
+                format!("{the_cap} is locked: ask an owner in the space to unlock it, on their headset or by asking you to with set_wall, before it can be removed.")
             } else {
                 error.to_owned()
             }
@@ -785,7 +788,7 @@ impl Hub {
             1 => "; the panel on it floats where it was".to_owned(),
             held => format!("; the {held} panels on it float where they were"),
         };
-        let content = notice(format!("The agent removed the {name}{floated}."));
+        let content = notice(format!("The agent removed {the}{floated}."));
         let panel = record.stage.project_notice(&walls, NOTICE, content, now);
         log::info!("The agent of space {space} removed {id}; projected {panel}.");
         state.touch_projection(&space);
@@ -797,7 +800,7 @@ impl Hub {
             "wall": id,
             "removed": true,
             "floating": held,
-            "next": format!("Tell everyone in the space that you removed the {name}{floated}."),
+            "next": format!("Tell everyone in the space that you removed {the}{floated}."),
         }))
     }
 
@@ -1131,6 +1134,8 @@ mod tests {
         let projection = Projection::new("space-1", "sky").with_walls(vec![
             Wall::new(TOMORI_WALL, WallKind::Tomori, Pose::default()),
             Wall::new("wall-1", WallKind::Added, Pose::default()),
+            Wall::new("environment-0", WallKind::Environment, Pose::default())
+                .with_name(Some("Details".to_owned())),
         ]);
         let notice = |title: &str, place| {
             moved_notice(&projection, &Panel::new("panel-1", title, "Body", place))
@@ -1143,6 +1148,12 @@ mod tests {
             notice("Build status", on("wall-1")),
             "Tomori moved 'Build status' to added wall 1."
         );
+        // A wall its environment named, by its name, as a name; one no longer shown, by nothing.
+        assert_eq!(
+            notice("web-2", on("environment-0")),
+            "Tomori moved 'web-2' to the wall \"Details\"."
+        );
+        assert_eq!(notice("Gone", on("wall-9")), "Tomori moved 'Gone' to.");
         assert_eq!(
             notice(
                 "Notes",

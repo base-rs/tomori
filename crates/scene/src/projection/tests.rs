@@ -1748,6 +1748,44 @@ fn a_curved_wall_draws_a_board_for_each_slot_its_label_and_its_panels_in_them() 
     // Another kind of wall is labelled so.
     let other = Wall::new("w", WallKind::Added, curved().pose).with_shape(curved().shape);
     assert_eq!(arc_label(&other).plain().trim(), "WALL");
+    // An environment's wall its environment named is labelled with its name, in capitals, curved or flat.
+    let named = Wall::new("w", WallKind::Environment, curved().pose)
+        .with_shape(curved().shape)
+        .with_name(Some("Details".to_owned()));
+    assert_eq!(arc_label(&named).plain().trim(), "DETAILS");
+    assert!(
+        wall_face(&named.clone().with_shape(WallShape::Grid))
+            .plain()
+            .contains("DETAILS")
+    );
+}
+
+#[test]
+fn a_wall_s_label_is_its_kind_s_or_the_name_its_environment_gave_it_cut_to_a_line_of_cells() {
+    let label = |wall: &Wall| wall_label(wall).0;
+    let environment = wall("w", WallKind::Environment, 0.0, 3.0);
+    assert_eq!(label(&environment), "WALL");
+    assert_eq!(
+        label(&wall(TOMORI_WALL, WallKind::Tomori, 0.0, 3.0)),
+        "TOMORI"
+    );
+    let named = |name: &str| label(&environment.clone().with_name(Some(name.to_owned())));
+    assert_eq!(named("Pods under load"), "PODS UNDER LOAD");
+    // Nothing a server sends is drawn past a line of cells, or as control characters, or as an empty label.
+    assert_eq!(named(&"w".repeat(40)), "W".repeat(NAME_CELLS));
+    assert_eq!(named("a\nb\u{7}c"), "ABC");
+    assert_eq!(named("  "), "WALL");
+    // Bounded once in capitals: `ß` is two letters then, and a wide character two cells.
+    let sharp = named(&"ß".repeat(20));
+    assert_eq!(sharp, "S".repeat(NAME_CELLS));
+    assert_eq!(crate::ui_text::width(&named(&"表".repeat(20))), NAME_CELLS);
+    assert_eq!(
+        crate::ui_text::width(&named(&format!("{}表", "a".repeat(23)))),
+        23
+    );
+    // Only an environment's own wall takes a name: an added wall's is its kind's, whatever the server says.
+    let added = wall("w", WallKind::Added, 0.0, 3.0).with_name(Some("Details".to_owned()));
+    assert_eq!(label(&added), "WALL");
 }
 
 #[test]
