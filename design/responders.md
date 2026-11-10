@@ -46,7 +46,7 @@ So "focus follows the pointer" exists: the frame computes one focus per frame, T
 
 ### The current routing
 
-What each control does in each situation, as the frame before found it, before #291 and #292; since #292, a teleport pad pointed at takes the trigger and A, to go to the pad paired with it, after everything else of Tomori's and before the environment's, and the sticks as Tomori's. "Swarm" is attracting the swarm; "summons" adds summoning it after 0.5 s held. Cells read left to right as the first column that applies wins, except where the cell says otherwise.
+What each control does in each situation, as the frame before found it, before #291 and #292; since #292, a teleport pad pointed at takes the trigger and A, to go to the pad paired with it, after everything else of Tomori's and before the environment's, and the sticks as Tomori's. "Swarm" is attracting the swarm; "summons" adds summoning it after 0.5 s held. Since stage 1 of the agent following the speaker (`docs/proposals/agent-follows-the-speaker.md`), the trigger in a space neither attracts the swarm nor summons: those cells read "nothing" in a space, and the swarm rung is outside a space alone. Cells read left to right as the first column that applies wins, except where the cell says otherwise.
 
 | Control | Hand menu shows | Transcript shows | Panel or wall carried | Panel pointed at | Card, worker, wall board | Environment object | Nothing |
 | --- | --- | --- | --- | --- | --- | --- | --- |
