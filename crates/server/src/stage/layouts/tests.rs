@@ -232,14 +232,15 @@ fn a_layout_is_checked_whole_and_refused_whole() {
         refused(&mut stage, &[first.clone(), unknown]),
         "Tomori does not know that edge or alignment."
     );
-    // With five walls added already, two more are more than an environment takes, and none is built.
-    for index in 0..5 {
+    // With all but one of the walls an environment takes added already, two more are too many, and none is built.
+    for index in 0..crate::stage::ADDED_WALLS - 1 {
+        let at = [
+            (index % 12) as f32 * 3.0 - 16.5,
+            1.5,
+            5.0 + (index / 12) as f32 * 2.5,
+        ];
         stage
-            .add_wall(
-                &SKY,
-                &Pose::upright_facing([index as f32, 1.5, 5.0], EYES),
-                None,
-            )
+            .add_wall(&SKY, &Pose::upright_facing(at, EYES), None)
             .unwrap();
     }
     let before = view(&stage);

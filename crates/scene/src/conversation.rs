@@ -29,6 +29,27 @@ use tomori_protocol::{
 
 const BODY_ROWS: usize = ROWS - 4;
 
+/// What the headset states in each `Hello` that it reads and draws at most, as a conversation does unless
+/// [`Conversation::set_limits`] says otherwise: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], so that its code
+/// panels are sent whole, but a projection within today's bounds, [`tomori_protocol::Limits::TODAY`]. The frame step
+/// lays out every panel's face each frame, which takes about 25 µs for each line of its text on a desktop machine, and
+/// 0.7 ms for a full panel, so that today's 90 panels already take longer than a headset's frame when every one is full;
+/// more waits until faces are kept between frames. See `design/clients.md`.
+pub const HEADSET_LIMITS: tomori_protocol::Limits =
+    tomori_protocol::Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32);
+
+/// What the desktop window states: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], and twice today's walls owners
+/// add, slots, floating panels and panels, since a desktop machine lays them out about three times as fast as a headset
+/// and a slower frame there is not felt as it is in a headset. See [`HEADSET_LIMITS`] and `design/clients.md`.
+pub const DESKTOP_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TODAY
+    .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+    .with_projection(
+        1 + 6 + 12,
+        2 * tomori_protocol::PROJECTION_SLOTS,
+        2 * tomori_protocol::PROJECTION_FLOATING,
+        2 * tomori_protocol::PROJECTION_PANELS,
+    );
+
 /// The longest instructions an owner gives a space, as the server limits them.
 const INSTRUCTIONS_BYTES: usize = 4096;
 
@@ -437,6 +458,12 @@ pub struct Conversation {
     laid_out: Option<(TranscriptKey, Vec<crate::ui_text::Row>)>,
     /// Whether the status pill shows, a setting of this headset's. See `design/interaction.md`.
     pill: bool,
+    /// What each connection states in its `Hello` that this client reads and draws at most: [`HEADSET_LIMITS`] unless
+    /// [`Conversation::set_limits`] says otherwise.
+    limits: tomori_protocol::Limits,
+    /// How much of a long frame has arrived, `received` of `length` bytes, while one is arriving, as the projection whole
+    /// on joining a space, which the pill shows. See `design/clients.md`.
+    receiving: Option<(usize, usize)>,
     /// Whether the participant travels where an environment allows it, a setting of this headset's. See `design/locomotion.md`.
     travel: bool,
     /// Approvals are decided and queued entries removed on the right wrist, so A elsewhere does neither, as on the headset and desktop window; the console decides with its own commands.
@@ -557,6 +584,8 @@ impl Conversation {
             laid_out: None,
             decide_on_wrist: false,
             pill: true,
+            limits: HEADSET_LIMITS,
+            receiving: None,
             travel: true,
             launch: format!(
                 "{:x}",
@@ -740,6 +769,10 @@ impl Conversation {
                 self.images
                     .arrived(hash, png, &shown.iter().collect::<Vec<_>>());
             }
+            // Shown on the pill until all of it has arrived.
+            Event::Receiving { received, length } => {
+                self.receiving = (received < length).then_some((received, length));
+            }
             // Push-to-talk audio for the words being recorded or sent that could not be delivered. Anything else a later client observes is not this conversation's to apply.
             event => {
                 if let Event::UtteranceFailed(failed) = event
@@ -762,6 +795,8 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
+            // What was arriving will not, on this connection.
+            self.receiving = None;
             // What was asked for will not arrive on this connection.
             self.images.disconnected();
             // A pairing belongs to its connection; the server withdraws it. Whether pairing is open is told again on connecting.
@@ -3204,7 +3239,11 @@ impl Conversation {
                 retry_in.as_secs_f32().ceil()
             )),
             Some(ConnectionState::Closed) => Some("Disconnected.".into()),
-            // Connected, or in a state a later client knows of, which has nothing to say.
+            // Connected, saying how much has arrived of a long frame arriving, as the projection whole on joining.
+            Some(ConnectionState::Connected { .. }) => self
+                .receiving
+                .map(|(received, length)| format!("Syncing space... {}%", received * 100 / length)),
+            // In a state a later client knows of, which has nothing to say.
             Some(_) => None,
         };
         let leaving = self
@@ -3237,6 +3276,16 @@ impl Conversation {
             replaying: self.replaying,
             need,
         })
+    }
+
+    /// State `limits` in each `Hello` from the next connection on, as the desktop window states [`DESKTOP_LIMITS`].
+    pub fn set_limits(&mut self, limits: tomori_protocol::Limits) {
+        self.limits = limits;
+    }
+
+    /// How much of a long frame has arrived, `received` of `length` bytes, while one is arriving.
+    pub fn receiving(&self) -> Option<(usize, usize)> {
+        self.receiving
     }
 
     /// Turn the status pill on or off, on this headset.
@@ -5385,6 +5434,11 @@ impl Session for Conversation {
     /// The conversation applies patches to the projection it holds. See `design/projection.md`.
     fn projection_patches(&self) -> bool {
         true
+    }
+
+    /// What this client reads and draws at most: [`HEADSET_LIMITS`] unless [`Conversation::set_limits`] says otherwise.
+    fn limits(&self) -> tomori_protocol::Limits {
+        self.limits
     }
 
     fn report(&mut self, report: Report) {
@@ -12432,6 +12486,55 @@ mod tests {
             let status = conversation.pill_status(Instant::now()).unwrap();
             assert_eq!(status.need, Some(Need::Question));
             assert_eq!(status.mode.as_deref(), Some("custom"));
+        }
+
+        #[test]
+        fn the_pill_says_how_much_of_a_long_frame_has_arrived_until_all_of_it_has() {
+            use crate::pill::Need;
+            let need = |conversation: &mut Conversation| {
+                conversation.pill_status(Instant::now()).unwrap().need
+            };
+            let mut conversation = joined();
+            assert_eq!(need(&mut conversation), None);
+            let (received, length) = (1_800_000, 4_000_000);
+            conversation.apply(Event::Receiving { received, length });
+            assert_eq!(conversation.receiving(), Some((received, length)));
+            assert_eq!(
+                need(&mut conversation),
+                Some(Need::Connection("Syncing space... 45%".into()))
+            );
+            // All of it arrived, it says nothing more.
+            conversation.apply(Event::Receiving {
+                received: length,
+                length,
+            });
+            assert_eq!(conversation.receiving(), None);
+            assert_eq!(need(&mut conversation), None);
+            // Lost part way through, it says how the connection is instead, and nothing of syncing once connected again.
+            conversation.apply(Event::Receiving {
+                received: 1,
+                length,
+            });
+            conversation.apply(Event::State(ConnectionState::Connecting { attempt: 1 }));
+            assert_eq!(conversation.receiving(), None);
+            assert_eq!(
+                need(&mut conversation),
+                Some(Need::Connection("Connecting...".into()))
+            );
+        }
+
+        #[test]
+        fn the_headset_states_today_s_projection_and_the_desktop_window_twice_it_both_with_the_longest_frames()
+         {
+            use tomori_client::connection::Session;
+            use tomori_protocol::{Limits, MOST_FRAME_BYTES};
+            let longest = Limits::TODAY.with_frame_bytes(MOST_FRAME_BYTES as u32);
+            let mut conversation = joined();
+            assert_eq!(HEADSET_LIMITS, longest);
+            assert_eq!(Session::limits(&conversation), HEADSET_LIMITS);
+            assert_eq!(DESKTOP_LIMITS, longest.with_projection(19, 156, 24, 180));
+            conversation.set_limits(DESKTOP_LIMITS);
+            assert_eq!(Session::limits(&conversation), DESKTOP_LIMITS);
         }
 
         #[test]

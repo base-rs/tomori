@@ -263,7 +263,7 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
-fn hello_says_whether_the_session_applies_projection_patches_and_states_today_s_limits() {
+fn hello_says_whether_the_session_applies_projection_patches_and_states_its_limits() {
     for patches in [false, true] {
         let server = MiniServer::start(localhost(), Mode::Normal);
         let mut options = options(server.address);
@@ -278,11 +278,72 @@ fn hello_says_whether_the_session_applies_projection_patches_and_states_today_s_
         else {
             unreachable!("Hello comes first");
         };
+        // By default, frames of up to 32 MiB, which the connection reads, and today's projection.
         assert_eq!(
             (projection_patches, limits),
-            (patches, Some(tomori_protocol::Limits::TODAY))
+            (
+                patches,
+                Some(
+                    tomori_protocol::Limits::TODAY
+                        .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+                )
+            )
         );
     }
+}
+
+#[test]
+fn a_long_frame_is_read_within_the_limit_both_sides_state_and_its_arrival_reported() {
+    use tomori_protocol::{Frame, Limits, MAX_FRAME_BYTES, MOST_FRAME_BYTES};
+    let long = ServerMessage::Error {
+        error: "x".repeat(3 * MAX_FRAME_BYTES),
+        space: None,
+        panel: None,
+    };
+    let mut frame = Vec::new();
+    Frame::server(&long)
+        .try_encode_within(&mut frame, MOST_FRAME_BYTES)
+        .unwrap();
+    let length = frame.len() - 5;
+    // In chunks of 64 KiB, so that it arrives in pieces.
+    let pieces =
+        |frame: &[u8]| -> Vec<u8> { frame.chunks(64 * 1024).flat_map(raw::chunk).collect() };
+    let mut body = raw::welcome_stating(Some(Limits::MOST));
+    body.extend(pieces(&frame));
+    let client = Client::connect(options(raw::start(Some(body)))).unwrap();
+    wait_connected(&client);
+    let mut reported = Vec::new();
+    let arrived = wait_for(&client, |event| match event {
+        Event::Receiving { received, length } => {
+            reported.push((*received, *length));
+            false
+        }
+        Event::Message(_) => true,
+        _ => false,
+    });
+    assert_eq!(arrived, Event::Message(long));
+    // As each whole percent more arrives, rising, and once more when all of it has, before the message.
+    assert!(reported.len() > 2, "{reported:?}");
+    assert!(reported.iter().all(|(_, of)| *of == length));
+    assert!(reported.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(reported.last(), Some(&(length, length)));
+    let percents: Vec<usize> = reported
+        .iter()
+        .map(|(received, _)| received * 100 / length)
+        .collect();
+    assert!(
+        percents.windows(2).all(|pair| pair[0] < pair[1]),
+        "{percents:?}"
+    );
+    // An older server, which states none, is read at today's limit, as before limits were stated.
+    let mut body = raw::welcome();
+    body.extend(pieces(&frame));
+    let (reason, connected) = raw_disconnect(Some(body), TIMEOUT);
+    assert!(connected);
+    assert_eq!(
+        reason,
+        Disconnect::Protocol(format!("frame of {length} bytes exceeds the limit"))
+    );
 }
 
 #[test]

@@ -40,3 +40,7 @@ pub use options::{Options, Transport};
 pub use outbox::{FailedUtterance, Membership, SendError, UtteranceFailure};
 pub use tomori_protocol::Keepalive;
 pub use tomori_security::Fingerprint;
+
+/// The shortest frame whose arrival is reported as [`Event::Receiving`], as it arrives: a quarter of
+/// [`tomori_protocol::MAX_FRAME_BYTES`], which takes long enough to arrive over a slow link to be worth showing.
+pub const PROGRESS_BYTES: usize = tomori_protocol::MAX_FRAME_BYTES / 4;

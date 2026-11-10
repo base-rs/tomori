@@ -69,7 +69,9 @@ struct Transfer {
 /// The outbound queue of one connection. Producers never block; the connection body drains it.
 ///
 /// Keepalive messages go first, then control messages, then the agent speech stream, then participant audio, then
-/// images, one chunk at a time, so that an image never holds up anything else for longer than a chunk takes to send. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
+/// images, one chunk at a time, so that an image never holds up anything else for longer than a chunk takes to send. A
+/// projection, which may be sent whole in one long frame, waits behind the audio already queued, agent speech and
+/// participant audio both, so that sending it holds up only audio queued after it. See `design/server.md`. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
 #[derive(Default)]
 pub struct Outbox {
     inner: Mutex<Inner>,
@@ -325,13 +327,16 @@ impl Outbox {
         self.ready.notify(usize::MAX);
     }
 
-    /// The next item: keepalive first, then control messages, then agent speech, then participant audio.
+    /// The next item: keepalive first, then control messages, then agent speech, then participant audio, except that a
+    /// projection waits behind the audio already queued.
     pub fn pop(&self) -> Popped {
         let mut inner = self.inner.lock().unwrap();
         if let Some(message) = inner.keepalive.pop_front() {
             return Popped::Control(Outgoing::Message(message));
         }
-        if let Some(item) = inner.control.pop_front() {
+        let audio_first = matches!(inner.control.front(), Some(Outgoing::Projection))
+            && !(inner.agent.is_empty() && inner.audio.is_empty());
+        if !audio_first && let Some(item) = inner.control.pop_front() {
             match item {
                 Outgoing::Space => inner.space_pending = false,
                 Outgoing::Spaces => inner.spaces_pending = false,
@@ -532,6 +537,50 @@ mod tests {
         let Popped::Closed = outbox.pop() else {
             unreachable!("expected Popped::Closed");
         };
+    }
+
+    #[test]
+    fn a_projection_waits_behind_the_audio_already_queued_and_nothing_else_does() {
+        let outbox = Outbox::new();
+        let popped = |outbox: &Outbox| match outbox.pop() {
+            Popped::Control(Outgoing::Projection) => "projection",
+            Popped::Control(Outgoing::Message(ServerMessage::Left { .. })) => "left",
+            Popped::Control(Outgoing::Message(ServerMessage::Speech { .. })) => "speech",
+            Popped::Audio(frame) if frame == [1] => "agent",
+            Popped::Audio(frame) if frame == [2] => "participant",
+            Popped::Empty => "empty",
+            other => unreachable!("{other:?}"),
+        };
+        // Agent speech and participant audio queued, then the projection and a message: the projection, which may be
+        // one long frame, goes after the audio, and what was queued after it after it, in order.
+        outbox.agent_message(speech(1));
+        outbox.agent_audio(vec![1]);
+        outbox.audio(vec![2]);
+        outbox.projection();
+        outbox.message(ServerMessage::LEFT);
+        let order: Vec<&str> = (0..6).map(|_| popped(&outbox)).collect();
+        assert_eq!(
+            order,
+            [
+                "speech",
+                "agent",
+                "participant",
+                "projection",
+                "left",
+                "empty"
+            ]
+        );
+        // Any other control message goes before audio, as ever.
+        outbox.agent_audio(vec![1]);
+        outbox.message(ServerMessage::LEFT);
+        outbox.projection();
+        let order: Vec<&str> = (0..4).map(|_| popped(&outbox)).collect();
+        assert_eq!(order, ["left", "agent", "projection", "empty"]);
+        // With nothing of audio queued, the projection goes at once, and audio queued after it is sent after it.
+        outbox.projection();
+        assert_eq!(popped(&outbox), "projection");
+        outbox.agent_audio(vec![1]);
+        assert_eq!(popped(&outbox), "agent");
     }
 
     #[test]

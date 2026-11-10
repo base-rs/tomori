@@ -64,8 +64,11 @@ pub struct Options {
     /// connection says in its Hello. `false`, the default, is sent the projection whole at every change, as a session
     /// that does not apply them needs. See `design/projection.md`.
     pub projection_patches: bool,
-    /// What this client reads and draws at most, which each connection states in its Hello: today's bounds,
-    /// [`tomori_protocol::Limits::TODAY`], by default. See `design/projection.md`.
+    /// What this client reads and draws at most, which each connection states in its Hello: by default frames of up to
+    /// [`tomori_protocol::MOST_FRAME_BYTES`], which the connection reads, and a projection within today's bounds,
+    /// [`tomori_protocol::Limits::TODAY`], since what a session draws is its own to say; see
+    /// [`crate::connection::Session::limits`]. The connection reads frames of up to the lesser of this and what the
+    /// server states in its Welcome, today's from a server that states none. See `design/projection.md`.
     pub limits: Limits,
 }
 
@@ -121,7 +124,7 @@ impl Options {
             microphone_rearm_on_disconnect: false,
             environments: None,
             projection_patches: false,
-            limits: Limits::TODAY,
+            limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
         }
     }
 }

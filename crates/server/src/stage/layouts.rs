@@ -7,8 +7,9 @@ use tomori_protocol::{Align, Attach, Edge, Pose, Wall, WallKind, group, wall as 
 
 use super::{Layout, Stage, Walls};
 
-/// The most walls one layout has: as many as an environment takes added.
-pub const LAYOUT_WALLS: usize = super::ADDED_WALLS;
+/// The most walls one layout has: six, as many as an environment took added before frames were negotiated, so that a
+/// layout stays one group that a participant takes in at once, however many more walls are added.
+pub const LAYOUT_WALLS: usize = 6;
 
 /// One wall of a layout, as the agent asks for it: its own name for it, how it is laid out, the width in metres it is to
 /// be instead of its scale, whether it said its slots' size at all, and, for every wall but the first, the earlier wall it
@@ -92,7 +93,7 @@ impl Stage {
         };
         if planned.len() > LAYOUT_WALLS {
             return Err(format!(
-                "A layout has at most {LAYOUT_WALLS} walls, as many as an environment takes."
+                "A layout has at most {LAYOUT_WALLS} walls, as one group can be taken in."
             ));
         }
         if first.attach.is_some() {

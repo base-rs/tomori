@@ -2,8 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The numeric limits each side of a connection states: the client in its `Hello`, what it reads and draws at most, and
-//! the server in its `Welcome`, what it sends at most. Each is today's bound unless a side says otherwise, so that an
-//! older peer, which says none, is read as stating today's. See `design/projection.md` and `design/server.md`.
+//! the server in its `Welcome`, what it sends at most. Each is today's bound, [`Limits::TODAY`], unless a side says
+//! otherwise, so that an older peer, which says none, is read as stating today's; a connection is bound by the lesser of
+//! each, [`Limits::negotiate`], and never by more than [`Limits::MOST`]. See `design/projection.md` and
+//! `design/server.md`.
 use serde::{Deserialize, Serialize};
 
 /// The most walls one environment of a space shows: the Tomori wall, six of the environment's own and six its owners
@@ -25,13 +27,15 @@ pub const PROJECTION_PANELS: u32 = PROJECTION_SLOTS + PROJECTION_FLOATING;
 /// its `Welcome`, what it sends. A field a side leaves out is today's bound, as is every field from an older peer, which
 /// sends none, so that a limit added later reads as today's from both.
 ///
-/// A connection is bound by the lesser of each, [`Limits::meet`]. Today's server sends within today's bounds whatever a
-/// client states, and only keeps what the client said: a later server may raise its bounds for a client that states it
-/// takes more, and keep within less for one that states less. See `design/projection.md`.
+/// A connection is bound by the lesser of each, within [`Limits::MOST`], as [`Limits::negotiate`] finds them: frames of
+/// up to [`Limits::frame_bytes`] each way, which each side's decoder takes from when it has the peer's limits, and a
+/// projection of at most the walls, slots and panels stated, which the server sends each client within whatever the
+/// space holds. See `design/projection.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Limits {
-    /// The longest frame's payload, in bytes: [`crate::MAX_FRAME_BYTES`].
+    /// The longest frame's payload, in bytes: [`crate::MAX_FRAME_BYTES`]. Less is read as that, which every peer takes,
+    /// and more than [`crate::MOST_FRAME_BYTES`] as that.
     #[serde(default = "frame_bytes")]
     pub frame_bytes: u32,
     /// The most walls of one projection: [`PROJECTION_WALLS`].
@@ -84,6 +88,33 @@ impl Limits {
         panels: PROJECTION_PANELS,
     };
 
+    /// The most any connection is bound by, which Tomori's server states in its `Welcome`, and its desktop window in its
+    /// `Hello`: frames of [`crate::MOST_FRAME_BYTES`], and ten times today's slots and floating panels, on as many as
+    /// sixty walls owners add, so that a projection at every limit fits in one frame. A peer stating more is read as
+    /// stating this. See `design/projection.md`.
+    pub const MOST: Limits = Limits {
+        frame_bytes: crate::MOST_FRAME_BYTES as u32,
+        walls: 1 + 6 + 60,
+        slots: 10 * PROJECTION_SLOTS,
+        floating: 10 * PROJECTION_FLOATING,
+        panels: 10 * PROJECTION_SLOTS + 10 * PROJECTION_FLOATING,
+    };
+
+    /// What a connection is bound by between a side stating `own` and a peer stating `peer`, `None` from an older peer,
+    /// which is read as [`Limits::TODAY`]: the lesser of each, within [`Limits::MOST`], with frames within
+    /// [`crate::frame_limit`], so that no declaration, however large, raises a bound past what any connection takes,
+    /// and none takes frames smaller than every peer always has.
+    pub fn negotiate(own: Limits, peer: Option<Limits>) -> Limits {
+        let mut limits = own.meet(peer.unwrap_or_default()).meet(Limits::MOST);
+        limits.frame_bytes = crate::frame_limit(limits.frame_bytes as usize) as u32;
+        limits
+    }
+
+    /// The longest frame's payload, in bytes, within [`crate::frame_limit`].
+    pub fn frame_limit(&self) -> usize {
+        crate::frame_limit(self.frame_bytes as usize)
+    }
+
     /// What a connection between a side of these limits and one of `other`'s is bound by: the lesser of each.
     pub fn meet(self, other: Limits) -> Limits {
         Limits {
@@ -96,14 +127,20 @@ impl Limits {
     }
 
     /// These limits, with frames of at most `frame_bytes`.
-    pub fn with_frame_bytes(mut self, frame_bytes: u32) -> Self {
+    pub const fn with_frame_bytes(mut self, frame_bytes: u32) -> Self {
         self.frame_bytes = frame_bytes;
         self
     }
 
     /// These limits, with at most `walls`, `slots` on them together, `floating` panels floating while they have every
     /// slot, and `panels` in all, in one projection.
-    pub fn with_projection(mut self, walls: u32, slots: u32, floating: u32, panels: u32) -> Self {
+    pub const fn with_projection(
+        mut self,
+        walls: u32,
+        slots: u32,
+        floating: u32,
+        panels: u32,
+    ) -> Self {
         self.walls = walls;
         self.slots = slots;
         self.floating = floating;
@@ -157,5 +194,65 @@ mod tests {
         assert_eq!(client.meet(Limits::TODAY), Limits::TODAY);
         assert_eq!(Limits::TODAY.meet(client), Limits::TODAY);
         assert_eq!(Limits::TODAY.meet(small), small);
+    }
+
+    #[test]
+    fn both_sides_new_take_the_most_and_either_side_older_today_s() {
+        assert_eq!(
+            Limits::MOST,
+            Limits {
+                frame_bytes: 32 * 1024 * 1024,
+                walls: 67,
+                slots: 780,
+                floating: 120,
+                panels: 900,
+            }
+        );
+        assert_eq!(
+            Limits::negotiate(Limits::MOST, Some(Limits::MOST)),
+            Limits::MOST
+        );
+        // An older peer states nothing, and an older server states today's.
+        assert_eq!(Limits::negotiate(Limits::MOST, None), Limits::TODAY);
+        assert_eq!(
+            Limits::negotiate(Limits::MOST, Some(Limits::TODAY)),
+            Limits::TODAY
+        );
+        assert_eq!(
+            Limits::negotiate(Limits::TODAY, Some(Limits::MOST)),
+            Limits::TODAY
+        );
+        // A headset that draws fewer panels than the most, but takes the longest frames.
+        let headset = Limits::TODAY
+            .with_frame_bytes(crate::MOST_FRAME_BYTES as u32)
+            .with_projection(19, 156, 24, 180);
+        assert_eq!(Limits::negotiate(Limits::MOST, Some(headset)), headset);
+        assert_eq!(Limits::negotiate(headset, Some(Limits::MOST)), headset);
+        assert_eq!(Limits::negotiate(headset, None), Limits::TODAY);
+    }
+
+    #[test]
+    fn a_hostile_declaration_is_bound_by_the_most_and_none_takes_less_than_every_peer() {
+        let hostile = Limits {
+            frame_bytes: u32::MAX,
+            walls: u32::MAX,
+            slots: u32::MAX,
+            floating: u32::MAX,
+            panels: u32::MAX,
+        };
+        // Even a side that states as much is held to the most any connection takes.
+        assert_eq!(Limits::negotiate(hostile, Some(hostile)), Limits::MOST);
+        assert_eq!(Limits::negotiate(Limits::MOST, Some(hostile)), Limits::MOST);
+        assert_eq!(hostile.frame_limit(), crate::MOST_FRAME_BYTES);
+        // Frames shorter than every peer takes are read as that, and counts as stated.
+        let small = Limits::TODAY
+            .with_frame_bytes(16)
+            .with_projection(1, 6, 0, 6);
+        let negotiated = Limits::negotiate(Limits::MOST, Some(small));
+        assert_eq!(
+            negotiated,
+            small.with_frame_bytes(crate::MAX_FRAME_BYTES as u32)
+        );
+        assert_eq!(small.frame_limit(), crate::MAX_FRAME_BYTES);
     }
 }
