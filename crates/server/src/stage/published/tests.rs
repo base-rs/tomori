@@ -23,6 +23,15 @@ fn pose(x: f32, z: f32) -> Pose {
     }
 }
 
+/// The `index`th of many spots in rows of twelve, 3 m apart, each row `step` further from `z`, so that as many as a
+/// space holds stand within 20 m of its middle.
+fn spread(index: usize, z: f32, step: f32) -> Pose {
+    pose(
+        (index % 12) as f32 * 3.0 - 16.5,
+        z + (index / 12) as f32 * step,
+    )
+}
+
 /// The yard's two walls: a notice board and a console.
 const DECLARED: [crate::EnvironmentWall; 2] = [
     crate::EnvironmentWall::new(Pose {
@@ -537,7 +546,7 @@ fn a_panel_dismissed_stays_away_through_its_side_failing_and_one_floated_away_to
         let note = crate::stage::Content::parse(&format!("title: N{index}\n---\nx")).unwrap();
         let panel = stage.project(&walls, note, None, 0);
         stage
-            .place(&walls, &panel, Target::Free(pose(index as f32, 1.0)))
+            .place(&walls, &panel, Target::Free(spread(index, 1.0, 0.4)))
             .unwrap();
     }
     assert!(stage.view("s", &walls, 0).panel(&float).is_none());
@@ -674,7 +683,7 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
     for index in 0..crate::stage::FLOATING {
         let id = stage.project(&walls, largest.clone(), None, 0);
         stage
-            .place(&walls, &id, Target::Free(pose(index as f32, 0.0)))
+            .place(&walls, &id, Target::Free(spread(index, 0.0, 0.4)))
             .unwrap();
     }
     for _ in 0..crate::stage::ADDED_WALLS {
@@ -717,6 +726,14 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
     );
     let message = tomori_protocol::ServerMessage::Projection {
         projection: Box::new(view),
+    };
+    let bytes = serde_json::to_vec(&message).unwrap().len();
+    // Within the longest frame, for a client that takes the most; and within today's for an older one, which is sent
+    // as much as today's limits hold.
+    assert!(bytes <= tomori_protocol::MOST_FRAME_BYTES, "{bytes} bytes");
+    let today = stage.view_within("s", &walls, u64::MAX, &tomori_protocol::Limits::TODAY);
+    let message = tomori_protocol::ServerMessage::Projection {
+        projection: Box::new(today),
     };
     let bytes = serde_json::to_vec(&message).unwrap().len();
     assert!(bytes <= tomori_protocol::MAX_FRAME_BYTES, "{bytes} bytes");
