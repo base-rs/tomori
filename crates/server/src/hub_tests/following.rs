@@ -11,7 +11,10 @@ use crate::hub::following::{COMMIT, DWELL, EMPTY, GLANCE, LEFT};
 use tomori_protocol::{AgentMovement, Movement};
 
 /// What the agent of `space` does: where it is summoned to, where it faces, and whether it is pinned.
-fn agent(hub: &Hub, space: &str) -> (Option<tomori_protocol::Pose>, Option<[f32; 3]>, bool) {
+pub(super) fn agent(
+    hub: &Hub,
+    space: &str,
+) -> (Option<tomori_protocol::Pose>, Option<[f32; 3]>, bool) {
     let state = hub.lock();
     let record = state.space(space).unwrap();
     (
@@ -23,7 +26,7 @@ fn agent(hub: &Hub, space: &str) -> (Option<tomori_protocol::Pose>, Option<[f32;
 
 /// A hub whose transcripts the test gives, with an idle space whose owner, Ada, chose that its agent follows the
 /// speaker and goes home after `delay`.
-fn following(
+pub(super) fn following(
     delay: Option<u32>,
 ) -> (
     Arc<Hub>,
@@ -44,7 +47,7 @@ fn following(
 }
 
 /// `client` begins words for the agent, as `utterance`.
-fn press(client: &Client, utterance: &str) {
+pub(super) fn press(client: &Client, utterance: &str) {
     client.send(ClientMessage::UtteranceBegin {
         utterance: utterance.to_owned(),
         answer: None,
@@ -57,7 +60,7 @@ fn press(client: &Client, utterance: &str) {
 }
 
 /// `client` lets go of X, ending `utterance`.
-fn release(client: &Client, utterance: &str) {
+pub(super) fn release(client: &Client, utterance: &str) {
     client.send(ClientMessage::UtteranceEnd {
         utterance: utterance.to_owned(),
         pointed: None,
@@ -65,14 +68,14 @@ fn release(client: &Client, utterance: &str) {
 }
 
 /// `client` cancels `utterance`.
-fn cancel(client: &Client, utterance: &str) {
+pub(super) fn cancel(client: &Client, utterance: &str) {
     client.send(ClientMessage::UtteranceCancel {
         utterance: utterance.to_owned(),
     });
 }
 
 /// Every utterance still being transcribed is heard as `text`, in the order they began.
-fn heard(hub: &Hub, text: &str) {
+pub(super) fn heard(hub: &Hub, text: &str) {
     let mut utterances: Vec<UtteranceId> = hub.lock().utterances.keys().copied().collect();
     utterances.sort_by_key(|id| id.0);
     for utterance in utterances {
@@ -81,12 +84,12 @@ fn heard(hub: &Hub, text: &str) {
 }
 
 /// The horizontal distance between `a` and `b`.
-fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(super) fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
     (a[0] - b[0]).hypot(a[2] - b[2])
 }
 
 /// The space's state as `client` was last sent it.
-fn last_state(client: &Client) -> Option<tomori_protocol::SpaceState> {
+pub(super) fn last_state(client: &Client) -> Option<tomori_protocol::SpaceState> {
     client
         .read()
         .into_iter()
@@ -97,7 +100,7 @@ fn last_state(client: &Client) -> Option<tomori_protocol::SpaceState> {
         .next_back()
 }
 
-const ADA: [f32; 3] = [0.0, 1.6, 2.0];
+pub(super) const ADA: [f32; 3] = [0.0, 1.6, 2.0];
 
 #[test]
 fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_entourage_staying_home()
@@ -230,10 +233,10 @@ fn a_huddle_who_spoke_to_it_lately_is_served_from_one_spot() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     let bob = Client::greeted(&hub, Access::open(), "bob");
     bob.join(&space);
-    // Ada and Bob stand a metre apart, looking the same way.
-    let (at_ada, at_bob) = ([-0.5, 1.6, 2.0], [0.5, 1.6, 2.0]);
+    // Ada and Bob stand 2 m apart, looking the same way, Bob more than 3 m from where it stands for Ada.
+    let (at_ada, at_bob) = ([-0.5, 1.6, 2.0], [1.0, 1.6, 3.5]);
     ada.send(looking(at_ada, [-0.5, 1.6, -3.0]));
-    bob.send(looking(at_bob, [0.5, 1.6, -3.0]));
+    bob.send(looking(at_bob, [1.0, 1.6, -3.0]));
     press(&ada, "u1");
     let start = Instant::now();
     hub.flush_snapshots(start + COMMIT);
@@ -247,7 +250,7 @@ fn a_huddle_who_spoke_to_it_lately_is_served_from_one_spot() {
     assert!((1.5..1.7).contains(&nearest), "{spot:?}");
     // And it faces the middle of them.
     let ahead = crate::stage::geometry::rotate(spot.orientation, [0.0, 0.0, 1.0]);
-    let towards = [-spot.position[0], 0.0, 2.0 - spot.position[2]];
+    let towards = [0.25 - spot.position[0], 0.0, 2.75 - spot.position[2]];
     assert!((ahead[0].atan2(ahead[2]) - towards[0].atan2(towards[2])).abs() < 1e-3);
 }
 

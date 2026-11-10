@@ -7177,6 +7177,8 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
 mod anchors;
 #[path = "hub_tests/following.rs"]
 mod following;
+#[path = "hub_tests/keeping.rs"]
+mod keeping;
 #[path = "hub_tests/moving.rs"]
 mod moving;
 #[path = "hub_tests/patches.rs"]

@@ -394,6 +394,8 @@ The maintainer approved this proposal, with its amendments, to be implemented in
 
 Stages 1 and 2 can swap if the data centre's clutter is the pressing problem, since the status wall alone frees the agent's surroundings.
 
+**Tuning notes.** From the headset in November 2026: the agent keeps with whoever it talks with through the whole exchange, as they speak, while it thinks and while it replies, turning to them with a 5° dead zone and following them on once they have stood still for 0.75 s more than 3 m away, or after 3 s if they never stand still; and distance alone moves it, within 3 m (or 4 m, to try) it only turns, while the 50° and line-of-sight rules choose where it stands, and standing in someone's way is put right when they ask, with `move_agent near`.
+
 ## Risks
 
 - **Motion as distraction.** An agent that moves at every question becomes the thing everyone watches. The 0.4 s commit, the 3 m and 50° "near enough" rule and the 10 s dwell are there to make it move rarely. The logs will show how often it does.

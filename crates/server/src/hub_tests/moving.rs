@@ -120,6 +120,39 @@ fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with
 }
 
 #[test]
+fn standing_in_someones_way_close_by_it_stays_until_they_ask_and_near_them_takes_it_out_of_their_way()
+ {
+    let (hub, space, commands, _outlet, ada) = yard(0);
+    follows(&ada);
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    hub.agent_move_agent("session", "near ada", None).unwrap();
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .backdate(Duration::from_secs(30));
+    let before = summoned(&hub, &space).unwrap();
+    // She turns to look at it, so that it stands in her way: speaking to it, it only turns to her.
+    let beyond: [f32; 3] = std::array::from_fn(|axis| ADA[axis] + (before[axis] - ADA[axis]) * 3.0);
+    ada.send(looking(ADA, [beyond[0], 1.6, beyond[2]]));
+    press(&ada, "u1", Vec::new());
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    assert_eq!(summoned(&hub, &space), Some(before));
+    ada.send(ClientMessage::UtteranceCancel {
+        utterance: "u1".to_owned(),
+    });
+    // Asked to move out of her way, it goes beside her, off her line of sight to what she looks at.
+    said(&hub, &ada, &commands, Vec::new(), None);
+    let moved = hub
+        .agent_move_agent("session", "near ada", Some("ada"))
+        .unwrap();
+    assert_eq!(moved["moved"], true);
+    let after = summoned(&hub, &space).unwrap();
+    assert!((level(after, ADA) - 1.5).abs() < 1e-3, "{after:?}");
+    assert!(apart(ADA, after, beyond) > 36.0, "{after:?}");
+}
+
+#[test]
 fn near_someone_who_has_not_reported_it_stands_beside_where_they_were_as_they_spoke() {
     let (hub, space, commands, _outlet, ada) = yard(0);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));

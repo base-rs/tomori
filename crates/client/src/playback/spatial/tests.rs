@@ -255,6 +255,49 @@ fn moving_a_source_glides_without_a_step() {
 }
 
 #[test]
+fn the_agent_speaking_as_it_streams_past_close_by_glides_without_a_step() {
+    let mut ears = Ears::new(RATE);
+    let steady = vec![1_000.0; 480];
+    // Its voice streams from 3 m to the left to 3 m to the right at 6 m/s, passing 0.3 m in front, within the nearest
+    // distance, a new place each 10 ms callback, as a client places it each frame while it follows someone.
+    render(
+        &mut ears,
+        &steady,
+        place(&listener(), at(-3.0, -0.3), AGENT_FLOOR, RATE, false),
+    );
+    let mut previous: Option<[f32; 2]> = None;
+    for call in 0..100 {
+        let x = -3.0 + 6.0 * call as f32 / 100.0;
+        let placement = place(&listener(), at(x, -0.3), AGENT_FLOOR, RATE, false);
+        let (left, right) = render(&mut ears, &steady, placement);
+        for channel in [&left, &right] {
+            let largest = channel
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0, f32::max);
+            assert!(largest < 10.0, "a step of {largest} in call {call}");
+            // Never silent, nor louder than its nearest, 12 dB above unity, in the nearer ear.
+            assert!(
+                channel
+                    .iter()
+                    .all(|sample| sample.abs() < 1_000.0 * 4.0 * 1.42)
+            );
+            assert!(
+                channel[479].abs() > 100.0,
+                "{} in call {call}",
+                channel[479]
+            );
+        }
+        let delay = ears.placement().unwrap().delay;
+        if let Some([a, b]) = previous {
+            let [c, d] = delay;
+            assert!((c - a).abs() < 8.0 && (d - b).abs() < 8.0, "call {call}");
+        }
+        previous = Some(delay);
+    }
+}
+
+#[test]
 fn mono_rendering_glides_its_gain() {
     let mut ears = Ears::new(RATE);
     let mut output = vec![0.0; 4];

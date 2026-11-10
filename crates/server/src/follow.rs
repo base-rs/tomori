@@ -55,11 +55,10 @@ const PANEL: [f32; 2] = crate::stage::BESIDE_SIZE;
 /// How thick a wall stands about its slots, in metres, that the agent stays clear of.
 const THICKNESS: f32 = 0.05;
 
-/// How near the speaker's eyes the agent already stands to need no move, in metres.
+/// How near the speaker's eyes the agent already stands to need no move, in metres: within it, it never moves on its
+/// own, only turning to them, whichever way they face and whatever it stands in front of. The maintainer named three or
+/// four metres; 4 m is the alternative to try.
 pub(crate) const NEAR: f32 = 3.0;
-
-/// How far off the way the speaker's head faces it may stand and need no move, in degrees.
-pub(crate) const AHEAD: f32 = 50.0;
 
 /// How far along the way their head faces the speaker is taken to attend to, in metres, with nothing else known.
 pub(crate) const GAZE: f32 = 2.0;
@@ -357,19 +356,48 @@ pub(crate) fn huddle(speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
         .or_else(|| spot(&speakers[0], scene))
 }
 
-/// Whether the agent standing at `agent` already serves `speaker`, so that it only turns to them: within [`NEAR`] of
-/// their eyes, within [`AHEAD`] of the way their head faces, seen clearly from their eyes, and out of the way of what
-/// they attend to.
-pub(crate) fn near_enough(agent: &Pose, speaker: &Speaker, scene: &Scene) -> bool {
-    let eyes = speaker.head.position;
-    let offset = sub(agent.position, eyes);
-    let distance = (0..3).map(|axis| offset[axis].powi(2)).sum::<f32>().sqrt();
-    let (x, z) = level_ahead(&speaker.head);
-    let off = wrapped(bearing(offset) - x.atan2(-z)).abs();
-    distance <= NEAR
-        && off <= AHEAD.to_radians()
-        && sees(agent, eyes, scene)
-        && !in_the_way(agent, eyes, speaker.focus)
+/// Whether the agent standing at `agent` already serves `speaker`, so that it never moves on its own, only turning to
+/// them: within [`NEAR`] of their eyes. Distance is the only rule that moves it: where it stands off the way they face,
+/// or in their way to what they attend to, it stays, and moves only when asked; the way they face and what they attend
+/// to choose where it stands once it moves, by [`spot`].
+pub(crate) fn near_enough(agent: &Pose, speaker: &Speaker) -> bool {
+    distance(agent.position, speaker.head.position) <= NEAR
+}
+
+/// Whether the agent standing at `agent` already serves `huddle`, those who spoke to it lately standing together, the
+/// one it answers first: within [`HUDDLE`] of the middle of their heads, horizontally, so that one of them moving about
+/// within the group does not move it.
+pub(crate) fn serves(agent: &Pose, huddle: &[Speaker]) -> bool {
+    let count = huddle.len().max(1) as f32;
+    let middle: [f32; 3] = std::array::from_fn(|axis| {
+        huddle
+            .iter()
+            .map(|speaker| speaker.head.position[axis])
+            .sum::<f32>()
+            / count
+    });
+    level(sub(agent.position, middle)) <= HUDDLE
+}
+
+/// The bearing, horizontally, from `from` to `to`, in radians clockwise from −Z as seen from above.
+pub(crate) fn towards(from: [f32; 3], to: [f32; 3]) -> f32 {
+    bearing(sub(to, from))
+}
+
+/// The bearing, horizontally, of the way `head` faces.
+pub(crate) fn heading(head: &Pose) -> f32 {
+    let (x, z) = level_ahead(head);
+    x.atan2(-z)
+}
+
+/// The bearing, horizontally, of the way the agent standing at `agent` faces, along its +Z.
+pub(crate) fn faces(agent: &Pose) -> f32 {
+    bearing(rotate(agent.orientation, [0.0, 0.0, 1.0]))
+}
+
+/// How far apart the bearings `a` and `b` are, in radians, either way round.
+pub(crate) fn apart(a: f32, b: f32) -> f32 {
+    wrapped(a - b).abs()
 }
 
 /// Whether someone whose eyes are at `eyes` sees the agent standing at `agent`, nothing of the scene between.
