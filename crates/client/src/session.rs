@@ -322,8 +322,9 @@ async fn exchange(
             speech_held: true,
             // And receives image panels' images, which it checks and hands on as events, for its session to fetch and show.
             images: true,
-            projection_patches: false,
-            limits: None,
+            // And applies patches to the projection, where its session does, which it hands on as any other message.
+            projection_patches: options.projection_patches,
+            limits: Some(options.limits),
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
