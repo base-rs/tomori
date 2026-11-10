@@ -174,6 +174,21 @@ pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
 
 Each pad must stand on one of the profile's surfaces, within 20 m of home, as the anchors are; a pair with a pad that does not is ignored. A pad is 0.5 m across from its centre unless `with_radius` says otherwise, its name is what the label on the other pad says, as `Racks ↓`, and `facing` turns whoever arrives on it, who otherwise keeps facing the way they faced.
 
+A surface need not be a rectangle or a disc. `Surface::sector` is a curved deck, the part of a ring between two radii and two directions, exact as a disc is, and `Surface::polygon` is any flat outline at one height, given as its corners in order, such as a crescent, an L or a deck with a notch, so neither needs faking with rectangles and discs that overlap:
+
+```rust
+use std::f32::consts::FRAC_PI_3;
+
+// A balcony 5.4 m up, 2 m deep, curving a third of the way round, 6 m ahead of the origin at its middle.
+let balcony = Surface::sector(glam::Vec3::new(0.0, 5.4, 0.0), 6.0, 8.0, -FRAC_PI_3, FRAC_PI_3);
+// An L-shaped deck 3 m up: its corners, X and Z, in order, either way round.
+let corners = [(2.0, -2.0), (6.0, -2.0), (6.0, 0.0), (4.0, 0.0), (4.0, 2.0), (2.0, 2.0)];
+let deck = Surface::polygon(corners.map(|(x, z)| glam::Vec2::new(x, z)), 3.0)
+    .expect("the deck's outline is simple");
+```
+
+A sector's angles are in radians about the vertical from −Z, as a pad faces: 0 is ahead of the origin, a quarter turn is along −X, and it runs from the first anticlockwise, seen from above, to the second; a full turn is the whole ring, while an end equal to the start, or a whole turn less, sweeps nothing and holds nothing. `balcony.sector_triangles(32)` gives triangles to draw its floor with, whose chords fall short of the exact arcs it holds by at most the radius times 1 − cos of half a step, about 1.2 cm for 32 steps over half a ring of 10 m, so draw it with enough. A polygon is any simple outline, convex or not, without holes: from 3 to 64 corners within 1 km of the origin, whose edges do not cross, with no corner repeated or within 1 mm of an edge it does not end. `Surface::polygon` checks it once and refuses one that is not, with an `OutlineError` saying which corner or edges, so a mistake is found as the build starts. A point on a surface's edge is on it, and Tomori keeps nobody in from the edge, so declare where a participant may stand, already clear of railings and drops. Tomori cuts a polygon into triangles as it is declared: `deck.outline()` gives them, with its corners, in your scenery's coordinates, to draw the deck's floor from the same outline. The doc comment on `Surface::polygon` builds a crescent from two arcs.
+
 The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 
 ## Named places: cluster anchors
