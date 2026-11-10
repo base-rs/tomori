@@ -823,6 +823,26 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_says_its_name_only_where_its_environment_gave_it_one() {
+        let plain = Wall::new("w", WallKind::Environment, level());
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("name").is_none(), "{json}");
+        assert_eq!(plain.name, None);
+        let named = plain.clone().with_name(Some("Details".to_owned()));
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["name"], "Details");
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), named);
+        assert_eq!(named.with_name(None), plain);
+        // An older server's wall says none.
+        assert_eq!(
+            serde_json::from_value::<Wall>(serde_json::to_value(&plain).unwrap())
+                .unwrap()
+                .name,
+            None
+        );
+    }
+
+    #[test]
     fn a_big_wall_s_slots_are_up_to_five_times_a_standard_slot_within_a_cinema_s_screen() {
         let big = Wall::new("w", WallKind::Added, level()).with_scale(SCALES.1);
         assert_eq!(big.scale(), 5.0);

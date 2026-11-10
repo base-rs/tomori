@@ -886,7 +886,7 @@ fn wall_face(wall: &Wall) -> Canvas {
     let (label, color) = wall_label(wall);
     let border = wall_border(wall);
     canvas.border = Some(border);
-    let label = Row::text(label, Style::bold(color), columns);
+    let label = Row::text(&label, Style::bold(color), columns);
     canvas.rows = vec![Row::new(
         std::iter::repeat_n((' ', Style::plain(color)), LABEL_INDENT / CELL_WIDTH)
             .chain(label.cells)
@@ -933,18 +933,44 @@ const ARC_LABEL_DROP: f32 = 0.04;
 /// A curved wall's label, below the middle of its row of slots.
 fn arc_label(wall: &Wall) -> Canvas {
     let (label, color) = wall_label(wall);
-    let mut canvas = Canvas::new(label.len(), PIXEL);
+    let mut canvas = Canvas::new(crate::ui_text::width(&label), PIXEL);
     canvas.padding = (CELL_WIDTH, 2);
     canvas.background = [0.01, 0.02, 0.04, 0.5];
-    canvas.rows = vec![Row::text(label, Style::bold(color), label.len())];
+    canvas.rows = vec![Row::text(
+        &label,
+        Style::bold(color),
+        crate::ui_text::width(&label),
+    )];
     canvas
 }
 
-/// What a wall is labelled, and in which colour.
-fn wall_label(wall: &Wall) -> (&'static str, [f32; 4]) {
-    match wall.kind {
-        WallKind::Tomori => ("TOMORI", [0.6, 0.85, 1.0, 1.0]),
-        _ => ("WALL", DIM),
+/// The most characters of the name an environment gives its wall that a client draws as its label.
+const NAME_CELLS: usize = 24;
+
+/// What a wall is labelled, and in which colour: the Tomori wall `TOMORI`, an environment's own wall, if its
+/// environment named it, its name in capitals, and any other `WALL`.
+fn wall_label(wall: &Wall) -> (String, [f32; 4]) {
+    match (&wall.kind, &wall.name) {
+        (WallKind::Tomori, _) => ("TOMORI".to_owned(), [0.6, 0.85, 1.0, 1.0]),
+        (WallKind::Environment, Some(name)) if !name.trim().is_empty() => {
+            // In capitals first, since a letter may become more than one, as `ß` becomes `SS`, then cut to a line of
+            // cells as drawn, a wide character taking two.
+            let upper = name
+                .chars()
+                .filter(|letter| !letter.is_control())
+                .collect::<String>()
+                .to_uppercase();
+            let mut label = String::new();
+            for letter in upper.chars() {
+                label.push(letter);
+                if crate::ui_text::width(&label) > NAME_CELLS {
+                    label.pop();
+                    break;
+                }
+            }
+            (label, DIM)
+        }
+        _ => ("WALL".to_owned(), DIM),
     }
 }
 

@@ -336,9 +336,13 @@ pub fn slot_centres(wall: &Wall) -> Vec<[f32; 3]> {
     slots(wall).iter().map(|slot| slot.middle).collect()
 }
 
-/// What `wall` of `projection` is called, as the agent is told and may name it: the Tomori wall, or an environment's
-/// wall or an added wall by its number among those of its kind, from 1.
+/// What `wall` of `projection` is called, as the agent is told and may name it: the Tomori wall, an environment's wall
+/// by the name its environment gave it, if it did, or else, and an added wall, by its number among those of its kind,
+/// from 1.
 pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
+    if let (WallKind::Environment, Some(name)) = (&wall.kind, &wall.name) {
+        return name.clone();
+    }
     let number = projection
         .walls
         .iter()
@@ -350,6 +354,24 @@ pub(crate) fn wall_name(projection: &Projection, wall: &Wall) -> String {
         WallKind::Environment => format!("environment wall {number}"),
         _ => format!("added wall {number}"),
     }
+}
+
+/// `wall` of `projection` as a sentence names it, after "the": "the Tomori wall", "the environment wall 1" or "the
+/// added wall 2", and a wall its environment named by its name in quotes, as "the wall "Details"", which reads as a
+/// name rather than a kind of wall.
+pub(crate) fn the_wall(projection: &Projection, wall: &Wall) -> String {
+    match (&wall.kind, &wall.name) {
+        (WallKind::Environment, Some(name)) => format!("the wall \"{name}\""),
+        _ => format!("the {}", wall_name(projection, wall)),
+    }
+}
+
+/// `words` with its first letter in capitals, to begin a sentence.
+pub(crate) fn capitalised(words: &str) -> String {
+    let mut letters = words.chars();
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
 }
 
 /// The parts of `wall` a ray can meet: its slots, and, for a flat wall, the board they stand on.
@@ -1125,8 +1147,8 @@ pub(crate) fn destination(
             // A slot it does not have is refused, rather than taken as its most prominent free one.
             if let Some(slot) = slot.filter(|slot| *slot >= wall.slots()) {
                 return Err(format!(
-                    "The {} has no slot {slot}: its slots are numbered from 0 to {}.",
-                    wall_name(projection, wall),
+                    "{} has no slot {slot}: its slots are numbered from 0 to {}.",
+                    capitalised(&the_wall(projection, wall)),
                     wall.slots() - 1
                 ));
             }

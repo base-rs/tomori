@@ -185,6 +185,11 @@ pub struct Wall {
     /// slots stand in [`Wall::frame`], its pose tilted so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tilt: Option<f32>,
+    /// What an environment calls its own wall, such as `Details`: shown in capitals as the wall's label in place of
+    /// `WALL`, and the name by which the agent names it, as `place: wall Details slot 2`, in place of `environment wall
+    /// 1`. Only an environment's own wall has one, and only if it declares one; an older client draws `WALL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Its version: the space's projection revision, [`Projection::revision`], at which it last changed in anything it
     /// says, so that a change a client asks for, as by a wall's handles, says the version it saw, and the server refuses
     /// it where the wall changed since. Sent as `revision`, as a panel's is; 0, and absent, from older servers. See
@@ -208,8 +213,15 @@ impl Wall {
             joined: Vec::new(),
             locked: false,
             tilt: None,
+            name: None,
             version: 0,
         }
+    }
+
+    /// The wall, called `name` by its environment, or nothing with `None`.
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
     }
 
     /// The wall at `version`, the projection revision at which it last changed.

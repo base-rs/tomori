@@ -814,6 +814,7 @@ impl Stage {
                 let locked = !room.is_some_and(|room| room.unlocked.contains(&id));
                 layout
                     .apply(Wall::new(id, WallKind::Environment, pose))
+                    .with_name(declared.name().map(str::to_owned))
                     .with_locked(locked)
             },
         ));
@@ -1600,7 +1601,7 @@ impl Stage {
     /// Whether `wall`, laid out as `layout` says, is one a wall can be, or why not: its grid within bounds, its slots
     /// within [`layout::SCALES`] of a flat wall's, its curve, if it has one, of a radius from [`layout::LEAST_RADIUS`] to
     /// [`LONGEST_RADIUS`] about no more than half a circle, and no wider or taller than [`WALL_SIZE`].
-    fn fits(wall: &Wall, layout: Layout) -> Result<(), &'static str> {
+    pub(crate) fn fits(wall: &Wall, layout: Layout) -> Result<(), &'static str> {
         if !layout.grid.valid() {
             return Err(
                 "A wall has from 1 to 8 columns and from 1 to 4 rows of slots, and at most 24 slots.",
@@ -2008,6 +2009,7 @@ impl Stage {
             let after = declared
                 .layout()
                 .apply(Wall::new(wall, WallKind::Environment, declared.pose))
+                .with_name(declared.name().map(str::to_owned))
                 .with_locked(true);
             if after == before {
                 return Ok(false);
@@ -4624,6 +4626,82 @@ mod tests {
             Ok(true)
         );
         assert!(stage.rooms["sky"].unlocked.is_empty());
+    }
+
+    #[test]
+    fn an_environment_s_wall_is_shown_by_the_name_it_declares_and_put_back_with_it() {
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0)).with_name("Details")];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let view = stage.view("s", &walls, 0);
+        assert_eq!(view.walls[1].name.as_deref(), Some("Details"));
+        assert_eq!(view.walls[0].name, None);
+        // The agent puts a panel on it by that name, though it is locked.
+        let onto = Destination::Wall {
+            wall: "environment-0".into(),
+            slot: Some(4),
+        };
+        stage.project_to(&walls, content("A"), &onto, 0);
+        assert!(matches!(
+            &stage.view("s", &walls, 0).panels[0].place,
+            Place::Wall { wall, slot: 4 } if wall == "environment-0"
+        ));
+        // Moved, then put back as the environment has it, it keeps its name.
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", false, false),
+            Ok(true)
+        );
+        let moved = WallChange {
+            pose: Some(pose(2.0, -4.0)),
+            ..WallChange::default()
+        };
+        assert_eq!(stage.set_wall(&walls, "environment-0", moved), Ok(true));
+        assert_eq!(
+            stage.lock_wall(&walls, "environment-0", true, true),
+            Ok(true)
+        );
+        assert_eq!(
+            stage.view("s", &walls, 0).walls[1].name.as_deref(),
+            Some("Details")
+        );
+    }
+
+    #[test]
+    fn an_environment_s_wall_is_shown_with_the_slots_curve_and_tilt_it_declares() {
+        // A console: three wide slots stacked, on an arc about where people stand, tilted towards them.
+        let declared = [crate::EnvironmentWall::from(pose(-3.0, -3.0))
+            .with_grid(Grid::from((1, 3)))
+            .with_aspect(4.0)
+            .with_curve(5.0)
+            .with_tilt(15.0)];
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let shown = stage.view("s", &walls, 0).walls[1].clone();
+        assert_eq!(
+            (shown.grid(), shown.aspect(), shown.radius(), shown.tilt()),
+            (Grid::from((1, 3)), 4.0, Some(5.0), 15.0)
+        );
+        assert!(shown.is_locked());
+        // A space's change stands over it, and putting it back is the environment's again.
+        let flat = WallChange {
+            radius: Some(None),
+            ..WallChange::default()
+        };
+        assert!(
+            stage
+                .lock_wall(&walls, "environment-0", false, false)
+                .is_ok()
+        );
+        assert!(stage.set_wall(&walls, "environment-0", flat).is_ok());
+        assert_eq!(stage.view("s", &walls, 0).walls[1].radius(), None);
+        assert!(stage.lock_wall(&walls, "environment-0", true, true).is_ok());
+        assert_eq!(stage.view("s", &walls, 0).walls[1].radius(), Some(5.0));
     }
 
     #[test]

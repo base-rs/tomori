@@ -48,8 +48,9 @@ pub struct Environment {
 }
 
 /// One of an environment's own projection walls: where it stands, in the environment's own coordinates, upright and
-/// facing along its pose's +Z, and how it is laid out, flat, its grid of slots and their size, unless a space changes
-/// them: three columns of two rows of standard slots unless it says otherwise. It is locked, part of the place, such as
+/// facing along its pose's +Z, and how it is laid out, its grid of slots, their size and shape, whether it curves and
+/// how far it tilts, unless a space changes them: three columns of two rows of standard slots, flat and upright, unless
+/// it says otherwise, as a console of wide slots on an arc about where people stand, tilted towards them. It is locked, part of the place, such as
 /// a notice board or a console people walk up to, until a space's owner unlocks it. See `design/projection.md`.
 ///
 /// ```
@@ -60,12 +61,63 @@ pub struct Environment {
 /// let notices = EnvironmentWall::new(board).with_grid(Grid::from((2, 1)));
 /// assert_eq!(notices.grid(), Grid::from((2, 1)));
 /// assert_eq!(EnvironmentWall::from(board).grid(), Grid::from((3, 2)));
+/// let console = EnvironmentWall::new(board)
+///     .with_grid(Grid::from((1, 3)))
+///     .with_aspect(4.0)
+///     .with_curve(5.0)
+///     .with_tilt(-15.0);
+/// assert_eq!((console.aspect(), console.radius(), console.tilt()), (Some(4.0), Some(5.0), Some(-15.0)));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvironmentWall {
     pub pose: tomori_protocol::Pose,
     grid: Option<tomori_protocol::Grid>,
     scale: Option<f32>,
+    aspect: Option<f32>,
+    radius: Option<f32>,
+    tilt: Option<f32>,
+    name: Option<&'static str>,
+}
+
+/// The most bytes of the name an environment gives its own wall.
+pub const WALL_NAME_BYTES: usize = 24;
+
+/// Whether `name` is one an environment may call its own wall, which its label shows in capitals and the agent names it
+/// by, as `place: wall Details slot 2`: from 1 to [`WALL_NAME_BYTES`] ASCII letters, digits, spaces and `-`, with no
+/// space at either end or two together, that does not begin with `the `, and holds no word `slot`, which would end a
+/// wall's name where a slot's number begins, nor begins as a wall is already called, `Tomori`, `environment` or
+/// `added`, or as a wall's identity begins, `wall-`, nor whose first word is one a place begins with, `near`,
+/// `nearest`, `look`, `looking`, `front`, `beside` or `wall`, in any case, which `set_wall` would read as that form.
+///
+/// ```
+/// use tomori_server::valid_wall_name;
+///
+/// assert!(valid_wall_name("Details"));
+/// assert!(valid_wall_name("Pods under load"));
+/// assert!(!valid_wall_name(""));
+/// assert!(!valid_wall_name("Tomori wall"));
+/// assert!(!valid_wall_name("Slot machine"));
+/// ```
+pub fn valid_wall_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    (1..=WALL_NAME_BYTES).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'-'))
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && !name.contains("  ")
+        && !lower.starts_with("the ")
+        && !lower.split(' ').any(|word| word == "slot")
+        && ["tomori", "environment", "added", "wall-"]
+            .iter()
+            .all(|taken| !lower.starts_with(taken))
+        && !lower.split(' ').next().is_some_and(|first| {
+            [
+                "near", "nearest", "look", "looking", "front", "beside", "wall",
+            ]
+            .contains(&first)
+        })
 }
 
 impl EnvironmentWall {
@@ -75,7 +127,61 @@ impl EnvironmentWall {
             pose,
             grid: None,
             scale: None,
+            aspect: None,
+            radius: None,
+            tilt: None,
+            name: None,
         }
+    }
+
+    /// The wall, called `name`, which its label shows in capitals in place of `WALL`, and the space's agent names it by,
+    /// as `place: wall Details slot 2`, in place of `environment wall 1`, so that it is asked to put panels on a wall by
+    /// what the wall is for. The name must be [`valid_wall_name`]: one that is not is ignored, as is one an earlier wall
+    /// of the environment already has, in any case. Without one, the wall is `WALL`, and `environment wall` and its
+    /// number among the environment's walls.
+    pub fn with_name(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// What it is called, if its environment calls it anything the server takes: see [`Self::with_name`].
+    pub fn name(&self) -> Option<&'static str> {
+        self.name.filter(|name| valid_wall_name(name))
+    }
+
+    /// The wall, its slots' width over their height `aspect`, from 1:4 to 4:1, or else a standard slot's shape.
+    pub fn with_aspect(mut self, aspect: f32) -> Self {
+        self.aspect = Some(aspect);
+        self
+    }
+
+    /// The wall, curved along an arc about a vertical line `radius` metres ahead of it, at least
+    /// `tomori_protocol::wall::LEAST_RADIUS`, or else flat.
+    pub fn with_curve(mut self, radius: f32) -> Self {
+        self.radius = Some(radius);
+        self
+    }
+
+    /// The wall, tilted `degrees` about its horizontal middle line, positive with its top towards the people in front
+    /// of it, within `tomori_protocol::wall::TILTS`, or else upright.
+    pub fn with_tilt(mut self, degrees: f32) -> Self {
+        self.tilt = Some(degrees);
+        self
+    }
+
+    /// Its slots' shape, unless a space changes it: `None` for a standard slot's.
+    pub fn aspect(&self) -> Option<f32> {
+        self.layout().aspect
+    }
+
+    /// The radius it curves along, unless a space changes it: `None` for a flat wall.
+    pub fn radius(&self) -> Option<f32> {
+        self.layout().radius
+    }
+
+    /// How far it tilts, in degrees, unless a space changes it: `None` upright.
+    pub fn tilt(&self) -> Option<f32> {
+        self.layout().tilt
     }
 
     /// The wall, with `grid` of slots, within a wall's bounds, or else three columns of two rows.
@@ -95,8 +201,18 @@ impl EnvironmentWall {
         self.layout().grid
     }
 
-    /// How it is laid out unless a space changes it: flat, its grid and scale within bounds, or else a flat wall's.
+    /// How it is laid out unless a space changes it: see [`Self::checked`].
     pub(crate) fn layout(&self) -> crate::stage::Layout {
+        self.checked().0
+    }
+
+    /// How it is laid out unless a space changes it, and why not as it says, if it is not: each of its grid, scale,
+    /// aspect, curve and tilt within its bounds, or else, unsaid, a flat wall's; and then the whole as a participant's
+    /// change must be, by the stage's own rule: curved no further round than half a circle, and at most 16 m wide and
+    /// 9 m tall. A layout that is not, as eight wide columns at twice a standard slot, or three wide columns curved at
+    /// 1 m, is as though its shape, curve and tilt were unsaid, and, should its grid and scale still not be, as a flat
+    /// wall's, so that a declared wall is never one the space could not then change.
+    pub(crate) fn checked(&self) -> (crate::stage::Layout, Option<&'static str>) {
         let flat = crate::stage::Layout::FLAT;
         let scale = self
             .scale
@@ -106,10 +222,41 @@ impl EnvironmentWall {
                         .contains(scale)
             })
             .unwrap_or(flat.scale);
-        crate::stage::Layout {
+        let within = |value: Option<f32>, (least, most): (f32, f32)| {
+            value.filter(|value| value.is_finite() && (least..=most).contains(value))
+        };
+        let said = crate::stage::Layout {
             grid: self.grid.filter(|grid| grid.valid()).unwrap_or(flat.grid),
             scale,
+            aspect: within(self.aspect, tomori_protocol::wall::ASPECTS),
+            radius: within(
+                self.radius,
+                (
+                    tomori_protocol::wall::LEAST_RADIUS,
+                    crate::stage::LONGEST_RADIUS,
+                ),
+            ),
+            tilt: within(self.tilt, tomori_protocol::wall::TILTS).filter(|tilt| *tilt != 0.0),
+        };
+        let fits = |layout: crate::stage::Layout| {
+            let wall = layout.apply(tomori_protocol::Wall::new(
+                "declared",
+                tomori_protocol::WallKind::Environment,
+                self.pose,
+            ));
+            crate::stage::Stage::fits(&wall, layout)
+        };
+        let Err(why) = fits(said) else {
+            return (said, None);
+        };
+        let plain = crate::stage::Layout {
+            grid: said.grid,
+            scale: said.scale,
             ..flat
+        };
+        match fits(plain) {
+            Ok(()) => (plain, Some(why)),
+            Err(_) => (flat, Some(why)),
         }
     }
 }
@@ -403,7 +550,28 @@ impl Environment {
         mut self,
         walls: impl IntoIterator<Item = impl Into<EnvironmentWall>>,
     ) -> Self {
-        self.walls = walls.into_iter().map(Into::into).collect();
+        let mut walls: Vec<EnvironmentWall> = walls.into_iter().map(Into::into).collect();
+        // A name two walls would share names the first alone, so that the agent's `place: wall NAME` is never ambiguous.
+        for index in 1..walls.len() {
+            let taken = walls[..index].iter().any(|other| {
+                other
+                    .name()
+                    .zip(walls[index].name())
+                    .is_some_and(|(taken, name)| taken.eq_ignore_ascii_case(name))
+            });
+            if taken {
+                walls[index].name = None;
+            }
+        }
+        for (index, wall) in walls.iter().enumerate() {
+            if let (_, Some(why)) = wall.checked() {
+                log::warn!(
+                    "Environment {}'s wall {index} is laid out as a flat wall's, not as it says: {why}",
+                    self.id
+                );
+            }
+        }
+        self.walls = walls;
         self.carry_walls();
         self
     }
@@ -766,6 +934,51 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_is_named_by_letters_digits_spaces_and_hyphens_that_the_agent_can_say_in_a_place() {
+        for good in [
+            "Details",
+            "Pods under load",
+            "a",
+            "Zone-2",
+            &"n".repeat(WALL_NAME_BYTES),
+        ] {
+            assert!(valid_wall_name(good), "{good:?}");
+        }
+        let long = "n".repeat(WALL_NAME_BYTES + 1);
+        for bad in [
+            "",
+            " Details",
+            "Details ",
+            "Two  spaces",
+            "Café",
+            "Details!",
+            "a/b",
+            "the Details",
+            "Slot machine",
+            "Pod slot",
+            "Tomori wall",
+            "environment wall 2",
+            "Added wall",
+            "wall-3",
+            "near the door",
+            "Nearest",
+            "Look here",
+            "looking glass",
+            "Front desk",
+            "BESIDE",
+            "Wall of fame",
+            &long,
+        ] {
+            assert!(!valid_wall_name(bad), "{bad:?}");
+        }
+        // A word that only holds `slot`, or a place's first word, is fine.
+        assert!(valid_wall_name("Slots"));
+        assert!(valid_wall_name("Nearby"));
+        assert!(valid_wall_name("Frontline"));
+        assert!(valid_wall_name("Pods near load"));
+    }
+
+    #[test]
     fn an_environment_has_a_server_side_only_when_given_one() {
         let plain = Environment::new("observe", "Observe");
         let with = Environment::new("observe", "Observe").with_server_side(Idle);
@@ -821,6 +1034,102 @@ mod tests {
                 EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((2, 1)))
             ])
         );
+        // Its slots' shape, its curve and its tilt, within bounds, or else a flat wall's: standard, flat and upright.
+        let console = EnvironmentWall::new(pose)
+            .with_grid(tomori_protocol::Grid::from((1, 3)))
+            .with_aspect(4.0)
+            .with_curve(5.0)
+            .with_tilt(-15.0);
+        assert_eq!(
+            console.layout(),
+            crate::stage::Layout {
+                grid: tomori_protocol::Grid::from((1, 3)),
+                aspect: Some(4.0),
+                radius: Some(5.0),
+                tilt: Some(-15.0),
+                ..flat
+            }
+        );
+        // A name the server takes, and one it does not, and the second of two alike, in any case, is nobody's.
+        let named = |name: &'static str| EnvironmentWall::new(pose).with_name(name);
+        assert_eq!(named("Details").name(), Some("Details"));
+        assert_eq!(named("Details").layout(), flat);
+        assert_eq!(EnvironmentWall::new(pose).name(), None);
+        assert_eq!(named("Tomori wall").name(), None);
+        let env = plain
+            .clone()
+            .with_walls([named("Details"), named("details"), named("Load")]);
+        let names: Vec<_> = env.walls().iter().map(EnvironmentWall::name).collect();
+        assert_eq!(names, [Some("Details"), None, Some("Load")]);
+        // A name the server does not take takes nothing from a later wall's, which is still kept from its own double.
+        let env = plain
+            .clone()
+            .with_walls([named("Tomori"), named("Details"), named("DETAILS")]);
+        let names: Vec<_> = env.walls().iter().map(EnvironmentWall::name).collect();
+        assert_eq!(names, [None, Some("Details"), None]);
+        // Carried into a space, a wall keeps its name.
+        let carried = plain
+            .clone()
+            .with_arrival(tomori_protocol::Pose::at([1.0, 0.0, 0.0]))
+            .with_walls([
+                EnvironmentWall::new(tomori_protocol::Pose::at([0.0, 1.5, -3.0]))
+                    .with_name("Details"),
+            ]);
+        assert_eq!(carried.carried[0].name(), Some("Details"));
+        // Upright is no tilt, either side of zero.
+        for upright in [0.0, -0.0] {
+            assert_eq!(EnvironmentWall::new(pose).with_tilt(upright).tilt(), None);
+        }
+        // As a participant's change must, a declared wall keeps within a wall's size and curves no further round than
+        // half a circle; one that would not is laid out without its shape, curve and tilt, or else as a flat wall.
+        let upright = tomori_protocol::Pose::at([0.0, 1.5, -3.0]);
+        let wide = EnvironmentWall::new(upright)
+            .with_grid(tomori_protocol::Grid::from((8, 1)))
+            .with_scale(2.0)
+            .with_aspect(4.0)
+            .with_tilt(10.0);
+        let (laid, why) = wide.checked();
+        assert!(
+            why.unwrap().starts_with("A wall is at most 16 m wide"),
+            "{why:?}"
+        );
+        assert_eq!(
+            laid,
+            crate::stage::Layout {
+                grid: tomori_protocol::Grid::from((8, 1)),
+                scale: 2.0,
+                ..flat
+            }
+        );
+        let bent = EnvironmentWall::new(upright)
+            .with_grid(tomori_protocol::Grid::from((3, 1)))
+            .with_aspect(4.0)
+            .with_curve(1.0);
+        assert!(bent.checked().1.unwrap().starts_with("Curved that tightly"));
+        assert_eq!((bent.radius(), bent.aspect()), (None, None));
+        let huge = EnvironmentWall::new(upright)
+            .with_grid(tomori_protocol::Grid::from((8, 1)))
+            .with_scale(5.0);
+        assert_eq!(huge.layout(), flat);
+        assert!(huge.checked().1.is_some());
+        // Declared so, the environment still registers it, laid out as it can be, saying why in the log.
+        let registered = plain.clone().with_walls([wide, bent, huge]);
+        assert_eq!(registered.walls().len(), 3);
+        assert_eq!(registered.walls()[2].layout(), flat);
+        for (aspect, radius, tilt) in [
+            (0.1, 0.5, 60.0),
+            (9.0, 80.0, -50.0),
+            (f32::NAN, f32::INFINITY, 0.0),
+        ] {
+            let wall = EnvironmentWall::new(pose)
+                .with_aspect(aspect)
+                .with_curve(radius)
+                .with_tilt(tilt);
+            assert_eq!(
+                (wall.aspect(), wall.radius(), wall.tilt()),
+                (None, None, None)
+            );
+        }
     }
 
     #[test]

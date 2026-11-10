@@ -887,6 +887,56 @@ fn wall_at(id: &str, at: Vec3) -> Wall {
 }
 
 #[test]
+fn an_environment_s_wall_is_called_by_the_name_its_environment_gave_it_and_placed_on_by_it() {
+    let named = wall_at("environment-0", [0.0, 1.6, -3.8]).with_name(Some("Details".to_owned()));
+    let other = wall_at("environment-1", [3.0, 1.6, -3.8]);
+    let projection =
+        Projection::new("space-1", "sky").with_walls(vec![tomori(), named.clone(), other.clone()]);
+    assert_eq!(wall_name(&projection, &named), "Details");
+    assert_eq!(wall_name(&projection, &other), "environment wall 2");
+    // A sentence names it as a name, the others as kinds of wall.
+    assert_eq!(the_wall(&projection, &named), "the wall \"Details\"");
+    assert_eq!(the_wall(&projection, &other), "the environment wall 2");
+    assert_eq!(the_wall(&projection, &tomori()), "the Tomori wall");
+    assert_eq!(capitalised("the wall \"Details\""), "The wall \"Details\"");
+    assert_eq!(capitalised(""), "");
+    // An added wall is never called by a name a server says.
+    let added =
+        Wall::new("wall-1", WallKind::Added, named.pose).with_name(Some("Details".to_owned()));
+    let projection =
+        Projection::new("space-1", "sky").with_walls(vec![tomori(), named, added.clone()]);
+    assert_eq!(wall_name(&projection, &added), "added wall 1");
+    let onto = |named: &str, slot| {
+        destination(
+            &Placement::Wall(named.into(), slot),
+            None,
+            &[],
+            &projection,
+            &[],
+        )
+    };
+    let expected = |slot| {
+        Ok(Destination::Wall {
+            wall: "environment-0".into(),
+            slot,
+        })
+    };
+    // In any case, with or without `the`, with a slot, or an identity.
+    assert_eq!(onto("Details", Some(2)), expected(Some(2)));
+    assert_eq!(onto("the details", None), expected(None));
+    assert_eq!(onto("environment-0", None), expected(None));
+    assert_eq!(
+        onto("Details", Some(6)),
+        Err("The wall \"Details\" has no slot 6: its slots are numbered from 0 to 5.".to_owned())
+    );
+    // The name replaces the number: `environment wall 1` is no longer a wall.
+    assert_eq!(
+        onto("environment wall 1", None),
+        Err("There is no wall called \"environment wall 1\" here.".to_owned())
+    );
+}
+
+#[test]
 fn a_wall_looked_at_too_far_to_read_gives_way_to_the_nearest_wall_in_view_with_looking_and_beside_by_default()
  {
     let home = [0.0, 1.6, 0.0];
