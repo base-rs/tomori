@@ -564,10 +564,8 @@ mod tests {
         scripted_as(access, frames, false)
     }
 
-    /// Read `body` until its response ends, returning the messages it was sent, or how it failed.
-    fn sent_until_ended<B: ReadableBody>(
-        body: &mut ConnectionBody<B>,
-    ) -> Result<Vec<ServerMessage>, String> {
+    /// Read `body` until its response ends, returning the messages it was sent.
+    fn sent_until_ended<B: ReadableBody>(body: &mut ConnectionBody<B>) -> Vec<ServerMessage> {
         let mut decoder = FrameDecoder::with_limit(tomori_protocol::MOST_FRAME_BYTES);
         loop {
             match read(body) {
@@ -578,30 +576,23 @@ mod tests {
                     }
                 }
                 Ok(BodyFrame::End) => break,
-                Ok(_) => unreachable!("no trailers"),
-                Err(error) => return Err(format!("{error:?}")),
+                _ => unreachable!("data until the response ends"),
             }
         }
-        let mut messages = Vec::new();
-        while let Some(frame) = decoder.next_frame().unwrap() {
-            if let Ok(message) = frame.to_server_message() {
-                messages.push(message);
-            }
-        }
-        Ok(messages)
+        std::iter::from_fn(|| decoder.next_frame().unwrap())
+            .map(|frame| frame.to_server_message().unwrap())
+            .collect()
     }
 
-    /// The errors `body` was sent until its response ended, or how it failed.
-    fn errors_until_ended<B: ReadableBody>(
-        body: &mut ConnectionBody<B>,
-    ) -> Result<Vec<String>, String> {
-        Ok(sent_until_ended(body)?
+    /// The errors `body` was sent until its response ended.
+    fn errors_until_ended<B: ReadableBody>(body: &mut ConnectionBody<B>) -> Vec<String> {
+        sent_until_ended(body)
             .into_iter()
             .filter_map(|message| match message {
                 ServerMessage::Error { error, .. } => Some(error),
                 _ => None,
             })
-            .collect())
+            .collect()
     }
 
     fn ended(bytes: &[u8]) -> Result<BodyFrame<Vec<u8>>, std::io::Error> {
@@ -640,7 +631,7 @@ mod tests {
                     data(&header(tomori_protocol::MOST_FRAME_BYTES)),
                 ],
             );
-            let errors = errors_until_ended(&mut body).unwrap();
+            let errors = errors_until_ended(&mut body);
             assert!(refused(&errors, watching, whom), "{errors:?}");
             assert!(body.input_ended && body.finished && body.request.frames.is_empty());
             // What it is sent is as long as it reads, however little it sends.
@@ -655,7 +646,7 @@ mod tests {
                 ended(&padded_pong(watching)),
             ],
         );
-        assert_eq!(errors_until_ended(&mut body), Ok(Vec::new()));
+        assert!(errors_until_ended(&mut body).is_empty());
         assert_eq!(body.output.inbound(), crate::inbound::Inbound::Watching);
     }
 
@@ -664,7 +655,7 @@ mod tests {
         let watching = crate::inbound::WATCHING_FRAME_BYTES;
         let whom = crate::inbound::Inbound::Watching.whom();
         let mut body = admitted(Access::open(), vec![ended(&padded_pong(watching + 1))]);
-        let errors = errors_until_ended(&mut body).unwrap();
+        let errors = errors_until_ended(&mut body);
         assert!(refused(&errors, watching, whom), "{errors:?}");
         // As is the Hello itself.
         let long_hello = Frame::client(&ClientMessage::Hello {
@@ -683,7 +674,7 @@ mod tests {
         })
         .encode();
         let mut body = admitted(Access::open(), vec![ended(&long_hello)]);
-        let errors = errors_until_ended(&mut body).unwrap();
+        let errors = errors_until_ended(&mut body);
         assert!(refused(&errors, watching, whom), "{errors:?}");
     }
 
@@ -708,7 +699,7 @@ mod tests {
                 ended(&padded_pong(participating)),
             ],
         );
-        assert_eq!(errors_until_ended(&mut body), Ok(Vec::new()));
+        assert!(errors_until_ended(&mut body).is_empty());
         assert_eq!(
             body.output.inbound(),
             crate::inbound::Inbound::Participating
@@ -723,7 +714,7 @@ mod tests {
                     data(&header(longer)),
                 ],
             );
-            let errors = errors_until_ended(&mut body).unwrap();
+            let errors = errors_until_ended(&mut body);
             assert!(
                 refused(&errors, participating, "an owner or a collaborator"),
                 "{errors:?}"
@@ -735,7 +726,7 @@ mod tests {
             Access::open(),
             vec![data(&hello(None)), ended(&padded_pong(participating))],
         );
-        assert_eq!(errors_until_ended(&mut body), Ok(Vec::new()));
+        assert!(errors_until_ended(&mut body).is_empty());
         assert_eq!(body.output.frame_limit(), tomori_protocol::MAX_FRAME_BYTES);
     }
 
@@ -746,7 +737,7 @@ mod tests {
         let mut frames = vec![data(&hello(None))];
         frames.extend((0..1000).map(|_| data(&ping)));
         let mut body = admitted(Access::visitor(), frames);
-        let sent = sent_until_ended(&mut body).unwrap();
+        let sent = sent_until_ended(&mut body);
         assert!(
             sent.iter().any(|message| matches!(message, ServerMessage::Error { error, .. } if error
                 == "This connection sent more often than this server takes from a visitor, a device pairing or a client before its Hello, for too long.")),
