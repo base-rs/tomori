@@ -1317,7 +1317,6 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let going = agent(
         &anchors,
         &AgentState {
-            moving: true,
             at: Some(ahead),
             movement: follow,
             ..AgentState::default()

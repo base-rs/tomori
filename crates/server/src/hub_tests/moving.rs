@@ -264,6 +264,37 @@ fn by_an_object_it_stands_off_the_line_of_sight_to_it_where_it_stands_now_or_at_
     );
 }
 
+#[test]
+fn near_someone_with_nowhere_clear_beside_them_it_stands_in_front_of_them() {
+    let (hub, space, _commands, _outlet, ada) = yard(0);
+    // Beyond what it may reach on every side, nowhere beside her is clear, nor at the fallback distance.
+    let far = [40.0, 1.6, 40.0];
+    ada.send(looking(far, [40.0, 1.6, 35.0]));
+    hub.agent_move_agent("session", "beside ada", None).unwrap();
+    // In front of her, as a summons stood it, 2.3 m along the way she looks, though out of reach.
+    let at = summoned(&hub, &space).unwrap();
+    assert!(level(at, [40.0, 1.9, 37.7]) < 1e-3, "{at:?}");
+}
+
+#[test]
+fn whoever_asked_having_left_it_stands_beside_where_they_were_as_they_spoke() {
+    let (hub, space, commands, _outlet, ada) = yard(0);
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    said(&hub, &ada, &commands, Vec::new(), None);
+    ada.send(ClientMessage::Leave);
+    let moved = hub.agent_move_agent("session", "near", None).unwrap();
+    let at = summoned(&hub, &space).unwrap();
+    assert!((level(at, ADA) - 1.5).abs() < 1e-3, "{at:?}");
+    // Talking with nobody here now.
+    assert!(moved["agent"].get("partner").is_none());
+    // An object named by nothing is no object.
+    assert!(
+        hub.agent_move_agent("session", "object:", None)
+            .unwrap_err()
+            .contains("does not know where")
+    );
+}
+
 /// The anchor `name` by the object `object`, at a rack 4 m along x.
 fn rack_anchor(name: &str, object: &str) -> tomori_protocol::cluster::Anchor {
     rack(name, 4.0).with_object(object)

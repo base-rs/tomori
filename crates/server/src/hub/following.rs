@@ -311,6 +311,7 @@ impl Hub {
         let following = &record.following;
         let home = home(&anchors);
         let moving = following.moving(record.summoned, home, now);
+        // Where it has reached, while it is on its way.
         let partner = following
             .partner()
             .and_then(|key| state.participants.get(key))
@@ -320,7 +321,6 @@ impl Hub {
             at: moving.then(|| following.at(record.summoned, home, now)),
             pinned: following.pinned,
             pinned_by: following.pinned_by.clone(),
-            moving,
             partner,
             returns_in: following.returns_in(
                 record.summoned.is_some(),
@@ -466,7 +466,7 @@ impl Hub {
     }
 
     /// Move the agent of `space` to `at`, before someone whose eyes are at `eyes`, as its own `move_agent` asked, at
-    /// `now`, its status wall and workers staying home. Whether it moved.
+    /// `now`, its status wall and workers staying home: the caller found it stands elsewhere.
     pub(super) fn agent_goes(
         &self,
         state: &mut HubState,
@@ -474,17 +474,14 @@ impl Hub {
         at: Pose,
         eyes: [f32; 3],
         now: Instant,
-    ) -> bool {
+    ) {
         let record = state.space(space).expect("the caller found it");
         let (scene, _, home) = self.scene(state, space);
         let from = record.following.at(record.summoned, home, now).position;
         let route = follow::route(from, at.position, &scene);
         let was = record.summoned;
-        let moved = state.summon(space, Some(at), Some(eyes));
-        if moved {
-            state.agent_moved(space, (from, was), at, route, now);
-        }
-        moved
+        state.summon(space, Some(at), Some(eyes));
+        state.agent_moved(space, (from, was), at, route, now);
     }
 
     /// What the agent of `space` keeps clear of now, the environment's solids, the walls shown, the panels floating and

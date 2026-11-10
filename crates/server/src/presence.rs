@@ -1280,13 +1280,11 @@ pub(crate) fn before(head: &Pose) -> Pose {
 pub(crate) struct AgentState {
     /// Where it was summoned to, or none at home.
     pub summoned: Option<Pose>,
-    /// Where it stands now, along its way, while it is on its way.
+    /// Where it has reached, while it is on its way somewhere, or home.
     pub at: Option<Pose>,
     pub pinned: bool,
     /// Who pinned it, by name, where a participant did.
     pub pinned_by: Option<String>,
-    /// Whether it is on its way somewhere, or home.
-    pub moving: bool,
     /// Whom it talks with now, or last did, by their handle.
     pub partner: Option<String>,
     /// How long until it goes home if nothing more is said, while it follows.
@@ -1308,7 +1306,7 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
     let facing = rotate(at.orientation, [0.0, 0.0, 1.0]);
     let mode = match (state.pinned, state.summoned, state.movement.mode) {
         (true, _, _) => "pinned",
-        (false, None, _) if state.moving => "going home",
+        (false, None, _) if state.at.is_some() => "going home",
         (false, None, _) => "home",
         (false, Some(_), tomori_protocol::Movement::Follow) => "following",
         (false, Some(_), _) => "away",
@@ -1326,11 +1324,9 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
         "mode": mode,
         "movement": movement,
     });
-    if state.moving {
+    if let Some(now) = state.at {
         agent["moving"] = json!(true);
-        if let Some(now) = state.at {
-            agent["now_at"] = position(now.position);
-        }
+        agent["now_at"] = position(now.position);
     }
     if let Some(partner) = &state.partner {
         agent["partner"] = json!(partner);

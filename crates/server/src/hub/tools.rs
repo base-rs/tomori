@@ -1008,7 +1008,7 @@ impl Hub {
                         )
                     })?;
                     limited(&mut state)?;
-                    let moved = self.agent_goes(&mut state, &space, at, eyes, now);
+                    self.agent_goes(&mut state, &space, at, eyes, now);
                     let record = state.space_mut(&space).expect("found above");
                     record.agent_at = record.summoned.map(|pose| (name.clone(), pose));
                     log::info!(
@@ -1016,7 +1016,7 @@ impl Hub {
                         because(&asked)
                     );
                     state.touch_space(&space);
-                    moved
+                    true
                 }
             }
             Going::Object(id) => {
@@ -1046,7 +1046,7 @@ impl Hub {
                             .arriving(&environments, &name, 0)
                             .expect("an anchor of its clusters");
                         limited(&mut state)?;
-                        let moved = self.agent_goes(&mut state, &space, at, eyes, now);
+                        self.agent_goes(&mut state, &space, at, eyes, now);
                         let record = state.space_mut(&space).expect("found above");
                         record.agent_at = record.summoned.map(|pose| (name.clone(), pose));
                         log::info!(
@@ -1054,7 +1054,7 @@ impl Hub {
                             because(&asked)
                         );
                         state.touch_space(&space);
-                        moved
+                        true
                     }
                     (None, Some(position)) => {
                         let asker = record.model.origin().unwrap_or_else(|| {
