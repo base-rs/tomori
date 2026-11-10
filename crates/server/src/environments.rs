@@ -1537,6 +1537,15 @@ mod tests {
             (compatible.workers, compatible.clusters),
             (Some(yard), vec![])
         );
+        // A home anchor that stands its workers in a ring is sent, with or without room, its sweep with it; one that
+        // stands them on the arc, without room, is not, as `with_workers` declares it.
+        use tomori_protocol::cluster::Formation;
+        let ring = Anchor::new(HOME, yard)
+            .with_formation(Formation::Ring)
+            .with_sweep(240.0);
+        let ringed = tomoris().with(Environment::new("ringed", "Ringed").with_anchor(ring.clone()));
+        assert_eq!(ringed.anchors("ringed").clusters, [ring]);
+        assert_eq!(ringed.anchors("ringed").workers, Some(yard));
         let street = offered.anchors("street");
         let home = street.cluster(HOME).unwrap();
         assert_eq!(Some(home.pose), street.workers);

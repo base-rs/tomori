@@ -860,6 +860,14 @@ mod tests {
             }));
         let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
         assert_eq!(feed.swarm_anchor(), Anchor::from_pose(&agent).unwrap());
+        // Its ring on the floor about the agent's home, as the headset draws it.
+        assert_eq!(
+            feed.home_ring(),
+            tomori_scene::anchors::HomeRing {
+                centre: glam::Vec3::from_array(agent.position),
+                ..tomori_scene::anchors::HomeRing::WHOLE
+            }
+        );
         // As the headset's frame step places it, by the same placement about the same anchor.
         assert_eq!(frame.worker_stations[0].position, [0.0, 1.5, -6.0]);
     }

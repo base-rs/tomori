@@ -154,8 +154,26 @@ mod tests {
             [
                 (false, false, false, false),
                 (false, false, false, false),
-                (true, true, false, false)
+                (true, true, false, true)
             ]
+        );
+        // Sky and the grid keep today's arc about the arrival, a theatre about whoever sits with the agent; the farmyard's
+        // workers stand in a ring about the agent's home, on the ring drawn there, in its room.
+        let formations: Vec<Option<tomori_protocol::cluster::Formation>> = builder
+            .environments()
+            .iter()
+            .map(|environment| environment.home().map(|home| home.formation))
+            .collect();
+        assert_eq!(
+            formations,
+            [None, None, Some(tomori_protocol::cluster::Formation::Ring)]
+        );
+        let home = super::farmyard_home();
+        assert_eq!(home.pose, super::farmyard_agent());
+        assert_eq!(
+            home.extent
+                .map(|room| [room.width, room.height, room.depth]),
+            Some(tomori_environment_farmyard::layout::HOME_ROOM)
         );
     }
 

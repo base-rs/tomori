@@ -7764,6 +7764,8 @@ mod tests {
             let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
             let at = frame.swarm.anchor().position;
             assert!(at.distance(last) <= crate::glide::SPEED * FRAME + 1e-4);
+            // Its ring on the floor stays at home as it goes.
+            assert_eq!(frame.home_ring, crate::anchors::HomeRing::WHOLE);
             highest = highest.max(at.y);
             last = at;
         }
@@ -8031,6 +8033,8 @@ mod tests {
             // Where the environment and the agent stand in the participant's room.
             let carriage = rig.unplace(arrangement.carriage);
             let agent = rig.unplace(arrangement.agent);
+            let ring = rig.unplace(at(arrangement.home_ring().centre)).position;
+            assert_eq!(frame.home_ring, arrangement.home_ring());
             let mut swarm = rig.matrix().inverse().transform_point3(middle(&step));
             // Leaving, the rig goes home at once, while the environment shrinks back into the space's object.
             let mut senses = if within {
@@ -8055,6 +8059,7 @@ mod tests {
                     // Once it has gone, the agent appears back at its place, and nothing is carried.
                     assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
                     assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
+                    assert_eq!(frame.home_ring, crate::anchors::HomeRing::WHOLE);
                     break;
                 }
                 shrinking += 1;
@@ -8065,6 +8070,14 @@ mod tests {
                 );
                 assert!(
                     close(rig.unplace(frame.swarm.anchor()), agent),
+                    "{within} {shrinking}"
+                );
+                // Its ring on the floor with it.
+                assert!(
+                    rig.unplace(at(frame.home_ring.centre))
+                        .position
+                        .distance(ring)
+                        < 1e-4,
                     "{within} {shrinking}"
                 );
                 let seen = rig.matrix().inverse().transform_point3(middle(&step));

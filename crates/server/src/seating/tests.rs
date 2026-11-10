@@ -183,6 +183,18 @@ fn the_home_anchor_stands_about_the_workers_anchor_or_else_the_agent_s_home_in_i
         home(&tomori_protocol::Anchors::new()).pose,
         crate::hub::agent_home(&tomori_protocol::Anchors::new())
     );
+    // In a ring, part of one, as its environment says, as every client lays it out.
+    let ring = Anchor::new(HOME, pose)
+        .with_formation(tomori_protocol::cluster::Formation::Ring)
+        .with_sweep(270.0);
+    let anchors = tomori_protocol::Anchors::new()
+        .with_workers(pose)
+        .with_cluster(ring.clone());
+    assert_eq!(home(&anchors), ring);
+    assert_eq!(
+        Cluster::new(&home(&anchors)).arrange(3).step(),
+        tomori_protocol::cluster::Step::Ring
+    );
 }
 
 #[test]

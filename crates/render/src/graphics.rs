@@ -3168,6 +3168,107 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_on_the_floor_stays_at_home_faint_while_the_agent_is_away() {
+        use tomori_scene::anchors::HomeRing;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            let mut swarm = Swarm::default();
+            let home = glam::Vec3::new(-1.0, 1.5, -4.0);
+            let ring = HomeRing {
+                centre: home,
+                radius: tomori_protocol::cluster::RING,
+                towards: glam::Vec3::Z,
+                sweep: std::f32::consts::TAU,
+            };
+            renderer.set_home_ring(Some(ring));
+            // The ring's cubes, on the floor beneath home, raised 0.1 m above the swarm's usual height.
+            let floor = |renderer: &Renderer| -> Vec<Instance> {
+                renderer
+                    .scene
+                    .iter()
+                    .filter(|instance| (instance.position[1] - 0.115).abs() < 1e-5)
+                    .copied()
+                    .collect()
+            };
+            let at = |anchor: glam::Vec3| tomori_scene::anchors::Anchor {
+                position: anchor,
+                orientation: glam::Quat::IDENTITY,
+            };
+            swarm.set_anchor(at(home));
+            renderer.update(&queue, &swarm, None, false);
+            let at_home = floor(&renderer);
+            assert_eq!(at_home.len(), HOME_RING_CUBES);
+            for instance in &at_home {
+                let across =
+                    glam::Vec2::new(instance.position[0] - home.x, instance.position[2] - home.z)
+                        .length();
+                assert!((across - ring.radius).abs() < 1e-4);
+                assert_eq!(instance.color, HOME_RING_COLOUR);
+            }
+            // The agent gone to someone 4 m away, the ring stays where it was, faint.
+            swarm.set_anchor(at(glam::Vec3::new(2.0, 1.5, -1.0)));
+            renderer.update(&queue, &swarm, None, false);
+            let away = floor(&renderer);
+            assert_eq!(
+                away.iter()
+                    .map(|instance| instance.position)
+                    .collect::<Vec<_>>(),
+                at_home
+                    .iter()
+                    .map(|instance| instance.position)
+                    .collect::<Vec<_>>()
+            );
+            let faint = HOME_RING_COLOUR.map(|channel| channel * HOME_RING_AWAY);
+            assert!(away.iter().all(|instance| {
+                (0..3).all(|channel| (instance.color[channel] - faint[channel]).abs() < 1e-6)
+            }));
+            // Coming back within the ring, it brightens again.
+            swarm.set_anchor(at(home + glam::Vec3::new(0.9, 0.0, 0.0)));
+            renderer.update(&queue, &swarm, None, false);
+            let nearly = floor(&renderer)[0].color[1];
+            assert!(
+                nearly > faint[1] && nearly < HOME_RING_COLOUR[1],
+                "{nearly}"
+            );
+            // Two thirds of a ring, about the way to the arrival: the side behind it is not drawn.
+            renderer.set_home_ring(Some(HomeRing {
+                sweep: 240f32.to_radians(),
+                ..ring
+            }));
+            renderer.update(&queue, &swarm, None, false);
+            let part = floor(&renderer);
+            assert!(part.len() < HOME_RING_CUBES * 3 / 4 && part.len() > HOME_RING_CUBES / 2);
+            assert!(
+                part.iter()
+                    .all(|instance| instance.position[2] - home.z > -0.71)
+            );
+            // Nonsense, or none, draws it beneath the swarm, as before there were homes.
+            for nonsense in [
+                HomeRing {
+                    radius: 9.0,
+                    ..ring
+                },
+                HomeRing {
+                    centre: glam::Vec3::NAN,
+                    ..ring
+                },
+            ] {
+                renderer.set_home_ring(Some(nonsense));
+                renderer.update(&queue, &swarm, None, false);
+                let beneath = floor(&renderer);
+                assert_eq!(beneath.len(), HOME_RING_CUBES);
+                let middle = beneath
+                    .iter()
+                    .map(|instance| glam::Vec3::from_array(instance.position))
+                    .sum::<glam::Vec3>()
+                    / beneath.len() as f32;
+                assert!((middle.x - (home.x + 0.9)).abs() < 1e-3, "{middle}");
+            }
+        });
+    }
+
+    #[test]
     fn a_blink_darkens_the_whole_view_to_black_and_back() {
         const SIZE: u32 = 64;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
