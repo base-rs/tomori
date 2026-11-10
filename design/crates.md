@@ -53,6 +53,8 @@ These stay unpublished, with `publish = false`:
 
 A published crate depends only on published crates and on crates.io packages, never on an unpublished crate, a path outside its folder or a Git repository. Each published crate has a description, license, repository, readme, keywords and categories, and ships `license.md`, linked from the repository root.
 
+Every crate that does networking or asynchronous work uses one set of Base crates, at one version each across the workspace: `base-http` 0.4, with `base-http-server` for the server's listeners and `base-http-client` for clients, backends and data sources, `base-scheduler` 0.5 on its native backend, `base-scheduler-native`, and `base-endpoint` 0.3 for TLS. Their types, such as `base_scheduler::Cancellation`, appear in the interfaces of `tomori-environment` and `tomori-server`, so a downstream crate uses the same versions, and moving to a newer one is a breaking change that `releases.md` records.
+
 ## Rationale
 
 Other projects need to build their own server and headset with their own environments, data sources and tools, without forking Tomori. That needs Tomori's crates on crates.io under names that cannot collide with other packages in its flat namespace, released at one version so that a downstream project can depend on a matching set. The short folder names keep paths in the repository readable, as Base's own workspaces do. The executable, library and Android names are what people and scripts already use, so packaging must not break them. Proposed in [#73](https://github.com/ioquatix/tomori/issues/73) in November 2026; when to publish for the first time is still the maintainer's decision. The names were found free on crates.io on 2026-11-03; see `docs/naming.md`.

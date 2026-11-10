@@ -88,12 +88,12 @@ async-channel = "2"
 tomori-backend = { version = "0.2.0", path = "../backend" }
 tomori-environment = { version = "0.2.0", path = "../environment" }
 tomori-backend-opencode = { version = "0.2.0", path = "../backend-opencode", optional = true }
-base-http = "0.2.0"
-base-http-client = { version = "0.2.0", features = ["rustls"] }
-base-endpoint = { version = "0.1.0", features = ["rustls"] }
-base-http-server = { version = "0.2.0", features = ["rustls"] }
-base-scheduler = "0.3.0"
-base-scheduler-native = "0.3.1"
+base-http = "0.4.0"
+base-http-client = { version = "0.4.0", features = ["rustls"] }
+base-endpoint = { version = "0.3.0", features = ["rustls"] }
+base-http-server = { version = "0.4.0", features = ["rustls"] }
+base-scheduler = "0.5.0"
+base-scheduler-native = "0.5.0"
 tomori-discovery = { version = "0.2.0", path = "../discovery" }
 tomori-highlight = { version = "0.2.0", path = "../highlight", optional = true }
 env_logger = "0.11"

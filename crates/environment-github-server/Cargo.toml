@@ -11,10 +11,10 @@ keywords = ["tomori", "github", "environment", "server"]
 categories = ["network-programming", "api-bindings"]
 
 [dependencies]
-base-http = "0.2.0"
-base-http-client = { version = "0.2.0", features = ["rustls"] }
-base-scheduler = "0.3.0"
-base-scheduler-native = "0.3.1"
+base-http = "0.4.0"
+base-http-client = { version = "0.4.0", features = ["rustls"] }
+base-scheduler = "0.5.0"
+base-scheduler-native = "0.5.0"
 futures-lite = "2"
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 serde_json = "1"

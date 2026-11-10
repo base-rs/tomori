@@ -4,7 +4,7 @@ This describes the target design for the Rust server that replaces `bridge/`, an
 
 ## Requirement
 
-The PC server is a Rust program built on `base-http-server`. It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
+The PC server is a Rust program built on `base-http-server`, from `base-http` 0.4, running on `base-scheduler` 0.5's native backend, with TLS from `base-endpoint` 0.3 (see `crates.md`). It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`.
 
@@ -46,7 +46,7 @@ The server crate, the protocol crate, the shared client crate and network config
 
 ## Validation
 
-- Inspect dependencies: the server uses `base-http-server`; client and server wire types come from the protocol crate.
+- Inspect dependencies: the server uses `base-http-server` 0.4, and every crate the same versions of `base-http`, `base-scheduler` and `base-endpoint`; client and server wire types come from the protocol crate.
 - Test a client session over one connection carrying control messages, events and audio concurrently.
 - Confirm that a headset can connect over the local network without USB.
 - Test that a space or worker state a client does not know is read as unknown.
