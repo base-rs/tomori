@@ -106,7 +106,14 @@ impl Pose {
     /// assert!((origin[2] + 8.0).abs() < 1e-5);
     /// ```
     pub fn carriage(arrival: &Self) -> Self {
-        let yaw = Self::HOME.yaw() - arrival.yaw();
+        // Turned exactly as home is, unturned exactly, rather than by the difference of two `atan2`s, which differ by a
+        // rounding where the compiler folds home's and the platform's library computes the arrival's, as macOS's does:
+        // so that the default arrival's carriage is exactly the identity everywhere.
+        let yaw = if arrival.orientation == Self::HOME.orientation {
+            0.0
+        } else {
+            Self::HOME.yaw() - arrival.yaw()
+        };
         let (sin, cos) = yaw.sin_cos();
         let [x, y, z] = arrival.position;
         Self::upright([-(x * cos + z * sin), -y, -(-x * sin + z * cos)], yaw)
@@ -2056,6 +2063,39 @@ mod tests {
             ServerMessage::SessionDeleted {
                 error: Some("the agent is unreachable".into()),
             }
+        );
+    }
+
+    #[test]
+    fn the_default_arrival_carries_nothing_exactly_on_every_platform() {
+        // Unturned and unmoved, bit for bit, where macOS's `atan2f(0, −1)` is a rounding below the π folded for home:
+        // given home as a client is, at run time, so that the compiler cannot fold the arrival's yaw too.
+        let carriage = Pose::carriage(&std::hint::black_box(Pose::HOME));
+        assert_eq!(carriage, Pose::at([0.0; 3]));
+        // Facing as home does, elsewhere, only moved.
+        let ahead = Pose::carriage(&Pose {
+            position: [1.0, 2.0, -3.0],
+            ..Pose::HOME
+        });
+        assert_eq!(ahead, Pose::at([-1.0, -2.0, 3.0]));
+    }
+
+    #[test]
+    fn an_arrival_elsewhere_is_carried_to_home() {
+        // Arriving 8 m along +X, facing −X: turned a quarter clockwise, seen from above, and the environment's origin
+        // is 8 m ahead of home.
+        let street = Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        let carriage = Pose::carriage(&street);
+        let yaw = carriage.yaw();
+        assert!((yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-6, "{yaw}");
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5);
+        let origin = carriage.carry(&Pose::at([0.0; 3])).position;
+        assert!(close(origin, [0.0, 0.0, -8.0]), "{origin:?}");
+        let arrival = carriage.carry(&street);
+        assert!(close(arrival.position, [0.0; 3]), "{arrival:?}");
+        assert!(
+            (arrival.yaw().abs() - std::f32::consts::PI).abs() < 1e-6,
+            "{arrival:?}"
         );
     }
 }
