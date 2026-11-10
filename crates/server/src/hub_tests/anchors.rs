@@ -134,10 +134,18 @@ fn a_ring_home_is_sent_to_everyone_its_workers_seated_in_it_and_the_agent_told_o
     let ring = Anchor::new(HOME, home)
         .with_formation(tomori_protocol::cluster::Formation::Ring)
         .with_sweep(270.0);
+    // And a pen elsewhere, its whole ring about its point.
+    let pen = Anchor::new(
+        "pen",
+        tomori_protocol::Pose::at([3.0, 1.2, -5.0]).facing_towards([0.0, 1.2, 0.0]),
+    )
+    .with_formation(tomori_protocol::cluster::Formation::Ring)
+    .with_extent(4.0, 2.0, 4.0);
     hub.set_environments(Environments::new([crate::environments::Environment::new(
         "farm", "Farm",
     )
-    .with_anchor(ring.clone())]));
+    .with_anchor(ring.clone())
+    .with_anchor(pen)]));
     hub.serving();
     let mut bound = request("ada");
     bound.environment = "farm".to_owned();
@@ -177,6 +185,13 @@ fn a_ring_home_is_sent_to_everyone_its_workers_seated_in_it_and_the_agent_told_o
             &serde_json::json!("the ring about home")
         )
     );
+    let pen = &presence["anchors"][1];
+    assert_eq!(
+        (&pen["name"], &pen["formation"]),
+        (&serde_json::json!("pen"), &serde_json::json!("ring"))
+    );
+    assert!(pen.get("sweep").is_none());
+    assert_eq!(pen["extent"]["width"], 4.0);
 }
 
 #[test]
