@@ -54,18 +54,16 @@ impl Held {
     /// Apply `patch`, sent at `now`, to what it holds, undoing a tick shown at once first, so that it applies to what the
     /// server sent. Returns the revision held where the patch does not apply, as from another revision after one was
     /// missed, or one naming what it does not hold, the first time since it was last sent the projection whole, for the
-    /// client to ask for it whole with `ClientMessage::ResyncProjection`; it keeps what it held meanwhile.
+    /// client to ask for it whole with `ClientMessage::ResyncProjection`; it keeps what it held meanwhile, since a patch
+    /// refused, even partway, changes nothing.
     pub(crate) fn patch(&mut self, patch: &ProjectionPatch, now: Instant) -> Option<u64> {
         let Some(projection) = self.projection.as_mut() else {
             return self.ask(0);
         };
         for (panel, body) in self.ticked.drain() {
-            projection
-                .panels
-                .iter_mut()
-                .find(|shown| shown.id == panel)
-                .expect("a panel ticked is held until the server sends again")
-                .body = body;
+            if let Some(shown) = projection.panels.iter_mut().find(|shown| shown.id == panel) {
+                shown.body = body;
+            }
         }
         let revision = projection.revision;
         if let Err(error) = patch.apply(projection) {
@@ -80,11 +78,13 @@ impl Held {
         }
         self.projected
             .retain(|id, _| projection.panels.iter().any(|panel| panel.id == *id));
-        // Every panel held was sent whole, by the projection or a patch, when it was projected.
+        // Every panel held was sent whole, by the projection or a patch, when it was projected; one that somehow was
+        // not, as from a server that names one panel twice, keeps the age it was sent with, rather than the client
+        // failing on what a server sent.
         for panel in &mut projection.panels {
-            panel.age = now
-                .saturating_duration_since(self.projected[&panel.id])
-                .as_secs();
+            if let Some(projected) = self.projected.get(&panel.id) {
+                panel.age = now.saturating_duration_since(*projected).as_secs();
+            }
         }
         None
     }

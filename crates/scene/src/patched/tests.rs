@@ -74,6 +74,23 @@ fn a_patch_applies_from_the_revision_held_and_a_gap_asks_once_for_the_projection
         }],
     );
     assert_eq!(held.patch(&missing, now), Some(9));
+    assert_eq!(held.projection().unwrap().revision, 9);
+    // One refused partway, after a panel it added and one it removed, keeps what is held, not half patched, and is
+    // patched from there once sent whole again; a later patch from the revision held then applies, every panel's age
+    // counted.
+    let held_now = held.projection().cloned().unwrap();
+    let mut partway = fifth.clone().with_revision(10);
+    partway.panels.remove(0);
+    partway
+        .panels
+        .push(Panel::new("new", "New", "New.", on(2)).with_revision(1));
+    let mut refused = patch(&fifth, &partway);
+    refused.ops.push(PatchOp::Unknown);
+    held.whole(fifth.clone(), now);
+    assert_eq!(held.patch(&refused, now), Some(9));
+    assert_eq!(held.projection(), Some(&held_now));
+    assert_eq!(held.patch(&patch(&fifth, &partway), now), None);
+    assert_eq!(held.projection(), Some(&partway));
     held.clear();
     assert_eq!(held.projection(), None);
 }
