@@ -3698,7 +3698,10 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     };
     // Published, it is on the environment's wall for everyone, a chart with its summary for older clients.
     assert_eq!(outlet(binding).publish(chart(0.7)), Ok(()));
-    let shown = ada.projections().pop().expect("sent as it is published");
+    let shown = ada
+        .paced_projections()
+        .pop()
+        .expect("sent as it is published");
     let panel = shown.panels[0].clone();
     assert_eq!(
         panel.place,
@@ -3723,26 +3726,26 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     // itself, goes at once while the space has changes left, rather than waiting behind it.
     assert_eq!(outlet(binding).publish(chart(0.8)), Ok(()));
     assert_eq!(outlet(binding).publish(chart(0.85)), Ok(()));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     let rota = tomori_environment::Panel::text("rota", "Rota", "Feed the hens");
     assert_eq!(outlet(binding).publish(rota.clone()), Ok(()));
-    let shown = ada.projections().pop().unwrap();
+    let shown = ada.paced_projections().pop().unwrap();
     assert_eq!(shown.panels.len(), 2);
     assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.7 now");
     // As soon as it may be, at the hub's next sweep, the latest arrives.
     let soon = Instant::now() + Duration::from_secs(1);
     hub.flush_publishes(soon);
-    let shown = ada.projections().pop().unwrap();
+    let shown = ada.paced_projections().pop().unwrap();
     assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.85 now");
     // The same again changes nothing, waits for nothing and costs nothing.
     assert_eq!(outlet(binding).publish(chart(0.85)), Ok(()));
     hub.flush_publishes(soon + Duration::from_secs(1));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     // An update that could never be made is refused at once, though it would have waited: onto a wall the environment
     // does not declare, or into a slot its wall has not.
     let note = tomori_environment::Panel::text("note", "Note", "x");
     assert_eq!(outlet(binding).publish(note.clone()), Ok(()));
-    assert_eq!(ada.projections().pop().unwrap().panels.len(), 3);
+    assert_eq!(ada.paced_projections().pop().unwrap().panels.len(), 3);
     for refused in [Some(3), None].map(|wall| {
         let panel = tomori_environment::Panel::text("note", "Note", "y");
         match wall {
@@ -3753,9 +3756,9 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         assert!(outlet(binding).publish(refused).is_err());
     }
     hub.flush_publishes(soon + Duration::from_secs(2));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     assert_eq!(outlet(binding).retract("note"), Ok(()));
-    assert_eq!(ada.projections().pop().unwrap().panels.len(), 2);
+    assert_eq!(ada.paced_projections().pop().unwrap().panels.len(), 2);
     // One waiting that the stage refuses once it may be made, its wall having filled with panels participants
     // arranged meanwhile, is dropped, and said once for each panel.
     let late = |id: &str| {
@@ -3820,7 +3823,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         outlet(binding).publish(tomori_environment::Panel::text("full", "Full", "x")),
         Err("That wall is full.".into())
     );
-    let _ = ada.projections();
+    let _ = ada.paced_projections();
     {
         let mut state = hub.lock();
         let record = state.space_mut(&id).unwrap();
@@ -3865,7 +3868,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         slot: Some(4),
         pose: None,
     });
-    let shown = ada.projections().pop().unwrap();
+    let shown = ada.paced_projections().pop().unwrap();
     assert!(wall(&shown));
     let on = |slot| tomori_protocol::Place::Wall {
         wall: "environment-0".into(),
@@ -3874,7 +3877,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     assert_eq!(shown.panel(&panel.id).unwrap().place, on(4));
     hub.flush_publishes(soon + Duration::from_secs(3));
     assert_eq!(outlet(binding).publish(chart(0.9)), Ok(()));
-    let shown = ada.projections().pop().unwrap();
+    let shown = ada.paced_projections().pop().unwrap();
     let updated = shown.panel(&panel.id).unwrap();
     assert_eq!(
         (updated.body.as_str(), &updated.place),
@@ -3884,21 +3887,21 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     ada.send(ClientMessage::DismissPanel {
         panel: panel.id.clone(),
     });
-    assert_eq!(ada.projections().pop().unwrap().panels.len(), 1);
+    assert_eq!(ada.paced_projections().pop().unwrap().panels.len(), 1);
     assert_eq!(outlet(binding).publish(chart(0.9)), Ok(()));
     hub.flush_publishes(soon + Duration::from_secs(3));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     // Retracted, the rota goes; retracting what is not there sends nothing.
     assert_eq!(outlet(binding).retract("rota"), Ok(()));
-    assert!(ada.projections().pop().unwrap().panels.is_empty());
+    assert!(ada.paced_projections().pop().unwrap().panels.is_empty());
     assert_eq!(outlet(binding).retract("gone"), Ok(()));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     // Retracted and published again at once, it is back.
     assert_eq!(outlet(binding).retract("pressure"), Ok(()));
     assert_eq!(outlet(binding).publish(chart(1.0)), Ok(()));
-    assert_eq!(ada.projections().pop().unwrap().panels.len(), 1);
+    assert_eq!(ada.paced_projections().pop().unwrap().panels.len(), 1);
     assert_eq!(outlet(binding).retract("pressure"), Ok(()));
-    assert!(ada.projections().pop().unwrap().panels.is_empty());
+    assert!(ada.paced_projections().pop().unwrap().panels.is_empty());
     // With no changes left, updates wait, at most so many, one a panel.
     hub.lock()
         .space_mut(&id)
@@ -3932,7 +3935,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     // Made as soon as they may be: those the stage takes go up, at the next sweep.
     let before = ada.projection().panels.len();
     hub.flush_publishes(soon + Duration::from_secs(10));
-    assert!(ada.projections().pop().unwrap().panels.len() > before);
+    assert!(ada.paced_projections().pop().unwrap().panels.len() > before);
     // The same again, when it may be made, changes nothing.
     hub.lock()
         .space_mut(&id)
@@ -3943,7 +3946,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         .publishes = Some(crate::channel::Publishes::new(Instant::now()));
     let w0 = tomori_environment::Panel::text("w0", "", "x");
     assert_eq!(outlet(binding).publish(w0), Ok(()));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     // Messages, whatever they change, are held to a rate too.
     let refused = (0..crate::channel::MESSAGE_BURST as usize + 1)
         .map(|_| outlet(binding).retract("gone"))
@@ -3978,14 +3981,14 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
             message: Some("The yard environment failed.".into()),
         });
     }
-    let projections = ada.projections();
+    let projections = ada.paced_projections();
     assert_eq!(projections.len(), 1);
     assert!(projections[0].panels.is_empty());
     hub.flush_publishes(soon + Duration::from_secs(20));
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     assert!(outlet(binding).publish(update.clone()).is_err());
     assert!(outlet(binding).retract("w0").is_err());
-    assert!(ada.projections().is_empty());
+    assert!(ada.paced_projections().is_empty());
     // Run again, for a new binding, its side publishes as before, its panels back where they rested.
     ada.send(ClientMessage::SetEnvironment {
         environment: "sky".into(),
@@ -3997,7 +4000,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     let again = hub.server_sides.binding(&id).unwrap();
     assert_ne!(again, binding);
     assert_eq!(outlet(again).publish(update), Ok(()));
-    let back = ada.projections().pop().unwrap();
+    let back = ada.paced_projections().pop().unwrap();
     assert_eq!(back.panels.len(), 1);
     assert_eq!(back.panels[0].body, "y");
     let orphan = outlet(again);
@@ -4016,7 +4019,11 @@ fn every_panel_s_latest_update_arrives_in_turn_when_a_side_updates_more_than_the
     hub.set_environments(Environments::new([
         crate::environments::Environment::new("sky", "Sky"),
         crate::environments::Environment::new("yard", "Yard")
-            .with_walls([upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])])
+            .with_walls(
+                [upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])].map(|pose| {
+                    crate::EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((8, 2)))
+                }),
+            )
             .with_server_side(Idle),
     ]));
     hub.serving();
@@ -4032,10 +4039,17 @@ fn every_panel_s_latest_update_arrives_in_turn_when_a_side_updates_more_than_the
     };
     let ada = Client::projecting(&hub, Access::open(), "ada");
     ada.join(&id);
-    // Eight panels, each updated every second in the same order: twice the 4 changes a second the space may make.
+    // As many panels as a side may show, 32, on two walls of 16 slots, each updated every second in the same order:
+    // twice the 16 changes a second the space may make.
+    let panels = crate::stage::PUBLISHED as u64;
+    assert_eq!(
+        panels as f32,
+        2.0 * crate::channel::PUBLISHES_PER_SECOND,
+        "twice what the space may change"
+    );
     let start = Instant::now();
     for second in 0..12_u64 {
-        for panel in 0..8_u64 {
+        for panel in 0..panels {
             let update = tomori_environment::Panel::text(
                 format!("p{panel}"),
                 format!("P{panel}"),
@@ -4045,10 +4059,14 @@ fn every_panel_s_latest_update_arrives_in_turn_when_a_side_updates_more_than_the
             let at = start + Duration::from_secs(second) + Duration::from_millis(panel);
             assert_eq!(hub.channel_publish_at(&outlet, update, at), Ok(()));
         }
+        // Every one is put up at once, as the side first publishes them.
+        if second == 0 {
+            assert_eq!(ada.projection().panels.len(), panels as usize);
+        }
         hub.flush_publishes(start + Duration::from_secs(second) + Duration::from_millis(500));
         // Every panel shows an update at most 2 seconds old: none is starved.
         let shown = ada.projection();
-        for panel in 0..8 {
+        for panel in 0..panels {
             let value: u64 = shown
                 .panels
                 .iter()
@@ -4058,6 +4076,205 @@ fn every_panel_s_latest_update_arrives_in_turn_when_a_side_updates_more_than_the
             assert!(value + 2 >= second, "panel {panel} at {second}: {value}");
         }
     }
+}
+
+#[test]
+fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls(
+                [upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])].map(|pose| {
+                    crate::EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((8, 2)))
+                }),
+            )
+            .with_server_side(Idle),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    // The largest list there can be: as many rows as it may have, each with the longest id and reference, their text
+    // as long as a body holds of them all, in characters of four bytes, and the longest title.
+    let list = |panel: usize| {
+        let rows = (0..tomori_environment::ROW_LIMIT)
+            .map(|row| {
+                let name = format!("{panel:02}-{row:02}-{}", "r".repeat(58));
+                assert_eq!(name.len(), tomori_environment::ROW_ID_BYTES);
+                tomori_environment::Row::new(name.clone(), "\u{1F600}".repeat(38))
+                    .with_reference(name)
+            })
+            .collect();
+        tomori_environment::Panel::list(format!("list-{panel}"), "\u{1F600}".repeat(80), rows)
+            .on_wall(panel as u32 % 2, None)
+            .with_reference(format!("list/{panel}"))
+    };
+    // Every one is taken in the same instant, and shown to everyone at once; one more is refused, saying how many.
+    let now = Instant::now();
+    for panel in 0..crate::stage::PUBLISHED {
+        assert_eq!(hub.channel_publish_at(&outlet, list(panel), now), Ok(()));
+    }
+    let shown = ada.projections().pop().unwrap();
+    assert_eq!(shown.panels.len(), crate::stage::PUBLISHED);
+    assert!(shown.panels.iter().all(|panel| {
+        panel.body.lines().count() == tomori_environment::ROW_LIMIT
+            && matches!(&panel.place, tomori_protocol::Place::Wall { wall, .. } if wall.starts_with("environment-"))
+    }));
+    assert_eq!(
+        hub.channel_publish_at(&outlet, list(crate::stage::PUBLISHED), now),
+        Err("An environment publishes at most 32 panels in a space.".into())
+    );
+    assert!(ada.projections().is_empty());
+    // The agent lists them, briefly: how much each holds, its lines, items and rows, as counts, a page at a time, each
+    // page within what an agent reads as it is sent, as structured content and again as text, where their text, its
+    // rows and its items took 531 KB, and 1.1 MB as sent. Every panel is on some page, once, in the projection's order.
+    let most = crate::hub::agent_panels::LISTING_BYTES;
+    let wire =
+        |result: &serde_json::Value| crate::mcp::structured(result.clone()).to_string().len();
+    let pages = |hub: &Arc<Hub>| -> Vec<serde_json::Value> {
+        let mut pages = Vec::new();
+        let mut offset = Some(0);
+        while let Some(from) = offset {
+            let page = hub.tool_panels("session", None, from).unwrap();
+            assert!(wire(&page) <= most, "{} bytes", wire(&page));
+            assert_eq!(page["offset"], from);
+            assert_eq!(crate::hub::agent_panels::sent(&page), wire(&page) - 58);
+            offset = page["next"].as_u64().map(|next| next as usize);
+            assert_eq!(offset.is_some(), page.get("note").is_some());
+            pages.push(page);
+        }
+        pages
+    };
+    let identities = |pages: &[serde_json::Value]| -> Vec<String> {
+        let panels = pages
+            .iter()
+            .flat_map(|page| page["panels"].as_array().unwrap());
+        panels
+            .map(|panel| panel["panel"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let shown = |ada: &Client| -> Vec<String> {
+        ada.projection()
+            .panels
+            .into_iter()
+            .map(|panel| panel.id)
+            .collect()
+    };
+    let listed: [serde_json::Value; 2] = pages(&hub).try_into().expect("two pages");
+    assert_eq!(identities(&listed), shown(&ada));
+    assert!(wire(&listed[0]) > most - 2048);
+    assert!(listed[0]["note"].as_str().unwrap().starts_with(&format!(
+        "Panels 1 to {} of 32 are listed.",
+        listed[0]["next"]
+    )));
+    for panel in listed
+        .iter()
+        .flat_map(|page| page["panels"].as_array().unwrap())
+    {
+        let counts = ["line_count", "item_count", "row_count"].map(|count| panel[count].as_u64());
+        assert_eq!(counts, [Some(30); 3]);
+        assert_eq!(panel["kind"], "text");
+        assert!(panel["environment_panel"].is_string());
+        assert!(
+            ["body", "items", "rows"]
+                .iter()
+                .all(|key| panel.get(key).is_none())
+        );
+        assert!(panel.to_string().len() <= 1024);
+    }
+    assert!(listed.iter().all(|page| page["total"] == 32));
+    // A page that holds every panel from its offset says how each one's text begins; one that does not, leaves it out.
+    let excerpts = listed.each_ref().map(|page| {
+        let panels = page["panels"].as_array().unwrap();
+        panels
+            .iter()
+            .filter(|panel| panel.get("excerpt").is_some())
+            .count()
+            == panels.len()
+    });
+    assert_eq!(excerpts, [false, true]);
+    // It reads one whole by naming it: its rows, each with its id, its inspect id and its text, once, with neither
+    // its body nor its items, which say the same; the largest list there can be is 11 KB, 23 KB as sent.
+    let published = identities(&listed);
+    let named = published[3].clone();
+    let read = hub.tool_panels("session", Some(&named), 0).unwrap();
+    assert!(wire(&read) <= most, "{} bytes", wire(&read));
+    let read = read["panels"].as_array().unwrap();
+    assert_eq!(read.len(), 1);
+    let rows = read[0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), tomori_environment::ROW_LIMIT);
+    assert_eq!(rows[2]["text"], "\u{1F600}".repeat(38));
+    assert!(rows[2]["inspect_id"].as_str().unwrap().starts_with("yard:"));
+    assert_eq!(rows[2]["highlighted"], false);
+    let absent = ["body", "items", "row_count", "item_count", "line_count"];
+    assert!(absent.iter().all(|key| read[0].get(key).is_none()));
+    assert_eq!(
+        hub.tool_panels("session", Some("no such panel"), 0),
+        Err("There is no such panel here.".to_owned())
+    );
+    // With the agent's own panels as well, as many as float, each the largest text panel there is, 152 panels are
+    // listed over several pages, each within what is read, every panel on one of them, so that the agent can name
+    // any; a page past the last lists none; and each is read whole by naming it, its body and its items, within it too.
+    let largest = format!(
+        "title: {}\n---\n{}",
+        "\u{1F600}".repeat(200),
+        vec![format!("- [ ] {}", "\u{1F600}".repeat(34)); 30].join("\n")
+    );
+    let floating = {
+        let mut state = hub.lock();
+        let record = state.space_mut(&id).unwrap();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let ids: Vec<String> = (0..crate::stage::FLOATING)
+            .map(|index| {
+                let note = crate::stage::Content::parse(&largest).unwrap();
+                let at = crate::stage::Destination::Free(tomori_protocol::Pose::at([
+                    index as f32 % 12.0 - 6.0,
+                    1.5,
+                    (index / 12) as f32 - 5.0,
+                ]));
+                record.stage.project_to(&walls, note, &at, 0)
+            })
+            .collect();
+        ids
+    };
+    let total = crate::stage::PUBLISHED + floating.len();
+    let listed = pages(&hub);
+    assert!((4..=8).contains(&listed.len()), "{} pages", listed.len());
+    assert!(listed.iter().all(|page| page["total"] == total));
+    let every = identities(&listed);
+    assert_eq!(every.len(), total);
+    assert_eq!(every[..crate::stage::PUBLISHED], published);
+    assert_eq!(every[crate::stage::PUBLISHED..], floating);
+    let past = hub.tool_panels("session", None, total + 5).unwrap();
+    assert_eq!(past["panels"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        (&past["total"], &past["offset"]),
+        (&serde_json::json!(total), &serde_json::json!(total))
+    );
+    assert!(past.get("next").is_none());
+    let read = hub
+        .tool_panels("session", floating.last().map(String::as_str), 0)
+        .unwrap();
+    assert!(wire(&read) <= most, "{} bytes", wire(&read));
+    let read = &read["panels"][0];
+    assert_eq!(read["items"].as_array().unwrap().len(), 30);
+    assert_eq!(read["body"].as_str().unwrap().lines().count(), 30);
+    assert!(read.get("rows").is_none());
 }
 
 /// A side that publishes a panel, then finishes.
@@ -4141,6 +4358,15 @@ impl Client {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The projections sent since, with those of what the space's environment changed that waited for the interval
+    /// since its connections were last told, as though it had passed. See [`crate::hub::PROJECTION_INTERVAL`].
+    fn paced_projections(&self) -> Vec<tomori_protocol::Projection> {
+        while let Some(due) = self.hub.snapshot_deadline() {
+            self.hub.flush_snapshots(due);
+        }
+        self.projections()
     }
 
     /// The projection as it would be sent now.

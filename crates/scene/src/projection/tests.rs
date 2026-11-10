@@ -122,7 +122,7 @@ fn panel(id: &str, place: Place) -> Panel {
 
 /// How many rows down `panel` scrolls at most, sized as `fit` says, as its layout says.
 fn most_scroll(panel: &Panel, fit: Fit) -> usize {
-    Projector::default().laid(panel, fit).most_scroll
+    faces::Faces::new(panel).at(fit).most_scroll
 }
 
 /// How many layouts this thread has laid out, and how many faces it has drawn from them.
@@ -429,7 +429,7 @@ fn a_panel_in_a_tall_or_wide_slot_shows_more_rows_or_columns_at_its_text_s_size_
     let mut projector = Projector::default();
     projector.update(input(&projection, None, 0.0, Instant::now()));
     let laid = |projector: &mut Projector, fit| {
-        let layout = projector.laid(&code, fit).code.as_ref();
+        let layout = projector.faces_for(&code).at(fit).code.as_ref();
         layout.map(|layout| layout.columns)
     };
     assert_eq!(

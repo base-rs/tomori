@@ -364,13 +364,19 @@ fn tools() -> Value {
         },
         {
             "name": "panels",
-            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, how long ago it was projected and last updated, and its version, which changes whenever anything about it but its live chart data changes, its text, a tick or where it is; and, for a text panel, its body and its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text. Read a list here before changing it.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "The panels shown in your space now, listed briefly: each one's identity, the id you gave it, if any, its title, whether it is text, code or a chart, its wall and slot or that it floats, whether a participant put it there, how long ago it was projected and last updated, its version, which changes whenever anything about it but its live chart data changes, its text, a tick or where it is, how many lines, list items and rows it has, as line_count, item_count and row_count, and the start of its text. A space of many panels is listed a page at a time: total says how many there are, and next, where there are more, the offset to give to list those after. To read one, give panel, its id, identity or title: you are told that panel alone, with its body and its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text, or, for an environment's list, its rows, each with its id, the id to inspect it by, whether it is highlighted and its text. Read a list so before changing it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "A panel to read whole, by its id, identity or title. If not given, the panels are listed briefly." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "How many panels to pass over before listing, as next gave it, to list a space of more panels than one result holds. If not given, 0." },
+                },
+            },
             "annotations": read,
         },
         {
             "name": "update_panel",
-            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; version is the panel's version you last read, as panels gives it: give it whenever you name items by number or rewrite the body from what you read, and if the panel has changed since, as when a participant ticked an item or moved it, the update is refused with its current version, so read it again with panels and redo the update from what it shows; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
+            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels gives them when you read that panel, or by its text, giving a box to an item without one; version is the panel's version you last read, as panels gives it: give it whenever you name items by number or rewrite the body from what you read, and if the panel has changed since, as when a participant ticked an item or moved it, the update is refused with its current version, so read it again with panels, naming it, and redo the update from what it shows; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -621,7 +627,7 @@ fn tools() -> Value {
 }
 
 /// A tool's result: its structured content, with the same as text for clients that read only text.
-fn structured(content: Value) -> Value {
+pub(crate) fn structured(content: Value) -> Value {
     json!({
         "content": [{ "type": "text", "text": content.to_string() }],
         "structuredContent": content,
@@ -751,7 +757,7 @@ async fn call(
         "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
         "move_agent" => session.and_then(|session| move_agent(hub, session, arguments)),
-        "panels" => session.and_then(|session| hub.tool_panels(session).map(structured)),
+        "panels" => session.and_then(|session| panels(hub, session, arguments)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
         "create_layout" => session.and_then(|session| create_layout(hub, session, arguments)),
@@ -797,6 +803,16 @@ fn changed(changed: Changed, setting: (&str, &str), announcement: String) -> Val
             "It was already so, so nothing changed and there is nothing to tell.".to_owned()
         },
     }))
+}
+
+/// The `panels` tool: every panel listed briefly, or, with `panel`, that one read whole.
+fn panels(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let panel = optional_identifier(arguments, "panel")?;
+    let offset = match arguments.get("offset") {
+        None | Some(Value::Null) => 0,
+        Some(offset) => offset.as_u64().ok_or("offset is a whole number, from 0.")? as usize,
+    };
+    hub.tool_panels(session, panel, offset).map(structured)
 }
 
 /// The `move_panel` tool.

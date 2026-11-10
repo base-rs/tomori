@@ -1570,6 +1570,7 @@ mod tests {
                 read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
             };
             let mut drawn = |panels_shown: Vec<Panel>| {
+                let count = panels_shown.len();
                 let mut conversation = joined();
                 show_projection(
                     &mut conversation,
@@ -1577,13 +1578,13 @@ mod tests {
                     panels_shown,
                 );
                 let mut step = Step::default();
-                let frame = step.update(
-                    &senses,
-                    &mut conversation,
-                    &mut felt(),
-                    Instant::now(),
-                    0.01,
-                );
+                // The frame step lays out eight panels that arrive a frame: after as many frames as that takes, every
+                // one stands.
+                let now = Instant::now();
+                for _ in 0..count / 8 {
+                    step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+                }
+                let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
                 draw(&mut renderer, &device, &queue, &mut panels, &frame);
                 (
                     capture(&renderer, &panels, at_wide),

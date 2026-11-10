@@ -145,10 +145,35 @@ fn the_agent_updates_a_checklist_in_place_by_its_id_and_ticks_its_items_through_
         }
     );
 
-    // The agent reads it back, by its id and items.
+    // The agent lists it, briefly, with how much it holds and the start of its text, and reads it back whole by its
+    // id, with its body and items.
     let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
     assert_eq!(listed["space"], space);
-    let described = &listed["panels"][0];
+    let brief = &listed["panels"][0];
+    assert_eq!(brief["panel"], agenda.id);
+    assert_eq!(brief["id"], "agenda");
+    assert_eq!(brief["line_count"], agenda.body.lines().count());
+    assert!(brief["item_count"].as_u64().unwrap() > 0);
+    assert!(brief.get("items").is_none());
+    assert_eq!(
+        (&listed["total"], &listed["offset"]),
+        (&json!(1), &json!(0))
+    );
+    assert!(listed.get("next").is_none());
+    let excerpt = brief["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("Pairing window") && !excerpt.contains('\n'));
+    assert!(brief.get("body").is_none());
+    let read = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"panel": "agenda"}),
+    ))
+    .clone();
+    assert_eq!(read["space"], space);
+    assert_eq!(read["panels"].as_array().unwrap().len(), 1);
+    let described = &read["panels"][0];
     assert_eq!(described["panel"], agenda.id);
     assert_eq!(described["id"], "agenda");
     assert_eq!(described["kind"], "text");
@@ -324,6 +349,53 @@ fn the_agent_updates_a_checklist_in_place_by_its_id_and_ticks_its_items_through_
         .unwrap();
     assert_eq!(described["language"], "rust");
     assert!(described.get("body").is_none());
+    assert!(described["line_count"].as_u64().unwrap() > 1);
+    // Read by its identity, a code panel says its language, and no body, as listed: its code is in the transcript.
+    let read = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"panel": code.id}),
+    ))
+    .clone();
+    assert_eq!(read["panels"][0]["language"], "rust");
+    assert!(read["panels"][0].get("body").is_none());
+    assert!(read["panels"][0].get("items").is_none());
+    // A panel it names that is not here is refused, saying so.
+    let missing = call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"panel": "nothing"}),
+    );
+    assert_eq!(failure(&missing), "There is no such panel here.");
+    let number = call(&server, &token, &agent, "panels", json!({"panel": 5}));
+    assert_eq!(failure(&number), "panel is text.");
+    // Listed from an offset, as a space of many panels is paged through: past the first, the second; past both, none.
+    let paged = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"offset": 1}),
+    ))
+    .clone();
+    assert_eq!((&paged["total"], &paged["offset"]), (&json!(2), &json!(1)));
+    assert_eq!(paged["panels"].as_array().unwrap().len(), 1);
+    let past = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"offset": 7}),
+    ))
+    .clone();
+    assert_eq!((&past["total"], &past["offset"]), (&json!(2), &json!(2)));
+    assert!(past["panels"].as_array().unwrap().is_empty());
+    let negative = call(&server, &token, &agent, "panels", json!({"offset": -1}));
+    assert_eq!(failure(&negative), "offset is a whole number, from 0.");
 }
 
 #[test]
@@ -490,7 +562,14 @@ fn a_participant_s_tick_reaches_the_agent_through_panels_and_before_the_next_wor
     assert_eq!((&shown[0].id, &shown[0].place), (&agenda.id, &agenda.place));
 
     // The agent sees it at once through `panels`, without a turn of its own.
-    let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
+    let listed = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"panel": "agenda"}),
+    ))
+    .clone();
     assert_eq!(
         items(&listed["panels"][0]),
         [
@@ -562,7 +641,14 @@ fn a_tick_or_an_update_from_a_version_since_changed_is_refused_rather_than_land_
         .contains(&format!("changed since version {first}"))
     );
     // Read again, it is at that version, and redone from what it shows, it applies, and says its version now.
-    let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
+    let listed = content(&call(
+        &server,
+        &token,
+        &agent,
+        "panels",
+        json!({"panel": "agenda"}),
+    ))
+    .clone();
     assert_eq!(version(&listed["panels"][0]["version"]), ticked);
     assert_eq!(listed["panels"][0]["items"][0]["checked"], true);
     let updated = content(&update(json!({

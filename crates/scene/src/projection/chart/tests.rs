@@ -78,7 +78,8 @@ fn a_chart_is_laid_out_again_only_when_it_or_its_size_changes() {
     let mut changed = chart.clone();
     changed.series[0].values[180] = Some(0.5);
     assert!(!Rc::ptr_eq(&first, &drawn(&changed, 34, 12)));
-    // Beyond so many, the least recent is forgotten.
+    // Beyond so many, as many as the panels an environment may publish, the least recent is forgotten.
+    assert_eq!(DRAWN, tomori_environment::PANEL_LIMIT);
     for columns in 0..DRAWN {
         drawn(&chart, 100 + columns, 12);
     }

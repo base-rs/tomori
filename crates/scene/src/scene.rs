@@ -532,7 +532,7 @@ impl Default for Step {
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
-            projector: crate::projection::Projector::default(),
+            projector: crate::projection::Projector::paced(),
             card_reach: f32::INFINITY,
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,

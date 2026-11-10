@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tomori_protocol::{
     CODE_LINES, Code, Panel, Place, Pose, Projection, TOMORI_WALL, TokenKind, Wall, WallKind,
@@ -1452,6 +1452,12 @@ pub struct Projector {
     /// Each panel's faces laid out, and how far it scrolls as it stands this frame, laid out again only when what it
     /// shows changes, as the server's patch upserts it, or its size does. See `design/rendering.md`.
     faces: HashMap<String, faces::Faces>,
+    /// Whether it lays out at most [`faces::LAYOUTS`] panels a frame for what the server changed, as the frame step's
+    /// does, or every one in the frame it changes, as by default. See [`Projector::paced`].
+    paced: bool,
+    /// Where among the projection's panels the next frame begins following them, after the last panel this one laid
+    /// out in its turn, so that where more panels changed than a frame lays out, each is laid out in turn.
+    turn: usize,
     /// The wall taken hold of, its handles, and a wall carried.
     editor: editing::Editor,
     /// The Tomori wall travelling with the agent, and how far folded it is this frame, from 0, unfolded, to 1.
@@ -1463,6 +1469,57 @@ pub struct Projector {
 type Standing<'a> = (&'a Panel, Mat4, Fit);
 
 impl Projector {
+    /// A projector that lays out at most a few panels a frame of those the server sent or changed, each in its turn:
+    /// [`faces::ARRIVALS`] new ones, each standing from the frame it is laid out in, and [`faces::LAYOUTS`] changed
+    /// ones, each showing what it showed until then, so that many panels arriving or changing together, as on entering
+    /// a space or an environment's on one tick, never cost one frame all their layout. The frame step's is paced; [`Projector::default`] lays out every panel in the frame it
+    /// arrives or changes, as a console or a still picture wants. See `design/rendering.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::{Panel, Place, Pose, Projection, Wall, WallKind};
+    /// use tomori_scene::projection::{Controls, Input, Projector, editing::Rights};
+    ///
+    /// let pose = Pose::upright_facing([0.0, 1.5, -3.0], [0.0, 1.5, 0.0]);
+    /// let panels = (0..24).map(|slot| {
+    ///     let place = Place::Wall { wall: "wall-1".into(), slot };
+    ///     Panel::new(format!("panel-{slot}"), "Notes", "A note.", place)
+    /// });
+    /// let projection = Projection::new("space", "sky")
+    ///     .with_walls(vec![Wall::new("wall-1", WallKind::Added, pose).with_grid((8, 3).into())])
+    ///     .with_panels(panels.collect());
+    /// let input = || Input {
+    ///     projection: Some(&projection),
+    ///     ray: None,
+    ///     grip: None,
+    ///     viewer: None,
+    ///     active: true,
+    ///     pointing: false,
+    ///     nearer: f32::INFINITY,
+    ///     stick: glam::Vec2::ZERO,
+    ///     straighten: false,
+    ///     free: false,
+    ///     controls: Controls::Controllers,
+    ///     scroll: None,
+    ///     rights: Rights::default(),
+    ///     now: std::time::Instant::now(),
+    ///     dt: 1.0 / 72.0,
+    /// };
+    /// let shown = |projector: &mut Projector| {
+    ///     let sheets = projector.update(input()).sheets;
+    ///     sheets.iter().filter(|sheet| sheet.canvas.is_some()).count()
+    /// };
+    /// // The wall, and every panel at once; or, paced, eight more panels each frame.
+    /// assert_eq!(shown(&mut Projector::default()), 1 + 24);
+    /// let mut paced = Projector::paced();
+    /// assert_eq!([shown(&mut paced), shown(&mut paced), shown(&mut paced)], [1 + 8, 1 + 16, 1 + 24]);
+    /// ```
+    pub fn paced() -> Self {
+        Self {
+            paced: true,
+            ..Self::default()
+        }
+    }
+
     /// Follow `input`, and say what to draw and send.
     pub fn update(&mut self, input: Input<'_>) -> Output {
         // The grip is followed even while the panels do not take it, so that a squeeze held as they start to is not a new
@@ -1595,7 +1652,7 @@ impl Projector {
             });
         output.item = pointed.and_then(|(panel, model, fit, _, point)| {
             let scroll = self.scroll(&panel.id);
-            self.laid(panel, fit).item(model, scroll, point)
+            self.faces_for(panel).item(fit, model, scroll, point)
         });
         output.pointed =
             pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
@@ -1726,7 +1783,7 @@ impl Projector {
                     .map(|panel| (panel, held.model))
             });
         output.hint = carried
-            .map(|(panel, model)| (panel, model, self.laid(panel, Fit::Text).size))
+            .map(|(panel, model)| (panel, model, self.faces_for(panel).at(Fit::Text).size))
             .map(|(panel, model, size)| {
                 let release = match &self.aim {
                     None => Release::Float,
@@ -1779,7 +1836,7 @@ impl Projector {
                 };
                 let border = frame(highlighted.as_deref() == Some(panel.id.as_str()), newest);
                 let scroll = self.scroll(&panel.id);
-                self.laid(panel, *fit).face(panel, scroll, border)
+                self.faces_for(panel).face(*fit, scroll, border)
             })
             .collect()
     }
@@ -1893,10 +1950,12 @@ impl Projector {
     /// floating, fitting its text. `None` for a panel thrown away, on a wall not shown, in a slot past the last, or in a
     /// place this client does not know.
     fn stands(&self, panel: &Panel, walls: &[(&Wall, Mat4)]) -> Option<(Mat4, Fit)> {
-        if self
-            .thrown
-            .as_ref()
-            .is_some_and(|(thrown, _)| *thrown == panel.id)
+        // A panel whose turn to be laid out has not come does not yet stand.
+        if !self.faces.contains_key(&panel.id)
+            || self
+                .thrown
+                .as_ref()
+                .is_some_and(|(thrown, _)| *thrown == panel.id)
         {
             return None;
         }
@@ -1982,7 +2041,7 @@ impl Projector {
             .iter()
             .map(|(panel, _, fit)| {
                 let faces = self.faces_for(panel);
-                let layout = faces.at(panel, *fit);
+                let layout = faces.at(*fit);
                 let (size, most) = (layout.size, layout.most_scroll);
                 if limits {
                     faces.limit = Some(most);
@@ -1994,35 +2053,56 @@ impl Projector {
 
     /// Follow what each of `projection`'s panels shows, laying out again those whose content changed, and forget the
     /// faces of panels, and how far they are scrolled, no longer projected, and how far every panel scrolls, until it
-    /// is known again as it stands this frame.
+    /// is known again as it stands this frame. Paced, at most [`faces::LAYOUTS`] of the panels the server changed
+    /// take their turn this frame, laid out or drawn again, and at most [`faces::ARRIVALS`] of those it sent that show
+    /// nothing yet are given their faces, so that they stand; the rest wait for the frames after, each in turn from
+    /// where this frame's ended, in the projection's order, so that none waits behind the same ones every frame.
     fn lay_out(&mut self, projection: &Projection) {
-        let shown: HashMap<&str, &Panel> = projection
+        let shown: HashSet<&str> = projection
             .panels
             .iter()
-            .map(|panel| (panel.id.as_str(), panel))
+            .map(|panel| panel.id.as_str())
             .collect();
         self.faces.retain(|id, faces| {
-            shown.get(id.as_str()).is_some_and(|panel| {
-                faces.follow(panel);
-                faces.limit = None;
-                true
-            })
+            faces.limit = None;
+            shown.contains(id.as_str())
         });
-        self.scrolls.retain(|id, _| shown.contains_key(id.as_str()));
-    }
-
-    /// `panel`'s faces, made now if it has none yet.
-    fn faces_for(&mut self, panel: &Panel) -> &mut faces::Faces {
-        if !self.faces.contains_key(&panel.id) {
-            self.faces
-                .insert(panel.id.clone(), faces::Faces::new(panel));
+        self.scrolls.retain(|id, _| shown.contains(id.as_str()));
+        let count = projection.panels.len();
+        let (mut turns, mut arrivals) = if self.paced {
+            (faces::LAYOUTS, faces::ARRIVALS)
+        } else {
+            (count, count)
+        };
+        let from = self.turn;
+        for offset in 0..count {
+            let index = (from + offset) % count;
+            let panel = &projection.panels[index];
+            let took = match self.faces.get_mut(&panel.id) {
+                Some(faces) => {
+                    let took = faces.follow(panel, turns > 0);
+                    turns -= usize::from(took);
+                    took
+                }
+                None if arrivals > 0 => {
+                    self.faces
+                        .insert(panel.id.clone(), faces::Faces::new(panel));
+                    arrivals -= 1;
+                    true
+                }
+                None => false,
+            };
+            if took {
+                self.turn = index + 1;
+            }
         }
-        self.faces.get_mut(&panel.id).expect("made just now")
     }
 
-    /// `panel`'s layout sized as `fit` says, laid out now if it was not already.
-    fn laid(&mut self, panel: &Panel, fit: Fit) -> &mut faces::Layout {
-        self.faces_for(panel).at(panel, fit)
+    /// The faces of `panel`, which stands, and so has them.
+    fn faces_for(&mut self, panel: &Panel) -> &mut faces::Faces {
+        self.faces
+            .get_mut(&panel.id)
+            .expect("a panel that stands has its faces")
     }
 
     /// The wall taken hold of, whose handles show, by identity.

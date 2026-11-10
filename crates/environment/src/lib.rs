@@ -495,14 +495,14 @@ impl Space {
     /// [retracts](Space::retract) it and publishes it again, the space comes back to the environment or the server restarts.
     ///
     /// The server refuses, saying why: an id [`valid_panel_id`] refuses; a wall the environment does not declare, or a
-    /// slot it does not have, or a full wall; a chart [`chart::Chart::cleaned`] refuses; more than [`PANEL_LIMIT`], 8,
+    /// slot it does not have, or a full wall; a chart [`chart::Chart::cleaned`] refuses; more than [`PANEL_LIMIT`], 32,
     /// panels in the space; a list panel of more than [`ROW_LIMIT`] rows, a row id [`valid_row_id`] refuses or that
     /// another of its rows has, or a highlight that names none of its rows or is not a list panel's;
-    /// and more than 20 calls a second, after a burst of 40. It makes a panel's changes at most about once a second, and
-    /// 4 changes, or 32 KiB of panels, a second in the space, after a burst of 8 or 128 KiB, counting only what changes:
+    /// and more than 80 calls a second, after a burst of 160. It makes a panel's changes at most about once a second, and
+    /// 16 changes, or 128 KiB of panels, a second in the space, after a burst of 32 or 512 KiB, counting only what changes:
     /// a side may publish more often, and an update that comes too soon waits, the newest replacing the one before, and
     /// is made as soon as it may be, so that the latest always arrives. One that waits is refused at once for what can
-    /// be known then, its wall, its slot and the 8, counting those waiting; one refused once it may be made, as its wall
+    /// be known then, its wall, its slot and the 32, counting those waiting; one refused once it may be made, as its wall
     /// filled meanwhile, is dropped, which the server logs. When more than 12 panels float in the space, the one floating
     /// longest goes, whoever's it is, so that the agent's panels can push away one of the side's a participant left
     /// floating, which then stays away as a dismissed one does. Once this side's `run` has returned, or it has

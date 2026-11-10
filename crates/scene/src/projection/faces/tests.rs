@@ -375,21 +375,21 @@ fn a_panel_keeps_its_faces_at_a_few_sizes_the_latest_first() {
         .collect();
     let (laid, _) = counts();
     for fit in &sizes {
-        faces.at(&panel, *fit);
+        faces.at(*fit);
     }
     assert_eq!(counts().0, laid + 4);
     assert_eq!(faces.sizes.len(), SIZES);
     // The first is forgotten, the others kept: going back to one kept lays nothing out, and puts it first.
-    faces.at(&panel, sizes[1]);
+    faces.at(sizes[1]);
     assert_eq!(counts().0, laid + 4);
     assert_eq!(faces.sizes[0].fit, sizes[1]);
-    faces.at(&panel, sizes[0]);
+    faces.at(sizes[0]);
     assert_eq!(counts().0, laid + 5);
     // A code panel floating is as tall as its code, and points at no item.
     let code = Panel::new("code", "main.rs", "fn main() {}", on("wall-1", 1))
         .with_code(Code::new("rust", 1));
     let mut faces = Faces::new(&code);
-    let floating = faces.at(&code, Fit::Text);
+    let floating = faces.at(Fit::Text);
     assert_eq!(floating.size, super::super::fitted_size(&code, Fit::Text));
     assert_eq!(floating.item(Mat4::IDENTITY, 0, Vec3::ZERO), None);
 }
@@ -470,4 +470,312 @@ fn a_chart_panel_from_a_server_before_versions_is_followed_by_its_points() {
     shown.panels[4].chart = Some(chart);
     projector.update(input(&shown, HOME, None));
     assert_eq!(counts(), (laid, drawn + 1));
+}
+
+/// As many charts as an environment may publish, 32, on two walls of 16 slots, versioned, each at the data seq `seq`
+/// with a latest point of its own for it, and a text panel floating.
+fn charts(seq: u64) -> Projection {
+    let chart = |index: usize| {
+        let mut chart = crate::chart::fixtures::pressure();
+        *chart.series[0].values.last_mut().unwrap() =
+            Some(0.5 + 0.01 * (seq as usize + index) as f32);
+        chart
+    };
+    let mut panels: Vec<Panel> = (0..32)
+        .map(|index| {
+            let chart = chart(index);
+            let place = on(&format!("wall-{}", 1 + index / 16), index as u32 % 16);
+            Panel::new(format!("chart-{index}"), "Pressure", chart.summary(), place)
+                .with_chart(chart)
+                .with_version(5)
+                .with_data_seq(seq)
+        })
+        .collect();
+    let aside = Place::Free {
+        pose: Pose::upright_facing([0.6, 1.5, -1.2], HOME.to_array()),
+    };
+    panels.push(Panel::new("aside", "Aside", "Floating.", aside).with_version(5));
+    let wall = |id: &str, x: f32| {
+        Wall::new(
+            id,
+            WallKind::Added,
+            Pose::upright_facing([x, 1.5, -3.0], [x, 1.5, 0.0]),
+        )
+        .with_grid(tomori_protocol::Grid::from((8, 2)))
+    };
+    Projection::new("s", "sky")
+        .with_walls(vec![wall("wall-1", -3.0), wall("wall-2", 3.0)])
+        .with_panels(panels)
+}
+
+/// As many panels as an environment may publish, 32, each a list, on two walls of 16 slots, versioned `version`, their
+/// rows saying so.
+fn lists(version: u64) -> Projection {
+    let mut shown = charts(5);
+    shown.panels.truncate(32);
+    for (index, panel) in shown.panels.iter_mut().enumerate() {
+        panel.title = format!("Queue {index}");
+        panel.body = format!("- [ ] first at {version}\n- [ ] second");
+        panel.chart = None;
+        panel.data_seq = 0;
+        panel.version = version;
+    }
+    shown
+}
+
+/// Whether each panel's face is the one a projector that lays every panel out at once shows.
+fn current(projector: &Projector, shown: &Projection) -> Vec<bool> {
+    let mut fresh = Projector::default();
+    fresh.update(input(shown, HOME, None));
+    shown
+        .panels
+        .iter()
+        .map(|panel| {
+            projector.faces.contains_key(&panel.id)
+                && *face(projector, &panel.id) == *face(&fresh, &panel.id)
+        })
+        .collect()
+}
+
+/// Paced, as the frame step's projector is, panels that arrive together, as on entering a space or as an environment
+/// puts up its 32, are laid out a few a frame, [`ARRIVALS`], in the projection's order, each standing from the frame it
+/// is laid out in, rather than all in one frame, which would cost that frame several times what it has.
+#[test]
+fn panels_arriving_together_are_laid_out_a_few_a_frame_in_the_projection_s_order() {
+    let shown = lists(5);
+    let mut projector = Projector::paced();
+    let (laid, drawn) = counts();
+    for frame in 1..=32 / ARRIVALS {
+        let output = projector.update(input(&shown, HOME, None));
+        // Each frame lays out and draws so many, no more: the next in order.
+        assert_eq!(
+            counts(),
+            (laid + frame * ARRIVALS, drawn + frame * ARRIVALS)
+        );
+        let standing: Vec<bool> = shown
+            .panels
+            .iter()
+            .map(|panel| projector.faces.contains_key(&panel.id))
+            .collect();
+        assert!(standing[..frame * ARRIVALS].iter().all(|stands| *stands));
+        assert!(standing[frame * ARRIVALS..].iter().all(|stands| !stands));
+        // Those laid out are drawn, with both walls; the rest are not yet.
+        let faces = output.sheets.iter().filter(|sheet| sheet.canvas.is_some());
+        assert_eq!(faces.count(), 2 + frame * ARRIVALS);
+    }
+    // Nothing more is laid out, and every one stands, as a projector that lays them out at once shows them.
+    for _ in 0..3 {
+        projector.update(input(&shown, HOME, None));
+    }
+    assert_eq!(counts(), (laid + 32, drawn + 32));
+    assert!(current(&projector, &shown).iter().all(|current| *current));
+}
+
+/// Paced, as many panels as a space shows a client that takes them all, 900, stand within a bounded number of frames
+/// of entering it, 113, about a second and a half, where two a frame took 450: panels that show nothing yet are laid
+/// out [`ARRIVALS`] a frame, and no frame lays out more than that and the [`LAYOUTS`] that are laid out again of those
+/// that already show something, however many of those the server changes meanwhile.
+#[test]
+fn every_panel_of_the_fullest_space_stands_within_a_bounded_number_of_frames() {
+    let panels: Vec<Panel> = (0..900)
+        .map(|index| {
+            let (column, row) = ((index % 30) as f32, (index / 30) as f32);
+            let at = [column * 0.7 - 10.0, 0.5 + row * 0.4, -6.0];
+            let pose = Pose::upright_facing(at, [at[0], at[1], 0.0]);
+            Panel::new(
+                format!("panel-{index}"),
+                "Note",
+                format!("Note {index}."),
+                Place::Free { pose },
+            )
+            .with_version(5)
+        })
+        .collect();
+    let mut shown = Projection::new("s", "sky").with_panels(panels);
+    let mut projector = Projector::paced();
+    let (laid, _) = counts();
+    let mut frames = 0;
+    while projector.faces.len() < 900 {
+        // Halfway, the server changes every panel that stands: they are laid out again two a frame, as ever, while the
+        // rest go on arriving eight a frame.
+        if frames == 50 {
+            for panel in &mut shown.panels {
+                panel.body.push_str(" Changed.");
+                panel.version = 6;
+            }
+        }
+        let before = (counts().0, projector.faces.len());
+        let output = projector.update(input(&shown, HOME, None));
+        frames += 1;
+        let arrived = projector.faces.len() - before.1;
+        let again = counts().0 - before.0 - arrived;
+        assert_eq!(arrived, ARRIVALS.min(900 - before.1));
+        assert_eq!(again, if frames > 50 { LAYOUTS } else { 0 });
+        let standing = output.sheets.iter().filter(|sheet| sheet.canvas.is_some());
+        assert_eq!(standing.count(), projector.faces.len());
+        assert!(frames <= 900_usize.div_ceil(ARRIVALS));
+    }
+    assert_eq!(frames, 900_usize.div_ceil(ARRIVALS));
+    // Every one stands, in the projection's order as it arrived; those changed are then laid out again in turn.
+    let again = counts().0 - laid - 900;
+    assert_eq!(again, (frames - 50) * LAYOUTS);
+    assert!(face(&projector, "panel-899").plain().contains("Changed"));
+}
+
+/// Paced, panels the server changed together, as an environment's lists on one tick, are laid out again a few a frame,
+/// each in turn, showing what they showed until then; what this client changed itself is laid out in its frame.
+#[test]
+fn panels_the_server_changed_together_are_laid_out_a_few_a_frame_each_in_turn() {
+    let mut shown = lists(5);
+    let mut projector = Projector::paced();
+    for _ in 0..32 / LAYOUTS {
+        projector.update(input(&shown, HOME, None));
+    }
+    let (laid, drawn) = counts();
+    let first = every_face(&projector, &shown);
+    // Every list changes in one patch, at a new version: the frame lays out only so many, the first in order, and the
+    // rest show what they showed, the very faces.
+    shown = lists(6);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + LAYOUTS, drawn + LAYOUTS));
+    let second = every_face(&projector, &shown);
+    let again = kept(&second, &first);
+    assert!(again[..LAYOUTS].iter().all(|kept| !kept));
+    assert!(again[LAYOUTS..].iter().all(|kept| *kept));
+    assert!(face(&projector, "chart-0").plain().contains("first at 6"));
+    assert!(face(&projector, "chart-31").plain().contains("first at 5"));
+    // They change again before the rest are laid out: the next frame goes on from where the last ended, rather than
+    // with the first again, so that none waits behind the same ones every frame, and lays them out as they now are.
+    shown = lists(7);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 2 * LAYOUTS, drawn + 2 * LAYOUTS));
+    let third = every_face(&projector, &shown);
+    let again = kept(&third, &second);
+    assert!(again[..LAYOUTS].iter().all(|kept| *kept));
+    assert!(again[LAYOUTS..2 * LAYOUTS].iter().all(|kept| !kept));
+    assert!(again[2 * LAYOUTS..].iter().all(|kept| *kept));
+    assert!(face(&projector, "chart-0").plain().contains("first at 6"));
+    assert!(face(&projector, "chart-2").plain().contains("first at 7"));
+    // A tick this participant makes, shown at once at the version the panel has, is laid out in its frame, whatever
+    // waits, and takes no other panel's turn; an age that shows otherwise waits its turn as the server's changes do.
+    shown.panels[3].body = "- [x] first at 7\n- [ ] second".into();
+    shown.panels[2].age = 3600;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 3 * LAYOUTS + 1, drawn + 3 * LAYOUTS + 1));
+    assert!(face(&projector, "chart-3").plain().contains("☑ first at 7"));
+    let now = current(&projector, &shown);
+    assert_eq!(now[..3 * LAYOUTS], [false, false, false, true, true, true]);
+    // Frame after frame, each in turn, the first ones last, none starved: within as many frames as lay every one out
+    // once, each shows what laying it out afresh shows, and then nothing more is laid out.
+    let mut frames = 0;
+    let waiting = 32 - 2 * LAYOUTS + 1;
+    while current(&projector, &shown).contains(&false) {
+        let before = counts();
+        projector.update(input(&shown, HOME, None));
+        let laid = counts().0 - before.0;
+        assert!((1..=LAYOUTS).contains(&laid) && counts().1 - before.1 == laid);
+        frames += 1;
+        assert!(frames <= waiting.div_ceil(LAYOUTS));
+    }
+    assert_eq!(frames, waiting.div_ceil(LAYOUTS));
+    assert!(face(&projector, "chart-2").plain().contains("1h"));
+    let settled = counts();
+    for _ in 0..3 {
+        projector.update(input(&shown, HOME, None));
+    }
+    assert_eq!(counts(), settled);
+}
+
+/// Paced, charts whose live data changed together are drawn again a few a frame, each in turn, without being laid
+/// out, on the same turns as panels laid out.
+#[test]
+fn charts_whose_data_changed_together_are_drawn_again_a_few_a_frame_each_in_turn() {
+    let mut shown = charts(5);
+    let mut projector = Projector::paced();
+    while current(&projector, &shown).contains(&false) {
+        projector.update(input(&shown, HOME, None));
+    }
+    let (laid, drawn) = counts();
+    let first = every_face(&projector, &shown);
+    // Every chart's next point arrives in one patch: the frame draws only so many again, the first in order, and lays
+    // nothing out; the rest show what they showed.
+    shown = charts(6);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid, drawn + LAYOUTS));
+    let second = every_face(&projector, &shown);
+    let again = kept(&second, &first);
+    assert!(again[..LAYOUTS].iter().all(|kept| !kept));
+    assert!(again[LAYOUTS..].iter().all(|kept| *kept));
+    // A text panel's change at a new version takes a turn among them, laid out as its turn comes.
+    shown.panels[32].body = "Floating, changed.".into();
+    shown.panels[32].version = 8;
+    for frame in 2..=32 / LAYOUTS {
+        projector.update(input(&shown, HOME, None));
+        assert_eq!(counts(), (laid, drawn + frame * LAYOUTS));
+    }
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 1, drawn + 33));
+    assert!(face(&projector, "aside").plain().contains("changed"));
+    for _ in 0..3 {
+        projector.update(input(&shown, HOME, None));
+    }
+    assert_eq!(counts(), (laid + 1, drawn + 33));
+    assert!(current(&projector, &shown).iter().all(|current| *current));
+}
+
+/// While a panel's faces are behind the projection's panel, its turn not yet come, none of its items is pointed at,
+/// since the lines it shows are no longer the panel's, so that no tick names another item than the one shown.
+#[test]
+fn a_panel_waiting_its_turn_points_at_no_item() {
+    let panel = lists(5).panels.remove(0);
+    let mut faces = Faces::new(&panel);
+    let size = faces.at(Fit::SLOT).size;
+    // The middle of the row of its first item, below its title, its age and the rule.
+    let y = size.1 / 2.0
+        - (super::super::PADDING.1 as f32 + 3.5 * CELL_HEIGHT as f32) * super::super::PIXEL;
+    let item =
+        |faces: &mut Faces| faces.item(Fit::SLOT, Mat4::IDENTITY, 0, Vec3::new(-0.05, y, 0.0));
+    assert_eq!(item(&mut faces), Some(0));
+    // The server changed it, and its turn has not come: it shows what it showed, and points at nothing.
+    let changed = lists(6).panels.remove(0);
+    assert!(!faces.follow(&changed, false));
+    assert_eq!(item(&mut faces), None);
+    assert!(
+        faces
+            .face(Fit::SLOT, 0, FRAME)
+            .plain()
+            .contains("first at 5")
+    );
+    // Its turn come, it shows the panel as it is, and points at its items again.
+    assert!(faces.follow(&changed, true));
+    assert_eq!(item(&mut faces), Some(0));
+    assert!(
+        faces
+            .face(Fit::SLOT, 0, FRAME)
+            .plain()
+            .contains("first at 6")
+    );
+    assert!(!faces.follow(&changed, false));
+    assert_eq!(item(&mut faces), Some(0));
+}
+
+/// A chart panel sent as its summary, as a server sends it where a client's frame cannot hold its chart, at the version
+/// and data seq it had, is laid out again as the text panel it then is, and as a chart once it is sent whole again.
+#[test]
+fn a_chart_panel_sent_as_its_summary_is_laid_out_again_as_text_and_as_a_chart_again() {
+    let mut shown = charts(5);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let (laid, drawn) = counts();
+    let chart = shown.panels[0].chart.take();
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 1, drawn + 1));
+    assert!(face(&projector, "chart-0").shapes.is_empty());
+    assert!(face(&projector, "chart-0").plain().contains("mean: "));
+    // Whole again, with a point newer, it is a chart again, laid out as one rather than only drawn from its data.
+    shown.panels[0].chart = chart;
+    shown.panels[0].data_seq = 6;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 2, drawn + 2));
+    assert!(!face(&projector, "chart-0").shapes.is_empty());
 }

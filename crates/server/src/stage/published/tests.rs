@@ -14,6 +14,11 @@ use crate::stage::published::{RESTING, RESTING_RUNS};
 /// every series at every point, its labels, summary and title, each at its longest, with room to spare. These tests
 /// check that the largest there can be is within it.
 const PUBLISHED_BYTES: usize = 24 * 1024;
+
+/// The most bytes of JSON a published panel of a chart of every series at every point takes without its lines' breaks,
+/// as a live chart is: the bytes a side may publish at once, [`crate::channel::PUBLISH_BYTES_BURST`], hold as many of
+/// it as it may show.
+const PLOTTED_BYTES: usize = 16 * 1024;
 use crate::stage::{Destination, Placed, Target, WallChange};
 
 fn pose(x: f32, z: f32) -> Pose {
@@ -50,6 +55,79 @@ fn yard() -> Walls<'static> {
         tomori: crate::stage::default_stage(),
         declared: &DECLARED,
     }
+}
+
+/// The yard's two walls, each of 8 by 3 slots, so that they have room for every panel an environment may publish.
+fn roomy() -> Vec<crate::EnvironmentWall> {
+    const { assert!(PUBLISHED <= 48) };
+    DECLARED
+        .iter()
+        .map(|wall| wall.with_grid(tomori_protocol::Grid::from((8, 3))))
+        .collect()
+}
+
+/// The largest chart there can be: every series at every point, each value as long as one is written, its line broken
+/// after every point, with every label, reference line and shaded region, a unit, a badge and a status line, each as
+/// long as it may be in characters of four bytes.
+fn largest_chart() -> Chart {
+    use tomori_environment::chart::{Note, Tone, ValueAxis};
+    use tomori_protocol::chart::{
+        CHART_LABELS, CHART_NAME_CHARS, CHART_POINTS, CHART_REFERENCES, CHART_SERIES, CHART_SHADES,
+        CHART_STATUS_CHARS,
+    };
+    let wide = |count: usize| "\u{1F600}".repeat(count);
+    let mut chart = Chart::new(CHART_POINTS)
+        .with_axis(ValueAxis::new(
+            Some(-1.234e-12),
+            Some(1.234e-12),
+            wide(CHART_NAME_CHARS),
+        ))
+        .with_labels(
+            (0..CHART_LABELS as u32)
+                .map(|at| AxisLabel::new(CHART_POINTS - 1 - at, wide(CHART_NAME_CHARS)))
+                .collect(),
+        )
+        .with_badge(Note::new(wide(CHART_NAME_CHARS), Tone::Neutral))
+        .with_status(Note::new(wide(CHART_STATUS_CHARS), Tone::Neutral));
+    for index in 0..CHART_SERIES as u32 {
+        let series = Series::new(
+            wide(CHART_NAME_CHARS),
+            Colour::Rgb([254, 254, 254]),
+            SeriesStyle::Bars,
+            (0..CHART_POINTS)
+                .map(|point| Some(-1.234_5e-12 * (point + 1) as f32 - 1.0e-20))
+                .collect(),
+        )
+        .with_width(1.25)
+        .with_dashed(true)
+        .with_breaks((0..CHART_POINTS).collect());
+        chart = chart.with_series(series);
+        chart = chart.with_reference(
+            Reference::new(
+                -1.234e-12,
+                wide(CHART_NAME_CHARS),
+                Colour::Rgb([254, 254, 254]),
+            )
+            .with_dashed(true),
+        );
+        chart = chart.with_shade(Shade::new(
+            Edge::Reference { index },
+            Edge::Series { index },
+            true,
+            Colour::Rgb([254, 254, 254]),
+        ));
+    }
+    let chart = chart.cleaned().unwrap();
+    assert_eq!(
+        (
+            chart.references.len(),
+            chart.shades.len(),
+            chart.labels.len()
+        ),
+        (CHART_REFERENCES, CHART_SHADES, CHART_LABELS)
+    );
+    assert_eq!(chart.series[0].breaks.len(), CHART_POINTS as usize - 1);
+    chart
 }
 
 fn pressure(latest: f32) -> Chart {
@@ -133,11 +211,35 @@ fn a_published_panel_is_cleaned_bounded_and_a_chart_s_body_is_its_summary() {
             .map(|at| AxisLabel::new(at, "\u{1F600}".repeat(32)))
             .collect(),
     );
-    // The largest a chart can be, with the longest title, is within the bound.
+    // A chart of every series at every point, with the longest title, is within what a side may publish at once for
+    // each panel it may show; the largest a chart can be, in every part, is within the bound.
     let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), wide))
         .unwrap()
         .bytes();
-    assert!(bytes <= PUBLISHED_BYTES, "{bytes}");
+    assert!(bytes <= PLOTTED_BYTES, "{bytes}");
+    assert!(
+        (PLOTTED_BYTES * PUBLISHED) as f32 <= crate::channel::PUBLISH_BYTES_BURST,
+        "every one is put up at once"
+    );
+    let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), largest_chart()))
+        .unwrap()
+        .bytes();
+    assert!(bytes > PLOTTED_BYTES && bytes <= PUBLISHED_BYTES, "{bytes}");
+    // A live chart of three series over 15 minutes at 5 seconds is under 4 KiB, so that as many as a side may show,
+    // each a point newer every second, are within what a space's panels may change by each second.
+    let mut live = Chart::new(181);
+    for (name, above) in [("mean", 0.0), ("greatest", 0.4), ("p99", 1.4)] {
+        let values = (0..181).map(|point| Some(0.7 + above + 0.15 * (point as f32 / 9.0).sin()));
+        live = live.with_series(Series::new(
+            name,
+            Colour::Teal,
+            SeriesStyle::Line,
+            values.collect(),
+        ));
+    }
+    let bytes = publishing(Panel::chart("live", "Scaling pressure", live)).bytes();
+    assert!((3000..4096).contains(&bytes), "{bytes}");
+    assert!((bytes * PUBLISHED) as f32 <= crate::channel::PUBLISH_BYTES_PER_SECOND);
 }
 
 #[test]
@@ -212,24 +314,11 @@ fn an_environment_publishes_onto_its_own_walls_updates_in_place_and_retracts() {
             )
             .is_err()
     );
-    // At most so many in a space.
-    for index in 2..PUBLISHED {
-        let panel = Panel::text(format!("n{index}"), "", "b").on_wall(1, None);
-        assert_eq!(
-            stage.publish(&walls, publishing(panel), 0),
-            Ok(Change::Added)
-        );
-    }
-    assert!(
-        stage
-            .publish(&walls, publishing(Panel::text("more", "", "b")), 0)
-            .is_err()
-    );
     // Retracted, it goes; again, nothing.
     assert!(stage.retract("yard", "rota"));
     assert!(!stage.retract("yard", "rota"));
     assert!(!stage.retract("elsewhere", "rota"));
-    assert_eq!(shown(&stage, &walls).len(), PUBLISHED - 1);
+    assert_eq!(shown(&stage, &walls).len(), 1);
     // Nothing of the environment's is told the agent as its own to update.
     assert!(stage.content(&walls, &id).is_none());
     assert_eq!(stage.published("yard", &id), Some(("pressure", None)));
@@ -237,7 +326,55 @@ fn an_environment_publishes_onto_its_own_walls_updates_in_place_and_retracts() {
 }
 
 #[test]
-fn a_full_wall_gives_up_only_the_agent_s_panels_and_an_environment_s_given_up_stays_away() {
+fn an_environment_publishes_at_most_so_many_panels_in_a_space() {
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
+    let mut stage = Stage::default();
+    let text = |id: String, body: &str| publishing(Panel::text(id, "", body).on_wall(1, None));
+    // As many as it may show, 32, each on a wall it names, the second wall's 24 slots filling before it is refused one.
+    assert_eq!(PUBLISHED, 32);
+    for index in 0..PUBLISHED {
+        let panel = Panel::text(format!("n{index}"), "", "b").on_wall(index as u32 / 24, None);
+        assert_eq!(
+            stage.publish(&walls, publishing(panel), 0),
+            Ok(Change::Added)
+        );
+    }
+    assert_eq!(shown(&stage, &walls).len(), PUBLISHED);
+    // One more is refused, saying how many it may show, wherever it would go.
+    let refused = format!("An environment publishes at most {PUBLISHED} panels in a space.");
+    assert_eq!(
+        stage.publish(&walls, text("more".into(), "b"), 0),
+        Err(refused.as_str())
+    );
+    assert_eq!(shown(&stage, &walls).len(), PUBLISHED);
+    // Every one is still updated in place, and one retracted makes room for another.
+    for index in 0..PUBLISHED {
+        assert_eq!(
+            stage.publish(&walls, text(format!("n{index}"), "c"), 1),
+            Ok(Change::Updated)
+        );
+    }
+    assert!(stage.retract("yard", "n31"));
+    assert_eq!(
+        stage.publish(&walls, text("more".into(), "b"), 2),
+        Ok(Change::Added)
+    );
+    // A wall with no free slot, every panel on it the environment's own, refuses another, saying so, rather than
+    // putting it elsewhere: its first wall has 24 slots, each taken.
+    assert!(stage.retract("yard", "more"));
+    assert_eq!(
+        stage.publish(&walls, publishing(Panel::text("crowded", "", "b")), 3),
+        Err("That wall is full.")
+    );
+    assert_eq!(shown(&stage, &walls).len(), PUBLISHED - 1);
+}
+
+#[test]
+fn a_full_wall_gives_up_only_the_agent_s_panels_and_never_its_environment_s() {
     let walls = yard();
     let mut stage = Stage::default();
     let note = |index: usize| {
@@ -248,12 +385,18 @@ fn a_full_wall_gives_up_only_the_agent_s_panels_and_an_environment_s_given_up_st
         slot: None,
     };
     let rota = |id: &str| publishing(Panel::text(id, id, "x"));
+    let titles = |stage: &Stage, wall: &str| -> Vec<String> {
+        let shown = shown(stage, &walls).into_iter();
+        let on =
+            shown.filter(|(_, place)| matches!(place, Place::Wall { wall: on, .. } if on == wall));
+        on.map(|(title, _)| title).collect()
+    };
     assert_eq!(stage.publish(&walls, rota("a"), 0), Ok(Change::Added));
     // The agent's panels fill the wall, giving up only their own once it is full.
     for index in 0..7 {
         stage.project_to(&walls, note(index), &board, 0);
     }
-    assert!(shown(&stage, &walls).iter().any(|(title, _)| title == "a"));
+    assert!(titles(&stage, "environment-0").contains(&"a".to_owned()));
     // The agent's panels make room for the environment's.
     assert_eq!(stage.publish(&walls, rota("b"), 0), Ok(Change::Added));
     // A wall of a participant's and the environment's own refuses another.
@@ -272,11 +415,103 @@ fn a_full_wall_gives_up_only_the_agent_s_panels_and_an_environment_s_given_up_st
         stage.publish(&walls, rota("c"), 0),
         Err("That wall is full.")
     );
-    // The agent's newcomer on a wall where every panel is arranged gives up the one there longest, which, its
-    // environment's, stays away rather than coming back as it is next updated.
+    // The agent's newcomer on a wall where every panel is arranged gives up the one there longest of those that are
+    // not the environment's, which stay, though they have been there longest of all.
+    let before = titles(&stage, "environment-0");
     stage.project_to(&walls, note(10), &board, 0);
-    assert!(!shown(&stage, &walls).iter().any(|(title, _)| title == "a"));
-    assert_eq!(stage.publish(&walls, rota("a"), 0), Ok(Change::Unchanged));
+    let after = titles(&stage, "environment-0");
+    assert_eq!(after.len(), 6);
+    assert!(
+        ["a", "b", "Note 10"]
+            .iter()
+            .all(|title| after.contains(&title.to_string()))
+    );
+    let gone: Vec<&String> = before
+        .iter()
+        .filter(|title| !after.contains(title))
+        .collect();
+    assert_eq!(gone.len(), 1);
+    assert!(gone[0].starts_with("Note "));
+    // Once every slot of the wall holds the environment's own, it gives none of them up: the agent's newcomer goes
+    // onto the Tomori wall instead, as when nobody asked, and a panel moved onto the wall, by hand or by the agent, is
+    // refused, saying so, unless it goes into one of its slots, changing places with the panel there.
+    for kept in &after {
+        if kept.starts_with("Note ") {
+            let id = stage.view("s", &walls, 0);
+            let id = id.panels.iter().find(|panel| panel.title == *kept).unwrap();
+            stage.dismiss("yard", &id.id.clone()).unwrap();
+        }
+    }
+    for id in ["c", "d", "e", "f"] {
+        assert_eq!(stage.publish(&walls, rota(id), 0), Ok(Change::Added));
+    }
+    assert_eq!(
+        titles(&stage, "environment-0"),
+        ["a", "b", "c", "d", "e", "f"]
+    );
+    let newcomer = stage.project_to(&walls, note(11), &board, 0);
+    assert_eq!(
+        titles(&stage, "environment-0"),
+        ["a", "b", "c", "d", "e", "f"]
+    );
+    assert_eq!(titles(&stage, TOMORI_WALL), ["Note 11"]);
+    assert_eq!(
+        stage.place(&walls, &newcomer, Target::Wall("environment-0".into())),
+        Err(
+            "That wall is full of its environment's own panels, which stay on it: put it on another wall, or leave it floating."
+        )
+    );
+    assert_eq!(
+        stage.place(&walls, &newcomer, Target::Slot("environment-0".into(), 0)),
+        Err("That panel is its environment's, and stays on its walls or floating in it.")
+    );
+    assert_eq!(titles(&stage, TOMORI_WALL), ["Note 11"]);
+    assert_eq!(
+        titles(&stage, "environment-0"),
+        ["a", "b", "c", "d", "e", "f"]
+    );
+    // One of the environment's own put back on the wall it is on stays in its slot; and nothing was dismissed, so
+    // each is still updated in place.
+    let a = stage.view("s", &walls, 0);
+    let a = a.panels.iter().find(|panel| panel.title == "a").unwrap();
+    assert_eq!(
+        stage.place(&walls, &a.id, Target::Wall("environment-0".into())),
+        Ok(false)
+    );
+    assert_eq!(
+        stage.publish(&walls, publishing(Panel::text("a", "a", "y")), 1),
+        Ok(Change::Updated)
+    );
+    // Left floating, the agent's panel changes places with the environment's in a slot, which floats where it was,
+    // still in its environment; and from the Tomori wall a panel goes into a slot of the Tomori wall, or into a slot
+    // of another wall of the environment's that has a free one, the panel there moving along.
+    stage
+        .place(&walls, &newcomer, Target::Free(pose(0.0, -1.0)))
+        .unwrap();
+    assert_eq!(
+        stage.place(&walls, &newcomer, Target::Slot("environment-0".into(), 0)),
+        Ok(true)
+    );
+    assert_eq!(titles(&stage, "environment-0").len(), 6);
+    assert!(titles(&stage, TOMORI_WALL).is_empty());
+    assert_eq!(shown(&stage, &walls).len(), 7);
+    let other = stage.project(&walls, note(12), None, 0);
+    assert_eq!(
+        stage.place(&walls, &other, Target::Slot(TOMORI_WALL.into(), 3)),
+        Ok(true)
+    );
+    let elsewhere = publishing(Panel::text("g", "g", "x").on_wall(1, Some(1)));
+    assert_eq!(stage.publish(&walls, elsewhere, 2), Ok(Change::Added));
+    assert_eq!(
+        stage.place(&walls, &other, Target::Slot("environment-1".into(), 1)),
+        Ok(true)
+    );
+    assert!(titles(&stage, TOMORI_WALL).is_empty());
+    assert_eq!(titles(&stage, "environment-1").len(), 2);
+    assert_eq!(
+        stage.place(&walls, "panel-999", Target::Wall("environment-0".into())),
+        Err("That panel is not here.")
+    );
 }
 
 #[test]
@@ -311,7 +546,11 @@ fn a_dismissed_panel_stays_away_until_retracted_or_the_space_comes_back() {
 
 #[test]
 fn what_a_run_that_ended_published_rests_where_it_was_holding_no_slot_until_published_again() {
-    let walls = yard();
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
     let mut stage = Stage::default();
     let chart = |latest: f32| {
         publishing(
@@ -446,7 +685,11 @@ fn a_resting_panel_keeps_its_place_for_a_few_runs_that_do_not_publish_it() {
 
 #[test]
 fn at_most_so_many_panels_rest_those_missed_most_forgotten_first() {
-    let walls = yard();
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
     let mut stage = Stage::default();
     for round in 0..3 {
         for index in 0..PUBLISHED {
@@ -637,6 +880,102 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
     );
 }
 
+/// The projection whole, as JSON, of a space at every limit whose environment publishes as many panels of `chart` as
+/// it may, on its own walls, of 4 by 2 slots so that they hold them, every other slot and floating place holding
+/// `largest`: as the server holds it, and as an older client is sent it, each as it is sent, in a message, its walls and
+/// panels at the longest versions and its charts at the longest data seqs there can be, with how many of them it shows
+/// as charts, every one of them sent to both.
+fn at_every_limit(chart: &Chart, largest: &crate::stage::Content) -> [(usize, usize); 2] {
+    let declared: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
+        .map(|index| {
+            crate::EnvironmentWall::new(pose(index as f32 - 3.0, -5.0))
+                .with_grid(tomori_protocol::Grid::from((4, 2)))
+        })
+        .collect();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
+    let mut stage = Stage::default();
+    for index in 0..PUBLISHED {
+        let title = "\u{1F600}".repeat(blocks::TITLE_CHARS);
+        let panel = Panel::chart(format!("chart-{index}"), title, chart.clone())
+            .on_wall((index % DECLARED_WALLS) as u32, None);
+        stage.publish(&walls, publishing(panel), 0).unwrap();
+    }
+    let published: Vec<String> = stage
+        .view("s", &walls, 0)
+        .panels
+        .into_iter()
+        .map(|panel| panel.id)
+        .collect();
+    assert_eq!(published.len(), PUBLISHED);
+    for index in 0..crate::stage::FLOATING {
+        let id = stage.project(&walls, largest.clone(), None, 0);
+        stage
+            .place(&walls, &id, Target::Free(spread(index, 0.0, 0.4)))
+            .unwrap();
+    }
+    for _ in 0..crate::stage::ADDED_WALLS {
+        stage.add_wall(&walls, &pose(0.0, 5.0), None).unwrap();
+    }
+    for _ in 0..tomori_protocol::WALL_SLOTS {
+        stage.project(&walls, largest.clone(), None, 0);
+    }
+    // Every other wall, its environment's own, where the charts leave room, and those added, by name.
+    let others: Vec<(String, u32)> = stage
+        .view("s", &walls, 0)
+        .walls
+        .iter()
+        .filter(|wall| wall.kind != tomori_protocol::WallKind::Tomori)
+        .map(|wall| (wall.id.clone(), wall.slots()))
+        .collect();
+    for (wall, slots) in &others {
+        for _ in 0..*slots {
+            stage.project_to(
+                &walls,
+                largest.clone(),
+                &Destination::Wall {
+                    wall: wall.clone(),
+                    slot: None,
+                },
+                0,
+            );
+        }
+    }
+    let most = stage.view(&"s".repeat(64), &walls, u64::MAX);
+    let today = stage.view_within(
+        &"s".repeat(64),
+        &walls,
+        u64::MAX,
+        &tomori_protocol::Limits::TODAY,
+    );
+    assert_eq!(
+        today.panels.len(),
+        tomori_protocol::PROJECTION_PANELS as usize
+    );
+    [most, today].map(|mut view| {
+        assert!(published.iter().all(|id| view.panel(id).is_some()));
+        let charts = view
+            .panels
+            .iter()
+            .filter(|panel| panel.chart.is_some())
+            .count();
+        // As the hub sends it: versioned after it is fitted, at a revision.
+        for wall in &mut view.walls {
+            wall.version = u64::MAX;
+        }
+        for panel in &mut view.panels {
+            panel.version = u64::MAX;
+            panel.data_seq = if panel.chart.is_some() { u64::MAX } else { 0 };
+        }
+        let message = tomori_protocol::ServerMessage::Projection {
+            projection: Box::new(view.with_revision(u64::MAX)),
+        };
+        (serde_json::to_vec(&message).unwrap().len(), charts)
+    })
+}
+
 #[test]
 fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
     // Every slot of every wall full of the largest text panels there are, but those the environment's charts take.
@@ -650,89 +989,122 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
         wide(200),
         vec![wide(40); 2 * blocks::BODY_LINES].join("\n")
     );
-    let largest = crate::stage::Content::parse(&source).unwrap();
-    let declared: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
-        .map(|index| crate::EnvironmentWall::new(pose(index as f32 - 3.0, -5.0)))
-        .collect();
-    let walls = Walls {
-        declared: &declared,
-        ..yard()
-    };
-    let mut stage = Stage::default();
-    let mut chart = Chart::new(256);
-    for _ in 0..4 {
-        chart = chart.with_series(Series::new(
-            wide(32),
-            Colour::Teal,
-            SeriesStyle::Line,
-            (0..256)
-                .map(|point| Some(-1.234_5e-12 * point as f32 - 1.0e-20))
-                .collect(),
-        ));
-    }
-    chart = chart.with_labels((0..8).map(|at| AxisLabel::new(at, wide(32))).collect());
-    for index in 0..PUBLISHED {
-        let panel = Panel::chart(format!("chart-{index}"), wide(80), chart.clone())
-            .on_wall(index as u32 % 2, None);
-        stage.publish(&walls, publishing(panel), 0).unwrap();
-    }
-    for index in 0..crate::stage::FLOATING {
-        let id = stage.project(&walls, largest.clone(), None, 0);
-        stage
-            .place(&walls, &id, Target::Free(spread(index, 0.0, 0.4)))
-            .unwrap();
-    }
-    for _ in 0..crate::stage::ADDED_WALLS {
-        stage.add_wall(&walls, &pose(0.0, 5.0), None).unwrap();
-    }
-    let near =
-        std::iter::once(None).chain(walls.declared.iter().map(|wall| Some(wall.pose.position)));
-    for origin in near {
-        for _ in 0..tomori_protocol::WALL_SLOTS {
-            stage.project(&walls, largest.clone(), origin, 0);
-        }
-    }
-    let added: Vec<String> = stage
-        .view("s", &walls, 0)
-        .walls
-        .iter()
-        .filter(|wall| wall.kind == tomori_protocol::WallKind::Added)
-        .map(|wall| wall.id.clone())
-        .collect();
-    for wall in &added {
-        for _ in 0..tomori_protocol::WALL_SLOTS {
-            stage.project_to(
-                &walls,
-                largest.clone(),
-                &Destination::Wall {
-                    wall: wall.clone(),
-                    slot: None,
-                },
-                0,
-            );
-        }
-    }
-    let view = stage.view(&"s".repeat(64), &walls, u64::MAX);
-    assert_eq!(
-        view.panels
-            .iter()
-            .filter(|panel| panel.chart.is_some())
-            .count(),
-        PUBLISHED
+    let text = crate::stage::Content::parse(&source).unwrap();
+    // Or of the largest code panels, as many of them sent short as the frame needs, each longer than a text panel.
+    let lines = tomori_protocol::CODE_LINES;
+    let body = format!(
+        "{}…",
+        vec![wide(tomori_protocol::CODE_CHARS / lines); lines].join("\n")
     );
-    let message = tomori_protocol::ServerMessage::Projection {
-        projection: Box::new(view),
+    let length = body.chars().count() as u32;
+    let spans = (0..tomori_protocol::CODE_SPANS as u32)
+        .map(|index| {
+            tomori_protocol::Span::new(
+                length - 2 * tomori_protocol::CODE_SPANS as u32 + 2 * index,
+                1,
+                tomori_protocol::TokenKind::Punctuation,
+            )
+        })
+        .collect();
+    let code = crate::stage::Content {
+        title: format!("{}…", wide(blocks::TITLE_CHARS)),
+        body,
+        meta: Vec::new(),
+        code: Some(
+            tomori_protocol::Code::new(format!("{}…", wide(blocks::META_KEY_CHARS)), u32::MAX)
+                .with_spans(spans),
+        ),
+        slug: Some("a".repeat(blocks::ID_CHARS)),
+        image: None,
     };
-    let bytes = serde_json::to_vec(&message).unwrap().len();
-    // Within the longest frame, for a client that takes the most; and within today's for an older one, which is sent
-    // as much as today's limits hold.
-    assert!(bytes <= tomori_protocol::MOST_FRAME_BYTES, "{bytes} bytes");
-    let today = stage.view_within("s", &walls, u64::MAX, &tomori_protocol::Limits::TODAY);
-    let message = tomori_protocol::ServerMessage::Projection {
-        projection: Box::new(today),
+    // A chart of every series at every point, as a live chart is, its lines unbroken.
+    let mut plotted = largest_chart();
+    for series in &mut plotted.series {
+        series.breaks.clear();
+    }
+    // Every chart is shown, to a client that takes the most and to an older one, which is sent as much as today's
+    // limits hold, its environment's walls before those owners add and every panel on a wall: the message whole, with
+    // every version and data seq at its longest, within each one's frame. The largest chart there can be, its lines
+    // broken after every point, is larger still, and so many among the largest text panels could not all be sent to
+    // an older client: it is sent 29 of them as charts, as many as fit, the frame then within 8 KB of full, and the
+    // other three as their summaries.
+    let largest = largest_chart();
+    for (chart, others, charts, least) in [
+        (&plotted, &text, PUBLISHED, 900_000),
+        (&plotted, &code, PUBLISHED, 900_000),
+        (
+            &largest,
+            &text,
+            29,
+            tomori_protocol::MAX_FRAME_BYTES - 8_000,
+        ),
+        (&largest, &code, PUBLISHED, 900_000),
+    ] {
+        let [(most, shown), (today, sent)] = at_every_limit(chart, others);
+        assert_eq!((shown, sent), (PUBLISHED, charts));
+        assert!(most <= tomori_protocol::MOST_FRAME_BYTES, "{most} bytes");
+        let frames = least..=tomori_protocol::MAX_FRAME_BYTES;
+        assert!(frames.contains(&today), "{today} bytes");
+    }
+}
+
+#[test]
+fn charts_that_do_not_fit_in_a_frame_are_sent_as_their_summaries_the_oldest_first() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let chart = |index: usize, latest: f32| {
+        publishing(Panel::chart(
+            format!("chart-{index}"),
+            format!("Chart {index}"),
+            pressure(latest),
+        ))
     };
-    let bytes = serde_json::to_vec(&message).unwrap().len();
-    assert!(bytes <= tomori_protocol::MAX_FRAME_BYTES, "{bytes} bytes");
+    for index in 0..3 {
+        stage.publish(&walls, chart(index, 1.0), 0).unwrap();
+    }
+    let whole = stage.view("s", &walls, 0);
+    let size = |projection: &tomori_protocol::Projection| crate::stage::json_size(projection);
+    let charts = |projection: &tomori_protocol::Projection| -> Vec<bool> {
+        projection
+            .panels
+            .iter()
+            .map(|panel| panel.chart.is_some())
+            .collect()
+    };
+    // The first chart published was put where it is longest ago.
+    let placed: Vec<u64> = (0..whole.panels.len() as u64).collect();
+    // With room for all but one chart, the one put where it is longest ago is sent as its summary: the same panel, a
+    // text panel an older client draws, where it is, at its version.
+    let mut fitted = whole.clone();
+    crate::stage::fit(&mut fitted, &placed, size(&whole) - 1);
+    assert_eq!(charts(&fitted), [false, true, true]);
+    assert!(size(&fitted) < size(&whole));
+    let (was, short) = (&whole.panels[0], &fitted.panels[0]);
+    assert_eq!(short.body, "greatest: 1 now\ntarget: 1");
+    let mut summary = was.clone();
+    summary.chart = None;
+    assert_eq!(*short, summary);
+    // With room for none, every one is; with room for all, none.
+    let mut fitted = whole.clone();
+    crate::stage::fit(&mut fitted, &placed, 0);
+    assert_eq!(charts(&fitted), [false, false, false]);
+    let mut fitted = whole.clone();
+    crate::stage::fit(&mut fitted, &placed, size(&whole));
+    assert_eq!(fitted, whole);
+    // A client that applies data ops, sent a chart as its summary, is sent its next point as the panel whole, which
+    // applied makes what it is sent whole.
+    let mut before = whole.clone().with_revision(1);
+    crate::stage::fit(&mut before, &placed, 0);
+    stage.publish(&walls, chart(0, 1.5), 5).unwrap();
+    let mut after = stage.view("s", &walls, 0).with_revision(2);
+    after.panels[0].data_seq = 2;
+    crate::stage::fit(&mut after, &placed, 0);
+    let patch = tomori_protocol::ProjectionPatch::between_live(&before, &after);
+    assert_eq!(patch.whole(), 1);
+    let mut applied = before.clone();
+    patch.apply(&mut applied).unwrap();
+    assert_eq!(applied, after);
+    assert_eq!(applied.panels[0].body, "greatest: 1.5 now\ntarget: 1");
 }
 
 /// Whether the wall `wall` is locked, as the space shows it.
@@ -917,17 +1289,29 @@ fn what_could_never_be_published_is_known_before_it_waits_those_waiting_counted(
         Err("That wall has no such slot.")
     );
     // Shown and waiting together, at most so many; an update of one shown or waiting is always taken.
-    for index in 0..4 {
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
+    let half = PUBLISHED / 2;
+    for index in 0..half {
         stage
             .publish(&walls, text(&format!("s{index}")), 0)
             .unwrap();
     }
-    let waiting = ["w0", "w1", "w2", "s0"];
-    assert_eq!(stage.admits(&walls, &text("w3"), &waiting), Ok(()));
-    let waiting = ["w0", "w1", "w2", "w3", "s0"];
+    // One fewer waiting than would make as many as it may show, with one shown waiting too, which counts once.
+    let mut ids: Vec<String> = (0..PUBLISHED - half - 1)
+        .map(|index| format!("w{index}"))
+        .collect();
+    ids.push("s0".into());
+    let waiting: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(stage.admits(&walls, &text("last"), &waiting), Ok(()));
+    ids.push("last".into());
+    let waiting: Vec<&str> = ids.iter().map(String::as_str).collect();
     assert_eq!(
         stage.admits(&walls, &text("new"), &waiting),
-        Err("An environment publishes at most 8 panels in a space.")
+        Err("An environment publishes at most 32 panels in a space.")
     );
     assert_eq!(stage.admits(&walls, &text("w1"), &waiting), Ok(()));
     assert_eq!(stage.admits(&walls, &text("s2"), &waiting), Ok(()));

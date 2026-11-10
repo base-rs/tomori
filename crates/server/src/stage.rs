@@ -144,47 +144,140 @@ fn walls_within(shown: Vec<Wall>, limits: &tomori_protocol::Limits) -> Vec<Wall>
     kept
 }
 
-/// The most bytes of JSON `panel` takes: every byte of its text escaped as the longest escape, `\u0000`, and a little
-/// for its keys.
+/// How many bytes `text` takes in a JSON string, without its quotes, as `serde_json` writes it: a quote, a backslash and
+/// the controls it names, such as a new line, as two bytes, any other control as six, and every other byte as it is.
+fn escaped(text: &str) -> usize {
+    let more: usize = text
+        .bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | 0x08 | b'\t' | b'\n' | 0x0c | b'\r' => 1,
+            0x00..=0x1f => 5,
+            _ => 0,
+        })
+        .sum();
+    text.len() + more
+}
+
+/// The most bytes of JSON `panel` takes, within a kilobyte of what it does, and a few bytes for each span of its code
+/// of a kind with a short name: its text as JSON writes it, which reading its bytes finds without writing it, its
+/// spans by their digits, its chart measured, and room for its keys, numbers and place at their longest.
+/// A projection whose panels' together is within a frame fits it, whatever it holds, without its JSON being measured:
+/// only one that may not fit is measured.
 fn most_bytes(panel: &Panel) -> usize {
-    let text = panel.id.len()
-        + panel.title.len()
-        + panel.body.len()
+    let text = escaped(&panel.id)
+        + escaped(&panel.title)
+        + escaped(&panel.body)
         + panel
             .meta
             .iter()
-            .map(|meta| meta.key.len() + meta.value.len())
+            .map(|meta| escaped(&meta.key) + escaped(&meta.value) + 24)
             .sum::<usize>()
-        + panel.code.as_ref().map_or(0, |code| code.language.len());
-    let spans = panel.code.as_ref().map_or(0, |code| code.spans.len());
+        + panel
+            .code
+            .as_ref()
+            .map_or(0, |code| escaped(&code.language))
+        + panel.slug.as_ref().map_or(0, |slug| escaped(slug))
+        + panel.image.as_ref().map_or(0, |image| escaped(&image.hash))
+        + match &panel.place {
+            Place::Wall { wall, .. } => escaped(wall),
+            _ => 0,
+        };
+    // A span is written `[start,length,"kind"]`, its kind's name of at most 11 letters.
+    let digits = |number: u32| {
+        number
+            .checked_ilog10()
+            .map_or(1, |digits| digits as usize + 1)
+    };
+    let spans: usize = panel
+        .code
+        .iter()
+        .flat_map(|code| &code.spans)
+        .map(|span| digits(span.start) + digits(span.length) + 18)
+        .sum();
     let chart = panel.chart.as_ref().map_or(0, json_size);
-    6 * text + 32 * spans + 6 * chart + 512
+    text + spans + chart + 768
 }
 
-/// `projection`, with its code panels whole where it fits in `budget` bytes of JSON, and otherwise as many as need be
-/// sent short, as `code::short` shortens them, the least recently put where they are, by `placed`, first, so that the
-/// panels most likely being read are whole. A projection of every code panel short fits in a frame.
+/// The most a projection's panels may take together, by [`most_bytes`], for its JSON to be measured to fit it to a
+/// frame: measuring a longer one would take longer than the frames it is sent between, so it is fitted by its panels'
+/// bounds until it is within this, or within its frame if that is longer.
+const MEASURED: usize = 4 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has measured a projection's JSON whole to fit it to a frame, for the tests.
+    pub(crate) static MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one more projection measured, for the tests.
+#[cfg(test)]
+fn count_measure() {
+    MEASURES.with(|measures| measures.set(measures.get() + 1));
+}
+
+/// `projection`, with its code panels and its charts whole where it fits in `budget` bytes of JSON, and otherwise as
+/// many as need be sent short, the least recently put where they are, by `placed`, first, so that the panels most
+/// likely being read are whole: its code panels, as `code::short` shortens them, and then, where every code panel short
+/// is still too long, as only a frame of 1 MiB full of an environment's largest charts is, its chart panels without
+/// their charts, each as the text panel of its summary an older client draws. A projection of every code panel short
+/// and no chart fits in a frame.
+///
+/// Its JSON is measured only where it must be: one whose panels' bounds, [`most_bytes`], are together within `budget`
+/// fits as it is, and one far longer, as a space full of the largest code panels is, is shortened by those bounds,
+/// which only read its text, until it is within [`MEASURED`], and only from there, where `budget` is less, by its
+/// measured JSON, so that a frame nearly full holds as much as it can.
 fn fit(projection: &mut Projection, placed: &[u64], budget: usize) {
-    let most =
-        4096 * projection.walls.len() + projection.panels.iter().map(most_bytes).sum::<usize>();
-    if most <= budget {
+    let walls = 4096 * projection.walls.len();
+    let mut total = walls + projection.panels.iter().map(most_bytes).sum::<usize>();
+    if total <= budget {
         return;
     }
-    let mut total = json_size(&*projection);
-    let mut order: Vec<usize> = (0..projection.panels.len())
-        .filter(|index| projection.panels[*index].code.is_some())
-        .collect();
-    order.sort_by_key(|index| placed[*index]);
-    for index in order {
-        if total <= budget {
-            return;
-        }
-        let panel = &mut projection.panels[index];
-        let before = json_size(&*panel);
-        if code::short(panel) {
-            total = total - before + json_size(&*panel);
+    total = shorten(projection, placed, total, budget.max(MEASURED), most_bytes);
+    if total <= budget {
+        return;
+    }
+    #[cfg(test)]
+    count_measure();
+    total = json_size(&*projection);
+    shorten(projection, placed, total, budget, json_size);
+}
+
+/// Send as many of `projection`'s code panels short, and then of its chart panels without their charts, the least
+/// recently put where they are, by `placed`, first, as bring it from `total` bytes to within `budget`, each panel's
+/// bytes as `size` finds them. Returns how many bytes it then is.
+fn shorten(
+    projection: &mut Projection,
+    placed: &[u64],
+    mut total: usize,
+    budget: usize,
+    size: fn(&Panel) -> usize,
+) -> usize {
+    /// Whether a panel is of a kind sent short, and the panel sent so, saying whether that made it shorter.
+    type Kind = (fn(&Panel) -> bool, fn(&mut Panel) -> bool);
+    let kinds: [Kind; 2] = [
+        (|panel| panel.code.is_some(), code::short),
+        (
+            |panel| panel.chart.is_some(),
+            |panel| panel.chart.take().is_some(),
+        ),
+    ];
+    for (kind, short) in kinds {
+        let mut order: Vec<usize> = (0..projection.panels.len())
+            .filter(|index| kind(&projection.panels[*index]))
+            .collect();
+        order.sort_by_key(|index| placed[*index]);
+        for index in order {
+            if total <= budget {
+                return total;
+            }
+            let panel = &mut projection.panels[index];
+            let before = size(panel);
+            if short(panel) {
+                total = total - before + size(panel);
+            }
         }
     }
+    total
 }
 
 /// How a wall's slots are laid out, as the stage keeps it: its grid, how large its slots are, as a proportion of a flat
@@ -238,6 +331,19 @@ impl Layout {
             wall.with_grid(self.grid).with_scale(self.scale)
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has built what a connection is sent of a space, [`Stage::view_within`], so that
+    /// tests see how many builds a change costs.
+    pub(crate) static VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one more view built, for the tests.
+#[cfg(test)]
+fn count_view() {
+    VIEWS.with(|views| views.set(views.get() + 1));
 }
 
 /// How many bytes `value` takes as JSON.
@@ -1013,9 +1119,19 @@ impl Stage {
         (0..slots).find(|slot| !taken.contains(slot))
     }
 
+    /// Whether every slot of the wall `wall`, of `slots` slots, in `environment` holds a panel its environment
+    /// published, so that it takes no other: an environment's panel is never given up for a newcomer.
+    fn crowded(&self, environment: &str, wall: &str, slots: u32) -> bool {
+        let published = self
+            .here(environment)
+            .filter(|kept| kept.published.is_some() && kept.slot_on(wall).is_some());
+        published.count() as u32 >= slots
+    }
+
     /// Put `kept` on the wall `wall`, of `slots` slots, in `environment`, `arranged` by a participant or not, in its most
     /// prominent free slot, or else in the slot of the panel that has been on it longest of those not arranged, or, when
-    /// all are, of them all, which leaves.
+    /// all are, of them all, which leaves; but never of a panel its environment published, which stays. The wall is not
+    /// [`Stage::crowded`], which the caller sees to.
     fn put_on(
         &mut self,
         environment: &str,
@@ -1033,6 +1149,7 @@ impl Stage {
                 let (index, slot) = list
                     .iter()
                     .enumerate()
+                    .filter(|(_, other)| other.published.is_none())
                     .filter_map(|(index, other)| {
                         other
                             .slot_on(wall)
@@ -1040,12 +1157,8 @@ impl Stage {
                     })
                     .min_by_key(|(_, order, _)| *order)
                     .map(|(index, _, slot)| (index, slot))
-                    .expect("a full wall holds panels");
-                // One its environment published stays away, as one dismissed does, rather than coming back in the
-                // newcomer's place as its environment next updates it.
-                if let Some(published) = list.remove(index).published {
-                    self.room(environment).dismissed.insert(published.id);
-                }
+                    .expect("a full wall that is not crowded holds a panel to give up");
+                list.remove(index);
                 slot
             }
         };
@@ -1122,6 +1235,8 @@ impl Stage {
         now: u64,
         limits: &tomori_protocol::Limits,
     ) -> Projection {
+        #[cfg(test)]
+        count_view();
         let shown = walls_within(self.walls(walls), limits);
         let room = self
             .rooms
@@ -1168,11 +1283,16 @@ impl Stage {
         let mut projection = Projection::new(space, walls.environment)
             .with_walls(shown)
             .with_panels(panels);
-        fit(
-            &mut projection,
-            &placed,
-            limits.frame_limit() - MESSAGE_BYTES,
-        );
+        // Fitted before its walls and panels are given their versions, and its live panels their data seqs, each a
+        // number of at most 20 digits with its key, 32 bytes: room is left for them, and for the message around it.
+        let live = projection
+            .panels
+            .iter()
+            .filter(|panel| panel.chart.is_some())
+            .count();
+        let versions = 32 * (projection.walls.len() + projection.panels.len() + live);
+        let budget = limits.frame_limit() - MESSAGE_BYTES;
+        fit(&mut projection, &placed, budget.saturating_sub(versions));
         projection
     }
 
@@ -1281,13 +1401,18 @@ impl Stage {
     }
 
     /// Put the agent's panel `kept` on the wall `wall` in `walls`' environment, in `slot` if it is free, and otherwise as
-    /// [`Stage::put_on`] puts it.
+    /// [`Stage::put_on`] puts it; or, where every slot of the wall holds a panel its environment published, onto the
+    /// Tomori wall instead, as when nobody asked, since an environment's panel is never given up for it.
     fn put_at(&mut self, walls: &Walls<'_>, mut kept: Kept, wall: &str, slot: Option<u32>) {
         let slots = self.slots_of(walls, wall);
         let environment = walls.environment;
         let list = self.list(environment, Some(wall));
         let free = slot.filter(|slot| !list.iter().any(|other| other.slot_on(wall) == Some(*slot)));
         let Some(slot) = free else {
+            if self.crowded(environment, wall, slots) {
+                let slots = self.slots_of(walls, TOMORI_WALL);
+                return self.put_on(environment, kept, TOMORI_WALL, slots, false);
+            }
             return self.put_on(environment, kept, wall, slots, false);
         };
         kept.placed = self.tick();
@@ -2077,6 +2202,34 @@ impl Stage {
         if self.leaves_environment(walls, panel, onto_tomori) {
             return Err(STAYS);
         }
+        // A wall whose every slot holds its environment's own panels gives none of them up for another put on it,
+        // unless it is on it already.
+        if let Target::Wall(wall) = &target
+            && self.crowded(walls.environment, wall, slots(wall))
+            && self
+                .kept(walls.environment, panel)
+                .is_some_and(|kept| kept.slot_on(wall).is_none())
+        {
+            return Err(CROWDED);
+        }
+        // Into a slot, a panel changes places with the one there, which, on a wall with no free slot, goes where it
+        // came from: not onto the Tomori wall, for a panel its environment published, which stays in its environment.
+        if let Target::Slot(wall, slot) = &target
+            && self
+                .kept(walls.environment, panel)
+                .is_some_and(|kept| kept.slot_on(TOMORI_WALL).is_some())
+        {
+            let there: Vec<&Kept> = self
+                .here(walls.environment)
+                .filter(|kept| kept.slot_on(wall).is_some())
+                .collect();
+            let held = there
+                .iter()
+                .any(|kept| kept.published.is_some() && kept.slot_on(wall) == Some(*slot));
+            if held && there.len() as u32 >= slots(wall) {
+                return Err(STAYS);
+            }
+        }
         let mut kept = self
             .take(walls.environment, panel)
             .ok_or("That panel is not here.")?;
@@ -2311,6 +2464,9 @@ const ENVIRONMENT_S: &str = "That panel is its environment's: only the environme
 
 /// Why an environment's panel cannot go onto the Tomori wall.
 const STAYS: &str = "That panel is its environment's, and stays on its walls or floating in it.";
+
+/// Why no panel is put onto a wall whose every slot holds a panel its environment published.
+const CROWDED: &str = "That wall is full of its environment's own panels, which stay on it: put it on another wall, or leave it floating.";
 
 /// A checklist item a participant ticked or unticked, as [`Stage::tick_item`] found it.
 #[derive(Clone, Debug, PartialEq)]
@@ -3794,6 +3950,170 @@ mod tests {
             let size = bytes(&every);
             assert!(size <= limit, "{size} bytes");
         }
+    }
+
+    /// The largest code panel there can be, as [`a_projection_of_code_panels_at_every_limit_fits_in_one_frame`] makes
+    /// it, in a place of the longest numbers.
+    fn largest_code(id: &str) -> Panel {
+        let lines = tomori_protocol::CODE_LINES;
+        let line = "\u{1F600}".repeat(tomori_protocol::CODE_CHARS / lines);
+        let body = format!("{}…", vec![line; lines].join("\n"));
+        let length = body.chars().count() as u32;
+        let spans = (0..tomori_protocol::CODE_SPANS as u32)
+            .map(|index| {
+                let start = length - 2 * tomori_protocol::CODE_SPANS as u32 + 2 * index;
+                tomori_protocol::Span::new(start, 1, tomori_protocol::TokenKind::Punctuation)
+            })
+            .collect();
+        let place = Place::Free {
+            pose: Pose {
+                position: [-12.345_678, -1.234_567_9e-5, -19.999_998],
+                orientation: [-0.123_456_79, -0.987_654_3, -1.234_567_9e-7, -0.333_333_34],
+            },
+        };
+        Panel::new(id, "\u{1F600}".repeat(blocks::TITLE_CHARS), body, place)
+            .with_code(
+                Code::new("\u{1F600}".repeat(blocks::META_KEY_CHARS), u32::MAX).with_spans(spans),
+            )
+            .with_age(u64::MAX)
+            .with_pinned(true)
+            .with_version(u64::MAX)
+    }
+
+    #[test]
+    fn a_panel_s_bound_is_at_least_its_json_and_close_to_it() {
+        // A JSON string's length is found by reading its bytes: every byte there is, and characters of several.
+        let every: String = (0..=0x7f_u8)
+            .map(char::from)
+            .chain("é…\u{1F600}".chars())
+            .collect();
+        for text in [
+            every.as_str(),
+            "",
+            "plain",
+            "\"\\\n\t\r\u{8}\u{c}\u{0}\u{1f}\u{7f}",
+        ] {
+            assert_eq!(escaped(text) + 2, json_size(&text), "{text:?}");
+        }
+        // Each kind of panel at its longest, its text hostile, its numbers and place as long as they are written: its
+        // bound is never less than its JSON, so that a projection within a frame by its bounds fits it, and within a
+        // kilobyte of it, or, for a code panel, a few bytes for each of its spans.
+        let hostile = format!("{every}{}", "\"\\\n\u{1}".repeat(100));
+        let meta = (0..8)
+            .map(|index| Meta::new(format!("k\"{index}"), hostile.clone()))
+            .collect();
+        let text = Panel::new(
+            "panel-123456789",
+            hostile.clone(),
+            hostile.repeat(4),
+            largest_code("c").place,
+        )
+        .with_meta(meta)
+        .with_slug(Some("a".repeat(blocks::ID_CHARS)))
+        .with_age(u64::MAX)
+        .with_pinned(true)
+        .with_version(u64::MAX)
+        .with_data_seq(u64::MAX);
+        let image = text.clone().with_image(tomori_protocol::Image::new(
+            "f".repeat(64),
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+        ));
+        let mut on_wall = text.clone();
+        on_wall.place = Place::Wall {
+            wall: "environment-5".into(),
+            slot: u32::MAX,
+        };
+        let chart = tomori_protocol::chart::Chart::new(256).with_series(
+            tomori_protocol::chart::Series::new(
+                hostile.clone(),
+                tomori_protocol::chart::Colour::Rgb([254, 254, 254]),
+                tomori_protocol::chart::SeriesStyle::Bars,
+                vec![Some(-1.234e-12); 256],
+            ),
+        );
+        let charted = text.clone().with_chart(chart);
+        for panel in [&text, &image, &on_wall, &charted] {
+            let (bound, bytes) = (most_bytes(panel), json_size(panel));
+            assert!(
+                (bytes..=bytes + 1024).contains(&bound),
+                "{bound} for {bytes}"
+            );
+        }
+        let code = largest_code("panel-123456789");
+        let (bound, bytes) = (most_bytes(&code), json_size(&code));
+        assert!(
+            (bytes..=bytes + 1024).contains(&bound),
+            "{bound} for {bytes}"
+        );
+        // A span of a kind with a short name, at the start of its code, is bounded a few bytes over.
+        let mut short = code.clone();
+        short.code.as_mut().unwrap().spans = vec![tomori_protocol::Span::new(
+            0,
+            0,
+            tomori_protocol::TokenKind::Type,
+        )];
+        let (bound, bytes) = (most_bytes(&short), json_size(&short));
+        assert!(
+            (bytes..=bytes + 1024).contains(&bound),
+            "{bound} for {bytes}"
+        );
+    }
+
+    #[test]
+    fn a_projection_s_json_is_measured_only_where_a_frame_is_nearly_full() {
+        let measures = || MEASURES.with(std::cell::Cell::get);
+        let measured = measures();
+        let whole = |projection: &Projection| {
+            let whole = projection
+                .panels
+                .iter()
+                .filter(|panel| panel.body.split('\n').count() > code::SHORT.lines);
+            whole.count()
+        };
+        // Six hundred of the largest code panels, each put where it is later than the one before.
+        let panels: Vec<Panel> = (0..600)
+            .map(|index| largest_code(&format!("panel-{index}")))
+            .collect();
+        let placed: Vec<u64> = (0..600).collect();
+        let long = Projection::new("s", "sky").with_panels(panels);
+        let most = tomori_protocol::MOST_FRAME_BYTES - MESSAGE_BYTES;
+        assert!(json_size(&long) > most);
+        // Within its frame by its panels' bounds, as most projections are, it is sent as it is, unmeasured.
+        let mut fits = Projection::new("s", "sky").with_panels(long.panels[..300].to_vec());
+        fit(&mut fits, &placed, most);
+        assert_eq!((whole(&fits), measures()), (300, measured));
+        // Longer than the longest frame, it is fitted by its panels' bounds alone, since measuring so much would hold
+        // the hub for tens of milliseconds: the oldest are sent short, as few as need be, to within a hundredth.
+        let mut fitted = long.clone();
+        fit(&mut fitted, &placed, most);
+        assert_eq!(measures(), measured);
+        let bytes = json_size(&fitted);
+        assert!(bytes <= most && bytes > most - most / 100, "{bytes}");
+        let short = 600 - whole(&fitted);
+        assert!((1..300).contains(&short), "{short}");
+        assert!(
+            fitted.panels[..short]
+                .iter()
+                .all(|panel| panel.body != long.panels[0].body)
+        );
+        assert!(
+            fitted.panels[short..]
+                .iter()
+                .all(|panel| panel.body == long.panels[0].body)
+        );
+        // To an older client's frame, today's ninety panels are fitted by bounds until they are short enough to
+        // measure, and by their JSON from there, once, so that the frame holds as many whole as it can: one more whole
+        // would not fit.
+        let today = tomori_protocol::MAX_FRAME_BYTES - MESSAGE_BYTES;
+        let mut fitted = Projection::new("s", "sky").with_panels(long.panels[..90].to_vec());
+        fit(&mut fitted, &placed, today);
+        assert_eq!(measures(), measured + 1);
+        let bytes = json_size(&fitted);
+        let one = json_size(&long.panels[0]) - json_size(&fitted.panels[0]);
+        assert!(bytes <= today && bytes + one > today, "{bytes}");
+        assert!((1..90).contains(&whole(&fitted)));
     }
 
     #[test]
