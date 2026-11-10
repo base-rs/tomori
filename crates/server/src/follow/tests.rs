@@ -146,9 +146,9 @@ fn a_spot_within_its_reach_of_the_line_to_what_they_attend_to_is_refused() {
 }
 
 #[test]
-fn it_stands_near_enough_to_need_no_move_only_within_reach_ahead_seen_and_out_of_the_way() {
+fn it_stands_near_enough_to_need_no_move_within_3_m_whichever_way_they_face_and_whatever_it_stands_before()
+ {
     let ada = speaker(EYES, [0.0, 1.6, -3.0]);
-    let scene = open(&[EYES]);
     let at = |turn: f32, distance: f32| {
         let towards = turn.to_radians();
         Pose::upright_facing(
@@ -156,17 +156,38 @@ fn it_stands_near_enough_to_need_no_move_only_within_reach_ahead_seen_and_out_of
             EYES,
         )
     };
-    assert!(near_enough(&at(-45.0, 1.5), &ada, &scene));
-    assert!(near_enough(&at(40.0, 2.9), &ada, &scene));
-    // Too far, too far round, in the way, or out of sight.
-    assert!(!near_enough(&at(-45.0, 3.2), &ada, &scene));
-    assert!(!near_enough(&at(-60.0, 1.5), &ada, &scene));
-    assert!(!near_enough(&at(-10.0, 1.5), &ada, &scene));
+    assert!(near_enough(&at(-45.0, 1.5), &ada));
+    assert!(near_enough(&at(40.0, 2.9), &ada));
+    // Close up, far round, behind her or in her way to what she attends to, it only turns.
+    assert!(near_enough(&at(-60.0, 1.5), &ada));
+    assert!(near_enough(&at(180.0, 2.0), &ada));
+    assert!(near_enough(&at(-10.0, 1.5), &ada));
+    assert!(in_the_way(&at(-10.0, 1.5), EYES, ada.focus));
+    // Distance alone moves it.
+    assert!(!near_enough(&at(-45.0, 3.2), &ada));
     let screen = Solid::new([-2.0, 0.0, -1.0], [2.0, 3.0, -0.9]);
     let hidden = Scene::new(&[screen], &[], Vec::new(), vec![EYES]);
-    assert!(!near_enough(&at(-45.0, 1.5), &ada, &hidden));
     assert!(!sees(&at(-45.0, 1.5), EYES, &hidden));
-    assert!(sees(&at(-45.0, 1.5), EYES, &scene));
+    assert!(sees(&at(-45.0, 1.5), EYES, &open(&[EYES])));
+}
+
+#[test]
+fn a_huddle_is_served_from_within_4_m_of_its_middle() {
+    let ada = speaker([-0.5, 1.6, 0.0], [-0.5, 1.6, -3.0]);
+    let bob = speaker([0.5, 1.6, 0.0], [0.5, 1.6, -3.0]);
+    let at = |position: [f32; 3]| Pose::upright_facing(position, EYES);
+    assert!(serves(&at([-3.0, 1.7, -2.0]), &[ada, bob]));
+    assert!(!serves(&at([-4.0, 1.7, -2.0]), &[ada, bob]));
+}
+
+#[test]
+fn bearings_are_measured_clockwise_from_ahead_either_way_round() {
+    assert!((towards(EYES, [1.0, 1.6, 0.0]) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    assert!(heading(&head(EYES, [0.0, 1.6, -3.0])).abs() < 1e-5);
+    // The agent faces along its +Z, towards whoever it faces.
+    let agent = Pose::upright_facing([0.0, 1.7, -1.5], EYES);
+    assert!((apart(faces(&agent), towards(agent.position, EYES))).abs() < 1e-5);
+    assert!((apart(3.0, -3.0) - (std::f32::consts::TAU - 6.0)).abs() < 1e-5);
 }
 
 #[test]

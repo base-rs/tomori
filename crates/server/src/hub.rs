@@ -4035,9 +4035,10 @@ impl Hub {
                 hands,
                 carrying,
             } => {
-                let Some(space) = space.and_then(|space| state.space(space)) else {
+                let Some(id) = space.filter(|space| state.space(space).is_some()) else {
                     return;
                 };
+                let space = state.space(id).expect("found above");
                 let source = state.participants[participant].source;
                 // The panel carried is the server's to know, and not relayed.
                 let seen = crate::presence::Seen::reported(
@@ -4070,6 +4071,8 @@ impl Hub {
                     .as_ref()
                     .is_some_and(crate::presence::Seen::tracks_hands);
                 record.seen = seen;
+                // A following agent keeps with whoever it talks with as they move. See `design/environments.md`.
+                self.agent_seen(state, id, participant, Instant::now());
             }
             ClientMessage::SetAttribution { enabled } => {
                 let Some(space) = in_space(state) else {
@@ -6182,6 +6185,7 @@ impl Hub {
         let mut state = self.lock();
         // And the agents' moves that are due. See `design/environments.md`.
         state.movements_due(now);
+        self.keep_up(&mut state, now);
         let due: Vec<String> = state
             .spaces
             .iter()
