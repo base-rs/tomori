@@ -326,6 +326,31 @@ mod tests {
     }
 
     #[test]
+    fn the_titles_hint_claims_only_what_the_controls_bind() {
+        // Each control the title hints at, with what `CONTROLS` says of it and the key that binds it.
+        for (hint, controls, code, bound) in [
+            ("left choose", "left button: choose", None, None),
+            ("right-drag look", "right drag: look around", None, None),
+            (
+                "M menu",
+                "M: open or close the hand menu",
+                Some(KeyCode::KeyM),
+                Some(Key::Menu),
+            ),
+            (
+                "Esc quit",
+                "Esc: close the hand menu, or quit",
+                Some(KeyCode::Escape),
+                Some(Key::Escape),
+            ),
+        ] {
+            assert!(TITLE.contains(hint), "{hint}");
+            assert!(CONTROLS.contains(controls), "{controls}");
+            assert_eq!(code.and_then(key), bound);
+        }
+    }
+
+    #[test]
     fn the_window_draws_when_seen_and_keeps_its_connection_going_when_hidden() {
         with_gpu(FORMAT, |gpu| {
             let mut surface = TestSurface::new(&gpu.device, FORMAT);
@@ -441,12 +466,12 @@ mod tests {
             until(&mut window, &mut surface, |window| {
                 !window.conversation.knocks().is_empty()
             });
-            assert!(
-                surface
-                    .titles
-                    .last()
-                    .is_some_and(|title| title.contains("Vic (visitor) is knocking"))
-            );
+            assert!(surface.titles.last().is_some_and(|title| {
+                title.starts_with("Tomori — Vic (visitor) is knocking")
+                    && title.ends_with(
+                        "| mouse: point · left choose · right-drag look · M menu · Esc quit",
+                    )
+            }));
             // + admits the first knock, and the title says no one is knocking.
             window
                 .input(press(KeyCode::Equal, true), &mut surface)
