@@ -36,6 +36,11 @@ pollster = { version = "0.4", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 
+# How long a frame of projected panels takes on the CPU, at today's limits; see `design/rendering.md`.
+[[example]]
+name = "panel_frames"
+required-features = ["test-gpu"]
+
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 pollster = "0.4"
