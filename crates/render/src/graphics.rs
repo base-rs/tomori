@@ -51,10 +51,11 @@ const MAX_INSTANCES: usize = AGENT_COUNT
         crate::arrival_graphics::MAX_CUBES
     };
 /// How many cubes make the ring on the floor at home, its colour, and the share of its brightness it keeps while the
-/// agent is away from it.
+/// agent is away from it: most of it, since the ring marks home, where the workers stand, whether or not the agent is
+/// there, and only a little dimmer says it is away.
 pub const HOME_RING_CUBES: usize = 40;
 pub const HOME_RING_COLOUR: [f32; 3] = [0.08, 0.5, 0.65];
-pub const HOME_RING_AWAY: f32 = 0.4;
+pub const HOME_RING_AWAY: f32 = 0.85;
 
 /// The widest ring on the floor at home drawn, in metres; one wider is drawn beneath the swarm.
 pub const MOST_HOME_RING: f32 = 4.0;
@@ -631,7 +632,7 @@ impl Renderer {
     }
 
     /// Draw the ring on the floor at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes:
-    /// faint while it is away, brightening as it comes back. With none, or one that is nonsense, it is drawn beneath the
+    /// a little dimmer while it is away, brightening as it comes back. With none, or one that is nonsense, it is drawn beneath the
     /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
     pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
         self.home_ring = ring.filter(|ring| {
@@ -688,7 +689,7 @@ impl Renderer {
         }
         // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, or else beneath
         // the swarm: on the room's floor, or, for a home raised above the swarm's usual height, on the floor it would
-        // stand that high over. Faint while the agent is away, it brightens as it comes back within the ring.
+        // stand that high over. A little dimmer while the agent is away, it brightens as it comes back within the ring.
         let swarm_at = swarm.anchor().position;
         let ring = self.home_ring.unwrap_or(tomori_scene::anchors::HomeRing {
             centre: swarm_at,
@@ -3168,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_on_the_floor_stays_at_home_faint_while_the_agent_is_away() {
+    fn the_ring_on_the_floor_stays_at_home_a_little_dimmer_while_the_agent_is_away() {
         use tomori_scene::anchors::HomeRing;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let mut renderer =
@@ -3206,7 +3207,7 @@ mod tests {
                 assert!((across - ring.radius).abs() < 1e-4);
                 assert_eq!(instance.color, HOME_RING_COLOUR);
             }
-            // The agent gone to someone 4 m away, the ring stays where it was, faint.
+            // The agent gone to someone 4 m away, the ring stays where it was, whole and still plainly seen, a little dimmer.
             swarm.set_anchor(at(glam::Vec3::new(2.0, 1.5, -1.0)));
             renderer.update(&queue, &swarm, None, false);
             let away = floor(&renderer);
@@ -3223,6 +3224,9 @@ mod tests {
             assert!(away.iter().all(|instance| {
                 (0..3).all(|channel| (instance.color[channel] - faint[channel]).abs() < 1e-6)
             }));
+            // Home is marked whether or not the agent is there: the ring keeps most of its brightness.
+            assert_eq!(away.len(), HOME_RING_CUBES);
+            assert!(faint[1] >= 0.8 * HOME_RING_COLOUR[1], "{faint:?}");
             // Coming back within the ring, it brightens again.
             swarm.set_anchor(at(home + glam::Vec3::new(0.9, 0.0, 0.0)));
             renderer.update(&queue, &swarm, None, false);
