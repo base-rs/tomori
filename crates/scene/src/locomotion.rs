@@ -4,7 +4,7 @@
 //! Travel beyond the room: the locomotion profile an environment declares, its walkable surfaces and where a ray lands on them, the participant's [`Rig`], and [`Travel`], which turns the left stick and the ray into teleports, snap turns, backsteps and rising. Pure, so that it is tested without a device; the frame step applies the rig to every pose. See `design/locomotion.md`.
 use glam::{Mat4, Quat, Vec2, Vec3};
 
-use crate::{environment::Environment, pointing::Ray};
+use crate::{anchors::Anchor, environment::Environment, pointing::Ray};
 
 /// How far a snap turn turns, in radians.
 pub const SNAP_TURN: f32 = std::f32::consts::PI / 6.0;
@@ -474,6 +474,30 @@ impl Rig {
     /// Raise the room by `distance`, never above `ceiling`, nor lower than it is.
     pub fn ascend(&mut self, distance: f32, ceiling: f32) {
         self.translation.y = (self.translation.y + distance).min(ceiling.max(self.translation.y));
+    }
+
+    /// `anchor`, in the room, in the scene: moved and turned with the room. At home, it is `anchor` itself.
+    pub fn place(&self, anchor: Anchor) -> Anchor {
+        if *self == Self::default() {
+            return anchor;
+        }
+        let turn = Quat::from_rotation_y(self.yaw);
+        Anchor {
+            position: self.translation + turn * anchor.position,
+            orientation: turn * anchor.orientation,
+        }
+    }
+
+    /// `anchor`, in the scene, in the room: where [`Self::place`] would take it from.
+    pub fn unplace(&self, anchor: Anchor) -> Anchor {
+        if *self == Self::default() {
+            return anchor;
+        }
+        let back = Quat::from_rotation_y(-self.yaw);
+        Anchor {
+            position: back * (anchor.position - self.translation),
+            orientation: back * anchor.orientation,
+        }
     }
 }
 
