@@ -143,8 +143,8 @@ pub const WORKBENCH_PIECES: usize = 5;
 /// whenever it is at home; its workers stand in the ring about it ([`HOME_SWEEP`]), those behind it over the bench.
 pub const AGENT_HOME: Vec3 = Vec3::new(WORKBENCH.x, 1.5, WORKBENCH.y);
 
-/// How much of the ring about the agent's home its workers stand on, in degrees, about the way to the arrival, which
-/// Tomori's own server gives the farmyard's `home` cluster anchor: all but the place straight behind the agent, which
+/// How much of the ring about the agent's home its workers stand on, in degrees, about the way the home faces, out of
+/// the corner towards the arrival, which Tomori's own server gives the farmyard's `home` cluster anchor: all but the place straight behind the agent, which
 /// the swarm would hide from there, so that six stand in each row at full size, two of them behind the agent, over the
 /// bench either side of its middle, and ten compact, four of them behind it.
 pub const HOME_SWEEP: f32 = 300.0;
@@ -533,6 +533,8 @@ mod tests {
         .with_audience(eyes);
         let middle = Vec2::new(AGENT_HOME.x, AGENT_HOME.z);
         let towards = on_workbench(1.0, 0.0) - middle;
+        // Its sweep is centred on the way the home faces, out of the corner, so that its gap is over the bench's middle.
+        assert!((Vec2::from(home.faces()) + towards).length() < 1e-4);
         // How many of `count` stand behind the agent, as seen from the arrival, and how many of those over the bench,
         // along its curve.
         let stand = |count: usize| {

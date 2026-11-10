@@ -120,7 +120,7 @@ pub const RING: f32 = 1.4;
 /// rather than over them; two rows at full size and three compact about a home at the swarm's usual height.
 pub const RING_HIGHEST: f32 = 2.5;
 
-/// The least and the most of its ring an anchor's ring may take, in degrees, about the way to its audience.
+/// The least and the most of its ring an anchor's ring may take, in degrees, about the way it faces.
 pub const LEAST_SWEEP: f32 = 90.0;
 pub const MOST_SWEEP: f32 = 360.0;
 
@@ -239,8 +239,8 @@ pub struct Anchor {
     #[serde(default, skip_serializing_if = "Formation::is_arc")]
     pub formation: Formation,
     /// How much of its ring its members stand on, in degrees, from [`LEAST_SWEEP`] to [`MOST_SWEEP`], centred on the
-    /// way from its point to its audience, so that a ring by a wall or in a corner leaves the side towards it clear: the
-    /// whole ring without one. Only a ring takes it.
+    /// way it faces, its +Z, so that a ring by a wall or in a corner, its anchor turned away from it, leaves the side
+    /// towards it clear: the whole ring without one. Only a ring takes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sweep: Option<f32>,
 }
@@ -277,8 +277,8 @@ impl Anchor {
         self
     }
 
-    /// This anchor, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, such
-    /// as 240° for a ring by a wall, which its back leaves clear.
+    /// This anchor, whose ring takes `degrees` of the circle about its point, centred on the way it faces, such as 240°
+    /// for a ring by a wall, which its back leaves clear.
     pub fn with_sweep(mut self, degrees: f32) -> Self {
         self.sweep = Some(degrees);
         self
@@ -530,7 +530,7 @@ pub struct Cluster {
     footprint: Footprint,
     kept: bool,
     formation: Formation,
-    /// How much of its ring it takes, in radians, about the way to its audience.
+    /// How much of its ring it takes, in radians, about the way it faces.
     sweep: f32,
 }
 
@@ -595,8 +595,8 @@ impl Cluster {
         }
     }
 
-    /// This cluster, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, or
-    /// the whole circle for a sweep that is not from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
+    /// This cluster, whose ring takes `degrees` of the circle about its point, centred on the way it faces, or the whole
+    /// circle for a sweep that is not from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
     pub fn with_sweep(mut self, degrees: f32) -> Self {
         self.sweep = if valid_sweep(degrees) && degrees < MOST_SWEEP {
             degrees.to_radians()
@@ -606,13 +606,21 @@ impl Cluster {
         self
     }
 
-    /// How much of its ring it takes, in radians, centred on the way from its point to its audience.
+    /// How much of its ring it takes, in radians, centred on the way it faces, [`Self::faces`].
     pub fn sweep(&self) -> f32 {
         self.sweep
     }
 
-    /// The way from its point to its audience, about the vertical, as `[x, z]`, which its ring's sweep is centred on:
-    /// or, with its audience straight above or below it, the way it faces.
+    /// The way it faces, its anchor's +Z, about the vertical, as `[x, z]`, which its ring's sweep is centred on: so that
+    /// an anchor turned away from a wall, or out of a corner, leaves that side clear, wherever its audience stands, as a
+    /// home's does, whose audience is the eyes at the arrival.
+    pub fn faces(&self) -> [f32; 2] {
+        let [x, _, z] = self.facing();
+        [x, z]
+    }
+
+    /// The way from its point to its audience, about the vertical, as `[x, z]`, which its ring's places are laid out and
+    /// ordered about: or, with its audience straight above or below it, the way it faces.
     pub fn towards(&self) -> [f32; 2] {
         let (ax, az) = (
             self.audience[0] - self.point[0],
@@ -1040,8 +1048,8 @@ impl Cluster {
     /// footprint's reach, turned any way, apart along it, evenly; in rows up from [`ROW_BELOW`] below the point, never
     /// nearer the floor than [`LOWEST`], a footprint's height apart, each place straight above the one below, so that a
     /// room clear about the first row is clear about every row, as many as its room's height holds, those above the
-    /// first no higher than [`RING_HIGHEST`]; and in each row, those within its sweep, the sides first as seen from its audience, then nearer
-    /// before further, right before left, each within its room.
+    /// first no higher than [`RING_HIGHEST`]; and in each row, those within its sweep about the way it faces, the sides
+    /// first as seen from its audience, then nearer before further, right before left, each within its room.
     fn ring(&self, scale: f32) -> Vec<[f32; 3]> {
         let footprint = self.footprint.scaled(scale);
         let reach = footprint.width.hypot(footprint.depth);
@@ -1059,9 +1067,17 @@ impl Cluster {
         let mut order: Vec<usize> = (0..count)
             .map(|place| (2 * count + 4 * place + offset) % quarters)
             .collect();
-        // Only those within its sweep, about the way to its audience.
-        let swept = self.sweep / std::f32::consts::TAU * quarters as f32 / 2.0 + 1e-3;
-        order.retain(|quarter| (*quarter).min(quarters - quarter) as f32 <= swept);
+        // Only those within its sweep, about the way it faces: its angle from the way to the audience, round to the
+        // right, as the places' are.
+        if self.sweep < std::f32::consts::TAU {
+            let [x, z] = self.faces();
+            let opens = (x * right[0] + z * right[1]).atan2(x * towards[0] + z * towards[1]);
+            let half = self.sweep / 2.0 + 1e-4;
+            order.retain(|quarter| {
+                let off = *quarter as f32 * std::f32::consts::TAU / quarters as f32 - opens;
+                off.sin().atan2(off.cos()).abs() <= half
+            });
+        }
         order.sort_by_key(|quarter| {
             let side = quarter.abs_diff(count).min(quarter.abs_diff(3 * count));
             let before = (*quarter).min(quarters - quarter);
