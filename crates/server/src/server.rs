@@ -284,7 +284,7 @@ impl Server {
         self
     }
 
-    /// Offer `environment`, after those offered before, whose spaces show the cards `source` reads, such as the GitHub environment prototype's, which `tomori-environment-github-server` offers through this. The server reads them, with whatever credential `source` holds, at once when someone first watches them and then about once a minute while someone does, waiting for the source's rate limit when it is nearly used up and backing off after failures, and never sends them to visitors. Each space keeps where its participants put them. Call it after [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
+    /// Offer `environment`, as [`Self::with_environment`] does, in place of the one offered with its identifier or else after those offered before, whose spaces show the cards `source` reads, such as the GitHub environment prototype's, which `tomori-environment-github-server` offers through this. The server reads them, with whatever credential `source` holds, at once when someone first watches them and then about once a minute while someone does, waiting for the source's rate limit when it is nearly used up and backing off after failures, and never sends them to visitors. Each space keeps where its participants put them. Call it after [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
     pub fn with_cards(
         mut self,
         environment: Environment,
@@ -295,7 +295,8 @@ impl Server {
             source.source(),
             source.service(),
         ));
-        self.hub.offer_environment(environment);
+        // The same write as `with_environment`'s, so that it replaces one with its identifier in place and reconciles server sides.
+        self.hub.set_environment(environment);
         self.cards = Some(source);
         self
     }
@@ -2196,6 +2197,22 @@ mod tests {
             .with_workspace_roots(WorkspaceRoots::none())
     }
 
+    /// The identifier, label, version and whether it has a server side of each environment `server` offers, in order.
+    fn offered(server: &Server) -> Vec<(String, String, u32, bool)> {
+        server
+            .environments()
+            .iter()
+            .map(|environment| {
+                (
+                    environment.id().to_owned(),
+                    environment.label().to_owned(),
+                    environment.version(),
+                    environment.server_side().is_some(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn an_environment_offered_again_replaces_the_one_with_its_identifier_in_its_place() {
         struct Idle;
@@ -2204,20 +2221,7 @@ mod tests {
                 Ok(())
             }
         }
-        let ids = |server: &Server| -> Vec<(String, String, u32, bool)> {
-            server
-                .environments()
-                .iter()
-                .map(|environment| {
-                    (
-                        environment.id().to_owned(),
-                        environment.label().to_owned(),
-                        environment.version(),
-                        environment.server_side().is_some(),
-                    )
-                })
-                .collect()
-        };
+        let ids = offered;
         // None are offered until some are, and one offered alone is the default.
         assert!(server().environments().is_empty());
         let server = server().with_environment(Environment::new("observe", "Observe"));
@@ -2408,9 +2412,85 @@ mod tests {
         drop(open);
     }
 
+    #[test]
+    fn cards_offer_their_environment_exactly_as_with_environment_does() {
+        let offered_both_ways = |before: &[Environment], environment: Environment| {
+            let with_cards = server()
+                .with_environments(before.to_vec())
+                .with_cards(environment.clone(), scripted(Vec::new()));
+            let with_environment = server()
+                .with_environments(before.to_vec())
+                .with_environment(environment);
+            assert_eq!(offered(&with_cards), offered(&with_environment));
+            with_cards
+        };
+        let github = || Environment::new("github", "GitHub").with_version(2);
+        // One not offered yet goes after the others.
+        let added = offered_both_ways(&[Environment::new("sky", "Sky")], github());
+        assert_eq!(
+            offered(&added),
+            [
+                ("sky".to_owned(), "Sky".to_owned(), 1, false),
+                ("github".to_owned(), "GitHub".to_owned(), 2, false),
+            ]
+        );
+        // One offered already, here the default, is replaced in its place, and stays the default.
+        let replaced = offered_both_ways(
+            &[
+                Environment::new("github", "Issues"),
+                Environment::new("sky", "Sky"),
+            ],
+            github(),
+        );
+        assert_eq!(
+            offered(&replaced),
+            [
+                ("github".to_owned(), "GitHub".to_owned(), 2, false),
+                ("sky".to_owned(), "Sky".to_owned(), 1, false),
+            ]
+        );
+        assert_eq!(
+            Environments::new(replaced.environments()).choose(None),
+            Ok("github".to_owned())
+        );
+        // Either way, the cards are shown in its spaces.
+        watching(added);
+        watching(replaced);
+    }
+
+    #[test]
+    fn cards_offered_while_serving_run_their_environment_s_server_side() {
+        /// A server side that says which space it runs for, and ends.
+        struct Announcing(std::sync::Mutex<std::sync::mpsc::Sender<String>>);
+        impl tomori_environment::ServerSide for Announcing {
+            fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+                self.0.lock().unwrap().send(space.id().to_owned()).unwrap();
+                Ok(())
+            }
+        }
+        let server = server().with_environments([
+            Environment::new("sky", "Sky"),
+            Environment::new("github", "GitHub"),
+        ]);
+        server.hub.serving();
+        let id = github_space(&server);
+        let (sender, ran) = std::sync::mpsc::channel();
+        let server = server.with_cards(
+            Environment::new("github", "GitHub")
+                .with_server_side(Announcing(std::sync::Mutex::new(sender))),
+            scripted(Vec::new()),
+        );
+        assert_eq!(ran.recv_timeout(Duration::from_secs(30)), Ok(id));
+        server.hub.shutdown();
+    }
+
     /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
     fn server_with_watcher(source: Arc<dyn crate::cards::CardSource>) -> Server {
-        let server = server().with_cards(Environment::new("github", "GitHub"), source);
+        watching(server().with_cards(Environment::new("github", "GitHub"), source))
+    }
+
+    /// Register a space in the GitHub environment on `server`, returning its identifier.
+    fn github_space(server: &Server) -> String {
         let (commands, _receiver) = async_channel::unbounded();
         let request = crate::hub::CreateRequest {
             title: "Cards".to_owned(),
@@ -2422,10 +2502,15 @@ mod tests {
             environment: "github".to_owned(),
             instructions: String::new(),
         };
-        let id = server
+        server
             .hub
             .register_space(&request, "session".to_owned(), Default::default(), commands)
-            .unwrap();
+            .unwrap()
+    }
+
+    /// `server`, which shows cards in the GitHub environment, with an owner watching them in a space of it, whose cards are due at once.
+    fn watching(server: Server) -> Server {
+        let id = github_space(&server);
         let (connection, ..) = server
             .hub
             .connect(Cancellation::new(), crate::Access::open())

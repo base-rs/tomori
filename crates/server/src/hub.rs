@@ -5450,15 +5450,6 @@ impl Hub {
         self.lock().board = Some(board);
     }
 
-    /// Offer `environment` too, in place of one with the same identifier, or else after those offered.
-    pub(crate) fn offer_environment(&self, environment: crate::Environment) {
-        let mut environments = self
-            .environments
-            .write()
-            .expect("environments are never left poisoned");
-        *environments = environments.clone().with(environment);
-    }
-
     /// Notified when someone starts watching the cards.
     pub(crate) fn listen_cards(&self) -> EventListener {
         self.cards_watched.listen()
