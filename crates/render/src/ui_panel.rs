@@ -140,8 +140,12 @@ const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
 
 /// One panel's canvas on the GPU, with a transform for each eye.
 pub struct Panel {
+    device: wgpu::Device,
     vertices: wgpu::Buffer,
     capacity: usize,
+    /// The most vertices its buffer grows to hold, for a face larger than it holds now: as many as it holds, for a
+    /// panel whose buffer never grows.
+    most: usize,
     count: u32,
     cameras: [wgpu::Buffer; 2],
     bindings: [wgpu::BindGroup; 2],
@@ -183,12 +187,7 @@ impl Panel {
                 }],
             })
         });
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("panel quads"),
-            size: (capacity * size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let vertices = vertices(device, capacity);
         let image_quad = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("panel image quad"),
             size: 6 * 16,
@@ -196,8 +195,10 @@ impl Panel {
             mapped_at_creation: false,
         });
         Self {
+            device: device.clone(),
             vertices,
             capacity,
+            most: capacity,
             count: 0,
             cameras,
             bindings,
@@ -210,6 +211,14 @@ impl Panel {
             #[cfg(test)]
             builds: (0, 0),
         }
+    }
+
+    /// The panel, its buffer grown, as a face larger than it holds is shown, to hold as many vertices as that face has,
+    /// up to `most`, so that a face of many small cells, as a wall's content drawn smaller lays out, is drawn whole
+    /// while every other keeps a buffer of its usual size.
+    pub fn growing(mut self, most: usize) -> Self {
+        self.most = most.max(self.capacity);
+        self
     }
 
     /// Show `canvas`, rebuilding the mesh only if it changed, or if glyphs it needs were waiting for the atlas when it was last built.
@@ -268,6 +277,12 @@ impl Panel {
         let waited = tomori_text::atlas::waited();
         let mut mesh = canvas.mesh();
         self.complete = tomori_text::atlas::waited() == waited;
+        // A mesh larger than its buffer grows the buffer, where it may, at least twice as large, within its most, so
+        // that a face growing by steps is not given a buffer at each.
+        if mesh.len() > self.capacity && self.capacity < self.most {
+            self.capacity = mesh.len().max(self.capacity * 2).min(self.most);
+            self.vertices = vertices(&self.device, self.capacity);
+        }
         // A mesh too large is cut, losing what is drawn last, its text; said once each time a panel's face first is.
         let cut = mesh.len() > self.capacity;
         if cut && !self.cut {
@@ -353,6 +368,16 @@ impl Panel {
     }
 }
 
+/// A panel's buffer of `capacity` vertices.
+fn vertices(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("panel quads"),
+        size: (capacity * size_of::<Vertex>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +412,73 @@ mod tests {
             let waited = tomori_text::atlas::waited();
             panel.set(&gpu.queue, &canvas);
             assert_eq!(tomori_text::atlas::waited(), waited);
+        });
+    }
+
+    #[test]
+    fn a_wall_s_card_grows_to_draw_whole_every_face_its_content_drawn_at_half_lays_out() {
+        use crate::scene_graphics::{CARD_CAPACITY, CARD_MOST};
+        use tomori_protocol::{Code, Place, Pose, Wall, WallKind};
+        use tomori_scene::projection::{Cells, Fit, face};
+        let words =
+            "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod ".repeat(200);
+        let lines: String = (0..200)
+            .map(|line| {
+                format!("    let value_{line} = compute(alpha, beta, gamma) + offset * {line};\n")
+            })
+            .collect();
+        let place = Place::Wall {
+            wall: "w".into(),
+            slot: 0,
+        };
+        let text = tomori_protocol::Panel::new("text", "Notes", &words, place.clone());
+        let code = tomori_protocol::Panel::new("code", "main.rs", &lines, place)
+            .with_code(Code::new("rust", 200));
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            // Filled to their cells, text and code in a standard slot and a tall one, 9:16, at half, are drawn whole.
+            let mut largest = 0;
+            for aspect in [None, Some(9.0 / 16.0)] {
+                let wall = Wall::new("w", WallKind::Added, Pose::default())
+                    .with_aspect(aspect)
+                    .with_content_scale(Some(0.5));
+                for panel in [&text, &code] {
+                    let canvas = face(panel, false, false, Fit::Slot(Cells::of(&wall)));
+                    let vertices = canvas.mesh().len();
+                    largest = largest.max(vertices);
+                    let mut card =
+                        Panel::new(&gpu.device, &pipeline, CARD_CAPACITY).growing(CARD_MOST);
+                    card.set(&gpu.queue, &canvas);
+                    assert!(!card.cut, "{aspect:?} {}: {vertices}", panel.id);
+                    assert_eq!(card.count as usize, vertices);
+                }
+            }
+            // Beyond what a card holds at first, as a standard slot's code at half is.
+            assert!(largest > CARD_CAPACITY, "{largest}");
+            // A buffer grows at least twice as large, as a face needs, and never beyond its most, past which it cuts.
+            let row = |columns: usize| {
+                let mut canvas = Canvas::new(columns, 0.001);
+                canvas.rows = vec![Row::new(vec![('#', Style::plain([1.0; 4])); columns])];
+                canvas
+            };
+            let mut panel = Panel::new(&gpu.device, &pipeline, 64).growing(600);
+            panel.set(&gpu.queue, &row(8));
+            assert_eq!((panel.capacity, panel.cut), (64, false));
+            panel.set(&gpu.queue, &row(12));
+            let vertices = row(12).mesh().len();
+            assert!(vertices > 64 && vertices <= 128, "{vertices}");
+            assert_eq!((panel.capacity, panel.cut), (128, false));
+            assert_eq!(panel.count as usize, vertices);
+            panel.set(&gpu.queue, &row(200));
+            assert_eq!((panel.capacity, panel.cut, panel.count), (600, true, 600));
+            // Never smaller again, and one that never grows keeps its buffer.
+            panel.set(&gpu.queue, &row(8));
+            assert_eq!((panel.capacity, panel.cut), (600, false));
+            let mut fixed = Panel::new(&gpu.device, &pipeline, 64);
+            fixed.set(&gpu.queue, &row(12));
+            assert_eq!((fixed.capacity, fixed.cut, fixed.count), (64, true, 60));
         });
     }
 

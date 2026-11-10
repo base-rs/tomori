@@ -51,6 +51,11 @@ pub const SPARE_CARDS: usize = 8;
 /// panel's, a chart panel's at its largest included (see `design/projection.md`).
 pub const CARD_CAPACITY: usize = CAPACITY / 2;
 
+/// The most vertices one card's buffer grows to hold, for a face larger than [`CARD_CAPACITY`]: four times as many, so
+/// that a wall's content drawn at half its size, about four times as many cells in each slot, is drawn whole, a tall
+/// slot's code included (see `design/projection.md`).
+pub const CARD_MOST: usize = 4 * CARD_CAPACITY;
+
 impl Panels {
     pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {
         Self {
@@ -115,7 +120,7 @@ impl Panels {
                 })
                 .unwrap_or_else(|| {
                     self.cards.push(Card {
-                        panel: renderer.panel(device, CARD_CAPACITY),
+                        panel: renderer.panel(device, CARD_CAPACITY).growing(CARD_MOST),
                         shown: 0,
                     });
                     self.cards.len() - 1
