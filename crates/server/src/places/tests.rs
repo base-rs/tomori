@@ -85,6 +85,28 @@ fn the_server_s_own_clusters_stand_beside_a_wall_or_a_person_shared_by_those_pla
 }
 
 #[test]
+fn the_server_s_own_cluster_by_an_object_stands_before_it_towards_whoever_asked_facing_them() {
+    assert_eq!(object_cluster("lamp/1", 2), "tomori/object/lamp/1");
+    assert_eq!(object_cluster("a lamp", 2), "tomori/object/2");
+    // A metre before it, towards them, at their eye height, facing them.
+    let pose = before_object([0.0, 0.5, -4.0], [3.0, 1.6, 0.0]);
+    let [x, y, z] = pose.position;
+    assert!((x - 0.6).abs() < 1e-5 && (y - 1.6).abs() < 1e-5 && (z + 3.2).abs() < 1e-5);
+    let facing = tomori_protocol::Pose::upright_facing(pose.position, [3.0, 1.6, 0.0]);
+    assert!((pose.yaw() - facing.yaw()).abs() < 1e-4);
+    // Asked from where it stands, before it along +Z.
+    let pose = before_object([1.0, 0.5, 1.0], [1.0, 1.7, 1.0]);
+    assert_eq!(pose.position, [1.0, 1.7, 2.0]);
+    let ahead = Pose::upright_facing([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    assert!((pose.yaw() - ahead.yaw()).abs() < 1e-4);
+    let own = own(&[Placement {
+        beside: Some("yard:lamp/1".into()),
+        ..placed("f", "tomori/object/lamp/1", Some(pose))
+    }]);
+    assert_eq!(own[0].kind.as_deref(), Some("object"));
+}
+
+#[test]
 fn the_agent_places_each_worker_and_moves_itself_within_its_limits() {
     let start = Instant::now();
     let at = |seconds: u64| start + Duration::from_secs(seconds);

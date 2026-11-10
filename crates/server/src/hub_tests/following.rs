@@ -643,7 +643,8 @@ fn moving_only_when_asked_a_pinned_agent_still_turns_to_whoever_speaks_and_glanc
     assert_eq!(agent(&hub, &space), (at, Some(at_bob), true));
     cancel(&ada, "u2");
     // Sent home, its pin ends, and a press turns it no more.
-    hub.lock().agent_home(&space, "a test sent it");
+    hub.lock()
+        .agent_home(&space, "a test sent it", Instant::now());
     press(&bob, "u3");
     hub.flush_snapshots(Instant::now() + COMMIT);
     assert_eq!(agent(&hub, &space), (None, None, false));

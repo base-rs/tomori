@@ -1271,7 +1271,19 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let asked = tomori_protocol::AgentMovement::default();
     let follow = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, None);
     let kept = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Home, None);
-    let home = agent(&anchors, None, false, asked, None);
+    let report = |summoned, pinned, movement, anchor: Option<&str>| {
+        agent(
+            &anchors,
+            &AgentState {
+                summoned,
+                pinned,
+                movement,
+                anchor: anchor.map(str::to_owned),
+                ..AgentState::default()
+            },
+        )
+    };
+    let home = report(None, false, asked, None);
     assert_eq!(home["at_home"], true);
     assert!(home.get("anchor").is_none());
     assert_eq!(home["position"], json!([0.0, 1.4, -2.3]));
@@ -1280,24 +1292,69 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
         (home["mode"].as_str(), home["movement"].as_str()),
         (Some("home"), Some("moves only when asked"))
     );
-    let away = agent(&anchors, Some(ahead), false, asked, Some("rack/a12"));
+    for absent in [
+        "moving",
+        "now_at",
+        "partner",
+        "pinned_by",
+        "returns_home_in_s",
+    ] {
+        assert!(home.get(absent).is_none(), "{absent}");
+    }
+    let away = report(Some(ahead), false, asked, Some("rack/a12"));
     assert_eq!(away["at_home"], false);
     assert_eq!(away["anchor"], "rack/a12");
     assert_eq!(away["position"], json!([1.0, 1.9, -2.3]));
     assert_eq!(away["mode"], "away");
-    let following = agent(&anchors, Some(ahead), false, follow, None);
+    let following = report(Some(ahead), false, follow, None);
     assert_eq!(
         (following["mode"].as_str(), following["movement"].as_str()),
         (Some("following"), Some("follows the speaker"))
     );
-    assert_eq!(
-        agent(&anchors, Some(ahead), true, follow, None)["mode"],
-        "pinned"
+    assert_eq!(report(Some(ahead), true, follow, None)["mode"], "pinned");
+    assert_eq!(report(None, false, kept, None)["movement"], "stays home");
+    // On its way home, where it has reached, and not yet home.
+    let going = agent(
+        &anchors,
+        &AgentState {
+            at: Some(ahead),
+            movement: follow,
+            ..AgentState::default()
+        },
     );
     assert_eq!(
-        agent(&anchors, None, false, kept, None)["movement"],
-        "stays home"
+        (&going["mode"], &going["at_home"], &going["moving"]),
+        (&json!("going home"), &json!(true), &json!(true))
     );
+    assert_eq!(going["now_at"], json!([1.0, 1.9, -2.3]));
+    // Whom it talks with, who pinned it, while pinned only, and when it goes home.
+    let pinned = agent(
+        &anchors,
+        &AgentState {
+            summoned: Some(ahead),
+            pinned: true,
+            pinned_by: Some("Ada".to_owned()),
+            partner: Some("Ada#23".to_owned()),
+            movement: follow,
+            ..AgentState::default()
+        },
+    );
+    assert_eq!(
+        (&pinned["pinned_by"], &pinned["partner"]),
+        (&json!("Ada"), &json!("Ada#23"))
+    );
+    let followed = agent(
+        &anchors,
+        &AgentState {
+            summoned: Some(ahead),
+            pinned_by: Some("Ada".to_owned()),
+            returns_in: Some(std::time::Duration::from_millis(72_400)),
+            movement: follow,
+            ..AgentState::default()
+        },
+    );
+    assert!(followed.get("pinned_by").is_none());
+    assert_eq!(followed["returns_home_in_s"], 72);
 }
 
 #[test]

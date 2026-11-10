@@ -1274,27 +1274,44 @@ pub(crate) fn before(head: &Pose) -> Pose {
     )
 }
 
-/// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, which way it faces, whether it is
-/// at its home, and where that is; whether it is at home, following someone, pinned or away where it was asked to go;
-/// and how the space lets it move. See `design/environments.md`.
-pub(crate) fn agent(
-    anchors: &tomori_protocol::Anchors,
-    summoned: Option<Pose>,
-    pinned: bool,
-    movement: tomori_protocol::AgentMovement,
-    anchor: Option<&str>,
-) -> Value {
+/// What the `presence` and `move_agent` tools say of the agent beyond where it stands: how it moves now, whom it talks
+/// with, who pinned it and when it goes home. See `design/mcp.md`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AgentState {
+    /// Where it was summoned to, or none at home.
+    pub summoned: Option<Pose>,
+    /// Where it has reached, while it is on its way somewhere, or home.
+    pub at: Option<Pose>,
+    pub pinned: bool,
+    /// Who pinned it, by their handle, where a participant did.
+    pub pinned_by: Option<String>,
+    /// Whom it talks with now, or last did, by their handle.
+    pub partner: Option<String>,
+    /// How long until it goes home if nothing more is said, while it follows.
+    pub returns_in: Option<std::time::Duration>,
+    pub movement: tomori_protocol::AgentMovement,
+    /// The anchor it stands at, if any.
+    pub anchor: Option<String>,
+}
+
+/// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, or is going, which way it faces,
+/// whether its place is home, and where that is, and, on its way, where it has reached; its mode, at home, going home, following the speaker, pinned or away where it was
+/// asked to go, and whether it is on its way; whom it talks with, who pinned it and, while it follows, how long until
+/// it goes home if nothing more is said; how the space lets it move, and the anchor it stands at. See
+/// `design/environments.md`.
+pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> Value {
     let home = crate::hub::agent_home(anchors);
-    let at = summoned.unwrap_or(home);
+    let at = state.summoned.unwrap_or(home);
     // The way it faces, its +Z, clockwise from −Z.
     let facing = rotate(at.orientation, [0.0, 0.0, 1.0]);
-    let mode = match (pinned, summoned, movement.mode) {
+    let mode = match (state.pinned, state.summoned, state.movement.mode) {
         (true, _, _) => "pinned",
+        (false, None, _) if state.at.is_some() => "going home",
         (false, None, _) => "home",
         (false, Some(_), tomori_protocol::Movement::Follow) => "following",
         (false, Some(_), _) => "away",
     };
-    let movement = match movement.mode {
+    let movement = match state.movement.mode {
         tomori_protocol::Movement::Follow => "follows the speaker",
         tomori_protocol::Movement::Home => "stays home",
         _ => "moves only when asked",
@@ -1302,12 +1319,25 @@ pub(crate) fn agent(
     let mut agent = json!({
         "position": position(at.position),
         "facing_yaw": round(angles(facing).0, 0),
-        "at_home": summoned.is_none(),
+        "at_home": state.summoned.is_none(),
         "home": position(home.position),
         "mode": mode,
         "movement": movement,
     });
-    if let Some(anchor) = anchor {
+    if let Some(now) = state.at {
+        agent["moving"] = json!(true);
+        agent["now_at"] = position(now.position);
+    }
+    if let Some(partner) = &state.partner {
+        agent["partner"] = json!(partner);
+    }
+    if let Some(by) = state.pinned_by.as_ref().filter(|_| state.pinned) {
+        agent["pinned_by"] = json!(by);
+    }
+    if let Some(returns) = state.returns_in {
+        agent["returns_home_in_s"] = json!(returns.as_secs());
+    }
+    if let Some(anchor) = &state.anchor {
         agent["anchor"] = json!(anchor);
     }
     agent

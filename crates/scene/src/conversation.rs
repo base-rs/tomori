@@ -1725,6 +1725,7 @@ impl Conversation {
                     .joined_space()
                     .is_some_and(|(space, _)| space.summoned.is_some() || space.pinned),
             calls: self.offers_call(),
+            pins: self.offers_pin(),
             movement: self.agent_movement(),
             pointed: None,
             feedback: self.feedback,
@@ -1969,6 +1970,8 @@ impl Conversation {
             crate::hand_menu::Choice::Travel => self.toggle_travel(),
             crate::hand_menu::Choice::AgentHome => self.send_agent_home(),
             crate::hand_menu::Choice::CallAgent => self.call_agent(),
+            crate::hand_menu::Choice::AgentStay => self.pin_agent(true),
+            crate::hand_menu::Choice::AgentFollow => self.pin_agent(false),
             crate::hand_menu::Choice::AgentMovement => {
                 if let Some((movement, _)) = self.agent_movement() {
                     self.set_agent_movement(movement.next_mode());
@@ -2546,6 +2549,26 @@ impl Conversation {
                 .is_some_and(|(movement, _)| movement.mode != tomori_protocol::Movement::Home)
         {
             self.send(ClientMessage::CallAgent);
+        }
+    }
+
+    /// What the hand menu offers of the agent's pin, to a participant, where the space has it follow the speaker, on a
+    /// server that takes pins: `Some(true)`, **Tomori: stay here**, while it is not pinned, and `Some(false)`, **Tomori:
+    /// follow again**, while it is; none otherwise. See `design/hand-menu.md`.
+    fn offers_pin(&self) -> Option<bool> {
+        let (space, _) = self.joined_space()?;
+        let follows = space
+            .movement
+            .is_some_and(|movement| movement.mode == tomori_protocol::Movement::Follow);
+        (space.pins && follows && self.role.participates()).then_some(!space.pinned)
+    }
+
+    /// Pin the joined space's agent where it stands, or, `pinned` false, let it follow the speaker again, for everyone,
+    /// as **Tomori: stay here** and **Tomori: follow again** do: only where the hand menu offers it. See
+    /// `design/environments.md`.
+    pub fn pin_agent(&mut self, pinned: bool) {
+        if self.mode == Mode::Space && self.offers_pin() == Some(pinned) {
+            self.send(ClientMessage::PinAgent { pinned });
         }
     }
 
@@ -8110,6 +8133,10 @@ mod tests {
         assert!(!model.calls && model.agent_away);
         newer.apply(pinned([6.0, 1.6, -1.0]));
         assert!(newer.menu_model().calls);
+        // From a server that takes no pins, neither stay nor follow is offered or sent.
+        assert_eq!(newer.menu_model().pins, None);
+        newer.pin_agent(false);
+        assert!(sent(&mut newer).is_empty());
         newer.choose_menu(crate::hand_menu::Choice::AgentHome);
         assert_eq!(sent(&mut newer), [ClientMessage::PlaceAgent { at: None }]);
         // Kept home, it is never called.
@@ -8136,6 +8163,53 @@ mod tests {
         lobby.send_agent_home();
         assert!(lobby.menu_model().movement.is_none());
         assert!(!lobby.menu_model().calls);
+    }
+
+    #[test]
+    fn a_participant_pins_the_agent_or_lets_it_follow_again_from_the_hand_menu() {
+        use tomori_protocol::{AgentMovement, Movement};
+        let following = |pinned: bool| {
+            space(move |state| {
+                state.movement = Some(AgentMovement::new(Movement::Follow, Some(90)));
+                state.pins = true;
+                state.pinned = pinned;
+            })
+        };
+        let mut conversation = joined(|_| {});
+        // Following, unpinned, it is asked to stay, and only that.
+        conversation.apply(following(false));
+        assert_eq!(conversation.menu_model().pins, Some(true));
+        conversation.choose_menu(crate::hand_menu::Choice::AgentStay);
+        conversation.pin_agent(false);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::PinAgent { pinned: true }]
+        );
+        // Pinned, it is asked to follow again, and only that.
+        conversation.apply(following(true));
+        assert_eq!(conversation.menu_model().pins, Some(false));
+        conversation.choose_menu(crate::hand_menu::Choice::AgentFollow);
+        conversation.pin_agent(true);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::PinAgent { pinned: false }]
+        );
+        // Moving only when asked, or kept home, neither is offered.
+        for mode in [Movement::Asked, Movement::Home] {
+            conversation.apply(space(move |state| {
+                state.movement = Some(AgentMovement::new(mode, Some(90)));
+                state.pins = true;
+            }));
+            assert_eq!(conversation.menu_model().pins, None);
+        }
+        // Nor to a visitor.
+        conversation.apply(following(false));
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        assert_eq!(conversation.menu_model().pins, None);
+        conversation.pin_agent(true);
+        assert!(sent(&mut conversation).is_empty());
     }
 
     #[test]

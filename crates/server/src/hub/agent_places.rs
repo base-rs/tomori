@@ -247,16 +247,44 @@ impl Hub {
                 let reference = id
                     .rsplit_once(':')
                     .map_or(id.as_str(), |(_, reference)| reference);
-                let anchor = anchors
+                if let Some(anchor) = anchors
                     .iter()
                     .find(|anchor| anchor.object.as_deref() == Some(reference))
+                {
+                    return Ok(placed(anchor.name.clone(), None, None));
+                }
+                // Else in a small cluster of its own, 1 m before where the object stands, towards whoever asked.
+                let objects = record
+                    .channel
+                    .as_ref()
+                    .filter(|channel| channel.environment == record.model.environment)
+                    .map_or(&[][..], |channel| channel.objects.as_slice());
+                let (index, object, position) = objects
+                    .iter()
+                    .enumerate()
+                    .find(|(_, object)| {
+                        object.reference.as_deref() == Some(reference) || object.id == id
+                    })
+                    .and_then(|(index, object)| Some((index, object, object.position?)))
                     .ok_or_else(|| {
                         format!(
-                            "No anchor here stands by the object {:?}, so a worker has nowhere to stand by it: presence lists the anchors and what each stands by.",
+                            "Nothing here stands by the object {:?}, and the environment does not say where it stands, so a worker has nowhere to stand by it: presence lists the anchors and what each stands by.",
                             crate::space::one_line(&id, 80)
                         )
                     })?;
-                placed(anchor.name.clone(), None, None)
+                let asker = record
+                    .model
+                    .origin()
+                    .map_or(tomori_protocol::cluster::EYES, |head| head.position);
+                let pose = crate::places::before_object(position, asker);
+                placed(
+                    crate::places::object_cluster(
+                        object.reference.as_deref().unwrap_or(&object.id),
+                        index,
+                    ),
+                    Some(pose),
+                    Some(crate::space::one_line(&id, 80)),
+                )
             }
             Target::Wall(named) => {
                 let walls = environments.walls(&record.model.environment);

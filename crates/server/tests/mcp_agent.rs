@@ -195,7 +195,31 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
             "move_agent",
             json!({"place": "wall Tomori"})
         ))
-        .contains("home, stay, near NAME, front NAME or anchor NAME")
+        .contains(
+            "home, stay, follow, near NAME, beside NAME, front NAME, object ID or anchor NAME"
+        )
+    );
+    // Moving only when asked, it cannot follow the speaker.
+    assert!(
+        failure(&call(
+            &server,
+            &token,
+            &session,
+            "move_agent",
+            json!({"place": "follow"})
+        ))
+        .contains("only when someone asks")
+    );
+    // Of its own accord again within 20 s, somewhere else, it is refused and told to stay where it is.
+    assert!(
+        failure(&call(
+            &server,
+            &token,
+            &session,
+            "move_agent",
+            json!({"place": "beside Ada"})
+        ))
+        .contains("stay where you are")
     );
     assert!(
         failure(&call(
@@ -302,13 +326,8 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     ada.space(|state: &SpaceState| {
         state.movement == Some(tomori_protocol::AgentMovement::default())
     });
-    content(&call(
-        &server,
-        &token,
-        &session,
-        "move_agent",
-        json!({"place": "front Ada"}),
-    ));
+    ada.send(&ClientMessage::CallAgent);
+    ada.space(|state: &SpaceState| state.pinned);
 
     // A change of environment brings it home, to the new environment's home for it.
     ada.send(&ClientMessage::SetEnvironment {

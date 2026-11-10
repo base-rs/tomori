@@ -2200,7 +2200,14 @@ impl Hub {
         outlet: &SpaceOutlet,
         objects: Vec<tomori_environment::Object>,
     ) -> tomori_environment::Result<()> {
-        let objects = crate::channel::objects(objects);
+        // Where each stands, carried into the space's coordinates as its environment's anchors are.
+        let environments = self.environments();
+        let objects = crate::channel::objects(objects, |position| {
+            environments
+                .carry(&outlet.environment, &tomori_protocol::Pose::at(position))
+                .map(|pose| pose.position)
+        });
+        drop(environments);
         let mut state = self.lock();
         if let Some(record) = self.current_channel(&mut state, outlet) {
             record.objects = objects;
@@ -3777,6 +3784,8 @@ impl Hub {
                 // client, which the space resolves, ignoring those it does not have, cards only on the board of a
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
+                // What the agent stands off the line of sight to, where the server knows where it stands.
+                let attended = attention.clone();
                 let attention = match state.space(&space) {
                     Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
@@ -3843,7 +3852,9 @@ impl Hub {
                     .expect("checked above")
                     .speech
                     .recording(participant);
-                if question && let Some(captured) = self.capture(state, &space, participant) {
+                if question
+                    && let Some(captured) = self.capture(state, &space, participant, &attended)
+                {
                     state.agent_pressed(&space, participant, captured, Instant::now());
                 }
                 deferred.push(Deferred::Begin(id));
@@ -4981,13 +4992,21 @@ impl Hub {
                     return;
                 };
                 let name = state.participants[participant].name.clone();
-                state.agent_home(&space, &format!("{name} sent it home"));
+                state.agent_home(&space, &format!("{name} sent it home"), Instant::now());
             }
             ClientMessage::CallAgent => {
                 let Some(space) = in_space(state) else {
                     return;
                 };
                 if let Err(error) = self.call_agent(state, &space, participant, Instant::now()) {
+                    state.error(participant, error);
+                }
+            }
+            ClientMessage::PinAgent { pinned } => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if let Err(error) = state.pin_agent(&space, participant, pinned, Instant::now()) {
                     state.error(participant, error);
                 }
             }
@@ -6515,6 +6534,8 @@ impl Hub {
                 // `design/environments.md`.
                 state.summons = false;
                 state.pinned = space.following.pinned;
+                // Participants pin it, and let it follow again, from the hand menu. See `design/hand-menu.md`.
+                state.pins = true;
                 state.facing = space.following.faces();
                 state.partner = space.partner;
                 state.via = space.following.via;

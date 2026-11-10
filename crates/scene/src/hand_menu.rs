@@ -227,6 +227,10 @@ pub enum MenuKey {
     AgentHome,
     /// Bring the agent to the participant and pin it there, for everyone.
     CallAgent,
+    /// Pin the agent where it stands, for everyone, so that it follows nobody.
+    AgentStay,
+    /// End the agent's pin, for everyone, so that it follows the speaker again.
+    AgentFollow,
     /// Step how the agent moves, for everyone, as an owner.
     AgentMovement,
     /// Step how long the agent waits, quiet, before going home, for everyone, as an owner.
@@ -317,6 +321,10 @@ pub struct Model {
     /// Whether this participant may call the agent to them, which offers **Call Tomori here**: where the space lets it
     /// move, unless it is pinned near them already. See `design/hand-menu.md`.
     pub calls: bool,
+    /// What this participant may do of the agent's pin, where the space has it follow the speaker, on a server that
+    /// takes pins: `Some(true)` offers **Tomori: stay here**, pinning it where it stands, and `Some(false)` **Tomori:
+    /// follow again**, ending its pin. See `design/hand-menu.md`.
+    pub pins: Option<bool>,
     /// How the agent moves, on a server that says, and whether this participant, an owner, may change it.
     pub movement: Option<(tomori_protocol::AgentMovement, bool)>,
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
@@ -409,6 +417,10 @@ pub enum Choice {
     AgentHome,
     /// Bring the agent here and pin it, for everyone.
     CallAgent,
+    /// Pin the agent where it stands, for everyone.
+    AgentStay,
+    /// Let the agent follow the speaker again, for everyone.
+    AgentFollow,
     /// Step how the agent moves to the next way, for everyone.
     AgentMovement,
     /// Step how long the agent waits before going home to the next delay, for everyone.
@@ -745,6 +757,19 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 }
                 if model.calls {
                     button(&mut items, MenuKey::CallAgent, "Call Tomori here".into());
+                }
+                match model.pins {
+                    Some(true) => {
+                        button(&mut items, MenuKey::AgentStay, "Tomori: stay here".into())
+                    }
+                    Some(false) => {
+                        button(
+                            &mut items,
+                            MenuKey::AgentFollow,
+                            "Tomori: follow again".into(),
+                        );
+                    }
+                    None => {}
                 }
                 if model.agent_away {
                     button(&mut items, MenuKey::AgentHome, "Send Tomori home".into());
@@ -1175,6 +1200,8 @@ impl HandMenu {
             MenuKey::Travel => Some(Choice::Travel),
             MenuKey::AgentHome => Some(Choice::AgentHome),
             MenuKey::CallAgent => Some(Choice::CallAgent),
+            MenuKey::AgentStay => Some(Choice::AgentStay),
+            MenuKey::AgentFollow => Some(Choice::AgentFollow),
             MenuKey::AgentMovement => Some(Choice::AgentMovement),
             MenuKey::AgentReturn => Some(Choice::AgentReturn),
             MenuKey::AddWall => Some(Choice::AddWall),
@@ -2076,6 +2103,7 @@ mod tests {
         model.movement = Some((AgentMovement::new(Movement::Follow, Some(90)), true));
         model.calls = true;
         model.agent_away = true;
+        model.pins = Some(true);
         let named = tomori(&model);
         assert_eq!(
             named
@@ -2086,9 +2114,23 @@ mod tests {
                 (MenuKey::AgentMovement, "Moves: follows the speaker"),
                 (MenuKey::AgentReturn, "Goes home after 90 s quiet"),
                 (MenuKey::CallAgent, "Call Tomori here"),
+                (MenuKey::AgentStay, "Tomori: stay here"),
                 (MenuKey::AgentHome, "Send Tomori home"),
             ]
         );
+        // Pinned, it offers to follow again in its place.
+        model.pins = Some(false);
+        let named = tomori(&model);
+        assert_eq!(
+            (named[3].0.clone(), named[3].2.as_str()),
+            (MenuKey::AgentFollow, "Tomori: follow again")
+        );
+        assert_eq!(menu.choose(&MenuKey::AgentStay), Some(Choice::AgentStay));
+        assert_eq!(
+            menu.choose(&MenuKey::AgentFollow),
+            Some(Choice::AgentFollow)
+        );
+        model.pins = None;
         for (delay, said) in [
             (Some(30), "Goes home after 30 s quiet"),
             (Some(300), "Goes home after 5 min quiet"),
