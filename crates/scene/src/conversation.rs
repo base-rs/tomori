@@ -31,10 +31,10 @@ const BODY_ROWS: usize = ROWS - 4;
 
 /// What the headset states in each `Hello` that it reads and draws at most, as a conversation does unless
 /// [`Conversation::set_limits`] says otherwise: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], so that its code
-/// panels are sent whole, but a projection within today's bounds, [`tomori_protocol::Limits::TODAY`]. The frame step
-/// lays out every panel's face each frame, which takes about 25 µs for each line of its text on a desktop machine, and
-/// 0.7 ms for a full panel, so that today's 90 panels already take longer than a headset's frame when every one is full;
-/// more waits until faces are kept between frames. See `design/clients.md`.
+/// panels are sent whole, but a projection within today's bounds, [`tomori_protocol::Limits::TODAY`], chosen while the
+/// frame step laid out every panel's face each frame, about 0.7 ms for a full panel on a desktop machine, so that 90
+/// full panels took longer than a headset's frame. Faces are now kept between frames; more waits until what more panels
+/// cost is measured on the headset. See `design/clients.md`.
 pub const HEADSET_LIMITS: tomori_protocol::Limits =
     tomori_protocol::Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32);
 
