@@ -388,7 +388,12 @@ mod tests {
     fn a_build_declares_how_its_environments_travel() {
         use tomori_scene::locomotion::Surface;
         assert!(Builder::default().sceneries().locomotion().is_empty());
-        let teleport = Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]);
+        // Teleporting about a disc, between two pads on it.
+        let teleport =
+            Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]).with_pads([[
+                crate::Pad::at(glam::Vec3::new(1.0, 0.0, 0.0)),
+                crate::Pad::at(glam::Vec3::new(-1.0, 0.0, 0.0)).named("Door"),
+            ]]);
         let mut builder = Builder::empty()
             .scenery("floor", blank)
             .locomotion("floor", Locomotion::fly(Vec::new(), 10.0))

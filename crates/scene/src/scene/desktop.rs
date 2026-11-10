@@ -953,6 +953,60 @@ mod tests {
     }
 
     #[test]
+    fn a_click_or_enter_on_a_pad_the_mouse_points_at_takes_the_participant_to_its_partner() {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        let forward = Head::default()
+            .transform()
+            .transform_vector3(-Vec3::Z)
+            .with_y(0.0)
+            .normalize();
+        let pad = forward * 2.0;
+        let racks = pad + Vec3::new(0.0, -4.5, 0.0);
+        for click in [true, false] {
+            let mut conversation = joined();
+            conversation.set_locomotion(vec![(
+                crate::test_support::SKY,
+                Locomotion::teleport(vec![
+                    Surface::rectangle(Vec3::ZERO, Vec2::splat(20.0)),
+                    Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::splat(20.0)),
+                ])
+                .with_pads([[Pad::at(pad), Pad::at(racks).named("Racks")]]),
+            )]);
+            let mut desktop = desktop(&mut conversation);
+            let mut start = Instant::now();
+            for _ in 0..40 {
+                start += Duration::from_millis(100);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+            }
+            // Down the middle of the window, the mouse comes to the pad, whose label names the click.
+            let on_pad = (0..400).find(|row| {
+                desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.5 + *row as f32));
+                let drawn = desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+                drawn.frame.pads.first().is_some_and(|pad| pad.highlighted)
+                    && drawn.frame.projection.iter().any(|sheet| {
+                        sheet.canvas.as_deref().unwrap().plain() == "Racks ↓\nClick  go"
+                    })
+            });
+            assert!(on_pad.is_some(), "the mouse meets the pad");
+            // A click, or Enter, as A, takes them down to the racks.
+            if click {
+                desktop.mouse(Button::Left, true);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+                desktop.mouse(Button::Left, false);
+            } else {
+                tap(&mut desktop, Key::A, &mut conversation);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+            }
+            let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD, SIZE);
+            let head = Vec3::from_array(drawn.frame.presence.unwrap().head.position);
+            assert!(
+                head.distance(racks + Vec3::Y * arrival::HOME.y) < 1e-3,
+                "{click} {head}"
+            );
+        }
+    }
+
+    #[test]
     fn enter_ticks_or_unticks_the_checklist_item_the_mouse_points_at_as_a_does() {
         let mut conversation = lobby(ConnectionRole::Owner);
         let ahead = arrival::HOME + Head::default().transform().transform_vector3(-Vec3::Z) * 2.0;

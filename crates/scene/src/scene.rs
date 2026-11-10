@@ -197,6 +197,9 @@ pub struct Frame<'a> {
     pub landing: Option<Vec3>,
     /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
     pub blink: f32,
+    /// The teleport pads of the space's profile, drawn once its scenery has grown in, the one pointed at highlighted;
+    /// see `design/locomotion.md`.
+    pub pads: Vec<crate::pads::Shown>,
     /// What the environment's client side shows, for its scenery to draw. See `design/environments.md`.
     pub environment: Option<crate::client_side::Drawn>,
     /// The carriage from the environment's own coordinates, in which its scenery draws, into the space's. See
@@ -424,6 +427,10 @@ pub struct Step {
     /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
     /// swarm appears at the new one rather than gliding. See `design/environments.md`.
     agent_home: crate::anchors::Anchor,
+    /// The pulls of the trigger on teleport pads, with the thresholds that choose an arrival object, and the pad the ray
+    /// pointed at last frame, which a pull begun on it, or A, chooses. See `design/locomotion.md`.
+    pad_selector: crate::client_side::Selector,
+    pointed_pad: Option<crate::pads::Key>,
     /// While the trigger pulls the swarm, for how long, where it last drew it, and whether the pull is the swarm's own,
     /// begun on nothing of Tomori's nor the environment's, so that letting go of such a pull after [`SUMMON_HOLD`]
     /// summons the agent there.
@@ -476,6 +483,8 @@ impl Default for Step {
             #[cfg(test)]
             last_back: None,
             agent_home: crate::anchors::Anchor::AGENT,
+            pad_selector: crate::client_side::Selector::default(),
+            pointed_pad: None,
             summoning: None,
         }
     }
@@ -505,6 +514,7 @@ impl Step {
         self.environment_sticks = (Vec2::ZERO, Vec2::ZERO);
         self.left_stick = LeftStick::Free;
         self.a_press = crate::client_side::Press::default();
+        self.pointed_pad = None;
         if let Some(client) = self.client.as_mut() {
             client.back = false;
         }
@@ -563,7 +573,9 @@ impl Step {
         self.left_stick = self.left_stick.update(stick, || {
             match precedence::Left::first(|rung| match rung {
                 precedence::Left::Travel => travels,
-                precedence::Left::Tomori => aim == precedence::Aim::Tomori,
+                precedence::Left::Tomori => {
+                    matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
+                }
                 precedence::Left::Environment => environment,
                 precedence::Left::Nothing => true,
             }) {
@@ -602,7 +614,9 @@ impl Step {
                     precedence::Right::Carried => carrying,
                     precedence::Right::Transcript => wrist_active,
                     precedence::Right::Scroll => scrolls.is_some(),
-                    precedence::Right::Tomori => aim == precedence::Aim::Tomori,
+                    precedence::Right::Tomori => {
+                        matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
+                    }
                     precedence::Right::Environment => environment,
                     precedence::Right::Cards => true,
                 }) {
@@ -988,6 +1002,7 @@ impl Step {
             scene.viewer = viewer;
         }
         let in_arrival = conversation.arrival().is_some();
+        let in_space_shown = !in_arrival && conversation.joined_space().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         let scenery = self.motion.scenery(self.arrival_time);
         // Whose a pull of the trigger is, decided as it begins, until it is let go: the first rung of
@@ -1005,6 +1020,7 @@ impl Step {
             precedence::Trigger::Transcript => wrist_active,
             precedence::Trigger::CarriedWall => carrying_wall,
             precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
+            precedence::Trigger::Pad => aim == precedence::Aim::Pad,
             precedence::Trigger::Environment => focus.is_some(),
             precedence::Trigger::Swarm => true,
         });
@@ -1026,7 +1042,24 @@ impl Step {
         if let Some(client) = self.client.as_mut() {
             client.select = client.select.take().or(select);
         }
-        let selecting = self.selector.owns();
+        // A pull begun on a teleport pad chooses it once pressed as far as choosing an arrival object takes, as A does,
+        // which the conversation's `accept` took for it; either takes the participant to the pad paired with it, from
+        // this frame's travel. See `design/locomotion.md`.
+        let pad_name = self
+            .pointed_pad
+            .filter(|_| rung == precedence::Trigger::Pad)
+            .map(|key| format!("{}/{}", key.pair, key.end));
+        let pulled = matches!(
+            self.pad_selector.update(
+                pad_name.as_deref(),
+                senses.trigger,
+                crate::client_side::Press::default()
+            ),
+            Some(crate::client_side::Select::Pressed(_))
+        );
+        let pressed = conversation.take_pad_choice();
+        let chosen_pad = self.pointed_pad.filter(|_| pulled || pressed);
+        let selecting = self.selector.owns() || self.pad_selector.owns();
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
         // While a wall is carried, the trigger keeps it from snapping rather than attracting the swarm. See
         // `design/projection.md`.
@@ -1098,6 +1131,9 @@ impl Step {
             && conversation.joined_space().is_some();
         // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
         let locomotion = conversation.locomotion();
+        // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put it down. A panel carried travels along, in the hand, as the rig carries the ray it follows.
+        let grown = scenery.reveal.is_none() && scenery.environment == conversation.environment();
+        let travel_active = in_space && grown && self.board.held().is_none();
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
             locomotion: &locomotion,
@@ -1107,14 +1143,12 @@ impl Step {
             facing: senses
                 .head_pose
                 .and_then(|pose| locomotion::facing(glam::Quat::from_array(pose.orientation))),
-            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put it down. A panel carried travels along, in the hand, as the rig carries the ray it follows.
-            active: in_space
-                && scenery.reveal.is_none()
-                && scenery.environment == conversation.environment()
-                && self.board.held().is_none(),
+            active: travel_active,
+            chosen: chosen_pad,
             dt,
         });
-        if travel.teleported {
+        // Landing clicks as choosing does; a pad chosen with A clicked as A chose it.
+        if travel.teleported || (travel.transported && !pressed) {
             feedback.emit(feedback::Event::Choose, now);
         }
         // While a teleport is aimed, the ray serves only it, though a panel carried stays in the hand.
@@ -1126,6 +1160,12 @@ impl Step {
         if let Some(wall) = conversation.take_refused_wall() {
             self.projector.refused_wall(&wall);
         }
+        // The teleport pad the ray meets, if any, which nothing nearer takes, below; a panel behind it is not pulled
+        // off, as one behind a card is not.
+        let pad_met = senses
+            .ray
+            .filter(|_| travel_active && !travel.aiming && !self.projector.carrying())
+            .and_then(|ray| crate::pads::pick(&locomotion, &ray));
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
@@ -1136,7 +1176,9 @@ impl Step {
             viewer: senses.viewer,
             active: carrying_through && self.board.held().is_none(),
             pointing: !travel.aiming,
-            nearer: self.card_reach,
+            nearer: pad_met.map_or(self.card_reach, |(_, distance, _)| {
+                self.card_reach.min(distance)
+            }),
             stick: self.carry_stick,
             straighten: std::mem::take(&mut self.straighten),
             free: senses
@@ -1287,14 +1329,35 @@ impl Step {
         } else {
             (card, worker, object)
         };
+        // A teleport pad is pointed at, while travel may be used and nothing is carried, where the ray meets nothing else
+        // nearer that it may point at or take hold of: a card, a worker, an environment's object, or what the projector
+        // meets: a panel pointed at or a wall's board and handles.
+        let met = [
+            board.pointed.as_ref().map(|(_, distance, _)| *distance),
+            self.delegation_scene.hit_point().map(reach),
+            picked.as_ref().map(|picked| picked.distance),
+            projected.hit.map(|hit| hit.distance),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f32::INFINITY, f32::min);
+        let pad = pad_met
+            .filter(|_| !self.projector.carrying())
+            .filter(|(_, distance, _)| *distance < met);
+        let (card, worker, object, panel) = if pad.is_some() {
+            (None, None, None, None)
+        } else {
+            (card, worker, object, panel)
+        };
         // What the ray is on, Tomori's own interface first, which the trigger and the sticks act on next frame: a wall's
         // board, bar or handles, where the participant may take hold of walls, or a wall carried, count as Tomori's too.
-        let on_wall = projected.hit.is_some_and(|hit| {
-            hit.held
-                || picked
-                    .as_ref()
-                    .is_none_or(|picked| hit.distance < picked.distance)
-        });
+        let on_wall = pad.is_none()
+            && projected.hit.is_some_and(|hit| {
+                hit.held
+                    || picked
+                        .as_ref()
+                        .is_none_or(|picked| hit.distance < picked.distance)
+            });
         self.aim = if menu_shown
             || on_wall
             || wrist_active
@@ -1305,11 +1368,16 @@ impl Step {
             || worker.is_some()
         {
             precedence::Aim::Tomori
+        } else if pad.is_some() {
+            precedence::Aim::Pad
         } else if object.is_some() {
             precedence::Aim::Environment
         } else {
             precedence::Aim::Nothing
         };
+        // What the trigger and A choose next frame.
+        self.pointed_pad = pad.map(|(key, _, _)| key);
+        conversation.point_pad(pad.is_some());
         // What the trigger and B act on next frame.
         if let Some(client) = self.client.as_mut() {
             client.focus = object
@@ -1329,6 +1397,7 @@ impl Step {
                 .or_else(|| worker.as_ref().map(feedback::key))
                 .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
                 .or_else(|| panel.as_ref().map(feedback::key))
+                .or_else(|| pad.map(|(key, _, _)| feedback::key(&("pad", key))))
         };
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
@@ -1352,7 +1421,9 @@ impl Step {
                 .delegation_scene
                 .hit_point()
                 .map(|point| crate::pointing::End::new(point.distance(ray.origin), point));
-            crate::pointing::end([card_end, projected.hit, object_end, worker_end])
+            let pad_end =
+                pad.map(|(_, distance, point)| crate::pointing::End::new(distance, point));
+            crate::pointing::end([card_end, projected.hit, object_end, worker_end, pad_end])
         });
         // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next.
         let item = match (&panel, &projected.pointed, self.projector.held()) {
@@ -1385,6 +1456,17 @@ impl Step {
         }
         // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
         self.pointed_panel = panel.clone().filter(|_| self.projector.held().is_none());
+        // The label beside a teleport pad pointed at says where it goes.
+        let pairs: Vec<_> = locomotion.pads().collect();
+        projection.extend(pad.and_then(|(key, _, point)| {
+            crate::pads::label(
+                &pairs,
+                key,
+                point,
+                senses.viewer.unwrap_or(arrival::HOME),
+                self.controls,
+            )
+        }));
         // The hint beside a panel carried, over everything else.
         projection.extend(projected.hint);
         // The images the panels drawn show, of those held, for the renderer to decode and draw over them.
@@ -1559,6 +1641,11 @@ impl Step {
             images,
             landing: travel.landing,
             blink: travel.blink,
+            pads: if in_space_shown && grown {
+                crate::pads::shown(&locomotion, self.pointed_pad)
+            } else {
+                Vec::new()
+            },
             environment: drawn,
             carriage: arrangement.carriage,
             avatar: self.coordinator.shown(),
@@ -2621,7 +2708,7 @@ mod tests {
                 assert_eq!(step.highlighted, Some(mute));
             }
         }
-        let rows: [(A, &str, Setup, Late); 12] = [
+        let rows: [(A, &str, Setup, Late); 13] = [
             (
                 A::MenuRow,
                 "a hand menu row",
@@ -2790,6 +2877,21 @@ mod tests {
                 nothing,
             ),
             (
+                A::Conversation,
+                "a teleport pad pointed at, the last of its meanings",
+                |conversation, _, senses, _| {
+                    // Behind the head, where the lamp, which is ahead, does not pick; the pad takes A there, and, as
+                    // the frame before found it, would do before the lamp were it still in focus.
+                    conversation
+                        .set_locomotion(vec![(crate::test_support::SKY, pad_behind_home())]);
+                    senses.ray = Ray::new(arrival::HOME, Vec3::new(0.0, 0.3, 2.0) - arrival::HOME);
+                    Box::new(|conversation, feedback| {
+                        chose(feedback) && conversation.take_actions().is_empty()
+                    })
+                },
+                nothing,
+            ),
+            (
                 A::Tomori,
                 "a wall in front of the lamp",
                 |conversation, step, senses, now| {
@@ -2852,7 +2954,7 @@ mod tests {
             // there; forcing it in shows that A goes first to them, as it would on the frame the menu or the
             // transcript appears, before the frame step has found what is pointed at. Everywhere else the lamp is
             // pointed at, as the frame before found it.
-            if matches!(rung, A::MenuRow | A::Menu | A::Transcript) {
+            if matches!(rung, A::MenuRow | A::Menu | A::Transcript) || step.pointed_pad.is_some() {
                 step.client.as_mut().unwrap().focus = Some("lamp".into());
             }
             assert_eq!(
@@ -3752,6 +3854,512 @@ mod tests {
             now,
         );
         assert_eq!(step.travel_stick, Vec2::ZERO);
+    }
+
+    /// A main floor and racks 4.5 m below it, with a pad 2 m ahead of home and another on the racks.
+    fn storeys() -> crate::locomotion::Locomotion {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        Locomotion::teleport(vec![
+            Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0)),
+            Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::splat(40.0)),
+        ])
+        .with_pads([[
+            Pad::at(Vec3::new(0.0, 0.0, -2.0)).named("Main floor"),
+            Pad::at(Vec3::new(3.0, -4.5, -2.0)).named("Racks"),
+        ]])
+    }
+
+    /// The senses of a head at home, with the trigger at `trigger` and the ray from the head towards `towards`, in the
+    /// room, both placed with the rig the step settles for `conversation`, as the platform places them.
+    fn on_pads(
+        step: &mut Step,
+        conversation: &Conversation,
+        towards: Vec3,
+        trigger: f32,
+    ) -> Senses {
+        let rig = step.rig(conversation).matrix();
+        let head = rig * Mat4::from_translation(arrival::HOME);
+        Senses {
+            beam: true,
+            head: Some(head),
+            head_pose: Pose::from_transform(head),
+            viewer: Some(head.w_axis.truncate()),
+            ray: Ray::new(
+                rig.transform_point3(arrival::HOME),
+                rig.transform_vector3(towards - arrival::HOME),
+            ),
+            trigger: Some(trigger),
+            ..senses()
+        }
+    }
+
+    #[test]
+    fn a_pad_pointed_at_is_highlighted_and_labelled_and_the_trigger_or_a_takes_the_participant_to_its_partner()
+     {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(crate::test_support::SKY, storeys())]);
+        conversation.apply(space(|_| {}));
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let pad = Vec3::new(0.0, 0.2, -2.0);
+        // Before the scenery has grown in, no pad is drawn or pointed at.
+        let senses = on_pads(&mut step, &conversation, pad, 0.0);
+        let growing = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(growing.pads.is_empty());
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        // Pointed at, it is highlighted, its label says where it goes, the ray ends on its column, and it ticks.
+        let senses = on_pads(&mut step, &conversation, Vec3::new(0.0, 1.6, -5.0), 0.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(frame.pads.len(), 2);
+        assert!(frame.pads.iter().all(|pad| !pad.highlighted));
+        let later = now + Duration::from_secs(5);
+        felt_on(&mut feedback, Side::Right, later);
+        let senses = on_pads(&mut step, &conversation, pad, 0.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, later, FRAME);
+        assert!(frame.pads[0].highlighted && !frame.pads[1].highlighted);
+        assert_eq!(frame.pads[0].up, Some(false));
+        let labels: Vec<String> = frame
+            .projection
+            .iter()
+            .map(|sheet| sheet.canvas.as_deref().unwrap().plain())
+            .collect();
+        assert!(
+            labels.iter().any(|label| label.starts_with("Racks ↓")),
+            "{labels:?}"
+        );
+        let beam = frame
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.hit);
+        assert!((beam.end.z + 1.5).abs() < 1e-3, "{}", beam.end);
+        assert!(
+            !felt_on(&mut feedback, Side::Right, later).is_empty(),
+            "it ticks"
+        );
+        earcons(&mut feedback);
+        // The trigger, pulled on it, takes the participant down to the racks, blinking, without attracting the swarm.
+        let senses = on_pads(&mut step, &conversation, pad, 1.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(!frame.attracting);
+        assert_eq!(frame.blink, 1.0);
+        assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
+        let rig = step.rig(&conversation);
+        assert_eq!(rig.floor(), -4.5);
+        let head = rig.matrix().transform_point3(arrival::HOME);
+        assert!(
+            head.distance(Vec3::new(3.0, 1.6 - 4.5, -2.0)) < 1e-4,
+            "{head}"
+        );
+        // Held there, the pull neither attracts nor takes them anywhere else; they stand on the racks' pad, disarmed.
+        for _ in 0..60 {
+            let senses = on_pads(&mut step, &conversation, Vec3::new(0.0, 1.6, -5.0), 1.0);
+            let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            assert!(!frame.attracting && frame.blink < 1.0);
+        }
+        assert_eq!(step.rig(&conversation), rig);
+        // Pointing down at the pad stood on, A takes them back up, clicking once.
+        let feet = Vec3::new(0.0, 0.0, -0.05);
+        let senses = on_pads(&mut step, &conversation, feet, 0.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.pads[1].highlighted, "{:?}", frame.pads);
+        assert!(frame.projection.iter().any(|sheet| {
+            sheet
+                .canvas
+                .as_deref()
+                .unwrap()
+                .plain()
+                .starts_with("Main floor ↑")
+        }));
+        earcons(&mut feedback);
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(frame.blink, 1.0);
+        assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
+        let head = step
+            .rig(&conversation)
+            .matrix()
+            .transform_point3(arrival::HOME);
+        assert!(head.distance(Vec3::new(0.0, 1.6, -2.0)) < 1e-4, "{head}");
+        // A pointing at nothing then chooses no pad.
+        let senses = on_pads(&mut step, &conversation, Vec3::new(5.0, 1.6, -2.0), 0.0);
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let rig = step.rig(&conversation);
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.rig(&conversation), rig);
+    }
+
+    #[test]
+    fn a_pad_gives_way_to_anything_nearer_and_to_aiming_and_is_not_there_without_travel() {
+        use tomori_protocol::{Panel, Place};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(crate::test_support::SKY, storeys())]);
+        // A panel floating between home and the pad.
+        let between = arrival::HOME + Vec3::new(0.0, -0.6, -1.0);
+        fixtures::show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![Panel::new(
+                "panel-1",
+                "Build status",
+                "Green.",
+                Place::Free {
+                    pose: tomori_protocol::Pose::upright_facing(
+                        between.to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                },
+            )],
+        );
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        // Through the panel's middle to the pad's column behind it.
+        let pad = Vec3::new(0.0, 0.4, -2.0);
+        let senses = on_pads(&mut step, &conversation, pad, 0.0);
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        // Behind the panel, the pad is not pointed at, and the trigger is the panel's, attracting the swarm as ever.
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.pads.iter().all(|pad| !pad.highlighted));
+        assert_eq!(step.aim, precedence::Aim::Tomori);
+        let senses = Senses {
+            attractor: Some(pad),
+            ..on_pads(&mut step, &conversation, pad, 1.0)
+        };
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.attracting);
+        assert_eq!(step.rig(&conversation), Rig::default());
+        // Aiming a teleport, the ray serves only it.
+        // From the side, so that the panel is not in the way.
+        let from = Vec3::new(2.0, 1.3, 0.0);
+        let senses = Senses {
+            ray: Ray::new(from, Vec3::new(0.0, 0.3, -2.0) - from),
+            ..on_pads(&mut step, &conversation, pad, 0.0)
+        };
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.aim, precedence::Aim::Pad);
+        step.buttons(
+            &press(|buttons| buttons.left_stick = Vec2::Y),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.landing.is_some());
+        assert!(frame.pads.iter().all(|pad| !pad.highlighted));
+        step.cancel_travel();
+        // With travel turned off here, no pad is drawn or pointed at.
+        conversation.toggle_travel();
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.pads.is_empty());
+        assert_ne!(step.aim, precedence::Aim::Pad);
+    }
+
+    /// A profile with a pad on a disc 1 m beyond where `ray` meets something `nearer`, with its column 0.3 m up the ray
+    /// there, so that the ray would point at it but for what is nearer, on a disc too small for the ray to cross.
+    fn pad_behind(ray: &Ray, nearer: f32) -> crate::locomotion::Locomotion {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        let at = ray.at(nearer + 1.0);
+        let base = Vec3::new(at.x, at.y - 0.3, at.z);
+        // Its partner stands a little further along the ray, so that it is no nearer.
+        let along = Vec3::new(ray.direction.x, 0.0, ray.direction.z).normalize_or_zero();
+        Locomotion::teleport(vec![Surface::disc(base, 0.9)])
+            .with_pads([[Pad::at(base), Pad::at(base + along * 0.4)]])
+    }
+
+    /// With `ray` meeting something `nearer`, which makes the aim `aim`, the pad behind it is not pointed at, though it
+    /// would be alone.
+    fn behind_it_no_pad(
+        conversation: &mut Conversation,
+        step: &mut Step,
+        ray: Ray,
+        nearer: f32,
+        aim: precedence::Aim,
+    ) {
+        let profile = pad_behind(&ray, nearer);
+        let (_, distance, _) = crate::pads::pick(&profile, &ray).expect("alone, it is pointed at");
+        assert!(distance > nearer, "{distance} {nearer}");
+        conversation.set_locomotion(vec![(crate::test_support::SKY, profile)]);
+        let senses = Senses {
+            beam: true,
+            ray: Some(ray),
+            ..senses()
+        };
+        let frame = step.update(&senses, conversation, &mut felt(), Instant::now(), FRAME);
+        assert!(
+            frame.pads.iter().all(|pad| !pad.highlighted),
+            "{aim:?} {nearer}"
+        );
+        assert_eq!(step.aim, aim);
+    }
+
+    #[test]
+    fn a_pad_is_not_pointed_at_behind_a_card_a_worker_an_environment_s_object_or_a_wall() {
+        use precedence::Aim;
+        use tomori_protocol::{Pose, Wall, WallKind};
+        let now = Instant::now();
+        let ahead = senses();
+        let grown = |conversation: &mut Conversation| {
+            let mut step = Step::default();
+            grow(&mut step, conversation, &ahead, now);
+            step
+        };
+        // A card, wherever it stands, which a ray through its middle meets.
+        let mut conversation = lobby(ConnectionRole::Owner);
+        fixtures::show_cards(
+            &mut conversation,
+            vec![tomori_protocol::Card {
+                id: "github://o/r/issues/1".into(),
+                number: 1,
+                kind: tomori_protocol::CardKind::Issue,
+                title: "A card".into(),
+                author: "ada".into(),
+                labels: Vec::new(),
+                checks: tomori_protocol::Checks::Passing,
+                age: 0,
+                placement: None,
+            }],
+        );
+        let mut step = grown(&mut conversation);
+        let frame = step.update(&ahead, &mut conversation, &mut felt(), now, FRAME);
+        let card = frame.cards[0].model.expect("the card").w_axis.truncate();
+        let ray = Ray::new(arrival::HOME, card - arrival::HOME).unwrap();
+        behind_it_no_pad(
+            &mut conversation,
+            &mut step,
+            ray,
+            card.distance(arrival::HOME),
+            Aim::Tomori,
+        );
+        // A worker, met at the top of the sphere that points at it.
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let mut step = grown(&mut conversation);
+        let worker = Vec3::from_array(
+            step.update(&ahead, &mut conversation, &mut felt(), now, FRAME)
+                .stations[0]
+                .position,
+        ) + Vec3::Y * 0.28;
+        let ray = Ray::new(arrival::HOME, worker - arrival::HOME).unwrap();
+        behind_it_no_pad(
+            &mut conversation,
+            &mut step,
+            ray,
+            worker.distance(arrival::HOME) - 0.3,
+            Aim::Tomori,
+        );
+        // An environment's wall's board, where the participant may take hold of walls.
+        let wall = Wall::new(
+            "environment-0",
+            WallKind::Environment,
+            Pose::upright_facing([1.2, 1.5, -2.5], arrival::HOME.to_array()),
+        );
+        let board = Vec3::new(1.2, 1.5 + 0.42, -2.5);
+        let mut conversation = lobby(ConnectionRole::Owner);
+        fixtures::show_editable_walls(&mut conversation, vec![wall], Vec::new());
+        let mut step = grown(&mut conversation);
+        let ray = Ray::new(arrival::HOME, board - arrival::HOME).unwrap();
+        behind_it_no_pad(
+            &mut conversation,
+            &mut step,
+            ray,
+            board.distance(arrival::HOME),
+            Aim::Tomori,
+        );
+        // An environment's object, selectable or not, a metre away.
+        for selectable in [true, false] {
+            let (mut conversation, _) = lamp(Default::default(), selectable);
+            let mut step = grown(&mut conversation);
+            let ray = Ray::new(arrival::HOME, Vec3::new(0.0, -0.2, -1.0)).unwrap();
+            behind_it_no_pad(&mut conversation, &mut step, ray, 1.0, Aim::Environment);
+        }
+    }
+
+    /// A profile with a pad 2 m behind home, whose partner is on the racks below.
+    fn pad_behind_home() -> crate::locomotion::Locomotion {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        Locomotion::teleport(vec![
+            Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0)),
+            Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::splat(40.0)),
+        ])
+        .with_pads([[
+            Pad::at(Vec3::new(0.0, 0.0, 2.0)),
+            Pad::at(Vec3::new(3.0, -4.5, 2.0)),
+        ]])
+    }
+
+    #[test]
+    fn a_pull_begun_elsewhere_that_slides_onto_a_pad_chooses_nothing_and_a_still_goes_while_the_environment_holds_a_select()
+     {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        let at_pad = Ray::new(arrival::HOME, Vec3::new(0.0, 0.3, 2.0) - arrival::HOME);
+        let at_nothing = Ray::new(arrival::HOME, Vec3::X);
+        let aimed = |ray: Option<Ray>, trigger: f32| Senses {
+            ray,
+            trigger: Some(trigger),
+            ..senses()
+        };
+        // A pull that begins on nothing attracts the swarm, and sliding onto the pad then, even pulled fully, chooses it
+        // no more than letting go does.
+        let (mut conversation, mut step, _, _) = lit(pad_behind_home());
+        step.update(
+            &aimed(at_nothing, 0.0),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        let frame = step.update(
+            &aimed(at_nothing, 0.3),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        assert!(frame.attracting);
+        for trigger in [0.3, 1.0, 1.0, 0.0] {
+            let frame = step.update(
+                &aimed(at_pad, trigger),
+                &mut conversation,
+                &mut felt(),
+                now,
+                FRAME,
+            );
+            assert_eq!(
+                frame.pads.iter().filter(|pad| pad.highlighted).count(),
+                usize::from(trigger > 0.0 || frame.pads[0].highlighted)
+            );
+        }
+        assert_eq!(step.rig(&conversation), Rig::default());
+        // The environment's select, held from the lamp, and A on a pad slid onto: A goes, the select is pressed and let
+        // go once, and the pull chooses no pad.
+        let (mut conversation, mut step, _, done) = lit(pad_behind_home());
+        let ahead = Ray::new(arrival::HOME, Vec3::NEG_Z);
+        step.update(
+            &aimed(ahead, 0.7),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        let frame = step.update(
+            &aimed(at_pad, 0.7),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        assert!(frame.pads[0].highlighted && !frame.attracting);
+        assert_eq!(step.rig(&conversation), Rig::default());
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(
+            &aimed(at_pad, 0.7),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        assert_eq!(step.rig(&conversation).floor(), -4.5);
+        step.update(
+            &aimed(at_pad, 0.0),
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        assert_eq!(
+            selects(&done),
+            [
+                Select::Pressed("lamp".into()),
+                Select::Released("lamp".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_panel_behind_a_pad_is_not_pulled_off_by_the_grip() {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        use tomori_protocol::{Panel, Place};
+        let now = Instant::now();
+        // A low ray along the floor, to the right of the Tomori wall, which meets the pad's column 2 m ahead and a panel
+        // 1 m behind it.
+        let behind = Vec3::new(2.0, 0.4, -3.0);
+        let ray = Ray::new(Vec3::new(2.0, 0.5, 0.0), Vec3::new(0.0, -0.05, -1.5));
+        let held = |grip: f32| Senses {
+            ray,
+            grip: Some(grip),
+            ..senses()
+        };
+        for pad in [false, true] {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            fixtures::show_projection(
+                &mut conversation,
+                Vec::new(),
+                vec![Panel::new(
+                    "panel-1",
+                    "Behind",
+                    "Hidden.",
+                    Place::Free {
+                        pose: tomori_protocol::Pose::upright_facing(
+                            behind.to_array(),
+                            Vec3::new(2.0, 0.4, 0.0).to_array(),
+                        ),
+                    },
+                )],
+            );
+            let floor = Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0));
+            let racks = Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::splat(40.0));
+            let mut profile = Locomotion::teleport(vec![floor, racks]);
+            if pad {
+                profile = profile.with_pads([[
+                    Pad::at(Vec3::new(2.0, 0.0, -2.0)),
+                    Pad::at(Vec3::new(3.0, -4.5, -2.0)),
+                ]]);
+            }
+            conversation.set_locomotion(vec![(crate::test_support::SKY, profile)]);
+            let mut step = Step::default();
+            let mut feedback = felt();
+            grow(&mut step, &mut conversation, &held(0.0), now);
+            let frame = step.update(&held(0.0), &mut conversation, &mut feedback, now, FRAME);
+            assert_eq!(frame.pads.first().is_some_and(|pad| pad.highlighted), pad);
+            step.update(&held(1.0), &mut conversation, &mut feedback, now, FRAME);
+            // Without the pad, the grip pulls the panel off; with it nearer, it takes nothing.
+            assert_eq!(step.projector.held(), (!pad).then_some("panel-1"), "{pad}");
+        }
     }
 
     #[test]

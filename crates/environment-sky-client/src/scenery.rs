@@ -80,6 +80,38 @@ mod tests {
     }
 
     #[test]
+    fn a_build_may_declare_teleport_pads_beside_sky() {
+        use tomori_scene::locomotion::{Locomotion, Pad, Surface};
+        // A floor, racks 4.5 m below it, and a pair of pads between them, declared in Sky's own coordinates, as a build
+        // of another project declares them for its own environment.
+        let floors = Locomotion::fly(
+            vec![
+                Surface::rectangle(Vec3::ZERO, glam::Vec2::new(12.0, 12.0)),
+                Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), glam::Vec2::new(12.0, 12.0)),
+            ],
+            6.0,
+        )
+        .with_pads([[
+            Pad::at(Vec3::new(2.0, 0.0, -3.0)).named("Main floor"),
+            Pad::at(Vec3::new(2.0, -4.5, -3.0))
+                .named("Racks")
+                .facing(Vec3::NEG_Z),
+        ]]);
+        let mut sceneries = Sceneries::empty();
+        register(&mut sceneries);
+        sceneries.set_locomotion(crate::ID, floors.clone());
+        let declared = sceneries.locomotion();
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].0.id(), crate::ID);
+        let [floor, racks] = declared[0].1.pads().next().expect("the pair is used");
+        assert_eq!(
+            (floor.name(), racks.name()),
+            (Some("Main floor"), Some("Racks"))
+        );
+        assert_eq!(declared[0].1, floors);
+    }
+
+    #[test]
     fn sky_is_drawn_by_a_renderer_given_it() {
         tomori_render::test_gpu::with(|gpu| {
             let mut sceneries = Sceneries::empty();
