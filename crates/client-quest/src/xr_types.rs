@@ -150,17 +150,48 @@ pub fn controller_hand(path: &str) -> Option<usize> {
     }
 }
 
-/// What the frame log says, after `frames` stereo frames: that the first was submitted, or a summary since the last.
-pub fn frame_summary(frames: u64, due: &Due) -> String {
+/// What the frame log says, after `frames` stereo frames: that the first was submitted, or a summary since the last, with the display's refreshes that `missed` a new frame meanwhile.
+pub fn frame_summary(frames: u64, due: &Due, missed: u64) -> String {
     // The rate includes any time the session was not rendering.
     match due.elapsed {
         None => "Submitted first stereo frame".to_owned(),
         Some(elapsed) => format!(
-            "Submitted {frames} stereo frames; {} in the last {:.0} s ({:.1} fps)",
+            "Submitted {frames} stereo frames; {} in the last {:.0} s ({:.1} fps), missing {missed} display refreshes",
             due.skipped + 1,
             elapsed.as_secs_f64(),
             due.rate().unwrap_or_default()
         ),
+    }
+}
+
+/// The display refreshes that passed without a new frame from Tomori, from each frame's predicted display time and the display's period, in nanoseconds, as `xrWaitFrame` gives them. The runtime shows its last frame again at a refresh it missed, turned for where the head now looks but not moved for where it now is, as Tomori gives it no depth, so a head moving from side to side sees what is near shake back and forth; see `design/rendering.md`.
+#[derive(Debug, Default)]
+pub struct Refreshes {
+    last: Option<i64>,
+    missed: u64,
+}
+
+impl Refreshes {
+    /// A frame waited for, to be shown at `display_time`, with refreshes every `period`.
+    pub fn frame(&mut self, display_time: i64, period: i64) {
+        if let Some(last) = self.last.replace(display_time)
+            && period > 0
+            && display_time > last
+        {
+            // Rounded, as the runtime's prediction can wander by a little either side of a refresh.
+            let refreshes = ((display_time - last) as f64 / period as f64).round() as u64;
+            self.missed += refreshes.saturating_sub(1);
+        }
+    }
+
+    /// The session stopped rendering: the time until the next frame is not missed refreshes.
+    pub fn pause(&mut self) {
+        self.last = None;
+    }
+
+    /// The refreshes missed since the last call.
+    pub fn take(&mut self) -> u64 {
+        std::mem::take(&mut self.missed)
     }
 }
 
@@ -400,7 +431,8 @@ mod tests {
                 &Due {
                     elapsed: None,
                     skipped: 0
-                }
+                },
+                0
             ),
             "Submitted first stereo frame"
         );
@@ -410,9 +442,36 @@ mod tests {
                 &Due {
                     elapsed: Some(Duration::from_secs(60)),
                     skipped: 89
-                }
+                },
+                3
             ),
-            "Submitted 91 stereo frames; 90 in the last 60 s (1.5 fps)"
+            "Submitted 91 stereo frames; 90 in the last 60 s (1.5 fps), missing 3 display refreshes"
         );
+    }
+
+    #[test]
+    fn refreshes_without_a_new_frame_are_counted() {
+        const PERIOD: i64 = 13_888_889;
+        let mut refreshes = Refreshes::default();
+        // The first frame has nothing before it.
+        refreshes.frame(1_000_000_000, PERIOD);
+        // One a refresh, with the prediction wandering a little, misses none.
+        refreshes.frame(1_000_000_000 + PERIOD + 200_000, PERIOD);
+        refreshes.frame(1_000_000_000 + 2 * PERIOD - 300_000, PERIOD);
+        assert_eq!(refreshes.take(), 0);
+        // A late frame, shown two refreshes on, missed one; one three on, two.
+        refreshes.frame(1_000_000_000 + 4 * PERIOD, PERIOD);
+        refreshes.frame(1_000_000_000 + 7 * PERIOD, PERIOD);
+        assert_eq!(refreshes.take(), 3);
+        assert_eq!(refreshes.take(), 0);
+        // A period the runtime does not give, or a time that goes back, counts nothing.
+        refreshes.frame(1_000_000_000 + 9 * PERIOD, 0);
+        refreshes.frame(1_000_000_000 + 8 * PERIOD, PERIOD);
+        assert_eq!(refreshes.take(), 0);
+        // Nor does the time while the session was not rendering.
+        refreshes.pause();
+        refreshes.frame(5_000_000_000, PERIOD);
+        refreshes.frame(5_000_000_000 + PERIOD, PERIOD);
+        assert_eq!(refreshes.take(), 0);
     }
 }

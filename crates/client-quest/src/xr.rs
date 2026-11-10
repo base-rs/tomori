@@ -192,6 +192,9 @@ pub fn run(
     let mut event_buffer = xr::EventDataBuffer::new();
     let mut frames = 0_u64;
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
+    let mut refreshes = xr_types::Refreshes::default();
+    // The last frame's rendering, which may still be on the GPU while this frame's work is done on the CPU.
+    let mut rendering: Option<wgpu::SubmissionIndex> = None;
     // Drawing new glyphs, such as a first paragraph of Japanese, costs this thread at most about 1.5 ms a frame; the rest are drawn over the frames after, and the log reports what each frame spent. See `design/text.md`.
     tomori_render::glyphs::budget(tomori_render::glyphs::Budget::FRAME);
     log::info!(
@@ -249,12 +252,17 @@ pub fn run(
         connection.poll(headset.focused() && headset.running(), &mut conversation);
         headset.idle(&mut conversation);
         if !headset.running() {
+            refreshes.pause();
             microphone(&mut headset, &mut connection, &mut conversation, false);
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
         controller_models.refresh(&gpu.device, &gpu.queue, &mut renderer);
         let frame = waiter.wait()?;
+        refreshes.frame(
+            frame.predicted_display_time.as_nanos(),
+            frame.predicted_display_period.as_nanos(),
+        );
         stream.begin()?;
         let now = Instant::now();
         let dt = headset.tick(now);
@@ -331,25 +339,27 @@ pub fn run(
         for (hand, haptic) in headset.haptics(connection.feedback(), now) {
             input.haptics.apply(&vibrator, hand, haptic);
         }
+        // The frame's budget is the display's period for the CPU's work and the GPU's each, rather than for both one after the other: the last frame's rendering has had this frame's CPU work to finish in, and is waited for only now, so that at most one frame is on the GPU at once. A frame later than the display's refresh is shown again turned but not moved, so near things shake as the head moves; see `design/rendering.md`.
+        if let Some(previous) = rendering.take() {
+            gpu.device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(previous),
+                    timeout: None,
+                })
+                .context("waiting for the last frame's XR rendering")?;
+        }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
-        let submission = renderer.render(
+        rendering = Some(renderer.render(
             &gpu.device,
             &gpu.queue,
             &images[image].views,
             &projections,
             scene_to_space,
             &panels.list(scene_to_space),
-        );
-        // A deliberately simple, conservative bridge: finish GPU work before
-        // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
-        // as required by the OpenXR Vulkan swapchain contract.
-        let completed = gpu.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        });
+        ));
+        // The image goes back to XR once its commands are submitted to the session's queue, which the runtime's composition waits on, rather than once the GPU has finished them; rendering leaves it COLOR_ATTACHMENT_OPTIMAL, as the OpenXR Vulkan swapchain contract requires.
         swapchain.release_image()?;
-        completed.context("waiting for XR rendering")?;
         let projection_views: Vec<_> = located
             .iter()
             .enumerate()
@@ -381,7 +391,10 @@ pub fn run(
         frames += 1;
         // Once at the first frame, then a summary at most once a minute: per-frame lines would push lifecycle events out of logcat within minutes.
         if let Some(due) = frame_log.record(Instant::now()) {
-            log::info!("{}", xr_types::frame_summary(frames, &due));
+            log::info!(
+                "{}",
+                xr_types::frame_summary(frames, &due, refreshes.take())
+            );
         }
         microphone(&mut headset, &mut connection, &mut conversation, true);
     }

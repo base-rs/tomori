@@ -1656,6 +1656,87 @@ mod tests {
         assert_eq!(projection, view_projection(&rig.views[0]));
     }
 
+    /// Where `point`, in the reference space, is in an eye's normalised device coordinates, worked out from the eye's own pose and field of view rather than from [`view_projection`].
+    fn seen_by(view: &View, point: Vec3) -> glam::Vec2 {
+        let eye = Quat::from_array(view.pose.orientation).inverse()
+            * (point - Vec3::from_array(view.pose.position));
+        let (x, y) = (eye.x / -eye.z, eye.y / -eye.z);
+        let (left, right, down, up) = (
+            view.fov.left.tan(),
+            view.fov.right.tan(),
+            view.fov.down.tan(),
+            view.fov.up.tan(),
+        );
+        glam::Vec2::new(
+            (2.0 * x - (right + left)) / (right - left),
+            (2.0 * y - (up + down)) / (up - down),
+        )
+    }
+
+    fn device(clip: Vec4) -> glam::Vec2 {
+        glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    }
+
+    /// A participant standing still in the world and swaying their head from side to side, as the maintainer did when everything shook: whatever stands in the world, the pill near them and a wall across the room, is drawn each frame from that frame's own eyes, each eye from its own pose, and so moves across the view steadily one way while the head moves the other, never back and forth.
+    #[test]
+    fn what_stands_in_the_world_stays_put_as_the_head_sways() {
+        let mut rig = Rig::new(joined());
+        rig.frame(&Controls::default(), [None, None], Duration::ZERO);
+        // A wall 4 m ahead, in the space's scene, standing still.
+        let wall = Vec3::new(0.3, 1.5, -4.0);
+        let (mut pill, mut last) = (None::<Vec3>, None::<[[f32; 2]; 2]>);
+        // 40 cm across and back at 72 Hz, about as fast as a sway, within the half metre the pill stays put for.
+        let period = Duration::from_secs(1) / 72;
+        for step in 1..=96_u32 {
+            let phase = step as f32 / 96.0 * std::f32::consts::TAU;
+            let head = Vec3::new(0.2 * phase.sin(), 1.6, 0.0);
+            rig.views = stereo(head, Quat::IDENTITY);
+            let views = rig.views;
+            let drawn = rig.frame(&Controls::default(), [None, None], period * step);
+            let model = drawn
+                .frame
+                .panels
+                .pill
+                .model
+                .expect("the pill shows in a space");
+            let here = model.transform_point3(Vec3::ZERO);
+            // The pill stands in the room where it was placed, rather than following the head.
+            let placed = *pill.get_or_insert(here);
+            assert!(here.distance(placed) < 1e-5, "{here} moved from {placed}");
+            let wall_in_space = drawn.scene_to_space.transform_point3(wall);
+            let mut seen = [[0.0; 2]; 2];
+            for eye in 0..2 {
+                for (index, point) in [here, wall_in_space].into_iter().enumerate() {
+                    // This frame's eye, and this eye's own pose, not the head's middle nor an earlier frame's.
+                    let drawn_at = device(drawn.projections[eye] * point.extend(1.0));
+                    let expected = seen_by(&views[eye], point);
+                    assert!(
+                        drawn_at.distance(expected) < 1e-4,
+                        "step {step}, eye {eye}: {drawn_at} rather than {expected}"
+                    );
+                    seen[eye][index] = drawn_at.x;
+                }
+            }
+            // While the head moves right, what stands still moves left across the view, and back as it returns: nearer the more, and never against the head.
+            let moving = phase.cos();
+            if let Some(before) = last.replace(seen)
+                && moving.abs() > 0.2
+            {
+                for (now, before) in seen.iter().zip(before) {
+                    let [near, far] = [0, 1].map(|index| now[index] - before[index]);
+                    assert!(
+                        near * moving < 0.0 && far * moving < 0.0,
+                        "step {step}: {near} and {far} as the head moved {moving}"
+                    );
+                    assert!(
+                        near.abs() > far.abs(),
+                        "step {step}: the pill moved {near}, the wall {far}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn y_pins_the_menu_above_the_left_controller_facing_the_head() {
         let mut rig = Rig::new(joined());
