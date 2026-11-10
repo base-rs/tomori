@@ -180,9 +180,7 @@ mod tests {
             // One to eighteen workers stand in its home cluster, about its home anchor, or else about its agent's home,
             // clear of its solids and seen from the eyes at the arrival.
             let home = environment
-                .anchors()
-                .iter()
-                .find(|anchor| anchor.is_home())
+                .home()
                 .cloned()
                 .unwrap_or_else(|| tomori_protocol::cluster::Anchor::new("home", agent));
             let cluster =

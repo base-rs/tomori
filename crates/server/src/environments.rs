@@ -814,8 +814,8 @@ impl Environment {
         &self.anchors
     }
 
-    /// Its `home` anchor, if it gives one.
-    fn home(&self) -> Option<&tomori_protocol::cluster::Anchor> {
+    /// Its `home` anchor, where its workers stand, if it gives one, in its own coordinates.
+    pub fn home(&self) -> Option<&tomori_protocol::cluster::Anchor> {
         self.anchors.iter().find(|anchor| anchor.is_home())
     }
 
@@ -1462,6 +1462,8 @@ mod tests {
         assert_eq!(roomy.clusters, std::slice::from_ref(&room));
         let compatible = offered.get("compatible").unwrap();
         assert_eq!(compatible.anchors(), [Anchor::new(HOME, yard)]);
+        assert_eq!(compatible.home(), Some(&Anchor::new(HOME, yard)));
+        assert_eq!(Environment::new("plain", "Plain").home(), None);
         assert_eq!(compatible.workers(), Some(yard));
         let compatible = offered.anchors("compatible");
         assert_eq!(
