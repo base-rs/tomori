@@ -1248,11 +1248,13 @@ fn a_client_sent_less_holds_each_wall_at_the_version_every_client_has_and_hears_
     all.read(&desktop);
     some.read(&headset);
     assert!(all.shown().wall(&unsent.id).unwrap().version > unsent.version);
-    assert!(some.patches[patches..].iter().all(|patch| {
-        patch.ops.iter().all(
-            |op| !matches!(op, tomori_protocol::PatchOp::Wall { wall, .. } if wall.id == unsent.id),
-        )
-    }));
+    // The headset is sent the projection again, as everyone in the space is at every change, with nothing in it.
+    assert!(some.patches.len() > patches);
+    assert!(
+        some.patches[patches..]
+            .iter()
+            .all(|patch| patch.ops.is_empty())
+    );
     let mut now = some.shown();
     now.revision = sent.revision;
     assert_eq!(now, sent);

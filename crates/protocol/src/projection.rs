@@ -1456,13 +1456,14 @@ mod tests {
             serde_json::from_value::<ClientMessage>(json).unwrap(),
             change
         );
-        assert!(matches!(
-            serde_json::from_value::<ClientMessage>(
-                serde_json::json!({"type": "set_wall", "wall": "wall-1", "tilt": 10.0})
-            )
-            .unwrap(),
-            ClientMessage::SetWall { revision: None, .. }
-        ));
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "set_wall", "wall": "wall-1", "tilt": 10.0}),
+        )
+        .unwrap();
+        let ClientMessage::SetWall { revision, .. } = older else {
+            unreachable!("a wall's change");
+        };
+        assert_eq!(revision, None);
         let refused = ServerMessage::Error {
             error: "That wall changed as you changed it; look again.".into(),
             space: None,

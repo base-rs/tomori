@@ -846,7 +846,7 @@ fn a_data_op_already_held_is_dropped_and_one_that_does_not_fit_asks_for_the_proj
             },
             base.clone(),
         ),
-        (append(6, 0, vec![vec![Some(1.0)]]), text.clone()),
+        (append(6, 5, vec![vec![Some(1.0)]]), text.clone()),
         (
             replace(6, vec![vec![None; 6], vec![None; 6]], Vec::new()),
             base.clone(),
