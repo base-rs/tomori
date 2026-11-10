@@ -19,7 +19,10 @@ use crate::shapes::Mark;
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Row, Span, Style, cut};
 
 /// How many charts' drawings are kept, at the sizes they were drawn at, so that a chart is laid out again only when it,
-/// or its size, changes, rather than every frame its face is made: more than the panels an environment publishes.
+/// or its size, changes, rather than every time its face is made: as many as the panels an environment publishes,
+/// `tomori_environment::PANEL_LIMIT`, which this crate's tests check it against, one for each at the size it stands.
+/// Beyond them the least recent is drawn anew when its face is next made, which is only as its panel changes, since
+/// each panel's faces are kept (see [`super::faces`]).
 pub const DRAWN: usize = 32;
 
 /// A chart's legend and drawing, at a face of so many columns and rows below its heading.

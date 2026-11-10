@@ -122,6 +122,63 @@ impl ServerSide for Queue {
     }
 }
 
+/// How many regions the Terminals example shows, each a terminal of three charts and a list.
+const REGIONS: usize = 8;
+
+/// An example environment's side that shows as many panels as an environment may, as a console of terminals does:
+/// three live charts and a list of pods for each of eight regions, every chart a point newer each tick, and, once they
+/// are up, tries one more, keeping what the server said of it. See `design/projection.md`.
+struct Terminals {
+    /// What the server said of one panel more than it takes.
+    refused: Arc<Mutex<Option<String>>>,
+}
+
+impl Terminals {
+    /// The panels of the tick whose newest sample is `newest`: each region's charts on its wall's top row, its list
+    /// below them.
+    fn panels(newest: usize) -> Vec<Panel> {
+        let mut panels = Vec::new();
+        for region in 0..REGIONS {
+            for (index, metric) in ["pressure", "latency", "errors"].into_iter().enumerate() {
+                let id = format!("{metric}-{region}");
+                let title = format!("Region {region} {metric}");
+                let chart = pressure(newest + region + index);
+                panels.push(Panel::chart(id, title, chart).on_wall(region as u32 / 2, None));
+            }
+            let rows = (0..tomori_environment::ROW_LIMIT)
+                .map(|pod| Row::new(format!("pod{pod}"), format!("pod{pod} · {pod} waiting")))
+                .collect();
+            let list = Panel::list(
+                format!("pods-{region}"),
+                format!("Region {region} pods"),
+                rows,
+            );
+            panels.push(list.on_wall(region as u32 / 2, None));
+        }
+        panels
+    }
+}
+
+impl ServerSide for Terminals {
+    fn run(&self, space: &Space) -> Result<()> {
+        let mut next = POINTS - 1;
+        while !space.cancellation().is_cancelled() {
+            for panel in Self::panels(next) {
+                space.publish(panel)?;
+            }
+            let mut refused = self.refused.lock().unwrap();
+            if refused.is_none() {
+                let more = space.publish(Panel::text("more", "More", "One more than it may show."));
+                *refused = Some(more.unwrap_err().to_string());
+            }
+            drop(refused);
+            next += 1;
+            std::thread::sleep(TICK);
+        }
+        Ok(())
+    }
+}
+
 /// A server serving Tomori's tools, offering Sky, Gauges and Queue, each of the last two with one wall of its own.
 fn start(backend: &FakeBackend) -> TestServer {
     TestServer::with_tools(backend.clone(), |backends| {
@@ -139,6 +196,64 @@ fn start(backend: &FakeBackend) -> TestServer {
                     tomori_protocol::Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])
                 ])
                 .with_server_side(Queue),
+        ])
+    })
+}
+
+/// An example environment's side that changes a panel once more just after telling the space of a change, within the
+/// quarter of a second in which the server tells a space's clients of its environment's changes once, and then
+/// nothing more: the first note, then, when `go` is set, a second, and 120 ms after that a third.
+struct Paced {
+    go: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ServerSide for Paced {
+    fn run(&self, space: &Space) -> Result<()> {
+        let note = |body: &str| Panel::text("note", "Note", body);
+        space.publish(note("first"))?;
+        let mut sent = false;
+        while !space.cancellation().is_cancelled() {
+            if !sent && self.go.load(std::sync::atomic::Ordering::Acquire) {
+                space.publish(Panel::text("other", "Other", "second"))?;
+                std::thread::sleep(Duration::from_millis(120));
+                space.publish(Panel::text("last", "Last", "third"))?;
+                sent = true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+}
+
+/// A server offering Sky and Paced, which has a wall of its own, its side changing panels when `go` is set.
+fn start_paced(backend: &FakeBackend, go: Arc<std::sync::atomic::AtomicBool>) -> TestServer {
+    TestServer::with_tools(backend.clone(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(vec![
+            Environment::new("sky", "Sky"),
+            Environment::new("paced", "Paced")
+                .with_walls([
+                    tomori_protocol::Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])
+                ])
+                .with_server_side(Paced { go }),
+        ])
+    })
+}
+
+/// A server offering Sky and Terminals, which has four walls of its own of four by two slots, a terminal a row of each,
+/// and says into `refused` what the server said of one panel more than it takes.
+fn start_terminals(backend: &FakeBackend, refused: Arc<Mutex<Option<String>>>) -> TestServer {
+    TestServer::with_tools(backend.clone(), |backends| {
+        let walls = [-4.5_f32, -1.5, 1.5, 4.5].map(|x| {
+            tomori_server::EnvironmentWall::new(
+                tomori_protocol::Pose::at([x, 1.4, -4.0]).facing_towards([x, 1.4, 0.0]),
+            )
+            .with_grid(tomori_protocol::Grid::from((4, 2)))
+        });
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(vec![
+            Environment::new("sky", "Sky"),
+            Environment::new("terminals", "Terminals")
+                .with_walls(walls)
+                .with_server_side(Terminals { refused }),
         ])
     })
 }
@@ -167,6 +282,8 @@ fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: 
     stream.read_to_string(&mut response).unwrap();
     let (head, body) = response.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    // As it is sent, its text and its structured content both, no answer is longer than an agent reads at once.
+    assert!(body.len() <= 32 * 1024, "{} bytes", body.len());
     let result = serde_json::from_str::<Value>(body).unwrap()["result"].clone();
     assert_ne!(result["isError"], true, "{result}");
     result["structuredContent"].clone()
@@ -249,7 +366,19 @@ fn an_environment_s_live_chart_is_on_its_wall_for_everyone_and_the_agent_reads_i
     assert_eq!(listed["kind"], "chart");
     assert_eq!(listed["environment_panel"], "pressure");
     assert_eq!(listed["inspect_id"], "gauges:chart/pressure");
-    assert!(listed["body"].as_str().unwrap().contains("greatest: "));
+    assert!(listed["excerpt"].as_str().unwrap().contains("mean: "));
+    assert!(listed.get("body").is_none());
+    // Named, it is read whole: its summary as it is now.
+    let read = call(
+        &server,
+        &token,
+        &session,
+        "panels",
+        json!({"panel": "Scaling pressure"}),
+    );
+    let read = &read["panels"][0];
+    assert_eq!(read["panel"], listed["panel"]);
+    assert!(read["body"].as_str().unwrap().contains("greatest: "));
     let inspected = call(
         &server,
         &token,
@@ -330,14 +459,24 @@ fn an_environment_s_list_highlights_a_row_and_the_agent_inspects_a_row() {
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let token = token(&backend);
     let panels = call(&server, &token, &session, "panels", json!({}));
+    assert_eq!(panels["panels"][0]["row_count"], 3);
+    assert!(panels["panels"][0].get("rows").is_none());
+    let read = call(
+        &server,
+        &token,
+        &session,
+        "panels",
+        json!({"panel": "Queue"}),
+    );
     assert_eq!(
-        panels["panels"][0]["rows"],
+        read["panels"][0]["rows"],
         json!([
-            {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false},
-            {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true},
-            {"id": "pod9", "inspect_id": null, "highlighted": false},
+            {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false, "text": "pod7 · 3 waiting"},
+            {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true, "text": "pod112 · 41 waiting"},
+            {"id": "pod9", "inspect_id": null, "highlighted": false, "text": "pod9 · 1 waiting"},
         ])
     );
+    assert!(read["panels"][0].get("body").is_none());
     let inspected = call(
         &server,
         &token,
@@ -347,4 +486,137 @@ fn an_environment_s_list_highlights_a_row_and_the_agent_inspects_a_row() {
     );
     assert_eq!(inspected["details"], json!({"pod": "112", "waiting": 41}));
     assert_eq!(inspected["description"], "Queue: pod112 · 41 waiting");
+}
+
+#[test]
+fn an_environment_shows_as_many_panels_as_it_may_every_chart_live_and_is_refused_one_more() {
+    let backend = FakeBackend::new();
+    let refused = Arc::new(Mutex::new(None));
+    let server = start_terminals(&backend, refused.clone());
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Terminals".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("terminals".to_owned()),
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Terminals");
+    // Every panel it may show is up, each on a wall of its own environment's, three charts and a list a region.
+    let limit = tomori_environment::PANEL_LIMIT;
+    assert_eq!(Terminals::panels(0).len(), limit);
+    let whole = |ada: &TestClient, newer: &dyn Fn(&Projection) -> bool| {
+        ada.wait_for(|message| match message {
+            ServerMessage::Projection { projection }
+                if projection.panels.len() == limit && newer(projection) =>
+            {
+                Some((**projection).clone())
+            }
+            _ => None,
+        })
+    };
+    let first = whole(&ada, &|_| true);
+    let charts = |projection: &Projection| -> Vec<(String, Vec<Option<f32>>)> {
+        projection
+            .panels
+            .iter()
+            .filter_map(|panel| {
+                let chart = panel.chart.as_ref()?;
+                Some((panel.id.clone(), chart.series[0].values.clone()))
+            })
+            .collect()
+    };
+    let began = charts(&first);
+    assert_eq!(began.len(), 3 * REGIONS);
+    assert!(first.panels.iter().all(|panel| matches!(
+        &panel.place,
+        Place::Wall { wall, .. } if wall.starts_with("environment-")
+    )));
+    let lists = first.panels.iter().filter(|panel| panel.chart.is_none());
+    assert!(lists.clone().count() == REGIONS);
+    assert!(
+        lists
+            .into_iter()
+            .all(|panel| panel.body.lines().count() == 30)
+    );
+    // One more is refused, saying how many it may show, and nothing of the rest changes for it.
+    let said = eventually(|| refused.lock().unwrap().clone());
+    assert_eq!(
+        said,
+        "An environment publishes at most 32 panels in a space."
+    );
+    // Each chart is live: published again every second, every one of them moves on, in place.
+    let later = whole(&ada, &|projection| {
+        let now = charts(projection);
+        now.len() == began.len()
+            && now
+                .iter()
+                .zip(&began)
+                .all(|(now, began)| now.0 == began.0 && now.1 != began.1)
+    });
+    assert_eq!(later.panels.len(), limit);
+    // The agent reads every one back as its environment's.
+    let session = tomori_backend::Session::id(&backend.started()[0]);
+    let token = token(&backend);
+    let panels = call(&server, &token, &session, "panels", json!({}));
+    let listed = panels["panels"].as_array().unwrap();
+    assert_eq!(listed.len(), limit);
+    assert!(
+        listed
+            .iter()
+            .all(|panel| panel["environment_panel"].is_string())
+    );
+    let kinds = |kind: &str| listed.iter().filter(|panel| panel["kind"] == kind).count();
+    assert_eq!((kinds("chart"), kinds("text")), (3 * REGIONS, REGIONS));
+    // Listed briefly, a console of 24 charts and 8 lists of 30 rows is within what an agent reads at once, where
+    // with every panel's text, items and rows it was 44 KB.
+    let lists = listed.iter().filter(|panel| panel["row_count"] == 30);
+    assert_eq!(lists.count(), REGIONS);
+    assert_eq!(panels["total"], limit);
+    assert!(panels.get("next").is_none());
+}
+
+#[test]
+fn a_change_within_the_interval_of_the_last_is_sent_as_it_ends_though_nothing_else_happens() {
+    let backend = FakeBackend::new();
+    let go = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = start_paced(&backend, go.clone());
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Paced".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("paced".to_owned()),
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Paced");
+    // When a projection showing the panel titled `title` arrives, and how many panels it shows.
+    let shown = |ada: &TestClient, title: &str| {
+        ada.wait_for(|message| match message {
+            ServerMessage::Projection { projection } => projection
+                .panels
+                .iter()
+                .any(|panel| panel.title == title)
+                .then(|| (std::time::Instant::now(), projection.panels.len())),
+            _ => None,
+        })
+    };
+    shown(&ada, "Note");
+    // Its side's first note was told long enough ago, so the second change is told at once; the third, 120 ms later,
+    // is within the interval, and waits. Nothing else then happens in the space: nobody speaks, moves or changes
+    // anything, and its side publishes no more. The server's timer sends it as the interval ends, a quarter of a
+    // second after the second, and not before: were it not woken for it, the third would never arrive.
+    std::thread::sleep(Duration::from_millis(300));
+    go.store(true, std::sync::atomic::Ordering::Release);
+    let (second, panels) = shown(&ada, "Other");
+    let (third, _) = shown(&ada, "Last");
+    // Unless this machine was so slow to send the second that the third was already published, they come apart.
+    if panels == 2 {
+        let waited = third.duration_since(second);
+        assert!(waited >= Duration::from_millis(50), "{waited:?}");
+    }
 }

@@ -30,11 +30,27 @@ const SIZES: usize = 3;
 /// seq, at which its live data last changed (see `design/projection.md`): a new version lays it out again, and a chart's
 /// new data seq at the same version only draws its face again; with what this client changes of a panel itself, which no
 /// version follows, its body and code, as a tick shown at once changes it and a code panel is sent short or whole as its
-/// frame allows, its title, and its age as it shows. From an older server, which versions nothing, or counted each text
+/// frame allows, whether it has its chart, as a chart panel is sent as its summary where its frame cannot hold it, its
+/// title, and its age as it shows. From an older server, which versions nothing, or counted each text
 /// panel's changes but none its environment made, as a chart panel without a data seq shows, the panel compared whole,
 /// its age as it shows, so that every field that shows on its face is followed.
 #[derive(Clone, Debug)]
 struct Key(Panel);
+
+/// The most panels that show something already that one frame of a paced projector lays out again, or draws again for
+/// their live data, for what the server changed of them: one whose content changed at a new version, one whose age
+/// shows otherwise, and a chart whose data moved on. The rest keep the faces they have until a frame after, each in
+/// turn, so that an environment's 32 panels changing together, each up to 0.7 ms to lay out on a desktop and several
+/// times that on a headset, cost each frame what two do, and all show within 16 frames. What this client changed of a
+/// panel itself, a tick shown at once, and a panel sized anew are laid out in their frame. See `design/rendering.md`.
+pub(super) const LAYOUTS: usize = 2;
+
+/// The most panels that show nothing yet that one frame of a paced projector lays out, besides [`LAYOUTS`]: panels
+/// that arrive, as a space is entered or an environment puts up its 32, each standing from the frame it is laid out
+/// in. Four times as many as are laid out again, since nothing is seen of a panel until then, and waiting costs more
+/// than a frame a little longer as a space appears: a headset's 90 panels stand within 12 frames, a sixth of a second,
+/// and the 900 a space may show a client that takes them all within 113, about a second and a half.
+pub(super) const ARRIVALS: usize = 8;
 
 /// How a panel differs from the one its faces were laid out from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +58,11 @@ enum Change {
     Same,
     /// Only its chart's data, so that its faces are drawn again, but its size and its text kept.
     Plot,
-    /// What it shows, so that it is laid out again.
+    /// What it shows, as the server changed it, so that it is laid out again, in its turn.
     Content,
+    /// What it shows, as this client changed it itself, or as a server that versions nothing sent it, so that it is laid
+    /// out again in this frame.
+    Own,
 }
 
 impl Key {
@@ -62,7 +81,10 @@ impl Key {
         let versioned =
             |panel: &Panel| panel.version != 0 && (panel.chart.is_none() || panel.data_seq != 0);
         if versioned(&self.0) && versioned(panel) {
-            return if self.0.version != panel.version || self.0.id != panel.id {
+            return if self.0.version != panel.version
+                || self.0.id != panel.id
+                || self.0.chart.is_some() != panel.chart.is_some()
+            {
                 Change::Content
             } else if self.0.data_seq != panel.data_seq && panel.chart.is_some() {
                 // Its summary, its body, moves on with its data.
@@ -70,8 +92,10 @@ impl Key {
             } else if self.0.body != panel.body
                 || self.0.title != panel.title
                 || self.0.code != panel.code
-                || self.0.age != panel.age
             {
+                // At the version it had, only this client changed it: a tick shown at once, or its code short or whole.
+                Change::Own
+            } else if self.0.age != panel.age {
                 Change::Content
             } else {
                 Change::Same
@@ -87,7 +111,7 @@ impl Key {
                 return Change::Plot;
             }
         }
-        Change::Content
+        Change::Own
     }
 }
 
@@ -98,6 +122,10 @@ pub(super) struct Faces {
     pub(super) sizes: Vec<Layout>,
     /// How far down it scrolls at most, in rows, as it is sized this frame, while it stands; `None` while it does not.
     pub(super) limit: Option<usize>,
+    /// Whether the projection's panel has changed since its faces were laid out, its turn to be laid out again not
+    /// yet come: it shows what it showed, and none of its items is pointed at, since its lines are no longer the
+    /// panel's.
+    behind: bool,
 }
 
 impl Faces {
@@ -106,33 +134,65 @@ impl Faces {
             key: Key::of(panel),
             sizes: Vec::new(),
             limit: None,
+            behind: false,
         }
     }
 
     /// Follow `panel` as the projection has it now: its layouts are kept while it shows the same, its faces drawn again
-    /// where only its chart's data changed, and all of it laid out again where what it shows changed.
-    pub(super) fn follow(&mut self, panel: &Panel) {
-        match self.key.change(panel) {
-            Change::Same => return,
-            Change::Plot => self
-                .sizes
+    /// where only its chart's data changed, and all of it laid out again where what it shows changed. Where the server
+    /// changed it and `turn` is false, as when this frame has laid out as many panels as it may, it is left as it was,
+    /// showing what it showed, to be followed in a later frame; what this client changed itself is followed whatever
+    /// `turn` is. Returns whether it took a turn: whether the server's change of it was followed.
+    pub(super) fn follow(&mut self, panel: &Panel, turn: bool) -> bool {
+        let change = self.key.change(panel);
+        self.behind = matches!(change, Change::Plot | Change::Content) && !turn;
+        if change == Change::Same || self.behind {
+            return false;
+        }
+        if change == Change::Plot {
+            self.sizes
                 .iter_mut()
-                .for_each(|layout| layout.replot(panel)),
-            Change::Content => self.sizes.clear(),
+                .for_each(|layout| layout.replot(panel));
+        } else {
+            self.sizes.clear();
         }
         self.key = Key::of(panel);
+        change != Change::Own
     }
 
-    /// Its layout sized as `fit` says, laid out now if it was not already, kept first among its [`SIZES`].
-    pub(super) fn at(&mut self, panel: &Panel, fit: Fit) -> &mut Layout {
+    /// Its layout sized as `fit` says, of the panel as it was last followed, laid out now if it was not already, kept
+    /// first among its [`SIZES`].
+    pub(super) fn at(&mut self, fit: Fit) -> &mut Layout {
         match self.sizes.iter().position(|layout| layout.fit == fit) {
             Some(index) => self.sizes[..=index].rotate_right(1),
             None => {
-                self.sizes.insert(0, Layout::new(panel, fit));
+                self.sizes.insert(0, Layout::new(&self.key.0, fit));
                 self.sizes.truncate(SIZES);
             }
         }
         &mut self.sizes[0]
+    }
+
+    /// Its face sized as `fit` says, scrolled `scroll` rows down and framed in `border`, of the panel as it was last
+    /// followed, as [`Layout::face`] draws or keeps it.
+    pub(super) fn face(&mut self, fit: Fit, scroll: usize, border: [f32; 4]) -> Arc<Canvas> {
+        self.at(fit);
+        self.sizes[0].face(&self.key.0, scroll, border)
+    }
+
+    /// The line of its body that the list item where the ray meets it begins on, sized as `fit` says, as
+    /// [`Layout::item`] finds it; none while it is behind the projection's panel, whose lines it no longer shows.
+    pub(super) fn item(
+        &mut self,
+        fit: Fit,
+        model: glam::Mat4,
+        scroll: usize,
+        point: glam::Vec3,
+    ) -> Option<u32> {
+        if self.behind {
+            return None;
+        }
+        self.at(fit).item(model, scroll, point)
     }
 }
 
@@ -230,7 +290,7 @@ impl Layout {
 
     /// `panel`'s face as laid out here, scrolled `scroll` rows down and framed in `border`: the one last drawn, if it
     /// was drawn so; recoloured, if only its frame was another colour; or else drawn now, from what is laid out.
-    pub(super) fn face(&mut self, panel: &Panel, scroll: usize, border: [f32; 4]) -> Arc<Canvas> {
+    fn face(&mut self, panel: &Panel, scroll: usize, border: [f32; 4]) -> Arc<Canvas> {
         let face = match self.face.take() {
             Some(face) if face.scroll == scroll && face.border == border => face,
             Some(face) if face.scroll == scroll => {
@@ -271,7 +331,7 @@ impl Layout {
 
     /// The line of its panel's body that the list item where the ray meets it, at `point`, drawn with `model` and
     /// scrolled `scroll` rows down, begins on, as [`super::item_at`] finds it; none on a code panel.
-    pub(super) fn item(&self, model: glam::Mat4, scroll: usize, point: glam::Vec3) -> Option<u32> {
+    fn item(&self, model: glam::Mat4, scroll: usize, point: glam::Vec3) -> Option<u32> {
         if self.code.is_some() {
             return None;
         }

@@ -127,14 +127,32 @@ fn line(body: &str, item: &Item) -> Result<usize, String> {
     }
 }
 
-/// `panel`, as `panels` describes it to the agent: its identity and id, its title, whether it is code, where it is, its
-/// age, and, for a text panel, its body and its items.
-fn described(
+/// The most bytes `panels` lists a space's panels in, as its result is sent, as structured content and again as text,
+/// so that the agent can always read it: about 4,000 tokens of each.
+pub(crate) const LISTING_BYTES: usize = 32 * 1024;
+
+/// How many of [`LISTING_BYTES`] are left for what a listing says besides its panels, in both forms, and for the
+/// result around them.
+const LISTING_ROOM: usize = 1024;
+
+/// How many bytes `value` takes as a tool's result is sent: as its structured content, and again as its text, a JSON
+/// string of it, whose quotes and backslashes are escaped. See [`crate::mcp::structured`].
+pub(crate) fn sent(value: &Value) -> usize {
+    let text = value.to_string();
+    text.len() + Value::String(text).to_string().len()
+}
+
+/// The most characters of a panel's body `panels` lists it with, on one line.
+const EXCERPT_CHARS: usize = 80;
+
+/// What `panels` says of every panel, listed or read: its identity and id, its title, whether it is text, code or a
+/// chart, where it is, its age and its version, and, for an environment's panel, its environment's id for it and the
+/// id the agent may inspect it by.
+fn summarized(
     projection: &Projection,
     panel: &Panel,
     updated: Option<u64>,
     published: Option<(&str, Option<&str>)>,
-    rows: Option<(&[crate::stage::Row], Option<&str>)>,
 ) -> Value {
     let kind = if panel.code.is_some() {
         "code"
@@ -159,22 +177,6 @@ fn described(
                 .map(|reference| crate::space::inspectable(&projection.environment, reference))
         );
     }
-    // An environment's list panel gives its rows, each with its id, the id the agent may inspect it by and whether it is
-    // highlighted, so that the agent can inspect a row nobody points at.
-    if let Some((rows, highlighted)) = rows {
-        described["rows"] = rows
-            .iter()
-            .map(|row| {
-                json!({
-                    "id": row.id,
-                    "inspect_id": row.reference.as_deref().map(|reference| {
-                        crate::space::inspectable(&projection.environment, reference)
-                    }),
-                    "highlighted": highlighted == Some(row.id.as_str()),
-                })
-            })
-            .collect();
-    }
     if let Some(slug) = &panel.slug {
         described["id"] = json!(slug);
     }
@@ -193,20 +195,92 @@ fn described(
         }
         _ => described["floating"] = json!(true),
     }
-    match &panel.code {
-        Some(code) => described["language"] = json!(code.language),
-        None => {
+    if let Some(code) = &panel.code {
+        described["language"] = json!(code.language);
+    }
+    described
+}
+
+/// `panel`, as `panels` lists it among the others: what [`summarized`] says of it, how much it holds, as counts, its
+/// lines, its list items and, for an environment's list, its rows, named apart from the items and rows a panel read
+/// whole gives, and, with `excerpt`, the start of its text on one line, so that the agent can tell which to read
+/// without being sent every panel's text.
+fn listed(
+    projection: &Projection,
+    panel: &Panel,
+    updated: Option<u64>,
+    published: Option<(&str, Option<&str>)>,
+    rows: Option<usize>,
+    excerpt: bool,
+) -> Value {
+    let mut described = summarized(projection, panel, updated, published);
+    described["line_count"] = match &panel.code {
+        Some(code) => json!(code.lines),
+        None => json!(panel.body.lines().count()),
+    };
+    if panel.code.is_none() {
+        described["item_count"] = json!(checklist::items(&panel.body).len());
+        if excerpt {
+            described["excerpt"] = json!(crate::space::one_line(&panel.body, EXCERPT_CHARS));
+        }
+    }
+    if let Some(rows) = rows {
+        described["row_count"] = json!(rows);
+    }
+    described
+}
+
+/// `panel`, as `panels` describes the one panel the agent names: what [`summarized`] says of it, and what it shows,
+/// once: an environment's list its rows, each with its id, the id the agent may inspect it by, whether it is
+/// highlighted and its text; any other text or chart panel its body, as participants see it, and its list items; a
+/// code panel only its language, as before.
+fn detailed(
+    projection: &Projection,
+    panel: &Panel,
+    updated: Option<u64>,
+    published: Option<(&str, Option<&str>)>,
+    rows: Option<(&[crate::stage::Row], Option<&str>)>,
+) -> Value {
+    let mut described = summarized(projection, panel, updated, published);
+    match rows {
+        Some((rows, highlighted)) => {
+            described["rows"] = rows
+                .iter()
+                .map(|row| {
+                    json!({
+                        "id": row.id,
+                        "inspect_id": row.reference.as_deref().map(|reference| {
+                            crate::space::inspectable(&projection.environment, reference)
+                        }),
+                        "highlighted": highlighted == Some(row.id.as_str()),
+                        "text": row.text,
+                    })
+                })
+                .collect();
+        }
+        None if panel.code.is_none() => {
             described["body"] = json!(panel.body);
             described["items"] = items(&panel.body);
         }
+        None => {}
     }
     described
 }
 
 impl Hub {
     /// The panels shown in the space bound to `session`, in its current environment, as the `panels` tool tells its
-    /// agent: what each shows, with its items, so that it can read the current state of a list before changing it.
-    pub(crate) fn tool_panels(&self, session: &str) -> Result<Value, String> {
+    /// agent. Without `panel`, they are listed, from the `offset`th in the projection's order, each with where it is,
+    /// its version and the start of its text, in at most [`LISTING_BYTES`] as the result is sent: where they would take
+    /// more, without the start of their text, and then only as many as fit, saying how many there are in all and the
+    /// offset the next begin at, so that the agent pages through them and every panel is listed on some page. With
+    /// `panel`, by its id, identity or title, that panel alone with what it shows, its body and items or its rows, so
+    /// that the agent can read the current state of a list before changing it. See `design/mcp.md`.
+    pub(crate) fn tool_panels(
+        &self,
+        session: &str,
+        panel: Option<&str>,
+        offset: usize,
+    ) -> Result<Value, String> {
         let state = self.lock();
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
@@ -216,24 +290,75 @@ impl Hub {
             .travelling(record.travel);
         let now = crate::cards::unix_now();
         let projection = record.versioned(&environments, now);
-        let panels: Vec<Value> = projection
-            .panels
-            .iter()
-            .map(|panel| {
-                let updated = record
-                    .stage
-                    .updated(walls.environment, &panel.id)
-                    .map(|updated| now.saturating_sub(updated));
-                let published = record.stage.published(walls.environment, &panel.id);
-                let rows = record.stage.rows(walls.environment, &panel.id);
-                described(&projection, panel, updated, published, rows)
-            })
-            .collect();
-        Ok(json!({
+        let updated = |panel: &Panel| {
+            let updated = record.stage.updated(walls.environment, &panel.id);
+            updated.map(|updated| now.saturating_sub(updated))
+        };
+        let published = |panel: &Panel| record.stage.published(walls.environment, &panel.id);
+        let rows = |panel: &Panel| record.stage.rows(walls.environment, &panel.id);
+        let mut told = json!({
             "space": space,
             "environment": record.model.environment,
-            "panels": panels,
-        }))
+        });
+        if let Some(panel) = panel {
+            let id = find(&projection, panel)?;
+            let panel = projection.panel(&id).expect("a panel found");
+            let detail = detailed(
+                &projection,
+                panel,
+                updated(panel),
+                published(panel),
+                rows(panel),
+            );
+            told["panels"] = json!([detail]);
+            return Ok(told);
+        }
+        let total = projection.panels.len();
+        let offset = offset.min(total);
+        let list = |excerpt: bool| -> Vec<Value> {
+            let panels = projection.panels[offset..].iter().map(|panel| {
+                let rows = rows(panel).map(|(rows, _)| rows.len());
+                listed(
+                    &projection,
+                    panel,
+                    updated(panel),
+                    published(panel),
+                    rows,
+                    excerpt,
+                )
+            });
+            panels.collect()
+        };
+        // Each as it is sent, in both forms, with the comma after it.
+        let size = |panels: &[Value]| panels.iter().map(|panel| sent(panel) + 2).sum::<usize>();
+        let budget = LISTING_BYTES - LISTING_ROOM;
+        let mut panels = list(true);
+        if size(&panels) > budget {
+            panels = list(false);
+        }
+        // As many as fit, the next in the projection's order: at least one, since each is far shorter than the room.
+        let (mut bytes, mut fit) = (0, 0);
+        for panel in &panels {
+            bytes += sent(panel) + 2;
+            if bytes > budget {
+                break;
+            }
+            fit += 1;
+        }
+        panels.truncate(fit);
+        told["panels"] = json!(panels);
+        told["total"] = json!(total);
+        told["offset"] = json!(offset);
+        if offset + fit < total {
+            let next = offset + fit;
+            told["next"] = json!(next);
+            told["note"] = json!(format!(
+                "Panels {} to {} of {total} are listed. List those after with offset {next}, or read one whole by naming it in panel, by its id, identity or title.",
+                offset + 1,
+                next
+            ));
+        }
+        Ok(told)
     }
 
     /// Update the text panel `update.panel` names, in the space bound to `session`, in place, as its agent asked: its
@@ -289,7 +414,7 @@ impl Hub {
             && read != current
         {
             return Err(format!(
-                "That panel has changed since version {read}, as someone ticked an item, moved it or its text was updated; it is at version {current} now. Read it again with panels, and redo the update from what it shows, with version {current} if it still applies."
+                "That panel has changed since version {read}, as someone ticked an item, moved it or its text was updated; it is at version {current} now. Read it again with panels, naming it, and redo the update from what it shows, with version {current} if it still applies."
             ));
         }
         if let Some(title) = &update.title {

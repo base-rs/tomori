@@ -4020,6 +4020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tomori-client",
+ "tomori-environment",
  "tomori-protocol",
  "tomori-security",
  "tomori-server",

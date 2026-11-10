@@ -57,6 +57,13 @@ pub type Connected = (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>);
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long after telling a space's connections of a change its environment's side made to what it projects the next
+/// such change is told: at most four times a second, however often its panels change. A change within the interval is
+/// told at its end, with every change since, the newest state winning, so that one change is told at once and a stream
+/// of them costs each connection, and the hub's lock, which every space shares, at most four builds of its projection a
+/// second. See `design/projection.md`.
+pub const PROJECTION_INTERVAL: Duration = Duration::from_millis(250);
+
 /// What this server states in its `Welcome` that it sends at most, and sends each client within the lesser of and what
 /// the client states: the most any connection is bound by, as its stage holds a space's projection within. See
 /// `design/projection.md`.
@@ -577,7 +584,10 @@ struct ConnectionRecord {
     /// The projection this client was last sent, as it was sent, at its revision, which the next is sent as a patch
     /// from, for a client that takes patches: `None` until it is sent one, and once it asks for one whole again or
     /// joins another space. See `design/projection.md`.
-    projected: Option<tomori_protocol::Projection>,
+    projected: Option<Arc<tomori_protocol::Projection>>,
+    /// The revision of its space's projection it was last sent at, whole or patched, or 0 once it joins a space, so
+    /// that a change told late, at the end of its interval, is not sent again to a connection already sent it.
+    projection_sent: u64,
 }
 
 impl ConnectionRecord {
@@ -747,6 +757,13 @@ struct SpaceRecord {
     projection_revision: Cell<u64>,
     /// The versions of its walls and panels, found from each projection built. See [`SpaceRecord::versioned`].
     versions: std::cell::RefCell<crate::versions::Versions>,
+    /// When its connections were last told of a change its environment's side made to what it projects, and when they
+    /// are due to be told of one made within [`PROJECTION_INTERVAL`] of that, deferred to the interval's end.
+    projection_told: Cell<Option<Instant>>,
+    projection_deferred: Cell<Option<Instant>>,
+    /// What it projects as last built, for each kind of connection sent it, kept while it is at the same revision in
+    /// the same second, so that every connection told of one change shares one build. See [`SpaceRecord::built`].
+    built: std::cell::RefCell<Option<Built>>,
     /// Where a participant or the agent summoned the agent to, in the space's coordinates, while it is not at its home:
     /// for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
@@ -772,6 +789,19 @@ const ACTIVE_RESOLUTION: u64 = 60;
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
 const ANSWERED: usize = 16;
+
+/// The most kinds of connection, by the limits they state, whose projection a space keeps built: Tomori's own state
+/// two, the headset's and the desktop window's. One beyond them is built for itself each time.
+const BUILT: usize = 8;
+
+/// What a space projects as it was last built: at its `revision`, at `now`, in seconds since the epoch, since each
+/// panel's age is counted from then; whole, and within each of the `limits` a connection sent it stated.
+struct Built {
+    revision: u64,
+    now: u64,
+    whole: Arc<tomori_protocol::Projection>,
+    within: Vec<(Limits, Arc<tomori_protocol::Projection>)>,
+}
 
 /// When participants are told of a change to a space caused by an agent event; see [`SNAPSHOT_INTERVAL`].
 enum Pace {
@@ -802,25 +832,44 @@ impl SpaceRecord {
         projection
     }
 
-    /// What the space projects, as [`SpaceRecord::versioned`] finds it, as a connection that takes at most `limits` is
-    /// sent it: within them, each wall and panel at the version it has in the whole, so that every client is sent one
-    /// version of each, and one sent less is never sent a wall or panel it was not sent before as changed. See
-    /// `design/projection.md`.
-    fn versioned_within(
+    /// What the space projects at its revision now, at `now`, as [`SpaceRecord::versioned`] finds it, saying that
+    /// revision, as a connection that takes at most `limits` is sent it: within them, each wall and panel at the version
+    /// it has in the whole, so that every client is sent one version of each, and one sent less is never sent a wall or
+    /// panel it was not sent before as changed. It is built once for every connection of the same limits told of the
+    /// same change, and kept only while the space is at that revision in that second, so that a change, which raises
+    /// the revision, and each panel's age are always followed. See `design/projection.md`.
+    fn built(
         &self,
         environments: &crate::environments::Environments,
         now: u64,
         limits: &Limits,
-    ) -> tomori_protocol::Projection {
-        let whole = self.versioned(environments, now);
+    ) -> Arc<tomori_protocol::Projection> {
+        let revision = self.projection_revision.get();
+        let mut built = self.built.borrow_mut();
+        let current = built
+            .take()
+            .filter(|built| built.revision == revision && built.now == now);
+        let built = built.insert(current.unwrap_or_else(|| Built {
+            revision,
+            now,
+            whole: Arc::new(self.versioned(environments, now).with_revision(revision)),
+            within: Vec::new(),
+        }));
         if *limits == Limits::MOST {
-            return whole;
+            return built.whole.clone();
+        }
+        if let Some((_, projection)) = built.within.iter().find(|(kept, _)| kept == limits) {
+            return projection.clone();
         }
         let walls = environments
             .walls(&self.model.environment)
             .travelling(self.travel);
         let mut projection = self.stage.view_within(&self.model.id, &walls, now, limits);
-        crate::versions::Versions::label(&whole, &mut projection);
+        crate::versions::Versions::label(&built.whole, &mut projection);
+        let projection = Arc::new(projection.with_revision(revision));
+        if built.within.len() < BUILT {
+            built.within.push((*limits, projection.clone()));
+        }
         projection
     }
 
@@ -1178,15 +1227,54 @@ impl HubState {
             record
                 .projection_revision
                 .set(record.projection_revision.get() + 1);
-            for member in record.model.members() {
-                if let Some(connection) = self
-                    .participants
-                    .get(member)
-                    .and_then(|participant| participant.connection)
-                    .and_then(|connection| self.connections.get(&connection))
-                    .filter(|connection| connection.projection)
-                {
-                    connection.outbox.projection();
+            self.tell_projection(record);
+        }
+    }
+
+    /// Tell everyone in `record`'s space whose client reads what it projects, and was not sent it at its revision now,
+    /// that it changed: each is sent it as it is when sent, so that anything its environment's side changed that waited
+    /// to be told is told with it, and one sent it since the last change is not sent it again.
+    fn tell_projection(&self, record: &SpaceRecord) {
+        record.projection_deferred.set(None);
+        let revision = record.projection_revision.get();
+        for member in record.model.members() {
+            if let Some(connection) = self
+                .participants
+                .get(member)
+                .and_then(|participant| participant.connection)
+                .and_then(|connection| self.connections.get(&connection))
+                .filter(|connection| connection.projection && connection.projection_sent < revision)
+            {
+                connection.outbox.projection();
+            }
+        }
+    }
+
+    /// A change the environment's side of `space` made, at `now`, to what it projects: a revision, as every change is,
+    /// told to everyone in the space at once, unless they were told of one within [`PROJECTION_INTERVAL`], when it is
+    /// deferred to the interval's end, and told then with every change since, the server's snapshot timer woken for
+    /// it, as for an agent's next move, so that it is told then though nothing else happens.
+    fn touch_projection_paced(&self, space: &str, now: Instant) {
+        for record in self.space(space).into_iter() {
+            record
+                .projection_revision
+                .set(record.projection_revision.get() + 1);
+            if record.projection_deferred.get().is_some() {
+                continue;
+            }
+            let due = record
+                .projection_told
+                .get()
+                .map(|told| told + PROJECTION_INTERVAL)
+                .filter(|due| now < *due);
+            match due {
+                Some(due) => {
+                    record.projection_deferred.set(Some(due));
+                    self.woken.notify(usize::MAX);
+                }
+                None => {
+                    record.projection_told.set(Some(now));
+                    self.tell_projection(record);
                 }
             }
         }
@@ -1582,6 +1670,7 @@ impl HubState {
             .filter(|connection| connection.projection)
         {
             connection.projected = None;
+            connection.projection_sent = 0;
             outbox.projection();
         }
         // After the space's state, the state its environment's side keeps for it, so that the client knows which space and environment it is for.
@@ -2122,8 +2211,9 @@ impl Hub {
 
     /// [`Self::channel_publish`] at `now`. Updates waiting that are due are made first, the oldest first, and a fresh one
     /// after them, at once where the changes left allow it, and otherwise waits behind them, while an update of a panel
-    /// already waiting takes its place there, so that every panel's latest update is made in turn: with the changes a space may make, 4 a second, a side updating its 8 panels every second has each
-    /// one's latest made within 2 seconds, and at the next sweep after.
+    /// already waiting takes its place there, so that every panel's latest update is made in turn: with the changes a
+    /// space may make, 16 a second, a side updating its 32 panels every second has each one's latest made within 2
+    /// seconds, and at the next sweep after.
     fn channel_publish_at(
         &self,
         outlet: &SpaceOutlet,
@@ -2228,7 +2318,7 @@ impl Hub {
             .as_mut()
             .expect("made as its side first published")
             .charge(now, Some(&id), bytes);
-        state.touch_projection(space);
+        state.touch_projection_paced(space, now);
         Ok(change == crate::stage::Change::Added)
     }
 
@@ -2293,9 +2383,18 @@ impl Hub {
     /// may be published again at once; see [`Self::channel_publish`]. A retraction is never kept waiting: it costs a
     /// change, which later ones then wait for, but only where it took a panel away.
     fn channel_retract(&self, outlet: &SpaceOutlet, id: &str) -> tomori_environment::Result<()> {
+        self.channel_retract_at(outlet, id, Instant::now())
+    }
+
+    /// [`Self::channel_retract`] at `now`.
+    fn channel_retract_at(
+        &self,
+        outlet: &SpaceOutlet,
+        id: &str,
+        now: Instant,
+    ) -> tomori_environment::Result<()> {
         {
             let mut state = self.lock();
-            let now = Instant::now();
             Self::running(&state, outlet)?;
             let Some(channel) = self.current_channel(&mut state, outlet) else {
                 return Ok(());
@@ -2317,7 +2416,7 @@ impl Hub {
                 .as_mut()
                 .expect("made above")
                 .charge(now, None, 0);
-            state.touch_projection(&outlet.space);
+            state.touch_projection_paced(&outlet.space, now);
         }
         self.keep();
         Ok(())
@@ -2944,6 +3043,7 @@ impl Hub {
                 live_panels: false,
                 limits: Limits::TODAY,
                 projected: None,
+                projection_sent: 0,
             },
         );
         Some((id, outbox, received, output))
@@ -5397,6 +5497,9 @@ impl Hub {
             touched: Cell::new(None),
             projection_revision: Cell::new(crate::versions::first_revision()),
             versions: Default::default(),
+            projection_told: Cell::new(None),
+            projection_deferred: Cell::new(None),
+            built: Default::default(),
             deferred: Cell::new(None),
             closed: None,
             kept_open: false,
@@ -5550,6 +5653,9 @@ impl Hub {
                     touched: Cell::new(None),
                     projection_revision: Cell::new(crate::versions::first_revision()),
                     versions: Default::default(),
+                    projection_told: Cell::new(None),
+                    projection_deferred: Cell::new(None),
+                    built: Default::default(),
                     deferred: Cell::new(None),
                     closed,
                     kept_open: false,
@@ -5879,13 +5985,15 @@ impl Hub {
         *self.highlighter.write().expect("never left poisoned") = highlighter;
     }
 
-    /// When the earliest deferred snapshot, or an agent's next move, is due, if any.
+    /// When the earliest deferred snapshot, of a space's state or of what it projects, or an agent's next move, is due,
+    /// if any.
     pub fn snapshot_deadline(&self) -> Option<Instant> {
         let state = self.lock();
         state
             .spaces
             .iter()
-            .filter_map(|space| space.deferred.get())
+            .flat_map(|space| [space.deferred.get(), space.projection_deferred.get()])
+            .flatten()
             .chain(state.movement_deadline())
             .min()
     }
@@ -5941,7 +6049,8 @@ impl Hub {
         }
     }
 
-    /// Send the deferred snapshots that are due at `now`, and make the agents' moves that are due.
+    /// Send the deferred snapshots that are due at `now`, of spaces' states and of what they project, and make the
+    /// agents' moves that are due.
     pub fn flush_snapshots(&self, now: Instant) {
         let mut state = self.lock();
         // And the agents' moves that are due. See `design/environments.md`.
@@ -5954,6 +6063,18 @@ impl Hub {
             .collect();
         for space in due {
             state.touch_space(&space);
+        }
+        // What an environment's side changed of what a space projects within the interval since its connections were
+        // last told, told now, as it is now. See [`PROJECTION_INTERVAL`].
+        for space in &state.spaces {
+            if space
+                .projection_deferred
+                .get()
+                .is_some_and(|due| due <= now)
+            {
+                space.projection_told.set(Some(now));
+                state.tell_projection(space);
+            }
         }
     }
 
@@ -6378,32 +6499,35 @@ impl Hub {
                     revision.set(sent + 1);
                 }
                 // Versions are found from the projection whole, images and all, whatever this client is sent of it,
-                // and what it is sent within its limits has the same.
-                let mut projection =
-                    space.versioned_within(&environments, crate::cards::unix_now(), &limits);
+                // and what it is sent within its limits has the same; one build serves every connection of its limits.
+                let mut projection = space.built(&environments, crate::cards::unix_now(), &limits);
                 // A client that shows no images is sent each image panel as a text panel saying what it is.
                 let images = state
                     .connections
                     .get(&connection)
                     .is_some_and(|record| record.images);
-                if !images {
-                    projection.panels = projection
+                if !images && projection.panels.iter().any(|panel| panel.image.is_some()) {
+                    let mut plain = (*projection).clone();
+                    plain.panels = plain
                         .panels
                         .into_iter()
                         .map(crate::stage::without_image)
                         .collect();
+                    projection = Arc::new(plain);
                 }
                 let live = state
                     .connections
                     .get(&connection)
                     .is_some_and(|record| record.live_panels);
-                let projection = projection.with_revision(revision.get());
-                let message = crate::patches::message(projected, &projection, live);
-                if let Some(record) = state
+                let message =
+                    crate::patches::message(projected.map(|sent| &**sent), &projection, live);
+                // The connection reads what is projected, as found above, so it is there.
+                let record = state
                     .connections
                     .get_mut(&connection)
-                    .filter(|record| record.patches)
-                {
+                    .expect("found above, reading what is projected");
+                record.projection_sent = projection.revision;
+                if record.patches {
                     record.projected = Some(projection);
                 }
                 Some(message)

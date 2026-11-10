@@ -12,6 +12,11 @@ use super::{Content, DECLARED_WALLS, Kept, Placed, Pose, Stage, Walls, blocks};
 /// The most panels an environment publishes in one space, as `tomori-environment` exports it.
 pub const PUBLISHED: usize = tomori_environment::PANEL_LIMIT;
 
+/// Why a panel past [`PUBLISHED`] is refused, saying how many that is.
+static MOST_PUBLISHED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!("An environment publishes at most {PUBLISHED} panels in a space.")
+});
+
 /// What makes a kept panel one its environment published: the environment's id for it, the reference the agent can
 /// inspect it by, its chart, if it is a chart panel, and its rows and the one it highlights, if it is a list panel. It
 /// is kept only while its environment's run in the space has published it, never written: what the space keeps of it
@@ -320,7 +325,7 @@ impl Stage {
             .filter(|waiting| !shown.contains(waiting))
             .count();
         if shown.len() + others >= PUBLISHED {
-            return Err("An environment publishes at most 8 panels in a space.");
+            return Err(MOST_PUBLISHED.as_str());
         }
         Ok(())
     }

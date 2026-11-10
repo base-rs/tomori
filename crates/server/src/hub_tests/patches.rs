@@ -1264,3 +1264,281 @@ fn a_client_sent_less_holds_each_wall_at_the_version_every_client_has_and_hears_
     assert_eq!(now, sent);
     assert!(all.errors.is_empty() && some.errors.is_empty());
 }
+
+/// How many projections and patches `client` was sent since.
+fn sends(client: &Client) -> usize {
+    let sent = client.read().into_iter().filter(|message| {
+        matches!(
+            message,
+            ServerMessage::Projection { .. } | ServerMessage::ProjectionPatch { .. }
+        )
+    });
+    sent.count()
+}
+
+/// How many times this thread has built what a connection is sent of a space.
+fn views() -> usize {
+    crate::stage::VIEWS.with(std::cell::Cell::get)
+}
+
+/// What an environment's changes cost the hub's lock, which every space shares, counted rather than timed: each
+/// connection is told of them at most four times a second, however often its panels change, the first change at once,
+/// and every connection of the same limits told of a change shares one build of the projection.
+#[test]
+fn an_environment_s_changes_are_told_four_times_a_second_and_built_once_for_connections_alike() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls(
+                [upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])].map(|pose| {
+                    crate::EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((8, 2)))
+                }),
+            )
+            .with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    // Six connections of three kinds: two that state nothing and apply no patches, sent the projection whole within
+    // today's limits; two that take the most and apply data ops, as Tomori's own; and two that apply patches within
+    // twice today's panels.
+    let mut wider = Limits::MOST;
+    wider.panels = 2 * Limits::TODAY.panels;
+    let clients = [
+        Client::projecting(&hub, Access::open(), "old-1"),
+        Client::projecting(&hub, Access::open(), "old-2"),
+        Client::patching_as(&hub, Access::open(), "live-1", Some(Limits::MOST), true),
+        Client::patching_as(&hub, Access::open(), "live-2", Some(Limits::MOST), true),
+        Client::patching_within(&hub, Access::open(), "wide-1", Some(wider)),
+        Client::patching_within(&hub, Access::open(), "wide-2", Some(wider)),
+    ];
+    for client in &clients {
+        client.send(ClientMessage::Join { space: id.clone() });
+        client.read();
+    }
+    let kinds = 3;
+    let panels = crate::stage::PUBLISHED;
+    let panel = |index: usize, value: usize| {
+        tomori_environment::Panel::text(format!("p{index}"), format!("P{index}"), value.to_string())
+            .on_wall(index as u32 % 2, None)
+    };
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    // The side puts up every panel it may show in one instant: each connection is sent them once, all of them, from
+    // one build for each kind of connection, and nothing again once the interval ends, since each has them.
+    let built = views();
+    for index in 0..panels {
+        assert_eq!(
+            hub.channel_publish_at(&outlet, panel(index, 0), at(0)),
+            Ok(())
+        );
+    }
+    assert_eq!(clients.each_ref().map(sends), [1; 6]);
+    // Or one more for each, were a second to end between two connections' sends, since ages are counted in seconds.
+    let builds = views() - built;
+    assert!((kinds..=2 * kinds).contains(&builds), "{builds}");
+    assert_eq!(hub.snapshot_deadline(), Some(at(0) + PROJECTION_INTERVAL));
+    hub.flush_snapshots(at(0) + PROJECTION_INTERVAL);
+    assert_eq!(clients.each_ref().map(sends), [0; 6]);
+    assert_eq!(hub.snapshot_deadline(), None);
+    // One change, after a quiet while, is told at once; the next within the interval waits for its end, and is told
+    // then, with the newest of whatever changed since.
+    assert_eq!(
+        hub.channel_publish_at(&outlet, panel(0, 1), at(2000)),
+        Ok(())
+    );
+    assert_eq!(hub.snapshot_deadline(), None);
+    assert_eq!(clients.each_ref().map(sends), [1; 6]);
+    assert_eq!(
+        hub.channel_publish_at(&outlet, panel(1, 1), at(2010)),
+        Ok(())
+    );
+    assert_eq!(
+        hub.channel_publish_at(&outlet, panel(2, 1), at(2020)),
+        Ok(())
+    );
+    assert_eq!(clients.each_ref().map(sends), [0; 6]);
+    assert_eq!(hub.snapshot_deadline(), Some(at(2250)));
+    hub.flush_snapshots(at(2249));
+    assert_eq!(clients.each_ref().map(sends), [0; 6]);
+    hub.flush_snapshots(at(2250));
+    let whole = latest_whole(&clients[0]);
+    let bodies = |shown: &Projection| -> Vec<String> {
+        let body = |index: usize| {
+            let title = format!("P{index}");
+            let panel = shown.panels.iter().find(|panel| panel.title == title);
+            panel.unwrap().body.clone()
+        };
+        (0..panels).map(body).collect()
+    };
+    assert_eq!(bodies(&whole)[..4], ["1", "1", "1", "0"]);
+    assert_eq!(clients.each_ref().map(sends)[1..], [1; 5]);
+    // The side then changes a panel 16 times a second, as fast as a space's panels may, for five seconds, the
+    // deferred changes told as each interval ends, as the server's timer tells them. Before each connection was paced
+    // it was sent every one, 16 a second, and built the projection for itself each time, twice where it takes less
+    // than the most: 80 sends each, and 800 builds for these six.
+    let (built, mut told) = (views(), [0; 6]);
+    for change in 0..80_u64 {
+        let now = at(4000 + change * 1000 / 16);
+        while let Some(due) = hub.snapshot_deadline().filter(|due| *due <= now) {
+            hub.flush_snapshots(due);
+        }
+        let update = panel(change as usize % panels, 2 + change as usize / panels);
+        assert_eq!(hub.channel_publish_at(&outlet, update, now), Ok(()));
+        let second = clients.each_ref().map(sends);
+        for (told, sent) in told.iter_mut().zip(second) {
+            *told += sent;
+        }
+        // Never more than one send between two changes, and by the end of each second at most four more.
+        assert!(second.iter().all(|sent| *sent <= 1));
+        if change % 16 == 15 {
+            let most = 4 * (change as usize / 16 + 1);
+            assert!(told.iter().all(|told| *told <= most), "{told:?}");
+        }
+    }
+    hub.flush_snapshots(at(9250));
+    for (told, sent) in told.iter_mut().zip(clients.each_ref().map(sends)) {
+        *told += sent;
+    }
+    // Four a second each, where there were 16, and one more for what changed last; and one build a send for each
+    // kind of connection, with one more wherever a second ended between two connections' sends, since each panel's
+    // age is counted in seconds: 63 builds, where there were 800.
+    assert_eq!(told, [21; 6]);
+    let builds = views() - built;
+    assert!((21 * kinds..=23 * kinds).contains(&builds), "{builds}");
+    // Each holds the latest of everything.
+    let whole = clients[0].projection();
+    assert_eq!(bodies(&whole)[..16], [4; 16].map(|value| value.to_string()));
+    assert_eq!(bodies(&whole)[16..], [3; 16].map(|value| value.to_string()));
+    // A space keeps what it built for only so many kinds of connection: nine more kinds, each stating limits of its
+    // own, the last two connections alike, are six kinds past them, and the last kind is built for each of its two.
+    let others: Vec<Client> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 8]
+        .into_iter()
+        .map(|kind| {
+            let mut limits = Limits::MOST;
+            limits.panels = 100 + kind;
+            let name = format!("other-{kind}-{}", views());
+            let client = Client::patching_within(&hub, Access::open(), &name, Some(limits));
+            client.send(ClientMessage::Join { space: id.clone() });
+            client.read();
+            client
+        })
+        .collect();
+    let built = views();
+    assert_eq!(
+        hub.channel_publish_at(&outlet, panel(0, 9), at(20_000)),
+        Ok(())
+    );
+    for client in clients.iter().chain(&others) {
+        assert_eq!(sends(client), 1);
+    }
+    let builds = views() - built;
+    assert!(
+        (kinds + 10..=2 * (kinds + 10)).contains(&builds),
+        "{builds}"
+    );
+    // A retraction is told as any change its side makes: at once after a quiet while, and the next at the
+    // interval's end.
+    assert_eq!(hub.channel_retract_at(&outlet, "p5", at(30_000)), Ok(()));
+    assert_eq!(clients.each_ref().map(sends), [1; 6]);
+    assert_eq!(hub.channel_retract_at(&outlet, "p6", at(30_100)), Ok(()));
+    assert_eq!(clients.each_ref().map(sends), [0; 6]);
+    assert_eq!(hub.snapshot_deadline(), Some(at(30_250)));
+    hub.flush_snapshots(at(30_250));
+    assert_eq!(clients.each_ref().map(sends), [1; 6]);
+    assert_eq!(clients[0].projection().panels.len(), panels - 2);
+}
+
+/// A change made at once, a participant's or the agent's, while a change of the environment's waits for its interval
+/// to end, tells everyone both together, and nothing is then left to tell at the interval's end.
+#[test]
+fn a_change_told_at_once_carries_what_the_environment_changed_that_waited() {
+    let (hub, id, outlet, lea, ada) = publishing_space();
+    let text = |id: &str, body: &str| tomori_environment::Panel::text(id, id, body);
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let bodies = |held: &Held| -> Vec<(String, String)> {
+        let panels = held.shown().panels.into_iter();
+        panels.map(|panel| (panel.title, panel.body)).collect()
+    };
+    // When what the environment changed is due to be told, if any of it waits.
+    let deferred = || {
+        let state = hub.lock();
+        state.space(&id).unwrap().projection_deferred.get()
+    };
+    let (mut live, mut patched) = (Held::default(), Held::default());
+    for panel in ["a", "b", "c"] {
+        assert_eq!(
+            hub.channel_publish_at(&outlet, text(panel, "1"), at(0)),
+            Ok(())
+        );
+    }
+    hub.flush_snapshots(at(250));
+    assert_eq!(
+        hub.channel_publish_at(&outlet, text("a", "2"), at(1000)),
+        Ok(())
+    );
+    live.read(&lea);
+    patched.read(&ada);
+    // The environment changes another panel within the interval: it waits, and nobody is told.
+    assert_eq!(
+        hub.channel_publish_at(&outlet, text("b", "2"), at(1100)),
+        Ok(())
+    );
+    assert_eq!(deferred(), Some(at(1250)));
+    assert_eq!((sends(&lea), sends(&ada)), (0, 0));
+    // A participant throws the third panel away meanwhile: told at once, as ever, with what waited.
+    let thrown = live.shown().panels[2].id.clone();
+    lea.send(ClientMessage::DismissPanel { panel: thrown });
+    assert_eq!(deferred(), None);
+    live.read(&lea);
+    patched.read(&ada);
+    let expected = vec![
+        ("a".to_owned(), "2".to_owned()),
+        ("b".to_owned(), "2".to_owned()),
+    ];
+    assert_eq!(
+        (bodies(&live), bodies(&patched)),
+        (expected.clone(), expected)
+    );
+    hub.flush_snapshots(at(1250));
+    assert_eq!((sends(&lea), sends(&ada)), (0, 0));
+    // So with the agent's own panel: its reply's panel goes up at once, with the environment's change that waited.
+    assert_eq!(
+        hub.channel_publish_at(&outlet, text("a", "3"), at(2000)),
+        Ok(())
+    );
+    live.read(&lea);
+    patched.read(&ada);
+    assert_eq!(
+        hub.channel_publish_at(&outlet, text("b", "3"), at(2100)),
+        Ok(())
+    );
+    assert_eq!(deferred(), Some(at(2250)));
+    reply(&hub, &id, "m1", "```panel\ntitle: Notes\n---\nA note.\n```");
+    assert_eq!(deferred(), None);
+    live.read(&lea);
+    patched.read(&ada);
+    for held in [&live, &patched] {
+        let shown = bodies(held);
+        assert!(
+            shown.contains(&("b".to_owned(), "3".to_owned())),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(&("Notes".to_owned(), "A note.".to_owned())),
+            "{shown:?}"
+        );
+    }
+    hub.flush_snapshots(at(2250));
+    assert_eq!((sends(&lea), sends(&ada)), (0, 0));
+}

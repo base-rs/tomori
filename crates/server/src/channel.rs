@@ -30,8 +30,8 @@ pub struct Channel {
     /// How many more changes to the panels it publishes it may make, once it has made one.
     pub publishes: Option<Publishes>,
     /// The newest update of each panel it published that came too soon to be made, made as soon as it may be, so that
-    /// the latest always arrives: one for each panel, at most the 8 an environment may show, since those waiting count
-    /// towards them.
+    /// the latest always arrives: one for each panel, at most the [`tomori_environment::PANEL_LIMIT`] an environment
+    /// may show, since those waiting count towards them.
     pub pending: Vec<crate::stage::Publishing>,
     /// The panels an update of which, waiting, the stage refused once it could be made, the latest last, at most
     /// [`REFUSED`], each said once until it is taken or retracted. See [`Channel::refuse`].
@@ -188,20 +188,27 @@ impl Intents {
 }
 
 /// How many changes a side may make to the panels it publishes in a space at once, and how many more each second after:
-/// each change sends the panel again to everyone in it, in a projection patch to a client that applies them, coalesced
-/// for a connection that has not taken the last. Only changes the stage takes count: the same again, one to a panel dismissed, one refused and a retraction of
-/// nothing cost nothing.
-pub const PUBLISH_BURST: f32 = 8.0;
-pub const PUBLISHES_PER_SECOND: f32 = 4.0;
+/// as many at once as the panels it may show, [`tomori_environment::PANEL_LIMIT`], 32, so that it puts up, or updates,
+/// every one together, and half as many each second after, 16, so that a side updating every one each second has each
+/// one's latest made within two. Each change sends the panel again to everyone in the space, in a projection patch to a
+/// client that applies them, coalesced for a connection that has not taken the last. Only changes the stage takes
+/// count: the same again, one to a panel dismissed, one refused and a retraction of nothing cost nothing.
+pub const PUBLISH_BURST: f32 = tomori_environment::PANEL_LIMIT as f32;
+pub const PUBLISHES_PER_SECOND: f32 = PUBLISH_BURST / 2.0;
 
-/// How many bytes of panels a side may publish in a space at once, and how many more each second after.
-pub const PUBLISH_BYTES_BURST: f32 = 128.0 * 1024.0;
-pub const PUBLISH_BYTES_PER_SECOND: f32 = 32.0 * 1024.0;
+/// How many bytes of panels a side may publish in a space at once, and how many more each second after: 16 KiB at once
+/// for each panel it may show, 512 KiB, so that it puts up every one together even where each is a chart of every
+/// series at every point, about 13 KiB, and a quarter of that each second, 128 KiB, 8 KiB for each change it may make,
+/// as much as every one of its panels a live chart of three series over 181 points, under 4 KiB, changing each second.
+pub const PUBLISH_BYTES_BURST: f32 = PUBLISH_BURST * 16.0 * 1024.0;
+pub const PUBLISH_BYTES_PER_SECOND: f32 = PUBLISH_BYTES_BURST / 4.0;
 
 /// How many times a side may publish or retract in a space at once, and how many more each second after, whether or
-/// not they change anything, so that a side sending nothing new as fast as it can never keeps the hub busy.
-pub const MESSAGE_BURST: f32 = 40.0;
-pub const MESSAGES_PER_SECOND: f32 = 20.0;
+/// not they change anything, so that a side sending nothing new as fast as it can never keeps the hub busy: 160 and 80,
+/// five times and two and a half times the panels it may show, so that a side publishing every one each second, as on
+/// a timer, is never refused for it.
+pub const MESSAGE_BURST: f32 = PUBLISH_BURST * 5.0;
+pub const MESSAGES_PER_SECOND: f32 = MESSAGE_BURST / 2.0;
 
 /// How soon after the last a side may update the same panel: once a second, as fast as a live chart needs, with a tenth
 /// of that to spare, so that a side publishing on a timer of a second never has a tick held back.
@@ -325,7 +332,8 @@ mod tests {
         publishes.charge(at(900), Some("a"), 100);
         publishes.forget("a");
         assert!(publishes.ready(at(901), Some("a"), 100));
-        // The space's changes: a burst, then four a second; retractions too.
+        // The space's changes: a burst, as many as the panels a side may show, then half as many a second; retractions
+        // too.
         let mut publishes = Publishes::new(start);
         for index in 0..PUBLISH_BURST as usize {
             let panel = format!("p{index}");
@@ -334,13 +342,14 @@ mod tests {
         }
         assert!(!publishes.ready(start, Some("late"), 10));
         assert!(!publishes.ready(start, None, 0));
-        assert!(publishes.ready(at(250), None, 0));
-        publishes.charge(at(250), None, 0);
+        assert!(!publishes.ready(at(62), None, 0));
+        assert!(publishes.ready(at(63), None, 0));
+        publishes.charge(at(63), None, 0);
         // A clock that goes back refills nothing.
         assert!(!publishes.ready(start, Some("earlier"), 10));
-        // Bytes: a burst, then 32 KiB a second; a panel larger than what is left waits until the bucket is full.
+        // Bytes: a burst, then 128 KiB a second; a panel larger than what is left waits until the bucket is full.
         let mut publishes = Publishes::new(start);
-        let chart = 48 * 1024;
+        let chart = 192 * 1024;
         for panel in ["a", "b"] {
             assert!(publishes.ready(start, Some(panel), chart));
             publishes.charge(start, Some(panel), chart);
@@ -348,18 +357,53 @@ mod tests {
         assert!(!publishes.ready(start, Some("c"), chart));
         assert!(publishes.ready(at(500), Some("c"), chart));
         let mut publishes = Publishes::new(start);
-        let huge = 600 * 1024;
+        let huge = 2400 * 1024;
         assert!(publishes.ready(start, Some("a"), huge));
         publishes.charge(start, Some("a"), huge);
         assert!(!publishes.ready(at(10_000), Some("b"), 1));
         assert!(publishes.ready(at(60_000), Some("b"), 1));
-        // Messages, whatever they change: a burst of forty, then twenty a second.
+        // Messages, whatever they change: a burst, then half as many a second.
         let mut publishes = Publishes::new(start);
         for _ in 0..MESSAGE_BURST as usize {
             assert_eq!(publishes.message(start), Ok(()));
         }
         assert!(publishes.message(start).is_err());
-        assert_eq!(publishes.message(at(50)), Ok(()));
+        assert!(publishes.message(at(12)).is_err());
+        assert_eq!(publishes.message(at(13)), Ok(()));
+    }
+
+    /// What a space's panels may change grows with how many a side may show, so that a side showing as many as it may
+    /// is held no harder for each than one showing a few: these are the numbers `design/projection.md` states.
+    #[test]
+    fn a_space_s_rates_are_those_the_panels_a_side_may_show_need() {
+        assert_eq!(tomori_environment::PANEL_LIMIT, 32);
+        assert_eq!((PUBLISH_BURST, PUBLISHES_PER_SECOND), (32.0, 16.0));
+        assert_eq!(
+            (PUBLISH_BYTES_BURST, PUBLISH_BYTES_PER_SECOND),
+            (512.0 * 1024.0, 128.0 * 1024.0)
+        );
+        assert_eq!((MESSAGE_BURST, MESSAGES_PER_SECOND), (160.0, 80.0));
+        // Every panel a side may show is put up at once, each a chart of every series at every point, 16 KiB; one more
+        // would wait, were it not refused first.
+        let start = Instant::now();
+        let mut publishes = Publishes::new(start);
+        for index in 0..tomori_environment::PANEL_LIMIT {
+            let panel = format!("p{index}");
+            assert!(publishes.ready(start, Some(&panel), 16 * 1024));
+            publishes.charge(start, Some(&panel), 16 * 1024);
+        }
+        assert!(!publishes.ready(start, Some("more"), 1));
+        // A side publishing every one each second, whether or not each changed, is never refused for how often it
+        // calls, for as long as it likes.
+        let mut publishes = Publishes::new(start);
+        for second in 0..600 {
+            for _ in 0..tomori_environment::PANEL_LIMIT {
+                assert_eq!(
+                    publishes.message(start + Duration::from_secs(second)),
+                    Ok(())
+                );
+            }
+        }
     }
 
     #[test]

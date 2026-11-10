@@ -37,3 +37,5 @@ unicode-width = "0.2"
 [dev-dependencies]
 # A server on a loopback port, with a scripted backend, for the tests that take part in its spaces.
 tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
+# The panels an environment may publish, which the charts' drawings kept are checked against.
+tomori-environment = { version = "0.2.0", path = "../environment" }
