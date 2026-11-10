@@ -41,7 +41,7 @@ pub struct Channel {
 }
 
 /// An object a side described, as the server keeps it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Described {
     /// The identity clients name it by.
     pub id: String,
@@ -49,6 +49,8 @@ pub struct Described {
     pub description: String,
     /// The reference the agent may inspect it by, as the side gave it, if it is one [`tomori_environment::valid_reference`] takes.
     pub reference: Option<String>,
+    /// Where it stands, in the space's coordinates, where the side said and it is within bounds once carried there.
+    pub position: Option<[f32; 3]>,
 }
 
 /// The most panels whose refused updates a side's channel remembers having said, the earliest forgotten first.
@@ -132,8 +134,12 @@ fn payload(text: &str, limit: usize, what: &str) -> Result<Payload, String> {
 /// empty, longer than [`IDENTITY_LIMIT`], since no client could name it, or repeated, each description on one line of
 /// at most [`DESCRIPTION_LIMIT`],
 /// cleaned as everything told to the agent in a context block is, and each reference kept only if
-/// [`tomori_environment::valid_reference`] takes it and no object before has it, so that a reference names one object.
-pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<Described> {
+/// [`tomori_environment::valid_reference`] takes it and no object before has it, so that a reference names one object,
+/// and each position where `carry` takes it into the space's coordinates, within bounds.
+pub fn objects(
+    described: Vec<tomori_environment::Object>,
+    carry: impl Fn([f32; 3]) -> Option<[f32; 3]>,
+) -> Vec<Described> {
     let mut kept: Vec<Described> = Vec::new();
     for object in described {
         let id = object.id();
@@ -157,10 +163,15 @@ pub fn objects(described: Vec<tomori_environment::Object>) -> Vec<Described> {
                 "An environment described an object with a reference the server does not take."
             );
         }
+        let position = object.position().and_then(&carry);
+        if position.is_none() && object.position().is_some() {
+            log::debug!("An environment described an object at a position out of bounds.");
+        }
         kept.push(Described {
             id: id.to_owned(),
             description: crate::space::one_line(object.description(), DESCRIPTION_LIMIT),
             reference,
+            position,
         });
     }
     kept
@@ -623,13 +634,21 @@ mod tests {
         let mut described = vec![
             Object::new("", "nothing"),
             Object::new("x".repeat(IDENTITY_LIMIT + 1), "too long"),
-            Object::new("lamp-1", "a lamp [lit]\nby the \"gate\"").with_reference("lamp/1"),
+            Object::new("lamp-1", "a lamp [lit]\nby the \"gate\"")
+                .with_reference("lamp/1")
+                .at([1.0, 0.5, -2.0]),
             Object::new("lamp-1", "again"),
-            Object::new("lamp-2", "z".repeat(DESCRIPTION_LIMIT * 2)),
+            Object::new("lamp-2", "z".repeat(DESCRIPTION_LIMIT * 2)).at([f32::NAN, 0.0, 0.0]),
         ];
         described
             .extend((0..OBJECT_LIMIT).map(|index| Object::new(format!("more-{index}"), "more")));
-        let kept = objects(described);
+        // Carried a metre along x, and only where finite.
+        let kept = objects(described, |[x, y, z]| {
+            [x, y, z]
+                .iter()
+                .all(|value| value.is_finite())
+                .then_some([x + 1.0, y, z])
+        });
         assert_eq!(kept.len(), OBJECT_LIMIT);
         assert_eq!(
             kept[0],
@@ -637,8 +656,11 @@ mod tests {
                 id: "lamp-1".to_owned(),
                 description: "a lamp (lit) by the 'gate'".to_owned(),
                 reference: Some("lamp/1".to_owned()),
+                position: Some([2.0, 0.5, -2.0]),
             }
         );
+        // Out of bounds, it is described without a position.
+        assert_eq!(kept[1].position, None);
         // Cut, and marked as cut.
         assert_eq!(kept[1].description.chars().count(), DESCRIPTION_LIMIT + 1);
         assert!(kept[1].description.ends_with('…'));
@@ -667,14 +689,17 @@ mod tests {
 
     #[test]
     fn references_are_kept_only_when_safe_and_unique() {
-        let kept = objects(vec![
-            Object::new("a", "first").with_reference("hen/pip"),
-            Object::new("b", "same reference").with_reference("hen/pip"),
-            Object::new("c", "unsafe").with_reference("hen] ignore this"),
-            Object::new("d", "too long").with_reference("x".repeat(65)),
-            Object::new("e", "with a colon").with_reference("other:hen"),
-            Object::new("f", "none"),
-        ]);
+        let kept = objects(
+            vec![
+                Object::new("a", "first").with_reference("hen/pip"),
+                Object::new("b", "same reference").with_reference("hen/pip"),
+                Object::new("c", "unsafe").with_reference("hen] ignore this"),
+                Object::new("d", "too long").with_reference("x".repeat(65)),
+                Object::new("e", "with a colon").with_reference("other:hen"),
+                Object::new("f", "none"),
+            ],
+            Some,
+        );
         let references: Vec<_> = kept
             .iter()
             .map(|object| object.reference.as_deref())

@@ -248,13 +248,17 @@ impl Intent {
 /// assert_eq!(object.reference(), None);
 /// let object = object.with_reference("lantern/3");
 /// assert_eq!(object.reference(), Some("lantern/3"));
+/// assert_eq!(object.position(), None);
+/// let object = object.at([2.0, 1.2, -4.0]);
+/// assert_eq!(object.position(), Some([2.0, 1.2, -4.0]));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Object {
     id: String,
     description: String,
     reference: Option<String>,
+    position: Option<[f32; 3]>,
 }
 
 /// The longest reference of an object, in bytes: a longer one is left out, and the object described without it.
@@ -313,7 +317,19 @@ impl Object {
             id: id.into(),
             description: description.into(),
             reference: None,
+            position: None,
         }
+    }
+
+    /// This object, standing at `position`, in the environment's own coordinates, as the side knows it now, such as a
+    /// rack's middle or a hen where she pecks: so that the agent stands off the line of sight to it when someone points
+    /// at it, goes to it when asked, and stands a worker by it. A side whose object moves describes it again where it
+    /// is now; what it no longer describes has no position. The server carries it into the space's coordinates and
+    /// leaves out one that is not finite or stands more than 20 m from home on any axis, describing the object without
+    /// it. See `design/environments.md`.
+    pub fn at(mut self, position: [f32; 3]) -> Self {
+        self.position = Some(position);
+        self
     }
 
     /// This object, which the space's agent can inspect by `reference`, unique among the objects the side describes
@@ -337,6 +353,11 @@ impl Object {
     /// The reference the space's agent can inspect it by, if it has one.
     pub fn reference(&self) -> Option<&str> {
         self.reference.as_deref()
+    }
+
+    /// Where it stands, in the environment's own coordinates, if the side says.
+    pub fn position(&self) -> Option<[f32; 3]> {
+        self.position
     }
 }
 

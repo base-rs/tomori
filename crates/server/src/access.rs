@@ -143,6 +143,7 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         // Visitors watch the agent, but summon it nowhere. See `design/environments.md`.
         | ClientMessage::PlaceAgent { .. }
         | ClientMessage::CallAgent
+        | ClientMessage::PinAgent { .. }
         // Participants tick and untick checklist items for everyone, as they rearrange panels; visitors only watch.
         | ClientMessage::CheckPanelItem { .. }
         // Choosing a row asks its environment for something, as an intent does. See `design/panel-actions.md`.
@@ -325,6 +326,7 @@ mod tests {
             },
             ClientMessage::PlaceAgent { at: None },
             ClientMessage::CallAgent,
+            ClientMessage::PinAgent { pinned: true },
             ClientMessage::SetAgentMovement {
                 movement: tomori_protocol::AgentMovement::default(),
             },

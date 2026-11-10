@@ -2243,6 +2243,7 @@ impl SpaceModel {
             movement: Some(self.movement),
             // Set by the hub, which knows where the agent stands.
             pinned: false,
+            pins: false,
             facing: None,
             partner: None,
             via: None,
@@ -4027,16 +4028,19 @@ mod tests {
         let mut space = model();
         space.environment = "farmyard".to_owned();
         let mut channel = crate::channel::Channel::new(1, "farmyard", 1);
-        channel.objects = crate::channel::objects(vec![
-            tomori_environment::Object::new("chicken-2", "Marigold, a hen")
-                .with_reference("hen/marigold"),
-            tomori_environment::Object::new("post-1", "a fence post"),
-            tomori_environment::Object::new(
-                "long-1",
-                "l".repeat(tomori_environment::DESCRIPTION_LIMIT * 2),
-            )
-            .with_reference("x".repeat(tomori_environment::REFERENCE_BYTES)),
-        ]);
+        channel.objects = crate::channel::objects(
+            vec![
+                tomori_environment::Object::new("chicken-2", "Marigold, a hen")
+                    .with_reference("hen/marigold"),
+                tomori_environment::Object::new("post-1", "a fence post"),
+                tomori_environment::Object::new(
+                    "long-1",
+                    "l".repeat(tomori_environment::DESCRIPTION_LIMIT * 2),
+                )
+                .with_reference("x".repeat(tomori_environment::REFERENCE_BYTES)),
+            ],
+            Some,
+        );
         let resolved = |objects: &[&str]| {
             let named: Vec<_> = objects
                 .iter()

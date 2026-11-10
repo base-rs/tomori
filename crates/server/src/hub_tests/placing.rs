@@ -145,7 +145,7 @@ fn a_placement_is_refused_for_a_worker_or_a_place_not_here_and_beyond_the_agent_
             .contains("not bound")
     );
     assert!(!refused("ses_00", "anchor zzz").contains("Nearest"));
-    assert!(refused("ses_00", "object yard:hen/marigold").contains("No anchor"));
+    assert!(refused("ses_00", "object yard:hen/marigold").contains("Nothing here stands by"));
     assert!(refused("ses_00", "wall the moon").contains("no wall"));
     assert!(refused("ses_00", "beside bob").contains("bob"));
     // Placed again of its own accord within a minute, refused; asked for, by whoever's words it answers, not.

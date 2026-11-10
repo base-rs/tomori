@@ -118,13 +118,18 @@ pub(crate) struct Following {
     /// What each participant's last press of X captured.
     captured: HashMap<String, Captured>,
     /// The participant it talks with now, or last did.
-    partner: Option<String>,
+    pub(super) partner: Option<String>,
     /// When it last went somewhere for someone, and for whom.
     moved: Option<(Instant, String)>,
     /// Who spoke to it lately, and when.
     spoken: Vec<(String, Instant)>,
     /// Whether it is pinned where it stands.
     pub(super) pinned: bool,
+    /// Who pinned it, by name, where a participant did, with **Call Tomori here** or **Tomori: stay here**, rather than
+    /// the agent itself: only someone's words free a participant's pin for the agent's own `follow`.
+    pub(super) pinned_by: Option<String>,
+    /// Where it was, and when, as it was sent home: it glides home from there.
+    homing: Option<([f32; 3], Instant)>,
     /// Since when the space has had nobody in it, while it is pinned.
     empty: Option<Instant>,
     /// Since when the conversation has been quiet, while it is away from home.
@@ -177,16 +182,63 @@ impl Following {
         self.quiet = None;
     }
 
-    /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides.
-    fn at(&self, summoned: Option<Pose>, home: Pose, now: Instant) -> Pose {
+    /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides,
+    /// or its way home, while it goes home.
+    pub(super) fn at(&self, summoned: Option<Pose>, home: Pose, now: Instant) -> Pose {
         let pose = summoned.unwrap_or(home);
-        match &self.glide {
+        match self.glide.clone().or_else(|| self.homeward(summoned, home)) {
             Some(glide) => Pose {
                 position: glide.at(now),
                 ..pose
             },
             None => pose,
         }
+    }
+
+    /// Its way home, at home's `home`, while it was sent home and is summoned nowhere since.
+    fn homeward(&self, summoned: Option<Pose>, home: Pose) -> Option<Glide> {
+        let (from, started) = self.homing.filter(|_| summoned.is_none())?;
+        Some(Glide {
+            from,
+            was: None,
+            path: vec![home.position],
+            started,
+            speed: GLIDE,
+        })
+    }
+
+    /// Whether it is on its way somewhere at `now`, or home.
+    pub(super) fn moving(&self, summoned: Option<Pose>, home: Pose, now: Instant) -> bool {
+        self.glide
+            .clone()
+            .or_else(|| self.homeward(summoned, home))
+            .is_some_and(|glide| glide.ends() > now)
+    }
+
+    /// How long, at `now`, until the agent goes home if nothing more is said, where the space's `movement` has it
+    /// follow the speaker and return, and it is away and not pinned: the return delay, or [`LEFT`] where `gone`, its
+    /// partner having left or gone away, less how long the conversation has been quiet.
+    pub(super) fn returns_in(
+        &self,
+        away: bool,
+        movement: tomori_protocol::AgentMovement,
+        gone: bool,
+        now: Instant,
+    ) -> Option<Duration> {
+        if self.pinned || !away || movement.mode != Movement::Follow {
+            return None;
+        }
+        let delay = Duration::from_secs(u64::from(movement.return_after?));
+        let delay = if gone { delay.min(LEFT) } else { delay };
+        let quiet = self
+            .quiet
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        Some(delay.saturating_sub(quiet))
+    }
+
+    /// The participant it talks with now, or last did, by their key.
+    pub(super) fn partner(&self) -> Option<&str> {
+        self.partner.as_deref()
     }
 }
 
@@ -199,14 +251,16 @@ pub(crate) fn home(anchors: &tomori_protocol::Anchors) -> Pose {
 
 impl Hub {
     /// What `participant`, in `space`, attends to now, as their client last reported, with what the agent keeps clear
-    /// of there and where its home is: what they point at with their right controller, else what they look at, a wall,
-    /// a panel or another person, else [`follow::GAZE`] along the way their head faces. None before they report where
-    /// they are.
+    /// of there and where its home is: what `attention` names that the server knows the place of, an environment's
+    /// object its side gave a position or a worker where it stands, else what they point at with their right
+    /// controller, else what they look at, a wall, a panel or another person, else [`follow::GAZE`] along the way their
+    /// head faces. None before they report where they are.
     pub(super) fn capture(
         &self,
         state: &HubState,
         space: &str,
         participant: &str,
+        attention: &[tomori_protocol::Resource],
     ) -> Option<Captured> {
         let seen = state
             .participants
@@ -227,9 +281,9 @@ impl Hub {
                 std::array::from_fn(|axis| ray.position[axis] + ahead[axis] * along)
             })
         };
-        let focus = seen.controllers[1]
-            .as_ref()
-            .and_then(point)
+        let focus = self
+            .attended(state, space, attention)
+            .or_else(|| seen.controllers[1].as_ref().and_then(point))
             .or_else(|| point(&seen.head))
             .unwrap_or_else(|| follow::gaze(&seen.head));
         Some(Captured {
@@ -244,6 +298,72 @@ impl Hub {
 }
 
 impl Hub {
+    /// What the `presence` and `move_agent` tools say of the agent of `space` at `now`, among `environments`: where it
+    /// stands, its mode, whom it talks with, who pinned it and when it goes home. See `design/mcp.md`.
+    pub(super) fn agent_report(
+        state: &HubState,
+        environments: &crate::environments::Environments,
+        space: &str,
+        now: Instant,
+    ) -> serde_json::Value {
+        let record = state.space(space).expect("the caller found it");
+        let anchors = environments.anchors(&record.model.environment);
+        let following = &record.following;
+        let home = home(&anchors);
+        let moving = following.moving(record.summoned, home, now);
+        let partner = following
+            .partner()
+            .and_then(|key| state.participants.get(key))
+            .map(|partner| crate::presence::handle(&partner.name, partner.tag));
+        let report = crate::presence::AgentState {
+            summoned: record.summoned,
+            at: moving.then(|| following.at(record.summoned, home, now)),
+            pinned: following.pinned,
+            pinned_by: following.pinned_by.clone(),
+            moving,
+            partner,
+            returns_in: following.returns_in(
+                record.summoned.is_some(),
+                record.model.movement(),
+                state.partner_gone(space),
+                now,
+            ),
+            movement: record.model.movement(),
+            anchor: record.agent_anchor().map(str::to_owned),
+        };
+        crate::presence::agent(&anchors, &report)
+    }
+
+    /// Where the first of `attention` stands that the server knows the place of, in `space`: an object its environment's
+    /// side describes with a position, or a worker, where its cluster seats it.
+    fn attended(
+        &self,
+        state: &HubState,
+        space: &str,
+        attention: &[tomori_protocol::Resource],
+    ) -> Option<[f32; 3]> {
+        let record = state.space(space).expect("the caller found it");
+        let environments = self.environments();
+        attention.iter().find_map(|resource| match resource {
+            tomori_protocol::Resource::Object { object, .. } => {
+                record
+                    .channel
+                    .as_ref()
+                    .filter(|channel| channel.environment == record.model.environment)?
+                    .describe(object)?
+                    .position
+            }
+            tomori_protocol::Resource::Worker { worker, .. } => {
+                let anchors = record.clusters(&environments);
+                record
+                    .seated(&environments)
+                    .position(&anchors, &crate::seating::Member::Worker(worker.clone()))
+                    .map(|(at, _)| at)
+            }
+            _ => None,
+        })
+    }
+
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
     /// does: beside them, as following stands it, or, with nowhere clear there, in front of them, as a summons stood it,
     /// its status wall and workers staying home. Refused where the space keeps it home, or before they report where
@@ -265,7 +385,7 @@ impl Hub {
             );
         }
         let captured = self
-            .capture(state, space, participant)
+            .capture(state, space, participant, &[])
             .ok_or("Tomori does not know where you are yet.")?;
         let record = state.space(space).expect("found above");
         let from = record
@@ -279,10 +399,70 @@ impl Hub {
         let was = record.summoned;
         state.summon(space, Some(at), Some(head.position));
         state.agent_moved(space, (from, was), at, route, now);
-        state.agent_pin(space, now);
-        let name = &state.participants[participant].name;
+        let name = state.participants[participant].name.clone();
+        state.agent_pin(space, now, Some(name.clone()));
+        state
+            .space_mut(space)
+            .expect("found above")
+            .following
+            .partner = Some(participant.to_owned());
         log::info!("{name} called the agent of space {space} to them, where it stays.");
         Ok(())
+    }
+
+    /// Where the agent of `space` stands at `participant`'s conversation spot, as following would choose it, as its own
+    /// `move_agent near` or `beside` asks: from where they stand now and what they attend to, else, where they have not
+    /// reported, from `head`, where they were as their words began, looking ahead; or, with nowhere clear there, in front
+    /// of them. With the eyes it faces.
+    pub(super) fn beside_spot(
+        &self,
+        state: &HubState,
+        space: &str,
+        participant: Option<&str>,
+        head: Pose,
+    ) -> (Pose, [f32; 3]) {
+        let captured =
+            participant.and_then(|participant| self.capture(state, space, participant, &[]));
+        let (speaker, scene) = match captured {
+            Some(captured) => (captured.speaker, captured.scene),
+            None => (
+                Speaker {
+                    head,
+                    focus: follow::gaze(&head),
+                },
+                self.scene(state, space).0,
+            ),
+        };
+        let at = follow::spot(&speaker, &scene)
+            .unwrap_or_else(|| crate::presence::before(&speaker.head));
+        (at, speaker.head.position)
+    }
+
+    /// Where the agent of `space` stands to be beside what stands at `object`, for whoever asked, whose head was at
+    /// `asker` as their words began: off their line of sight to it, at the conversation distance from where they stand
+    /// or, further from it than [`follow::GAZE`], from where they would stand to look at it from that far, facing them;
+    /// or none, where nowhere there is clear. See `design/environments.md`.
+    pub(super) fn beside_object(
+        &self,
+        state: &HubState,
+        space: &str,
+        object: [f32; 3],
+        asker: Pose,
+    ) -> Option<Pose> {
+        let eyes = asker.position;
+        let (dx, dz) = (eyes[0] - object[0], eyes[2] - object[2]);
+        let apart = dx.hypot(dz);
+        let viewpoint = if apart > follow::GAZE {
+            let share = follow::GAZE / apart;
+            [object[0] + dx * share, eyes[1], object[2] + dz * share]
+        } else {
+            eyes
+        };
+        let speaker = Speaker {
+            head: Pose::upright_facing(viewpoint, [object[0], viewpoint[1], object[2]]),
+            focus: object,
+        };
+        follow::spot(&speaker, &self.scene(state, space).0)
     }
 
     /// Move the agent of `space` to `at`, before someone whose eyes are at `eyes`, as its own `move_agent` asked, at
@@ -347,7 +527,7 @@ impl HubState {
     pub(super) fn movement_changed(&mut self, space: &str, name: &str, now: Instant) {
         let record = self.space_mut(space).expect("the caller found it");
         if record.model.movement().mode == Movement::Home {
-            self.agent_home(space, &format!("{name} keeps it home"));
+            self.agent_home(space, &format!("{name} keeps it home"), now);
             return;
         }
         let following = &mut record.following;
@@ -594,12 +774,18 @@ impl HubState {
         self.woken.notify(usize::MAX);
     }
 
-    /// Send the agent of `space` home, unpinned and facing as its home faces, for `reason`,
-    /// logged if it moved; whether it moved.
-    pub(super) fn agent_home(&mut self, space: &str, reason: &str) -> bool {
+    /// Send the agent of `space` home at `now`, unpinned and facing as its home faces, for `reason`, logged if it
+    /// moved; whether it moved. It glides home from wherever it has reached.
+    pub(super) fn agent_home(&mut self, space: &str, reason: &str, now: Instant) -> bool {
         let record = self.space_mut(space).expect("the caller found it");
         let turned = record.following.faces().is_some() || record.following.pinned;
+        let homing = match (record.summoned, &record.following.glide) {
+            (None, _) => record.following.homing,
+            (Some(_), Some(glide)) => Some((glide.at(now), now)),
+            (Some(summoned), None) => Some((summoned.position, now)),
+        };
         record.following = Following {
+            homing,
             captured: std::mem::take(&mut record.following.captured),
             spoken: std::mem::take(&mut record.following.spoken),
             holding: std::mem::take(&mut record.following.holding),
@@ -616,18 +802,86 @@ impl HubState {
         moved
     }
 
-    /// Pin the agent of `space` where it is going, or stands, so that it follows nobody and does not go home on its own.
-    pub(super) fn agent_pin(&mut self, space: &str, now: Instant) {
+    /// Pin the agent of `space` where it is going, or stands, so that it follows nobody and does not go home on its own,
+    /// as the participant `by`, by name, or else the agent itself, asked.
+    pub(super) fn agent_pin(&mut self, space: &str, now: Instant, by: Option<String>) {
         let following = &mut self
             .space_mut(space)
             .expect("the caller found it")
             .following;
         following.pinned = true;
+        following.pinned_by = by;
         following.pending = None;
         following.empty = None;
         following.poll.get_or_insert(now + POLL);
         self.touch_space(space);
         self.woken.notify(usize::MAX);
+    }
+
+    /// Pin the agent of `space` where it stands, or, `pinned` false, end its pin, as `participant` asked from the hand
+    /// menu, with **Tomori: stay here** or **Tomori: follow again**, at `now`, whoever pinned it: a participant always
+    /// wins. Refused where the space keeps it home, and ending a pin, unless it follows the speaker there.
+    pub(super) fn pin_agent(
+        &mut self,
+        space: &str,
+        participant: &str,
+        pinned: bool,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let mode = self
+            .space(space)
+            .map(|record| record.model.movement().mode)
+            .unwrap_or_default();
+        if mode == Movement::Home {
+            return Err(
+                "Tomori stays home in this space: an owner can let it move in the Space section.",
+            );
+        }
+        let name = self.participants[participant].name.clone();
+        if pinned {
+            self.agent_pin(space, now, Some(name.clone()));
+            log::info!("{name} asked the agent of space {space} to stay where it stands.");
+        } else if mode == Movement::Follow {
+            self.agent_unpin(space, Some(&name), None, now);
+        } else {
+            return Err(
+                "Tomori moves only when asked in this space, so it stays where it goes: an owner can let it follow in the Space section.",
+            );
+        }
+        Ok(())
+    }
+
+    /// End the pin of the agent of `space` at `now`, as `name`, a participant, or else the agent itself, asked, so that it
+    /// follows the speaker again: it goes home once the conversation is quiet, and, where `speaker`, the participant
+    /// whose words it answers, said them as they held X, it goes to them now, as following would. Whether it was pinned.
+    pub(super) fn agent_unpin(
+        &mut self,
+        space: &str,
+        name: Option<&str>,
+        speaker: Option<&str>,
+        now: Instant,
+    ) -> bool {
+        let record = self.space_mut(space).expect("the caller found it");
+        let following = &mut record.following;
+        let pinned = std::mem::take(&mut following.pinned);
+        following.pinned_by = None;
+        following.empty = None;
+        following.quiet = None;
+        following.poll = Some(now + POLL);
+        match name {
+            Some(name) => {
+                log::info!("{name} let the agent of space {space} follow the speaker again.");
+            }
+            None => {
+                log::info!("The agent of space {space} follows the speaker again, as it asked.")
+            }
+        }
+        if let Some(speaker) = speaker {
+            self.follow(space, speaker, now, "it was asked to follow again");
+        }
+        self.touch_space(space);
+        self.woken.notify(usize::MAX);
+        pinned
     }
 
     /// The agent of `space` was moved by a participant or by its own tool to `at`, from `from`, where it was summoned to
@@ -692,21 +946,20 @@ impl HubState {
         }
     }
 
+    /// Whether the partner of the agent of `space` has left it, or gone away.
+    pub(super) fn partner_gone(&self, space: &str) -> bool {
+        let record = self.space(space).expect("the caller found it");
+        record.following.partner.as_ref().is_some_and(|partner| {
+            !record.model.participants.contains(partner)
+                || self.participants.get(partner).is_some_and(|participant| {
+                    participant.engagement == Some(tomori_protocol::Engagement::Away)
+                })
+        })
+    }
+
     fn movement_due(&mut self, space: &str, now: Instant) {
         let quiet = self.conversation_quiet(space, now);
-        let partner_gone = |state: &HubState, partner: &Option<String>| {
-            partner.as_ref().is_some_and(|partner| {
-                !state
-                    .space(space)
-                    .is_some_and(|record| record.model.participants.contains(partner))
-                    || state.participants.get(partner).is_some_and(|record| {
-                        record.engagement == Some(tomori_protocol::Engagement::Away)
-                    })
-            })
-        };
-        let gone = self
-            .space(space)
-            .is_some_and(|record| partner_gone(self, &record.following.partner));
+        let gone = self.partner_gone(space);
         let record = self.space_mut(space).expect("found above");
         let setting = record.model.movement();
         let empty = record.model.participants.is_empty();
@@ -763,7 +1016,7 @@ impl HubState {
             }
         }
         if let Some(reason) = home {
-            self.agent_home(space, reason);
+            self.agent_home(space, reason, now);
         } else if changed {
             self.touch_space(space);
         }
@@ -793,6 +1046,7 @@ impl Following {
             _ => None,
         };
         self.stream = route == Route::Stream;
+        self.homing = None;
         self.glide = Some(Glide {
             from,
             was,

@@ -769,6 +769,14 @@ pub enum ClientMessage {
     /// Tomori here** does: it stays until sent home. Participants only, and only to a server that sends
     /// [`crate::SpaceState::movement`]; refused while that setting keeps the agent home. See `design/environments.md`.
     CallAgent,
+    /// Pin the current space's agent where it stands, for everyone, as **Tomori: stay here** does, so that it follows
+    /// nobody and does not go home on its own until sent home; or, `pinned` false, end its pin, as **Tomori: follow
+    /// again** does, so that it follows the speaker again. Participants only, and only to a server that sets
+    /// [`crate::SpaceState::pins`]; refused while the space keeps the agent home, and ending a pin, unless the agent
+    /// follows the speaker there. See `design/environments.md`.
+    PinAgent {
+        pinned: bool,
+    },
     /// Change how the current space's agent moves, for everyone in it. Owners only, and only to a server that sends
     /// [`crate::SpaceState::movement`]. See `design/environments.md`.
     SetAgentMovement {

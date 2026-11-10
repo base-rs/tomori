@@ -69,6 +69,12 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     // Each with a reference, which the side's inspector answers while it runs.
     let reference = format!("hen/{}", first.chickens[0].name.to_lowercase());
     assert_eq!(objects[0].reference(), Some(reference.as_str()));
+    // And where she stands, on the ground of the yard.
+    let [x, y, z] = objects[0].position().expect("described where she stands");
+    assert!(
+        x.is_finite() && z.is_finite() && y.abs() < 1.0,
+        "{x} {y} {z}"
+    );
     let inspector = inbox.inspector().expect("the side gives an inspector");
     let details: serde_json::Value =
         serde_json::from_str(&inspector.inspect(&reference).unwrap().unwrap()).unwrap();

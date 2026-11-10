@@ -339,11 +339,16 @@ pub struct SpaceState {
     /// server. None from older servers. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub movement: Option<AgentMovement>,
-    /// Whether the agent is pinned where it stands, by a participant's **Call Tomori here** or the agent's own
-    /// `move_agent stay`: it follows nobody and does not go home on its own until it is sent home. See
-    /// `design/environments.md`.
+    /// Whether the agent is pinned where it stands, by a participant's **Call Tomori here** or **Tomori: stay here**, or
+    /// the agent's own `move_agent stay`: it follows nobody and does not go home on its own until it is sent home or
+    /// follows again. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Whether the server takes [`crate::ClientMessage::PinAgent`], pinning the agent where it stands or ending its
+    /// pin, which a client offers as **Tomori: stay here** and **Tomori: follow again**, and sends only to such a
+    /// server. Absent from older servers. See `design/hand-menu.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pins: bool,
     /// Where the agent turns to face, in the space's coordinates, while it does, rather than the way it stands facing:
     /// the eyes of whoever began speaking to it. Turned only about the vertical. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1274,12 +1279,14 @@ mod tests {
         let state = SpaceState {
             movement: Some(AgentMovement::new(Movement::Follow, Some(120))),
             pinned: true,
+            pins: true,
             facing: Some([1.0, 1.6, 2.0]),
             via: Some([0.0, 2.5, -1.0]),
             stream: true,
             ..SpaceState::default()
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["pins"], true);
         assert_eq!(json["movement"]["mode"], "follow");
         assert_eq!(json["movement"]["return_after"], 120);
         assert_eq!(
@@ -1291,7 +1298,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
         // From an older server, none of it, and none of it is written.
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
-        for field in ["movement", "pinned", "facing", "via", "stream"] {
+        for field in ["movement", "pinned", "pins", "facing", "via", "stream"] {
             assert!(plain.get(field).is_none(), "{field}");
         }
         // A way a newer server names reads as unknown; never going home is no delay.

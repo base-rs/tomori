@@ -73,12 +73,17 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         }
         if described.is_none_or(|described| described.elapsed() >= DESCRIBE) {
             described = Some(Instant::now());
+            let now = clock();
+            // Each where she stands now, so that the agent can go to her when asked.
             space.describe(
                 flock
-                    .describe(clock())
+                    .describe(now)
                     .into_iter()
-                    .map(|(id, reference, description)| {
-                        Object::new(id, description).with_reference(reference)
+                    .enumerate()
+                    .map(|(index, (id, reference, description))| {
+                        Object::new(id, description)
+                            .with_reference(reference)
+                            .at(flock.position(index, now).to_array())
                     })
                     .collect(),
             )?;

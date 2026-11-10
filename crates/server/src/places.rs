@@ -59,6 +59,39 @@ pub fn wall_cluster(wall: &str, index: usize) -> String {
     }
 }
 
+/// The name of the server's own cluster by the object `reference`, or, where that is not a name an anchor may have,
+/// by its place among the objects described.
+pub fn object_cluster(reference: &str, index: usize) -> String {
+    let name = format!("{OWN}object/{reference}");
+    if tomori_protocol::cluster::valid_name(&name) {
+        name
+    } else {
+        format!("{OWN}object/{index}")
+    }
+}
+
+/// How far before an object, in metres, towards whoever asked, the server's own cluster by it stands.
+pub const BEFORE_OBJECT: f32 = 1.0;
+
+/// Where the server's own cluster by an object at `object` stands, for whoever asked, whose eyes were at `eyes`:
+/// [`BEFORE_OBJECT`] before it, towards them, at their eye height, facing them; or, standing where the object is, before
+/// it along +Z.
+pub fn before_object(object: [f32; 3], eyes: [f32; 3]) -> Pose {
+    let (dx, dz) = (eyes[0] - object[0], eyes[2] - object[2]);
+    let apart = dx.hypot(dz);
+    let (x, z) = if apart > 1e-3 {
+        (dx / apart, dz / apart)
+    } else {
+        (0.0, 1.0)
+    };
+    let at = [
+        object[0] + x * BEFORE_OBJECT,
+        eyes[1],
+        object[2] + z * BEFORE_OBJECT,
+    ];
+    Pose::upright_facing(at, [at[0] + x, eyes[1], at[2] + z])
+}
+
 /// The name of the server's own cluster for a worker placed beside someone at `pose`: that of one of `placements`
 /// standing within [`SHARED`] of it, so that workers placed beside the same person stand together, or else one of its
 /// own, named from where it stands.
@@ -90,6 +123,8 @@ pub fn own(placements: &[Placement]) -> Vec<Anchor> {
         }
         let kind = if placement.at.starts_with(&format!("{OWN}wall/")) {
             "wall"
+        } else if placement.at.starts_with(&format!("{OWN}object/")) {
+            "object"
         } else {
             "person"
         };
