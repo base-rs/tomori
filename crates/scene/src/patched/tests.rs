@@ -19,9 +19,9 @@ fn projection(revision: u64, age: u64) -> Projection {
         .with_walls(vec![Wall::new(TOMORI_WALL, WallKind::Tomori, pose)])
         .with_panels(vec![
             Panel::new("agenda", "Agenda", "- [ ] One\n- [ ] Two", on(0))
-                .with_revision(1)
+                .with_version(1)
                 .with_age(age),
-            Panel::new("notes", "Notes", "Some notes.", on(1)).with_revision(1),
+            Panel::new("notes", "Notes", "Some notes.", on(1)).with_version(1),
         ])
         .with_revision(revision)
 }
@@ -83,7 +83,7 @@ fn a_patch_applies_from_the_revision_held_and_a_gap_asks_once_for_the_projection
     partway.panels.remove(0);
     partway
         .panels
-        .push(Panel::new("new", "New", "New.", on(2)).with_revision(1));
+        .push(Panel::new("new", "New", "New.", on(2)).with_version(1));
     let mut refused = patch(&fifth, &partway);
     refused.ops.push(PatchOp::Unknown);
     held.whole(fifth.clone(), now);
@@ -143,7 +143,7 @@ fn a_tick_shown_at_once_is_undone_by_whatever_the_server_sends_next() {
     held.tick("agenda", 0, true);
     let mut ticked = again.clone().with_revision(3);
     ticked.panels[0].body = "- [x] One\n- [ ] Two".into();
-    ticked.panels[0].revision = 2;
+    ticked.panels[0].version = 2;
     assert_eq!(held.patch(&patch(&again, &ticked), now), None);
     assert_eq!(held.projection(), Some(&ticked));
     // Sent whole, it is as sent.

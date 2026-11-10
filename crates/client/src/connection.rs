@@ -204,6 +204,13 @@ pub trait Session {
         tomori_protocol::Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
     }
 
+    /// Whether the session, which applies patches, also applies their data ops to live panels and keeps the version a
+    /// place op carries, as [`tomori_protocol::ProjectionPatch::apply`] does, which each connection says in its Hello;
+    /// see [`crate::Options::live_panels`]. A session that does not is sent a live panel whole at each change.
+    fn live_panels(&self) -> bool {
+        false
+    }
+
     /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         let _ = (feedback, now);
@@ -1314,9 +1321,11 @@ impl Connection {
                     self.feedback.emit(Feedback::NotSent(Hand::Left), now);
                 }
             }
-            // A participant's tick refused, as when the panel changed since they saw it, is cued as a request that could
-            // not be done; the projection sent again shows the item as it is. See `design/feedback.md`.
-            Event::Message(ServerMessage::Error { panel: Some(_), .. }) => {
+            // A participant's tick refused, as when the panel changed since they saw it, or their change to a wall, as
+            // when someone else changed it meanwhile, is cued as a request that could not be done; the projection sent
+            // again shows the item or the wall as it is. See `design/feedback.md`.
+            Event::Message(ServerMessage::Error { panel: Some(_), .. })
+            | Event::Message(ServerMessage::Error { wall: Some(_), .. }) => {
                 self.feedback.emit(Feedback::NotSent(Hand::Right), now);
             }
             Event::Message(ServerMessage::Speech { replay: true, .. }) => {
@@ -1585,6 +1594,7 @@ impl Connection {
         options.environments = session.environments();
         options.projection_patches = session.projection_patches();
         options.limits = session.limits();
+        options.live_panels = session.live_panels();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

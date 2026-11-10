@@ -35,24 +35,24 @@ fn a_client_is_sent_a_patch_only_from_what_it_holds_of_the_same_space_and_enviro
     let now = projection("sky", 4, 3);
     // Holding nothing, as on joining, after asking again, or taking no patches: whole.
     assert!(
-        matches!(message(None, &now), ServerMessage::Projection { projection } if *projection == now)
+        matches!(message(None, &now, false), ServerMessage::Projection { projection } if *projection == now)
     );
     // Holding the same space's in another environment, or another space's: whole.
     let elsewhere = projection("grid", 4, 2);
     assert!(matches!(
-        message(Some(&elsewhere), &now),
+        message(Some(&elsewhere), &now, false),
         ServerMessage::Projection { .. }
     ));
     let mut other = projection("sky", 4, 2);
     other.space = "t".into();
     assert!(matches!(
-        message(Some(&other), &now),
+        message(Some(&other), &now, false),
         ServerMessage::Projection { .. }
     ));
     // Holding an earlier revision of it: a patch from there.
     let mut earlier = projection("sky", 4, 2);
     earlier.panels[0].body = "Before".into();
-    let ServerMessage::ProjectionPatch { patch } = message(Some(&earlier), &now) else {
+    let ServerMessage::ProjectionPatch { patch } = message(Some(&earlier), &now, false) else {
         unreachable!("a patch");
     };
     assert_eq!((patch.from, patch.to, patch.ops.len()), (2, 3, 1));
@@ -67,7 +67,7 @@ fn a_patch_sending_more_than_half_of_what_is_shown_whole_is_sent_whole_instead()
         panel.body = "Before".into();
     }
     assert!(matches!(
-        message(Some(&half), &now),
+        message(Some(&half), &now, false),
         ServerMessage::ProjectionPatch { .. }
     ));
     // Four of six: whole.
@@ -76,7 +76,7 @@ fn a_patch_sending_more_than_half_of_what_is_shown_whole_is_sent_whole_instead()
         panel.body = "Before".into();
     }
     assert!(matches!(
-        message(Some(&most), &now),
+        message(Some(&most), &now, false),
         ServerMessage::Projection { .. }
     ));
 }

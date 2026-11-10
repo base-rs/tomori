@@ -173,6 +173,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             },
             ClientMessage::Ping { nonce: 1 },
@@ -293,6 +294,7 @@ mod tests {
                 shape: None,
                 pose: None,
                 tilt: None,
+                revision: None,
             },
             ClientMessage::CheckPanelItem {
                 panel: "panel-1".into(),

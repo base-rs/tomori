@@ -393,3 +393,81 @@ fn a_panel_keeps_its_faces_at_a_few_sizes_the_latest_first() {
     assert_eq!(floating.size, super::super::fitted_size(&code, Fit::Text));
     assert_eq!(floating.item(Mat4::IDENTITY, 0, Vec3::ZERO), None);
 }
+
+/// From a server that versions panels, a panel's version and data seq are its faces' keys: a new version lays it out
+/// again, and a chart's new data seq draws its face again from its new points without laying it out, while what the
+/// client changes itself, a tick shown at once, is still followed.
+#[test]
+fn a_versioned_panel_is_laid_out_again_for_its_version_and_drawn_again_for_its_data() {
+    let mut shown = projection(
+        panels()
+            .into_iter()
+            .map(|panel| {
+                let seq = if panel.chart.is_some() { 5 } else { 0 };
+                panel.with_version(5).with_data_seq(seq)
+            })
+            .collect(),
+    );
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let before = every_face(&projector, &shown);
+    let (laid, drawn) = counts();
+    // The chart's points and summary move on at a new data seq, its version as it was: its face is drawn again from
+    // them, and nothing laid out.
+    let chart = crate::chart::fixtures::provisioning();
+    shown.panels[4].body = chart.summary();
+    shown.panels[4].chart = Some(Box::new(chart));
+    shown.panels[4].data_seq = 6;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid, drawn + 1));
+    assert_eq!(
+        kept(&every_face(&projector, &shown), &before),
+        [true, true, true, true, false, true, true]
+    );
+    // The checklist ticked at once, its version as the server sent it, is laid out again, as it then is at its next
+    // version.
+    shown.panels[3].body = "- [x] one\n- [x] two".into();
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 1, drawn + 2));
+    shown.panels[3].version = 7;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 2, drawn + 3));
+    // At the same version, body and title, nothing else is looked at: its version says it is as it was.
+    shown.panels[0].meta.push(tomori_protocol::Meta::new(
+        "source",
+        "as no server sends without a version",
+    ));
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 2, drawn + 3));
+    // A new version lays it out again.
+    shown.panels[0].version = 8;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 3, drawn + 4));
+    // Its title is followed at the same version, since a server before versions counted no change its environment
+    // made of a panel.
+    shown.panels[0].title = "Renamed".into();
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 4, drawn + 5));
+    assert!(face(&projector, "text").plain().contains("Renamed"));
+}
+
+/// From a server before versions, which counted each panel's changes as its revision but not its environment's changes
+/// of it, a chart panel with a revision and no data seq is followed as it shows, its points moving on drawn again.
+#[test]
+fn a_chart_panel_from_a_server_before_versions_is_followed_by_its_points() {
+    let mut shown = projection(
+        panels()
+            .into_iter()
+            .map(|panel| panel.with_version(1))
+            .collect(),
+    );
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let (laid, drawn) = counts();
+    // Its points move on with its summary as it was, at the same revision.
+    let mut chart = shown.panels[4].chart.clone().unwrap();
+    chart.series[0].values.rotate_left(1);
+    shown.panels[4].chart = Some(chart);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid, drawn + 1));
+}

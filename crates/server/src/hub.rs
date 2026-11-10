@@ -561,6 +561,9 @@ struct ConnectionRecord {
     /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
     /// `design/projection.md`.
     patches: bool,
+    /// Whether the client said in Hello that it also applies a patch's data ops to live panels and keeps the version a
+    /// place op carries. See `design/projection.md`.
+    live_panels: bool,
     /// What the connection is bound by: the lesser of what the client said in Hello that it takes at most, today's from an
     /// older one, and [`LIMITS`]. See `design/projection.md`.
     limits: Limits,
@@ -711,9 +714,13 @@ struct SpaceRecord {
     /// The space's projection walls and the panels on them. See `design/projection.md`.
     stage: crate::stage::Stage,
     /// The space's projection revision, raised with each change to what it projects, which patches are sent from and
-    /// to; for this run only, since a client sent one connects again, and is sent the projection whole, after a
-    /// restart. A cell, because raising it only needs shared access to the state. See `design/projection.md`.
+    /// to, and each wall's and panel's version names; for this run only, since a client sent one connects again, and is
+    /// sent the projection whole, after a restart, but begun from the time, so that no version a run gives is one an
+    /// earlier run gave (see [`crate::versions::first_revision`]). A cell, because raising it only needs shared access
+    /// to the state. See `design/projection.md`.
     projection_revision: Cell<u64>,
+    /// The versions of its walls and panels, found from each projection built. See [`SpaceRecord::versioned`].
+    versions: std::cell::RefCell<crate::versions::Versions>,
     /// Where a participant or the agent summoned the agent to, in the space's coordinates, while it is not at its home:
     /// for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
@@ -747,6 +754,47 @@ enum Pace {
 }
 
 impl SpaceRecord {
+    /// What the space projects in its environment, among `environments`, at `now`, as clients are sent it: with each
+    /// wall's and panel's version, the projection revision at which it last changed, and each live panel's data seq,
+    /// found by comparing it with the last built, so that a change a participant or the agent makes against what they
+    /// saw is checked against what is shown now. See `design/projection.md`.
+    fn versioned(
+        &self,
+        environments: &crate::environments::Environments,
+        now: u64,
+    ) -> tomori_protocol::Projection {
+        let walls = environments
+            .walls(&self.model.environment)
+            .travelling(self.travel);
+        let mut projection = self.stage.view(&self.model.id, &walls, now);
+        self.versions
+            .borrow_mut()
+            .stamp(&mut projection, &self.projection_revision);
+        projection
+    }
+
+    /// What the space projects, as [`SpaceRecord::versioned`] finds it, as a connection that takes at most `limits` is
+    /// sent it: within them, each wall and panel at the version it has in the whole, so that every client is sent one
+    /// version of each, and one sent less is never sent a wall or panel it was not sent before as changed. See
+    /// `design/projection.md`.
+    fn versioned_within(
+        &self,
+        environments: &crate::environments::Environments,
+        now: u64,
+        limits: &Limits,
+    ) -> tomori_protocol::Projection {
+        let whole = self.versioned(environments, now);
+        if *limits == Limits::MOST {
+            return whole;
+        }
+        let walls = environments
+            .walls(&self.model.environment)
+            .travelling(self.travel);
+        let mut projection = self.stage.view_within(&self.model.id, &walls, now, limits);
+        crate::versions::Versions::label(&whole, &mut projection);
+        projection
+    }
+
     /// When participants are told of a change caused by an agent event at `now`: at once, unless they were told within [`SNAPSHOT_INTERVAL`], in which case it is deferred to the interval's end.
     fn pace(&self, now: Instant) -> Pace {
         if self.deferred.get().is_some() {
@@ -953,6 +1001,7 @@ fn error_message(error: impl Into<String>) -> ServerMessage {
         error: limits::truncate(&error.into(), limits::ERROR_BYTES),
         space: None,
         panel: None,
+        wall: None,
     }
 }
 
@@ -2477,6 +2526,7 @@ impl Hub {
                             .to_owned(),
                         space: None,
                         panel: None,
+                        wall: None,
                     });
                 }
                 return;
@@ -2849,6 +2899,7 @@ impl Hub {
                 speech_held: false,
                 images: false,
                 patches: false,
+                live_panels: false,
                 limits: Limits::TODAY,
                 projected: None,
             },
@@ -3083,6 +3134,7 @@ impl Hub {
                 speech_held,
                 images,
                 projection_patches,
+                live_panels,
                 limits,
             } = message
             {
@@ -3094,6 +3146,7 @@ impl Hub {
                     record.speech_held = speech_held;
                     record.images = images;
                     record.patches = projection && projection_patches;
+                    record.live_panels = record.patches && live_panels;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
                     // says, within the most any connection takes; frames each way from the next on. See
                     // `design/projection.md` and `design/server.md`.
@@ -3466,6 +3519,7 @@ impl Hub {
                             error: "That space does not exist.".to_owned(),
                             space: Some(target),
                             panel: None,
+                            wall: None,
                         },
                     );
                     return;
@@ -4281,6 +4335,7 @@ impl Hub {
                 shape,
                 pose,
                 tilt,
+                revision,
             } => {
                 if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
                     state.error(participant, error);
@@ -4299,6 +4354,28 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
+                // Changed since the version they saw, as by another participant's change, it is refused, naming the
+                // wall, so that their client cues it, rather than undo the other change; one that says none, as a
+                // carry's or an older client's, goes by what it says alone.
+                let shown = record
+                    .versioned(&environments, crate::cards::unix_now())
+                    .wall(&wall)
+                    .map(|shown| shown.version);
+                if let Some(seen) = revision
+                    && shown.is_some_and(|shown| shown != seen)
+                {
+                    state.send(
+                        participant,
+                        ServerMessage::Error {
+                            error: crate::stage::STALE_WALL.to_owned(),
+                            space: None,
+                            panel: None,
+                            wall: Some(wall),
+                        },
+                    );
+                    state.touch_projection(&space);
+                    return;
+                }
                 let walls = environments
                     .walls(&record.model.environment)
                     .travelling(record.travel);
@@ -4525,11 +4602,22 @@ impl Hub {
                 let who = state.participants[participant].name.clone();
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
-                let walls = environments.walls(&record.model.environment);
-                match record
-                    .stage
-                    .tick_item(&walls, &panel, line, checked, revision)
-                {
+                // Changed since the version they saw, as by the agent's rewrite, another participant's tick or a move,
+                // the tick is refused, rather than tick whatever item is on that line now. An older client says none.
+                let shown = record
+                    .versioned(&environments, crate::cards::unix_now())
+                    .panel(&panel)
+                    .map(|shown| shown.version);
+                let ticked = match revision {
+                    Some(seen) if shown.is_some_and(|shown| shown != seen) => {
+                        Err(crate::stage::STALE_TICK)
+                    }
+                    _ => {
+                        let walls = environments.walls(&record.model.environment);
+                        record.stage.tick_item(&walls, &panel, line, checked)
+                    }
+                };
+                match ticked {
                     Ok(Some(ticked)) => {
                         record.model.note_tick(&panel, line, ticked.note(&who));
                         log::info!(
@@ -4551,6 +4639,7 @@ impl Hub {
                                 error: error.to_owned(),
                                 space: None,
                                 panel: Some(panel),
+                                wall: None,
                             },
                         );
                         state.touch_projection(&space);
@@ -5235,7 +5324,8 @@ impl Hub {
             model,
             commands,
             touched: Cell::new(None),
-            projection_revision: Cell::new(1),
+            projection_revision: Cell::new(crate::versions::first_revision()),
+            versions: Default::default(),
             deferred: Cell::new(None),
             closed: None,
             kept_open: false,
@@ -5377,7 +5467,8 @@ impl Hub {
                     model,
                     commands,
                     touched: Cell::new(None),
-                    projection_revision: Cell::new(1),
+                    projection_revision: Cell::new(crate::versions::first_revision()),
+                    versions: Default::default(),
                     deferred: Cell::new(None),
                     closed,
                     kept_open: false,
@@ -5556,6 +5647,7 @@ impl Hub {
                 error: limits::truncate(&error, limits::ERROR_BYTES),
                 space: None,
                 panel: None,
+                wall: None,
             },
         };
         state.send(participant, message);
@@ -6173,33 +6265,12 @@ impl Hub {
                     })
                     .and_then(|space| state.space(&space))?;
                 let environments = self.environments();
-                let walls = environments
-                    .walls(&space.model.environment)
-                    .travelling(space.travel);
                 // Within what this connection takes, whatever the space holds. See `design/projection.md`.
                 let limits = state
                     .connections
                     .get(&connection)
                     .map_or(Limits::TODAY, |record| record.limits);
-                let mut projection = space.stage.view_within(
-                    &space.model.id,
-                    &walls,
-                    crate::cards::unix_now(),
-                    &limits,
-                );
                 let revision = &space.projection_revision;
-                // A client that shows no images is sent each image panel as a text panel saying what it is.
-                let images = state
-                    .connections
-                    .get(&connection)
-                    .is_some_and(|record| record.images);
-                if !images {
-                    projection.panels = projection
-                        .panels
-                        .into_iter()
-                        .map(crate::stage::without_image)
-                        .collect();
-                }
                 let projected = state
                     .connections
                     .get(&connection)
@@ -6213,8 +6284,28 @@ impl Hub {
                 {
                     revision.set(sent + 1);
                 }
+                // Versions are found from the projection whole, images and all, whatever this client is sent of it,
+                // and what it is sent within its limits has the same.
+                let mut projection =
+                    space.versioned_within(&environments, crate::cards::unix_now(), &limits);
+                // A client that shows no images is sent each image panel as a text panel saying what it is.
+                let images = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.images);
+                if !images {
+                    projection.panels = projection
+                        .panels
+                        .into_iter()
+                        .map(crate::stage::without_image)
+                        .collect();
+                }
+                let live = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.live_panels);
                 let projection = projection.with_revision(revision.get());
-                let message = crate::patches::message(projected, &projection);
+                let message = crate::patches::message(projected, &projection, live);
                 if let Some(record) = state
                     .connections
                     .get_mut(&connection)
@@ -6325,6 +6416,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             });
             // The welcome is the first reply to hello.
@@ -6428,6 +6520,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             },
         );
@@ -6501,6 +6594,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             },
         );
@@ -6541,6 +6635,7 @@ mod tests {
                     speech_held: false,
                     images: false,
                     projection_patches: false,
+                    live_panels: false,
                     limits: None,
                 },
             );
@@ -6744,6 +6839,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             },
         );

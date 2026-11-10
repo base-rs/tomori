@@ -500,10 +500,6 @@ struct Kept {
     /// When the agent last updated it in place, if it has, in seconds since the epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     updated: Option<u64>,
-    /// How many times its content has changed, from 1 as it was projected, as [`Panel::revision`] says; 1 for a panel
-    /// kept before revisions were.
-    #[serde(default = "first_revision")]
-    revision: u64,
     /// When it was last put where it is, in the stage's own order, so that the one there longest leaves first.
     placed: u64,
     place: Placed,
@@ -516,11 +512,6 @@ struct Kept {
     /// What makes it one its environment published, if it is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     published: Option<published::Published>,
-}
-
-/// The revision of a panel as it is projected.
-fn first_revision() -> u64 {
-    1
 }
 
 impl Kept {
@@ -556,8 +547,7 @@ impl Kept {
         )
         .with_age(now.saturating_sub(self.created))
         .with_pinned(self.pinned)
-        .with_slug(self.content.slug.clone())
-        .with_revision(self.revision);
+        .with_slug(self.content.slug.clone());
         panel.code = self.content.code.clone();
         panel.image = self.content.image.clone();
         panel.chart = self
@@ -1243,7 +1233,6 @@ impl Stage {
             content,
             created: now,
             updated: None,
-            revision: first_revision(),
             placed: 0,
             place: Placed::Free {
                 pose: Pose::default(),
@@ -1454,7 +1443,6 @@ impl Stage {
         if changed {
             kept.content = content;
             kept.updated = Some(now);
-            kept.revision += 1;
         }
         let moved = match to {
             Some(to) if !pinned => self.relocate(walls, panel, to).unwrap_or(false),
@@ -1464,20 +1452,17 @@ impl Stage {
     }
 
     /// Tick, or untick, as `checked` says, the checklist item that begins on `line` of the text panel `panel`'s body in
-    /// `walls`' environment, as a participant asked by pressing A while pointing at it, having seen the panel at
-    /// `revision`: in place, keeping everything else about the panel, when the agent last updated it included, as
-    /// [`checklist::set`] ticks it, and counting a revision. Returns the item, or `None` where it was already so, or why it
-    /// was refused: a panel not here, one with no body of items, such as a code or image panel, one changed since
-    /// `revision`, so that a tick never lands on another item of a body changed since the participant saw it, and a line
-    /// that begins no item with a box. An older client's tick, without a revision, goes by `line` alone. See
-    /// `design/projection.md`.
+    /// `walls`' environment, as a participant asked by pressing A while pointing at it: in place, keeping everything
+    /// else about the panel, when the agent last updated it included, as [`checklist::set`] ticks it. Returns the item,
+    /// or `None` where it was already so, or why it was refused: a panel not here, one with no body of items, such as a
+    /// code or image panel, and a line that begins no item with a box. Whoever calls it has checked the version the
+    /// participant saw, so that a tick never lands on another item of a body changed since. See `design/projection.md`.
     pub(crate) fn tick_item(
         &mut self,
         walls: &Walls<'_>,
         panel: &str,
         line: u32,
         checked: bool,
-        revision: Option<u64>,
     ) -> Result<Option<Ticked>, &'static str> {
         let kept = self
             .here_mut(walls.environment, panel)
@@ -1487,9 +1472,6 @@ impl Stage {
         }
         if kept.content.code.is_some() || kept.content.image.is_some() {
             return Err("That panel has no checklist.");
-        }
-        if revision.is_some_and(|revision| revision != kept.revision) {
-            return Err(STALE_TICK);
         }
         let content = &mut kept.content;
         let items = checklist::items(&content.body);
@@ -1513,14 +1495,7 @@ impl Stage {
         };
         content.body =
             checklist::set(&content.body, item.line, checked).expect("an item is on its line");
-        kept.revision += 1;
         Ok(Some(ticked))
-    }
-
-    /// The revision of the text panel `panel` in `walls`' environment, as [`Panel::revision`] says, if it is shown there.
-    pub(crate) fn revision(&self, walls: &Walls<'_>, panel: &str) -> Option<u64> {
-        self.kept(walls.environment, panel)
-            .map(|kept| kept.revision)
     }
 
     /// Move the panel `panel` where `to` says in `walls`' environment, as its agent asked. One a participant put where it
@@ -2294,9 +2269,14 @@ impl Stage {
     }
 }
 
-/// Why a participant's tick is refused when the panel changed since the revision they saw: the client cues it, and the
+/// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the
 /// projection sent again shows the panel as it is, so that they look and tick again.
 pub(crate) const STALE_TICK: &str = "That panel changed as you ticked it; look again.";
+
+/// Why a participant's change to a wall is refused when the wall changed since the version they saw, as when another
+/// participant changed it meanwhile: the client cues it, and the projection sent again shows the wall as it is, so that
+/// they change it again from there rather than undo the other change.
+pub(crate) const STALE_WALL: &str = "That wall changed as you changed it; look again.";
 
 /// Why the agent and participants cannot change what an environment's panel shows.
 const ENVIRONMENT_S: &str = "That panel is its environment's: only the environment updates it.";
@@ -2447,10 +2427,12 @@ mod tests {
         let room = &stage.rooms["sky"];
         assert!(room.resting.is_empty() && room.dismissed.is_empty());
         assert!(room.panels.iter().all(|kept| kept.published.is_none()));
-        assert_eq!(
-            serde_json::to_value(&stage).unwrap(),
-            serde_json::from_str::<serde_json::Value>(BEFORE_PUBLISHING).unwrap()
-        );
+        // Each panel's count of its changes, which versions took the place of, is not written again.
+        let mut written = serde_json::from_str::<serde_json::Value>(BEFORE_PUBLISHING).unwrap();
+        for panel in written["rooms"]["sky"]["panels"].as_array_mut().unwrap() {
+            panel.as_object_mut().unwrap().remove("revision");
+        }
+        assert_eq!(serde_json::to_value(&stage).unwrap(), written);
     }
 
     const SKY: Walls<'static> = Walls {
@@ -3263,7 +3245,6 @@ mod tests {
             content: content("hidden"),
             created: 0,
             updated: None,
-            revision: 1,
             placed,
             place: Placed::Free {
                 pose: pose(0.0, 0.0),
@@ -4210,10 +4191,7 @@ mod tests {
             5,
         );
         let before = stage.view("s", &SKY, 10).panel(&agenda).unwrap().clone();
-        let ticked = stage
-            .tick_item(&SKY, &agenda, 3, true, None)
-            .unwrap()
-            .unwrap();
+        let ticked = stage.tick_item(&SKY, &agenda, 3, true).unwrap().unwrap();
         assert_eq!((ticked.number, ticked.count, ticked.checked), (2, 3, true));
         assert_eq!(
             ticked.note("Ada"),
@@ -4228,26 +4206,13 @@ mod tests {
         assert_eq!((after.place, after.age), (before.place, before.age));
         assert_eq!(stage.updated("sky", &agenda), None);
         // Already so, nothing changes.
-        assert_eq!(stage.tick_item(&SKY, &agenda, 3, true, None), Ok(None));
+        assert_eq!(stage.tick_item(&SKY, &agenda, 3, true), Ok(None));
         // Floating, with the environment, it is ticked where it floats.
         let floating = Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
         stage.place(&SKY, &agenda, Target::Free(floating)).unwrap();
-        assert!(
-            stage
-                .tick_item(&SKY, &agenda, 3, false, None)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            stage
-                .tick_item(&SKY, &agenda, 3, true, None)
-                .unwrap()
-                .is_some()
-        );
-        let unticked = stage
-            .tick_item(&SKY, &agenda, 2, false, None)
-            .unwrap()
-            .unwrap();
+        assert!(stage.tick_item(&SKY, &agenda, 3, false).unwrap().is_some());
+        assert!(stage.tick_item(&SKY, &agenda, 3, true).unwrap().is_some());
+        let unticked = stage.tick_item(&SKY, &agenda, 2, false).unwrap().unwrap();
         assert_eq!(
             unticked.note("Bob"),
             "Bob unticked item 1 of 3 of panel \"Agenda (draft)\" (id agenda): \"Panels\""
@@ -4256,18 +4221,18 @@ mod tests {
         // refused.
         for line in [0, 4, 99] {
             assert_eq!(
-                stage.tick_item(&SKY, &agenda, line, true, None),
+                stage.tick_item(&SKY, &agenda, line, true),
                 Err("That is not an item of the panel's checklist."),
                 "{line}"
             );
         }
         assert_eq!(
-            stage.tick_item(&SKY, "panel-99", 2, true, None),
+            stage.tick_item(&SKY, "panel-99", 2, true),
             Err("That panel is not here.")
         );
         let code_panel = stage.project(&SKY, code("markdown", 2), None, 0);
         assert_eq!(
-            stage.tick_item(&SKY, &code_panel, 0, true, None),
+            stage.tick_item(&SKY, &code_panel, 0, true),
             Err("That panel has no checklist.")
         );
         // A panel without a title or an id is named by the start of its body.
@@ -4286,7 +4251,7 @@ mod tests {
         );
         assert_eq!(
             stage
-                .tick_item(&SKY, &plain, 0, true, None)
+                .tick_item(&SKY, &plain, 0, true)
                 .unwrap()
                 .unwrap()
                 .note("Ada"),
@@ -4295,7 +4260,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panels_revision_counts_each_change_of_its_content_and_a_tick_from_another_is_refused() {
+    fn a_panel_kept_with_the_count_of_its_changes_from_before_versions_reads_as_it_was() {
         let mut stage = Stage::default();
         let (agenda, _) = reply(
             &mut stage,
@@ -4305,97 +4270,18 @@ mod tests {
             false,
             0,
         );
-        let revision = |stage: &Stage| stage.view("s", &SKY, 0).panel(&agenda).unwrap().revision;
-        // Projected, it is the first; the same block again, or moving it, changes nothing of its content.
-        assert_eq!(revision(&stage), 1);
-        assert_eq!(stage.revision(&SKY, &agenda), Some(1));
-        reply(
-            &mut stage,
-            &SKY,
-            named("agenda", "Agenda", "- [ ] One\n- [ ] Two"),
-            Destination::Tomori,
-            false,
-            0,
-        );
-        stage
-            .place(&SKY, &agenda, Target::Slot(TOMORI_WALL.into(), 2))
-            .unwrap();
-        assert_eq!(revision(&stage), 1);
-        // A tick at the revision seen counts one, and another seen at that revision is refused, the body as it was.
-        assert!(
-            stage
-                .tick_item(&SKY, &agenda, 0, true, Some(1))
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(revision(&stage), 2);
-        assert_eq!(
-            stage.tick_item(&SKY, &agenda, 1, true, Some(1)),
-            Err(STALE_TICK)
-        );
-        let body = |stage: &Stage| {
-            stage
-                .view("s", &SKY, 0)
-                .panel(&agenda)
-                .unwrap()
-                .body
-                .clone()
-        };
-        assert_eq!(body(&stage), "- [x] One\n- [ ] Two");
-        // Already so, at the revision seen, it changes nothing and counts none.
-        assert_eq!(stage.tick_item(&SKY, &agenda, 0, true, Some(2)), Ok(None));
-        assert_eq!(revision(&stage), 2);
-        // The agent's block with the same id counts one, as does its title alone; a tick seen before either is refused
-        // rather than landing on whatever item is on its line now.
-        reply(
-            &mut stage,
-            &SKY,
-            named("agenda", "Agenda", "- [ ] Zero\n- [x] One\n- [ ] Two"),
-            Destination::Tomori,
-            false,
-            0,
-        );
-        assert_eq!(revision(&stage), 3);
-        assert_eq!(
-            stage.tick_item(&SKY, &agenda, 1, false, Some(2)),
-            Err(STALE_TICK)
-        );
-        stage
-            .revise(
-                &SKY,
-                &agenda,
-                named("agenda", "Agenda 2", "- [ ] Zero\n- [x] One\n- [ ] Two"),
-                None,
-                0,
-            )
-            .unwrap();
-        assert_eq!(revision(&stage), 4);
-        assert_eq!(body(&stage), "- [ ] Zero\n- [x] One\n- [ ] Two");
-        // An older client's tick, without a revision, goes by its line alone, and counts one.
-        assert!(
-            stage
-                .tick_item(&SKY, &agenda, 0, true, None)
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(revision(&stage), 5);
-        // A code panel is refused as before, whatever revision is said.
-        let code_panel = stage.project(&SKY, code("markdown", 2), None, 0);
-        assert_eq!(
-            stage.tick_item(&SKY, &code_panel, 0, true, Some(9)),
-            Err("That panel has no checklist.")
-        );
-        assert_eq!(stage.revision(&SKY, "panel-99"), None);
-        // Kept across restarts; a panel kept before revisions were is the first.
-        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
-        assert_eq!(revision(&kept), 5);
+        // A space kept by a server that counted each panel's changes reads as it was, the count forgotten, since a
+        // panel's version is now the projection's revision at which it last changed, found as it is shown.
         let mut json = serde_json::to_value(&stage).unwrap();
         json["tomori"][0]
             .as_object_mut()
             .unwrap()
-            .remove("revision");
+            .insert("revision".into(), serde_json::json!(5));
         let older: Stage = serde_json::from_value(json).unwrap();
-        assert_eq!(older.tomori[0].revision, 1);
+        assert_eq!(older.view("s", &SKY, 0), stage.view("s", &SKY, 0));
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(written["tomori"][0].get("revision").is_none());
+        assert_eq!(older.view("s", &SKY, 0).panel(&agenda).unwrap().version, 0);
     }
 
     fn grid(columns: u32, rows: u32) -> WallChange {

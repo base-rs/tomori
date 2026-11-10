@@ -16,6 +16,22 @@ impl Client {
         participant: &str,
         limits: Option<Limits>,
     ) -> Self {
+        Self::patching_as(hub, access, participant, limits, false)
+    }
+
+    /// Connected and greeted as `participant`, by a client that applies patches and their data ops to what is
+    /// projected, with what that sent read.
+    fn live(hub: &Arc<Hub>, access: Access, participant: &str) -> Self {
+        Self::patching_as(hub, access, participant, None, true)
+    }
+
+    fn patching_as(
+        hub: &Arc<Hub>,
+        access: Access,
+        participant: &str,
+        limits: Option<Limits>,
+        live_panels: bool,
+    ) -> Self {
         let client = Self::connect(hub, access);
         client.send(ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
@@ -29,6 +45,7 @@ impl Client {
             speech_held: false,
             images: false,
             projection_patches: true,
+            live_panels,
             limits,
         });
         client.read();
@@ -51,6 +68,8 @@ struct Held {
     resyncs: usize,
     /// Whether to drop the next patch unapplied, as a client that missed it.
     missing: bool,
+    /// The errors it was sent, each with the panel and the wall it names.
+    errors: Vec<(String, Option<String>, Option<String>)>,
 }
 
 impl Held {
@@ -64,6 +83,9 @@ impl Held {
                         self.projection = Some(*projection);
                         self.wholes += 1;
                     }
+                    ServerMessage::Error {
+                        error, panel, wall, ..
+                    } => self.errors.push((error, panel, wall)),
                     ServerMessage::ProjectionPatch { patch } => {
                         self.patches.push((*patch).clone());
                         if std::mem::take(&mut self.missing) {
@@ -163,6 +185,7 @@ fn a_client_that_applies_patches_holds_what_an_older_client_is_sent_whole() {
                 shape: None,
                 pose: None,
                 tilt: Some(12.0),
+                revision: None,
             })
         }),
     ));
@@ -196,7 +219,7 @@ fn a_client_that_applies_patches_holds_what_an_older_client_is_sent_whole() {
                 panel: panel.id.clone(),
                 line: 0,
                 checked: true,
-                revision: Some(panel.revision),
+                revision: Some(panel.version),
             })
         }),
     ));
@@ -403,6 +426,7 @@ fn a_client_joining_again_or_reconnecting_is_sent_the_projection_whole() {
         speech_held: false,
         images: false,
         projection_patches: true,
+        live_panels: false,
         limits: None,
     });
     rejoined.read(&again);
@@ -431,7 +455,7 @@ fn a_tick_refused_is_a_patch_that_changes_nothing_so_that_the_client_undoes_it()
         panel: panel.id.clone(),
         line: 0,
         checked: true,
-        revision: Some(panel.revision + 5),
+        revision: Some(panel.version + 5),
     });
     let messages = ada.read();
     assert!(
@@ -467,6 +491,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         });
         let Some(ServerMessage::Welcome { limits, .. }) = client.read().into_iter().next() else {
@@ -531,6 +556,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
         speech_held: false,
         images: false,
         projection_patches: true,
+        live_panels: false,
         limits: None,
     });
     assert_eq!(kept(&blind), (Limits::TODAY, false));
@@ -548,7 +574,8 @@ fn speech_queued_goes_before_the_projection_and_a_patch_is_far_smaller_than_it_w
     });
     held.read(&ada);
     old.join(&space);
-    for index in 0..4 {
+    // A typical space: the Tomori wall and eight short text panels.
+    for index in 0..8 {
         reply(&hub, &space, &format!("m{index}"), PANEL_REPLY);
     }
     held.read(&ada);
@@ -671,11 +698,18 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
         let (space, _commands) = idle(&hub);
         let ada = Client::patching(&hub, Access::open(), "ada");
         let fresh = Client::projecting(&hub, Access::open(), "fresh");
+        // And one that applies data ops and keeps the versions place ops carry, watching.
+        let lea = Client::live(&hub, Access::visitor(), "lea");
         let mut held = Held::default();
+        let mut watched = Held::default();
         ada.send(ClientMessage::Join {
             space: space.clone(),
         });
         held.read(&ada);
+        lea.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        watched.read(&lea);
         ada.send(standing([0.0, 1.6, 0.0]));
         fresh.join(&space);
         let mut serial = 0;
@@ -734,6 +768,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             shape: None,
                             pose: None,
                             tilt: Some(random.below(30) as f32),
+                            revision: None,
                         });
                         true
                     }
@@ -746,6 +781,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             shape: None,
                             pose: Some(upright([random.below(6) as f32 - 3.0, 1.5, 3.0])),
                             tilt: None,
+                            revision: None,
                         });
                         true
                     }),
@@ -799,12 +835,12 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                         true
                     }),
                     11 => panel.is_some_and(|panel| {
-                        // Sometimes from a revision the panel no longer has, which is refused and undone.
+                        // Sometimes from a version the panel no longer has, which is refused and undone.
                         ada.send(ClientMessage::CheckPanelItem {
                             panel: panel.id,
                             line: random.below(2) as u32,
                             checked: random.below(2) == 0,
-                            revision: Some(panel.revision + (random.below(4) == 0) as u64),
+                            revision: Some(panel.version + (random.below(4) == 0) as u64),
                         });
                         true
                     }),
@@ -824,7 +860,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                                 check: Vec::new(),
                                 uncheck: Vec::new(),
                                 place: (random.below(3) == 0).then(|| "beside ada".to_owned()),
-                                revision: None,
+                                version: None,
                             },
                         )
                         .is_ok()
@@ -861,18 +897,366 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                 }
             }
             held.read(&ada);
+            watched.read(&lea);
             fresh.read();
             // Built afresh, as a client joining now is sent it, not because anything was touched.
             let mut afresh = without_ages(fresh.projection());
             let shown = held.shown();
             afresh.revision = shown.revision;
             assert_eq!(shown, afresh, "seed {seed}, step {step}");
+            let mut watching = watched.shown();
+            watching.revision = shown.revision;
+            assert_eq!(watching, afresh, "seed {seed}, step {step}");
         }
         assert_eq!(held.resyncs, 0, "seed {seed}: every patch applied");
+        assert_eq!(watched.resyncs, 0, "seed {seed}: every patch applied");
         assert!(held.patches.len() > 30, "seed {seed}: sent as patches");
     }
     assert!(
         done.iter().all(|done| *done > 0),
         "every kind of change was made: {done:?}"
     );
+}
+
+#[test]
+fn a_panel_s_and_a_wall_s_version_is_the_revision_of_their_last_change() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::live(&hub, Access::open(), "ada");
+    let mut held = Held::default();
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\n- [ ] One\n- [ ] Two\n```\n",
+    );
+    held.read(&ada);
+    let shown = held.shown();
+    let (wall, panel) = (shown.walls[0].clone(), shown.panels[0].clone());
+    assert!(wall.version > 0 && panel.version > 0);
+    // A tick: the panel is sent whole, at the revision the patch goes to; the wall is as it was.
+    ada.send(ClientMessage::CheckPanelItem {
+        panel: panel.id.clone(),
+        line: 0,
+        checked: true,
+        revision: Some(panel.version),
+    });
+    held.read(&ada);
+    let patch = held.patches.last().unwrap().clone();
+    let ticked = held.shown().panels[0].clone();
+    assert_eq!(ticked.version, patch.to);
+    assert_eq!(held.shown().walls[0].version, wall.version);
+    // A move: a place op, carrying the version it made, to a client that keeps it.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(upright([1.0, 1.5, -1.0])),
+    });
+    held.read(&ada);
+    let patch = held.patches.last().unwrap().clone();
+    assert!(
+        matches!(patch.ops.as_slice(), [tomori_protocol::PatchOp::Place { version, .. }] if *version == patch.to),
+        "{:?}",
+        patch.ops
+    );
+    assert_eq!(held.shown().panels[0].version, patch.to);
+    // A wall's change: the wall at the revision it was made at, its panels as they were.
+    ada.send(ClientMessage::SetWall {
+        wall: wall.id.clone(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(10.0),
+        revision: Some(wall.version),
+    });
+    held.read(&ada);
+    let patch = held.patches.last().unwrap().clone();
+    assert_eq!(held.shown().walls[0].version, patch.to);
+    assert!(held.shown().panels[0].version < patch.to);
+    // Sent again with nothing changed, nothing's version changes.
+    let before = held.shown();
+    reply(&hub, &space, "m2", "Nothing to show.");
+    ada.send(ClientMessage::CheckPanelItem {
+        panel: panel.id.clone(),
+        line: 0,
+        checked: true,
+        revision: Some(ticked.version + 99),
+    });
+    held.read(&ada);
+    let mut after = held.shown();
+    after.revision = before.revision;
+    assert_eq!(after, before);
+}
+
+#[test]
+fn of_two_participants_changing_a_panel_or_a_wall_from_one_version_one_wins_and_the_other_is_refused()
+ {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::live(&hub, Access::open(), "ada");
+    let bob = Client::live(&hub, Access::open(), "bob");
+    let (mut seen_by_ada, mut seen_by_bob) = (Held::default(), Held::default());
+    for (client, held) in [(&ada, &mut seen_by_ada), (&bob, &mut seen_by_bob)] {
+        client.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        held.read(client);
+    }
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\n- [ ] One\n- [ ] Two\n```\n",
+    );
+    seen_by_ada.read(&ada);
+    seen_by_bob.read(&bob);
+    let panel = seen_by_ada.shown().panels[0].clone();
+    let wall = seen_by_ada.shown().walls[0].clone();
+    assert_eq!(seen_by_bob.shown(), seen_by_ada.shown());
+    // Both tick an item of the panel as they see it, Ada first: hers lands, and Bob's, made against what changed under
+    // it, is refused, naming the panel, rather than tick whatever is on its line now.
+    for (client, line) in [(&ada, 0), (&bob, 1)] {
+        client.send(ClientMessage::CheckPanelItem {
+            panel: panel.id.clone(),
+            line,
+            checked: true,
+            revision: Some(panel.version),
+        });
+    }
+    let refused = |held: &mut Held, client: &Client| {
+        held.read(client);
+        std::mem::take(&mut held.errors)
+    };
+    assert!(refused(&mut seen_by_ada, &ada).is_empty());
+    assert_eq!(
+        refused(&mut seen_by_bob, &bob),
+        [(
+            crate::stage::STALE_TICK.to_owned(),
+            Some(panel.id.clone()),
+            None
+        )]
+    );
+    // Both change the Tomori wall from the version they took hold of it at, Bob first: his lands, and Ada's, which
+    // would undo it, is refused, naming the wall.
+    let change = |columns: u32| ClientMessage::SetWall {
+        wall: wall.id.clone(),
+        grid: tomori_protocol::Grid::new(columns, 1),
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: None,
+        revision: Some(wall.version),
+    };
+    bob.send(change(4));
+    ada.send(change(5));
+    assert!(refused(&mut seen_by_bob, &bob).is_empty());
+    assert_eq!(
+        refused(&mut seen_by_ada, &ada),
+        [(
+            crate::stage::STALE_WALL.to_owned(),
+            None,
+            Some(wall.id.clone())
+        )]
+    );
+    seen_by_ada.read(&ada);
+    seen_by_bob.read(&bob);
+    let shown = seen_by_ada.shown();
+    assert_eq!(shown.walls[0].grid().columns, 4);
+    assert_eq!(shown.panels[0].body, "- [x] One\n- [ ] Two");
+    assert_eq!(seen_by_bob.shown(), shown);
+}
+
+/// A space in an environment whose server side publishes onto its notice board, with a client that applies data ops,
+/// Lea, and one that applies patches without them, Ada, joined, and an outlet to publish with.
+fn publishing_space() -> (Arc<Hub>, String, SpaceOutlet, Client, Client) {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0])])
+            .with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let lea = Client::live(&hub, Access::open(), "lea");
+    let ada = Client::patching(&hub, Access::open(), "ada");
+    for client in [&lea, &ada] {
+        client.send(ClientMessage::Join { space: id.clone() });
+    }
+    (hub, id, outlet, lea, ada)
+}
+
+/// A pressure chart of 15 minutes at 5 seconds, `polls` polls in: each poll moves its points along one.
+fn pressure(polls: usize) -> tomori_environment::Panel {
+    use tomori_environment::chart::{Chart, Colour, Series, SeriesStyle};
+    let values = (polls..polls + 181)
+        .map(|at| Some(0.5 + (at % 17) as f32 / 20.0))
+        .collect();
+    tomori_environment::Panel::chart(
+        "pressure",
+        "Pressure",
+        Chart::new(181).with_series(Series::new(
+            "greatest",
+            Colour::Amber,
+            SeriesStyle::Line,
+            values,
+        )),
+    )
+}
+
+#[test]
+fn a_live_chart_reaches_a_client_that_applies_data_ops_as_its_data_alone_coalesced_and_limited() {
+    use tomori_environment::Outlet;
+    let (hub, _space, outlet, lea, ada) = publishing_space();
+    let (mut live, mut older) = (Held::default(), Held::default());
+    assert_eq!(outlet.publish(pressure(0)), Ok(()));
+    live.read(&lea);
+    older.read(&ada);
+    let first = live.shown().panels[0].clone();
+    assert!(first.data_seq > 0);
+    // Polled again at once, it waits, as the environment's changes are limited, and a later poll takes its place.
+    assert_eq!(outlet.publish(pressure(1)), Ok(()));
+    assert_eq!(outlet.publish(pressure(2)), Ok(()));
+    assert!(lea.read().is_empty());
+    // Made at the hub's next sweep, it is one data op, its two new points appended, its version as it was.
+    hub.flush_publishes(Instant::now() + Duration::from_secs(1));
+    live.read(&lea);
+    older.read(&ada);
+    let patch = live.patches.last().unwrap().clone();
+    let [
+        tomori_protocol::PatchOp::ChartAppend {
+            values, from, seq, ..
+        },
+    ] = patch.ops.as_slice()
+    else {
+        unreachable!("{:?}", patch.ops);
+    };
+    assert_eq!((values[0].len(), *from), (2, first.data_seq));
+    let shown = live.shown().panels[0].clone();
+    assert_eq!((shown.version, shown.data_seq), (first.version, *seq));
+    // The older client is sent the panel whole, and both hold the same.
+    assert!(matches!(
+        older.patches.last().unwrap().ops.as_slice(),
+        [tomori_protocol::PatchOp::Panel { .. }]
+    ));
+    assert_eq!(live.shown(), older.shown());
+    // A participant's tick of another panel, or anything else made against a version, is never refused for the
+    // chart's data having moved on: its version did not change.
+    assert_eq!(shown.version, first.version);
+}
+
+#[test]
+fn a_client_that_misses_a_data_op_is_sent_the_live_panel_s_data_whole_with_the_projection() {
+    use tomori_environment::Outlet;
+    let (hub, _space, outlet, lea, ada) = publishing_space();
+    let (mut live, mut older) = (Held::default(), Held::default());
+    assert_eq!(outlet.publish(pressure(0)), Ok(()));
+    live.read(&lea);
+    older.read(&ada);
+    // A patch of its data missed leaves a gap, which the next shows; asked for, the projection is sent whole, the
+    // chart's data with it at its seq, and patched from there again.
+    live.missing = true;
+    let mut soon = Instant::now();
+    for polls in 1..=2 {
+        soon += Duration::from_secs(1);
+        assert_eq!(outlet.publish(pressure(polls)), Ok(()));
+        hub.flush_publishes(soon);
+        live.read(&lea);
+    }
+    assert_eq!((live.wholes, live.resyncs), (2, 1));
+    older.read(&ada);
+    assert_eq!(live.shown(), older.shown());
+    let whole = live.shown().panels[0].clone();
+    assert_eq!(
+        whole.chart.as_ref().unwrap().series[0].values[180],
+        tomori_protocol::chart::rounded(0.5 + ((2 + 180) % 17) as f32 / 20.0)
+    );
+    soon += Duration::from_secs(1);
+    assert_eq!(outlet.publish(pressure(3)), Ok(()));
+    hub.flush_publishes(soon);
+    live.read(&lea);
+    let patch = live.patches.last().unwrap().clone();
+    assert!(
+        matches!(patch.ops.as_slice(), [tomori_protocol::PatchOp::ChartAppend { from, .. }] if *from == whole.data_seq),
+        "{:?}",
+        patch.ops
+    );
+    assert_eq!(live.resyncs, 1);
+}
+
+#[test]
+fn a_client_sent_less_holds_each_wall_at_the_version_every_client_has_and_hears_nothing_of_one_it_was_not_sent()
+ {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    // The desktop window states the most; a headset that states nothing is sent today's walls.
+    let desktop = Client::patching_as(&hub, Access::open(), "desktop", Some(Limits::MOST), true);
+    let headset = Client::live(&hub, Access::open(), "headset");
+    let (mut all, mut some) = (Held::default(), Held::default());
+    for (client, held) in [(&desktop, &mut all), (&headset, &mut some)] {
+        client.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        held.read(client);
+    }
+    for index in 0..20 {
+        let x = (index % 10) as f32 * 3.0 - 13.5;
+        let z = 4.0 + (index / 10) as f32 * 3.0;
+        desktop.send(ClientMessage::AddWall {
+            pose: upright([x, 1.5, z]),
+        });
+    }
+    all.read(&desktop);
+    some.read(&headset);
+    let (everything, sent) = (all.shown(), some.shown());
+    assert_eq!(sent.walls.len(), Limits::TODAY.walls as usize);
+    // Every wall the headset holds is at the version the desktop window holds it at.
+    for wall in &sent.walls {
+        assert_eq!(Some(wall), everything.wall(&wall.id), "{}", wall.id);
+    }
+    // A wall the headset was never sent changes, from the version the desktop window holds: it lands, and the headset
+    // is sent nothing of it.
+    let unsent = everything.walls.last().unwrap().clone();
+    assert!(sent.wall(&unsent.id).is_none());
+    let patches = some.patches.len();
+    desktop.send(ClientMessage::SetWall {
+        wall: unsent.id.clone(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(10.0),
+        revision: Some(unsent.version),
+    });
+    all.read(&desktop);
+    some.read(&headset);
+    assert!(all.shown().wall(&unsent.id).unwrap().version > unsent.version);
+    // The headset is sent the projection again, as everyone in the space is at every change, with nothing in it.
+    assert!(some.patches.len() > patches);
+    assert!(
+        some.patches[patches..]
+            .iter()
+            .all(|patch| patch.ops.is_empty())
+    );
+    let mut now = some.shown();
+    now.revision = sent.revision;
+    assert_eq!(now, sent);
+    assert!(all.errors.is_empty() && some.errors.is_empty());
 }

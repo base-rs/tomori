@@ -398,6 +398,12 @@ pub enum ClientMessage {
         /// `design/projection.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         projection_patches: bool,
+        /// Whether this client, which applies patches, also applies their data ops, [`crate::PatchOp::ChartAppend`] and
+        /// [`crate::PatchOp::ChartReplace`], to a live panel's data, and keeps the version a [`crate::PatchOp::Place`]
+        /// carries. Absent from older clients, which are sent a live panel whole at each change of its data, and a panel
+        /// whose version a move changed whole, as before. See `design/projection.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        live_panels: bool,
         /// What this client reads and draws at most. Absent from older clients, and read as [`crate::Limits::TODAY`];
         /// a field left out is today's bound too. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,6 +610,13 @@ pub enum ClientMessage {
         /// positive with its top towards the front: `0` for upright. An older server ignores it, leaving it upright.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tilt: Option<f32>,
+        /// The wall's [`crate::Wall::version`] the client saw as the participant took hold of it, for a change made
+        /// against what it showed, as by its handles: where the wall has changed since, as when another participant
+        /// changed it, the server refuses the change, naming the wall in its [`ServerMessage::Error`], and sends the
+        /// projection again, rather than lose the other change. Absent for a change that is the participant's own
+        /// whatever the wall was, as carrying it, and from older clients, whose changes go by what they say alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
     },
     /// Snap the wall `wall`, one someone added, to another for everyone in the space, or take it out of its group. With
     /// `attach`, it stands across `attach.edge` of the wall `attach.to`, aligned along it, their slots a gutter apart, and
@@ -654,10 +667,10 @@ pub enum ClientMessage {
     /// ticks it in its own copy of the body, refusing a panel not here and a line that begins no item with a box, and
     /// tells the agent before the next words spoken in the space. See `design/projection.md`.
     ///
-    /// A client also says the panel's [`crate::Panel::revision`] it saw. Where the panel has changed since, as when the
-    /// agent rewrote its body, the server refuses the tick, naming the panel in its [`ServerMessage::Error`], rather than
-    /// tick whatever item is on `line` now, and the participant looks again. An older client says none, and its tick
-    /// goes by `line` alone.
+    /// A client also says, as `revision`, the panel's [`crate::Panel::version`] it saw. Where the panel has changed
+    /// since, as when the agent rewrote its body or someone moved it, the server refuses the tick, naming the panel in its
+    /// [`ServerMessage::Error`], rather than tick whatever item is on `line` now, and the participant looks again. An
+    /// older client says none, and its tick goes by `line` alone.
     CheckPanelItem {
         panel: String,
         line: u32,
@@ -895,6 +908,11 @@ pub enum ServerMessage {
         /// clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<String>,
+        /// The wall a refused [`ClientMessage::SetWall`] named, where it was refused as the wall had changed since the
+        /// version it said, so that a client cues it, as a refused tick, and shows the wall as the projection sent again
+        /// says. Absent for other errors, and ignored by older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wall: Option<String>,
     },
     /// The cards of the current space, sent to a client that asked with [`ClientMessage::WatchCards`], at once and
     /// whenever they or their placements change. See `design/github.md`.
@@ -1626,6 +1644,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         // A newer client lists what it presents, at each version.
@@ -1742,6 +1761,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -1816,6 +1836,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         assert_eq!(
@@ -1857,6 +1878,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         assert_eq!(
@@ -1916,6 +1938,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -1942,6 +1965,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 projection_patches: false,
+                live_panels: false,
                 limits: None,
             }
         );

@@ -5,12 +5,15 @@
 //! client holding the projection at the first is sent only the change rather than all of it again. Whole walls and
 //! panels are replaced, added and removed by their identity, and a panel that only moved is moved, rather than fields
 //! of them changed, so that applying a patch is simple and its result is exactly the projection the server sends
-//! whole. See `design/projection.md`.
+//! whole. A live panel's data, as a chart's points, which only its environment's server side writes, changes by data
+//! ops of its own, which a client that says it applies them takes in place of the panel whole. See
+//! `design/projection.md`.
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::{Panel, Place, Projection, Wall};
+use crate::chart::Note;
 
 /// What changed in the projection of `space`, in `environment`, from its revision `from` to its revision `to`: its
 /// `ops`, applied in order to the projection at `from`, make it the projection at `to`. Several changes made together,
@@ -60,7 +63,9 @@ pub enum PatchOp {
         first: bool,
     },
     /// The panel `panel` moved to `place`, pinned there or not, and is otherwise as it was: it was put on a wall, into
-    /// another slot, left floating, or only stands elsewhere in the list of panels.
+    /// another slot, left floating, or only stands elsewhere in the list of panels. Its `version`, sent as `revision`,
+    /// is the panel's now, which a move changes; only a client whose `Hello` sets `live_panels` is sent one that changes
+    /// it, and an older client the panel whole instead.
     Place {
         panel: String,
         place: Place,
@@ -70,9 +75,49 @@ pub enum PatchOp {
         after: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         first: bool,
+        #[serde(rename = "revision", default, skip_serializing_if = "is_zero")]
+        version: u64,
     },
     /// The panel `panel` is no longer shown.
     RemovePanel { panel: String },
+    /// The chart panel `panel`'s live data, at its data seq `seq`, from the data it had at `from`: `values` appended to
+    /// each of its series, in order, the same number to each, and as many of its oldest points dropped, so that it keeps
+    /// its points; each series' `breaks` whole, where given, or else its breaks moved along with its points, those
+    /// dropped with them; and its `status`, `badge` and summary, its `body`, as they now are. Its version is unchanged.
+    /// A client applies it only to the panel's data at `from`; one at `seq` or later already has it, and drops it, and
+    /// one at another seq cannot apply it, and asks for the whole projection. Sent only to a client whose `Hello` sets
+    /// `live_panels`.
+    ChartAppend {
+        panel: String,
+        seq: u64,
+        from: u64,
+        values: Vec<Vec<Option<f32>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        breaks: Option<Vec<Vec<u32>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<Note>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        badge: Option<Note>,
+        #[serde(default)]
+        body: String,
+    },
+    /// The chart panel `panel`'s live data, whole, at its data seq `seq`: each of its series' `values` and `breaks`, in
+    /// order, and its `status`, `badge` and summary, its `body`. Its version is unchanged. A client applies it where it
+    /// holds the panel's data at an earlier seq, and drops it otherwise. Sent only to a client whose `Hello` sets
+    /// `live_panels`.
+    ChartReplace {
+        panel: String,
+        seq: u64,
+        values: Vec<Vec<Option<f32>>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        breaks: Vec<Vec<u32>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<Note>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        badge: Option<Note>,
+        #[serde(default)]
+        body: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -90,6 +135,13 @@ pub enum PatchError {
     Missing(String),
     /// An op this side does not know.
     Unknown,
+    /// A data op that does not fit the panel it names: one with no chart, or other series, or an append from another
+    /// seq than the panel's data has.
+    Data(String),
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl std::fmt::Display for PatchError {
@@ -101,6 +153,7 @@ impl std::fmt::Display for PatchError {
             }
             Self::Missing(id) => write!(formatter, "the patch names {id:?}, which is not there"),
             Self::Unknown => write!(formatter, "the patch has an op this client does not know"),
+            Self::Data(id) => write!(formatter, "the patch's data for {id:?} does not fit it"),
         }
     }
 }
@@ -128,7 +181,22 @@ impl ProjectionPatch {
     /// The patch that makes `before` into `after`, two projections of one space and environment, from `before`'s
     /// revision to `after`'s: walls and panels gone are removed, those new or changed sent whole, those that only moved
     /// moved, and each that stands elsewhere in its list said where, as few as keep the rest in their order.
+    ///
+    /// This is the patch for a client whose `Hello` does not set `live_panels`: a panel whose version or live data
+    /// changed is sent whole, as before data ops, so that what it holds is exactly what is sent whole.
     pub fn between(before: &Projection, after: &Projection) -> Self {
+        Self::diff(before, after, false)
+    }
+
+    /// The patch that makes `before` into `after`, as [`ProjectionPatch::between`] makes it, for a client whose `Hello`
+    /// sets `live_panels`: a panel whose structure is unchanged, but that moved or whose version changed, is a
+    /// [`PatchOp::Place`] carrying its version, and one whose live data changed a [`PatchOp::ChartAppend`], where its
+    /// series only moved along and gained points, or a [`PatchOp::ChartReplace`], rather than the panel whole.
+    pub fn between_live(before: &Projection, after: &Projection) -> Self {
+        Self::diff(before, after, true)
+    }
+
+    fn diff(before: &Projection, after: &Projection, live: bool) -> Self {
         let mut ops = Vec::new();
         let walls = order(&before.walls, &after.walls, |wall| &wall.id);
         ops.extend(
@@ -169,17 +237,36 @@ impl ProjectionPatch {
         for (index, panel) in after.panels.iter().enumerate() {
             let position = panels.positions[index].clone();
             let (after, first) = Position::split(position.clone());
+            let place = || PatchOp::Place {
+                panel: panel.id.clone(),
+                place: panel.place.clone(),
+                pinned: panel.pinned,
+                after: after.clone(),
+                first,
+                version: panel.version,
+            };
+            let moved = |was: &Panel| {
+                was.place != panel.place || was.pinned != panel.pinned || position.is_some()
+            };
             match previous.get(panel.id.as_str()) {
-                Some(was) if same_content(was, panel) => {
-                    if was.place != panel.place || was.pinned != panel.pinned || position.is_some()
-                    {
-                        ops.push(PatchOp::Place {
-                            panel: panel.id.clone(),
-                            place: panel.place.clone(),
-                            pinned: panel.pinned,
-                            after,
-                            first,
-                        });
+                Some(was) if !live && same_content(was, panel) => {
+                    if moved(was) {
+                        ops.push(place());
+                    }
+                }
+                // Its live data sent apart, only where its seq moved on, so that a client never takes it for data it
+                // already has; data changed at the same seq, as no server sends, goes whole.
+                Some(was)
+                    if live
+                        && was.same_structure(panel)
+                        && (was.data_seq < panel.data_seq && panel.chart.is_some()
+                            || was.data_seq == panel.data_seq && was.same_data(panel)) =>
+                {
+                    if moved(was) || was.version != panel.version {
+                        ops.push(place());
+                    }
+                    if was.data_seq != panel.data_seq {
+                        ops.push(data(was, panel));
                     }
                 }
                 _ => ops.push(PatchOp::Panel {
@@ -257,6 +344,7 @@ impl ProjectionPatch {
                     pinned,
                     after,
                     first,
+                    version,
                 } => {
                     let list = panels.get_or_insert_with(|| projection.panels.clone());
                     let Some(shown) = list.iter().find(|shown| shown.id == *panel) else {
@@ -265,6 +353,10 @@ impl ProjectionPatch {
                     let mut moved = shown.clone();
                     moved.place = place.clone();
                     moved.pinned = *pinned;
+                    // An older server's says none, and leaves the panel's as it was.
+                    if *version != 0 {
+                        moved.version = *version;
+                    }
                     put(
                         list,
                         |shown| shown.id == *panel,
@@ -279,6 +371,52 @@ impl ProjectionPatch {
                     |shown| shown.id == *panel,
                     panel,
                 )?,
+                PatchOp::ChartAppend {
+                    panel,
+                    seq,
+                    from,
+                    values,
+                    breaks,
+                    status,
+                    badge,
+                    body,
+                } => {
+                    let list = panels.get_or_insert_with(|| projection.panels.clone());
+                    let shown = list
+                        .iter_mut()
+                        .find(|shown| shown.id == *panel)
+                        .ok_or_else(|| PatchError::Missing(panel.clone()))?;
+                    if shown.data_seq >= *seq {
+                        continue;
+                    }
+                    if shown.data_seq != *from {
+                        return Err(PatchError::Data(panel.clone()));
+                    }
+                    append(shown, values, breaks.as_deref())
+                        .ok_or_else(|| PatchError::Data(panel.clone()))?;
+                    live(shown, *seq, status, badge, body);
+                }
+                PatchOp::ChartReplace {
+                    panel,
+                    seq,
+                    values,
+                    breaks,
+                    status,
+                    badge,
+                    body,
+                } => {
+                    let list = panels.get_or_insert_with(|| projection.panels.clone());
+                    let shown = list
+                        .iter_mut()
+                        .find(|shown| shown.id == *panel)
+                        .ok_or_else(|| PatchError::Missing(panel.clone()))?;
+                    if shown.data_seq >= *seq {
+                        continue;
+                    }
+                    replace(shown, values, breaks)
+                        .ok_or_else(|| PatchError::Data(panel.clone()))?;
+                    live(shown, *seq, status, badge, body);
+                }
                 PatchOp::Unknown => return Err(PatchError::Unknown),
             }
         }
@@ -307,7 +445,8 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         pinned: _,
         slug,
         image,
-        revision,
+        version,
+        data_seq,
         chart,
     } = a;
     *id == b.id
@@ -317,8 +456,149 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         && *code == b.code
         && *slug == b.slug
         && *image == b.image
-        && *revision == b.revision
+        && *version == b.version
+        && *data_seq == b.data_seq
         && *chart == b.chart
+}
+
+/// The data op that makes `was`'s live data `now`'s, two chart panels of the same structure: an append, where every
+/// series only moved along by the same number of points, fewer than half of them, and gained as many, or else the data
+/// whole.
+fn data(was: &Panel, now: &Panel) -> PatchOp {
+    let (Some(old), Some(new)) = (&was.chart, &now.chart) else {
+        unreachable!("only chart panels have live data")
+    };
+    let status = new.status.clone();
+    let badge = new.badge.clone();
+    let body = now.body.clone();
+    let points = new.series.first().map_or(0, |series| series.values.len());
+    let shifted = (1..points.div_ceil(2)).find(|&along| {
+        old.series.iter().zip(&new.series).all(|(old, new)| {
+            old.values.len() == points
+                && new.values.len() == points
+                && old.values[along..] == new.values[..points - along]
+        })
+    });
+    match shifted {
+        Some(along) => {
+            let moved: Vec<Vec<u32>> = old
+                .series
+                .iter()
+                .map(|series| moved_breaks(&series.breaks, along))
+                .collect();
+            let breaks: Vec<Vec<u32>> = new
+                .series
+                .iter()
+                .map(|series| series.breaks.clone())
+                .collect();
+            PatchOp::ChartAppend {
+                panel: now.id.clone(),
+                seq: now.data_seq,
+                from: was.data_seq,
+                values: new
+                    .series
+                    .iter()
+                    .map(|series| series.values[points - along..].to_vec())
+                    .collect(),
+                breaks: (breaks != moved).then_some(breaks),
+                status,
+                badge,
+                body,
+            }
+        }
+        None => {
+            let breaks: Vec<Vec<u32>> = new
+                .series
+                .iter()
+                .map(|series| series.breaks.clone())
+                .collect();
+            PatchOp::ChartReplace {
+                panel: now.id.clone(),
+                seq: now.data_seq,
+                values: new
+                    .series
+                    .iter()
+                    .map(|series| series.values.clone())
+                    .collect(),
+                breaks: if breaks.iter().all(Vec::is_empty) {
+                    Vec::new()
+                } else {
+                    breaks
+                },
+                status,
+                badge,
+                body,
+            }
+        }
+    }
+}
+
+/// A series' `breaks` once its points move along by `along`: those after a point dropped are dropped with it.
+fn moved_breaks(breaks: &[u32], along: usize) -> Vec<u32> {
+    let along = u32::try_from(along).unwrap_or(u32::MAX);
+    breaks
+        .iter()
+        .filter(|at| **at >= along)
+        .map(|at| at - along)
+        .collect()
+}
+
+/// Append `values` to each series of `panel`'s chart, as many to each, dropping as many of its oldest points, and give
+/// each series `breaks` where given, or else move its breaks along; `None` where it has no chart, other series, or values
+/// it cannot take.
+fn append(
+    panel: &mut Panel,
+    values: &[Vec<Option<f32>>],
+    breaks: Option<&[Vec<u32>]>,
+) -> Option<()> {
+    let chart = panel.chart.as_mut()?;
+    let along = values.first()?.len();
+    if values.len() != chart.series.len()
+        || along == 0
+        || breaks.is_some_and(|breaks| breaks.len() != values.len())
+        || values.iter().any(|appended| appended.len() != along)
+        || chart
+            .series
+            .iter()
+            .any(|series| series.values.len() < along)
+    {
+        return None;
+    }
+    for (index, (series, appended)) in chart.series.iter_mut().zip(values).enumerate() {
+        series.values.drain(..along);
+        series.values.extend_from_slice(appended);
+        series.breaks = match breaks {
+            Some(breaks) => breaks[index].clone(),
+            None => moved_breaks(&series.breaks, along),
+        };
+    }
+    Some(())
+}
+
+/// Give each series of `panel`'s chart its `values` and `breaks` whole, no breaks where `breaks` is empty; `None` where
+/// it has no chart, or other series.
+fn replace(panel: &mut Panel, values: &[Vec<Option<f32>>], breaks: &[Vec<u32>]) -> Option<()> {
+    let chart = panel.chart.as_mut()?;
+    if values.len() != chart.series.len() || !(breaks.is_empty() || breaks.len() == values.len()) {
+        return None;
+    }
+    for (index, (series, values)) in chart.series.iter_mut().zip(values).enumerate() {
+        series.values = values.clone();
+        series.breaks = breaks.get(index).cloned().unwrap_or_default();
+    }
+    Some(())
+}
+
+/// Give `panel` the rest of its live data, at its data seq `seq`.
+fn live(panel: &mut Panel, seq: u64, status: &Option<Note>, badge: &Option<Note>, body: &str) {
+    let chart = panel
+        .chart
+        .as_mut()
+        .expect("a chart panel's data was applied");
+    chart.status = status.clone();
+    chart.badge = badge.clone();
+    panel.body = body.to_owned();
+    panel.data_seq = seq;
 }
 
 /// Where an op puts what it names: right after another, by its identity, or first.

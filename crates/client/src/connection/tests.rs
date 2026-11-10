@@ -2101,7 +2101,7 @@ fn this_participants_words_are_cued_when_the_server_transcribes_them_or_cannot()
 }
 
 #[test]
-fn a_tick_the_server_refuses_is_cued_as_not_done_and_other_errors_are_not() {
+fn a_tick_or_a_wall_s_change_the_server_refuses_is_cued_as_not_done_and_other_errors_are_not() {
     let peer = Peer::start();
     let mut session = Script::listening();
     let mut connection = with_peer(&peer, &mut session, Scripted::default(), Nowhere);
@@ -2110,9 +2110,20 @@ fn a_tick_the_server_refuses_is_cued_as_not_done_and_other_errors_are_not() {
         error: "That panel changed as you ticked it; look again.".into(),
         space: None,
         panel: panel.map(Into::into),
+        wall: None,
     };
     assert_eq!(heard(error(Some("panel-1"))), [Earcon::Failed]);
     assert!(heard(error(None)).is_empty());
+    // So is a change to a wall refused as the wall changed since it was taken hold of.
+    assert_eq!(
+        heard(ServerMessage::Error {
+            error: "That wall changed as you changed it; look again.".into(),
+            space: None,
+            panel: None,
+            wall: Some("tomori".into()),
+        }),
+        [Earcon::Failed]
+    );
 }
 
 #[test]

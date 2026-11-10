@@ -2014,6 +2014,12 @@ impl Projector {
         self.held.is_some() || self.editor.carrying().is_some()
     }
 
+    /// The server refused the change sent to the wall `wall`, as made against a version since changed: it is drawn as
+    /// the server has it at once. See [`editing::Editor::refused`].
+    pub fn refused_wall(&mut self, wall: &str) {
+        self.editor.refused(wall);
+    }
+
     /// Let go of the wall taken hold of, as B does when nothing is carried. Returns whether one was held.
     pub fn stop_editing(&mut self) -> bool {
         self.editor.stop()

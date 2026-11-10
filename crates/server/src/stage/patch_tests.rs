@@ -95,16 +95,30 @@ fn view(stage: &Stage, walls: &Walls<'_>, revision: u64) -> Projection {
     stage.view("s", walls, 1_000).with_revision(revision)
 }
 
-/// The patch `change` makes to what `stage` shows, which applied to what was shown is what is shown now.
+/// A space's first revision in a run, as the time in milliseconds makes it, so that what is measured is the size sent.
+const FIRST: u64 = 1_794_000_000_000;
+
+/// The patch `change` makes to what `stage` shows, versioned as the hub versions it, to a client that applies data ops,
+/// which applied to what was shown is what is shown now, as the patch to an older client is too.
 fn change(
     stage: &mut Stage,
     walls: &Walls<'_>,
     change: impl FnOnce(&mut Stage),
 ) -> ProjectionPatch {
-    let before = view(stage, walls, 1);
+    let mut versions = crate::versions::Versions::default();
+    let revision = std::cell::Cell::new(FIRST);
+    let mut before = view(stage, walls, FIRST);
+    versions.stamp(&mut before, &revision);
     change(stage);
-    let after = view(stage, walls, 2);
-    let patch = ProjectionPatch::between(&before, &after);
+    revision.set(FIRST + 1);
+    let mut after = view(stage, walls, FIRST + 1);
+    versions.stamp(&mut after, &revision);
+    // As a client that keeps the versions place ops carry, as Tomori's own do, is sent it, and as an older one is.
+    let older = ProjectionPatch::between(&before, &after);
+    let mut applied = before.clone();
+    older.apply(&mut applied).unwrap();
+    assert_eq!(without_ages(applied), without_ages(after.clone()));
+    let patch = ProjectionPatch::between_live(&before, &after);
     let mut applied = before.clone();
     patch.apply(&mut applied).unwrap();
     assert_eq!(without_ages(applied), without_ages(after));
@@ -152,7 +166,7 @@ fn each_change_to_a_stage_is_its_patch() {
     // A participant ticks an item: the panel is sent whole, at its next revision.
     let patch = change(&mut stage, &walls, |stage| {
         stage
-            .tick_item(&walls, &agenda_id, 0, true, Some(1))
+            .tick_item(&walls, &agenda_id, 0, true)
             .unwrap()
             .unwrap();
     });
@@ -160,7 +174,7 @@ fn each_change_to_a_stage_is_its_patch() {
     let PatchOp::Panel { panel, .. } = &patch.ops[0] else {
         unreachable!("a panel");
     };
-    assert_eq!((panel.revision, panel.body.starts_with("- [x]")), (2, true));
+    assert!(panel.body.starts_with("- [x]"));
     // The agent updates it in place.
     let patch = change(&mut stage, &walls, |stage| {
         let mut updated = agenda();
@@ -238,10 +252,19 @@ fn a_stage_s_changes_patched_in_turn_are_what_it_shows() {
     for seed in 1..=40u64 {
         let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut stage = Stage::default();
-        let mut client = view(&stage, &walls, 1);
-        let mut revision = 1;
+        // Versioned as the hub versions what it sends, each wall and panel at the revision it last changed.
+        let mut versions = crate::versions::Versions::default();
+        let revision = std::cell::Cell::new(1);
+        let versioned = |stage: &Stage, versions: &mut crate::versions::Versions| {
+            let mut shown = view(stage, &walls, 0);
+            versions.stamp(&mut shown, &revision);
+            shown.with_revision(revision.get())
+        };
+        let mut before = versioned(&stage, &mut versions);
+        // One client that applies data ops and keeps the versions place ops carry, and one that does not.
+        let mut live = before.clone();
+        let mut client = before.clone();
         for step in 0..80 {
-            let before = view(&stage, &walls, revision);
             // A burst of changes, sent together.
             for _ in 0..1 + random.below(3) {
                 let shown = stage.view("s", &walls, 0);
@@ -279,24 +302,39 @@ fn a_stage_s_changes_patched_in_turn_are_what_it_shows() {
                     }
                     8 => panel.map_or(Ok(false), |panel| {
                         stage
-                            .tick_item(&walls, &panel, random.below(5) as u32, true, None)
+                            .tick_item(&walls, &panel, random.below(5) as u32, true)
                             .map(|ticked| ticked.is_some())
                     }),
                     _ => stage.lock_wall(&walls, &wall, random.below(2) == 0, false),
                 };
             }
-            revision += 1;
-            let after = view(&stage, &walls, revision);
-            let patch: ProjectionPatch = serde_json::from_slice(
-                &serde_json::to_vec(&ProjectionPatch::between(&before, &after)).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(patch.apply(&mut client), Ok(()), "seed {seed}, step {step}");
-            assert_eq!(
-                without_ages(client.clone()),
-                without_ages(after),
+            revision.set(revision.get() + 1);
+            let after = versioned(&stage, &mut versions);
+            for (held, between) in [
+                (&mut live, ProjectionPatch::between_live as fn(&_, &_) -> _),
+                (&mut client, ProjectionPatch::between),
+            ] {
+                let patch: ProjectionPatch =
+                    serde_json::from_slice(&serde_json::to_vec(&between(&before, &after)).unwrap())
+                        .unwrap();
+                assert_eq!(patch.apply(held), Ok(()), "seed {seed}, step {step}");
+                assert_eq!(
+                    without_ages(held.clone()),
+                    without_ages(after.clone()),
+                    "seed {seed}, step {step}"
+                );
+            }
+            // Each version is the revision at which its wall or panel last changed, never later than now.
+            assert!(
+                after
+                    .walls
+                    .iter()
+                    .map(|wall| wall.version)
+                    .chain(after.panels.iter().map(|panel| panel.version))
+                    .all(|version| (1..=after.revision).contains(&version)),
                 "seed {seed}, step {step}"
             );
+            before = after;
         }
     }
 }
@@ -365,7 +403,7 @@ fn patches_are_far_smaller_than_the_projection_whole() {
         ),
     ] {
         let tick = change(stage, &walls, |stage| {
-            stage.tick_item(&walls, &listed, 2, true, None).unwrap();
+            stage.tick_item(&walls, &listed, 2, true).unwrap();
         });
         let update = change(stage, &walls, |stage| {
             let mut updated = agenda();
@@ -376,7 +414,8 @@ fn patches_are_far_smaller_than_the_projection_whole() {
             let change = WallChange::new(None, None, None, None, None, Some(8.0)).unwrap();
             stage.set_wall(&walls, &wall, change).unwrap();
         });
-        let shown = view(stage, &walls, 2);
+        let mut shown = view(stage, &walls, FIRST);
+        crate::versions::Versions::default().stamp(&mut shown, &std::cell::Cell::new(FIRST));
         for (what, patch) in [
             ("tick", tick),
             ("panel update", update),

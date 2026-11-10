@@ -242,11 +242,9 @@ impl Stage {
                 .as_ref()
                 .is_some_and(|published| published.id == id)
         }) {
-            // A change of what it shows is a revision of it, as an agent's update is.
             kept.updated = Some(now);
             kept.content = content;
             kept.published = Some(published);
-            kept.revision += 1;
             return Ok(Change::Updated);
         }
         let resting = room
@@ -266,7 +264,6 @@ impl Stage {
             pinned: false,
             arranged: false,
             published: Some(published),
-            revision: super::first_revision(),
         };
         // Back where it rested, where that is still there.
         if let Some(resting) = resting {

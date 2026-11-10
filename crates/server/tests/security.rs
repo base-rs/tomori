@@ -59,6 +59,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     client.wait_for(|message| {
@@ -336,6 +337,7 @@ fn a_token_renamed_elsewhere_renames_its_holders_within_a_sweep() {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     let welcomed = ada.wait_for(|message| match message {

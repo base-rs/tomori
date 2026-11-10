@@ -324,6 +324,7 @@ async fn exchange(
             images: true,
             // And applies patches to the projection, where its session does, which it hands on as any other message.
             projection_patches: options.projection_patches,
+            live_panels: options.projection_patches && options.live_panels,
             limits: Some(options.limits),
         };
         let mut bytes = Frame::client(&hello).encode();

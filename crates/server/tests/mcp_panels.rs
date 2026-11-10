@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tomori_backend::Event;
-use tomori_protocol::{ClientMessage, Panel, Place, ServerMessage};
+use tomori_protocol::{ClientMessage, Panel, Place, Pose, ServerMessage};
 use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
@@ -477,12 +477,12 @@ fn a_participant_s_tick_reaches_the_agent_through_panels_and_before_the_next_wor
     let agenda = panels(&ada, |panels| panels.len() == 1)[0].clone();
 
     // Ada points at the second item and presses A: it is ticked for everyone, in place.
-    assert_eq!(agenda.revision, 1);
+    assert!(agenda.version > 0);
     ada.send(&ClientMessage::CheckPanelItem {
         panel: agenda.id.clone(),
         line: 1,
         checked: true,
-        revision: Some(1),
+        revision: Some(agenda.version),
     });
     let shown = panels(&ada, |panels| {
         panels.len() == 1 && panels[0].body.ends_with("- [x] Panel ids")
@@ -511,7 +511,7 @@ fn a_participant_s_tick_reaches_the_agent_through_panels_and_before_the_next_wor
 }
 
 #[test]
-fn a_tick_or_an_update_by_number_from_a_revision_since_changed_is_refused_rather_than_land_on_another_item()
+fn a_tick_or_an_update_from_a_version_since_changed_is_refused_rather_than_land_on_another_item_and_redone()
  {
     let backend = FakeBackend::new();
     let server = start(&backend);
@@ -521,61 +521,76 @@ fn a_tick_or_an_update_by_number_from_a_revision_since_changed_is_refused_rather
     let session = backend.started()[0].clone();
     let agent = tomori_backend::Session::id(&session);
     let update = |arguments: Value| call(&server, &token, &agent, "update_panel", arguments);
+    let version = |value: &Value| value.as_u64().unwrap();
     agent_replies(
         &session,
         "m1",
         "```panel\nid: agenda\ntitle: Agenda\n---\n- [ ] Pairing window\n- [ ] Panel ids\n```\n",
     );
     let agenda = panels(&ada, |panels| panels.len() == 1)[0].clone();
-    assert_eq!(agenda.revision, 1);
-    // The agent reads the revision with the list.
+    let first = agenda.version;
+    assert!(first > 0);
+    // The agent reads the panel's version with the list, the one its participants are sent.
     let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
-    assert_eq!(listed["panels"][0]["revision"], 1);
+    assert_eq!(version(&listed["panels"][0]["version"]), first);
 
-    // Ada ticks the first item at the revision she saw, which counts one.
+    // Ada ticks the first item at the version she saw: it applies, and the panel is at the revision it was made at.
     ada.send(&ClientMessage::CheckPanelItem {
         panel: agenda.id.clone(),
         line: 0,
         checked: true,
-        revision: Some(1),
+        revision: Some(first),
     });
-    let shown = panels(&ada, |panels| panels[0].revision == 2);
+    let shown = panels(&ada, |panels| panels[0].version > first);
+    let ticked = shown[0].version;
     assert_eq!(shown[0].body, "- [x] Pairing window\n- [ ] Panel ids");
 
-    // The agent's update by number from the revision it read is refused, with the current one, and changes nothing.
-    let refused = update(json!({"panel": "agenda", "uncheck": [1], "revision": 1}));
+    // The agent's update by number from the version it read is refused, with the current one, and changes nothing.
+    let refused = update(json!({"panel": "agenda", "uncheck": [1], "version": first}));
     let said = failure(&refused);
-    assert!(said.contains("changed since revision 1"), "{said}");
-    assert!(said.contains("at revision 2 now"), "{said}");
+    assert!(
+        said.contains(&format!("changed since version {first}")),
+        "{said}"
+    );
+    assert!(said.contains(&format!("at version {ticked} now")), "{said}");
     assert!(said.contains("Read it again with panels"), "{said}");
+    // So is one that names it `revision`, as update_panel did before versions.
+    assert!(
+        failure(&update(
+            json!({"panel": "agenda", "uncheck": [1], "revision": first})
+        ))
+        .contains(&format!("changed since version {first}"))
+    );
+    // Read again, it is at that version, and redone from what it shows, it applies, and says its version now.
     let listed = content(&call(&server, &token, &agent, "panels", json!({}))).clone();
-    assert_eq!(listed["panels"][0]["revision"], 2);
+    assert_eq!(version(&listed["panels"][0]["version"]), ticked);
     assert_eq!(listed["panels"][0]["items"][0]["checked"], true);
-    // Read again, at the current revision, it applies, and says the next.
     let updated = content(&update(json!({
         "panel": "agenda",
         "body": "- [ ] Decide the agenda\n- [x] Pairing window\n- [ ] Panel ids",
-        "revision": 2,
+        "version": ticked,
     })))
     .clone();
-    assert_eq!(updated["revision"], 3);
-    // Ada is sent it, before she ticks, so that the projection sent again after her refusal is the one waited for
-    // below, rather than this one, which a projection still waiting to be sent would take the place of.
-    panels(&ada, |panels| panels[0].revision == 3);
+    let rewritten = version(&updated["version"]);
+    assert!(rewritten > ticked);
+    // Ada is sent it, at that version, before she ticks, so that the projection sent again after her refusal is the one
+    // waited for below, rather than this one, which a projection still waiting to be sent would take the place of.
+    panels(&ada, |panels| panels[0].version == rewritten);
     assert_eq!(
         failure(&update(
-            json!({"panel": "agenda", "check": [1], "revision": "two"})
+            json!({"panel": "agenda", "check": [1], "version": "two"})
         )),
-        "revision is the panel's revision, a whole number, as panels gives it."
+        "version is the panel's version, a whole number, as you last read it."
     );
 
-    // Ada, still seeing revision 2, ticks what was the second item: refused, with the panel named so that her client
-    // cues it, and the projection sent again shows the panel as it is, nothing ticked that she did not see.
+    // Ada, still seeing the panel as she ticked it, ticks what was the second item: refused, with the panel named so
+    // that her client cues it, and the projection sent again shows the panel as it is, nothing ticked that she did not
+    // see.
     ada.send(&ClientMessage::CheckPanelItem {
         panel: agenda.id.clone(),
         line: 1,
         checked: true,
-        revision: Some(2),
+        revision: Some(ticked),
     });
     let (error, panel) = ada.wait_for(|message| match message {
         ServerMessage::Error { error, panel, .. } => Some((error.clone(), panel.clone())),
@@ -583,27 +598,41 @@ fn a_tick_or_an_update_by_number_from_a_revision_since_changed_is_refused_rather
     });
     assert_eq!(error, "That panel changed as you ticked it; look again.");
     assert_eq!(panel.as_deref(), Some(agenda.id.as_str()));
-    let shown = panels(&ada, |panels| panels[0].revision == 3);
+    let shown = panels(&ada, |panels| panels[0].version == rewritten);
     assert_eq!(
         shown[0].body,
         "- [ ] Decide the agenda\n- [x] Pairing window\n- [ ] Panel ids"
     );
+    // Moved, the panel is at a version of its own, so that what was read before the move is read again.
+    ada.send(&ClientMessage::PlacePanel {
+        panel: agenda.id.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0])),
+    });
+    let moved = panels(&ada, |panels| panels[0].version > rewritten)[0].version;
+    assert!(
+        failure(&update(
+            json!({"panel": "agenda", "check": [1], "version": rewritten})
+        ))
+        .contains(&format!("at version {moved} now"))
+    );
 
-    // An older client, saying no revision, ticks by its line alone, as before.
+    // An older client, saying no version, ticks by its line alone, as before.
     ada.send(&ClientMessage::CheckPanelItem {
         panel: agenda.id.clone(),
         line: 2,
         checked: true,
         revision: None,
     });
-    let shown = panels(&ada, |panels| panels[0].revision == 4);
+    let shown = panels(&ada, |panels| panels[0].version > moved);
     assert!(shown[0].body.ends_with("- [x] Panel ids"));
-    // The agent without a revision updates as before.
+    // The agent without a version updates as before.
     let updated = content(&update(
         json!({"panel": "agenda", "check": ["Decide the agenda"]}),
     ))
     .clone();
-    assert_eq!(updated["revision"], 5);
+    assert!(version(&updated["version"]) > shown[0].version);
     // Nothing refused reaches the agent's notes: only the two ticks that landed.
     ada.say("u1", "next");
     let prompt = eventually(|| session.log().prompts.first().cloned());

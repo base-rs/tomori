@@ -29,6 +29,7 @@ fn added() -> Wall {
         WallKind::Added,
         Pose::upright_facing([0.0, 1.5, -2.5], HOME.to_array()),
     )
+    .with_version(7)
 }
 
 /// The Tomori wall where it stands by default.
@@ -904,6 +905,8 @@ fn the_hinge_moved_down_tilts_a_wall_towards_the_participant_within_the_travel_a
             pose: None,
             tilt: Some(layout::MOST_TILT),
             join: None,
+            // Made against the wall as its hinge was taken hold of, at its version then.
+            version: Some(7),
         })
     );
     // From the most it tilts down, one movement up of the travel takes it to the most it tilts up, upright on the way,
@@ -1218,6 +1221,28 @@ fn a_change_sent_is_drawn_until_the_server_agrees_curved_or_not_or_a_while_passe
     let agreed = shown(vec![curved(radius)], Vec::new());
     projector.update(frame_at(&agreed, None, 0.0, now + Duration::from_secs(1)));
     assert!(projector.editor.pending.is_none());
+    // Refused by the server, as made against a version since changed, it is drawn as the server has it at once; a
+    // refusal of another wall changes nothing.
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    bend(
+        &mut projector,
+        &projection,
+        &wall,
+        &[Vec3::X * 0.15],
+        Controls::Controllers,
+        now,
+    );
+    projector.refused_wall("wall-99");
+    assert!(projector.editor.pending.is_some());
+    projector.refused_wall(&wall.id);
+    assert!(projector.editor.pending.is_none());
+    projector.update(frame_at(
+        &projection,
+        None,
+        0.0,
+        now + Duration::from_secs(1),
+    ));
+    assert_eq!(projector.editor.walls(&projection)[0], wall);
 }
 
 #[test]

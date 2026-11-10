@@ -264,14 +264,22 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 
 #[test]
 fn hello_says_whether_the_session_applies_projection_patches_and_states_its_limits() {
-    for patches in [false, true] {
+    // Data ops are applied only with patches: a session that says it applies them without patches says neither.
+    for (patches, live, said) in [
+        (false, false, (false, false)),
+        (true, false, (true, false)),
+        (true, true, (true, true)),
+        (false, true, (false, false)),
+    ] {
         let server = MiniServer::start(localhost(), Mode::Normal);
         let mut options = options(server.address);
         options.projection_patches = patches;
+        options.live_panels = live;
         let client = Client::connect(options).unwrap();
         assert_eq!(wait_connected(&client), 1);
         let Some(Received::Message(ClientMessage::Hello {
             projection_patches,
+            live_panels,
             limits,
             ..
         })) = server.received(1).first().cloned()
@@ -280,9 +288,9 @@ fn hello_says_whether_the_session_applies_projection_patches_and_states_its_limi
         };
         // By default, frames of up to 32 MiB, which the connection reads, and today's projection.
         assert_eq!(
-            (projection_patches, limits),
+            ((projection_patches, live_panels), limits),
             (
-                patches,
+                said,
                 Some(
                     tomori_protocol::Limits::TODAY
                         .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
@@ -299,6 +307,7 @@ fn a_long_frame_is_read_within_the_limit_both_sides_state_and_its_arrival_report
         error: "x".repeat(3 * MAX_FRAME_BYTES),
         space: None,
         panel: None,
+        wall: None,
     };
     let mut frame = Vec::new();
     Frame::server(&long)
@@ -623,6 +632,7 @@ fn requires_welcome_first_and_only_once() {
         error: "full".into(),
         space: None,
         panel: None,
+        wall: None,
     });
     let (reason, _) = raw_disconnect(Some(refusal), TIMEOUT);
     assert_eq!(

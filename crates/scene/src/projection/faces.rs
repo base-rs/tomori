@@ -25,11 +25,14 @@ use crate::{
 /// it to another wall's slot of another size and back lays nothing out again.
 const SIZES: usize = 3;
 
-/// What a panel's faces are laid out from, by which they are kept or laid out again: today, the panel as the
-/// projection has it, compared whole, its age as it shows, which changes only when the server's patch upserts it or
-/// its age passes another minute, so that every field that shows on its face, and any added later, is followed. Once a panel carries the projection's revision of its last
-/// change, and a chart panel a sequence of its data's own, the key is those two, compared as cheaply; nothing else here
-/// changes.
+/// What a panel's faces are laid out from, by which they are kept or laid out again. From a server that versions panels,
+/// its version, the projection revision at which it last changed in anything but its live data and its age, and its data
+/// seq, at which its live data last changed (see `design/projection.md`): a new version lays it out again, and a chart's
+/// new data seq at the same version only draws its face again; with what this client changes of a panel itself, which no
+/// version follows, its body and code, as a tick shown at once changes it and a code panel is sent short or whole as its
+/// frame allows, its title, and its age as it shows. From an older server, which versions nothing, or counted each text
+/// panel's changes but none its environment made, as a chart panel without a data seq shows, the panel compared whole,
+/// its age as it shows, so that every field that shows on its face is followed.
 #[derive(Clone, Debug)]
 struct Key(Panel);
 
@@ -53,6 +56,26 @@ impl Key {
         // an age that shows the same changes nothing, so that a patch lays out only the panels it changes.
         if self.0.age != panel.age && board::age(self.0.age) == board::age(panel.age) {
             self.0.age = panel.age;
+        }
+        // A server before versions counted each text panel's changes as its revision, read here as its version, but not
+        // its environment's changes of it: a chart panel without a data seq, and its title, are followed as they show.
+        let versioned =
+            |panel: &Panel| panel.version != 0 && (panel.chart.is_none() || panel.data_seq != 0);
+        if versioned(&self.0) && versioned(panel) {
+            return if self.0.version != panel.version || self.0.id != panel.id {
+                Change::Content
+            } else if self.0.data_seq != panel.data_seq && panel.chart.is_some() {
+                // Its summary, its body, moves on with its data.
+                Change::Plot
+            } else if self.0.body != panel.body
+                || self.0.title != panel.title
+                || self.0.code != panel.code
+                || self.0.age != panel.age
+            {
+                Change::Content
+            } else {
+                Change::Same
+            };
         }
         if self.0 == *panel {
             return Change::Same;
@@ -91,7 +114,10 @@ impl Faces {
     pub(super) fn follow(&mut self, panel: &Panel) {
         match self.key.change(panel) {
             Change::Same => return,
-            Change::Plot => self.sizes.iter_mut().for_each(|layout| layout.face = None),
+            Change::Plot => self
+                .sizes
+                .iter_mut()
+                .for_each(|layout| layout.replot(panel)),
             Change::Content => self.sizes.clear(),
         }
         self.key = Key::of(panel);
@@ -190,6 +216,16 @@ impl Layout {
             most_scroll,
             face: None,
         }
+    }
+
+    /// Follow `panel`'s chart's live data, its points and its summary: its face is drawn again, and its summary's
+    /// rows, which say how far it scrolls and which items the ray meets, are its summary's now, its size kept, so that
+    /// nothing else is laid out again.
+    fn replot(&mut self, panel: &Panel) {
+        let (_, _, lines) = fitted(panel, self.fit);
+        self.most_scroll = lines.len().saturating_sub(self.cells.1);
+        self.lines = lines;
+        self.face = None;
     }
 
     /// `panel`'s face as laid out here, scrolled `scroll` rows down and framed in `border`: the one last drawn, if it

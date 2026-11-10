@@ -64,6 +64,10 @@ pub struct Options {
     /// connection says in its Hello. `false`, the default, is sent the projection whole at every change, as a session
     /// that does not apply them needs. See `design/projection.md`.
     pub projection_patches: bool,
+    /// Whether the session, which applies patches, also applies their data ops to a live panel's data, as
+    /// `ProjectionPatch::apply` does, and keeps the version a place op carries, which each connection says in its Hello.
+    /// `false`, the default, is sent a live panel whole at each change of its data. See `design/projection.md`.
+    pub live_panels: bool,
     /// What this client reads and draws at most, which each connection states in its Hello: by default frames of up to
     /// [`tomori_protocol::MOST_FRAME_BYTES`], which the connection reads, and a projection within today's bounds,
     /// [`tomori_protocol::Limits::TODAY`], since what a session draws is its own to say; see
@@ -96,6 +100,7 @@ impl std::fmt::Debug for Options {
             )
             .field("environments", &self.environments)
             .field("projection_patches", &self.projection_patches)
+            .field("live_panels", &self.live_panels)
             .field("limits", &self.limits)
             .finish()
     }
@@ -124,6 +129,7 @@ impl Options {
             microphone_rearm_on_disconnect: false,
             environments: None,
             projection_patches: false,
+            live_panels: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
         }
     }
