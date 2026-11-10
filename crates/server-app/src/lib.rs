@@ -39,6 +39,7 @@ pub fn builder() -> Builder {
             .with_status_wall(tomori_server::StatusWall::own(0))
             .with_arrival(farmyard_arrival())
             .with_agent(farmyard_agent())
+            .with_anchor(farmyard_home())
             .with_solids(tomori_environment_farmyard::layout::solids()),
         );
     tomori_environment_github_server::register(builder)
@@ -64,6 +65,15 @@ fn farmyard_eyes() -> [f32; 3] {
 pub fn farmyard_agent() -> tomori_protocol::Pose {
     tomori_protocol::Pose::at(tomori_environment_farmyard::layout::AGENT_HOME.to_array())
         .facing_towards(farmyard_eyes())
+}
+
+/// The farmyard's `home` cluster anchor: its workers stand in a ring about the agent's home, on the ring drawn there,
+/// in the room its layout gives them, rather than on the arc about the arrival. See `design/farmyard.md`.
+pub fn farmyard_home() -> tomori_protocol::cluster::Anchor {
+    let [width, height, depth] = tomori_environment_farmyard::layout::HOME_ROOM;
+    tomori_protocol::cluster::Anchor::new(tomori_protocol::cluster::HOME, farmyard_agent())
+        .with_formation(tomori_protocol::cluster::Formation::Ring)
+        .with_extent(width, height, depth)
 }
 
 /// The farmyard's notice board, a projection wall of its own, two slots wide and one high, on the board against the

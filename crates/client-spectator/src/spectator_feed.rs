@@ -129,6 +129,8 @@ pub struct Feed {
     swarm: SwarmAnimation,
     /// The agent's home as the swarm last stood at it, so that it appears at a new one, as the headset's does.
     agent_home: tomori_scene::anchors::Anchor,
+    /// The ring drawn on the floor at home, which stays there wherever the agent goes, as the headset draws it.
+    home_ring: tomori_scene::anchors::HomeRing,
     sequence: u64,
     /// The scenery shown outside a space, or in one from a server that names no environment, from `TOMORI_ENVIRONMENT`.
     environment: Environment,
@@ -221,6 +223,7 @@ impl Feed {
             scene: Scene::new(),
             swarm: SwarmAnimation::new(),
             agent_home: tomori_scene::anchors::Anchor::AGENT,
+            home_ring: tomori_scene::anchors::HomeRing::default(),
             sequence: 0,
             environment: Environment::initial(&[]),
             sceneries: Sceneries::empty(),
@@ -246,6 +249,12 @@ impl Feed {
     /// Where its swarm stands and faces, as the joined space's environment puts it, for the renderer's rings about it.
     pub fn swarm_anchor(&self) -> tomori_scene::anchors::Anchor {
         self.swarm.swarm().anchor()
+    }
+
+    /// The ring drawn on the floor at home, as the joined space's environment puts it, which stays there wherever the
+    /// agent goes. See `design/environments.md`.
+    pub fn home_ring(&self) -> tomori_scene::anchors::HomeRing {
+        self.home_ring
     }
 
     /// The registered avatar shown in place of the swarm, if any, and what it shows, for its scenery to draw. See
@@ -423,10 +432,12 @@ impl Feed {
         self.scene
             .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
         self.scene.seat(&arrangement.clusters, &arrangement.layouts);
-        self.scene.arrange(
+        self.home_ring = arrangement.home_ring();
+        self.scene.arrange_as(
             arrangement.workers,
             arrangement.audience,
             arrangement.extent,
+            arrangement.formation,
             arrangement.placement,
         );
         self.scene.update(root, workspace, dt);

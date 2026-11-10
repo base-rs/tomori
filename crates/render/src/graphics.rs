@@ -50,6 +50,15 @@ const MAX_INSTANCES: usize = AGENT_COUNT
     } else {
         crate::arrival_graphics::MAX_CUBES
     };
+/// How many cubes make the ring on the floor at home, its colour, and the share of its brightness it keeps while the
+/// agent is away from it.
+pub const HOME_RING_CUBES: usize = 40;
+pub const HOME_RING_COLOUR: [f32; 3] = [0.08, 0.5, 0.65];
+pub const HOME_RING_AWAY: f32 = 0.4;
+
+/// The widest ring on the floor at home drawn, in metres; one wider is drawn beneath the swarm.
+pub const MOST_HOME_RING: f32 = 4.0;
+
 /// How many cubes make the ring drawn where a teleport being aimed would land.
 const LANDING_CUBES: usize = 16;
 /// The ring's radius, in metres.
@@ -134,6 +143,8 @@ pub struct Renderer {
     carriage: Mat4,
     /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
     landing: Option<glam::Vec3>,
+    /// The ring drawn on the floor at home, as the frame step last gave it, or none, when it is drawn beneath the swarm.
+    home_ring: Option<tomori_scene::anchors::HomeRing>,
     /// The teleport pads drawn, each a ring with a plate and chevrons above it; see `design/locomotion.md`.
     pads: Vec<tomori_scene::pads::Shown>,
     /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -358,6 +369,7 @@ impl Renderer {
             reveal: None,
             carriage: Mat4::IDENTITY,
             landing: None,
+            home_ring: None,
             pads: Vec::new(),
             blink: 0.0,
             blink_pipeline,
@@ -618,6 +630,15 @@ impl Renderer {
         }
     }
 
+    /// Draw the ring on the floor at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes:
+    /// faint while it is away, brightening as it comes back. With none, or one that is nonsense, it is drawn beneath the
+    /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
+    pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
+        self.home_ring = ring.filter(|ring| {
+            ring.centre.is_finite() && ring.radius > 0.0 && ring.radius <= MOST_HOME_RING
+        });
+    }
+
     /// Draw a ring at `landing`, where a teleport being aimed would land, from the next [`Self::update`], or none.
     pub fn set_landing(&mut self, landing: Option<glam::Vec3>) {
         self.landing = landing.filter(|landing| landing.is_finite());
@@ -661,20 +682,29 @@ impl Renderer {
         if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
-        // Keep the coordinator's orientation ring in both environments, on the floor beneath the swarm wherever it stands:
-        // on the room's floor, or, for a swarm raised above its usual height, on the floor it would stand that high over.
-        let centre = swarm.anchor().position;
+        // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, or else beneath
+        // the swarm: on the room's floor, or, for a home raised above the swarm's usual height, on the floor it would
+        // stand that high over. Faint while the agent is away, it brightens as it comes back within the ring.
+        let swarm_at = swarm.anchor().position;
+        let (centre, radius) = self
+            .home_ring
+            .map_or((swarm_at, tomori_scene::anchors::FLOOR_RING), |ring| {
+                (ring.centre, ring.radius)
+            });
         let floor = (centre.y - crate::swarm::CENTER.y).max(0.0) + 0.015;
-        for n in 0..40 {
-            let angle = n as f32 * std::f32::consts::TAU / 40.0;
+        let away = (swarm_at.x - centre.x).hypot(swarm_at.z - centre.z);
+        let faint = ((away - radius / 2.0) / radius).clamp(0.0, 1.0);
+        let brightness = 1.0 - (1.0 - HOME_RING_AWAY) * faint;
+        for n in 0..HOME_RING_CUBES {
+            let angle = n as f32 * std::f32::consts::TAU / HOME_RING_CUBES as f32;
             self.scene.push(Instance {
                 position: [
-                    centre.x + angle.cos() * 1.25,
+                    centre.x + angle.cos() * radius,
                     floor,
-                    centre.z + angle.sin() * 1.25,
+                    centre.z + angle.sin() * radius,
                 ],
                 scale: [0.035, 0.015, 0.035],
-                color: [0.08, 0.5, 0.65],
+                color: HOME_RING_COLOUR.map(|channel| channel * brightness),
                 ..Default::default()
             });
         }

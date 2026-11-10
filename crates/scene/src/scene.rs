@@ -210,6 +210,8 @@ pub struct Frame<'a> {
     /// The registered avatar shown, while the swarm is not, and what it shows, for its scenery to draw. See
     /// `design/avatars.md`.
     pub avatar: Option<crate::avatar::Shown<'a>>,
+    /// The ring drawn on the floor at home, which stays there wherever the agent goes. See `design/environments.md`.
+    pub home_ring: crate::anchors::HomeRing,
 }
 
 /// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there,
@@ -508,7 +510,17 @@ struct Standing {
     environment: crate::environment::Environment,
     carriage: crate::anchors::Anchor,
     agent: crate::anchors::Anchor,
+    /// The ring on the floor at home, its middle in the participant's room, as the agent is.
+    ring: crate::anchors::HomeRing,
     rig: Rig,
+}
+
+/// An unturned anchor at `position`, which the rig carries as it carries the agent.
+fn at(position: Vec3) -> crate::anchors::Anchor {
+    crate::anchors::Anchor {
+        position,
+        orientation: glam::Quat::IDENTITY,
+    }
 }
 
 impl Default for Step {
@@ -1267,15 +1279,21 @@ impl Step {
                     placed.place(standing.carriage),
                     placed.place(standing.agent),
                     moved,
+                    crate::anchors::HomeRing {
+                        centre: placed.place(at(standing.ring.centre)).position,
+                        ..standing.ring
+                    },
                 )
             });
-        let carriage = departure.map_or(arrangement.carriage, |(carriage, _, _)| carriage);
+        let carriage = departure.map_or(arrangement.carriage, |(carriage, ..)| carriage);
         let appear = match departure {
-            Some((_, _, moved)) => moved,
+            Some((_, _, moved, _)) => moved,
             None => departed || arrangement.home != self.agent_home,
         };
         self.agent_home = arrangement.home;
-        let anchor = departure.map_or(arrangement.agent, |(_, agent, _)| agent);
+        let anchor = departure.map_or(arrangement.agent, |(_, agent, ..)| agent);
+        // The ring on the floor stays at home, wherever the agent goes, and with the environment as it shrinks away.
+        let home_ring = departure.map_or(arrangement.home_ring(), |(.., ring)| ring);
         // In a space whose environment is drawn, where it and the agent stand in the participant's room, for as long
         // as it shrinks away should the space be left.
         if in_a_space {
@@ -1285,6 +1303,10 @@ impl Step {
                         environment: scenery.environment,
                         carriage: placed.unplace(arrangement.carriage),
                         agent: placed.unplace(anchor),
+                        ring: crate::anchors::HomeRing {
+                            centre: placed.unplace(at(home_ring.centre)).position,
+                            ..home_ring
+                        },
                         rig: placed,
                     }
                 });
@@ -1804,10 +1826,11 @@ impl Step {
             .set_agent(arrangement.away().then_some((bounds.centre, bounds.radius)));
         self.delegation_scene
             .seat(&arrangement.clusters, &arrangement.layouts);
-        self.delegation_scene.arrange(
+        self.delegation_scene.arrange_as(
             arrangement.workers,
             arrangement.audience,
             arrangement.extent,
+            arrangement.formation,
             arrangement.placement,
         );
         self.delegation_scene.update(root, workspace, dt);
@@ -1907,6 +1930,7 @@ impl Step {
             environment: drawn,
             carriage,
             avatar: self.coordinator.shown(),
+            home_ring,
         }
     }
 }

@@ -236,6 +236,7 @@ pub fn draw(
     renderer.set_landing(frame.landing);
     renderer.set_pads(&frame.pads);
     renderer.set_blink(frame.blink);
+    renderer.set_home_ring(Some(frame.home_ring));
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
     renderer.set_presentation_page(frame.card);
     renderer.set_presentation_content_page(frame.content);

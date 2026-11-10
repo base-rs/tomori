@@ -50,6 +50,8 @@ impl SpectatorView {
         input.swarm.visual = frame.interaction;
         // Its rings stand about the swarm wherever the space's environment puts it.
         input.swarm.set_anchor(self.feed.swarm_anchor());
+        // Its ring on the floor stays at home, wherever the agent goes.
+        input.renderer.set_home_ring(Some(self.feed.home_ring()));
         let right_marker = if frame.controllers[crate::controller::RIGHT].is_some()
             || frame.hands[crate::controller::RIGHT].is_some()
         {

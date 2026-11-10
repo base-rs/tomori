@@ -319,6 +319,144 @@ fn a_member_s_reach_holds_it_facing_whoever_it_gathers_about() {
     assert_eq!(overhead.slots(3).len(), 3);
 }
 
+/// The home anchor 4 m ahead of the arrival, facing it, standing in a ring.
+fn ringed() -> Anchor {
+    Anchor::new(
+        HOME,
+        Pose::at([0.0, 1.5, -4.0]).facing_towards([0.0, 1.6, 0.0]),
+    )
+    .with_formation(Formation::Ring)
+}
+
+/// How far `position` stands from the point of [`ringed`] about the vertical, and its angle there from the way to the
+/// arrival, round to the arrival's right.
+fn about(position: [f32; 3]) -> (f32, f32) {
+    let (x, z) = (position[0], position[2] + 4.0);
+    (x.hypot(z), x.atan2(z))
+}
+
+#[test]
+fn a_ring_stands_evenly_about_the_agent_the_sides_first_clear_of_it() {
+    let cluster = Cluster::new(&ringed());
+    assert_eq!(
+        (cluster.formation(), cluster.radius(), cluster.bounded()),
+        (Formation::Ring, Some(RING), true)
+    );
+    // The swarm's room and half a sign's reach, turned any way, fit within the ring.
+    assert!(KEPT + WORKER.width.hypot(WORKER.depth) / 2.0 <= RING);
+    let few = cluster.arrange(2);
+    assert_eq!(
+        (few.step(), few.compact(), few.more()),
+        (Step::Ring, false, None)
+    );
+    // Seven to a row, three rows without room: eighteen at full size, each in a slot of its own.
+    assert_eq!(few.capacity(), Some(21));
+    let eighteen = cluster.slots(18);
+    assert!(eighteen.iter().all(|slot| slot.scale == 1.0 && !slot.more));
+    for slot in &eighteen {
+        let (radius, _) = about(slot.position);
+        assert!((radius - RING).abs() < 1e-4, "{slot:?}");
+    }
+    // The first two at the agent's right and left, as the arrival sees them, the same way round, nearer before further.
+    let (right, left) = (eighteen[0].position, eighteen[1].position);
+    assert!(right[0] > 1.0 && (right[0] + left[0]).abs() < 1e-4);
+    assert!((right[2] - left[2]).abs() < 1e-4 && right[2] > -4.0);
+    // Its first row, a little below the agent's middle, seven evenly about it, one straight behind and none before it.
+    let mut row: Vec<f32> = eighteen[..7]
+        .iter()
+        .map(|slot| {
+            assert!((slot.position[1] - (1.5 - ROW_BELOW)).abs() < 1e-5);
+            about(slot.position).1
+        })
+        .collect();
+    row.sort_by(f32::total_cmp);
+    let step = std::f32::consts::TAU / 7.0;
+    for pair in row.windows(2) {
+        assert!((pair[1] - pair[0] - step).abs() < 1e-4, "{row:?}");
+    }
+    assert!(row.iter().all(|angle| angle.abs() >= step / 2.0 - 1e-4));
+    assert!(
+        row.iter()
+            .any(|angle| (angle.abs() - std::f32::consts::PI).abs() < 1e-4)
+    );
+    // In order, the sides first.
+    let side = |slot: &Slot| about(slot.position).1.cos().abs();
+    for pair in eighteen[..7].windows(2) {
+        assert!(side(&pair[0]) <= side(&pair[1]) + 1e-4);
+    }
+    // The row above stands a footprint higher, each place straight above the one below, as today's arc's rows do.
+    let above = eighteen[7];
+    assert!((above.position[1] - (1.5 - ROW_BELOW + ROW_APART)).abs() < 1e-5);
+    assert!(
+        (above.position[0] - right[0]).abs() < 1e-5 && (above.position[2] - right[2]).abs() < 1e-5
+    );
+    // Each reaches as far, turned any way, as it is seen from every side.
+    let (low, high) = cluster.reach(&eighteen[0]);
+    let half = WORKER.width.hypot(WORKER.depth) / 2.0;
+    assert!(
+        (high[0] - low[0] - 2.0 * half).abs() < 1e-4
+            && (high[2] - low[2] - 2.0 * half).abs() < 1e-4
+    );
+    // Beyond its rows, compact, then the rest gathered into one sign at its last slot.
+    let compact = cluster.arrange(22);
+    assert!(compact.compact() && compact.more().is_none() && compact.step() == Step::Ring);
+    let most = compact.capacity().unwrap();
+    assert_eq!(most, 33);
+    let over = cluster.arrange(most + 4);
+    assert_eq!(over.more(), Some(most - 1));
+    assert!(cluster.slot(&over, most + 2).more);
+}
+
+#[test]
+fn a_ring_in_room_rises_as_its_height_allows_and_where_it_holds_none_the_room_s_steps_stand() {
+    // Room for one row: seven at full size, then eleven compact, then the sign.
+    let low = Cluster::new(&ringed().with_extent(4.0, 1.0, 4.0));
+    assert_eq!(low.arrange(7).capacity(), Some(7));
+    let compact = low.arrange(8);
+    assert!(compact.compact() && compact.capacity() == Some(11));
+    assert_eq!(low.arrange(12).more(), Some(10));
+    // Room for four rows: twenty-eight at full size.
+    let tall = Cluster::new(&ringed().with_extent(4.0, 6.0, 4.0));
+    assert_eq!(tall.arrange(28).capacity(), Some(28));
+    assert!(!tall.arrange(28).compact());
+    // A room too narrow for the ring stands its members as the room's steps do, the ring still where it is drawn.
+    let narrow = Cluster::new(&ringed().with_extent(1.0, 2.0, 8.0));
+    assert_ne!(narrow.arrange(3).step(), Step::Ring);
+    assert_eq!(narrow.radius(), Some(RING));
+    // A ring elsewhere stands about its anchor's point, kept for whatever the anchor stands by.
+    let pod = Anchor::new("pod", Pose::at([2.0, 1.2, -6.0])).with_formation(Formation::Ring);
+    let pod = Cluster::new(&pod.with_extent(4.0, 2.0, 4.0));
+    for slot in pod.slots(5) {
+        let away = (slot.position[0] - 2.0).hypot(slot.position[2] + 6.0);
+        assert!((away - RING).abs() < 1e-4, "{slot:?}");
+    }
+}
+
+#[test]
+fn a_formation_is_sent_only_where_it_is_not_the_arc_and_one_unknown_is_laid_out_as_the_arc() {
+    let arc = serde_json::to_value(ahead(HOME)).unwrap();
+    assert!(arc.get("formation").is_none());
+    let ring = serde_json::to_value(ringed()).unwrap();
+    assert_eq!(ring["formation"], "ring");
+    assert_eq!(serde_json::from_value::<Anchor>(ring).unwrap(), ringed());
+    // From an older server, the arc; from a newer, one this build does not know, laid out as the arc.
+    let mut newer = serde_json::to_value(ahead(HOME)).unwrap();
+    newer["formation"] = "spiral".into();
+    let newer: Anchor = serde_json::from_value(newer).unwrap();
+    assert_eq!(newer.formation, Formation::Unknown);
+    let pose = Pose::at([0.0, 1.4, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+    assert_eq!(Cluster::new(&newer), Cluster::home(pose, None));
+    assert_eq!(
+        Cluster::home(pose, None).with_formation(Formation::Unknown),
+        Cluster::home(pose, None)
+    );
+    assert!(Formation::default().is_arc() && !Formation::Ring.is_arc());
+    // The arc's home, as Sky's, is today's arc, holding any number, and no ring is drawn for it.
+    let sky = Cluster::new(&ahead(HOME));
+    assert_eq!((sky.radius(), sky.bounded()), (None, false));
+    assert_eq!(sky.arrange(18).step(), Step::Home);
+}
+
 #[test]
 fn rows_stand_at_the_point_then_alternately_above_and_below() {
     assert_eq!(
@@ -342,11 +480,15 @@ fn any(random: &mut Random) -> Cluster {
         random.between(LEAST_EXTENT, MOST_EXTENT),
     );
     let home = random.next() < 0.4;
-    let anchor = Anchor::new(if home { HOME } else { "anchor" }, pose).with_extent(
+    let mut anchor = Anchor::new(if home { HOME } else { "anchor" }, pose).with_extent(
         extent.width,
         extent.height,
         extent.depth,
     );
+    // Some stand in a ring, at home or elsewhere.
+    if random.next() < 0.3 {
+        anchor = anchor.with_formation(Formation::Ring);
+    }
     let cluster = Cluster::new(&anchor);
     if home {
         cluster
@@ -509,7 +651,10 @@ fn gaps_close_only_where_nobody_moves_who_would_not_anyway_and_never_keep_a_clus
             if now == standing {
                 let stayed = before.len() - usize::from(arrives);
                 for (was, is) in before[..stayed].iter().zip(&members) {
-                    assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                    assert!(
+                        was == is || standing.more().is_some_and(|more| *was >= more),
+                        "{cluster:?} {before:?} {members:?} {held:?} {standing:?}"
+                    );
                 }
             }
             standing = now;

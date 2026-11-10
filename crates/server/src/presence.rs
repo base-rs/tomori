@@ -1423,6 +1423,9 @@ pub(crate) fn anchors(
                 }),
                 None => json!("the arc about home"),
             };
+            if anchor.formation == tomori_protocol::cluster::Formation::Ring {
+                listed["formation"] = json!("ring");
+            }
             if anchor.placed {
                 listed["placed"] = json!(true);
             }

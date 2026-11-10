@@ -343,6 +343,9 @@ pub struct Arrangement {
     /// The room the workers' arrangement may take, as the environment's `home` cluster anchor gives it, laid out by
     /// `tomori_protocol::cluster`; none for today's arc.
     pub extent: Option<tomori_protocol::cluster::Extent>,
+    /// How the workers' arrangement stands about its middle, as the environment's `home` cluster anchor says: the arc
+    /// by default, or a ring about the agent's home.
+    pub formation: tomori_protocol::cluster::Formation,
     pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
@@ -375,6 +378,41 @@ impl Arrangement {
     pub fn away(&self) -> bool {
         self.agent.position.distance(self.home.position) > AWAY
     }
+
+    /// The ring drawn on the floor at home, which stays there wherever the agent goes: about the workers' ring, where
+    /// they stand in one, on its radius, or else about the agent's home, [`FLOOR_RING`] across. See
+    /// `design/environments.md`.
+    pub fn home_ring(&self) -> HomeRing {
+        match self.formation {
+            tomori_protocol::cluster::Formation::Ring => HomeRing {
+                centre: self.workers.position,
+                radius: tomori_protocol::cluster::RING,
+            },
+            _ => HomeRing {
+                centre: self.home.position,
+                radius: FLOOR_RING,
+            },
+        }
+    }
+}
+
+/// The radius of the ring drawn on the floor about the agent's home where its workers stand on the arc, in metres.
+pub const FLOOR_RING: f32 = 1.25;
+
+/// The ring drawn on the floor at home, the agent's place, which never travels with it: the middle it stands about, in
+/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the floor beneath; and
+/// its radius, in metres. Workers standing in a ring about the agent's home stand on it. See `design/environments.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HomeRing {
+    pub centre: Vec3,
+    pub radius: f32,
+}
+
+impl Default for HomeRing {
+    /// About the agent's default home.
+    fn default() -> Self {
+        Arrangement::default().home_ring()
+    }
 }
 
 impl Default for Arrangement {
@@ -385,6 +423,7 @@ impl Default for Arrangement {
             home: Anchor::AGENT,
             workers: Anchor::AGENT,
             extent: None,
+            formation: tomori_protocol::cluster::Formation::Arc,
             audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
@@ -405,6 +444,7 @@ impl std::fmt::Debug for Arrangement {
             .field("home", &self.home)
             .field("workers", &self.workers)
             .field("extent", &self.extent)
+            .field("formation", &self.formation)
             .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)

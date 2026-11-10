@@ -2410,15 +2410,22 @@ impl Conversation {
             arrangement.home = home;
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
-        // The room the home cluster may take, where the environment gives it, with the home anchor where it says.
+        // The room the home cluster may take, and how it stands, where the environment gives them, with the home anchor
+        // where it says; room out of bounds is none.
         if let Some(home) = space
             .anchors
             .cluster(tomori_protocol::cluster::HOME)
-            .filter(|home| home.extent.is_some_and(|extent| extent.valid()))
+            .filter(|home| {
+                home.extent.is_some_and(|extent| extent.valid())
+                    || home.formation == tomori_protocol::cluster::Formation::Ring
+            })
             && let Some(workers) = anchor(Some(home.pose))
         {
             arrangement.workers = workers;
-            arrangement.extent = home.extent;
+            arrangement.extent = home.extent.filter(|extent| extent.valid());
+            if home.formation == tomori_protocol::cluster::Formation::Ring {
+                arrangement.formation = tomori_protocol::cluster::Formation::Ring;
+            }
         }
         arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
         // Turned to whoever began speaking to it, about the vertical. See `design/environments.md`.
@@ -2459,6 +2466,7 @@ impl Conversation {
         if space.summoned.is_some() && entourage {
             arrangement.workers = arrangement.agent;
             arrangement.extent = None;
+            arrangement.formation = tomori_protocol::cluster::Formation::Arc;
             arrangement.audience = space
                 .summoner
                 .map(glam::Vec3::from_array)

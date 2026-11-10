@@ -468,6 +468,8 @@ pub struct Scene {
     audience: Vec3,
     /// The room the home cluster may take, as the joined space's environment gives it, or none for today's arc.
     extent: Option<tomori_protocol::cluster::Extent>,
+    /// How the home cluster stands about its point, as the joined space's environment says: the arc, or a ring.
+    formation: tomori_protocol::cluster::Formation,
     /// The home cluster, about the origin, gathered about the audience, in the extent.
     cluster: tomori_protocol::cluster::Cluster,
     /// How the home cluster stands for the slots its live workers take: it changes only as the highest slot taken
@@ -528,6 +530,7 @@ impl Scene {
             origin: Anchor::AGENT,
             audience: crate::anchors::EYES,
             extent: None,
+            formation: tomori_protocol::cluster::Formation::Arc,
             cluster: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None),
             layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
             pointed_more: None,
@@ -554,6 +557,25 @@ impl Scene {
         extent: Option<tomori_protocol::cluster::Extent>,
         placement: Option<Placement>,
     ) {
+        self.arrange_as(
+            origin,
+            audience,
+            extent,
+            tomori_protocol::cluster::Formation::Arc,
+            placement,
+        );
+    }
+
+    /// Arrange the workers as [`Self::arrange`] does, the home cluster standing in `formation` about `origin`: on the
+    /// arc, or in a ring about it, as the joined space's environment says. See `design/environments.md`.
+    pub fn arrange_as(
+        &mut self,
+        origin: Anchor,
+        audience: Vec3,
+        extent: Option<tomori_protocol::cluster::Extent>,
+        formation: tomori_protocol::cluster::Formation,
+        placement: Option<Placement>,
+    ) {
         // One that has panicked is never called again: its workers stand on the arc.
         let placement = placement.filter(|placement| {
             !self
@@ -564,6 +586,7 @@ impl Scene {
         let same = self.origin == origin
             && self.audience == audience
             && self.extent == extent
+            && self.formation == formation
             && match (&self.placement, &placement) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -575,8 +598,9 @@ impl Scene {
         self.origin = origin;
         self.audience = audience;
         self.extent = extent;
+        self.formation = formation;
         self.placement = placement;
-        self.cluster = crate::anchors::cluster(origin, audience, extent);
+        self.cluster = crate::anchors::cluster(origin, audience, extent).with_formation(formation);
         self.layout = self
             .cluster
             .arrange(self.home_laid.unwrap_or_else(|| self.span(&[])));
@@ -752,7 +776,7 @@ impl Scene {
             .map(|worker| worker.slot)
             .chain(absent.iter().copied())
             .collect();
-        let bounded = self.extent.is_some() && self.placement.is_none();
+        let bounded = self.cluster.bounded() && self.placement.is_none();
         let changed = bounded && self.cluster.reslot(&mut members, &held, &self.layout);
         let mut moved = false;
         if changed {

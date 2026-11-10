@@ -166,15 +166,16 @@ impl Seating {
 }
 
 /// The `home` anchor among `anchors`, as a space's state sends them: about the workers anchor, or else the agent's
-/// home, in the room its environment gives it, if it gives any, as every client lays the home cluster out.
+/// home, in the room and formation its environment gives it, if it gives any, as every client lays the home cluster out.
 pub(crate) fn home(anchors: &tomori_protocol::Anchors) -> Anchor {
     let pose = anchors
         .workers
         .unwrap_or_else(|| crate::hub::agent_home(anchors));
     let mut home = Anchor::new(tomori_protocol::cluster::HOME, pose);
-    home.extent = anchors
-        .cluster(tomori_protocol::cluster::HOME)
-        .and_then(|home| home.extent);
+    if let Some(given) = anchors.cluster(tomori_protocol::cluster::HOME) {
+        home.extent = given.extent;
+        home.formation = given.formation;
+    }
     home
 }
 
