@@ -890,7 +890,7 @@ fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seat
         let preview = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW").map(std::path::PathBuf::from);
         let mut feedback = Feedback::new(Settings::default());
 
-        // At home: from where participants arrive, the agent by the coop and its wall beneath it, its workers about it.
+        // At home: from where participants arrive, the agent at its bench, its wall beneath it, its workers about it.
         let eyes = Vec3::from_array(SUMMONER);
         let agent_home = Vec3::from_array(carried(layout::AGENT_HOME).position);
         let towards = (agent_home - eyes).with_y(0.0).normalize();
