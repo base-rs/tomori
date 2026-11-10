@@ -129,14 +129,34 @@ fn line(body: &str, item: &Item) -> Result<usize, String> {
 
 /// `panel`, as `panels` describes it to the agent: its identity and id, its title, whether it is code, where it is, its
 /// age, and, for a text panel, its body and its items.
-fn described(projection: &Projection, panel: &Panel, updated: Option<u64>) -> Value {
+fn described(
+    projection: &Projection,
+    panel: &Panel,
+    updated: Option<u64>,
+    published: Option<(&str, Option<&str>)>,
+) -> Value {
+    let kind = if panel.code.is_some() {
+        "code"
+    } else if panel.chart.is_some() {
+        "chart"
+    } else {
+        "text"
+    };
     let mut described = json!({
         "panel": panel.id,
         "title": crate::presence::title(panel),
-        "kind": if panel.code.is_some() { "code" } else { "text" },
+        "kind": kind,
         "pinned": panel.pinned,
         "projected_seconds_ago": panel.age,
     });
+    // An environment's panel says so, with its environment's id for it and the id the agent may inspect it by.
+    if let Some((id, reference)) = published {
+        described["environment_panel"] = json!(id);
+        described["inspect_id"] = json!(
+            reference
+                .map(|reference| crate::space::inspectable(&projection.environment, reference))
+        );
+    }
     if let Some(slug) = &panel.slug {
         described["id"] = json!(slug);
     }
@@ -187,7 +207,8 @@ impl Hub {
                     .stage
                     .updated(walls.environment, &panel.id)
                     .map(|updated| now.saturating_sub(updated));
-                described(&projection, panel, updated)
+                let published = record.stage.published(walls.environment, &panel.id);
+                described(&projection, panel, updated, published)
             })
             .collect();
         Ok(json!({
@@ -234,6 +255,11 @@ impl Hub {
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
         let id = find(&projection, &update.panel)?;
+        if record.stage.published(walls.environment, &id).is_some() {
+            return Err(
+                "That panel is its environment's: only the environment updates it.".to_owned(),
+            );
+        }
         let mut content = record
             .stage
             .content(&walls, &id)

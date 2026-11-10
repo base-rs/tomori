@@ -68,6 +68,8 @@ fn lamps(space: &Space) -> Result<()> {
 }
 ```
 
+A side can also publish panels onto its environment's own walls, text or live charts, by ids it chooses, with `Space::publish(Panel::chart("pressure", "Scaling pressure", chart))`, updating one in place by publishing it again and taking it away with `Space::retract`; the chart is `tomori_environment::chart::Chart`, a small bounded spec of evenly spaced points, a gap where nothing was measured.
+
 [Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
 
 ## See Also

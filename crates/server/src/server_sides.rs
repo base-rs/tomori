@@ -30,8 +30,8 @@ pub(crate) struct Failure {
     pub space: String,
     /// Which binding of the space to its environment the side ran for, so that a failure after the space moved on is ignored.
     pub binding: u64,
-    /// What to show in the space.
-    pub message: String,
+    /// What to show in the space, or `None` for a side that finished, returning `Ok` before its space was done with it.
+    pub message: Option<String>,
 }
 
 /// What is told of a side that fails after it started.
@@ -231,11 +231,11 @@ impl ServerSides {
                 let space = started;
                 let outcome = catch_unwind(AssertUnwindSafe(|| side.run(&space)));
                 let message = match outcome {
-                    Ok(Ok(())) => return,
-                    Ok(Err(error)) => format!(
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(format!(
                         "The {label} environment failed: {}",
                         limits::truncate(error.message(), limits::ERROR_BYTES)
-                    ),
+                    )),
                     Err(panic) => {
                         let reason = panic
                             .downcast_ref::<&str>()
@@ -245,10 +245,11 @@ impl ServerSides {
                         log::error!(
                             "The {label} environment's server side panicked in space {id}: {reason}"
                         );
-                        format!("The {label} environment stopped unexpectedly.")
+                        Some(format!("The {label} environment stopped unexpectedly."))
                     }
                 };
-                // Stopping is not a failure: the space has moved on, or the server is stopping.
+                // Stopping is not a failure: the space has moved on, or the server is stopping. Finishing before then is
+                // told, with no message, so that what the side published rests.
                 if !space.cancellation().is_cancelled()
                     && let Some(report) = report.get()
                 {
@@ -268,10 +269,10 @@ impl ServerSides {
                 failures.push(Failure {
                     space: space.id.clone(),
                     binding,
-                    message: format!(
+                    message: Some(format!(
                         "The {} environment could not be started.",
                         environment.label()
-                    ),
+                    )),
                 });
             }
             running.insert(
@@ -508,7 +509,7 @@ mod tests {
             started.recv_timeout(Duration::from_secs(5)).unwrap();
             let failure = reported.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(failure.space, "space-1");
-            assert_eq!(failure.message, message);
+            assert_eq!(failure.message.as_deref(), Some(message));
             assert!(sides.is_current(&failure.space, failure.binding));
             assert!(!sides.is_current(&failure.space, failure.binding + 1));
             // Not started again for the same binding.
@@ -535,8 +536,22 @@ mod tests {
         sides.reconcile(&environments, &[wanted("space-2", "observe")]);
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let failure = reported.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(failure.message.len() < 2 * limits::ERROR_BYTES);
-        assert!(failure.message.contains(limits::TRUNCATED));
+        let message = failure.message.unwrap();
+        assert!(message.len() < 2 * limits::ERROR_BYTES);
+        assert!(message.contains(limits::TRUNCATED));
+    }
+
+    #[test]
+    fn a_side_that_finishes_before_its_space_is_done_is_told_without_a_message() {
+        let (sides, reported) = reporting();
+        let (environments, started) = offered(|_| Ok(()));
+        sides.reconcile(&environments, &[wanted("space-1", "observe")]);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let finished = reported.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            (finished.space.as_str(), finished.message),
+            ("space-1", None)
+        );
     }
 
     #[test]
@@ -558,8 +573,8 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].space, "space-1");
         assert_eq!(
-            failures[0].message,
-            "The Observe environment could not be started."
+            failures[0].message.as_deref(),
+            Some("The Observe environment could not be started.")
         );
         assert!(sides.is_current("space-1", failures[0].binding));
         assert_eq!(sides.alive(), 0);

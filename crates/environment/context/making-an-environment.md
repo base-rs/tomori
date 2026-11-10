@@ -46,6 +46,32 @@ let server = tomori_server::Server::builder().environment(
 let headset = tomori::Builder::default().register(observe_client::register);
 ```
 
+## Panels on its walls
+
+A server side can put panels on the walls its environment declares with `Environment::with_walls`, for everyone in the space, through its `Space`: text panels, and charts of live data, a small bounded spec of evenly spaced points with gaps where nothing was measured. It names each by an id of its own, publishes it again to update it in place, wherever participants moved it, and retracts it when it is done:
+
+```rust
+use tomori_environment::chart::{AxisLabel, Chart, Colour, Edge, Reference, Series, SeriesStyle, Shade};
+use tomori_environment::{Panel, Space};
+
+fn pressure(space: &Space, mean: Vec<Option<f32>>, greatest: Vec<Option<f32>>) {
+    let chart = Chart::new(181)
+        .with_labels(vec![AxisLabel::new(0, "-15 min"), AxisLabel::new(180, "now")])
+        .with_series(Series::new("mean", Colour::Teal, SeriesStyle::Line, mean))
+        .with_series(Series::new("greatest", Colour::Amber, SeriesStyle::Line, greatest))
+        .with_reference(Reference::new(1.0, "target", Colour::White))
+        .with_shade(Shade::new(Edge::Reference { index: 0 }, Edge::Series { index: 1 }, true, Colour::Red));
+    // Published as often as the side likes: one too soon after the last waits, and the latest wins.
+    let _ = space.publish(
+        Panel::chart("pressure", "Scaling pressure", chart)
+            .on_wall(0, Some(0))
+            .with_reference("chart/pressure"),
+    );
+}
+```
+
+The server bounds and cleans what it is given, shows a panel's updates about once a second, the latest winning, and shows a panel only while the side runs, keeping where it was for when the side publishes it again; participants move and dismiss it as any panel, and a dismissed one stays away until the side retracts it. Older clients show a chart's title and a summary of its latest values. See Tomori's `design/environments.md` and `design/projection.md`.
+
 ## Where participants arrive, the agent lives and the Tomori wall stands
 
 An environment's registration gives fixed homes, each a pose in the environment's own coordinates, as its scenery is drawn, facing along its +Z, the way it looks, which `tomori_protocol::Pose::at(spot).facing_towards(target)` makes: where participants arrive, with `Environment::with_arrival`, and the agent's home, with `Environment::with_agent`, at least 1.4 m above the floor, beneath which the Tomori wall's home stands by default, 0.88 m below the swarm's middle, facing the way the agent faces (`tomori_protocol::entourage::wall_beneath`), or, only where the wall must stand elsewhere, as beneath an agent too high or far to read it there, the Tomori wall's, with `Environment::with_stage`; and, if it likes, the middle of its delegated workers' arrangement, with `Environment::with_workers`, otherwise the agent's home. A space's coordinates always have home, where participants arrive, at their origin facing −Z, so Tomori carries the environment's scenery, walkable surfaces, client side, anchors and walls into them; the environment's crates never see the space's coordinates. The Tomori wall stays at its home, and the agent appears at its home and stays there until a participant summons it, its wall going beneath it. Check, in the environment's tests, that the wall can be read and the agent seen from the arrival with `tomori_environment::sightlines`, the wall where `entourage::wall_beneath` stands it, on the arrival's floor, unless you give a `stage`:

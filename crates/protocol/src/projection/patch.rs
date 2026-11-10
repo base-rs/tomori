@@ -308,6 +308,7 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         slug,
         image,
         revision,
+        chart,
     } = a;
     *id == b.id
         && *title == b.title
@@ -317,6 +318,7 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         && *slug == b.slug
         && *image == b.image
         && *revision == b.revision
+        && *chart == b.chart
 }
 
 /// Where an op puts what it names: right after another, by its identity, or first.

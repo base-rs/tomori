@@ -459,3 +459,125 @@ fn marks_stand_in_for_their_shapes_and_join_as_lines_do() {
         [Shape::Ring { .. }, Shape::Disc { radius: 1.3, .. }]
     ));
 }
+
+#[test]
+fn a_quad_is_filled_to_its_corners_and_nothing_where_it_is_clear_or_not_finite() {
+    let corners = [[0.0, 2.0], [10.0, 0.0], [0.0, 8.0], [10.0, 8.0]];
+    let quad = pieces(Shape::Quad {
+        corners,
+        color: WHITE,
+    });
+    assert_eq!(quad.len(), 1);
+    assert_eq!(quad[0].corners, corners);
+    assert_eq!(quad[0].uv, [SOLID; 4]);
+    assert!(
+        pieces(Shape::Quad {
+            corners,
+            color: [1.0, 1.0, 1.0, 0.0],
+        })
+        .is_empty()
+    );
+    let mut broken = corners;
+    broken[3][1] = f32::NAN;
+    assert!(
+        pieces(Shape::Quad {
+            corners: broken,
+            color: WHITE,
+        })
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_stroke_and_a_dot_are_one_piece_each_and_nothing_where_they_cannot_be_drawn() {
+    let stroke = pieces(Shape::Stroke {
+        from: [0.0, 0.0],
+        to: [10.0, 10.0],
+        width: 1.5,
+        color: WHITE,
+    });
+    assert_eq!(stroke.len(), 1);
+    // Across its length it is drawn from the wedge's band, as a thin rule is, along it from end to end.
+    let [low, high, column] = band(0.75, SCALE);
+    assert_eq!(
+        stroke[0].uv,
+        [[column, low], [column, low], [column, high], [column, high]]
+    );
+    // Wider than the wedge's band, it is drawn as wide as the band allows.
+    let wide = pieces(Shape::Stroke {
+        from: [0.0, 0.0],
+        to: [10.0, 0.0],
+        width: 20.0,
+        color: WHITE,
+    });
+    assert_eq!(wide[0].uv[0][0], band(STROKE_WIDTH / 2.0, SCALE)[2]);
+    let dot = pieces(Shape::Dot {
+        centre: [5.0, 5.0],
+        radius: 1.5,
+        color: WHITE,
+    });
+    assert_eq!(dot.len(), 1);
+    let [left, top, right, bottom] = bounds(&dot[0]);
+    assert!(left < 3.5 && right > 6.5 && top < 3.5 && bottom > 6.5);
+    // Nothing where it has no length, no size, no colour or is not finite; a rule or disc not finite, nothing either.
+    for shape in [
+        Shape::Stroke {
+            from: [1.0, 1.0],
+            to: [1.0, 1.0],
+            width: 1.0,
+            color: WHITE,
+        },
+        Shape::Stroke {
+            from: [0.0, 0.0],
+            to: [1.0, 1.0],
+            width: 0.0,
+            color: WHITE,
+        },
+        Shape::Stroke {
+            from: [0.0, 0.0],
+            to: [1.0, 1.0],
+            width: 1.0,
+            color: [1.0, 1.0, 1.0, 0.0],
+        },
+        Shape::Stroke {
+            from: [0.0, f32::NAN],
+            to: [1.0, 1.0],
+            width: 1.0,
+            color: WHITE,
+        },
+        Shape::Stroke {
+            from: [0.0, 0.0],
+            to: [f32::INFINITY, 1.0],
+            width: 1.0,
+            color: WHITE,
+        },
+        Shape::Dot {
+            centre: [0.0, 0.0],
+            radius: 0.0,
+            color: WHITE,
+        },
+        Shape::Dot {
+            centre: [0.0, 0.0],
+            radius: 1.0,
+            color: [1.0, 1.0, 1.0, 0.0],
+        },
+        Shape::Dot {
+            centre: [f32::NAN, 0.0],
+            radius: 1.0,
+            color: WHITE,
+        },
+        Shape::Rule {
+            from: [0.0, f32::NAN],
+            to: [5.0, 0.0],
+            width: 1.0,
+            color: WHITE,
+        },
+        Shape::Disc {
+            centre: [f32::INFINITY, 0.0],
+            radius: 2.0,
+            color: WHITE,
+        },
+    ] {
+        assert!(pieces(shape).is_empty(), "{shape:?}");
+    }
+}

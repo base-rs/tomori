@@ -589,7 +589,8 @@ impl ImageChunk {
 /// A panel: a title, a body, and a little metadata, all bounded and cleaned by the server. A text panel's body is
 /// Markdown-lite text, which is drawn as text and never as HTML; a code panel's, with [`Panel::code`], the first lines
 /// of a block of code, drawn as they are, coloured by its spans; an image panel's, with [`Panel::image`], its image's
-/// caption, drawn below it.
+/// caption, drawn below it; a chart panel's, with [`Panel::chart`], a plain summary of its chart, drawn only by a client
+/// that cannot draw the chart.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Panel {
@@ -625,6 +626,11 @@ pub struct Panel {
     /// an item, so that a tick never lands on another item of a body changed since. 0, and absent, from older servers.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub revision: u64,
+    /// What makes it a chart panel, if it is one: its chart, which its environment's server side published. Its body is
+    /// a summary of what the chart shows now, in plain text, which an older client, which knows no charts, draws as a
+    /// text panel's. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<Box<crate::chart::Chart>>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -651,12 +657,19 @@ impl Panel {
             slug: None,
             image: None,
             revision: 0,
+            chart: None,
         }
     }
 
     /// The panel at `revision` of its content.
     pub fn with_revision(mut self, revision: u64) -> Self {
         self.revision = revision;
+        self
+    }
+
+    /// The panel, a chart panel of `chart`, its body a summary of it.
+    pub fn with_chart(mut self, chart: crate::chart::Chart) -> Self {
+        self.chart = Some(Box::new(chart));
         self
     }
 

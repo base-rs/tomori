@@ -2901,7 +2901,7 @@ fn a_failure_of_a_side_that_is_no_longer_current_or_has_no_space_shows_nowhere()
     let failure = |space: &str, binding: u64| crate::server_sides::Failure {
         space: space.to_owned(),
         binding,
-        message: "The Observe environment failed.".to_owned(),
+        message: Some("The Observe environment failed.".to_owned()),
     };
 
     // A failure of a space that never ran a side is ignored.
@@ -2945,7 +2945,7 @@ fn a_space_in_an_environment_with_a_server_side_shows_its_failure() {
     hub.side_failed(crate::server_sides::Failure {
         space: id.clone(),
         binding,
-        message: "The Observe environment failed.".to_owned(),
+        message: Some("The Observe environment failed.".to_owned()),
     });
     let shown = hub
         .lock()
@@ -3640,6 +3640,458 @@ fn a_binding_s_first_update_reaches_those_in_the_space_as_its_state() {
             ("event", serde_json::json!({"by": 2})),
         ]
     );
+}
+
+#[test]
+fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
+    use tomori_environment::Outlet;
+    use tomori_environment::chart::{Chart, Colour, Series, SeriesStyle};
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let board = upright([3.0, 1.4, -4.0]);
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([board])
+            .with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let binding = hub.server_sides.binding(&id).unwrap();
+    let outlet = |binding: u64| SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding,
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let chart = |latest: f32| {
+        tomori_environment::Panel::chart(
+            "pressure",
+            "Pressure",
+            Chart::new(2).with_series(Series::new(
+                "mean",
+                Colour::Teal,
+                SeriesStyle::Line,
+                vec![Some(0.5), Some(latest)],
+            )),
+        )
+        .with_reference("chart/pressure")
+    };
+    // Published, it is on the environment's wall for everyone, a chart with its summary for older clients.
+    assert_eq!(outlet(binding).publish(chart(0.7)), Ok(()));
+    let shown = ada.projections().pop().expect("sent as it is published");
+    let panel = shown.panels[0].clone();
+    assert_eq!(
+        panel.place,
+        tomori_protocol::Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0
+        }
+    );
+    assert_eq!(panel.body, "mean: 0.7 now");
+    assert!(panel.chart.is_some());
+    // The environment's wall is locked, as the environment has it, which keeps nothing of its own off it.
+    let wall = |shown: &tomori_protocol::Projection| {
+        shown
+            .walls
+            .iter()
+            .find(|wall| wall.id == "environment-0")
+            .unwrap()
+            .is_locked()
+    };
+    assert!(wall(&shown));
+    // Updated within a second, the update waits, the newest replacing the one before in its place; another panel, due
+    // itself, goes at once while the space has changes left, rather than waiting behind it.
+    assert_eq!(outlet(binding).publish(chart(0.8)), Ok(()));
+    assert_eq!(outlet(binding).publish(chart(0.85)), Ok(()));
+    assert!(ada.projections().is_empty());
+    let rota = tomori_environment::Panel::text("rota", "Rota", "Feed the hens");
+    assert_eq!(outlet(binding).publish(rota.clone()), Ok(()));
+    let shown = ada.projections().pop().unwrap();
+    assert_eq!(shown.panels.len(), 2);
+    assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.7 now");
+    // As soon as it may be, at the hub's next sweep, the latest arrives.
+    let soon = Instant::now() + Duration::from_secs(1);
+    hub.flush_publishes(soon);
+    let shown = ada.projections().pop().unwrap();
+    assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.85 now");
+    // The same again changes nothing, waits for nothing and costs nothing.
+    assert_eq!(outlet(binding).publish(chart(0.85)), Ok(()));
+    hub.flush_publishes(soon + Duration::from_secs(1));
+    assert!(ada.projections().is_empty());
+    // An update that could never be made is refused at once, though it would have waited: onto a wall the environment
+    // does not declare, or into a slot its wall has not.
+    let note = tomori_environment::Panel::text("note", "Note", "x");
+    assert_eq!(outlet(binding).publish(note.clone()), Ok(()));
+    assert_eq!(ada.projections().pop().unwrap().panels.len(), 3);
+    for refused in [Some(3), None].map(|wall| {
+        let panel = tomori_environment::Panel::text("note", "Note", "y");
+        match wall {
+            Some(wall) => panel.on_wall(wall, None),
+            None => panel.on_wall(0, Some(9)),
+        }
+    }) {
+        assert!(outlet(binding).publish(refused).is_err());
+    }
+    hub.flush_publishes(soon + Duration::from_secs(2));
+    assert!(ada.projections().is_empty());
+    assert_eq!(outlet(binding).retract("note"), Ok(()));
+    assert_eq!(ada.projections().pop().unwrap().panels.len(), 2);
+    // One waiting that the stage refuses once it may be made, its wall having filled with panels participants
+    // arranged meanwhile, is dropped, and said once for each panel.
+    let late = |id: &str| {
+        crate::stage::Publishing::new(tomori_environment::Panel::text(id, "Late", "x")).unwrap()
+    };
+    let arranged = {
+        let mut state = hub.lock();
+        let record = state.space_mut(&id).unwrap();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let board = crate::stage::Destination::Wall {
+            wall: "environment-0".into(),
+            slot: None,
+        };
+        let mut arranged = Vec::new();
+        for index in 0..6 {
+            let note = crate::stage::Content::parse(&format!("title: N{index}\n---\nx")).unwrap();
+            arranged.push(record.stage.project_to(&walls, note, &board, 0));
+        }
+        let shown: Vec<String> = record
+            .stage
+            .view(&id, &walls, 0)
+            .panels
+            .into_iter()
+            .map(|panel| panel.id)
+            .collect();
+        for panel in &shown {
+            record
+                .stage
+                .place(
+                    &walls,
+                    panel,
+                    crate::stage::Target::Wall("environment-0".into()),
+                )
+                .unwrap();
+        }
+        let channel = record.channel.as_mut().unwrap();
+        channel.pending.extend([late("late"), late("late")]);
+        arranged
+    };
+    hub.flush_publishes(soon + Duration::from_secs(4));
+    {
+        let state = hub.lock();
+        let channel = state.space(&id).unwrap().channel.as_ref().unwrap();
+        assert!(channel.pending.is_empty());
+        assert_eq!(channel.refused.iter().collect::<Vec<_>>(), ["late"]);
+    }
+    // Retracted, it is forgotten, so that a later refusal of it is said again.
+    assert_eq!(outlet(binding).retract("late"), Ok(()));
+    assert!(
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .unwrap()
+            .refused
+            .is_empty()
+    );
+    // Made at once onto the full wall, it is refused, saying so.
+    assert_eq!(
+        outlet(binding).publish(tomori_environment::Panel::text("full", "Full", "x")),
+        Err("That wall is full.".into())
+    );
+    let _ = ada.projections();
+    {
+        let mut state = hub.lock();
+        let record = state.space_mut(&id).unwrap();
+        // Those of them still there, the wall having given up the first as the last came.
+        for panel in arranged {
+            let _ = record.stage.dismiss("yard", &panel);
+        }
+    }
+    // Refused outright: what the stage refuses, and what cleaning refuses, before anything is kept.
+    assert!(
+        outlet(binding)
+            .publish(tomori_environment::Panel::text("far", "", "").on_wall(3, None))
+            .is_err()
+    );
+    assert!(
+        outlet(binding)
+            .publish(tomori_environment::Panel::text("a b", "", ""))
+            .is_err()
+    );
+    // Pointing at it tells the agent whose it is and the id it may inspect it by.
+    let described = {
+        let state = hub.lock();
+        let record = state.space(&id).unwrap();
+        let environments = hub.environments();
+        record
+            .stage
+            .describe(&environments.walls("yard"), &panel.id, None, 0)
+            .unwrap()
+    };
+    assert!(
+        described.contains("the yard environment's, id yard:chart/pressure"),
+        "{described}"
+    );
+    // Another binding's side keeps nothing.
+    assert_eq!(outlet(binding + 1).publish(rota.clone()), Ok(()));
+    assert_eq!(outlet(binding + 1).retract("rota"), Ok(()));
+    assert_eq!(ada.projection().panels.len(), 2);
+    // A participant moves it on the locked wall, as on any wall, and an update leaves it where they put it.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: Some("environment-0".into()),
+        slot: Some(4),
+        pose: None,
+    });
+    let shown = ada.projections().pop().unwrap();
+    assert!(wall(&shown));
+    let on = |slot| tomori_protocol::Place::Wall {
+        wall: "environment-0".into(),
+        slot,
+    };
+    assert_eq!(shown.panel(&panel.id).unwrap().place, on(4));
+    hub.flush_publishes(soon + Duration::from_secs(3));
+    assert_eq!(outlet(binding).publish(chart(0.9)), Ok(()));
+    let shown = ada.projections().pop().unwrap();
+    let updated = shown.panel(&panel.id).unwrap();
+    assert_eq!(
+        (updated.body.as_str(), &updated.place),
+        ("mean: 0.9 now", &on(4))
+    );
+    // A participant dismisses it; it stays away as the side updates it, which waits for nothing.
+    ada.send(ClientMessage::DismissPanel {
+        panel: panel.id.clone(),
+    });
+    assert_eq!(ada.projections().pop().unwrap().panels.len(), 1);
+    assert_eq!(outlet(binding).publish(chart(0.9)), Ok(()));
+    hub.flush_publishes(soon + Duration::from_secs(3));
+    assert!(ada.projections().is_empty());
+    // Retracted, the rota goes; retracting what is not there sends nothing.
+    assert_eq!(outlet(binding).retract("rota"), Ok(()));
+    assert!(ada.projections().pop().unwrap().panels.is_empty());
+    assert_eq!(outlet(binding).retract("gone"), Ok(()));
+    assert!(ada.projections().is_empty());
+    // Retracted and published again at once, it is back.
+    assert_eq!(outlet(binding).retract("pressure"), Ok(()));
+    assert_eq!(outlet(binding).publish(chart(1.0)), Ok(()));
+    assert_eq!(ada.projections().pop().unwrap().panels.len(), 1);
+    assert_eq!(outlet(binding).retract("pressure"), Ok(()));
+    assert!(ada.projections().pop().unwrap().panels.is_empty());
+    // With no changes left, updates wait, at most so many, one a panel.
+    hub.lock()
+        .space_mut(&id)
+        .unwrap()
+        .channel
+        .as_mut()
+        .unwrap()
+        .publishes = Some(crate::channel::Publishes::spent(Instant::now()));
+    for index in 0..crate::stage::PUBLISHED {
+        let panel = tomori_environment::Panel::text(format!("w{index}"), "", "x");
+        assert_eq!(outlet(binding).publish(panel), Ok(()));
+    }
+    assert!(
+        outlet(binding)
+            .publish(tomori_environment::Panel::text("over", "", "x"))
+            .is_err()
+    );
+    // A retraction takes away what waits for its panel.
+    assert_eq!(outlet(binding).retract("w3"), Ok(()));
+    let waiting = |hub: &Arc<Hub>| {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .unwrap()
+            .pending
+            .len()
+    };
+    assert_eq!(waiting(&hub), crate::stage::PUBLISHED - 1);
+    // Made as soon as they may be: those the stage takes go up, at the next sweep.
+    let before = ada.projection().panels.len();
+    hub.flush_publishes(soon + Duration::from_secs(10));
+    assert!(ada.projections().pop().unwrap().panels.len() > before);
+    // The same again, when it may be made, changes nothing.
+    hub.lock()
+        .space_mut(&id)
+        .unwrap()
+        .channel
+        .as_mut()
+        .unwrap()
+        .publishes = Some(crate::channel::Publishes::new(Instant::now()));
+    let w0 = tomori_environment::Panel::text("w0", "", "x");
+    assert_eq!(outlet(binding).publish(w0), Ok(()));
+    assert!(ada.projections().is_empty());
+    // Messages, whatever they change, are held to a rate too.
+    let refused = (0..crate::channel::MESSAGE_BURST as usize + 1)
+        .map(|_| outlet(binding).retract("gone"))
+        .filter(Result::is_err)
+        .count();
+    assert!(refused > 0);
+    assert!(
+        outlet(binding)
+            .publish(tomori_environment::Panel::text("late", "", "x"))
+            .is_err()
+    );
+    // A binding's first change may be a retraction.
+    hub.lock().space_mut(&id).unwrap().channel = None;
+    assert_eq!(outlet(binding).retract("gone"), Ok(()));
+    // Its side failing with an update waiting: what it published rests, at once and once, the waiting update is
+    // dropped, and from then on, whatever thread it left calls, it changes no panels.
+    let shown = ada.projection().panels.len();
+    assert!(shown > 0);
+    hub.lock()
+        .space_mut(&id)
+        .unwrap()
+        .channel
+        .as_mut()
+        .unwrap()
+        .publishes = Some(crate::channel::Publishes::spent(Instant::now()));
+    let update = tomori_environment::Panel::text("w0", "", "y");
+    assert_eq!(outlet(binding).publish(update.clone()), Ok(()));
+    for _ in 0..2 {
+        hub.side_failed(crate::server_sides::Failure {
+            space: id.clone(),
+            binding,
+            message: Some("The yard environment failed.".into()),
+        });
+    }
+    let projections = ada.projections();
+    assert_eq!(projections.len(), 1);
+    assert!(projections[0].panels.is_empty());
+    hub.flush_publishes(soon + Duration::from_secs(20));
+    assert!(ada.projections().is_empty());
+    assert!(outlet(binding).publish(update.clone()).is_err());
+    assert!(outlet(binding).retract("w0").is_err());
+    assert!(ada.projections().is_empty());
+    // Run again, for a new binding, its side publishes as before, its panels back where they rested.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".into(),
+    });
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "yard".into(),
+    });
+    ada.read();
+    let again = hub.server_sides.binding(&id).unwrap();
+    assert_ne!(again, binding);
+    assert_eq!(outlet(again).publish(update), Ok(()));
+    let back = ada.projections().pop().unwrap();
+    assert_eq!(back.panels.len(), 1);
+    assert_eq!(back.panels[0].body, "y");
+    let orphan = outlet(again);
+    hub.shutdown();
+    drop(ada);
+    drop(_commands);
+    drop(hub);
+    assert_eq!(orphan.publish(rota), Ok(()));
+    assert_eq!(orphan.retract("rota"), Ok(()));
+}
+
+#[test]
+fn every_panel_s_latest_update_arrives_in_turn_when_a_side_updates_more_than_the_space_may_change()
+{
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])])
+            .with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    // Eight panels, each updated every second in the same order: twice the 4 changes a second the space may make.
+    let start = Instant::now();
+    for second in 0..12_u64 {
+        for panel in 0..8_u64 {
+            let update = tomori_environment::Panel::text(
+                format!("p{panel}"),
+                format!("P{panel}"),
+                second.to_string(),
+            )
+            .on_wall(panel as u32 % 2, None);
+            let at = start + Duration::from_secs(second) + Duration::from_millis(panel);
+            assert_eq!(hub.channel_publish_at(&outlet, update, at), Ok(()));
+        }
+        hub.flush_publishes(start + Duration::from_secs(second) + Duration::from_millis(500));
+        // Every panel shows an update at most 2 seconds old: none is starved.
+        let shown = ada.projection();
+        for panel in 0..8 {
+            let value: u64 = shown
+                .panels
+                .iter()
+                .find(|shown| shown.title == format!("P{panel}"))
+                .map(|shown| shown.body.parse().unwrap())
+                .unwrap();
+            assert!(value + 2 >= second, "panel {panel} at {second}: {value}");
+        }
+    }
+}
+
+/// A side that publishes a panel, then finishes.
+struct Finishing;
+
+impl tomori_environment::ServerSide for Finishing {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        space.publish(tomori_environment::Panel::text("done", "Done", "x"))
+    }
+}
+
+#[test]
+fn a_side_that_finishes_puts_its_panels_to_rest_and_changes_none_after() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0])])
+            .with_server_side(Finishing),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let binding = hub.server_sides.binding(&id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while hub.lock().space(&id).unwrap().stopped != Some(binding) {
+        assert!(Instant::now() < deadline, "the side never finished");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    assert!(ada.projection().panels.is_empty());
+    // A thread it left behind changes nothing.
+    let straggler = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding,
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    use tomori_environment::Outlet;
+    assert!(
+        straggler
+            .publish(tomori_environment::Panel::text("done", "Done", "y"))
+            .is_err()
+    );
+    assert!(straggler.retract("done").is_err());
+    assert!(ada.projection().panels.is_empty());
 }
 
 impl Client {

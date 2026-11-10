@@ -415,6 +415,18 @@ impl tomori_environment::Outlet for SpaceOutlet {
             .upgrade()
             .map_or(Ok(()), |hub| hub.channel_describe(self, objects))
     }
+
+    fn publish(&self, panel: tomori_environment::Panel) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_publish(self, panel))
+    }
+
+    fn retract(&self, id: &str) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_retract(self, id))
+    }
 }
 
 pub struct Hub {
@@ -673,6 +685,9 @@ struct SpaceRecord {
     restoring: bool,
     /// What the server side of the space's environment keeps for it, for its current binding only. See `design/environments.md`.
     channel: Option<crate::channel::Channel>,
+    /// The binding of the space's environment whose server side has stopped, failed or finished, which changes no
+    /// panels from then on, any thread it left running included, until a side is run again for a new binding.
+    stopped: Option<u64>,
     /// The space's projection walls and the panels on them. See `design/projection.md`.
     stage: crate::stage::Stage,
     /// The space's projection revision, raised with each change to what it projects, which patches are sent from and
@@ -1982,6 +1997,223 @@ impl Hub {
         Ok(())
     }
 
+    /// The panel the side of `outlet`'s binding publishes onto its environment's own walls, or updates in place, for
+    /// everyone in the space, held to the rates [`crate::channel::Publishes`] keeps: an update that comes too soon waits,
+    /// replacing any update of the same panel waiting before it, and is made as soon as it may be, at the next change the
+    /// side makes or the hub's next sweep, so that the latest always arrives. A new panel, which takes a slot, is kept
+    /// with the space; an update in place, which its side makes again, is not written each time. See
+    /// `design/environments.md`.
+    fn channel_publish(
+        &self,
+        outlet: &SpaceOutlet,
+        panel: tomori_environment::Panel,
+    ) -> tomori_environment::Result<()> {
+        self.channel_publish_at(outlet, panel, Instant::now())
+    }
+
+    /// [`Self::channel_publish`] at `now`. Updates waiting that are due are made first, the oldest first, and a fresh one
+    /// after them, at once where the changes left allow it, and otherwise waits behind them, while an update of a panel
+    /// already waiting takes its place there, so that every panel's latest update is made in turn: with the changes a space may make, 4 a second, a side updating its 8 panels every second has each
+    /// one's latest made within 2 seconds, and at the next sweep after.
+    fn channel_publish_at(
+        &self,
+        outlet: &SpaceOutlet,
+        panel: tomori_environment::Panel,
+        now: Instant,
+    ) -> tomori_environment::Result<()> {
+        let publishing = crate::stage::Publishing::new(panel)?;
+        let added = {
+            let mut state = self.lock();
+            Self::running(&state, outlet)?;
+            let Some(channel) = self.current_channel(&mut state, outlet) else {
+                return Ok(());
+            };
+            channel
+                .publishes
+                .get_or_insert_with(|| crate::channel::Publishes::new(now))
+                .message(now)?;
+            // Refused at once, as it would be made now, for what can be known before it is: its wall, its slot and
+            // the most an environment shows, counting those waiting.
+            let waiting: Vec<String> = channel
+                .pending
+                .iter()
+                .map(|waiting| waiting.id().to_owned())
+                .collect();
+            {
+                let record = state.space(&outlet.space).expect("its channel is current");
+                let environments = self.environments();
+                let walls = environments.walls(&record.model.environment);
+                let waiting: Vec<&str> = waiting.iter().map(String::as_str).collect();
+                record.stage.admits(&walls, &publishing, &waiting)?;
+            }
+            let channel = state
+                .space_mut(&outlet.space)
+                .and_then(|record| record.channel.as_mut())
+                .expect("its channel is current");
+            if let Some(waiting) = channel
+                .pending
+                .iter_mut()
+                .find(|waiting| waiting.id() == publishing.id())
+            {
+                *waiting = publishing;
+                self.flush_space(&mut state, &outlet.space, now)
+            } else {
+                // Those waiting that are due first; then this one, at once where the changes left allow it.
+                let added = self.flush_space(&mut state, &outlet.space, now);
+                self.publish_now(&mut state, &outlet.space, publishing, now)? || added
+            }
+        };
+        if added {
+            self.keep();
+        }
+        Ok(())
+    }
+
+    /// Why the side of `outlet`'s binding may change no panels: it has stopped, failed or finished, though a thread it
+    /// left may still call.
+    fn running(state: &HubState, outlet: &SpaceOutlet) -> tomori_environment::Result<()> {
+        if state
+            .space(&outlet.space)
+            .is_some_and(|record| record.stopped == Some(outlet.binding))
+        {
+            return Err("The environment's side has stopped in this space, so it changes no panels until it runs again.".into());
+        }
+        Ok(())
+    }
+
+    /// Make `publishing` in the space `space`, whose channel is current, at `now`, if its rates allow, or else let it wait,
+    /// unless it would change nothing. Returns whether it put a new panel on a wall, or why the stage refused it.
+    fn publish_now(
+        &self,
+        state: &mut HubState,
+        space: &str,
+        publishing: crate::stage::Publishing,
+        now: Instant,
+    ) -> tomori_environment::Result<bool> {
+        let environments = self.environments();
+        let record = state.space_mut(space).expect("its channel is current");
+        let walls = environments.walls(&record.model.environment);
+        let channel = record.channel.as_mut().expect("its channel is current");
+        let publishes = channel
+            .publishes
+            .as_mut()
+            .expect("made as its side first published");
+        let (id, bytes) = (publishing.id().to_owned(), publishing.bytes());
+        if !publishes.ready(now, Some(&id), bytes) {
+            if record.stage.unchanged(walls.environment, &publishing) {
+                return Ok(false);
+            }
+            channel.pending.push(publishing);
+            return Ok(false);
+        }
+        let change = record
+            .stage
+            .publish(&walls, publishing, crate::cards::unix_now())?;
+        // Taken, so that a later refusal of it is said again.
+        channel.accept(&id);
+        if change == crate::stage::Change::Unchanged {
+            return Ok(false);
+        }
+        channel
+            .publishes
+            .as_mut()
+            .expect("made as its side first published")
+            .charge(now, Some(&id), bytes);
+        state.touch_projection(space);
+        Ok(change == crate::stage::Change::Added)
+    }
+
+    /// Make the updates waiting for the space `space`'s side that its rates allow at `now`, keeping the rest waiting, and
+    /// dropping any the stage now refuses. Returns whether any put a new panel on a wall.
+    fn flush_space(&self, state: &mut HubState, space: &str, now: Instant) -> bool {
+        let waiting = state
+            .space_mut(space)
+            .and_then(|record| record.channel.as_mut())
+            .map(|channel| std::mem::take(&mut channel.pending))
+            .unwrap_or_default();
+        let mut added = false;
+        for publishing in waiting {
+            let id = publishing.id().to_owned();
+            match self.publish_now(state, space, publishing, now) {
+                Ok(new) => added |= new,
+                // Refused for what changed while it waited, such as its wall filling: said once for each panel.
+                Err(error) => {
+                    let first = state
+                        .space_mut(space)
+                        .and_then(|record| record.channel.as_mut())
+                        .is_some_and(|channel| channel.refuse(&id));
+                    if first {
+                        log::warn!(
+                            "An update of panel {id} in space {space}, made once it could be, was refused: {error}"
+                        );
+                    }
+                }
+            }
+        }
+        added
+    }
+
+    /// Make every side's waiting panel updates that their rates allow at `now`, as the hub sweeps.
+    pub(crate) fn flush_publishes(&self, now: Instant) {
+        let added = {
+            let mut state = self.lock();
+            let waiting: Vec<String> = state
+                .spaces
+                .iter()
+                .filter(|record| {
+                    record
+                        .channel
+                        .as_ref()
+                        .is_some_and(|channel| !channel.pending.is_empty())
+                })
+                .map(|record| record.model.id.clone())
+                .collect();
+            // Every space's, not stopping at the first that adds a panel.
+            let mut added = false;
+            for space in &waiting {
+                added |= self.flush_space(&mut state, space, now);
+            }
+            added
+        };
+        if added {
+            self.keep();
+        }
+    }
+
+    /// Take away the panel the side of `outlet`'s binding published as `id`, and any update of it waiting, so that it
+    /// may be published again at once; see [`Self::channel_publish`]. A retraction is never kept waiting: it costs a
+    /// change, which later ones then wait for, but only where it took a panel away.
+    fn channel_retract(&self, outlet: &SpaceOutlet, id: &str) -> tomori_environment::Result<()> {
+        {
+            let mut state = self.lock();
+            let now = Instant::now();
+            Self::running(&state, outlet)?;
+            let Some(channel) = self.current_channel(&mut state, outlet) else {
+                return Ok(());
+            };
+            let publishes = channel
+                .publishes
+                .get_or_insert_with(|| crate::channel::Publishes::new(now));
+            publishes.message(now)?;
+            publishes.forget(id);
+            channel.pending.retain(|waiting| waiting.id() != id);
+            channel.accept(id);
+            let record = state.space_mut(&outlet.space).expect("found above");
+            if !record.stage.retract(&outlet.environment, id) {
+                return Ok(());
+            }
+            let channel = record.channel.as_mut().expect("found above");
+            channel
+                .publishes
+                .as_mut()
+                .expect("made above")
+                .charge(now, None, 0);
+            state.touch_projection(&outlet.space);
+        }
+        self.keep();
+        Ok(())
+    }
+
     /// What the space of `outlet` keeps for its binding, begun anew for a new binding, or `None` if the binding has ended or the space has gone.
     fn current_channel<'a>(
         &self,
@@ -2086,7 +2318,20 @@ impl Hub {
         let Some(record) = state.space_mut(&failure.space) else {
             return;
         };
-        record.model.fail_environment(failure.message);
+        // A side that failed shows why; one that finished, nothing. Either changes no panels from now on, and what it
+        // left waiting is dropped, so that nothing of it comes back until a side runs again.
+        if let Some(message) = failure.message {
+            record.model.fail_environment(message);
+        }
+        record.stopped = Some(failure.binding);
+        if let Some(channel) = record.channel.as_mut() {
+            channel.pending.clear();
+        }
+        // What the side published is no longer current, so it is shown no more until a side publishes it again.
+        let environment = record.model.environment.clone();
+        if record.stage.rest(&environment) {
+            state.touch_projection(&failure.space);
+        }
         state.touch_space(&failure.space);
     }
 
@@ -2705,6 +2950,8 @@ impl Hub {
             self.disconnect(id);
             cancellation.cancel();
         }
+        // Panel updates an environment's side made too soon, now that they may be made.
+        self.flush_publishes(now);
         // Such as after a closed space was forgotten.
         self.keep();
     }
@@ -4974,6 +5221,7 @@ impl Hub {
             placements: std::collections::BTreeMap::new(),
             restoring: false,
             channel: None,
+            stopped: None,
             stage: crate::stage::Stage::default(),
             summoned: None,
             summoner: None,
@@ -5115,6 +5363,7 @@ impl Hub {
                     placements: kept.placements,
                     restoring: true,
                     channel: None,
+                    stopped: None,
                     stage,
                     summoned: None,
                     summoner: None,

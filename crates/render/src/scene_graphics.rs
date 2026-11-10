@@ -28,8 +28,9 @@ pub struct Panels {
     card_models: Vec<Mat4>,
 }
 
-/// The most vertices one card's face takes, about three times what a full face of text does.
-const CARD_CAPACITY: usize = CAPACITY / 2;
+/// The most vertices one card's face takes, about three times what a full face of text does: every wall's and floating
+/// panel's, a chart panel's at its largest included (see `design/projection.md`).
+pub const CARD_CAPACITY: usize = CAPACITY / 2;
 
 impl Panels {
     pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {

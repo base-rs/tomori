@@ -34,8 +34,10 @@ const REACH: f32 = 2.0 * SPREAD;
 /// edge.
 const SMALLEST_RADIUS: f32 = 1.0;
 
-/// A shape, in font pixels from a canvas's top-left corner, y down.
+/// A shape, in font pixels from a canvas's top-left corner, y down. Non-exhaustive, so that a primitive can be added
+/// without breaking a `match` elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Shape {
     /// A straight line from `from` to `to`, `width` across, with square ends.
     Rule {
@@ -98,6 +100,39 @@ pub enum Shape {
         ticked: bool,
         color: Rgba,
     },
+    /// Any four-sided area, filled to its edges as [`Shape::Fill`] is, without antialiasing, its corners top-left,
+    /// top-right, bottom-left and bottom-right, as a [`Piece`]'s: a chart's shaded area under or between its lines,
+    /// whose sloping edges lie under the lines that bound them, and whose neighbours meet it without a seam. Two corners
+    /// may be one, for a triangle.
+    Quad { corners: [[f32; 2]; 4], color: Rgba },
+    /// A straight line from `from` to `to`, `width` across, at most [`STROKE_WIDTH`], drawn as one piece, antialiased
+    /// across its length as a rule is but cut square at its ends, which are not: a segment of a chart's line, whose
+    /// neighbours' ends overlap it, so that a line of many segments costs one piece each.
+    Stroke {
+        from: [f32; 2],
+        to: [f32; 2],
+        width: f32,
+        color: Rgba,
+    },
+    /// A small filled circle drawn as one piece, its whole tile scaled to it, as [`Shape::Ring`] is: a chart's lone
+    /// point or marker, where a [`Shape::Disc`]'s nine pieces would cost too much.
+    Dot {
+        centre: [f32; 2],
+        radius: f32,
+        color: Rgba,
+    },
+}
+
+/// The widest a [`Shape::Stroke`] is drawn, in font pixels: wider than the wedge's band, it would not be one piece.
+pub const STROKE_WIDTH: f32 = 7.5;
+
+/// Whether every one of `points` is finite, so that a shape made of them is drawn; one that is not draws nothing.
+fn finite(points: &[[f32; 2]], sizes: &[f32]) -> bool {
+    points
+        .iter()
+        .flatten()
+        .chain(sizes)
+        .all(|value| value.is_finite())
 }
 
 /// A quad of a shape, drawn from the atlas: its corners, top-left, top-right, bottom-left and bottom-right, in font
@@ -193,7 +228,7 @@ impl Shape {
             } => {
                 let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
                 let length = dx.hypot(dy);
-                if length <= 0.0 {
+                if length <= 0.0 || !finite(&[from, to], &[width]) {
                     return;
                 }
                 let along = [dx / length, dy / length];
@@ -286,13 +321,71 @@ impl Shape {
                 centre,
                 radius,
                 color,
-            } => Place::of(
+            } if finite(&[centre], &[radius]) => Place::of(
                 centre[0] - radius,
                 centre[1] - radius,
                 2.0 * radius,
                 2.0 * radius,
             )
             .fill(pieces, [radius, radius], radius, color),
+            Self::Disc { .. } => {}
+            Self::Stroke {
+                from,
+                to,
+                width,
+                color,
+            } => {
+                let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                let length = dx.hypot(dy);
+                if length <= 0.0
+                    || width <= 0.0
+                    || color[3] <= 0.0
+                    || !finite(&[from, to], &[width])
+                {
+                    return;
+                }
+                let along = [dx / length, dy / length];
+                let place = Place {
+                    middle: [(from[0] + to[0]) / 2.0, (from[1] + to[1]) / 2.0],
+                    along,
+                    across: [-along[1], along[0]],
+                };
+                let half = width.min(STROKE_WIDTH) / 2.0;
+                let [low, high, column] = band(half, SCALE);
+                let across = half + margin(SCALE);
+                place.raw(
+                    pieces,
+                    [-length / 2.0, length / 2.0],
+                    [-across, across],
+                    [[column, low], [column, low], [column, high], [column, high]],
+                    color,
+                );
+            }
+            Self::Dot {
+                centre,
+                radius,
+                color,
+            } => {
+                if radius <= 0.0 || color[3] <= 0.0 || !finite(&[centre], &[radius]) {
+                    return;
+                }
+                let place = Place {
+                    middle: centre,
+                    along: [1.0, 0.0],
+                    across: [0.0, 1.0],
+                };
+                let scale = DISC.reach / radius;
+                let reach = radius + REACH / scale;
+                place.piece(
+                    pieces,
+                    [-reach, reach],
+                    [-reach, reach],
+                    DISC,
+                    [-reach * scale, reach * scale],
+                    [-reach * scale, reach * scale],
+                    color,
+                );
+            }
             Self::Ring {
                 centre,
                 radius,
@@ -317,6 +410,15 @@ impl Shape {
                     [-reach * scale, reach * scale],
                     color,
                 );
+            }
+            Self::Quad { corners, color } => {
+                if color[3] > 0.0 && corners.iter().all(|[x, y]| x.is_finite() && y.is_finite()) {
+                    pieces.push(Piece {
+                        corners,
+                        uv: [SOLID; 4],
+                        color,
+                    });
+                }
             }
             Self::Check {
                 x,
