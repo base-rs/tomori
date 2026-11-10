@@ -1186,7 +1186,6 @@ mod tests {
         assert_eq!(asked.next_mode().next_mode().mode, Movement::Home);
         assert_eq!(newer.next_mode().mode, Movement::Follow);
         assert_eq!(asked.next_mode().next_mode().next_mode(), asked);
-        let follow = AgentMovement::new(Movement::Follow, Some(90));
         let mut delays = Vec::new();
         let mut stepped = AgentMovement::new(Movement::Follow, Some(RETURN_SHORTEST));
         for _ in 0..7 {
