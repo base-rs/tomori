@@ -3770,7 +3770,9 @@ impl Hub {
                             &attention,
                             state.cards_of(&space),
                             record.channel.as_ref(),
-                            &|panel, line| record.stage.describe(&walls, panel, line, now),
+                            &|panel, line, row| {
+                                record.stage.describe_at(&walls, panel, line, row, now)
+                            },
                         )
                     }
                     _ => Vec::new(),
@@ -3879,7 +3881,9 @@ impl Hub {
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
-                                    &|panel, line| space.stage.describe(&walls, panel, line, now),
+                                    &|panel, line, row| {
+                                        space.stage.describe_at(&walls, panel, line, row, now)
+                                    },
                                 )
                             })
                         })
@@ -4800,6 +4804,71 @@ impl Hub {
                         );
                         state.touch_projection(&space);
                     }
+                }
+            }
+            // A participant chooses a row of an environment's list panel, which is handed to that environment's server side
+            // as a choice only the server makes, by the row's id, never its place, within the participant's rate of
+            // intents. See `design/panel-actions.md`.
+            ClientMessage::ChoosePanelRow {
+                panel,
+                row,
+                revision,
+            } => {
+                if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
+                    state.error(participant, error);
+                    return;
+                }
+                if !tomori_environment::valid_row_id(&row) {
+                    state.error(participant, "That is not a row's id.");
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space(&space).expect("checked above");
+                let shown = record
+                    .versioned(&environments, crate::cards::unix_now())
+                    .panel(&panel)
+                    .map(|shown| shown.version);
+                let walls = environments
+                    .walls(&record.model.environment)
+                    .travelling(record.travel);
+                let chosen = record.stage.chosen(&walls, &panel, &row).map(|(id, row)| {
+                    // Chosen from the panel as it is now, unless it changed since the version they saw; a client
+                    // that says none is taken at its word.
+                    let current = revision.is_none_or(|seen| shown == Some(seen));
+                    tomori_environment::Chosen::new(id, row, current)
+                });
+                match chosen {
+                    Ok(chosen) => {
+                        let record = state
+                            .participants
+                            .get_mut(participant)
+                            .expect("the participant acting is listed");
+                        let taken = record.intents.take(Instant::now());
+                        let source = record.source;
+                        let said = format!("row {} of {}", chosen.row(), chosen.panel());
+                        // Logged only once taken, so that a flood past the rate fills no log.
+                        if taken
+                            && self
+                                .server_sides
+                                .deliver(&space, tomori_environment::Intent::choice(source, chosen))
+                        {
+                            log::info!("A participant chose {said} in space {space}.");
+                        } else {
+                            log::debug!("A choice of {said} was dropped.");
+                        }
+                    }
+                    Err(error) => state.send(
+                        participant,
+                        ServerMessage::Error {
+                            error: error.to_owned(),
+                            space: None,
+                            panel: Some(panel),
+                            wall: None,
+                        },
+                    ),
                 }
             }
             ClientMessage::WatchCards => {
@@ -6427,6 +6496,8 @@ impl Hub {
                 state.walls = true;
                 // Participants tick and untick checklist items pointed at.
                 state.checks = true;
+                // Participants choose the rows of an environment's lists it marks choosable. See `design/panel-actions.md`.
+                state.choices = true;
                 // Walls someone added snap together into groups, which move together. See `design/projection.md`.
                 state.groups = true;
                 // Walls are locked and unlocked by owners, an environment's own locked unless unlocked.

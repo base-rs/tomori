@@ -35,14 +35,16 @@ pub(super) struct Published {
 }
 
 /// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
-/// id for it, its text, cleaned and cut, and the reference the agent can inspect it by, if it has one. See
-/// `design/panel-actions.md`.
+/// id for it, its text, cleaned and cut, the reference the agent can inspect it by, if it has one, and whether a
+/// participant may choose it. See `design/panel-actions.md`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Row {
     pub(crate) id: String,
     pub(crate) text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reference: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) choosable: bool,
 }
 
 /// The pointer before the row a list panel highlights, bold, which every client draws as it draws any list.
@@ -125,6 +127,7 @@ fn list(
             id: row.id().to_owned(),
             text,
             reference: reference.map(str::to_owned),
+            choosable: row.is_choosable(),
         });
     }
     let highlighted =
@@ -514,6 +517,40 @@ impl Stage {
         let published = self.kept(environment, panel)?.published.as_ref()?;
         let rows = published.rows.as_deref()?;
         Some((rows, published.highlighted.as_deref()))
+    }
+
+    /// The environment's ids for the panel `panel` shown now in `walls`' environment and for its row `row`, by the row's
+    /// id, which a participant chose; or why it cannot be chosen: a panel not shown there now, as one kept on a wall the
+    /// environment no longer declares, one that is not a list its environment published, a row it no longer has, and
+    /// one its environment did not mark choosable. See `design/panel-actions.md`.
+    pub(crate) fn chosen(
+        &self,
+        walls: &Walls<'_>,
+        panel: &str,
+        row: &str,
+    ) -> Result<(&str, &str), &'static str> {
+        const GONE: &str = "That panel is not here.";
+        if self.view("", walls, 0).panel(panel).is_none() {
+            return Err(GONE);
+        }
+        let kept = self
+            .kept(walls.environment, panel)
+            .expect("a panel shown is kept");
+        let published = kept
+            .published
+            .as_ref()
+            .filter(|published| published.rows.is_some())
+            .ok_or("That panel has no rows to choose.")?;
+        let row = published
+            .rows
+            .iter()
+            .flatten()
+            .find(|shown| shown.id == row)
+            .ok_or("That row is no longer on the list.")?;
+        if !row.choosable {
+            return Err("That row cannot be chosen.");
+        }
+        Ok((&published.id, &row.id))
     }
 
     /// What the agent is told of what its environment published with `reference` in `environment`, as the `inspect`

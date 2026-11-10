@@ -210,6 +210,10 @@ const CONTEXT_TITLE_CHARS: usize = 160;
 /// Resources that would not fit, after the first, are left out.
 pub const CONTEXT_CHARS: usize = 1_000;
 
+/// How a panel attended to is described: by its identity, the line of its body pointed at and the row's id, as the
+/// client named them, from the stage's own store, or `None` where the space does not show it.
+pub type DescribePanel<'a> = dyn Fn(&str, Option<u32>, Option<&str>) -> Option<String> + 'a;
+
 /// `text` on one line of at most `limit` characters, as [`tomori_protocol::text::one_line`] makes all text others choose, with the context block's delimiters, double quotes and square brackets, made single quotes and parentheses, so that nothing in it can end the quotation or the block early, or begin another.
 pub(crate) fn one_line(text: &str, limit: usize) -> String {
     tomori_protocol::text::one_line(text, limit)
@@ -1596,7 +1600,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
-        self.attended_with(resource, cards, objects, &|_, _| None)
+        self.attended_with(resource, cards, objects, &|_, _, _| None)
     }
 
     /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
@@ -1606,7 +1610,7 @@ impl SpaceModel {
         resource: &tomori_protocol::Resource,
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
-        panels: &dyn Fn(&str, Option<u32>) -> Option<String>,
+        panels: &DescribePanel<'_>,
     ) -> Option<Attended> {
         match resource {
             tomori_protocol::Resource::Worker { worker, .. }
@@ -1648,12 +1652,16 @@ impl SpaceModel {
                 }))
             }
             // A panel's identity is only looked up: the stage describes the panel it has.
-            tomori_protocol::Resource::Panel { panel, line, .. }
-                if panel.len() <= limits::IDENTIFIER_BYTES =>
-            {
+            // A list's row is named by its id, which is dropped where it is longer than any, and the line taken alone.
+            tomori_protocol::Resource::Panel {
+                panel, line, row, ..
+            } if panel.len() <= limits::IDENTIFIER_BYTES => {
+                let row = row
+                    .as_deref()
+                    .filter(|row| row.len() <= tomori_environment::ROW_ID_BYTES);
                 Some(Attended(Resolved::Panel {
                     id: panel.clone(),
-                    description: panels(panel, *line)?,
+                    description: panels(panel, *line, row)?,
                 }))
             }
             _ => None,
@@ -1670,7 +1678,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
-        self.resolve_with(attention, cards, objects, &|_, _| None)
+        self.resolve_with(attention, cards, objects, &|_, _, _| None)
     }
 
     /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, as in
@@ -1680,7 +1688,7 @@ impl SpaceModel {
         attention: &[tomori_protocol::Resource],
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
-        panels: &dyn Fn(&str, Option<u32>) -> Option<String>,
+        panels: &DescribePanel<'_>,
     ) -> Vec<Attended> {
         let mut resolved: Vec<Attended> = Vec::new();
         for attended in attention
@@ -2139,6 +2147,7 @@ impl SpaceModel {
             projection: false,
             walls: false,
             checks: false,
+            choices: false,
             groups: false,
             wall_locks: false,
             // Set by the hub, which knows the board.
@@ -4541,8 +4550,8 @@ mod tests {
     #[test]
     fn a_panel_attended_to_is_described_as_the_stage_describes_it_once() {
         let space = model();
-        let describe = |panel: &str, _: Option<u32>| {
-            (panel == "panel-1").then(|| "panel \"Status\"".to_owned())
+        let describe = |panel: &str, _: Option<u32>, row: Option<&str>| {
+            (panel == "panel-1").then(|| format!("panel \"Status\"{}", row.unwrap_or_default()))
         };
         let panel = tomori_protocol::Resource::panel("panel-1");
         let attention = space.resolve_with(
@@ -4559,6 +4568,25 @@ mod tests {
         assert_eq!(attention.len(), 1);
         assert_eq!(
             context("fake", &attention, &[]).as_deref(),
+            Some("[Pointing at panel \"Status\"]")
+        );
+        // A row is passed on by its id, and one longer than any row's id is dropped, the line taken alone.
+        let row = |id: &str| {
+            space
+                .attended_with(
+                    &tomori_protocol::Resource::panel_row("panel-1", 1, id),
+                    None,
+                    None,
+                    &describe,
+                )
+                .map(|attended| context("fake", &[attended], &[]).unwrap())
+        };
+        assert_eq!(
+            row("pod7").as_deref(),
+            Some("[Pointing at panel \"Status\"pod7]")
+        );
+        assert_eq!(
+            row(&"a".repeat(tomori_environment::ROW_ID_BYTES + 1)).as_deref(),
             Some("[Pointing at panel \"Status\"]")
         );
         // Without the stage, a panel is not resolved.

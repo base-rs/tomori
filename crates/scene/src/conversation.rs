@@ -55,6 +55,10 @@ const INSTRUCTIONS_BYTES: usize = 4096;
 
 /// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
 const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
+
+/// What A on a choosable row says while a request waits, which a press is more likely meant for. See
+/// `design/panel-actions.md`.
+const ANSWER_FIRST: &str = "Answer the request before choosing.";
 /// Shown while the platform's request for the microphone is unanswered. See `design/arrival.md`.
 pub const MICROPHONE_REQUEST: &str = "Waiting for microphone permission...";
 
@@ -115,6 +119,9 @@ pub const CANCEL_UNDO: Duration = Duration::from_secs(3);
 
 /// How long A does nothing after an approval or question appears, so that a press meant for what was shown before it, such as undoing a cancellation, never decides it.
 pub const REQUEST_GRACE: Duration = Duration::from_millis(600);
+
+/// How long the label on the ray says a row was chosen, after A or the trigger chose it. See `design/panel-actions.md`.
+pub const CHOSEN_SHOWN: Duration = Duration::from_millis(800);
 
 /// The most panel rows the problem line and the queue strip each take.
 const PROBLEM_ROWS: usize = 2;
@@ -400,6 +407,9 @@ pub struct Conversation {
     /// whether A chose it since the frame step last asked. See `design/locomotion.md`.
     pointed_pad: bool,
     pad_chosen: bool,
+    /// The row of an environment's list this participant last chose, by its panel and the row's id, and when, which the
+    /// label on the ray says for [`CHOSEN_SHOWN`]. See `design/panel-actions.md`.
+    chosen_row: Option<(String, String, Instant)>,
     /// What each object of an environment's that the participant pointed at is called, by its identity, to name it as
     /// a worker or card is named. See `design/environments.md`.
     object_labels: std::collections::HashMap<String, String>,
@@ -563,6 +573,7 @@ impl Conversation {
             pointed_item: None,
             pointed_pad: false,
             pad_chosen: false,
+            chosen_row: None,
             object_labels: std::collections::HashMap::new(),
             cards: None,
             projection: crate::patched::Held::default(),
@@ -1076,13 +1087,23 @@ impl Conversation {
             }
             // A tick refused, as when the panel changed since the participant saw it, is cued by the connection, and the
             // projection sent again shows the item as it is, so that they look and tick again; it is no problem to show.
+            // A choice of a row refused, as of a row that has gone, is cued the same way, and the label says no more
+            // that it was chosen.
             ServerMessage::Error {
                 error,
                 panel: Some(panel),
                 wall: None,
                 ..
             } => {
-                log::info!("The server refused a tick on {panel}: {error}");
+                if self
+                    .chosen_row
+                    .take_if(|(chosen, _, _)| *chosen == panel)
+                    .is_some()
+                {
+                    log::info!("The server refused a choice of a row of {panel}: {error}");
+                } else {
+                    log::info!("The server refused a tick on {panel}: {error}");
+                }
             }
             // So is a change to a wall refused as the wall changed since it was taken hold of, as when another
             // participant changed it meanwhile: the projection sent again shows the wall as it is, at once, to change
@@ -2182,6 +2203,7 @@ impl Conversation {
                 | ClientMessage::PlacePanel { .. }
                 | ClientMessage::DismissPanel { .. }
                 | ClientMessage::CheckPanelItem { .. }
+                | ClientMessage::ChoosePanelRow { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -3075,7 +3097,7 @@ impl Conversation {
                 }
                 // Removing queued entries is on the right wrist.
                 if self.decide_on_wrist {
-                    return !self.choose_pad();
+                    return !self.last_meanings();
                 }
                 // A decision on its way still owns the button.
                 if self
@@ -3102,10 +3124,33 @@ impl Conversation {
                     self.notice = None;
                     false
                 } else {
-                    !self.choose_pad()
+                    !self.last_meanings()
                 }
             }
         }
+    }
+
+    /// A's last meanings, after everything that decides something, a request, a decision on its way and a queued entry,
+    /// so that a press meant for a prompt never acts on the world beyond Tomori: a choosable row of an environment's
+    /// list pointed at, which it chooses for that environment, unless a request, an approval or a question, waits, when
+    /// it is refused, saying to answer the request first, the press being likely meant for it; then a teleport pad
+    /// pointed at. Returns whether it did either, or was refused, as a visitor's choice is. See
+    /// `design/panel-actions.md` and `design/locomotion.md`.
+    fn last_meanings(&mut self) -> bool {
+        if self.pointed_row().is_some() {
+            let requested = self
+                .space
+                .as_ref()
+                .is_some_and(|space| space.approval.is_some() || space.question.is_some());
+            if requested {
+                self.refused = true;
+                self.notice = Some(ANSWER_FIRST.into());
+            } else if !self.choose_row() {
+                self.refused = true;
+            }
+            return true;
+        }
+        self.choose_pad()
     }
 
     /// Pointing at a teleport pad, A chooses it, as the trigger does, which the frame step takes the participant to the
@@ -3694,13 +3739,72 @@ impl Conversation {
             return None;
         }
         let shown = self.projection()?.panel(panel)?;
-        if shown.code.is_some() || shown.image.is_some() {
+        // An environment's list is chosen, never ticked, whatever its rows' text shows.
+        if shown.code.is_some() || shown.image.is_some() || !shown.rows.is_empty() {
             return None;
         }
         tomori_protocol::checklist::items(&shown.body)
             .into_iter()
             .find(|item| u32::try_from(item.line).ok() == Some(line))
             .and_then(|item| item.checked)
+    }
+
+    /// The item the participant points at now, as the frame step last reported it, for its tests.
+    #[cfg(test)]
+    pub(crate) fn pointed_item(&self) -> Option<&(String, u32)> {
+        self.pointed_item.as_ref()
+    }
+
+    /// The row of an environment's list panel on `line` of the panel `panel`'s body, which the joined space shows, by
+    /// the row's id and whether it may be chosen; `None` where the panel is not a list, or has no row there. See
+    /// `design/panel-actions.md`.
+    pub fn row_at(&self, panel: &str, line: u32) -> Option<&tomori_protocol::ListRow> {
+        self.projection()?.panel(panel)?.row_on(line)
+    }
+
+    /// The choosable row the participant points at now, by its panel and the row's id, as A or the trigger would choose
+    /// it: `None` where they point at no such row, or the server takes no choices. A visitor points at it too, and is
+    /// told they only watch.
+    pub fn pointed_row(&self) -> Option<(String, String)> {
+        if !self.joined_space().is_some_and(|(space, _)| space.choices) {
+            return None;
+        }
+        let (panel, line) = self.pointed_item.as_ref()?;
+        self.row_at(panel, *line)
+            .filter(|row| row.choosable)
+            .map(|row| (panel.clone(), row.id.clone()))
+    }
+
+    /// Choose the row the participant points at, [`Self::pointed_row`], for its environment, as A or the trigger does:
+    /// sent by the row's id with the panel's version the server last sent, so that a choice made as the list changes
+    /// names the row the participant saw. Says whether it chose, as only a participant does; a visitor is told they
+    /// only watch. See `design/panel-actions.md`.
+    pub fn choose_row(&mut self) -> bool {
+        let Some((panel, row)) = self.pointed_row() else {
+            return false;
+        };
+        let revision = self
+            .projection()
+            .and_then(|projection| projection.panel(&panel))
+            .map(|shown| shown.version)
+            .filter(|version| *version > 0);
+        if !self.send(ClientMessage::ChoosePanelRow {
+            panel: panel.clone(),
+            row: row.clone(),
+            revision,
+        }) {
+            return false;
+        }
+        self.chosen_row = Some((panel, row, Instant::now()));
+        true
+    }
+
+    /// Whether this participant chose the row `row` of the panel `panel` within [`CHOSEN_SHOWN`], which the label on the
+    /// ray says.
+    pub fn just_chose(&self, panel: &str, row: &str) -> bool {
+        self.chosen_row.as_ref().is_some_and(|(chosen, id, at)| {
+            chosen == panel && id == row && at.elapsed() < CHOSEN_SHOWN
+        })
     }
 
     /// Whether A would tick or untick a checklist item for this participant: one who takes part, as visitors only watch.
@@ -13397,6 +13501,112 @@ mod tests {
         assert!(conversation.projection().is_some());
         conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.projection.projection().is_none());
+    }
+
+    #[test]
+    fn a_chooses_the_choosable_row_pointed_at_by_its_id_and_the_version_seen_and_never_for_a_visitor()
+     {
+        let queue = |version: u64| {
+            Event::Message(ServerMessage::Projection {
+                projection: Box::new(tomori_protocol::Projection::new(SPACE, "sky").with_panels(
+                    vec![
+                        tomori_protocol::Panel::new(
+                            "panel-1",
+                            "Queue",
+                            "- pod7\n- [ ] pod112",
+                            tomori_protocol::Place::Wall {
+                                wall: "environment-0".into(),
+                                slot: 0,
+                            },
+                        )
+                        .with_rows(vec![
+                            tomori_protocol::ListRow::new("pod7", false),
+                            tomori_protocol::ListRow::new("pod112", true),
+                        ])
+                        .with_version(version),
+                    ],
+                )),
+            })
+        };
+        let choose = |revision: Option<u64>| ClientMessage::ChoosePanelRow {
+            panel: "panel-1".into(),
+            row: "pod112".into(),
+            revision,
+        };
+        let mut conversation = joined(|space| {
+            space.projection = true;
+            space.checks = true;
+            space.choices = true;
+        });
+        conversation.apply(role(ConnectionRole::Collaborator));
+        // With nothing projected, there is no row to choose.
+        conversation.point_item(Some(("panel-1".to_owned(), 1)));
+        assert_eq!(conversation.row_at("panel-1", 1), None);
+        assert!(!conversation.choose_row());
+        conversation.apply(queue(7));
+        conversation.take_actions();
+        // A row is found by its line, on a panel shown.
+        assert_eq!(
+            conversation.row_at("panel-1", 0),
+            Some(&tomori_protocol::ListRow::new("pod7", false))
+        );
+        assert_eq!(conversation.row_at("panel-9", 0), None);
+        assert_eq!(conversation.row_at("panel-1", 2), None);
+        // A row that may not be chosen, or none, is not one A chooses.
+        conversation.point_item(Some(("panel-1".to_owned(), 0)));
+        assert_eq!(conversation.pointed_row(), None);
+        assert!(conversation.press_a(None));
+        conversation.point_item(None);
+        assert_eq!(conversation.pointed_row(), None);
+        // A choosable row is chosen, by its id and the version seen, before the box its text shows is ticked; and is
+        // said to be just chosen.
+        conversation.point_item(Some(("panel-1".to_owned(), 1)));
+        assert_eq!(
+            conversation.pointed_row(),
+            Some(("panel-1".to_owned(), "pod112".to_owned()))
+        );
+        assert!(!conversation.press_a(None));
+        assert!(!conversation.a_refused());
+        assert_eq!(sent(&mut conversation), [choose(Some(7))]);
+        assert!(conversation.just_chose("panel-1", "pod112"));
+        assert!(!conversation.just_chose("panel-1", "pod7"));
+        assert!(!conversation.just_chose("panel-9", "pod112"));
+        // Refused, as of a row gone, it is no longer said to be chosen; a refusal of another panel leaves it so.
+        let refused = |panel: &str| {
+            Event::Message(ServerMessage::Error {
+                error: "That row is no longer on the list.".into(),
+                space: None,
+                panel: Some(panel.into()),
+                wall: None,
+            })
+        };
+        conversation.apply(refused("panel-9"));
+        assert!(conversation.just_chose("panel-1", "pod112"));
+        conversation.apply(refused("panel-1"));
+        assert!(!conversation.just_chose("panel-1", "pod112"));
+        conversation.apply(refused("panel-1"));
+        assert!(!conversation.just_chose("panel-1", "pod112"));
+        assert!(!conversation.press_a(None));
+        assert_eq!(sent(&mut conversation), [choose(Some(7))]);
+        // From an older server, which keeps no versions, the choice says none.
+        conversation.apply(queue(0));
+        assert!(conversation.choose_row());
+        assert_eq!(sent(&mut conversation), [choose(None)]);
+        // A server that takes no choices offers none.
+        conversation.apply(space(|space| {
+            space.projection = true;
+            space.checks = true;
+        }));
+        assert_eq!(conversation.pointed_row(), None);
+        // A visitor is told they only watch.
+        conversation.apply(space(|space| {
+            space.projection = true;
+            space.choices = true;
+        }));
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert!(!conversation.press_a(None));
+        assert!(conversation.a_refused());
+        assert!(sent(&mut conversation).is_empty());
     }
 
     #[test]

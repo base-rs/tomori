@@ -1712,3 +1712,109 @@ fn pointing_at_a_row_of_a_list_panel_describes_the_row() {
     );
     assert_eq!(describe(None), describe(Some(3)));
 }
+
+#[test]
+fn pointing_at_a_row_by_its_id_describes_that_row_wherever_it_now_is() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("queue", "Queue", queue(3))),
+            0,
+        )
+        .unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    let describe = |line: Option<u32>, row: Option<&str>| {
+        stage.describe_at(&walls, &id, line, row, 0).unwrap()
+    };
+    // Named by its id, the row is the one the participant saw, whatever is on that line now.
+    assert!(
+        describe(Some(0), Some("pod2"))
+            .ends_with("; row 3 of 3, id yard:pod/2: \"pod2 · 2 waiting\")")
+    );
+    // Gone, it says so, rather than describe whatever row is on that line.
+    assert!(describe(Some(0), Some("pod9")).ends_with("; a row since gone from the list)"));
+    // Without one, as from a client of a server before ids, it goes by the line.
+    assert!(describe(Some(1), None).contains("; row 2 of 3"));
+}
+
+#[test]
+fn a_row_is_chosen_only_on_its_environment_s_list_while_it_is_there_and_choosable() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let mut rows = queue(2);
+    rows[1] = rows[1].clone().choosable();
+    stage
+        .publish(&walls, publishing(Panel::list("queue", "Queue", rows)), 0)
+        .unwrap();
+    stage
+        .publish(&walls, publishing(Panel::text("rota", "Rota", "- a")), 0)
+        .unwrap();
+    let ids: Vec<String> = stage
+        .view("s", &walls, 0)
+        .panels
+        .into_iter()
+        .map(|panel| panel.id)
+        .collect();
+    // Its rows reach every client, with which may be chosen.
+    let view = stage.view("s", &walls, 0);
+    assert_eq!(
+        view.panel(&ids[0]).unwrap().rows,
+        [
+            tomori_protocol::ListRow::new("pod0", false),
+            tomori_protocol::ListRow::new("pod1", true)
+        ]
+    );
+    assert!(view.panel(&ids[1]).unwrap().rows.is_empty());
+    assert_eq!(stage.chosen(&walls, &ids[0], "pod1"), Ok(("queue", "pod1")));
+    assert_eq!(
+        stage.chosen(&walls, &ids[0], "pod0"),
+        Err("That row cannot be chosen.")
+    );
+    assert_eq!(
+        stage.chosen(&walls, &ids[0], "pod9"),
+        Err("That row is no longer on the list.")
+    );
+    assert_eq!(
+        stage.chosen(&walls, &ids[1], "a"),
+        Err("That panel has no rows to choose.")
+    );
+    let elsewhere = Walls {
+        environment: "elsewhere",
+        ..yard()
+    };
+    assert_eq!(
+        stage.chosen(&elsewhere, &ids[0], "pod1"),
+        Err("That panel is not here.")
+    );
+    // Kept, but on a wall the environment no longer declares, it is not shown, and not chosen.
+    let fewer = Walls {
+        declared: &DECLARED[..0],
+        ..yard()
+    };
+    assert!(stage.view("s", &fewer, 0).panel(&ids[0]).is_none());
+    assert_eq!(
+        stage.chosen(&fewer, &ids[0], "pod1"),
+        Err("That panel is not here.")
+    );
+    // An agent's panel has none either.
+    let note = crate::stage::Content::parse("title: Note\n---\n- a").unwrap();
+    let board = Destination::Wall {
+        wall: "environment-1".into(),
+        slot: None,
+    };
+    let agent = stage.project_to(&walls, note, &board, 0);
+    assert_eq!(
+        stage.chosen(&walls, &agent, "a"),
+        Err("That panel has no rows to choose.")
+    );
+    // Marking a row choosable is a change of the panel.
+    let mut again = queue(2);
+    again[0] = again[0].clone().choosable();
+    again[1] = again[1].clone().choosable();
+    assert_eq!(
+        stage.publish(&walls, publishing(Panel::list("queue", "Queue", again)), 1),
+        Ok(Change::Updated)
+    );
+}

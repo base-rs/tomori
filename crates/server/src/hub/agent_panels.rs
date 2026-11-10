@@ -253,6 +253,7 @@ fn detailed(
                             crate::space::inspectable(&projection.environment, reference)
                         }),
                         "highlighted": highlighted == Some(row.id.as_str()),
+                        "choosable": row.choosable,
                         "text": row.text,
                     })
                 })

@@ -674,6 +674,33 @@ pub struct Panel {
     /// text panel's. See `design/projection.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<Box<crate::chart::Chart>>,
+    /// What makes it a list panel, if its environment's server side published it as one: each of its rows, in order,
+    /// the first on the first line of its body and each on the next, with the environment's id for it and whether a
+    /// participant may choose it, by which a client says which row it points at and which it chose
+    /// ([`crate::ClientMessage::ChoosePanelRow`]). An older client ignores it, and draws the body as any list. See
+    /// `design/panel-actions.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<ListRow>,
+}
+
+/// A row of a list panel, [`Panel::rows`]: its environment's id for it, at most 64 bytes of ASCII letters, digits,
+/// `-`, `_`, `.` and `/`, and whether a participant may choose it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ListRow {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub choosable: bool,
+}
+
+impl ListRow {
+    /// The row `id`, which a participant may choose where `choosable` says.
+    pub fn new(id: impl Into<String>, choosable: bool) -> Self {
+        Self {
+            id: id.into(),
+            choosable,
+        }
+    }
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -702,7 +729,19 @@ impl Panel {
             version: 0,
             data_seq: 0,
             chart: None,
+            rows: Vec::new(),
         }
+    }
+
+    /// The panel, a list panel of `rows`, each on its line of the body, in order.
+    pub fn with_rows(mut self, rows: Vec<ListRow>) -> Self {
+        self.rows = rows;
+        self
+    }
+
+    /// The row on `line` of its body, from 0, if it is a list panel with a row there.
+    pub fn row_on(&self, line: u32) -> Option<&ListRow> {
+        self.rows.get(line as usize)
     }
 
     /// The panel at `version`, the projection revision at which it last changed.
@@ -718,8 +757,8 @@ impl Panel {
     }
 
     /// Whether it and `other` are alike in everything its version covers but where they are: their identity, title,
-    /// metadata, kind, id, code, image and chart's structure, and, but for a chart panel, whose body is a summary of its
-    /// live data, their body. See [`Panel::version`].
+    /// metadata, kind, id, code, image, chart's structure and rows, and, but for a chart panel, whose body is a summary of
+    /// its live data, their body. See [`Panel::version`].
     pub fn same_structure(&self, other: &Panel) -> bool {
         let Panel {
             id,
@@ -735,6 +774,7 @@ impl Panel {
             version: _,
             data_seq: _,
             chart,
+            rows,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -748,6 +788,7 @@ impl Panel {
             && *code == other.code
             && *slug == other.slug
             && *image == other.image
+            && *rows == other.rows
             && charts
     }
 
@@ -1225,6 +1266,23 @@ mod tests {
                 serde_json::json!({"type": "check_panel_item", "panel": "panel-1", "line": 3,
                     "checked": false}),
             ),
+            (
+                ClientMessage::ChoosePanelRow {
+                    panel: "panel-1".into(),
+                    row: "pod/112".into(),
+                    revision: Some(9),
+                },
+                serde_json::json!({"type": "choose_panel_row", "panel": "panel-1",
+                    "row": "pod/112", "revision": 9}),
+            ),
+            (
+                ClientMessage::ChoosePanelRow {
+                    panel: "panel-1".into(),
+                    row: "pod7".into(),
+                    revision: None,
+                },
+                serde_json::json!({"type": "choose_panel_row", "panel": "panel-1", "row": "pod7"}),
+            ),
         ];
         // A panel's version is sent as its revision, the name a client that ticks sends back, from a server that keeps
         // one, and read as 0 from an older one; so is a wall's, and a live panel's data seq.
@@ -1292,6 +1350,20 @@ mod tests {
                 message
             );
         }
+        // A server says it takes choices only when it does; an older one's state takes none.
+        let state = crate::SpaceState {
+            choices: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["choices"], true);
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("choices");
+        assert!(
+            !serde_json::from_value::<crate::SpaceState>(older)
+                .unwrap()
+                .choices
+        );
         // A server says it takes ticking only when it does; an older one's state, which says nothing, takes none.
         let state = crate::SpaceState {
             checks: true,
@@ -1523,5 +1595,41 @@ mod tests {
             serde_json::from_value::<ClientMessage>(json).unwrap(),
             resync
         );
+    }
+
+    #[test]
+    fn a_list_panel_s_rows_are_sent_only_where_it_has_them_and_count_in_its_version() {
+        let place = Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0,
+        };
+        let list =
+            Panel::new("panel-1", "Queue", "- pod7\n- pod112", place.clone()).with_rows(vec![
+                ListRow::new("pod7", false),
+                ListRow::new("pod112", true),
+            ]);
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(
+            json["rows"],
+            serde_json::json!([{"id": "pod7"}, {"id": "pod112", "choosable": true}])
+        );
+        assert_eq!(serde_json::from_value::<Panel>(json.clone()).unwrap(), list);
+        // An older server sends none, and a panel that is not a list says none.
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("rows");
+        assert!(
+            serde_json::from_value::<Panel>(older)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        let text = Panel::new("panel-1", "Queue", "- pod7\n- pod112", place);
+        assert!(serde_json::to_value(&text).unwrap().get("rows").is_none());
+        // Its rows are found by line, and are part of what its version covers.
+        assert_eq!(list.row_on(1).map(|row| row.id.as_str()), Some("pod112"));
+        assert_eq!(list.row_on(2), None);
+        assert_eq!(text.row_on(0), None);
+        assert!(!list.same_structure(&text));
+        assert!(list.same_structure(&list.clone().with_age(9)));
     }
 }

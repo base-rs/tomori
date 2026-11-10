@@ -663,6 +663,18 @@ impl Kept {
             .as_ref()
             .and_then(|published| published.chart.clone())
             .map(Box::new);
+        // A list's rows, by which a client names the row it points at and the one it chooses.
+        if let Some(rows) = self
+            .published
+            .as_ref()
+            .and_then(|published| published.rows.as_ref())
+        {
+            panel = panel.with_rows(
+                rows.iter()
+                    .map(|row| tomori_protocol::ListRow::new(row.id.clone(), row.choosable))
+                    .collect(),
+            );
+        }
         panel
     }
 
@@ -2295,11 +2307,26 @@ impl Stage {
     /// Tomori wall, projected 5 minutes ago, updated just now; item 3 of 5, not ticked: "Decide the pairing window")`:
     /// everything in it cleaned onto one line, without double quotes or square brackets, so that it cannot end the
     /// context block. A line that begins no item is left out. `None` when it is not shown there.
+    #[cfg(test)]
     pub(crate) fn describe(
         &self,
         walls: &Walls<'_>,
         panel: &str,
         line: Option<u32>,
+        now: u64,
+    ) -> Option<String> {
+        self.describe_at(walls, panel, line, None, now)
+    }
+
+    /// As [`Self::describe`] says, of the panel pointed at on its row `row`, by the row's id, where the client named one:
+    /// that row wherever it now is on the list, or, where it has gone, saying so, rather than the row on `line` now,
+    /// so that the agent is told of the row the participant saw. See `design/panel-actions.md`.
+    pub(crate) fn describe_at(
+        &self,
+        walls: &Walls<'_>,
+        panel: &str,
+        line: Option<u32>,
+        row: Option<&str>,
         now: u64,
     ) -> Option<String> {
         let shown = self.view("", walls, now);
@@ -2405,10 +2432,16 @@ impl Stage {
         // number, whether it is highlighted, its id to inspect it by and its text, in quotes, as it is the environment's.
         let items = checklist::items(&panel.body);
         if let Some((rows, highlighted)) = self.rows(walls.environment, &panel.id) {
-            if let Some((index, row)) = line
-                .and_then(|line| usize::try_from(line).ok())
-                .and_then(|line| rows.get(line).map(|row| (line, row)))
-            {
+            let found = match row {
+                Some(id) => rows.iter().enumerate().find(|(_, row)| row.id == id),
+                None => line
+                    .and_then(|line| usize::try_from(line).ok())
+                    .and_then(|line| rows.get(line).map(|row| (line, row))),
+            };
+            if row.is_some() && found.is_none() {
+                details.push_str("; a row since gone from the list");
+            }
+            if let Some((index, row)) = found {
                 let highlighted = if highlighted == Some(row.id.as_str()) {
                     ", highlighted"
                 } else {

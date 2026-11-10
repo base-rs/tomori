@@ -88,6 +88,36 @@ fn queue(space: &Space) {
 
 Every client draws it as a list, the highlighted row with a bold pointer before it, and scrolls it where it has more rows than its face shows. At most 30 rows, each id unique and at most 64 bytes of letters, digits, `-`, `_`, `.` and `/`; rows past a panel's body bound are left out whole. See Tomori's `design/panel-actions.md`.
 
+Mark a row `choosable` and a participant may choose it, pointing at it and pressing A, Enter in the desktop window, or pulling the trigger, a click there. The server hands the side each choice in the same inbox as its client side's intents, as an `Intent` whose `chosen()` names the panel and the row by the side's own ids; a client can never forge one, and a side is only handed choices of its own panels, so act on it as the participant's request, checking the row against your own state:
+
+```rust
+use std::time::Duration;
+use tomori_environment::{Panel, Row, Space};
+
+fn choosing(space: &Space) {
+    let list = |highlighted: &str| {
+        let rows = vec![
+            Row::new("pod7", "pod7 · 3 waiting").choosable(),
+            Row::new("pod112", "pod112 · 41 waiting").choosable(),
+        ];
+        Panel::list("queue", "Queue", rows).highlighting(highlighted)
+    };
+    let _ = space.publish(list("pod112"));
+    while !space.cancellation().is_cancelled() {
+        if let Some(intent) = space.next_intent(Duration::from_millis(50)) {
+            match intent.chosen() {
+                // Open the pod in the inspector, and highlight it for everyone.
+                Some(chosen) if chosen.panel() == "queue" => {
+                    let _ = space.publish(list(chosen.row()));
+                }
+                Some(_) => {}
+                None => { /* the client side's own intent, in intent.payload() */ }
+            }
+        }
+    }
+}
+```
+
 ## Where participants arrive, the agent lives and the Tomori wall stands
 
 An environment's registration gives fixed homes, each a pose in the environment's own coordinates, as its scenery is drawn, facing along its +Z, the way it looks, which `tomori_protocol::Pose::at(spot).facing_towards(target)` makes: where participants arrive, with `Environment::with_arrival`, and the agent's home, with `Environment::with_agent`, at least 1.4 m above the floor, beneath which the Tomori wall's home stands by default, 0.88 m below the swarm's middle, facing the way the agent faces (`tomori_protocol::entourage::wall_beneath`), or, only where the wall must stand elsewhere, as beneath an agent too high or far to read it there, the Tomori wall's, with `Environment::with_stage`; and, if it likes, the middle of its delegated workers' arrangement, with `Environment::with_workers`, otherwise the agent's home. A space's coordinates always have home, where participants arrive, at their origin facing −Z, so Tomori carries the environment's scenery, walkable surfaces, client side, anchors and walls into them; the environment's crates never see the space's coordinates. The Tomori wall stays at its home, and the agent appears at its home and stays there until a participant summons it, its wall going beneath it. Check, in the environment's tests, that the wall can be read and the agent seen from the arrival with `tomori_environment::sightlines`, the wall where `entourage::wall_beneath` stands it, on the arrival's floor, unless you give a `stage`:

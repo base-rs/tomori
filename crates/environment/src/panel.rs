@@ -62,14 +62,18 @@ pub fn valid_row_id(id: &str) -> bool {
 
 /// A row of a list panel, [`Panel::list`]: an id the side chooses, unique among the panel's rows, by which it
 /// highlights the row, its text, a line of Markdown-lite, drawn as text and never as HTML, and, optionally, a reference
-/// the space's agent may inspect the row by, as an [`crate::Object`]'s. See `design/panel-actions.md`.
+/// the space's agent may inspect the row by, as an [`crate::Object`]'s, and whether a participant may choose it, with A
+/// or the trigger, the choice reaching the side as an [`crate::Intent`] whose [`crate::Intent::chosen`] names it. See
+/// `design/panel-actions.md`.
 ///
 /// ```
 /// use tomori_environment::Row;
 ///
-/// let row = Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112");
+/// let row = Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112").choosable();
 /// assert_eq!((row.id(), row.text(), row.reference()), ("pod112", "pod112 · 41 waiting", Some("pod/112")));
+/// assert!(row.is_choosable());
 /// assert_eq!(Row::new("pod7", "pod7").reference(), None);
+/// assert!(!Row::new("pod7", "pod7").is_choosable());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -77,16 +81,32 @@ pub struct Row {
     id: String,
     text: String,
     reference: Option<String>,
+    choosable: bool,
 }
 
 impl Row {
-    /// The row `id`, showing `text`.
+    /// The row `id`, showing `text`, which nobody chooses.
     pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             text: text.into(),
             reference: None,
+            choosable: false,
         }
+    }
+
+    /// The row, which a participant may choose, pointing at it and pressing A, Enter in the desktop window, or pulling
+    /// the trigger, clicking with the left button there: the server hands the side each choice as an
+    /// [`crate::Intent`] whose [`crate::Intent::chosen`] names the panel and this row by their ids. A row nobody may
+    /// choose is only read and pointed at.
+    pub fn choosable(mut self) -> Self {
+        self.choosable = true;
+        self
+    }
+
+    /// Whether a participant may choose it.
+    pub fn is_choosable(&self) -> bool {
+        self.choosable
     }
 
     /// The row, which the space's agent can inspect by `reference`, as an object's: one that [`valid_reference`]
@@ -319,6 +339,8 @@ mod tests {
             (row.id(), row.text(), row.reference()),
             ("a", "A", Some("row/a"))
         );
+        assert!(!row.is_choosable());
+        assert!(Row::new("c", "C").choosable().is_choosable());
         let plain = Row::new("b", "B");
         assert_eq!(
             (plain.id(), plain.text(), plain.reference()),

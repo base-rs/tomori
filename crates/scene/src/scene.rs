@@ -489,6 +489,9 @@ pub struct Step {
     /// pointed at last frame, which a pull begun on it, or A, chooses. See `design/locomotion.md`.
     pad_selector: crate::client_side::Selector,
     pointed_pad: Option<crate::pads::Key>,
+    /// The pulls of the trigger on choosable rows of an environment's lists, with the same thresholds, a pull begun on
+    /// one choosing it once pressed there. See `design/panel-actions.md`.
+    row_selector: crate::client_side::Selector,
     /// The rig the platform placed this frame's poses with, as [`Self::rig`] last settled it.
     placed: Rig,
     /// Where the space's environment and its agent stood in the participant's room on the last frame in a space, and,
@@ -558,6 +561,7 @@ impl Default for Step {
             last_back: None,
             agent_home: crate::anchors::Anchor::AGENT,
             pad_selector: crate::client_side::Selector::default(),
+            row_selector: crate::client_side::Selector::default(),
             pointed_pad: None,
             placed: Rig::default(),
             standing: None,
@@ -1153,16 +1157,24 @@ impl Step {
             .and_then(|client| client.focus.as_deref());
         let aim = self.aim;
         let carrying_wall = self.projector.carried_wall().is_some();
+        // A choosable row of an environment's list the ray met last frame, for a participant: a pull begun on it chooses
+        // it, as A does, rather than attracting the swarm. See `design/panel-actions.md`.
+        let row = conversation
+            .pointed_row()
+            .filter(|_| conversation.ticks())
+            .map(|(panel, row)| format!("{panel}\n{row}"));
         let rung = precedence::Trigger::first(|rung| match rung {
             precedence::Trigger::Menu => menu_shown || in_arrival,
             precedence::Trigger::Transcript => wrist_active,
             precedence::Trigger::CarriedWall => carrying_wall,
+            precedence::Trigger::Row => aim == precedence::Aim::Tomori && row.is_some(),
             precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
             precedence::Trigger::Pad => aim == precedence::Aim::Pad,
             precedence::Trigger::Environment => focus.is_some(),
             precedence::Trigger::Swarm => true,
         });
-        let select = self.selector.update(
+        let others = self.pad_selector.holds() || self.row_selector.holds();
+        let select = self.selector.update_beside(
             focus.filter(|_| rung == precedence::Trigger::Environment),
             senses.trigger,
             // A press is told once; A held is as the last buttons found it, until the next. A press in the frame the hand
@@ -1176,6 +1188,7 @@ impl Step {
                     .filter(|_| !menu_shown && !wrist_active),
                 held: self.a_press.held,
             },
+            others,
         );
         if let Some(client) = self.client.as_mut() {
             client.select = client.select.take().or(select);
@@ -1187,17 +1200,32 @@ impl Step {
             .pointed_pad
             .filter(|_| rung == precedence::Trigger::Pad)
             .map(|key| format!("{}/{}", key.pair, key.end));
+        let others = self.selector.holds() || self.row_selector.holds();
         let pulled = matches!(
-            self.pad_selector.update(
+            self.pad_selector.update_beside(
                 pad_name.as_deref(),
                 senses.trigger,
-                crate::client_side::Press::default()
+                crate::client_side::Press::default(),
+                others,
             ),
             Some(crate::client_side::Select::Pressed(_))
         );
         let pressed = conversation.take_pad_choice();
         let chosen_pad = self.pointed_pad.filter(|_| pulled || pressed);
-        let selecting = self.selector.owns() || self.pad_selector.owns();
+        // Pressed as far as choosing takes, on the row it began on, it chooses that row, with the choosing click.
+        // One select at a time: a pull that begins while the environment's select or a pad's is held is nobody's.
+        let others = self.selector.holds() || self.pad_selector.holds();
+        if let Some(crate::client_side::Select::Pressed(_)) = self.row_selector.update_beside(
+            row.as_deref().filter(|_| rung == precedence::Trigger::Row),
+            senses.trigger,
+            crate::client_side::Press::default(),
+            others,
+        ) && conversation.choose_row()
+        {
+            feedback.emit(feedback::Event::Choose, now);
+        }
+        let selecting =
+            self.selector.owns() || self.pad_selector.owns() || self.row_selector.owns();
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
         // While a wall is carried, the trigger keeps it from snapping rather than attracting the swarm. See
         // `design/projection.md`. In a space it draws the swarm nowhere: the agent comes to whoever speaks to it, and the
@@ -1604,11 +1632,31 @@ impl Step {
                 .projection()
                 .and_then(|projection| projection.panel(panel))
         {
-            let tick = item
-                .as_ref()
+            // A choosable row says how to choose it, or, just chosen, that it was; a checklist item how to tick it.
+            let chosen = conversation
+                .pointed_row()
                 .filter(|_| conversation.ticks())
-                .and_then(|(panel, line)| conversation.item_checked(panel, *line))
-                .map(|checked| (self.controls, checked));
+                .map(|(panel, row)| {
+                    if conversation.just_chose(&panel, &row) {
+                        crate::projection::ItemAction::Chosen
+                    } else {
+                        crate::projection::ItemAction::Choose
+                    }
+                });
+            let tick = chosen
+                .or_else(|| {
+                    item.as_ref()
+                        .filter(|_| conversation.ticks())
+                        .and_then(|(panel, line)| conversation.item_checked(panel, *line))
+                        .map(|checked| {
+                            if checked {
+                                crate::projection::ItemAction::Untick
+                            } else {
+                                crate::projection::ItemAction::Tick
+                            }
+                        })
+                })
+                .map(|action| (self.controls, action));
             projection.push(crate::projection::label(
                 shown,
                 *point,
@@ -1656,11 +1704,19 @@ impl Step {
                     .as_ref()
                     .filter(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
                     .and(projected.item);
-                conversation.point(
-                    panel
-                        .clone()
-                        .map(|panel| tomori_protocol::Resource::panel_at(panel, item)),
-                )
+                // A row of an environment's list is named by its id too, so that the agent is told of the row the
+                // participant saw, even as the list changes.
+                let row = panel
+                    .as_deref()
+                    .zip(item)
+                    .and_then(|(panel, line)| conversation.row_at(panel, line))
+                    .map(|row| row.id.clone());
+                conversation.point(panel.clone().map(|panel| match (item, row) {
+                    (Some(line), Some(row)) => {
+                        tomori_protocol::Resource::panel_row(panel, line, row)
+                    }
+                    _ => tomori_protocol::Resource::panel_at(panel, item),
+                }))
             }
             (Some(card), _, _) => conversation.point(Some(tomori_protocol::Resource::card(card))),
             (None, Some(worker), _) => {
@@ -1995,6 +2051,43 @@ pub mod fixtures {
         conversation.take_actions();
     }
 
+    /// Showing a queue in [`SPACE`], an environment's list panel floating at `at`, facing `viewer`, whose rows `pod112`
+    /// and `pod9`, on lines 1 and 2, may be chosen and `pod7`, on line 0, may not, at version 6, by a server that takes
+    /// choices and ticks.
+    pub fn show_queue(conversation: &mut Conversation, at: glam::Vec3, viewer: glam::Vec3) {
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.checks = true;
+            state.choices = true;
+        }));
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![
+                        tomori_protocol::Panel::new(
+                            "panel-2",
+                            "Queue",
+                            "- pod7 waiting\n- pod112 waiting\n- pod9 waiting",
+                            tomori_protocol::Place::Free {
+                                pose: tomori_protocol::Pose::upright_facing(
+                                    at.to_array(),
+                                    viewer.to_array(),
+                                ),
+                            },
+                        )
+                        .with_rows(vec![
+                            tomori_protocol::ListRow::new("pod7", false),
+                            tomori_protocol::ListRow::new("pod112", true),
+                            tomori_protocol::ListRow::new("pod9", true),
+                        ])
+                        .with_version(6),
+                    ]),
+            ),
+        }));
+        conversation.take_actions();
+    }
+
     /// Showing `walls` and `panels` in [`SPACE`], whose server takes wall changes and locks walls.
     pub fn show_lockable_walls(
         conversation: &mut Conversation,
@@ -2010,13 +2103,18 @@ pub mod fixtures {
         conversation.take_actions();
     }
 
-    /// The last row of the label on the ray in `projection`, if there is one: the one with the panel's name.
+    /// The last row of the label on the ray in `projection`, if there is one: the one with the panel's name, the agenda
+    /// of [`show_checklist`] or the queue of [`show_queue`].
     #[cfg(test)]
     pub fn label_hint(projection: &[crate::controller_ui::Sheet]) -> Option<String> {
         projection
             .iter()
             .filter_map(|sheet| sheet.canvas.as_deref())
-            .find(|canvas| canvas.plain().starts_with("Agenda") && canvas.rows.len() <= 4)
+            .find(|canvas| {
+                let plain = canvas.plain();
+                (plain.starts_with("Agenda") || plain.starts_with("Queue"))
+                    && canvas.rows.len() <= 4
+            })
             .and_then(|canvas| {
                 canvas
                     .plain()
@@ -2894,7 +2992,29 @@ mod tests {
                 assert_eq!(step.highlighted, Some(mute));
             }
         }
-        let rows: [(A, &str, Setup, Late); 13] = [
+        /// The participant pointing at the queue's choosable row `pod112`, as the frame before found it.
+        fn on_row(conversation: &mut Conversation) {
+            conversation.point_item(Some(("panel-2".into(), 1)));
+        }
+        /// Whether A chose the row pointed at, which the environment would be told.
+        fn chose_row(actions: &[Action]) -> bool {
+            actions.contains(&Action::Send(
+                tomori_protocol::ClientMessage::ChoosePanelRow {
+                    panel: "panel-2".into(),
+                    row: "pod112".into(),
+                    revision: Some(6),
+                },
+            ))
+        }
+        /// The queue floating behind the lamp, which the ray meets first.
+        fn queue(conversation: &mut Conversation) {
+            show_queue(
+                conversation,
+                arrival::HOME + Vec3::new(0.0, 0.0, -2.0),
+                arrival::HOME,
+            );
+        }
+        let rows: [(A, &str, Setup, Late); 18] = [
             (
                 A::MenuRow,
                 "a hand menu row",
@@ -2988,6 +3108,20 @@ mod tests {
             ),
             (
                 A::Conversation,
+                "a request that has just appeared, before a choosable row",
+                |conversation, _, _, _| {
+                    queue(conversation);
+                    request(conversation);
+                    Box::new(|conversation, feedback| {
+                        conversation.a_refused()
+                            && !chose(feedback)
+                            && !chose_row(&conversation.take_actions())
+                    })
+                },
+                on_row,
+            ),
+            (
+                A::Conversation,
                 "a checklist item pointed at",
                 |conversation, _, _, _| {
                     // Behind the lamp, which the ray meets first.
@@ -3044,6 +3178,53 @@ mod tests {
             ),
             (
                 A::Conversation,
+                "a request to decide, before a choosable row",
+                |conversation, _, _, _| {
+                    queue(conversation);
+                    request(conversation);
+                    conversation.settle_request();
+                    Box::new(|conversation, feedback| {
+                        let actions = conversation.take_actions();
+                        chose(feedback)
+                            && actions
+                                == [Action::Send(tomori_protocol::ClientMessage::Decide {
+                                    request: "request-1".into(),
+                                    decision: tomori_protocol::Decision::AllowOnce,
+                                    option: None,
+                                })]
+                    })
+                },
+                on_row,
+            ),
+            (
+                A::Conversation,
+                "a question waiting, which refuses a choosable row",
+                |conversation, _, _, _| {
+                    queue(conversation);
+                    conversation.apply(space(|state| {
+                        state.projection = true;
+                        state.choices = true;
+                        state.question = Some(tomori_protocol::Question {
+                            id: "question-1".into(),
+                            title: "Which?".into(),
+                            text: "Name it".into(),
+                            field: "field-1".into(),
+                            supported: true,
+                        });
+                    }));
+                    conversation.settle_request();
+                    conversation.take_actions();
+                    Box::new(|conversation, feedback| {
+                        conversation.a_refused()
+                            && conversation.notice() == Some("Answer the request before choosing.")
+                            && !chose(feedback)
+                            && conversation.take_actions().is_empty()
+                    })
+                },
+                on_row,
+            ),
+            (
+                A::Conversation,
                 "a selected queue entry",
                 |conversation, _, _, _| {
                     conversation.apply(space(|state| {
@@ -3061,6 +3242,51 @@ mod tests {
                     })
                 },
                 nothing,
+            ),
+            (
+                A::Conversation,
+                "a selected queue entry, before a choosable row",
+                |conversation, _, _, _| {
+                    queue(conversation);
+                    conversation.apply(space(|state| {
+                        state.projection = true;
+                        state.choices = true;
+                        state.queue = vec![QueueEntry {
+                            id: "entry-1".into(),
+                            source: 1,
+                            speaker: "Ada".into(),
+                            text: "Fix the parser.".into(),
+                            state: QueueState::Queued,
+                        }]
+                    }));
+                    conversation.select_queued(1);
+                    conversation.take_actions();
+                    Box::new(|conversation, feedback| {
+                        chose(feedback)
+                            && conversation.text().contains("cancelling, A undoes")
+                            && !chose_row(&conversation.take_actions())
+                    })
+                },
+                on_row,
+            ),
+            (
+                A::Conversation,
+                "a choosable row of an environment's list pointed at, after everything that decides",
+                |conversation, _, _, _| {
+                    queue(conversation);
+                    Box::new(|conversation, feedback| {
+                        chose(feedback)
+                            && conversation.take_actions()
+                                == [Action::Send(
+                                    tomori_protocol::ClientMessage::ChoosePanelRow {
+                                        panel: "panel-2".into(),
+                                        row: "pod112".into(),
+                                        revision: Some(6),
+                                    },
+                                )]
+                    })
+                },
+                on_row,
             ),
             (
                 A::Conversation,
@@ -4497,6 +4723,83 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_on_a_row_or_a_pad_while_a_holds_the_environment_s_select_is_nobody_s() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        // A row: behind home, where the lamp, which picks only rays ahead, is not.
+        let (mut conversation, mut step, ahead, done) = lit(Default::default());
+        let behind = arrival::HOME + Vec3::new(0.0, 0.0, 2.0);
+        show_queue(&mut conversation, behind, arrival::HOME);
+        let row = queue_rows(&mut step, &mut conversation, behind)[1];
+        let pulled = Senses {
+            trigger: Some(1.0),
+            ..row
+        };
+        step.update(&ahead, &mut conversation, &mut felt(), now, FRAME);
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&ahead, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        conversation.take_actions();
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        for _ in 0..2 {
+            step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+            step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        }
+        // A let go while the pull lasts, the pull is still nobody's.
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Released("lamp".into())]);
+        assert!(conversation.take_actions().is_empty());
+        // Let go, and pulled again, it chooses the row.
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(
+                tomori_protocol::ClientMessage::ChoosePanelRow {
+                    panel: "panel-2".into(),
+                    row: "pod112".into(),
+                    revision: Some(6),
+                }
+            )]
+        );
+        // A pad: the same.
+        let (mut conversation, mut step, ahead, done) = lit(pad_behind_home());
+        let at_pad = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::new(0.0, 0.3, 2.0) - arrival::HOME),
+            ..ahead
+        };
+        let pulled = Senses {
+            trigger: Some(1.0),
+            ..at_pad
+        };
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&ahead, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        step.update(&at_pad, &mut conversation, &mut felt(), now, FRAME);
+        step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.rig(&conversation), Rig::default());
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(&at_pad, &mut conversation, &mut felt(), now, FRAME);
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.rig(&conversation).floor(), -4.5);
+    }
+
+    #[test]
     fn a_panel_behind_a_pad_is_not_pulled_off_by_the_grip() {
         use crate::locomotion::{Locomotion, Pad, Surface};
         use tomori_protocol::{Panel, Place};
@@ -5758,6 +6061,334 @@ mod tests {
                 Resource::panel("panel-1"),
             ]
         );
+    }
+
+    /// The senses with the ray on each line of the queue [`show_queue`] floats at `ahead`, from the top down: the first
+    /// that meets each of its rows, `pod7`, `pod112` and `pod9`.
+    fn queue_rows(step: &mut Step, conversation: &mut Conversation, ahead: Vec3) -> [Senses; 3] {
+        let mut found: [Option<Senses>; 3] = [None; 3];
+        for step_down in 0..60 {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            step.update(&senses, conversation, &mut felt(), Instant::now(), FRAME);
+            if let Some((_, line)) = conversation.pointed_item()
+                && found[*line as usize].is_none()
+            {
+                found[*line as usize] = Some(senses);
+            }
+        }
+        found.map(|senses| senses.expect("each row"))
+    }
+
+    #[test]
+    fn pointed_at_on_a_row_of_an_environment_s_list_the_words_name_the_row_by_its_id() {
+        use tomori_protocol::Resource;
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        let mut step = Step::default();
+        let mut named: Vec<Resource> = Vec::new();
+        for step_down in 0..60 {
+            let at = ahead + Vec3::new(-0.05, 0.15 - step_down as f32 * 0.005, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                FRAME,
+            );
+            conversation.talk(true);
+            conversation.talk(false);
+            // Recording begins, and ends, attending to what is pointed at.
+            let attended: Vec<_> = conversation
+                .take_actions()
+                .into_iter()
+                .filter_map(|action| match action {
+                    Action::BeginUtterance(utterance) => Some(utterance.attention),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(attended.len(), 1);
+            if let Some(attended) = attended[0].first()
+                && named.last() != Some(attended)
+            {
+                named.push(attended.clone());
+            }
+        }
+        assert_eq!(
+            named,
+            [
+                Resource::panel("panel-2"),
+                Resource::panel_row("panel-2", 0, "pod7"),
+                Resource::panel_row("panel-2", 1, "pod112"),
+                Resource::panel_row("panel-2", 2, "pod9"),
+                Resource::panel("panel-2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_list_waiting_for_its_layout_is_neither_named_nor_chosen() {
+        use tomori_protocol::{Panel, Place, Pose};
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        let queue = conversation
+            .projection()
+            .unwrap()
+            .panel("panel-2")
+            .unwrap()
+            .clone();
+        // Two other panels, beside it, and the queue, all changed together, the queue last.
+        let shown = |version: u64| {
+            let other = |index: usize| {
+                let at = arrival::HOME + Vec3::new(3.0 + index as f32, 0.0, -2.0);
+                Panel::new(
+                    format!("other-{index}"),
+                    format!("Other {index}"),
+                    format!("- at {version}"),
+                    Place::Free {
+                        pose: Pose::upright_facing(at.to_array(), arrival::HOME.to_array()),
+                    },
+                )
+                .with_version(version)
+            };
+            tomori_client::Event::Message(tomori_protocol::ServerMessage::Projection {
+                projection: Box::new(
+                    tomori_protocol::Projection::new(SPACE, "sky")
+                        .with_walls(vec![tomori_wall()])
+                        .with_panels(vec![
+                            other(0),
+                            other(1),
+                            queue.clone().with_version(version),
+                        ]),
+                ),
+            })
+        };
+        conversation.apply(shown(6));
+        let mut step = Step::default();
+        let row = queue_rows(&mut step, &mut conversation, ahead)[1];
+        let now = Instant::now();
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        assert!(conversation.pointed_row().is_some());
+        // Changed, the queue waits its turn behind the others: its row is not pointed at, named or chosen.
+        conversation.apply(shown(7));
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(conversation.pointed_item(), None);
+        assert_eq!(conversation.pointed_row(), None);
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        assert!(conversation.take_actions().is_empty());
+        // Its turn come, it is chosen as it is now.
+        for _ in 0..4 {
+            step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        }
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(
+                tomori_protocol::ClientMessage::ChoosePanelRow {
+                    panel: "panel-2".into(),
+                    row: "pod112".into(),
+                    revision: Some(7),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_or_the_trigger_on_a_choosable_row_chooses_it_once_for_its_environment() {
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        let mut step = Step::default();
+        let rows = queue_rows(&mut step, &mut conversation, ahead);
+        let [unchoosable, choosable, other] = rows;
+        let now = Instant::now();
+        let choose = |row: &str| {
+            Action::Send(tomori_protocol::ClientMessage::ChoosePanelRow {
+                panel: "panel-2".into(),
+                row: row.into(),
+                revision: Some(6),
+            })
+        };
+        let hint = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
+            let output = step.update(senses, conversation, &mut felt(), now, FRAME);
+            label_hint(&output.projection)
+        };
+        // On a choosable row, the label says A chooses it; on one that is not, it says nothing of choosing.
+        assert_eq!(
+            hint(&mut step, &mut conversation, &choosable).as_deref(),
+            Some("A  choose")
+        );
+        // A chooses it once, with the choosing cue, however many frames it is held, or skipped, before it is let go.
+        let mut feedback = felt();
+        step.buttons(&a_down(), true, &mut conversation, &mut feedback, now);
+        assert!(chose(&mut feedback));
+        assert_eq!(conversation.take_actions(), [choose("pod112")]);
+        for _ in 0..3 {
+            step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+        }
+        step.update(&choosable, &mut conversation, &mut felt(), now, FRAME);
+        assert!(conversation.take_actions().is_empty());
+        // Just chosen, the label says so.
+        assert_eq!(
+            hint(&mut step, &mut conversation, &choosable).as_deref(),
+            Some("✓  chosen")
+        );
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        // The trigger, pulled on another choosable row, chooses it once pressed there.
+        assert_eq!(
+            hint(&mut step, &mut conversation, &other).as_deref(),
+            Some("A  choose")
+        );
+        let mut feedback = felt();
+        let pulled = Senses {
+            trigger: Some(1.0),
+            attractor: Some(arrival::HOME),
+            ..other
+        };
+        step.update(&pulled, &mut conversation, &mut feedback, now, FRAME);
+        assert!(chose(&mut feedback));
+        assert_eq!(conversation.take_actions(), [choose("pod9")]);
+        for _ in 0..3 {
+            step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        }
+        assert!(conversation.take_actions().is_empty());
+        step.update(&other, &mut conversation, &mut felt(), now, FRAME);
+        // On a row that may not be chosen, A does nothing new, nor does the trigger, as anywhere on a panel in a space.
+        let shown = hint(&mut step, &mut conversation, &unchoosable);
+        assert!(!shown.unwrap_or_default().contains("choose"));
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        assert!(conversation.take_actions().is_empty());
+        let pulled = Senses {
+            trigger: Some(1.0),
+            attractor: Some(arrival::HOME),
+            ..unchoosable
+        };
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn the_trigger_on_a_choosable_row_decides_no_request_and_a_does_not_choose_while_one_waits() {
+        use tomori_protocol::{Approval, ApprovalOption};
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Collaborator);
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        conversation.apply(space(|state| {
+            state.projection = true;
+            state.choices = true;
+            state.approval = Some(Approval {
+                id: "request-1".into(),
+                title: "Bash".into(),
+                text: "cargo test".into(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                }],
+            });
+        }));
+        conversation.settle_request();
+        conversation.take_actions();
+        let mut step = Step::default();
+        let row = queue_rows(&mut step, &mut conversation, ahead)[1];
+        let now = Instant::now();
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        // The trigger never decides a request, so a pull on the row chooses it, and the request still waits.
+        step.update(
+            &Senses {
+                trigger: Some(1.0),
+                ..row
+            },
+            &mut conversation,
+            &mut felt(),
+            now,
+            FRAME,
+        );
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(
+                tomori_protocol::ClientMessage::ChoosePanelRow {
+                    panel: "panel-2".into(),
+                    row: "pod112".into(),
+                    revision: Some(6),
+                }
+            )]
+        );
+        assert!(conversation.is_choosing());
+        step.update(&row, &mut conversation, &mut felt(), now, FRAME);
+        // A, on the row, decides the request rather than choose the row.
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        let actions = conversation.take_actions();
+        assert!(matches!(
+            actions[..],
+            [Action::Send(tomori_protocol::ClientMessage::Decide { .. })]
+        ));
+    }
+
+    #[test]
+    fn a_visitor_s_a_or_trigger_on_a_choosable_row_chooses_nothing() {
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let mut conversation = lobby(ConnectionRole::Visitor);
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        let mut step = Step::default();
+        let rows = queue_rows(&mut step, &mut conversation, ahead);
+        let choosable = rows[1];
+        let now = Instant::now();
+        let output = step.update(&choosable, &mut conversation, &mut felt(), now, FRAME);
+        assert!(
+            !label_hint(&output.projection)
+                .unwrap_or_default()
+                .contains("choose")
+        );
+        let mut feedback = felt();
+        step.buttons(&a_down(), true, &mut conversation, &mut feedback, now);
+        assert!(!chose(&mut feedback));
+        assert!(conversation.a_refused());
+        assert!(conversation.take_actions().is_empty());
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        let pulled = Senses {
+            trigger: Some(1.0),
+            attractor: Some(arrival::HOME),
+            ..choosable
+        };
+        step.update(&pulled, &mut conversation, &mut felt(), now, FRAME);
+        assert!(conversation.take_actions().is_empty());
     }
 
     /// Where, scanning down the agenda [`show_checklist`] floats at `ahead`, the ray first meets a row whose label says

@@ -448,6 +448,7 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         version,
         data_seq,
         chart,
+        rows,
     } = a;
     *id == b.id
         && *title == b.title
@@ -459,6 +460,7 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         && *version == b.version
         && *data_seq == b.data_seq
         && *chart == b.chart
+        && *rows == b.rows
 }
 
 /// The data op that makes `was`'s live data `now`'s, two chart panels of the same structure: an append, where every
