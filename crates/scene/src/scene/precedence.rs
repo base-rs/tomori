@@ -54,6 +54,9 @@ pub(crate) enum Right {
     /// Anything else of Tomori's the ray is on, such as a panel that shows all it has, a card or a worker: the push is
     /// Tomori's, which pages result cards, as ever, and so nothing in a space.
     Tomori,
+    /// An object of the environment's client side pointed at that takes the right stick
+    /// ([`crate::client_side::Actions::SCROLL`]): the push is that object's, told with its identity.
+    Object,
     /// The environment's client side, with the ray on something of its own or on nothing of Tomori's.
     Environment,
     /// Nothing else: the push pages result cards, as ever, and so nothing in a space.
@@ -66,6 +69,7 @@ impl Ladder for Right {
         Self::Transcript,
         Self::Scroll,
         Self::Tomori,
+        Self::Object,
         Self::Environment,
         Self::Cards,
     ];
@@ -164,6 +168,21 @@ impl Ladder for A {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_object_that_takes_the_right_stick_comes_after_every_rung_of_tomori_s_and_before_its_client_side()
+     {
+        let at = |rung| Right::ORDER.iter().position(|other| *other == rung);
+        for rung in [
+            Right::Carried,
+            Right::Transcript,
+            Right::Scroll,
+            Right::Tomori,
+        ] {
+            assert!(at(rung) < at(Right::Object), "{rung:?}");
+        }
+        assert_eq!(at(Right::Object).map(|at| at + 1), at(Right::Environment));
+    }
 
     /// With every rung from each one on claiming, that rung wins, and with none claiming, the last does.
     fn each_rung_wins_over_the_ones_after_it<L: Ladder>() {
