@@ -175,6 +175,7 @@ pub(crate) fn home(anchors: &tomori_protocol::Anchors) -> Anchor {
     if let Some(given) = anchors.cluster(tomori_protocol::cluster::HOME) {
         home.extent = given.extent;
         home.formation = given.formation;
+        home.sweep = given.sweep;
     }
     home
 }

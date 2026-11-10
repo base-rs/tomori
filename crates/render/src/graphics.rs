@@ -635,7 +635,11 @@ impl Renderer {
     /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
     pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
         self.home_ring = ring.filter(|ring| {
-            ring.centre.is_finite() && ring.radius > 0.0 && ring.radius <= MOST_HOME_RING
+            ring.centre.is_finite()
+                && ring.towards.is_finite()
+                && ring.radius > 0.0
+                && ring.radius <= MOST_HOME_RING
+                && ring.sweep.is_finite()
         });
     }
 
@@ -686,17 +690,25 @@ impl Renderer {
         // the swarm: on the room's floor, or, for a home raised above the swarm's usual height, on the floor it would
         // stand that high over. Faint while the agent is away, it brightens as it comes back within the ring.
         let swarm_at = swarm.anchor().position;
-        let (centre, radius) = self
-            .home_ring
-            .map_or((swarm_at, tomori_scene::anchors::FLOOR_RING), |ring| {
-                (ring.centre, ring.radius)
-            });
+        let ring = self.home_ring.unwrap_or(tomori_scene::anchors::HomeRing {
+            centre: swarm_at,
+            ..tomori_scene::anchors::HomeRing::WHOLE
+        });
+        let (centre, radius) = (ring.centre, ring.radius);
         let floor = (centre.y - crate::swarm::CENTER.y).max(0.0) + 0.015;
         let away = (swarm_at.x - centre.x).hypot(swarm_at.z - centre.z);
         let faint = ((away - radius / 2.0) / radius).clamp(0.0, 1.0);
         let brightness = 1.0 - (1.0 - HOME_RING_AWAY) * faint;
+        // Only as much of it as its workers take, about the way to whoever they gather about.
+        let towards = glam::Vec2::new(ring.towards.x, ring.towards.z)
+            .try_normalize()
+            .unwrap_or(glam::Vec2::Y);
         for n in 0..HOME_RING_CUBES {
             let angle = n as f32 * std::f32::consts::TAU / HOME_RING_CUBES as f32;
+            let off = glam::Vec2::from_angle(angle).angle_to(towards).abs();
+            if off > ring.sweep / 2.0 + 1e-4 {
+                continue;
+            }
             self.scene.push(Instance {
                 position: [
                     centre.x + angle.cos() * radius,

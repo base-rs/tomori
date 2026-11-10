@@ -118,6 +118,10 @@ pub const RING: f32 = 1.4;
 /// How many rows a ring stands in, one above another, where its anchor gives it no room.
 pub const RING_ROWS: usize = 3;
 
+/// The least and the most of its ring an anchor's ring may take, in degrees, about the way to its audience.
+pub const LEAST_SWEEP: f32 = 90.0;
+pub const MOST_SWEEP: f32 = 360.0;
+
 /// The room an anchor's cluster may take, a box centred on its point, in its own frame: across, its X; up; and along
 /// the way it faces, its Z; in metres.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -231,6 +235,11 @@ pub struct Anchor {
     /// cluster out as the arc.
     #[serde(default, skip_serializing_if = "Formation::is_arc")]
     pub formation: Formation,
+    /// How much of its ring its members stand on, in degrees, from [`LEAST_SWEEP`] to [`MOST_SWEEP`], centred on the
+    /// way from its point to its audience, so that a ring by a wall or in a corner leaves the side towards it clear: the
+    /// whole ring without one. Only a ring takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<f32>,
 }
 
 /// The most bytes in an anchor's kind.
@@ -255,12 +264,20 @@ impl Anchor {
             object: None,
             placed: false,
             formation: Formation::Arc,
+            sweep: None,
         }
     }
 
     /// This anchor, whose cluster stands in `formation` about its point, such as a ring about the agent's home.
     pub fn with_formation(mut self, formation: Formation) -> Self {
         self.formation = formation;
+        self
+    }
+
+    /// This anchor, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, such
+    /// as 240° for a ring by a wall, which its back leaves clear.
+    pub fn with_sweep(mut self, degrees: f32) -> Self {
+        self.sweep = Some(degrees);
         self
     }
 
@@ -307,6 +324,9 @@ impl Anchor {
         }
         if self.extent.is_some_and(|extent| !extent.valid()) {
             return Err("its extent is not from 0.3 to 12 m on each side");
+        }
+        if self.sweep.is_some_and(|sweep| !valid_sweep(sweep)) {
+            return Err("its sweep is not from 90° to 360°");
         }
         if self.kind.as_deref().is_some_and(|kind| {
             !(1..=KIND_BYTES).contains(&kind.len())
@@ -382,6 +402,11 @@ impl Layout {
 pub struct Seat {
     pub worker: String,
     pub slot: u32,
+}
+
+/// Whether `degrees` is a sweep a ring may take: from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
+pub fn valid_sweep(degrees: f32) -> bool {
+    (LEAST_SWEEP..=MOST_SWEEP).contains(&degrees)
 }
 
 /// Whether `name` is one an anchor may have: 1 to [`NAME_BYTES`] bytes of ASCII letters, digits, `-`, `_`, `.` and `/`,
@@ -502,6 +527,8 @@ pub struct Cluster {
     footprint: Footprint,
     kept: bool,
     formation: Formation,
+    /// How much of its ring it takes, in radians, about the way to its audience.
+    sweep: f32,
 }
 
 /// A row's offset from the point, in rows: the point's own, then alternately above and below it.
@@ -525,8 +552,11 @@ impl Cluster {
             Formation::Ring => Formation::Ring,
             Formation::Arc | Formation::Unknown => Formation::Arc,
         };
+        let sweep = anchor.sweep.unwrap_or(MOST_SWEEP);
         if anchor.is_home() {
-            Self::home(pose, anchor.extent).with_formation(formation)
+            Self::home(pose, anchor.extent)
+                .with_formation(formation)
+                .with_sweep(sweep)
         } else {
             let (sin, cos) = yaw.sin_cos();
             Self {
@@ -541,7 +571,9 @@ impl Cluster {
                 footprint: WORKER,
                 kept: false,
                 formation,
+                sweep: std::f32::consts::TAU,
             }
+            .with_sweep(sweep)
         }
     }
 
@@ -556,6 +588,39 @@ impl Cluster {
             footprint: WORKER,
             kept: true,
             formation: Formation::Arc,
+            sweep: std::f32::consts::TAU,
+        }
+    }
+
+    /// This cluster, whose ring takes `degrees` of the circle about its point, centred on the way to its audience, or
+    /// the whole circle for a sweep that is not from [`LEAST_SWEEP`] to [`MOST_SWEEP`].
+    pub fn with_sweep(mut self, degrees: f32) -> Self {
+        self.sweep = if valid_sweep(degrees) && degrees < MOST_SWEEP {
+            degrees.to_radians()
+        } else {
+            std::f32::consts::TAU
+        };
+        self
+    }
+
+    /// How much of its ring it takes, in radians, centred on the way from its point to its audience.
+    pub fn sweep(&self) -> f32 {
+        self.sweep
+    }
+
+    /// The way from its point to its audience, about the vertical, as `[x, z]`, which its ring's sweep is centred on:
+    /// or, with its audience straight above or below it, the way it faces.
+    pub fn towards(&self) -> [f32; 2] {
+        let (ax, az) = (
+            self.audience[0] - self.point[0],
+            self.audience[2] - self.point[2],
+        );
+        let distance = ax.hypot(az);
+        if distance > 1e-4 {
+            [ax / distance, az / distance]
+        } else {
+            let [x, _, z] = self.facing();
+            [x, z]
         }
     }
 
@@ -936,7 +1001,7 @@ impl Cluster {
 
     /// How it stands in its ring with slots up to `span` taken, where it stands in one that holds any member: at full
     /// size while that holds them, or else compact, the rest gathered into the "+N more" sign at its last slot; none
-    /// where it stands in no ring, or its room holds none of it, when the other steps lay it out.
+    /// where it stands in no ring, or its room and sweep hold none of it, when the other steps lay it out.
     fn ringed(&self, span: usize) -> Option<Arrangement> {
         if self.formation != Formation::Ring {
             return None;
@@ -972,8 +1037,8 @@ impl Cluster {
     /// footprint's reach, turned any way, apart along it, evenly; in rows up from [`ROW_BELOW`] below the point, never
     /// nearer the floor than [`LOWEST`], a footprint's height apart, each place straight above the one below, so that a
     /// room clear about the first row is clear about every row, as many as its room's height holds, or [`RING_ROWS`]
-    /// without room; and in each row, the sides first as seen from its audience, then nearer before further, right
-    /// before left, each within its room.
+    /// without room; and in each row, those within its sweep, the sides first as seen from its audience, then nearer
+    /// before further, right before left, each within its room.
     fn ring(&self, scale: f32) -> Vec<[f32; 3]> {
         let footprint = self.footprint.scaled(scale);
         let reach = footprint.width.hypot(footprint.depth);
@@ -981,17 +1046,7 @@ impl Cluster {
             .floor()
             .max(1.0) as usize;
         // Towards the audience, about the vertical, or else the way it faces; and their right, as they look at it.
-        let (ax, az) = (
-            self.audience[0] - self.point[0],
-            self.audience[2] - self.point[2],
-        );
-        let distance = ax.hypot(az);
-        let towards = if distance > 1e-4 {
-            [ax / distance, az / distance]
-        } else {
-            let [x, _, z] = self.facing();
-            [x, z]
-        };
+        let towards = self.towards();
         let right = [towards[1], -towards[0]];
         // Each place's angle from the audience in quarter places, from 0, before the point, round to its right: a place
         // straight behind the point for an odd count, and none before or behind it for an even one. The sides stand at
@@ -1001,6 +1056,9 @@ impl Cluster {
         let mut order: Vec<usize> = (0..count)
             .map(|place| (2 * count + 4 * place + offset) % quarters)
             .collect();
+        // Only those within its sweep, about the way to its audience.
+        let swept = self.sweep / std::f32::consts::TAU * quarters as f32 / 2.0 + 1e-3;
+        order.retain(|quarter| (*quarter).min(quarters - quarter) as f32 <= swept);
         order.sort_by_key(|quarter| {
             let side = quarter.abs_diff(count).min(quarter.abs_diff(3 * count));
             let before = (*quarter).min(quarters - quarter);

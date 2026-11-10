@@ -468,8 +468,10 @@ pub struct Scene {
     audience: Vec3,
     /// The room the home cluster may take, as the joined space's environment gives it, or none for today's arc.
     extent: Option<tomori_protocol::cluster::Extent>,
-    /// How the home cluster stands about its point, as the joined space's environment says: the arc, or a ring.
+    /// How the home cluster stands about its point, as the joined space's environment says: the arc, or a ring, taking
+    /// as much of the circle as its sweep says, in degrees, or the whole of it.
     formation: tomori_protocol::cluster::Formation,
+    sweep: Option<f32>,
     /// The home cluster, about the origin, gathered about the audience, in the extent.
     cluster: tomori_protocol::cluster::Cluster,
     /// How the home cluster stands for the slots its live workers take: it changes only as the highest slot taken
@@ -531,6 +533,7 @@ impl Scene {
             audience: crate::anchors::EYES,
             extent: None,
             formation: tomori_protocol::cluster::Formation::Arc,
+            sweep: None,
             cluster: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None),
             layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
             pointed_more: None,
@@ -561,19 +564,20 @@ impl Scene {
             origin,
             audience,
             extent,
-            tomori_protocol::cluster::Formation::Arc,
+            (tomori_protocol::cluster::Formation::Arc, None),
             placement,
         );
     }
 
-    /// Arrange the workers as [`Self::arrange`] does, the home cluster standing in `formation` about `origin`: on the
-    /// arc, or in a ring about it, as the joined space's environment says. See `design/environments.md`.
+    /// Arrange the workers as [`Self::arrange`] does, the home cluster standing in `formation` about `origin`, with its
+    /// sweep in degrees, if it gives one: on the arc, or in a ring about it, as the joined space's environment says. See
+    /// `design/environments.md`.
     pub fn arrange_as(
         &mut self,
         origin: Anchor,
         audience: Vec3,
         extent: Option<tomori_protocol::cluster::Extent>,
-        formation: tomori_protocol::cluster::Formation,
+        (formation, sweep): (tomori_protocol::cluster::Formation, Option<f32>),
         placement: Option<Placement>,
     ) {
         // One that has panicked is never called again: its workers stand on the arc.
@@ -587,6 +591,7 @@ impl Scene {
             && self.audience == audience
             && self.extent == extent
             && self.formation == formation
+            && self.sweep == sweep
             && match (&self.placement, &placement) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -599,8 +604,11 @@ impl Scene {
         self.audience = audience;
         self.extent = extent;
         self.formation = formation;
+        self.sweep = sweep;
         self.placement = placement;
-        self.cluster = crate::anchors::cluster(origin, audience, extent).with_formation(formation);
+        self.cluster = crate::anchors::cluster(origin, audience, extent)
+            .with_formation(formation)
+            .with_sweep(sweep.unwrap_or(tomori_protocol::cluster::MOST_SWEEP));
         self.layout = self
             .cluster
             .arrange(self.home_laid.unwrap_or_else(|| self.span(&[])));

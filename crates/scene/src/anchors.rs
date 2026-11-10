@@ -344,8 +344,10 @@ pub struct Arrangement {
     /// `tomori_protocol::cluster`; none for today's arc.
     pub extent: Option<tomori_protocol::cluster::Extent>,
     /// How the workers' arrangement stands about its middle, as the environment's `home` cluster anchor says: the arc
-    /// by default, or a ring about the agent's home.
+    /// by default, or a ring about the agent's home, taking as much of the circle as `sweep` says, in degrees, or the
+    /// whole of it.
     pub formation: tomori_protocol::cluster::Formation,
+    pub sweep: Option<f32>,
     pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
@@ -379,18 +381,27 @@ impl Arrangement {
         self.agent.position.distance(self.home.position) > AWAY
     }
 
-    /// The ring drawn on the floor at home, which stays there wherever the agent goes: about the workers' ring, where
-    /// they stand in one, on its radius, or else about the agent's home, [`FLOOR_RING`] across. See
-    /// `design/environments.md`.
+    /// The ring drawn on the floor at home, which stays there wherever the agent goes: the workers' ring, where they
+    /// stand in one, on its radius and as much of it as they take, about the way to whoever they gather about; or else
+    /// about the agent's home, [`FLOOR_RING`] from it, whole. See `design/environments.md`.
     pub fn home_ring(&self) -> HomeRing {
         match self.formation {
-            tomori_protocol::cluster::Formation::Ring => HomeRing {
-                centre: self.workers.position,
-                radius: tomori_protocol::cluster::RING,
-            },
+            tomori_protocol::cluster::Formation::Ring => {
+                let cluster = cluster(self.workers, self.audience, self.extent)
+                    .with_formation(self.formation)
+                    .with_sweep(self.sweep.unwrap_or(tomori_protocol::cluster::MOST_SWEEP));
+                let [x, z] = cluster.towards();
+                HomeRing {
+                    centre: self.workers.position,
+                    radius: tomori_protocol::cluster::RING,
+                    towards: Vec3::new(x, 0.0, z),
+                    sweep: cluster.sweep(),
+                }
+            }
             _ => HomeRing {
                 centre: self.home.position,
                 radius: FLOOR_RING,
+                ..HomeRing::WHOLE
             },
         }
     }
@@ -400,12 +411,26 @@ impl Arrangement {
 pub const FLOOR_RING: f32 = 1.25;
 
 /// The ring drawn on the floor at home, the agent's place, which never travels with it: the middle it stands about, in
-/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the floor beneath; and
-/// its radius, in metres. Workers standing in a ring about the agent's home stand on it. See `design/environments.md`.
+/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the floor beneath; its
+/// radius, in metres; and how much of the circle it takes, in radians, centred on `towards`, the way from its middle
+/// to whoever its workers gather about, about the vertical. Workers standing in a ring about the agent's home stand on
+/// it. See `design/environments.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeRing {
     pub centre: Vec3,
     pub radius: f32,
+    pub towards: Vec3,
+    pub sweep: f32,
+}
+
+impl HomeRing {
+    /// A whole ring about the agent's default home.
+    pub const WHOLE: Self = Self {
+        centre: crate::swarm::CENTER,
+        radius: FLOOR_RING,
+        towards: Vec3::Z,
+        sweep: std::f32::consts::TAU,
+    };
 }
 
 impl Default for HomeRing {
@@ -424,6 +449,7 @@ impl Default for Arrangement {
             workers: Anchor::AGENT,
             extent: None,
             formation: tomori_protocol::cluster::Formation::Arc,
+            sweep: None,
             audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
@@ -445,6 +471,7 @@ impl std::fmt::Debug for Arrangement {
             .field("workers", &self.workers)
             .field("extent", &self.extent)
             .field("formation", &self.formation)
+            .field("sweep", &self.sweep)
             .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)

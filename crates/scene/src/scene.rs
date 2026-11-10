@@ -1830,7 +1830,7 @@ impl Step {
             arrangement.workers,
             arrangement.audience,
             arrangement.extent,
-            arrangement.formation,
+            (arrangement.formation, arrangement.sweep),
             arrangement.placement,
         );
         self.delegation_scene.update(root, workspace, dt);

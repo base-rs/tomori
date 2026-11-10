@@ -437,7 +437,7 @@ impl Feed {
             arrangement.workers,
             arrangement.audience,
             arrangement.extent,
-            arrangement.formation,
+            (arrangement.formation, arrangement.sweep),
             arrangement.placement,
         );
         self.scene.update(root, workspace, dt);
