@@ -7887,7 +7887,7 @@ mod tests {
             [
                 ClientMessage::CallAgent,
                 ClientMessage::SetAgentMovement {
-                    movement: AgentMovement::new(Movement::Home, Some(90))
+                    movement: AgentMovement::new(Movement::Follow, Some(90))
                 },
                 ClientMessage::SetAgentMovement {
                     movement: AgentMovement::new(Movement::Asked, Some(120))

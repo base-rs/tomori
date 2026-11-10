@@ -539,13 +539,13 @@ impl AgentMovement {
         }
     }
 
-    /// This setting, with the next mode a client steps to: following, only when asked, staying home, then following
-    /// again.
+    /// This setting, with the next mode a client steps to: from only when asked, the default, to following, then
+    /// staying home, then only when asked again.
     pub fn next_mode(self) -> Self {
         let mode = match self.mode {
-            Movement::Follow => Movement::Asked,
-            Movement::Asked => Movement::Home,
-            Movement::Home | Movement::Unknown => Movement::Follow,
+            Movement::Asked | Movement::Unknown => Movement::Follow,
+            Movement::Follow => Movement::Home,
+            Movement::Home => Movement::Asked,
         };
         Self { mode, ..self }
     }
@@ -1181,11 +1181,12 @@ mod tests {
             Movement::Asked
         );
         // A client steps the mode round, and the delay through its choices to never and round again.
-        let follow = AgentMovement::new(Movement::Follow, Some(90));
-        assert_eq!(follow.next_mode().mode, Movement::Asked);
-        assert_eq!(follow.next_mode().next_mode().mode, Movement::Home);
+        let asked = AgentMovement::default();
+        assert_eq!(asked.next_mode().mode, Movement::Follow);
+        assert_eq!(asked.next_mode().next_mode().mode, Movement::Home);
         assert_eq!(newer.next_mode().mode, Movement::Follow);
-        assert_eq!(follow.next_mode().next_mode().next_mode(), follow);
+        assert_eq!(asked.next_mode().next_mode().next_mode(), asked);
+        let follow = AgentMovement::new(Movement::Follow, Some(90));
         let mut delays = Vec::new();
         let mut stepped = AgentMovement::new(Movement::Follow, Some(RETURN_SHORTEST));
         for _ in 0..7 {
