@@ -645,10 +645,11 @@ impl Voice {
                 samples,
                 failed,
                 Box::new(move || sender.connection_is_current(generation)),
-            )?
+            )
         } else {
-            self.capture.open(samples, failed)?
+            self.capture.open(samples, failed)
         };
+        let recording = recording.inspect_err(|_| self.discard())?;
         let mut captured = self.lock();
         let mut microphone = match captured.microphone.take() {
             Some(microphone) if microphone.sample_rate() == recording.sample_rate => microphone,
@@ -674,6 +675,12 @@ impl Voice {
             .map(|microphone| microphone.push_float(&early));
     }
 
+    /// Close the capture without passing on what it heard before the microphone was set, as when setting it failed.
+    fn discard(&mut self) {
+        self.recording = None;
+        self.lock().early = None;
+    }
+
     /// Ask for the microphone ahead of its first use, so that the platform's
     /// request does not interrupt the first recording. Opening the microphone
     /// still checks, and explains how to allow it if it was refused.
@@ -690,7 +697,7 @@ impl Voice {
             .unwrap()
             .set_gate(Gate::Live);
         if let Err(error) = result {
-            self.recording = None;
+            self.discard();
             return Err(format!("Cannot send: {error}"));
         }
         self.live = true;
@@ -748,12 +755,13 @@ impl Voice {
         let result = microphone.start(utterance, answer, (naming, titling), attention, seen);
         drop(voice);
         if let Err(error) = result {
-            self.recording = None;
+            self.discard();
             return Err(format!("Cannot send: {error}"));
         }
         // Agent audio is captured as push-to-talk always is, for recognition;
         // `finish` reopens live capture afterwards.
         if resume_live && let Err(error) = self.open(client, false, generation) {
+            self.discard();
             // Only fails once the client is closed, when nothing more can be sent.
             let _ = self.lock().microphone.as_mut().map(Microphone::cancel);
             return Err(error);
@@ -809,7 +817,7 @@ impl Voice {
 
     /// The client is going away: close the microphone and forget it.
     fn reset(&mut self) {
-        self.recording = None;
+        self.discard();
         self.live = false;
         self.generation = None;
         self.lock().microphone = None;
