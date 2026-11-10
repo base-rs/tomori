@@ -55,6 +55,7 @@ pub mod timers;
 mod transcriber;
 mod versions;
 mod voice;
+mod watch;
 mod workspace;
 
 pub mod mixer;

@@ -109,6 +109,10 @@ pub enum State {
     Error,
     /// Ended before it finished without failing; it may be resumed.
     Stopped,
+    /// Not finished, but showing no progress for longer than the server allows. See `design/events.md`.
+    Stalled,
+    /// Given a message it has not answered for longer than the server allows. See `design/events.md`.
+    Unanswered,
     #[default]
     Unknown,
 }
@@ -271,6 +275,8 @@ impl Workspace {
                     tomori_protocol::WorkerState::Completed => State::Completed,
                     tomori_protocol::WorkerState::Error => State::Error,
                     tomori_protocol::WorkerState::Stopped => State::Stopped,
+                    tomori_protocol::WorkerState::Stalled => State::Stalled,
+                    tomori_protocol::WorkerState::Unanswered => State::Unanswered,
                     tomori_protocol::WorkerState::Unknown => State::Unknown,
                 },
             });
@@ -1004,8 +1010,7 @@ impl Scene {
             return;
         };
         for (id, worker) in &self.workers {
-            let working =
-                worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting);
+            let working = worker.retired.is_none() && is_working(worker.state);
             let finished = worker.retired.is_none() && is_terminal(worker.state);
             match self.motes.iter_mut().find(|mote| mote.id == *id) {
                 Some(mote) if working => {
@@ -1035,9 +1040,9 @@ impl Scene {
                 *pulse += dt;
                 *pulse < PULSE_SECONDS
             }
-            None => workers.get(&mote.id).is_some_and(|worker| {
-                worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting)
-            }),
+            None => workers
+                .get(&mote.id)
+                .is_some_and(|worker| worker.retired.is_none() && is_working(worker.state)),
         });
         // In the order of their slots, sorted in place, so that drawing them allocates nothing.
         self.motes.sort_unstable_by_key(|mote| mote.slot);
@@ -1933,6 +1938,15 @@ fn terminal_position(anchor: Vec3, state: State, i: usize) -> Vec3 {
     anchor + tangent * local.x + Vec3::Y * local.y + radial * local.z
 }
 
+/// Whether a worker in `state` is still at work, as far as anyone knows: running, waiting, or stalled or unanswered,
+/// which have not ended it.
+fn is_working(state: State) -> bool {
+    matches!(
+        state,
+        State::Running | State::Waiting | State::Stalled | State::Unanswered
+    )
+}
+
 fn palette(state: State) -> Vec3 {
     match state {
         State::Running => Vec3::new(0.22, 0.72, 0.95),
@@ -1941,6 +1955,8 @@ fn palette(state: State) -> Vec3 {
         State::Completed => Vec3::new(0.30, 0.85, 0.52),
         State::Error => Vec3::new(1.00, 0.25, 0.20),
         State::Stopped => Vec3::new(0.62, 0.52, 0.42),
+        // Amber, deeper than waiting's: something may be wrong.
+        State::Stalled | State::Unanswered => Vec3::new(1.00, 0.55, 0.10),
         State::Unknown => Vec3::new(0.50, 0.55, 0.65),
     }
 }
@@ -1954,6 +1970,7 @@ fn flock_offset(i: usize, seed: f32, time: f64, state: State) -> Vec3 {
             unreachable!("a terminal worker gathers into its terminal shape instead")
         }
         State::Stopped => (Vec3::new(0.11, 0.08, 0.09), 0.05),
+        State::Stalled | State::Unanswered => (Vec3::new(0.12, 0.08, 0.10), 0.04),
         State::Unknown => (Vec3::new(0.13, 0.10, 0.13), 0.12),
     };
     let y = 1.0 - 2.0 * (i as f32 + 0.5) / PARTICLES as f32;
@@ -4832,11 +4849,29 @@ mod space_tests {
             (WorkerState::Completed, State::Completed),
             (WorkerState::Error, State::Error),
             (WorkerState::Stopped, State::Stopped),
+            (WorkerState::Stalled, State::Stalled),
+            (WorkerState::Unanswered, State::Unanswered),
             (WorkerState::Unknown, State::Unknown),
         ] {
             let workspace = Workspace::from_space(&space(vec![worker("a", None, from)]), true);
             assert_eq!(workspace.nodes[0].state, to);
         }
+    }
+
+    /// A stalled or unanswered worker is amber, deeper than a waiting one's, still at work, and drifts slowly. See
+    /// `design/events.md`.
+    #[test]
+    fn a_stalled_or_unanswered_worker_is_amber_and_still_at_work() {
+        for state in [State::Stalled, State::Unanswered] {
+            let colour = palette(state);
+            assert_eq!(colour, Vec3::new(1.00, 0.55, 0.10));
+            assert_ne!(colour, palette(State::Waiting));
+            assert_ne!(colour, palette(State::Error));
+            assert!(is_working(state) && !is_terminal(state));
+            let offset = flock_offset(3, 0.5, 1.0, state);
+            assert!(offset.is_finite() && offset.length() < 0.2);
+        }
+        assert!(!is_working(State::Completed));
     }
 
     #[test]

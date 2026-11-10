@@ -52,7 +52,7 @@ In November 2026 the maintainer found that the agent coordinating a space, which
 
 **Data, not instructions.** The note text is the agent's own, but a timer fires when no one is asking; marking it as Tomori's, with square brackets that participants' words never have, and superseding the words given last, keeps a timer from being taken for, or standing behind, a request. The limits bound what a timer can cost, which is the agent's turns, since an `always` timer can wake it with nobody present.
 
-**A generic queue.** The queue knows sources and keys, not timers, so that the worker events proposed in `events.md` push notes keyed by the worker's session, coalescing as a worker's stall and then failure would, and share the pacing, the framing and the supersession above, without another path into the agent's session.
+**A generic queue.** The queue knows sources and keys, not timers, so that the worker events of `events.md` push notes of their own source, one for each condition, and share the pacing, the framing and the supersession above, without another path into the agent's session; they add a pace of their own, at most once every 2 minutes for stalls, a failure told at once, and caps of their own, as `events.md` describes.
 
 **Drawing deferred.** Workers are drawn by a layout the server seats, their stations, signs and swarm flights, in `tomori-scene` and `tomori-render`; a timer's dial follows none of that closely enough to add in the same change without building most of a second layout. This first increment carries everything a client needs, the state and the pointing, so that the dials are a client change on a server that already sends them.
 
@@ -77,4 +77,3 @@ In November 2026 the maintainer found that the agent coordinating a space, which
 - Whether a timer may be one participant's, "remind me", firing only while they are present.
 - Whether notes waiting in the queue should survive a restart, rather than only occurrences not yet looked at.
 - Whether the limits, 8 timers, 96 firings a day and 24 unattended, suit real use; they are to be tuned from the logs.
-- Whether worker events share timers' 30-second gap or have their own, as `events.md` decides.

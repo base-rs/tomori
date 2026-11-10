@@ -164,6 +164,9 @@ pub struct SpaceModel {
     events: crate::events::EventQueue,
     /// When the agent's turn last ended, after which a prompt of notes alone waits a quiet moment.
     quiet_since: Option<std::time::Instant>,
+    /// The watch over its workers, which tells the agent of those that failed, stalled or left a message unanswered.
+    /// See `design/events.md`.
+    watch: crate::watch::Watch,
 }
 
 /// The most notes of what participants did that the space keeps for the agent until the next words, the oldest left
@@ -342,6 +345,8 @@ fn describe_worker(
                 WorkerState::Completed => "completed",
                 WorkerState::Error => "failed",
                 WorkerState::Stopped => "stopped",
+                WorkerState::Stalled => "stalled",
+                WorkerState::Unanswered => "not answering",
                 WorkerState::Unknown => "state unknown",
             },
         ),
@@ -844,6 +849,7 @@ impl SpaceModel {
             timers: crate::timers::Timers::default(),
             events: crate::events::EventQueue::default(),
             quiet_since: None,
+            watch: crate::watch::Watch::default(),
         };
         model.load_messages(snapshot.messages);
         for permission in snapshot.permissions {
@@ -1122,6 +1128,30 @@ impl SpaceModel {
     pub fn remove_workers(&mut self, removed: &HashSet<String>) {
         self.workers.retain(|worker| !removed.contains(&worker.id));
         self.finished.retain(|id, _| !removed.contains(id));
+        self.watch.judge(&self.workers);
+    }
+
+    /// What is wrong with the worker `id`, as the space's watch over its workers last judged it, if anything is. See
+    /// `design/events.md`.
+    pub fn worker_condition(&self, id: &str) -> Option<&crate::watch::Condition> {
+        self.watch.condition(id)
+    }
+
+    /// `worker` as everyone in the space sees it, stalled or unanswered while it is. See `design/events.md`.
+    pub fn shown_worker(&self, worker: &tomori_protocol::Worker) -> tomori_protocol::Worker {
+        self.watch.shown(worker)
+    }
+
+    /// Whether the space watches any worker, which the clock then judges.
+    pub fn watching_workers(&self) -> bool {
+        self.watch.watching()
+    }
+
+    /// Judge the space's workers at `now`, in milliseconds since the Unix epoch, with `monotonic` the monotonic clock
+    /// now, by which a sleep or a jump of the clock is noticed, if it is to be. Returns whether how any is shown
+    /// changed. See `design/events.md`.
+    pub fn tick_workers(&mut self, now: u64, monotonic: Option<std::time::Instant>) -> bool {
+        self.watch.tick(now, monotonic, &self.workers)
     }
 
     /// Replace the space's workers with `workers`, the backend's latest list, noting when each that was not finished has
@@ -1524,6 +1554,8 @@ impl SpaceModel {
                 self.replace_workers(workers);
                 self.workers_authoritative = true;
                 self.worker_error = None;
+                self.watch.retain(&self.workers);
+                self.watch.judge(&self.workers);
             }
             Event::WorkersPartial { workers, message } => {
                 let workers = workers
@@ -1533,6 +1565,11 @@ impl SpaceModel {
                 self.replace_workers(workers);
                 self.workers_authoritative = false;
                 self.worker_error = Some(message);
+                self.watch.judge(&self.workers);
+            }
+            Event::WorkerActivity { worker, activity } => {
+                self.watch.observe(worker, activity);
+                self.watch.judge(&self.workers);
             }
             Event::WorkersUnavailable { message } => {
                 self.worker_error = Some(message);
@@ -1552,6 +1589,8 @@ impl SpaceModel {
                 self.unattended_problem();
             }
             Event::Reconnecting { reason } => {
+                // What the workers do is unknown until the backend reads them again. See `design/events.md`.
+                self.watch.unknown();
                 // Whatever the session is given while Tomori cannot see it may not be a participant's.
                 self.supersede(Superseded::Reconnected);
                 if !self.closed {
@@ -1980,12 +2019,19 @@ impl SpaceModel {
             return None;
         }
         let attribution = self.attribution;
-        if !self
+        let queued = self
             .queue
             .entries()
             .iter()
-            .any(|entry| entry.state == QueueState::Queued)
-        {
+            .any(|entry| entry.state == QueueState::Queued);
+        // Notes about workers join the queue only as they can be told, so that each is judged again just before.
+        if self.watch.due() && (queued || (!hold && self.events.may_give(now, self.quiet_since))) {
+            let present = !self.participants.is_empty();
+            for (key, note) in self.watch.take(&self.backend, &self.workers, present) {
+                self.events.push(crate::events::Source::Worker, key, note);
+            }
+        }
+        if !queued {
             return self.event_prompt(now, hold);
         }
         let events = self.events.block();
@@ -1994,10 +2040,15 @@ impl SpaceModel {
         let key = entry.id.clone();
         let (source, speaker) = (entry.source, entry.speaker.clone());
         // What the speaker attended to comes before their words, described as the space knows it now.
-        let context = self
-            .attending
-            .remove(&key)
-            .and_then(|attention| context(&self.backend, &attention, &self.workers));
+        let context = self.attending.remove(&key).and_then(|attention| {
+            // As everyone sees the workers, stalled or unanswered while they are.
+            let shown: Vec<tomori_protocol::Worker> = self
+                .workers
+                .iter()
+                .map(|worker| self.watch.shown(worker))
+                .collect();
+            context(&self.backend, &attention, &shown)
+        });
         // And, before that, which of the agent's messages they answer, should it have said more since they began.
         let reply = self
             .seen
@@ -2317,7 +2368,11 @@ impl SpaceModel {
                 .questions
                 .front()
                 .map(|pending| projection::question(&pending.question, &pending.answers)),
-            workers: self.workers.clone(),
+            workers: self
+                .workers
+                .iter()
+                .map(|worker| self.watch.shown(worker))
+                .collect(),
             workers_authoritative: Some(self.workers_authoritative),
             presentations: Vec::new(),
             participants,

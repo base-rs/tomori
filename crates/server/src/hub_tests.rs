@@ -7196,3 +7196,5 @@ mod patches;
 mod placing;
 #[path = "hub_tests/timers.rs"]
 mod timers;
+#[path = "hub_tests/watching.rs"]
+mod watching;

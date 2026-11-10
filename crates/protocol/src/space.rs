@@ -823,6 +823,12 @@ pub enum WorkerState {
     Error,
     /// Ended before it finished without failing, such as when its agent process ended. It may be resumed.
     Stopped,
+    /// Not finished, but it has shown no progress for longer than the server allows, as the server judged it. See
+    /// `design/events.md`.
+    Stalled,
+    /// It was given a message and has shown no progress since, for longer than the server allows, as the server judged
+    /// it. See `design/events.md`.
+    Unanswered,
     #[default]
     #[serde(other)]
     Unknown,

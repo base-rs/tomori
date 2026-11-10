@@ -16,6 +16,7 @@ use tomori_backend::{
     Backend, Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary, ToolServer,
 };
 
+mod activity;
 mod api;
 mod connection;
 mod endpoint;

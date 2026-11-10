@@ -86,6 +86,23 @@ fn running(state: WorkerState) -> bool {
     matches!(state, WorkerState::Running | WorkerState::Waiting)
 }
 
+/// What is wrong with a worker, and the evidence, for the `workers` tool, at `now`, in milliseconds since the Unix epoch:
+/// its kind, how many seconds it has held, why it failed, the tool it is running and for how long, and how its last step
+/// ended. See `design/events.md`.
+fn condition_json(condition: &crate::watch::Condition, now: u64) -> Value {
+    let seconds = |since: u64| now.saturating_sub(since) / 1_000;
+    json!({
+        "kind": condition.kind.name(),
+        "seconds": seconds(condition.since),
+        "error": condition.error,
+        "tool": condition.tool.as_ref().map(|tool| json!({
+            "name": tool.name,
+            "seconds": seconds(tool.since),
+        })),
+        "last_step_ended": condition.finish,
+    })
+}
+
 /// How a worker in `state` is described to the agent.
 fn state_name(state: WorkerState) -> &'static str {
     match state {
@@ -95,6 +112,8 @@ fn state_name(state: WorkerState) -> &'static str {
         WorkerState::Completed => "completed",
         WorkerState::Error => "failed",
         WorkerState::Stopped => "stopped",
+        WorkerState::Stalled => "stalled",
+        WorkerState::Unanswered => "unanswered",
         WorkerState::Unknown => "unknown",
     }
 }
@@ -178,6 +197,7 @@ impl Hub {
         let record = state.space(&space).expect("found above");
         self.reports_workers(&record.model.backend)?;
         let now = crate::cards::unix_now();
+        let now_ms = u64::try_from(self.wall_now().as_millisecond()).unwrap_or(0);
         let environments = self.environments();
         let seating = record.seated(&environments);
         let listed: Vec<Value> = record
@@ -190,11 +210,18 @@ impl Hub {
                 let at = seating
                     .seat_of(&crate::seating::Member::Worker(worker.id.clone()))
                     .map_or(tomori_protocol::cluster::HOME, |(at, _)| at);
+                // Stalled or unanswered as the space shows it, with the evidence; see `design/events.md`.
+                let shown = record.model.shown_worker(worker).state;
+                let condition = record
+                    .model
+                    .worker_condition(&worker.id)
+                    .map(|condition| condition_json(condition, now_ms));
                 json!({
                     "session": worker.id,
                     // Written by whatever named the worker, so on one line and bounded; see `design/mcp.md`.
                     "title": crate::space::one_line(&worker.title, TITLE_CHARS),
-                    "state": state_name(worker.state),
+                    "state": state_name(shown),
+                    "condition": condition,
                     "running": running(worker.state),
                     "finished": finished,
                     "finished_seconds_ago": record
