@@ -24,6 +24,6 @@ tomori-environment = { version = "0.2.0", path = "../environment" }
 
 [dev-dependencies]
 # The cancellation a test's space stops with, as the server's do.
-base-scheduler = "0.3.0"
+base-scheduler = "0.5.0"
 # The rule the Tomori wall's home beneath the agent's is stood by, which the layout's tests check.
 tomori-protocol = { version = "0.2.0", path = "../protocol" }

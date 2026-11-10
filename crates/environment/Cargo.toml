@@ -11,5 +11,5 @@ keywords = ["tomori", "environment", "xr", "agents"]
 categories = ["development-tools"]
 
 [dependencies]
-base-scheduler = "0.3.0"
+base-scheduler = "0.5.0"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
