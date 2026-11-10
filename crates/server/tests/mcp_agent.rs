@@ -195,7 +195,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
             "move_agent",
             json!({"place": "wall Tomori"})
         ))
-        .contains("home, stay, near NAME or front NAME")
+        .contains("home, stay, near NAME, front NAME or anchor NAME")
     );
     assert!(
         failure(&call(

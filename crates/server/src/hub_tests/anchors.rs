@@ -11,9 +11,9 @@ use tomori_environment::Outlet;
 use tomori_protocol::cluster::{Anchor, HOME, Layout};
 
 /// The room about the default home, which holds two workers, then eight compact.
-const ROOM: (f32, f32, f32) = (4.2, 1.6, 2.0);
+pub(super) const ROOM: (f32, f32, f32) = (4.2, 1.6, 2.0);
 
-fn worker(id: &str) -> tomori_backend::Worker {
+pub(super) fn worker(id: &str) -> tomori_backend::Worker {
     tomori_backend::Worker {
         id: id.to_owned(),
         parent: None,
@@ -24,8 +24,25 @@ fn worker(id: &str) -> tomori_backend::Worker {
 
 /// A yard whose server side runs, with a home of its own room and an aisle, and Sky; a space in it with `workers`,
 /// whose agent's tools are served; Ada, joined; and an outlet for its side.
-fn yard(
+pub(super) fn yard(
     workers: usize,
+) -> (
+    Arc<Hub>,
+    String,
+    async_channel::Receiver<SpaceCommand>,
+    SpaceOutlet,
+    Client,
+) {
+    yard_with(
+        (0..workers)
+            .map(|index| worker(&format!("ses_{index:02}")))
+            .collect(),
+    )
+}
+
+/// The yard of [`yard`], its space with `workers`.
+pub(super) fn yard_with(
+    workers: Vec<tomori_backend::Worker>,
 ) -> (
     Arc<Hub>,
     String,
@@ -60,9 +77,7 @@ fn yard(
         &bound,
         Snapshot {
             busy: Some(false),
-            workers: (0..workers)
-                .map(|index| worker(&format!("ses_{index:02}")))
-                .collect(),
+            workers,
             ..Snapshot::default()
         },
     );
@@ -79,7 +94,7 @@ fn yard(
 }
 
 /// The space's state `client` was sent last, if any.
-fn state(client: &Client) -> Option<tomori_protocol::SpaceState> {
+pub(super) fn state(client: &Client) -> Option<tomori_protocol::SpaceState> {
     client
         .read()
         .into_iter()
@@ -91,7 +106,7 @@ fn state(client: &Client) -> Option<tomori_protocol::SpaceState> {
 }
 
 /// The names of the space's cluster anchors in `state`.
-fn names(state: &tomori_protocol::SpaceState) -> Vec<&str> {
+pub(super) fn names(state: &tomori_protocol::SpaceState) -> Vec<&str> {
     state
         .anchors
         .clusters
@@ -100,7 +115,7 @@ fn names(state: &tomori_protocol::SpaceState) -> Vec<&str> {
         .collect()
 }
 
-fn rack(name: &str, x: f32) -> Anchor {
+pub(super) fn rack(name: &str, x: f32) -> Anchor {
     Anchor::new(
         name,
         tomori_protocol::Pose::at([x, 1.4, -8.0]).facing_towards([0.0, 1.4, 0.0]),

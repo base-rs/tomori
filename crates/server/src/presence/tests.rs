@@ -1271,25 +1271,33 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let asked = tomori_protocol::AgentMovement::default();
     let follow = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, None);
     let kept = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Home, None);
-    let home = agent(&anchors, None, false, asked);
+    let home = agent(&anchors, None, false, asked, None);
     assert_eq!(home["at_home"], true);
+    assert!(home.get("anchor").is_none());
     assert_eq!(home["position"], json!([0.0, 1.4, -2.3]));
     assert_eq!(home["facing_yaw"], 180.0);
     assert_eq!(
         (home["mode"].as_str(), home["movement"].as_str()),
         (Some("home"), Some("moves only when asked"))
     );
-    let away = agent(&anchors, Some(ahead), false, asked);
+    let away = agent(&anchors, Some(ahead), false, asked, Some("rack/a12"));
     assert_eq!(away["at_home"], false);
+    assert_eq!(away["anchor"], "rack/a12");
     assert_eq!(away["position"], json!([1.0, 1.9, -2.3]));
     assert_eq!(away["mode"], "away");
-    let following = agent(&anchors, Some(ahead), false, follow);
+    let following = agent(&anchors, Some(ahead), false, follow, None);
     assert_eq!(
         (following["mode"].as_str(), following["movement"].as_str()),
         (Some("following"), Some("follows the speaker"))
     );
-    assert_eq!(agent(&anchors, Some(ahead), true, follow)["mode"], "pinned");
-    assert_eq!(agent(&anchors, None, false, kept)["movement"], "stays home");
+    assert_eq!(
+        agent(&anchors, Some(ahead), true, follow, None)["mode"],
+        "pinned"
+    );
+    assert_eq!(
+        agent(&anchors, None, false, kept, None)["movement"],
+        "stays home"
+    );
 }
 
 #[test]
@@ -1376,4 +1384,61 @@ fn panels_fanned_beside_someone_stand_as_the_stage_places_them_or_walled_in_in_f
     // Walled in, in front of them, as front puts it.
     let around = ([-5.0, -1.0, -5.0], [5.0, 3.0, 5.0]);
     assert_eq!(fanned_beside(&head, &[], &[around], 1), [front_of(&head)]);
+}
+
+#[test]
+fn a_worker_placed_by_a_wall_stands_beyond_its_end_nearer_whoever_asked_and_one_beside_someone_to_their_right()
+ {
+    let wall = Wall::new(
+        "wall-1",
+        WallKind::Added,
+        Pose::upright_facing([0.0, 1.5, -2.0], [0.0, 1.5, 0.0]),
+    );
+    let ends: Vec<f32> = slot_centres(&wall).iter().map(|slot| slot[0]).collect();
+    let (left, right) = (
+        ends.iter().copied().fold(f32::INFINITY, f32::min),
+        ends.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+    );
+    // Facing +Z, its own right is towards +X; it takes the end nearer whoever asked, or else its right.
+    let towards = |eyes: Option<[f32; 3]>| beyond(&wall, eyes).position;
+    let by_plus = towards(Some([5.0, 1.6, 0.0]));
+    let by_minus = towards(Some([-5.0, 1.6, 0.0]));
+    assert!(by_plus[0] > right + 0.9 && by_minus[0] < left - 0.9);
+    assert_eq!(towards(None), by_plus);
+    // At its slots' height, facing as it faces.
+    let height = slot_centres(&wall).iter().map(|slot| slot[1]).sum::<f32>() / 6.0;
+    assert!((by_plus[1] - height).abs() < 1e-4);
+    assert!(rotate(beyond(&wall, None).orientation, [0.0, 0.0, 1.0])[2] > 0.99);
+    // Beside someone facing -Z, 1.5 m to their right, a little below their eyes, facing them; looking straight down,
+    // as though facing -Z.
+    let head = Pose::at([1.0, 1.6, 2.0]);
+    let beside = right_of(&head);
+    let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|axis| (a[axis] - b[axis]).abs() < 1e-4);
+    assert!(close(beside.position, [2.5, 1.4, 2.0]));
+    let down = Pose {
+        position: [1.0, 1.6, 2.0],
+        orientation: [
+            -std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ],
+    };
+    assert!(close(right_of(&down).position, [2.5, 1.4, 2.0]));
+}
+
+#[test]
+fn an_anchor_names_no_wall_and_only_the_hub_finds_a_slot_at_one() {
+    let projection = Projection::new("space", "yard");
+    let err = which_wall("anchor rack/a12", None, &[], &projection).unwrap_err();
+    assert!(err.contains("anchor names no wall"));
+    let err = destination(
+        &Placement::Anchor("rack/a12".to_owned()),
+        None,
+        &[],
+        &projection,
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.contains("no anchor"));
 }

@@ -480,6 +480,9 @@ pub enum Destination {
     },
     /// Onto the Tomori wall, as when nobody asked.
     Tomori,
+    /// Floating at `pose`, its slot of the cluster at the cluster anchor `anchor`, by name, of which it stays a member
+    /// while it floats there. See `design/projection.md`.
+    Anchor { anchor: String, pose: Pose },
 }
 
 /// The panels of the replies that one event completed, waiting for their code to be highlighted before they are
@@ -644,9 +647,21 @@ struct Kept {
     /// What makes it one its environment published, if it is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     published: Option<published::Published>,
+    /// The cluster anchor it was put at, by name, and where it was put: a member of that anchor's cluster for as long
+    /// as it floats there, so that moving it anywhere else, as a participant carrying it does, takes it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<(String, Pose)>,
 }
 
 impl Kept {
+    /// The anchor it stands at, by name, while it floats where it was put there.
+    fn anchored(&self) -> Option<&str> {
+        match (&self.anchor, &self.place) {
+            (Some((anchor, at)), Placed::Free { pose }) if at == pose => Some(anchor),
+            _ => None,
+        }
+    }
+
     /// Whether it is on the wall `wall`, and in which slot.
     fn slot_on(&self, wall: &str) -> Option<u32> {
         match &self.place {
@@ -1385,7 +1400,9 @@ impl Stage {
                 let slots = self.slots_of(walls, wall);
                 Spot::Wall(wall.clone(), slot.filter(|slot| *slot < slots))
             }
-            Destination::Free(pose) => valid(pose).map_or(tomori, Spot::Free),
+            Destination::Free(pose) | Destination::Anchor { pose, .. } => {
+                valid(pose).map_or(tomori, Spot::Free)
+            }
             Destination::Beside { head, solids } => {
                 let floating: Vec<Pose> = self
                     .rooms
@@ -1426,10 +1443,47 @@ impl Stage {
             pinned: false,
             arranged: false,
             published: None,
+            anchor: None,
         };
         self.put(walls, kept, to);
         self.bound(walls.environment);
         id
+    }
+
+    /// The panels floating in `environment` at a cluster anchor, each by identity with the anchor's name and where it
+    /// floats, in the order they were put there.
+    pub(crate) fn anchored(&self, environment: &str) -> Vec<(String, String, Pose)> {
+        let mut anchored: Vec<(u64, String, String, Pose)> = self
+            .here(environment)
+            .filter_map(|kept| {
+                let (_, pose) = kept.anchor.as_ref()?;
+                kept.anchored()
+                    .map(|anchor| (kept.placed, kept.id.clone(), anchor.to_owned(), *pose))
+            })
+            .collect();
+        anchored.sort_by_key(|(placed, ..)| *placed);
+        anchored
+            .into_iter()
+            .map(|(_, id, anchor, pose)| (id, anchor, pose))
+            .collect()
+    }
+
+    /// Take the panels floating in `environment` at the cluster anchor `anchor` out of its cluster, leaving them where they
+    /// float, as the anchor goes. Returns how many there were.
+    pub(crate) fn unanchor(&mut self, environment: &str, anchor: &str) -> usize {
+        let mut count = 0;
+        for kept in self
+            .rooms
+            .get_mut(environment)
+            .into_iter()
+            .flat_map(|room| room.panels.iter_mut())
+        {
+            if kept.anchored() == Some(anchor) {
+                kept.anchor = None;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Project `content`, one of Tomori's own notices of `kind`, such as that workers were removed, at `now` onto the
@@ -1455,12 +1509,20 @@ impl Stage {
         id
     }
 
-    /// Put the agent's panel `kept` where `to` says in `walls`' environment, not arranged.
-    fn put(&mut self, walls: &Walls<'_>, kept: Kept, to: &Destination) {
+    /// Put the agent's panel `kept` where `to` says in `walls`' environment, not arranged: at a cluster anchor, a member
+    /// of its cluster while it floats where it is put.
+    fn put(&mut self, walls: &Walls<'_>, mut kept: Kept, to: &Destination) {
+        kept.anchor = None;
         match self.resolve(walls, to) {
             Spot::Wall(wall, slot) => self.put_at(walls, kept, &wall, slot, false),
             Spot::Status(slot) => self.put_at(walls, kept, &walls.status_wall(), slot, true),
-            Spot::Free(pose) => self.float(walls, kept, pose),
+            Spot::Free(pose) => {
+                // At the pose it floats at, as the stage keeps it.
+                if let Destination::Anchor { anchor, .. } = to {
+                    kept.anchor = Some((anchor.clone(), pose));
+                }
+                self.float(walls, kept, pose)
+            }
         }
     }
 
@@ -3589,6 +3651,7 @@ mod tests {
             pinned: false,
             arranged: false,
             published: None,
+            anchor: None,
         };
         // More hidden in other environments than the limit allows, the earliest placed in the second.
         for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {

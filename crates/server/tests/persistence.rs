@@ -363,6 +363,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         closed_order: None,
         placements: Default::default(),
         stage: Default::default(),
+        places: Default::default(),
         active: None,
     };
     std::fs::write(

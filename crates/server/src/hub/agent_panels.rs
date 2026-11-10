@@ -465,8 +465,10 @@ impl Hub {
             return Err("A panel needs a title or a body.".to_owned());
         }
         let to = match &placement {
-            Some(placement) => Some(crate::presence::destination(
+            Some(placement) => Some(record.panel_destination(
+                &environments,
                 placement,
+                0,
                 record.model.origin().as_ref(),
                 &people,
                 &projection,

@@ -829,3 +829,58 @@ fn a_space_deleted_while_its_workers_are_removed_is_left_deleted() {
             .any(|listed| listed["id"] == space)
     );
 }
+
+#[test]
+fn a_worker_is_placed_through_the_endpoint_where_the_space_has_a_place_for_it() {
+    let spaces = Spaces::new();
+    let one = spaces.one.clone();
+    spaces.workers(vec![worker(
+        "w1",
+        &one,
+        "Review commit",
+        WorkerState::Running,
+    )]);
+    // In Sky, which names no anchors, an anchor is not here; home is.
+    let refused = spaces.call(
+        "place_worker",
+        json!({ "worker": "w1", "place": "anchor rack/a12" }),
+    );
+    assert!(failure(&refused).contains("no anchor"));
+    let placed = spaces.call(
+        "place_worker",
+        json!({ "worker": "Review commit", "place": "home" }),
+    );
+    assert_eq!(content(&placed)["at"], "home");
+    // Each argument is needed, and bounded.
+    let missing = spaces.call("place_worker", json!({ "worker": "w1" }));
+    assert!(failure(&missing).contains("place"));
+    let missing = spaces.call("place_worker", json!({ "place": "home" }));
+    assert!(failure(&missing).contains("worker"));
+    let long = spaces.call(
+        "place_worker",
+        json!({ "worker": "w".repeat(2000), "place": "home" }),
+    );
+    assert!(failure(&long).contains("worker"));
+    let long = spaces.call(
+        "place_worker",
+        json!({ "worker": "w1", "place": "p".repeat(2000) }),
+    );
+    assert!(failure(&long).contains("place"));
+    let unnamed = spaces.call(
+        "place_worker",
+        json!({ "worker": "w1", "place": "home", "requested_by": 3 }),
+    );
+    assert!(failure(&unnamed).contains("requested_by"));
+    // `workers` says where it stands.
+    let listed = spaces.call("workers", json!({}));
+    assert_eq!(content(&listed)["workers"][0]["at"], "home");
+    assert_eq!(content(&listed)["workers"][0]["placed_by"], Value::Null);
+    // And the agent goes to an anchor only where there is one.
+    let moved = spaces.call("move_agent", json!({ "place": "anchor rack/a12" }));
+    assert!(failure(&moved).contains("no anchor"));
+    let unnamed = spaces.call(
+        "move_agent",
+        json!({ "place": "anchor rack/a12", "requested_by": 3 }),
+    );
+    assert!(failure(&unnamed).contains("requested_by"));
+}

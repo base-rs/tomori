@@ -7172,3 +7172,5 @@ mod anchors;
 mod following;
 #[path = "hub_tests/patches.rs"]
 mod patches;
+#[path = "hub_tests/placing.rs"]
+mod placing;

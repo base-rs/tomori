@@ -455,6 +455,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "create_layout",
             "remove_layout",
             "move_agent",
+            "place_worker",
             "set_speech",
             "set_environment",
             "rename_space",
@@ -2437,7 +2438,7 @@ fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_d
         ),
         (
             json!({"place": "behind", "walls": [{"id": "a"}]}),
-            "Tomori does not know where \"behind\" is: say near NAME, looking NAME, front NAME, beside NAME, wall WALL or wall WALL slot N, or near, looking, front or beside for whoever asked.",
+            "Tomori does not know where \"behind\" is: say near NAME, looking NAME, front NAME, beside NAME, wall WALL, wall WALL slot N or anchor NAME, or near, looking, front or beside for whoever asked.",
         ),
         (
             json!({"walls": [{"id": "a"}]}),

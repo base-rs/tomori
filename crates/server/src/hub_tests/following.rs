@@ -396,7 +396,7 @@ fn moving_only_when_asked_its_own_move_leaves_its_wall_and_workers_home() {
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     ada.read();
     // It goes before her, and nothing goes with it: the projection is not sent again.
-    hub.agent_move_agent("session", "front ada").unwrap();
+    hub.agent_move_agent("session", "front ada", None).unwrap();
     let state = last_state(&ada).expect("told");
     assert!(state.summoned.is_some());
     assert_eq!(state.summoner, None);
@@ -767,21 +767,21 @@ fn its_own_tool_pins_it_or_takes_it_to_someone_its_entourage_home_while_it_follo
     ));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     // To Ada, in front of her: its entourage stays home, and it goes home again once quiet.
-    hub.agent_move_agent("session", "front ada").unwrap();
+    hub.agent_move_agent("session", "front ada", None).unwrap();
     let state = last_state(&ada).expect("told");
     assert!(state.summoned.is_some() && !state.pinned);
     assert_eq!(state.summoner, None);
     assert_eq!(state.partner, Some(ADA));
     // Asked to stay, it is pinned.
-    let stayed = hub.agent_move_agent("session", "stay").unwrap();
+    let stayed = hub.agent_move_agent("session", "stay", None).unwrap();
     assert_eq!(stayed["agent"]["mode"], "pinned");
     assert!(agent(&hub, &space).2);
     // Home, its pin ends, and it stands for nobody.
-    hub.agent_move_agent("session", "home").unwrap();
+    hub.agent_move_agent("session", "home", None).unwrap();
     assert_eq!(agent(&hub, &space), (None, None, false));
     assert_eq!(last_state(&ada).expect("told").partner, None);
     // Pinned at home, changing environment ends the pin too.
-    hub.agent_move_agent("session", "stay").unwrap();
+    hub.agent_move_agent("session", "stay", None).unwrap();
     assert!(agent(&hub, &space).2);
     let mut state = hub.lock();
     let changed = hub.move_space(&mut state, &space, "farmyard".to_owned());

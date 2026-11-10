@@ -34,11 +34,19 @@ fn seated(ids: &[&str], at: &'static str) -> Vec<(Member, &'static str)> {
         .collect()
 }
 
+/// A member by its identity, or `agent`.
+fn named(member: &Member) -> String {
+    match member {
+        Member::Worker(id) | Member::Panel(id) => id.clone(),
+        Member::Agent => "agent".to_owned(),
+    }
+}
+
 fn slots(seating: &Seating, name: &str) -> Vec<(String, usize)> {
     seating
         .members(name)
         .iter()
-        .map(|(Member::Worker(id), slot)| (id.clone(), *slot))
+        .map(|(member, slot)| (named(member), *slot))
         .collect()
 }
 
@@ -175,4 +183,43 @@ fn the_home_anchor_stands_about_the_workers_anchor_or_else_the_agent_s_home_in_i
         home(&tomori_protocol::Anchors::new()).pose,
         crate::hub::agent_home(&tomori_protocol::Anchors::new())
     );
+}
+
+#[test]
+fn panels_and_the_agent_take_slots_beside_workers_and_only_workers_are_sent() {
+    let anchors = anchors();
+    let mut seating = Seating::default();
+    let wanted = [
+        (Member::Worker("a".into()), "rack/a12"),
+        (Member::Panel("panel-1".into()), "rack/a12"),
+        (Member::Agent, "rack/a12"),
+    ];
+    seating.seat(&anchors, &wanted);
+    assert_eq!(
+        slots(&seating, "rack/a12"),
+        [("a".into(), 0), ("panel-1".into(), 1), ("agent".into(), 2)]
+    );
+    assert_eq!(seating.seat_of(&Member::Agent), Some(("rack/a12", 2)));
+    assert_eq!(seating.seat_of(&Member::Worker("b".into())), None);
+    assert_eq!(
+        seating.layouts(),
+        [Layout::new("rack/a12", 3).with_seat("a", 0)]
+    );
+    // Where each stands, and whom its cluster gathers about; one not seated stands nowhere.
+    let cluster = Cluster::new(&anchors[1]);
+    let (at, eyes) = seating
+        .position(&anchors, &Member::Panel("panel-1".into()))
+        .unwrap();
+    assert_eq!(at, cluster.slot(&cluster.arrange(3), 1).position);
+    assert_eq!(eyes, cluster.audience());
+    assert_eq!(
+        seating.position(&anchors, &Member::Worker("b".into())),
+        None
+    );
+    assert_eq!(seating.position(&anchors[..1], &Member::Agent), None);
+    // One arriving takes the next free slot, or the one after for the next arriving with it.
+    let (next, _) = seating.arriving(&anchors[1], 0);
+    assert_eq!(next, cluster.slot(&cluster.arrange(4), 3).position);
+    let (after, _) = seating.arriving(&anchors[1], 1);
+    assert_eq!(after, cluster.slot(&cluster.arrange(5), 4).position);
 }
