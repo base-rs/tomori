@@ -291,25 +291,44 @@ pub(crate) struct Selector {
 impl Selector {
     /// The trigger at `trigger`, `None` while it does not act, as without focus, with the ray on the selectable object
     /// `on`, if any, and A as `a` finds it: what the client side is told of them this frame, at most one select, since
-    /// a second can begin only once the first is let go.
+    /// a second can begin only once the first is let go; alone, as its tests try it, beside no other selector.
+    #[cfg(test)]
     pub(crate) fn update(
         &mut self,
         on: Option<&str>,
         trigger: Option<f32>,
         a: Press,
     ) -> Option<Select> {
-        let from_a = self.update_a(a);
+        self.update_beside(on, trigger, a, false)
+    }
+
+    /// As [`Self::update`] says, beside other selectors, of which one holds a select where `others` says, as a teleport
+    /// pad's or a row's pull does while the environment's A is held: then a press of A begun now is ignored, and a pull
+    /// begun now is nobody's until it is let go, so that only one select is held at a time across them all.
+    pub(crate) fn update_beside(
+        &mut self,
+        on: Option<&str>,
+        trigger: Option<f32>,
+        a: Press,
+        others: bool,
+    ) -> Option<Select> {
+        let from_a = self.update_a(a, others);
         // A press of A and a pull of the trigger that begin together are told apart by this order, and never both
         // select: A's press is ignored while a pull is the environment's, and a pull that begins while A holds the
         // select, or presses or lets go of it this frame, is nobody's.
-        let busy = self.a.is_some() || from_a.is_some();
+        let busy = self.a.is_some() || from_a.is_some() || others;
         let from_trigger = self.update_trigger(on, trigger, busy);
         from_a.or(from_trigger)
     }
 
-    /// A's press: pressed on the object it was taken on, unless a pull of the trigger is the environment's, and let go
-    /// once A is.
-    fn update_a(&mut self, a: Press) -> Option<Select> {
+    /// Whether it holds a select now: a pull on its object, pressed or not yet, or a press of A not yet let go.
+    pub(crate) fn holds(&self) -> bool {
+        matches!(self.pull, Pull::On { .. }) || self.a.is_some()
+    }
+
+    /// A's press: pressed on the object it was taken on, unless a pull of the trigger is the environment's, or another
+    /// selector holds a select, as `others` says, and let go once A is.
+    fn update_a(&mut self, a: Press, others: bool) -> Option<Select> {
         match self.a.take() {
             Some(object) if !a.held => Some(Select::Released(object)),
             Some(object) => {
@@ -318,7 +337,7 @@ impl Selector {
             }
             None => {
                 let object = a.on?;
-                if matches!(self.pull, Pull::On { .. }) {
+                if others || matches!(self.pull, Pull::On { .. }) {
                     return None;
                 }
                 self.a = Some(object.clone());
@@ -942,6 +961,75 @@ mod tests {
             for abandon in 0..=3 {
                 run(3, Some(abandon), sequence);
             }
+        }
+    }
+
+    /// Only one select at a time across selectors side by side, as the environment's beside a teleport pad's or a row's,
+    /// whose A is the conversation's: every sequence of four frames of the ray on nothing, the lamp or a row, the
+    /// trigger at rest, part way, pulled or lost, and A free, pressed, held or pressed and let go in the frame, never
+    /// holds two selects open at once, nor lets go of one not pressed.
+    #[test]
+    fn selectors_side_by_side_never_hold_two_selects_at_once() {
+        let ons = [None, Some("lamp"), Some("row")];
+        let triggers = [Some(0.0), Some(0.3), Some(1.0), None];
+        let presses = 4;
+        let frames = ons.len() * triggers.len() * presses;
+        let run = |sequence: usize| {
+            let (mut lamp, mut row) = (Selector::default(), Selector::default());
+            let mut open: Option<String> = None;
+            let mut judge = |select: Option<Select>| match select {
+                Some(Select::Pressed(object)) => {
+                    assert!(
+                        open.is_none(),
+                        "{sequence}: {object} pressed while one is open"
+                    );
+                    open = Some(object);
+                }
+                Some(Select::Released(object)) => {
+                    assert_eq!(open.take(), Some(object), "{sequence}: released unpressed");
+                }
+                None => {}
+            };
+            let mut rest = sequence;
+            for _ in 0..4 {
+                let frame = rest % frames;
+                rest /= frames;
+                let on = ons[frame % ons.len()];
+                let trigger = triggers[frame / ons.len() % triggers.len()];
+                let lamp_on = on.filter(|on| *on == "lamp").map(str::to_owned);
+                let press = match frame / (ons.len() * triggers.len()) {
+                    0 => Press::default(),
+                    1 => Press {
+                        on: lamp_on,
+                        held: true,
+                    },
+                    2 => held(),
+                    _ => Press {
+                        on: lamp_on,
+                        held: false,
+                    },
+                };
+                let others = row.holds();
+                judge(lamp.update_beside(on.filter(|on| *on == "lamp"), trigger, press, others));
+                let others = lamp.holds();
+                judge(row.update_beside(
+                    on.filter(|on| *on == "row"),
+                    trigger,
+                    Press::default(),
+                    others,
+                ));
+            }
+            for _ in 0..2 {
+                let others = row.holds();
+                judge(lamp.update_beside(None, Some(0.0), Press::default(), others));
+                let others = lamp.holds();
+                judge(row.update_beside(None, Some(0.0), Press::default(), others));
+            }
+            assert!(open.is_none(), "{sequence}: left open");
+            assert!(!lamp.owns() && !row.owns(), "{sequence}: left owning");
+        };
+        for sequence in 0..frames.pow(4) {
+            run(sequence);
         }
     }
 }

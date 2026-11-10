@@ -2702,20 +2702,20 @@ fn the_ray_s_label_says_how_to_tick_or_untick_the_checklist_item_it_meets() {
     // Nothing to tick says nothing of it.
     assert_eq!(lines(None, None).len(), 3);
     assert_eq!(
-        lines(None, Some((Controls::Controllers, false)))
+        lines(None, Some((Controls::Controllers, ItemAction::Tick)))
             .last()
             .unwrap(),
         "A  tick"
     );
     assert_eq!(
-        lines(None, Some((Controls::Controllers, true)))
+        lines(None, Some((Controls::Controllers, ItemAction::Untick)))
             .last()
             .unwrap(),
         "A  untick"
     );
     // The desktop window's A is Enter.
     assert_eq!(
-        lines(None, Some((Controls::Keyboard, false)))
+        lines(None, Some((Controls::Keyboard, ItemAction::Tick)))
             .last()
             .unwrap(),
         "Enter  tick"
@@ -2723,9 +2723,27 @@ fn the_ray_s_label_says_how_to_tick_or_untick_the_checklist_item_it_meets() {
     // A panel that scrolls says both, scrolling first.
     let both = lines(
         Some(Controls::Controllers),
-        Some((Controls::Controllers, false)),
+        Some((Controls::Controllers, ItemAction::Tick)),
     );
     assert_eq!(both[both.len() - 2..], ["Stick ↕  scroll", "A  tick"]);
+    // A row of an environment's list says how to choose it, and, just chosen, that it was.
+    for (controls, said) in [
+        (Controls::Controllers, "A  choose"),
+        (Controls::Keyboard, "Enter  choose"),
+    ] {
+        assert_eq!(
+            lines(None, Some((controls, ItemAction::Choose)))
+                .last()
+                .unwrap(),
+            said
+        );
+        assert_eq!(
+            lines(None, Some((controls, ItemAction::Chosen)))
+                .last()
+                .unwrap(),
+            "✓  chosen"
+        );
+    }
 }
 
 /// The table the maintainer could not read on the Quest 3, as the agent projected it.

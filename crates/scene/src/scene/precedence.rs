@@ -103,6 +103,11 @@ pub(crate) enum Trigger {
     /// A wall carried: held, the trigger keeps it from snapping to another, so that let go it stays where it is, and the
     /// pull attracts nothing.
     CarriedWall,
+    /// A choosable row of an environment's list panel, pointed at, not carried, for a participant: the pull chooses it,
+    /// for its environment, as A does (see `design/panel-actions.md`). The trigger is the environment's selecting
+    /// control, and the row is the environment's content, so the pull is the environment's, while everywhere else on a
+    /// panel it is Tomori's, doing nothing in a space.
+    Row,
     /// Anything else of Tomori's the ray is on, such as a panel, a card or a worker: the pull attracts the swarm, as
     /// ever, and never reaches the environment behind it.
     Tomori,
@@ -120,6 +125,7 @@ impl Ladder for Trigger {
         Self::Menu,
         Self::Transcript,
         Self::CarriedWall,
+        Self::Row,
         Self::Tomori,
         Self::Pad,
         Self::Environment,
@@ -141,7 +147,8 @@ pub(crate) enum A {
     /// or removes the focused queue entry or undoes that.
     Transcript,
     /// What the conversation's A takes: the list of modes, a request that has just appeared, which A refuses for 0.6
-    /// seconds, a checklist item pointed at, a request to decide, a queue entry to cancel or keep, then, the last of
+    /// seconds, a choosable row of an environment's list pointed at, which the press chooses for its environment (see
+    /// `design/panel-actions.md`), or else a checklist item pointed at, a request to decide, a queue entry to cancel or keep, then, the last of
     /// them, a teleport pad pointed at, which the press chooses (see `design/locomotion.md`), and outside a space what
     /// the lobby and arrival offer.
     Conversation,
@@ -182,6 +189,16 @@ mod tests {
             assert!(at(rung) < at(Right::Object), "{rung:?}");
         }
         assert_eq!(at(Right::Object).map(|at| at + 1), at(Right::Environment));
+    }
+
+    #[test]
+    fn a_choosable_row_takes_the_trigger_after_tomori_s_modal_rungs_and_before_the_rest_of_a_panel()
+    {
+        let at = |rung| Trigger::ORDER.iter().position(|other| *other == rung);
+        for rung in [Trigger::Menu, Trigger::Transcript, Trigger::CarriedWall] {
+            assert!(at(rung) < at(Trigger::Row), "{rung:?}");
+        }
+        assert_eq!(at(Trigger::Row).map(|at| at + 1), at(Trigger::Tomori));
     }
 
     /// With every rung from each one on claiming, that rung wins, and with none claiming, the last does.
@@ -240,6 +257,7 @@ mod tests {
             Trigger::Menu,
             Trigger::Transcript,
             Trigger::CarriedWall,
+            Trigger::Row,
             Trigger::Tomori,
             Trigger::Pad,
         ] {

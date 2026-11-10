@@ -1116,6 +1116,39 @@ mod tests {
     }
 
     #[test]
+    fn enter_or_a_click_chooses_the_row_the_mouse_points_at_as_a_and_the_trigger_do() {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Head::default().transform().transform_vector3(-Vec3::Z) * 2.0;
+        show_queue(&mut conversation, ahead, arrival::HOME);
+        let mut desktop = desktop(&mut conversation);
+        let now = Instant::now();
+        let choose = |row: &str| {
+            Action::Send(ClientMessage::ChoosePanelRow {
+                panel: "panel-2".into(),
+                row: row.into(),
+                revision: Some(6),
+            })
+        };
+        // Down the middle of the window, the mouse comes to the first choosable row, whose label names Enter.
+        let on_row = (0..400).find(|row| {
+            desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.25 + *row as f32));
+            let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            label_hint(&drawn.frame.projection).as_deref() == Some("Enter  choose")
+        });
+        assert!(on_row.is_some(), "the mouse meets a choosable row");
+        // Enter chooses it.
+        tap(&mut desktop, Key::A, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(conversation.take_actions(), [choose("pod112")]);
+        // So does a click, the left button being the trigger.
+        desktop.mouse(Button::Left, true);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        desktop.mouse(Button::Left, false);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(conversation.take_actions(), [choose("pod112")]);
+    }
+
+    #[test]
     fn page_up_and_down_and_the_brackets_reach_an_environment_with_nothing_carried() {
         let (mut conversation, done) = crate::scene::tests::lamp(Default::default(), false);
         let mut desktop = desktop(&mut conversation);

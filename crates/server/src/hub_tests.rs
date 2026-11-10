@@ -4277,6 +4277,389 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     assert!(read.get("rows").is_none());
 }
 
+/// A side that keeps every intent it is handed, for a test to read.
+struct Recording(Arc<Mutex<Vec<tomori_environment::Intent>>>);
+
+impl tomori_environment::ServerSide for Recording {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        while !space.cancellation().is_cancelled() {
+            if let Some(intent) = space.next_intent(Duration::from_millis(2)) {
+                self.0.lock().unwrap().push(intent);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_else_does() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    vic.join(&id);
+    let start = Instant::now();
+    let queue = |rows: Vec<tomori_environment::Row>| {
+        tomori_environment::Panel::list("queue", "Queue", rows).on_wall(0, None)
+    };
+    let pod = |id: &str| tomori_environment::Row::new(id, format!("{id} waiting"));
+    assert_eq!(
+        hub.channel_publish_at(
+            &outlet,
+            queue(vec![
+                pod("pod7"),
+                pod("pod112").choosable(),
+                pod("pod9").choosable()
+            ]),
+            start
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        hub.channel_publish_at(
+            &outlet,
+            tomori_environment::Panel::text("rota", "Rota", "- a").on_wall(1, None),
+            start
+        ),
+        Ok(())
+    );
+    hub.flush_publishes(start);
+    let shown = ada.projection();
+    let panel = |title: &str| {
+        shown
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .unwrap()
+            .clone()
+    };
+    let list = panel("Queue");
+    // Every client is sent the rows' ids, and which may be chosen.
+    assert_eq!(
+        list.rows,
+        [
+            tomori_protocol::ListRow::new("pod7", false),
+            tomori_protocol::ListRow::new("pod112", true),
+            tomori_protocol::ListRow::new("pod9", true),
+        ]
+    );
+    let choose = |row: &str, revision: Option<u64>| ClientMessage::ChoosePanelRow {
+        panel: list.id.clone(),
+        row: row.to_owned(),
+        revision,
+    };
+    let source = {
+        let state = hub.lock();
+        let key = state.connections[&ada.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    let chosen = |count: usize| {
+        eventually_in("the side is handed the choice", || {
+            seen.lock().unwrap().len() >= count
+        });
+        seen.lock().unwrap()[count - 1].clone()
+    };
+    // Chosen from the panel as it is, the side is handed the panel's and the row's ids, by whom, and nothing to read.
+    ada.send(choose("pod112", Some(list.version)));
+    assert!(ada.errors().is_empty());
+    assert_eq!(
+        chosen(1),
+        tomori_environment::Intent::choice(
+            source,
+            tomori_environment::Chosen::new("queue", "pod112", true)
+        )
+    );
+    // Reordered since, the row is still named by its id, and the side told the list changed since it was seen.
+    hub.channel_publish_at(
+        &outlet,
+        queue(vec![pod("pod9").choosable(), pod("pod112").choosable()]),
+        start + Duration::from_secs(2),
+    )
+    .unwrap();
+    hub.flush_publishes(start + Duration::from_secs(2));
+    ada.read();
+    ada.send(choose("pod112", Some(list.version)));
+    assert_eq!(
+        chosen(2).chosen(),
+        Some(&tomori_environment::Chosen::new("queue", "pod112", false))
+    );
+    // Refused, naming the panel: a row gone or never there, one not choosable, a panel that is not a list, one not
+    // here, and ids that could be no row's or panel's; and a visitor only watches.
+    let refusals = [
+        (choose("pod7", None), "That row is no longer on the list."),
+        (choose("pod404", None), "That row is no longer on the list."),
+        (
+            ClientMessage::ChoosePanelRow {
+                panel: panel("Rota").id,
+                row: "a".into(),
+                revision: None,
+            },
+            "That panel has no rows to choose.",
+        ),
+        (
+            ClientMessage::ChoosePanelRow {
+                panel: "panel-404".into(),
+                row: "a".into(),
+                revision: None,
+            },
+            "That panel is not here.",
+        ),
+        (choose("a b", None), "That is not a row's id."),
+        (
+            choose(&"a".repeat(tomori_environment::ROW_ID_BYTES + 1), None),
+            "That is not a row's id.",
+        ),
+    ];
+    for (message, refused) in refusals {
+        ada.send(message);
+        let errors: Vec<(String, Option<String>)> = ada
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Error { error, panel, .. } => Some((error, panel)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{refused}");
+        assert_eq!(errors[0].0, refused);
+        assert!(refused.starts_with("That is not") || errors[0].1.is_some());
+    }
+    ada.send(ClientMessage::ChoosePanelRow {
+        panel: "p".repeat(limits::IDENTIFIER_BYTES + 1),
+        row: "pod9".into(),
+        revision: None,
+    });
+    assert_eq!(ada.errors().len(), 1);
+    hub.channel_publish_at(
+        &outlet,
+        queue(vec![pod("pod7"), pod("pod9").choosable()]),
+        start + Duration::from_secs(4),
+    )
+    .unwrap();
+    hub.flush_publishes(start + Duration::from_secs(4));
+    ada.read();
+    ada.send(choose("pod112", None));
+    assert_eq!(ada.errors(), ["That row is no longer on the list."]);
+    vic.send(choose("pod9", None));
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // Outside the space, nobody's row is chosen. Choices reach the side in the order the hub takes them, so once a later
+    // choice has arrived, nothing refused or dropped before it can still arrive: Bob's, from inside the space, made
+    // against a version it never had, so that it is told apart from any other.
+    let bob = Client::projecting(&hub, Access::open(), "bob");
+    bob.send(choose("pod9", None));
+    bob.join(&id);
+    bob.send(choose("pod9", Some(1)));
+    let sentinel = chosen(3);
+    assert_eq!(
+        sentinel.chosen(),
+        Some(&tomori_environment::Chosen::new("queue", "pod9", false))
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    // Beyond the participant's burst of intents, choices are dropped quietly: of twice the burst, at most a burst is
+    // taken, however quickly the bucket refills, as Bob's next choice, arriving after all of them, shows.
+    let burst = crate::channel::INTENT_BURST as usize;
+    for _ in 0..burst * 2 {
+        ada.send(choose("pod9", None));
+    }
+    assert!(ada.errors().is_empty());
+    bob.send(choose("pod9", Some(1)));
+    eventually_in("Bob's choice arrives after Ada's", || {
+        let seen = seen.lock().unwrap();
+        seen.len() > 3 && seen.last() == Some(&sentinel)
+    });
+    let flood = seen.lock().unwrap().len() - 4;
+    assert!((1..=burst).contains(&flood), "{flood}");
+    // In another environment, the list is hidden, and its rows are chosen no more.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".to_owned(),
+    });
+    ada.read();
+    ada.send(choose("pod9", None));
+    assert_eq!(ada.errors(), ["That panel is not here."]);
+}
+
+#[test]
+fn a_choice_made_against_the_version_a_paced_client_was_sent_is_resolved_by_id() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let queue = |pods: &[&str]| {
+        tomori_environment::Panel::list(
+            "queue",
+            "Queue",
+            pods.iter()
+                .map(|pod| tomori_environment::Row::new(*pod, *pod).choosable())
+                .collect(),
+        )
+        .on_wall(0, None)
+    };
+    // The queue as the client is sent it: the last projection it was sent.
+    let received = |ada: &Client| {
+        ada.projections().pop().and_then(|projection| {
+            projection
+                .panels
+                .into_iter()
+                .find(|panel| panel.title == "Queue")
+        })
+    };
+    hub.channel_publish_at(&outlet, queue(&["pod7", "pod112", "pod9"]), at(0))
+        .unwrap();
+    hub.flush_publishes(at(0));
+    let first = received(&ada).expect("the first version is sent at once");
+    // Another change, told at once, and then the queue changed within the pace's interval of it: the change is the
+    // space's, but not yet sent to the client, which still shows the first version.
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::text("rota", "Rota", "x").on_wall(1, None),
+        at(1_000),
+    )
+    .unwrap();
+    hub.flush_publishes(at(1_000));
+    assert!(!ada.projections().is_empty());
+    hub.channel_publish_at(&outlet, queue(&["pod112", "pod9"]), at(1_100))
+        .unwrap();
+    hub.flush_publishes(at(1_100));
+    assert!(ada.projections().is_empty(), "paced: not yet sent");
+    let choose = |row: &str, revision: u64| ClientMessage::ChoosePanelRow {
+        panel: first.id.clone(),
+        row: row.to_owned(),
+        revision: Some(revision),
+    };
+    let chosen = |count: usize| {
+        eventually_in("the side is handed the choice", || {
+            seen.lock().unwrap().len() >= count
+        });
+        seen.lock().unwrap()[count - 1].chosen().cloned()
+    };
+    // Against the version it was sent, a row still on the list is chosen, by its id, not current.
+    ada.send(choose("pod112", first.version));
+    assert!(ada.errors().is_empty());
+    assert_eq!(
+        chosen(1),
+        Some(tomori_environment::Chosen::new("queue", "pod112", false))
+    );
+    // A row the newer version took away is refused, though the client still shows it.
+    ada.send(choose("pod7", first.version));
+    assert_eq!(ada.errors(), ["That row is no longer on the list."]);
+    // Once the paced send arrives, a choice against it is current.
+    hub.flush_snapshots(at(1_300));
+    let second = received(&ada).expect("the paced send arrives");
+    assert_ne!(second.version, first.version);
+    assert_eq!(second.rows.len(), 2);
+    ada.send(choose("pod9", second.version));
+    assert_eq!(
+        chosen(2),
+        Some(tomori_environment::Chosen::new("queue", "pod9", true))
+    );
+}
+
+#[test]
+fn a_row_of_the_last_of_as_many_lists_as_a_side_may_show_is_chosen() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls(
+                [upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])].map(|pose| {
+                    crate::EnvironmentWall::new(pose).with_grid(tomori_protocol::Grid::from((8, 2)))
+                }),
+            )
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let now = Instant::now();
+    for panel in 0..crate::stage::PUBLISHED {
+        let rows = vec![tomori_environment::Row::new(format!("pod{panel}"), "waiting").choosable()];
+        let list =
+            tomori_environment::Panel::list(format!("list-{panel}"), format!("List {panel}"), rows)
+                .on_wall(panel as u32 % 2, None);
+        assert_eq!(hub.channel_publish_at(&outlet, list, now), Ok(()));
+    }
+    let shown = ada.projections().pop().unwrap();
+    assert_eq!(shown.panels.len(), crate::stage::PUBLISHED);
+    let last = crate::stage::PUBLISHED - 1;
+    let panel = shown
+        .panels
+        .iter()
+        .find(|panel| panel.title == format!("List {last}"))
+        .unwrap();
+    ada.send(ClientMessage::ChoosePanelRow {
+        panel: panel.id.clone(),
+        row: format!("pod{last}"),
+        revision: Some(panel.version),
+    });
+    assert!(ada.errors().is_empty());
+    eventually_in("the side is handed the choice", || {
+        !seen.lock().unwrap().is_empty()
+    });
+    let expected = format!("list-{last}");
+    assert_eq!(
+        seen.lock().unwrap()[0].chosen(),
+        Some(&tomori_environment::Chosen::new(
+            expected,
+            format!("pod{last}"),
+            true
+        ))
+    );
+}
+
 /// A side that publishes a panel, then finishes.
 struct Finishing;
 

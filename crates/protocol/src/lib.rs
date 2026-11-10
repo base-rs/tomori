@@ -43,7 +43,7 @@ pub use projection::group;
 pub use projection::layout as wall;
 pub use projection::{
     Align, Attach, CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Edge, Grid, IMAGE_BYTES,
-    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, Meta, Panel,
+    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, ListRow, Meta, Panel,
     PatchError, PatchOp, Place, Projection, ProjectionPatch, SlotFrame, Span, TOMORI_WALL,
     TokenKind, WALL_SLOTS, Wall, WallKind, WallShape, hash_bytes, hash_text, valid_spans,
 };

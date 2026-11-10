@@ -276,6 +276,11 @@ pub struct SpaceState {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checks: bool,
+    /// Whether the server takes [`crate::ClientMessage::ChoosePanelRow`] from participants, handing the choice of a
+    /// choosable row of an environment's list panel to its server side. False from older servers, to which a client
+    /// sends none and offers no choosing. See `design/panel-actions.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub choices: bool,
     /// Whether the server snaps walls into groups, taking [`crate::ClientMessage::AttachWall`] from participants, moving
     /// a group together as one of its walls is moved and sending each wall's [`crate::Wall::group`] and
     /// [`crate::Wall::joined`]. False from older servers, which a client sends no `AttachWall` and offers no snapping. See

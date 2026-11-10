@@ -9,7 +9,7 @@
 //!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
 //!
-//! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`].
+//! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`]. A participant's choice of a row it marks [choosable](Row::choosable) reaches it as an [`Intent`] whose [`Intent::chosen`] names the row.
 //!
 //! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], and what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 use std::collections::VecDeque;
@@ -96,11 +96,63 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// assert_eq!(intent.participant(), 3);
 /// assert_eq!(intent.payload(), r#"{"notice":1}"#);
 /// ```
+///
+/// An intent may instead be a participant's choice of a row of a list panel the side published, which the server makes
+/// itself, never from what a client sends as an intent: see [`Intent::chosen`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Intent {
     participant: u32,
     payload: String,
+    chosen: Option<Chosen>,
+}
+
+/// A participant's choice of a row of a list panel the side published, as the server hands it on: the side's own id
+/// for the panel and the row's id, as it published them, and whether the participant chose it from the panel as it is
+/// now. The server checked that the panel is this side's, shown in the space, that the row is on it now and marked
+/// [choosable](crate::Row::choosable), and that the participant takes part in the space and is within the intents'
+/// rate; it names the row by its id, never by where it stands in the list, so that a choice made just as the list
+/// changed names the row the participant saw, or is refused, should that row have gone. See `design/panel-actions.md`.
+///
+/// ```
+/// use tomori_environment::Chosen;
+///
+/// let chosen = Chosen::new("queue", "pod112", true);
+/// assert_eq!((chosen.panel(), chosen.row(), chosen.current()), ("queue", "pod112", true));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Chosen {
+    panel: String,
+    row: String,
+    current: bool,
+}
+
+impl Chosen {
+    /// The row `row` of the panel `panel`, by the side's ids, chosen from the panel as it is now, as `current` says.
+    pub fn new(panel: impl Into<String>, row: impl Into<String>, current: bool) -> Self {
+        Self {
+            panel: panel.into(),
+            row: row.into(),
+            current,
+        }
+    }
+
+    /// The side's id for the panel, as it published it.
+    pub fn panel(&self) -> &str {
+        &self.panel
+    }
+
+    /// The row's id, as the side published it.
+    pub fn row(&self) -> &str {
+        &self.row
+    }
+
+    /// Whether the participant chose it from the panel as it is now: false where the panel has changed since the version
+    /// they saw, as when the side reordered its rows, though the row they chose, named by its id, is still on it.
+    pub fn current(&self) -> bool {
+        self.current
+    }
 }
 
 impl Intent {
@@ -109,6 +161,27 @@ impl Intent {
         Self {
             participant,
             payload: payload.into(),
+            chosen: None,
+        }
+    }
+
+    /// The participant numbered `participant`'s choice, `chosen`, of a row of a list panel the side published, whose
+    /// payload is empty. The server makes it, as a participant chooses a row, never from a client's intent; a side's own
+    /// tests make it to try their handling of a choice.
+    ///
+    /// ```
+    /// use tomori_environment::{Chosen, Intent};
+    ///
+    /// let intent = Intent::choice(3, Chosen::new("queue", "pod112", true));
+    /// assert_eq!(intent.chosen().map(Chosen::row), Some("pod112"));
+    /// assert_eq!((intent.participant(), intent.payload()), (3, ""));
+    /// assert_eq!(Intent::new(3, "{}").chosen(), None);
+    /// ```
+    pub fn choice(participant: u32, chosen: Chosen) -> Self {
+        Self {
+            participant,
+            payload: String::new(),
+            chosen: Some(chosen),
         }
     }
 
@@ -119,9 +192,18 @@ impl Intent {
         self.participant
     }
 
-    /// The environment's own intent, as JSON text.
+    /// The environment's own intent, as JSON text: empty for a choice, which a side that knows nothing of choices reads
+    /// as it reads any intent it cannot, and ignores.
     pub fn payload(&self) -> &str {
         &self.payload
+    }
+
+    /// The row of one of the side's list panels the participant chose, if this is a choice rather than the client
+    /// side's own intent. Only the server makes a choice, as a participant chooses a row of a panel this side published
+    /// in this space: a client's intent is never one, whatever its payload says, so a side may act on a choice as a
+    /// participant's own, as on anything they asked, validating the row against its own state.
+    pub fn chosen(&self) -> Option<&Chosen> {
+        self.chosen.as_ref()
     }
 }
 
@@ -653,6 +735,27 @@ mod tests {
         assert_eq!(space.describe(Vec::new()), Ok(()));
         assert_eq!(space.publish(Panel::text("a", "b", "c")), Ok(()));
         assert_eq!(space.retract("a"), Ok(()));
+    }
+
+    #[test]
+    fn a_choice_is_an_intent_apart_from_any_payload() {
+        let chosen = Chosen::new("queue", "pod/7", false);
+        assert_eq!(
+            (chosen.panel(), chosen.row(), chosen.current()),
+            ("queue", "pod/7", false)
+        );
+        let intent = Intent::choice(4, chosen.clone());
+        assert_eq!(intent.chosen(), Some(&chosen));
+        assert_eq!((intent.participant(), intent.payload()), (4, ""));
+        // A client's intent is never a choice, whatever it says.
+        let forged = Intent::new(4, r#"{"chosen":{"panel":"queue","row":"pod/7"}}"#);
+        assert_eq!(forged.chosen(), None);
+        // Choices wait in the same inbox, in order with the client side's intents.
+        let space = Space::new("space-1-4", "Fleet", "/");
+        assert!(space.inbox().push(forged.clone()));
+        assert!(space.inbox().push(intent.clone()));
+        assert_eq!(space.next_intent(Duration::ZERO), Some(forged));
+        assert_eq!(space.next_intent(Duration::ZERO), Some(intent));
     }
 
     #[test]

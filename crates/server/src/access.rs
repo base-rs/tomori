@@ -144,7 +144,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::PlaceAgent { .. }
         | ClientMessage::CallAgent
         // Participants tick and untick checklist items for everyone, as they rearrange panels; visitors only watch.
-        | ClientMessage::CheckPanelItem { .. } => participant,
+        | ClientMessage::CheckPanelItem { .. }
+        // Choosing a row asks its environment for something, as an intent does. See `design/panel-actions.md`.
+        | ClientMessage::ChoosePanelRow { .. } => participant,
     };
     if permitted {
         None
@@ -303,6 +305,11 @@ mod tests {
                 panel: "panel-1".into(),
                 line: 0,
                 checked: true,
+                revision: None,
+            },
+            ClientMessage::ChoosePanelRow {
+                panel: "panel-1".into(),
+                row: "pod7".into(),
                 revision: None,
             },
             ClientMessage::AttachWall {

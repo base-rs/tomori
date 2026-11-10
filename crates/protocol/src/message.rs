@@ -187,14 +187,18 @@ pub enum Resource {
     #[non_exhaustive]
     Object { object: String },
     /// A panel projected in the space, by its [`crate::Panel::id`], and, where the ray meets a list item of a text
-    /// panel's body, the `line` of the body, counted from 0, that the item begins on. The server describes it from its own
-    /// store of the space's panels, and the item from its own copy of the body; an older server ignores `line`. See
-    /// `design/projection.md`.
+    /// panel's body, the `line` of the body, counted from 0, that the item begins on, and, on a row of a list panel
+    /// ([`crate::Panel::rows`]), the `row`'s id, so that the server describes the row the participant saw, even where
+    /// the list changed meanwhile. The server describes it from its own store of the space's panels, and the item from
+    /// its own copy of the body; an older server ignores `line` and `row`. See `design/projection.md` and
+    /// `design/panel-actions.md`.
     #[non_exhaustive]
     Panel {
         panel: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         line: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -225,6 +229,7 @@ impl Resource {
         Self::Panel {
             panel: panel.into(),
             line: None,
+            row: None,
         }
     }
 
@@ -234,6 +239,27 @@ impl Resource {
         Self::Panel {
             panel: panel.into(),
             line,
+            row: None,
+        }
+    }
+
+    /// The list panel whose [`crate::Panel::id`] is `panel`, pointed at on its row `row`, by the row's id, on `line` of
+    /// its body, counted from 0, as [`crate::Panel::rows`] names it.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// let pointed = Resource::panel_row("panel-3", 1, "pod112");
+    /// assert_eq!(
+    ///     serde_json::to_value(&pointed).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-3", "line": 1, "row": "pod112"})
+    /// );
+    /// ```
+    pub fn panel_row(panel: impl Into<String>, line: u32, row: impl Into<String>) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line: Some(line),
+            row: Some(row.into()),
         }
     }
 }
@@ -675,6 +701,23 @@ pub enum ClientMessage {
         panel: String,
         line: u32,
         checked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+    },
+    /// Choose the row `row`, by its id, of the list panel `panel`, which its environment's server side published and
+    /// marked choosable ([`crate::ListRow::choosable`]): pressing A, or pulling the trigger, while pointing at it.
+    /// Participants only, and only to a server whose [`crate::SpaceState::choices`] is set. The server checks that the
+    /// panel is shown in the space's environment, published by it, and has that row now, choosable, holds choices to the
+    /// rate of the participant's environment intents, and hands the choice to the environment's server side, which alone
+    /// decides what it does; it changes nothing in the projection. A choice the server refuses, as of a row that has
+    /// gone, names the panel in its [`ServerMessage::Error`]; one past the rate is dropped quietly.
+    ///
+    /// A client also says, as `revision`, the panel's [`crate::Panel::version`] it saw. The row is named by its id, never
+    /// by its place in the list, so that a choice made as the list changed still names the row the participant saw; the
+    /// server tells the environment whether the panel was as they saw it. See `design/panel-actions.md`.
+    ChoosePanelRow {
+        panel: String,
+        row: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<u64>,
     },

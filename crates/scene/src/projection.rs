@@ -996,15 +996,27 @@ pub fn slot_frames(wall: &Wall, frame: Mat4) -> Vec<Mat4> {
         .collect()
 }
 
+/// What A does to the item of a panel the ray meets, which the label on the ray says: tick or untick a checklist item,
+/// or choose a row of an environment's list, which, just chosen, it says it has. See `design/projection.md` and
+/// `design/panel-actions.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemAction {
+    Tick,
+    Untick,
+    Choose,
+    Chosen,
+}
+
 /// The label on the ray naming `panel`, pointed at where the ray meets it, `at`, facing `viewer`: what it is called, its
 /// metadata, and when and where it was projected; where it `scrolls`, how to scroll it with those controls; and, where
-/// the ray meets a checklist item A would `tick`, whether it is ticked now, how to tick or untick it with those.
+/// the ray meets an `item` A acts on, a checklist item it would tick or untick or a row it would choose, how to with
+/// those, or that the row was just chosen.
 pub fn label(
     panel: &Panel,
     at: Vec3,
     viewer: Vec3,
     scrolls: Option<Controls>,
-    tick: Option<(Controls, bool)>,
+    item: Option<(Controls, ItemAction)>,
 ) -> Sheet {
     let mut canvas = Canvas::new(LABEL_COLUMNS, LABEL_PIXEL);
     canvas.background = [0.0, 0.0, 0.0, 0.88];
@@ -1061,18 +1073,22 @@ pub fn label(
             LABEL_COLUMNS,
         )));
     }
-    if let Some((controls, checked)) = tick {
-        let control = match controls {
-            Controls::Controllers => "A",
-            Controls::Keyboard => "Enter",
+    if let Some((controls, action)) = item {
+        let control = match (action, controls) {
+            (ItemAction::Chosen, _) => "✓",
+            (_, Controls::Controllers) => "A",
+            (_, Controls::Keyboard) => "Enter",
+        };
+        let (does, style) = match action {
+            ItemAction::Tick => ("tick", Style::plain(TEXT)),
+            ItemAction::Untick => ("untick", Style::plain(TEXT)),
+            ItemAction::Choose => ("choose", Style::plain(TEXT)),
+            ItemAction::Chosen => ("chosen", Style::bold(HIGHLIGHT)),
         };
         canvas.rows.push(Row::new(cut(
             &[
                 crate::ui_text::Span::new(format!("{control}  "), Style::bold(BRIGHT)),
-                crate::ui_text::Span::new(
-                    if checked { "untick" } else { "tick" },
-                    Style::plain(TEXT),
-                ),
+                crate::ui_text::Span::new(does, style),
             ],
             LABEL_COLUMNS,
         )));

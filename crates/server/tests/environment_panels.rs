@@ -98,8 +98,9 @@ impl ServerSide for Gauges {
     }
 }
 
-/// An example environment's side that publishes a queue of pods as a list panel, highlighting one, and answers the
-/// agent's inspection of a pod. See `design/panel-actions.md`.
+/// An example environment's side that publishes a queue of pods as a list panel, highlighting one, answers the agent's
+/// inspection of a pod, and, as a participant chooses a pod, highlights the one chosen, as an inspector would open it.
+/// See `design/panel-actions.md`.
 struct Queue;
 
 impl ServerSide for Queue {
@@ -109,14 +110,29 @@ impl ServerSide for Queue {
                 .strip_prefix("pod/")
                 .map(|pod| json!({"pod": pod, "waiting": 41}).to_string()))
         });
-        let rows = vec![
-            Row::new("pod7", "pod7 · 3 waiting").with_reference("pod/7"),
-            Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112"),
-            Row::new("pod9", "pod9 · 1 waiting"),
-        ];
-        space.publish(Panel::list("queue", "Queue", rows).highlighting("pod112"))?;
+        let queue = |highlighted: &str| {
+            let rows = vec![
+                Row::new("pod7", "pod7 · 3 waiting")
+                    .with_reference("pod/7")
+                    .choosable(),
+                Row::new("pod112", "pod112 · 41 waiting")
+                    .with_reference("pod/112")
+                    .choosable(),
+                Row::new("pod9", "pod9 · 1 waiting"),
+            ];
+            Panel::list("queue", "Queue", rows).highlighting(highlighted)
+        };
+        space.publish(queue("pod112"))?;
         while !space.cancellation().is_cancelled() {
-            std::thread::sleep(Duration::from_millis(20));
+            // A choice is the server's, naming this side's own panel and a row it marked choosable; a client side's
+            // intent, which this environment has none of, never is.
+            if let Some(chosen) = space
+                .next_intent(Duration::from_millis(20))
+                .and_then(|intent| intent.chosen().cloned())
+                && chosen.panel() == "queue"
+            {
+                space.publish(queue(chosen.row()))?;
+            }
         }
         Ok(())
     }
@@ -471,9 +487,12 @@ fn an_environment_s_list_highlights_a_row_and_the_agent_inspects_a_row() {
     assert_eq!(
         read["panels"][0]["rows"],
         json!([
-            {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false, "text": "pod7 · 3 waiting"},
-            {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true, "text": "pod112 · 41 waiting"},
-            {"id": "pod9", "inspect_id": null, "highlighted": false, "text": "pod9 · 1 waiting"},
+            {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false, "choosable": true,
+                "text": "pod7 · 3 waiting"},
+            {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true, "choosable": true,
+                "text": "pod112 · 41 waiting"},
+            {"id": "pod9", "inspect_id": null, "highlighted": false, "choosable": false,
+                "text": "pod9 · 1 waiting"},
         ])
     );
     assert!(read["panels"][0].get("body").is_none());
@@ -619,4 +638,73 @@ fn a_change_within_the_interval_of_the_last_is_sent_as_it_ends_though_nothing_el
         let waited = third.duration_since(second);
         assert!(waited >= Duration::from_millis(50), "{waited:?}");
     }
+}
+
+#[test]
+fn choosing_a_row_of_an_environment_s_list_reaches_its_side_which_highlights_it() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Queue".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("queue".to_owned()),
+        instructions: None,
+    });
+    let state = ada.space(|state| state.title == "Queue");
+    assert!(state.choices, "the server takes choices");
+    let list = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Queue")
+            .cloned(),
+        _ => None,
+    });
+    assert_eq!(
+        list.rows,
+        [
+            tomori_protocol::ListRow::new("pod7", true),
+            tomori_protocol::ListRow::new("pod112", true),
+            tomori_protocol::ListRow::new("pod9", false),
+        ]
+    );
+    // Ada chooses pod7, by its id and the version she saw; its side is handed the choice, and highlights it.
+    ada.send(&ClientMessage::ChoosePanelRow {
+        panel: list.id.clone(),
+        row: "pod7".into(),
+        revision: Some(list.version),
+    });
+    let body = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.id == list.id && panel.body.contains("**▸** pod7"))
+            .map(|panel| panel.body.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        body,
+        "- **▸** pod7 · 3 waiting\n- pod112 · 41 waiting\n- pod9 · 1 waiting"
+    );
+    // A row it did not mark choosable is refused, naming the panel, and its side is told nothing.
+    ada.send(&ClientMessage::ChoosePanelRow {
+        panel: list.id.clone(),
+        row: "pod9".into(),
+        revision: None,
+    });
+    let refused = ada.wait_for(|message| match message {
+        ServerMessage::Error { error, panel, .. } => Some((error.clone(), panel.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        refused,
+        (
+            "That row cannot be chosen.".to_owned(),
+            Some(list.id.clone())
+        )
+    );
 }
