@@ -225,6 +225,82 @@ pub fn noticed(arrival: &Spot, wall: &Spot, floor: f32, solids: &[Solid]) -> Res
     Ok(())
 }
 
+/// How many workers a cluster anchor's room must hold, each in a slot of its own: one to this many.
+pub const MEMBERS: usize = 18;
+
+/// How far clear of the scenery's solids each member of a cluster stands, about the box it takes, in metres.
+pub const CLEAR: f32 = 0.1;
+
+/// Whether `solid` and the box from `low` to `high` overlap.
+fn overlaps(solid: &Solid, low: [f32; 3], high: [f32; 3]) -> bool {
+    (0..3).all(|axis| low[axis] < solid.high[axis] && solid.low[axis] < high[axis])
+}
+
+/// Whether one to [`MEMBERS`] workers fit `cluster`, an anchor's cluster in the environment's own coordinates, as
+/// `tomori_protocol::cluster` lays it out, gathered about its audience: for each number, every one in a slot of its
+/// own rather than gathered into the "+N more" sign, within the cluster's room, as the rule keeps it; the box each
+/// takes, [`CLEAR`] larger on every side, clear of `solids` and above the floor at `floor`; and nothing of them between
+/// its audience's eyes and it, so that it reads from there, as signs grow with distance. For the `home` anchor, give the
+/// cluster the eyes at the arrival as its audience, [`Spot::eyes`]. As [`readable`] checks walls. See
+/// `design/environments.md`.
+///
+/// ```
+/// use tomori_environment::sightlines::{Solid, Spot, fits};
+/// use tomori_protocol::Pose;
+/// use tomori_protocol::cluster::{Anchor, Cluster};
+///
+/// let arrival = Spot::facing([0.0; 3], [0.0, 0.0, -1.0]);
+/// let pose = Pose::at([0.0, 1.4, -2.3]).facing_towards(arrival.eyes());
+/// // Today's arc about the default home fits an empty yard; not one with a shed beside the agent.
+/// let home = Cluster::new(&Anchor::new("home", pose)).with_audience(arrival.eyes());
+/// assert_eq!(fits(&home, 0.0, &[]), Ok(()));
+/// let shed = Solid::new([1.0, 0.0, -2.5], [3.0, 2.5, -0.5]);
+/// assert!(fits(&home, 0.0, &[shed]).is_err());
+/// ```
+pub fn fits(
+    cluster: &tomori_protocol::cluster::Cluster,
+    floor: f32,
+    solids: &[Solid],
+) -> Result<(), String> {
+    let eyes = cluster.audience();
+    for count in 1..=MEMBERS {
+        let slots = cluster.slots(count);
+        if slots.iter().any(|slot| slot.more) {
+            return Err(format!(
+                "Its room holds {} workers in slots of their own, fewer than {count}.",
+                slots.iter().filter(|slot| !slot.more).count()
+            ));
+        }
+        for (index, slot) in slots.iter().enumerate() {
+            let (low, high) = cluster.reach(slot);
+            let low = low.map(|value| value - CLEAR);
+            let high = high.map(|value| value + CLEAR);
+            if let Some(solid) = solids.iter().find(|solid| overlaps(solid, low, high)) {
+                return Err(format!(
+                    "Worker {} of {count} stands within {CLEAR} m of {solid:?}.",
+                    index + 1
+                ));
+            }
+            if low[1] < floor {
+                return Err(format!(
+                    "Worker {} of {count} reaches below the floor.",
+                    index + 1
+                ));
+            }
+            if let Some(solid) = solids
+                .iter()
+                .find(|solid| solid.blocks(eyes, slot.position))
+            {
+                return Err(format!(
+                    "{solid:?} stands between whoever watches and worker {} of {count}.",
+                    index + 1
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether the agent's home, `agent`, the middle of the swarm facing along its +Z, can be seen from `arrival`: within
 /// [`READING`] of the eyes there, facing them within [`FACING`], its middle clear of `solids`, and nothing of them
 /// between the eyes and it.
@@ -311,5 +387,56 @@ mod tests {
         let turned = Spot::facing([2.0, 0.5, 0.0], [0.0, 0.5, 0.0]);
         assert_eq!(turned.eyes(), [2.0, 2.1, 0.0]);
         assert!((turned.place([0.0, 0.0, 1.0])[0] - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod fit {
+    use super::*;
+    use tomori_protocol::Pose;
+    use tomori_protocol::cluster::{Anchor, Cluster, HOME};
+
+    fn home(arrival: &Spot, pose: Pose) -> Cluster {
+        Cluster::new(&Anchor::new(HOME, pose)).with_audience(arrival.eyes())
+    }
+
+    #[test]
+    fn one_to_eighteen_workers_fit_clear_of_solids_above_the_floor_seen_and_in_their_room() {
+        let arrival = Spot::facing([0.0; 3], [0.0, 0.0, -1.0]);
+        let pose = Pose::at([0.0, 1.4, -2.3]).facing_towards(arrival.eyes());
+        assert_eq!(fits(&home(&arrival, pose), 0.0, &[]), Ok(()));
+        // A box beside the agent, within 0.1 m of a worker's reach.
+        let crate_ = Solid::new([-2.6, 0.0, -1.6], [-2.2, 1.2, -1.2]);
+        assert!(
+            fits(&home(&arrival, pose), 0.0, &[crate_])
+                .unwrap_err()
+                .contains("within 0.1 m")
+        );
+        // A post between the eyes and a worker.
+        let post = Solid::new([1.0, 1.0, -0.8], [1.1, 1.5, -0.6]);
+        assert!(
+            fits(&home(&arrival, pose), 0.0, &[post])
+                .unwrap_err()
+                .contains("between")
+        );
+        // A home too low, its first row below the floor of a raised arrival.
+        assert!(
+            fits(&home(&arrival, pose), 1.2, &[])
+                .unwrap_err()
+                .contains("floor")
+        );
+        // A room too small for eighteen workers in slots of their own.
+        let small = Cluster::new(&Anchor::new(HOME, pose).with_extent(3.0, 1.0, 1.0))
+            .with_audience(arrival.eyes());
+        assert!(fits(&small, 0.0, &[]).unwrap_err().contains("fewer than"));
+        // A room large enough holds them, fitted.
+        let yard = Pose::at([0.0, 1.6, -5.0]).facing_towards(arrival.eyes());
+        let roomy = Cluster::new(&Anchor::new(HOME, yard).with_extent(10.0, 3.0, 4.0))
+            .with_audience(arrival.eyes());
+        assert_eq!(fits(&roomy, 0.0, &[]), Ok(()));
+        // A named anchor's, gathered about its audience before it.
+        let aisle = Cluster::new(&Anchor::new("aisle", yard).with_extent(2.4, 2.0, 12.0));
+        assert_eq!(fits(&aisle, 0.0, &[]), Ok(()));
+        assert_eq!(tomori_protocol::cluster::NAME_BYTES, crate::REFERENCE_BYTES);
     }
 }

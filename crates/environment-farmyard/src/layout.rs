@@ -265,6 +265,25 @@ mod tests {
     }
 
     #[test]
+    fn one_to_eighteen_workers_stand_about_the_agent_s_home_clear_of_the_yard_and_seen_from_the_arrival()
+     {
+        use tomori_environment::sightlines::{Solid, Spot, fits};
+        use tomori_protocol::Pose;
+        use tomori_protocol::cluster::{Anchor, Cluster, HOME, Step};
+        let arrival = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array());
+        let solids: Vec<Solid> = solids()
+            .into_iter()
+            .map(|(low, high)| Solid::new(low, high))
+            .collect();
+        // The farmyard gives no home anchor: its workers stand on today's arc about the agent's home, gathered about
+        // the eyes at the arrival.
+        let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(arrival.eyes());
+        let home = Cluster::new(&Anchor::new(HOME, agent)).with_audience(arrival.eyes());
+        assert_eq!(home.arrange(18).step(), Step::Home);
+        assert_eq!(fits(&home, ARRIVAL.y, &solids), Ok(()));
+    }
+
+    #[test]
     fn the_notice_board_stands_against_the_fence_its_wall_on_its_back_read_from_the_earth_in_front()
     {
         use tomori_environment::sightlines::{READING, Solid, Spot, readable};
