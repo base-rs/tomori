@@ -1074,6 +1074,10 @@ impl Step {
         let in_space = in_space && !travel.aiming;
         // What is projected stands wherever the space shows it; the ray and the right grip act on it only while nothing else takes them, and not while a card is carried. A card the ray met nearer last frame takes the grip. See `design/projection.md`.
         conversation.observe_head(senses.head_pose.map(Into::into));
+        // A change to a wall the server refused is drawn as the server has it at once, not as sent.
+        if let Some(wall) = conversation.take_refused_wall() {
+            self.projector.refused_wall(&wall);
+        }
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
@@ -3092,6 +3096,18 @@ mod tests {
         senses.trigger = Some(1.0);
         let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(frame.attracting);
+        // A change to it the server refused, as made against a version since changed, the frame step takes, to draw
+        // the wall as the server has it at once.
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::Error {
+                error: "That wall changed as you changed it; look again.".into(),
+                space: None,
+                panel: None,
+                wall: Some("wall-1".into()),
+            },
+        ));
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(conversation.take_refused_wall(), None);
     }
 
     #[test]

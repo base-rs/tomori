@@ -29,9 +29,10 @@ const SIZES: usize = 3;
 /// its version, the projection revision at which it last changed in anything but its live data and its age, and its data
 /// seq, at which its live data last changed (see `design/projection.md`): a new version lays it out again, and a chart's
 /// new data seq at the same version only draws its face again; with what this client changes of a panel itself, which no
-/// version follows, its body, as a tick shown at once changes it and a code panel is sent short or whole as its frame
-/// allows, and its age as it shows. From an older server, which versions nothing, the panel compared whole, its age as
-/// it shows, so that every field that shows on its face is followed.
+/// version follows, its body and code, as a tick shown at once changes it and a code panel is sent short or whole as its
+/// frame allows, its title, and its age as it shows. From an older server, which versions nothing, or counted each text
+/// panel's changes but none its environment made, as a chart panel without a data seq shows, the panel compared whole,
+/// its age as it shows, so that every field that shows on its face is followed.
 #[derive(Clone, Debug)]
 struct Key(Panel);
 
@@ -56,13 +57,21 @@ impl Key {
         if self.0.age != panel.age && board::age(self.0.age) == board::age(panel.age) {
             self.0.age = panel.age;
         }
-        if self.0.version != 0 && panel.version != 0 {
+        // A server before versions counted each text panel's changes as its revision, read here as its version, but not
+        // its environment's changes of it: a chart panel without a data seq, and its title, are followed as they show.
+        let versioned =
+            |panel: &Panel| panel.version != 0 && (panel.chart.is_none() || panel.data_seq != 0);
+        if versioned(&self.0) && versioned(panel) {
             return if self.0.version != panel.version || self.0.id != panel.id {
                 Change::Content
             } else if self.0.data_seq != panel.data_seq && panel.chart.is_some() {
                 // Its summary, its body, moves on with its data.
                 Change::Plot
-            } else if self.0.body != panel.body || self.0.age != panel.age {
+            } else if self.0.body != panel.body
+                || self.0.title != panel.title
+                || self.0.code != panel.code
+                || self.0.age != panel.age
+            {
                 Change::Content
             } else {
                 Change::Same

@@ -432,13 +432,42 @@ fn a_versioned_panel_is_laid_out_again_for_its_version_and_drawn_again_for_its_d
     shown.panels[3].version = 7;
     projector.update(input(&shown, HOME, None));
     assert_eq!(counts(), (laid + 2, drawn + 3));
-    // At the same version and body, nothing else is looked at: its version says it is as it was.
-    shown.panels[0].title = "Renamed, as no server sends without a version".into();
+    // At the same version, body and title, nothing else is looked at: its version says it is as it was.
+    shown.panels[0].meta.push(tomori_protocol::Meta::new(
+        "source",
+        "as no server sends without a version",
+    ));
     projector.update(input(&shown, HOME, None));
     assert_eq!(counts(), (laid + 2, drawn + 3));
-    // A new version, as of its title, lays it out again.
+    // A new version lays it out again.
     shown.panels[0].version = 8;
     projector.update(input(&shown, HOME, None));
     assert_eq!(counts(), (laid + 3, drawn + 4));
+    // Its title is followed at the same version, since a server before versions counted no change its environment
+    // made of a panel.
+    shown.panels[0].title = "Renamed".into();
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 4, drawn + 5));
     assert!(face(&projector, "text").plain().contains("Renamed"));
+}
+
+/// From a server before versions, which counted each panel's changes as its revision but not its environment's changes
+/// of it, a chart panel with a revision and no data seq is followed as it shows, its points moving on drawn again.
+#[test]
+fn a_chart_panel_from_a_server_before_versions_is_followed_by_its_points() {
+    let mut shown = projection(
+        panels()
+            .into_iter()
+            .map(|panel| panel.with_version(1))
+            .collect(),
+    );
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let (laid, drawn) = counts();
+    // Its points move on with its summary as it was, at the same revision.
+    let mut chart = shown.panels[4].chart.clone().unwrap();
+    chart.series[0].values.rotate_left(1);
+    shown.panels[4].chart = Some(chart);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid, drawn + 1));
 }

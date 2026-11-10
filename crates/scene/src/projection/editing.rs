@@ -1560,6 +1560,19 @@ impl Editor {
         self.wall.take().is_some()
     }
 
+    /// The server refused the change sent to the wall `wall`, as made against a version it has changed since: drawn as
+    /// the server has it at once, rather than as sent until [`PENDING`] passes, as the projection sent again says.
+    pub fn refused(&mut self, wall: &str) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(sent, _)| sent.id == wall)
+        {
+            self.pending = None;
+            self.moved_pending.clear();
+        }
+    }
+
     /// B pressed while carrying a wall, with `held` panels on it, at `now`: the wall to remove, for an owner, or `None`
     /// when it holds panels and this is not a second press within [`CONFIRM`], which it then waits for.
     pub fn remove(&mut self, held: usize, now: Instant) -> Option<String> {
