@@ -13,6 +13,10 @@ use tomori_protocol::{Grid, TOMORI_WALL};
 /// is seated again as a slot frees, in whichever environment the space is in.
 const WAITING: &str = "waiting";
 
+/// How many notices float side by side before a full status wall of an environment's own, each a slot's width further
+/// to its right, before the next shares the first's place.
+const BEFORE_END: usize = 6;
+
 impl Layout {
     /// This layout, as the Tomori wall beneath the agent's home can stand it: one row of at most [`TOMORI_COLUMNS`],
     /// as many slots as it has, of its own size and shape, curved and tilted as it is, so that an edit the space made
@@ -146,27 +150,87 @@ impl Stage {
         Some(slot)
     }
 
+    /// Make way, on the status wall in `walls`' environment, an environment's own, for one of the environment's own
+    /// panels that names its slot `slot` on `wall`: a status panel there, with none of the wall's own, waits for another
+    /// slot, since the environment's own panels come first. Returns whether one did.
+    pub(super) fn give_way(&mut self, walls: &Walls<'_>, wall: &str, slot: u32) -> bool {
+        if !walls.shared() || wall != walls.status_wall() || self.taken_by_own(walls, wall, slot) {
+            return false;
+        }
+        let Some(index) = self
+            .tomori
+            .iter()
+            .position(|kept| kept.slot_on(wall) == Some(slot))
+        else {
+            return false;
+        };
+        let placed = self.tick();
+        let kept = &mut self.tomori[index];
+        kept.place = Placed::Wall {
+            wall: WAITING.to_owned(),
+            slot: 0,
+        };
+        kept.placed = placed;
+        true
+    }
+
+    /// Whether one of the environment's or participants' panels, not a status panel, is in the slot `slot` of `wall`
+    /// in `walls`' environment.
+    fn taken_by_own(&self, walls: &Walls<'_>, wall: &str, slot: u32) -> bool {
+        self.rooms.get(walls.environment).is_some_and(|room| {
+            room.panels
+                .iter()
+                .any(|kept| kept.slot_on(wall) == Some(slot))
+        })
+    }
+
     /// Where a notice floats that the full status wall `wall` in `walls`' environment, an environment's own, has no
-    /// room for: just in front of its right end, facing as it faces, so that it is never lost.
+    /// room for: just in front of its right end, facing as it faces, so that it is never lost; and, where one floats
+    /// there already, a slot's width further to its right for each, so that notices never stand inside one another.
     pub(super) fn before_end(&self, walls: &Walls<'_>, wall: &str) -> Pose {
         let shown = self
             .shown_wall(walls, wall)
             .expect("the status wall is shown");
         let (width, _) = shown.size();
         let (slot, _) = shown.slot_size();
-        let along = width / 2.0 - slot / 2.0;
         let yaw = shown.pose.yaw();
         let [x, y, z] = shown.pose.position;
         let ahead = 0.25;
-        let pose = Pose {
-            position: [
-                x + along * yaw.cos() + ahead * yaw.sin(),
-                y,
-                z - along * yaw.sin() + ahead * yaw.cos(),
-            ],
-            orientation: shown.pose.orientation,
+        let at = |step: usize| {
+            let along = width / 2.0 - slot / 2.0 + slot * 1.1 * step as f32;
+            let pose = Pose {
+                position: [
+                    x + along * yaw.cos() + ahead * yaw.sin(),
+                    y,
+                    z - along * yaw.sin() + ahead * yaw.cos(),
+                ],
+                orientation: shown.pose.orientation,
+            };
+            super::valid(&pose).unwrap_or(shown.pose)
         };
-        super::valid(&pose).unwrap_or(shown.pose)
+        let floating: Vec<[f32; 3]> = self
+            .rooms
+            .get(walls.environment)
+            .into_iter()
+            .flat_map(|room| &room.panels)
+            .filter_map(|kept| match &kept.place {
+                Placed::Free { pose } => Some(pose.position),
+                Placed::Wall { .. } => None,
+            })
+            .collect();
+        let near = |pose: &Pose| {
+            floating.iter().any(|position| {
+                (0..3)
+                    .map(|axis| (position[axis] - pose.position[axis]).powi(2))
+                    .sum::<f32>()
+                    < 0.05 * 0.05
+            })
+        };
+        // As many steps as notices may float there, after which the first is shared.
+        (0..BEFORE_END)
+            .map(at)
+            .find(|pose| !near(pose))
+            .unwrap_or_else(|| at(0))
     }
 
     /// Whether the status panel `kept` is shown in `walls`' environment, in a slot of the status wall, rather than

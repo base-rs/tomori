@@ -787,7 +787,7 @@ impl Environment {
 
     /// The environment, with `solids`, boxes of its scenery, in its own coordinates, each from its least to its greatest
     /// corner, aligned with its axes, such as a building or a stack of hay: nothing of Tomori's that moves about the
-    /// space, the Tomori wall at its travel spot while the agent is summoned, stands inside one, nor is seen through
+    /// space, the agent where it goes and the panels floating beside someone, stands inside one, nor is seen through
     /// one. The same boxes its tests check its homes against with `tomori_environment::sightlines`. See
     /// `design/environments.md`.
     ///

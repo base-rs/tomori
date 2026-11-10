@@ -1476,6 +1476,12 @@ impl Stage {
         slot: Option<u32>,
         status: bool,
     ) {
+        // An environment's own panel takes the slot it names on its own wall in the status role from a status panel.
+        if kept.published.is_some()
+            && let Some(slot) = slot.filter(|slot| *slot < self.slots_of(walls, wall))
+        {
+            self.give_way(walls, wall, slot);
+        }
         let taken = self.taken(walls, wall);
         let Some(slot) = slot.filter(|slot| !taken.contains(slot)) else {
             if self.crowded(walls.environment, wall, self.slots_of(walls, wall)) {
@@ -2024,6 +2030,10 @@ impl Stage {
                 .partition(|kept| status.contains(&kept.id) && kept.slot_on(&before.id).is_some());
             room.panels = rest;
             self.tomori.extend(back);
+        }
+        // Grown again, as when put back as its environment has it, its new slots take the status panels waiting.
+        if walls.shared() && before.id == walls.status_wall() {
+            self.settle(walls);
         }
     }
 
