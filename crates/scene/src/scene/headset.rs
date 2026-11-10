@@ -77,6 +77,8 @@ pub struct Controls {
     /// The trigger's value, while its action is active; the pointer decides whether a pull attracts or chooses.
     pub trigger: Option<f32>,
     pub reset: bool,
+    /// A is held, which lets an environment's select be let go with it.
+    pub reset_held: bool,
     pub talk: bool,
     pub talk_active: bool,
     pub back: bool,
@@ -111,6 +113,7 @@ impl Controls {
         Self {
             trigger: actions.trigger.active.then_some(actions.trigger.value),
             reset: pressed(actions.reset),
+            reset_held: held(actions.reset),
             talk: held(actions.talk),
             talk_active: actions.talk.active,
             back: pressed(actions.back),
@@ -147,6 +150,7 @@ impl Controls {
     pub fn buttons(&self) -> Buttons {
         Buttons {
             a: self.reset,
+            a_held: self.reset_held,
             back: self.back,
             back_held: self.back_held,
             y: self.refresh,
@@ -754,6 +758,25 @@ mod tests {
     }
 
     #[test]
+    fn a_is_held_only_while_its_action_is_active_and_down_and_nothing_without_focus() {
+        // Held and active: held, and pressed only on the sync it changed.
+        for (changed, pressed) in [(true, true), (false, false)] {
+            let controls = Controls::from_actions(actions(true, true, changed), true);
+            assert_eq!((controls.reset, controls.reset_held), (pressed, true));
+            assert!(controls.buttons().a_held);
+        }
+        // An action bound to no connected controller reads as let go, whatever it last said.
+        let controls = Controls::from_actions(actions(true, false, true), true);
+        assert_eq!((controls.reset, controls.reset_held), (false, false));
+        assert!(!controls.buttons().a_held);
+        // Let go, or without focus, it is not held.
+        for (held, focused) in [(false, true), (true, false)] {
+            let controls = Controls::from_actions(actions(held, true, true), focused);
+            assert!(!controls.reset_held);
+        }
+    }
+
+    #[test]
     fn held_x_survives_tracking_loss_and_releases_while_untracked() {
         let frames = [
             (true, true, [location(true, true), location(true, true)]),
@@ -856,6 +879,7 @@ mod tests {
             controls.buttons(),
             Buttons {
                 a: true,
+                a_held: true,
                 back: true,
                 back_held: true,
                 y: true,
