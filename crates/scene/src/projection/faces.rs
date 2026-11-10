@@ -15,6 +15,7 @@ use super::{
     item_in, sized, text_face,
 };
 use crate::{
+    board,
     canvas::Canvas,
     transcript::Line,
     ui_text::{CELL_HEIGHT, CELL_WIDTH},
@@ -25,8 +26,8 @@ use crate::{
 const SIZES: usize = 3;
 
 /// What a panel's faces are laid out from, by which they are kept or laid out again: today, the panel as the
-/// projection has it, compared whole, which changes only when the server's patch upserts it, so that every field that
-/// shows on its face, and any added later, is followed. Once a panel carries the projection's revision of its last
+/// projection has it, compared whole, its age as it shows, which changes only when the server's patch upserts it or
+/// its age passes another minute, so that every field that shows on its face, and any added later, is followed. Once a panel carries the projection's revision of its last
 /// change, and a chart panel a sequence of its data's own, the key is those two, compared as cheaply; nothing else here
 /// changes.
 #[derive(Clone, Debug)]
@@ -47,7 +48,12 @@ impl Key {
         Self(panel.clone())
     }
 
-    fn change(&self, panel: &Panel) -> Change {
+    fn change(&mut self, panel: &Panel) -> Change {
+        // Its age, in seconds, is counted on for every panel at each patch, but shows only as minutes, hours or days:
+        // an age that shows the same changes nothing, so that a patch lays out only the panels it changes.
+        if self.0.age != panel.age && board::age(self.0.age) == board::age(panel.age) {
+            self.0.age = panel.age;
+        }
         if self.0 == *panel {
             return Change::Same;
         }

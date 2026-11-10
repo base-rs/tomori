@@ -329,6 +329,37 @@ fn what_a_panel_shows_or_its_size_changing_lays_it_out_again() {
     assert_eq!(counts(), (laid + 8, drawn + 9));
 }
 
+/// A patch counts on the age of every panel held, in seconds, but a panel shows its age in minutes, hours or days: one
+/// whose age shows the same is not laid out again, and one whose age passes another minute is.
+#[test]
+fn an_age_counted_on_lays_a_panel_out_again_only_where_it_shows_otherwise() {
+    let mut shown = projection(panels());
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let before = every_face(&projector, &shown);
+    let (laid, drawn) = counts();
+    // A few seconds on, as when the next patch arrives, every panel shows the same age.
+    for panel in &mut shown.panels {
+        panel.age += 5;
+    }
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid, drawn));
+    assert!(
+        kept(&every_face(&projector, &shown), &before)
+            .iter()
+            .all(|kept| *kept)
+    );
+    // The checklist, a minute old, passes to two minutes: it alone is laid out again, and shows it.
+    shown.panels[3].age = 120;
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(counts(), (laid + 1, drawn + 1));
+    assert_eq!(
+        kept(&every_face(&projector, &shown), &before),
+        [true, true, true, false, true, true, true]
+    );
+    assert!(face(&projector, "list").plain().contains("2m"));
+}
+
 #[test]
 fn a_panel_keeps_its_faces_at_a_few_sizes_the_latest_first() {
     let panel = Panel::new("text", "Notes", LONG, on("wall-1", 0));
