@@ -2,12 +2,12 @@
 
 ## Status
 
-**A proposal for discussion,** November 2026. Nothing here is a requirement yet. If it is accepted, the parts adopted become requirements in `design/server.md`, `projection.md`, `security.md`, `speech.md`, `live-audio.md` and `environments.md`, as listed under [Changes to the design documents](#changes-to-the-design-documents), and those documents then take precedence over this one.
+**Accepted,** 10 November 2026. The maintainer accepted the proposal as written ("That proposal sounds good to me"), so its recommendations stand, including the proposed answers to the [open questions](#open-questions-for-the-maintainer); questions without a proposed answer are left to the stage that needs them. Nothing is built yet, and stage 0, moving to `base-http` 0.4, comes first. As each stage is built, the parts it adopts become requirements in `design/server.md`, `projection.md`, `security.md`, `speech.md`, `live-audio.md` and `environments.md`, as listed under [Changes to the design documents](#changes-to-the-design-documents), and those documents then take precedence over this one. The rest of this document is the proposal as it was put to the maintainer, from [PR #283](https://github.com/ioquatix/tomori/pull/283).
 
 It builds on these:
 
 - the protocol scaling audit of `34d8ab56` (#275);
-- projection revisions, patches and numeric `Limits` in `Hello` and `Welcome` (#281, #282, merging now);
+- projection revisions, patches and numeric `Limits` in `Hello` and `Welcome` (#281, #282, merging as this was written);
 - the negotiated 32 MiB frame limit (in progress);
 - image panels by content hash (#239, #240);
 - environment text and live chart panels (#267, open).
