@@ -111,6 +111,10 @@ impl Glide {
 pub(crate) struct Following {
     /// The participant whose press of X waits to commit, and when it does.
     pending: Option<(String, Instant)>,
+    /// When each participant's press of X under way counts as held, rather than a tap, whether or not it commits.
+    holding: HashMap<String, Instant>,
+    /// Those whose last press of X was a tap, let go before [`COMMIT`]: their words, if given, move nothing.
+    tapped: Vec<String>,
     /// What each participant's last press of X captured.
     captured: HashMap<String, Captured>,
     /// The participant it talks with now, or last did.
@@ -155,6 +159,7 @@ impl Following {
     pub(super) fn deadline(&self) -> Option<Instant> {
         [
             self.pending.as_ref().map(|(_, due)| *due),
+            self.holding.values().min().copied(),
             self.glance.map(|(_, until)| until),
             self.glide.as_ref().map(Glide::ends),
             self.poll,
@@ -168,6 +173,8 @@ impl Following {
     pub(super) fn spoke(&mut self, now: Instant, duration: Duration) {
         let until = now + duration + SPOKEN;
         self.speaking = Some(self.speaking.map_or(until, |was| was.max(until)));
+        // Its speech starting puts off its return, however short, between one check and the next.
+        self.quiet = None;
     }
 
     /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides.
@@ -397,6 +404,10 @@ impl HubState {
             .retain(|(who, at)| who != participant && now.saturating_duration_since(*at) < LATELY);
         following.spoken.push((participant.to_owned(), now));
         following.captured.insert(participant.to_owned(), captured);
+        following.tapped.retain(|who| who != participant);
+        following
+            .holding
+            .insert(participant.to_owned(), now + COMMIT);
         following.quiet = None;
         if busy || following.pinned {
             following.glance = Some((eyes, now + GLANCE));
@@ -413,16 +424,22 @@ impl HubState {
         self.woken.notify(usize::MAX);
     }
 
-    /// `participant` let go of X at `now`: a press let go before it committed was a tap, and moves nothing.
+    /// `participant` let go of X at `now`: a press let go before [`COMMIT`] was a tap, and moves nothing, neither now
+    /// nor as its words are given.
     pub(super) fn agent_released(&mut self, space: &str, participant: &str, now: Instant) {
         if let Some(record) = self.space_mut(space)
             && record
                 .following
-                .pending
-                .as_ref()
-                .is_some_and(|(who, due)| who == participant && *due > now)
+                .holding
+                .remove(participant)
+                .is_some_and(|held| held > now)
         {
-            record.following.pending = None;
+            let following = &mut record.following;
+            following.tapped.push(participant.to_owned());
+            following.pending = following
+                .pending
+                .take()
+                .filter(|(who, _)| who != participant);
         }
     }
 
@@ -433,6 +450,7 @@ impl HubState {
             return;
         };
         let following = &mut record.following;
+        following.holding.remove(participant);
         if following
             .pending
             .as_ref()
@@ -470,7 +488,7 @@ impl HubState {
     }
 
     /// The agent of `space` was given the words of the participant numbered `source` at `now`: in a space whose agent
-    /// follows the speaker, it goes to them as it begins answering them.
+    /// follows the speaker, it goes to them as it begins answering them, unless their press was a tap.
     pub(super) fn agent_given(&mut self, space: &str, source: u32, now: Instant) {
         let record = self.space(space).expect("given in a listed space");
         // Unless they have left meanwhile.
@@ -485,7 +503,12 @@ impl HubState {
             })
             .cloned()
         {
-            self.follow(space, &participant, now, "it began answering them");
+            let following = &mut self.space_mut(space).expect("found above").following;
+            let tapped = following.tapped.contains(&participant);
+            following.tapped.retain(|who| *who != participant);
+            if !tapped {
+                self.follow(space, &participant, now, "it began answering them");
+            }
         }
     }
 
@@ -562,7 +585,9 @@ impl HubState {
         following.facing = None;
         following.glance = None;
         following.quiet = None;
-        following.moved = Some((now, participant.to_owned()));
+        // Its dwell runs from when it arrives.
+        let arrives = following.glide.as_ref().map_or(now, Glide::ends);
+        following.moved = Some((arrives, participant.to_owned()));
         following.poll.get_or_insert(now + POLL);
         record.summoned = Some(spot);
         record.summoner = None;
@@ -588,6 +613,8 @@ impl HubState {
         record.following = Following {
             captured: std::mem::take(&mut record.following.captured),
             spoken: std::mem::take(&mut record.following.spoken),
+            holding: std::mem::take(&mut record.following.holding),
+            tapped: std::mem::take(&mut record.following.tapped),
             speaking: record.following.speaking,
             ..Following::default()
         };
@@ -702,6 +729,8 @@ impl HubState {
             Some((_, due)) if *due <= now => following.pending.take().map(|(who, _)| who),
             _ => None,
         };
+        // A press held this long is no tap, whenever it is let go.
+        following.holding.retain(|_, held| *held > now);
         if following.glance.is_some_and(|(_, until)| until <= now) {
             following.glance = None;
             changed = true;

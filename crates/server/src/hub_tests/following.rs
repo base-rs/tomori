@@ -144,6 +144,22 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
 }
 
 #[test]
+fn a_tap_only_turns_it_even_once_its_words_are_given() {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    press(&ada, "u1");
+    release(&ada, "u1");
+    heard(&hub, "Yes.");
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|command| matches!(command, SpaceCommand::Send(_)))
+    );
+    assert_eq!(agent(&hub, &space), (None, Some(ADA), false));
+    hub.flush_snapshots(Instant::now() + Duration::from_secs(1));
+    assert_eq!(agent(&hub, &space).0, None);
+}
+
+#[test]
 fn far_away_it_streams_there() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     let far = [0.0, 1.6, 8.0];
@@ -182,19 +198,24 @@ fn it_waits_its_dwell_before_leaving_one_partner_for_another_unless_they_are_far
     assert_eq!(agent(&hub, &space).0, Some(for_ada));
     assert_eq!(agent(&hub, &space).1, Some(near));
     cancel(&bob, "u2");
-    // After it, he moves it.
+    // Its dwell runs from when it arrived, some 4 s after it set off, not from when it set off.
     press(&bob, "u3");
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(1));
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    cancel(&bob, "u3");
+    // After it, he moves it.
+    press(&bob, "u4");
+    hub.flush_snapshots(committed + DWELL + Duration::from_secs(5));
     let for_bob = agent(&hub, &space).0.expect("gone to Bob");
     assert!((level(for_bob.position, near) - 1.5).abs() < 1e-3);
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(8));
-    cancel(&bob, "u3");
+    cancel(&bob, "u4");
     assert_eq!(agent(&hub, &space).0, Some(for_bob));
     // Carl, far from where it stands for Bob now, moves it within its dwell.
     let carl = Client::greeted(&hub, Access::open(), "carl");
     carl.join(&space);
     carl.send(looking([8.0, 1.6, 8.0], [8.0, 1.6, 0.0]));
-    press(&carl, "u4");
+    press(&carl, "u5");
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(9));
     let far = agent(&hub, &space).0.expect("gone to Carl");
     assert!(
@@ -217,9 +238,9 @@ fn a_huddle_who_spoke_to_it_lately_is_served_from_one_spot() {
     hub.flush_snapshots(start + COMMIT);
     hub.flush_snapshots(start + Duration::from_secs(5));
     cancel(&ada, "u1");
-    // Bob, beside her, speaks after its dwell: it stands for both of them, clear of each.
+    // Bob, beside her, speaks after its dwell, from when it arrived: it stands for both of them, clear of each.
     press(&bob, "u2");
-    hub.flush_snapshots(start + DWELL + Duration::from_secs(1));
+    hub.flush_snapshots(start + DWELL + Duration::from_secs(5));
     let spot = agent(&hub, &space).0.expect("serving them");
     let nearest = level(spot.position, at_ada).min(level(spot.position, at_bob));
     assert!((1.5..1.7).contains(&nearest), "{spot:?}");
@@ -237,8 +258,9 @@ fn while_it_answers_someone_a_press_only_glances_and_it_goes_to_them_as_their_wo
     bob.join(&space);
     let at_bob = [6.0, 1.6, 6.0];
     bob.send(looking(at_bob, [6.0, 1.6, 0.0]));
-    // Ada's words are given to the agent, which goes to her as it begins answering.
+    // Ada's words, held, are given to the agent, which goes to her as it begins answering.
     press(&ada, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
     release(&ada, "u1");
     heard(&hub, "What is this?");
     let key = std::iter::from_fn(|| commands.try_recv().ok())
@@ -452,6 +474,7 @@ fn it_goes_home_once_the_conversation_has_been_quiet_and_new_words_or_its_speech
     let (hub, _jobs, space, commands, ada) = following(Some(90));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     press(&ada, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
     release(&ada, "u1");
     heard(&hub, "What is this?");
     let key = std::iter::from_fn(|| commands.try_recv().ok())
@@ -467,9 +490,20 @@ fn it_goes_home_once_the_conversation_has_been_quiet_and_new_words_or_its_speech
     hub.flush_snapshots(start);
     hub.flush_snapshots(start + Duration::from_secs(100));
     assert!(agent(&hub, &space).0.is_some());
-    // Its turn over, quiet for 90 s, it goes home, unseen by nobody.
+    // Its turn over, a question of its own waiting holds it too.
     hub.drive_event(&space, Event::Idle);
-    let quiet = start + Duration::from_secs(101);
+    hub.drive_event(&space, Event::QuestionAsked(question()));
+    hub.flush_snapshots(start + Duration::from_secs(101));
+    hub.flush_snapshots(start + Duration::from_secs(200));
+    assert!(agent(&hub, &space).0.is_some());
+    hub.drive_event(
+        &space,
+        Event::QuestionResolved {
+            id: "question-1".to_owned(),
+        },
+    );
+    // Then quiet for 90 s, it goes home, unseen by nobody.
+    let quiet = start + Duration::from_secs(201);
     hub.flush_snapshots(quiet);
     hub.flush_snapshots(quiet + Duration::from_secs(89));
     assert!(agent(&hub, &space).0.is_some());
