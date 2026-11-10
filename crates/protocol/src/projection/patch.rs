@@ -77,8 +77,8 @@ pub enum PatchOp {
     Unknown,
 }
 
-/// Why a [`ProjectionPatch`] could not be applied. The projection may then be partly patched; its revision is not
-/// changed, so that the client asks for the whole projection.
+/// Why a [`ProjectionPatch`] could not be applied. The projection is left as it was, at its revision, so that the
+/// client keeps showing it and asks for the whole projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PatchError {
@@ -207,9 +207,10 @@ impl ProjectionPatch {
     }
 
     /// Apply it to `projection`, the client's own, which is then at its revision `to`. Refused, changing nothing, for a
-    /// projection of another space or environment, or at another revision than `from`; refused partway, leaving
-    /// `projection` at its revision, for an op that names a wall or panel it does not have, or one this side does not
-    /// know. Either way, the client asks for the whole projection.
+    /// projection of another space or environment, at another revision than `from`, or with an op that names a wall or
+    /// panel it does not have or that this side does not know: the client keeps showing what it had and asks for the
+    /// whole projection. The ops are applied to copies of the lists they change, which replace them only once every op
+    /// applied, so that a patch refused partway never leaves the projection half patched.
     pub fn apply(&self, projection: &mut Projection) -> Result<(), PatchError> {
         if projection.space != self.space || projection.environment != self.environment {
             return Err(PatchError::Elsewhere);
@@ -220,25 +221,30 @@ impl ProjectionPatch {
                 from: self.from,
             });
         }
+        // Copied only where an op changes them, as a patch of panels alone leaves the walls.
+        let mut walls: Option<Vec<Wall>> = None;
+        let mut panels: Option<Vec<Panel>> = None;
         for op in &self.ops {
             match op {
                 PatchOp::Wall { wall, after, first } => put(
-                    &mut projection.walls,
+                    walls.get_or_insert_with(|| projection.walls.clone()),
                     |shown| shown.id == wall.id,
                     |shown| &shown.id,
                     wall.clone(),
                     after.as_deref(),
                     *first,
                 )?,
-                PatchOp::RemoveWall { wall } => {
-                    remove(&mut projection.walls, |shown| shown.id == *wall, wall)?
-                }
+                PatchOp::RemoveWall { wall } => remove(
+                    walls.get_or_insert_with(|| projection.walls.clone()),
+                    |shown| shown.id == *wall,
+                    wall,
+                )?,
                 PatchOp::Panel {
                     panel,
                     after,
                     first,
                 } => put(
-                    &mut projection.panels,
+                    panels.get_or_insert_with(|| projection.panels.clone()),
                     |shown| shown.id == panel.id,
                     |shown| &shown.id,
                     panel.clone(),
@@ -252,15 +258,15 @@ impl ProjectionPatch {
                     after,
                     first,
                 } => {
-                    let Some(shown) = projection.panels.iter().find(|shown| shown.id == *panel)
-                    else {
+                    let list = panels.get_or_insert_with(|| projection.panels.clone());
+                    let Some(shown) = list.iter().find(|shown| shown.id == *panel) else {
                         return Err(PatchError::Missing(panel.clone()));
                     };
                     let mut moved = shown.clone();
                     moved.place = place.clone();
                     moved.pinned = *pinned;
                     put(
-                        &mut projection.panels,
+                        list,
                         |shown| shown.id == *panel,
                         |shown| &shown.id,
                         moved,
@@ -268,11 +274,19 @@ impl ProjectionPatch {
                         *first,
                     )?;
                 }
-                PatchOp::RemovePanel { panel } => {
-                    remove(&mut projection.panels, |shown| shown.id == *panel, panel)?
-                }
+                PatchOp::RemovePanel { panel } => remove(
+                    panels.get_or_insert_with(|| projection.panels.clone()),
+                    |shown| shown.id == *panel,
+                    panel,
+                )?,
                 PatchOp::Unknown => return Err(PatchError::Unknown),
             }
+        }
+        if let Some(walls) = walls {
+            projection.walls = walls;
+        }
+        if let Some(panels) = panels {
+            projection.panels = panels;
         }
         projection.revision = self.to;
         Ok(())

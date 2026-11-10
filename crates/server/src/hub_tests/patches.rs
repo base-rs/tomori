@@ -349,6 +349,20 @@ fn a_client_that_misses_a_patch_asks_and_is_sent_the_projection_whole() {
     older.join(&space);
     older.send(ClientMessage::ResyncProjection { revision: 3 });
     assert!(older.read().is_empty());
+    // Asking again before it is sent is sent it once, and a client that applies no patches, sent it whole at every
+    // change, is sent nothing for asking.
+    for _ in 0..3 {
+        vic.send(ClientMessage::ResyncProjection { revision: 0 });
+    }
+    let wholes = vic
+        .read()
+        .into_iter()
+        .filter(|message| matches!(message, ServerMessage::Projection { .. }))
+        .count();
+    assert_eq!(wholes, 1);
+    old.read();
+    old.send(ClientMessage::ResyncProjection { revision: 0 });
+    assert!(old.read().is_empty());
 }
 
 #[test]
@@ -560,4 +574,244 @@ fn a_projection_sent_again_with_nothing_touched_is_a_later_revision() {
     };
     assert_eq!((patch.from, patch.to), (revision, revision + 1));
     assert!(patch.ops.is_empty());
+}
+
+/// A small, fast generator of numbers, seeded, so that each run tries the same sequences.
+struct Random(u64);
+
+impl Random {
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % bound.max(1) as u64) as usize
+    }
+}
+
+/// Every way the hub changes what a space projects, at random, by participants, the agent's replies and its tools, the
+/// agent summoned and sent home, and the space changing environment: after each burst, what a client holds from the
+/// patches it was sent is what a client joining now would be sent whole, built afresh rather than sent because the
+/// projection was touched, so that a change that forgets to send it shows here, and no patch is ever refused.
+#[test]
+fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
+    const KINDS: usize = 18;
+    let mut done = [0usize; KINDS];
+    for seed in 1..=16u64 {
+        let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let (hub, _jobs) = hub_waiting();
+        hub.set_environments(Environments::new([
+            crate::Environment::new("sky", "Sky"),
+            crate::Environment::new("farmyard", "Farmyard").with_stage(upright([0.0, 1.5, -4.0])),
+        ]));
+        hub.serve_tools(tomori_backend::ToolServer::new(
+            "tomori",
+            "http://127.0.0.1:1/mcp",
+        ));
+        let (space, _commands) = idle(&hub);
+        let ada = Client::patching(&hub, Access::open(), "ada");
+        let fresh = Client::projecting(&hub, Access::open(), "fresh");
+        let mut held = Held::default();
+        ada.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        held.read(&ada);
+        ada.send(standing([0.0, 1.6, 0.0]));
+        fresh.join(&space);
+        let mut serial = 0;
+        for step in 0..60 {
+            for _ in 0..1 + random.below(3) {
+                serial += 1;
+                let shown = held.shown();
+                let panel = (!shown.panels.is_empty())
+                    .then(|| shown.panels[random.below(shown.panels.len())].clone());
+                let added: Vec<String> = shown.walls[1..]
+                    .iter()
+                    .map(|wall| wall.id.clone())
+                    .collect();
+                let wall = shown.walls[random.below(shown.walls.len())].id.clone();
+                let other = (!added.is_empty()).then(|| added[random.below(added.len())].clone());
+                let kind = random.below(KINDS);
+                let ok = match kind {
+                    0 => {
+                        reply(
+                            &hub,
+                            &space,
+                            &format!("m{serial}"),
+                            &format!(
+                                "```panel\nid: list-{serial}\ntitle: List {serial}\n---\n- [ ] One\n- [ ] Two\n```\n"
+                            ),
+                        );
+                        true
+                    }
+                    1 => {
+                        reply(&hub, &space, &format!("m{serial}"), PANEL_REPLY);
+                        true
+                    }
+                    2 => {
+                        ada.send(ClientMessage::AddWall {
+                            pose: upright([
+                                random.below(6) as f32 - 3.0,
+                                1.5,
+                                -3.0 - random.below(3) as f32,
+                            ]),
+                        });
+                        true
+                    }
+                    3 => other.is_some_and(|wall| {
+                        ada.send(ClientMessage::RemoveWall { wall });
+                        true
+                    }),
+                    4 => {
+                        ada.send(ClientMessage::SetWall {
+                            wall: wall.clone(),
+                            grid: tomori_protocol::Grid::new(
+                                1 + random.below(4) as u32,
+                                1 + random.below(2) as u32,
+                            ),
+                            scale: Some([1.0, 1.5, 2.0][random.below(3)]),
+                            aspect: Some([0.0, 0.5, 2.0][random.below(3)]),
+                            shape: None,
+                            pose: None,
+                            tilt: Some(random.below(30) as f32),
+                        });
+                        true
+                    }
+                    5 => other.is_some_and(|wall| {
+                        ada.send(ClientMessage::SetWall {
+                            wall,
+                            grid: None,
+                            scale: None,
+                            aspect: None,
+                            shape: None,
+                            pose: Some(upright([random.below(6) as f32 - 3.0, 1.5, 3.0])),
+                            tilt: None,
+                        });
+                        true
+                    }),
+                    6 => {
+                        ada.send(ClientMessage::LockWall {
+                            wall: wall.clone(),
+                            locked: random.below(2) == 0,
+                            reset: random.below(4) == 0,
+                        });
+                        true
+                    }
+                    7 => match (other, added.len() > 1) {
+                        (Some(moved), true) => {
+                            let to = added.iter().find(|id| **id != moved).unwrap().clone();
+                            ada.send(ClientMessage::AttachWall {
+                                wall: moved,
+                                attach: (random.below(3) != 0).then(|| {
+                                    tomori_protocol::Attach::new(
+                                        to,
+                                        tomori_protocol::Edge::ALL[random.below(4)],
+                                        tomori_protocol::Align::ALL[random.below(3)],
+                                    )
+                                }),
+                                alone: random.below(2) == 0,
+                                pose: Some(upright([0.0, 1.5, -5.0])),
+                            });
+                            true
+                        }
+                        _ => false,
+                    },
+                    8 => panel.is_some_and(|panel| {
+                        ada.send(ClientMessage::PlacePanel {
+                            panel: panel.id,
+                            wall: None,
+                            slot: None,
+                            pose: Some(upright([random.below(4) as f32 - 2.0, 1.5, -1.0])),
+                        });
+                        true
+                    }),
+                    9 => panel.is_some_and(|panel| {
+                        ada.send(ClientMessage::PlacePanel {
+                            panel: panel.id,
+                            wall: Some(wall.clone()),
+                            slot: Some(random.below(6) as u32),
+                            pose: None,
+                        });
+                        true
+                    }),
+                    10 => panel.is_some_and(|panel| {
+                        ada.send(ClientMessage::DismissPanel { panel: panel.id });
+                        true
+                    }),
+                    11 => panel.is_some_and(|panel| {
+                        // Sometimes from a revision the panel no longer has, which is refused and undone.
+                        ada.send(ClientMessage::CheckPanelItem {
+                            panel: panel.id,
+                            line: random.below(2) as u32,
+                            checked: random.below(2) == 0,
+                            revision: Some(panel.revision + (random.below(4) == 0) as u64),
+                        });
+                        true
+                    }),
+                    12 => panel.is_some_and(|panel| {
+                        let place =
+                            ["wall tomori", "front ada", "beside ada", "near ada"][random.below(4)];
+                        hub.agent_move_panel("session", &panel.id, place).is_ok()
+                    }),
+                    13 => panel.is_some_and(|panel| {
+                        hub.agent_update_panel(
+                            "session",
+                            crate::hub::agent_panels::Update {
+                                panel: panel.id,
+                                title: Some(format!("Updated {serial}")),
+                                body: (random.below(2) == 0)
+                                    .then(|| format!("- [ ] Item {serial}\n- [x] Done")),
+                                check: Vec::new(),
+                                uncheck: Vec::new(),
+                                place: (random.below(3) == 0).then(|| "beside ada".to_owned()),
+                                revision: None,
+                            },
+                        )
+                        .is_ok()
+                    }),
+                    14 => hub
+                        .agent_create_layout(
+                            "session",
+                            Some("front ada"),
+                            vec![crate::stage::Planned {
+                                id: format!("board-{serial}"),
+                                layout: crate::stage::Layout::FLAT,
+                                width: None,
+                                sized: false,
+                                attach: None,
+                            }],
+                        )
+                        .is_ok(),
+                    15 => {
+                        other.is_some_and(|wall| hub.agent_remove_layout("session", &wall).is_ok())
+                    }
+                    16 => {
+                        // The agent summoned to someone, or sent home, its Tomori wall travelling with it.
+                        let at = (random.below(2) == 0).then(|| upright([1.0, 0.0, 1.0]));
+                        ada.send(ClientMessage::PlaceAgent { at });
+                        true
+                    }
+                    _ => {
+                        let environment = ["sky", "farmyard"][random.below(2)];
+                        hub.agent_set_environment("session", environment).is_ok()
+                    }
+                };
+                if ok {
+                    done[kind] += 1;
+                }
+            }
+            held.read(&ada);
+            fresh.read();
+            // Built afresh, as a client joining now is sent it, not because anything was touched.
+            let mut afresh = without_ages(fresh.projection());
+            let shown = held.shown();
+            afresh.revision = shown.revision;
+            assert_eq!(shown, afresh, "seed {seed}, step {step}");
+        }
+        assert_eq!(held.resyncs, 0, "seed {seed}: every patch applied");
+        assert!(held.patches.len() > 30, "seed {seed}: sent as patches");
+    }
+    assert!(
+        done.iter().all(|done| *done > 0),
+        "every kind of change was made: {done:?}"
+    );
 }

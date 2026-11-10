@@ -4180,16 +4180,18 @@ impl Hub {
                 }
             }
             // A client that could not apply a patch is sent the projection whole, at the space's revision now; one in no
-            // space, or that reads no projection, is sent nothing, as a patch on its way as it left asks innocently.
+            // space, or that reads no projection, is sent nothing, as a patch on its way as it left asks innocently. So is
+            // one already waiting for it whole, as on joining or having asked, so that asking again and again is sent it
+            // once, and one that applies no patches, which is sent it whole at every change anyway.
             ClientMessage::ResyncProjection { .. } => {
                 if space.is_some()
                     && let Some(record) = state
                         .connections
                         .get_mut(&connection)
-                        .filter(|record| record.projection)
+                        .filter(|record| record.projection && record.patches)
+                    && record.projected.take().is_some()
                 {
                     log::debug!("A client asked for the projection whole.");
-                    record.projected = None;
                     record.outbox.projection();
                 }
             }
@@ -5931,9 +5933,12 @@ impl Hub {
                     .filter(|record| record.patches)
                     .and_then(|record| record.projected.as_ref());
                 // Each message is a revision of its own, even where nothing was touched since the last, as when it is
-                // sent whole again on joining, so that a patch always goes from one revision to a later one.
-                if projected.is_some_and(|projected| projected.revision >= revision.get()) {
-                    revision.set(revision.get() + 1);
+                // sent whole again on joining, so that a patch always goes from one revision to a later one, past the
+                // one last sent even where the space's count began again meanwhile.
+                if let Some(sent) = projected.map(|projected| projected.revision)
+                    && sent >= revision.get()
+                {
+                    revision.set(sent + 1);
                 }
                 let projection = projection.with_revision(revision.get());
                 let message = crate::patches::message(projected, &projection);

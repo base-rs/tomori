@@ -322,7 +322,34 @@ fn a_patch_applies_only_to_its_projection_at_its_revision() {
             patch.apply(&mut shown),
             Err(PatchError::Missing(missing.into()))
         );
+        assert_eq!(shown, base, "nothing changed");
     }
+    // One refused partway, after ops that applied, leaves the projection as it was, not half patched.
+    let mut shown = base.clone();
+    let partway = ProjectionPatch::new(
+        "s",
+        "sky",
+        3,
+        4,
+        vec![
+            PatchOp::Wall {
+                wall: added("wall-1", 1.0),
+                after: None,
+                first: false,
+            },
+            PatchOp::Panel {
+                panel: panel("panel-2", "Two", on(TOMORI_WALL, 1)),
+                after: None,
+                first: false,
+            },
+            PatchOp::RemovePanel {
+                panel: "panel-1".into(),
+            },
+            PatchOp::Unknown,
+        ],
+    );
+    assert_eq!(partway.apply(&mut shown), Err(PatchError::Unknown));
+    assert_eq!(shown, base, "nothing changed");
     for error in [
         PatchError::Elsewhere,
         PatchError::Revision { have: 1, from: 2 },
