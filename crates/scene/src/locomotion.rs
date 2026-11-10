@@ -6,6 +6,10 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 
 use crate::{anchors::Anchor, environment::Environment, pointing::Ray};
 
+mod outline;
+
+pub use outline::{CLEARANCE, FARTHEST, MOST_POINTS, Outline, OutlineError, SMALLEST_AREA};
+
 /// How far a snap turn turns, in radians.
 pub const SNAP_TURN: f32 = std::f32::consts::PI / 6.0;
 /// How fast flying rises, in metres a second.
@@ -42,8 +46,10 @@ pub const WIDEST_PAD: f32 = 2.0;
 pub const LONGEST_NAME: usize = 24;
 /// The most pairs of pads a profile uses: those declared after them are ignored.
 pub const MOST_PAIRS: usize = 8;
+/// The most steps [`Surface::sector_triangles`] cuts a sector's sweep into.
+pub const MOST_SEGMENTS: usize = 1024;
 
-/// A horizontal surface a participant may land on, in the space's scene coordinates. Made with [`Surface::rectangle`] and [`Surface::disc`], so that it can grow, as with colliders or rotated surfaces, without breaking:
+/// A horizontal surface a participant may land on, in the space's scene coordinates. Made with [`Surface::rectangle`], [`Surface::disc`], [`Surface::sector`] and [`Surface::polygon`], so that it can grow, as with colliders, without breaking:
 ///
 /// ```
 /// use glam::{Vec2, Vec3};
@@ -59,7 +65,7 @@ pub const MOST_PAIRS: usize = 8;
 /// ```compile_fail
 /// let _ = tomori_scene::locomotion::Surface::Disc { centre: glam::Vec3::ZERO, radius: 1.0 };
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Surface {
     /// A rectangle centred at `centre`, `half` its size along its own X and Z, turned `yaw` about the vertical from the
@@ -70,6 +76,38 @@ pub enum Surface {
     /// A disc centred at `centre`. Made with [`Surface::disc`].
     #[non_exhaustive]
     Disc { centre: Vec3, radius: f32 },
+    /// The part of a ring about `centre`, from `inner` to `outer` of it, from the direction `from` round by `sweep`,
+    /// anticlockwise seen from above, each an angle about the vertical from −Z, as a [`Pad`] faces. Made with
+    /// [`Surface::sector`].
+    #[non_exhaustive]
+    Sector {
+        centre: Vec3,
+        inner: f32,
+        outer: f32,
+        from: f32,
+        sweep: f32,
+    },
+    /// A polygon, its `outline` as it was declared, X and Z, standing with the outline's origin at `origin`, at its
+    /// height, and turned `yaw` about the vertical from the scene's axes, as it is carried into a space (see
+    /// [`Locomotion::carried`]). Made with [`Surface::polygon`].
+    #[non_exhaustive]
+    Polygon {
+        outline: std::sync::Arc<Outline>,
+        origin: Vec3,
+        yaw: f32,
+    },
+}
+
+/// Where `point`, seen from above, is in the frame of a surface standing at `origin` and turned `yaw` about the
+/// vertical: X and Z from its origin, along its own axes.
+fn within(point: Vec3, origin: Vec3, yaw: f32) -> Vec2 {
+    let offset = Vec3::new(point.x - origin.x, 0.0, point.z - origin.z);
+    let local = if yaw == 0.0 {
+        offset
+    } else {
+        Quat::from_rotation_y(-yaw) * offset
+    };
+    Vec2::new(local.x, local.z)
 }
 
 impl Surface {
@@ -90,44 +128,243 @@ impl Surface {
         }
     }
 
+    /// A ring sector, such as a curved deck: the part of the ring about `centre`, at its height, between the radii
+    /// `inner` and `outer`, from the direction `from` round to `to`, anticlockwise seen from above. Exact, as a disc
+    /// is. The angles are in radians about the vertical from −Z, as a [`Pad`] faces and the rig turns: 0 is ahead of
+    /// the origin, along −Z, and a quarter turn, π/2, is along −X. A `to` less than `from` is a turn further round, and
+    /// a full turn or more is the whole ring, a surface with a round hole. A `to` that comes back round to `from`, as
+    /// `from` itself or a whole turn less, sweeps nothing and holds nothing, not even the line along `from`. The radii
+    /// are taken without their signs and in order; an `inner` of nothing makes a wedge of a disc. To draw it, see
+    /// [`Surface::sector_triangles`].
+    ///
+    /// ```
+    /// use std::f32::consts::FRAC_PI_3;
+    ///
+    /// use glam::Vec3;
+    /// use tomori_scene::locomotion::Surface;
+    ///
+    /// // A balcony 5.4 m up, 2 m deep, curving a third of the way round, 6 m ahead of the origin at its middle.
+    /// let balcony = Surface::sector(Vec3::new(0.0, 5.4, 0.0), 6.0, 8.0, -FRAC_PI_3, FRAC_PI_3);
+    /// assert!(balcony.contains(Vec3::new(0.0, 5.4, -7.0)));
+    /// assert!(balcony.contains(Vec3::new(-5.0, 5.4, -5.0)));
+    /// assert!(!balcony.contains(Vec3::new(0.0, 5.4, -5.0)));
+    /// assert!(!balcony.contains(Vec3::new(0.0, 5.4, 7.0)));
+    /// ```
+    pub fn sector(centre: Vec3, inner: f32, outer: f32, from: f32, to: f32) -> Self {
+        // A radius that is not a number stays one, which holds nothing.
+        let (inner, outer) = match (inner.abs(), outer.abs()) {
+            (inner, outer) if outer < inner => (outer, inner),
+            radii => radii,
+        };
+        let sweep = to - from;
+        Self::Sector {
+            centre,
+            inner,
+            outer,
+            from,
+            // Nonsense stays nonsense, which holds nothing.
+            sweep: if sweep.is_finite() && sweep >= std::f32::consts::TAU {
+                std::f32::consts::TAU
+            } else {
+                sweep.rem_euclid(std::f32::consts::TAU)
+            },
+        }
+    }
+
+    /// A polygon at `height`: the outline through `points`, its corners in order, either way round, each the X and Z
+    /// of a place in the environment's horizontal plane. Any simple outline, convex or not, without holes: from 3 to
+    /// [`MOST_POINTS`] corners, each finite and within [`FARTHEST`] of the environment's origin on each axis, whose
+    /// edges do not cross, which encloses at least [`SMALLEST_AREA`], and none of whose corners is within
+    /// [`CLEARANCE`] of an edge it does not end; corners in a straight line are allowed. It is checked, and cut into
+    /// triangles, once, here: an outline that is not one is refused, saying why, rather than making a surface nobody
+    /// can land on. A point on the outline is on the surface, so four corners hold exactly what
+    /// [`Surface::rectangle`] holds as declared; carried into a space, where a polygon turns about its outline's
+    /// origin and a rectangle about its centre, they hold the same up to rounding, which near 1 km from the origin
+    /// may move an edge by a tenth of a millimetre.
+    ///
+    /// ```
+    /// use std::f32::consts::FRAC_PI_2;
+    ///
+    /// use glam::{Vec2, Vec3};
+    /// use tomori_scene::locomotion::{Locomotion, OutlineError, Surface};
+    ///
+    /// // A crescent balcony 5.4 m up, 4 m deep at its middle, ahead of the origin: its outer edge half a circle of 8 m
+    /// // about the origin, its inner edge an arc of 10 m about a point 6 m behind it, meeting at its horns.
+    /// let arc = |centre: Vec2, radius: f32, from: f32, to: f32, steps: usize| {
+    ///     (0..=steps).map(move |step| {
+    ///         let angle = from + (to - from) * step as f32 / steps as f32;
+    ///         centre + radius * Vec2::new(-angle.sin(), -angle.cos())
+    ///     })
+    /// };
+    /// let horn = (4.0_f32 / 3.0).atan();
+    /// let outer = arc(Vec2::ZERO, 8.0, FRAC_PI_2, -FRAC_PI_2, 24);
+    /// let inner = arc(Vec2::new(0.0, 6.0), 10.0, -horn, horn, 16);
+    /// // The arcs meet at the horns, which the outer one gives.
+    /// let points = outer.chain(inner.skip(1).take(15));
+    /// let crescent = Surface::polygon(points, 5.4)?;
+    /// assert!(crescent.contains(Vec3::new(0.0, 5.4, -6.0)));
+    /// assert!(!crescent.contains(Vec3::new(0.0, 5.4, -3.0)));
+    /// let profile = Locomotion::fly(vec![crescent], 8.0);
+    /// assert!(profile.travels());
+    ///
+    /// // Edges that cross are refused.
+    /// let bow = [Vec2::ZERO, Vec2::new(2.0, 2.0), Vec2::new(2.0, 0.0), Vec2::new(0.0, 3.0)];
+    /// assert!(matches!(Surface::polygon(bow, 0.0), Err(OutlineError::Crossing { .. })));
+    /// # Ok::<(), OutlineError>(())
+    /// ```
+    pub fn polygon(
+        points: impl IntoIterator<Item = Vec2>,
+        height: f32,
+    ) -> Result<Self, OutlineError> {
+        Ok(Self::Polygon {
+            outline: std::sync::Arc::new(Outline::new(points)?),
+            origin: Vec3::new(0.0, height, 0.0),
+            yaw: 0.0,
+        })
+    }
+
     /// The surface, given in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
     /// turned with it.
     pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
-        match *self {
-            Self::Rectangle { centre, half, yaw } => Self::Rectangle {
+        match self {
+            &Self::Rectangle { centre, half, yaw } => Self::Rectangle {
                 centre: carriage.place(centre),
                 half,
                 yaw: yaw + carriage.yaw(),
             },
-            Self::Disc { centre, radius } => Self::Disc {
+            &Self::Disc { centre, radius } => Self::Disc {
                 centre: carriage.place(centre),
                 radius,
+            },
+            &Self::Sector {
+                centre,
+                inner,
+                outer,
+                from,
+                sweep,
+            } => Self::Sector {
+                centre: carriage.place(centre),
+                inner,
+                outer,
+                from: from + carriage.yaw(),
+                sweep,
+            },
+            Self::Polygon {
+                outline,
+                origin,
+                yaw,
+            } => Self::Polygon {
+                outline: outline.clone(),
+                origin: carriage.place(*origin),
+                yaw: yaw + carriage.yaw(),
             },
         }
     }
 
     /// The surface's height.
     pub fn height(&self) -> f32 {
-        match *self {
-            Self::Rectangle { centre, .. } | Self::Disc { centre, .. } => centre.y,
+        match self {
+            Self::Rectangle { centre, .. }
+            | Self::Disc { centre, .. }
+            | Self::Sector { centre, .. } => centre.y,
+            Self::Polygon { origin, .. } => origin.y,
         }
     }
 
-    /// Whether `point`, seen from above, is on the surface.
-    pub fn contains(&self, point: Vec3) -> bool {
-        match *self {
-            Self::Rectangle { centre, half, yaw } => {
-                let offset = Vec3::new(point.x - centre.x, 0.0, point.z - centre.z);
-                let local = if yaw == 0.0 {
-                    offset
-                } else {
-                    Quat::from_rotation_y(-yaw) * offset
-                };
-                local.x.abs() <= half.x && local.z.abs() <= half.y
+    /// A polygon's outline, in the coordinates it was declared in, wherever the surface has been carried, with the
+    /// triangles Tomori cut it into, for whoever draws it; `None` for the other shapes.
+    pub fn outline(&self) -> Option<&Outline> {
+        match self {
+            Self::Polygon { outline, .. } => Some(outline),
+            _ => None,
+        }
+    }
+
+    /// Triangles to draw a sector's floor with, at its height, in the coordinates its centre is in: its sweep cut into
+    /// `segments` equal steps, from 1 to [`MOST_SEGMENTS`], each two triangles, or one where it has no inner radius.
+    /// Empty for the other shapes and for a sector that holds nothing. They are not what it holds, which is exact:
+    /// their edges are chords of its arcs, so the floor drawn falls short of its outer arc, and reaches into its
+    /// hollow past its inner arc, by at most the radius times 1 − cos(sweep ÷ 2 · `segments`), as for 32 steps over
+    /// half a ring of 10 m about 1.2 cm, and for 64 about 3 mm.
+    ///
+    /// ```
+    /// use std::f32::consts::FRAC_PI_3;
+    ///
+    /// use glam::Vec3;
+    /// use tomori_scene::locomotion::Surface;
+    ///
+    /// let balcony = Surface::sector(Vec3::new(0.0, 5.4, 0.0), 6.0, 8.0, -FRAC_PI_3, FRAC_PI_3);
+    /// let floor = balcony.sector_triangles(32);
+    /// assert_eq!(floor.len(), 64);
+    /// assert!(floor.iter().flatten().all(|corner| corner.y == 5.4));
+    /// ```
+    pub fn sector_triangles(&self, segments: usize) -> Vec<[Vec3; 3]> {
+        let &Self::Sector {
+            centre,
+            inner,
+            outer,
+            from,
+            sweep,
+        } = self
+        else {
+            return Vec::new();
+        };
+        // Nonsense, or a sweep of nothing, holds nothing; a start that is not a number has a sweep that is not either.
+        if !(sweep > 0.0 && inner.is_finite() && outer.is_finite()) {
+            return Vec::new();
+        }
+        let segments = segments.clamp(1, MOST_SEGMENTS);
+        let at = |step: usize, radius: f32| {
+            let angle = from + sweep * step as f32 / segments as f32;
+            centre + radius * Vec3::new(-angle.sin(), 0.0, -angle.cos())
+        };
+        let mut triangles = Vec::with_capacity(2 * segments);
+        for step in 0..segments {
+            let (near, far) = (at(step, outer), at(step + 1, outer));
+            if inner == 0.0 {
+                triangles.push([centre, near, far]);
+            } else {
+                let (back, ahead) = (at(step, inner), at(step + 1, inner));
+                triangles.push([back, near, far]);
+                triangles.push([back, far, ahead]);
             }
-            Self::Disc { centre, radius } => {
+        }
+        triangles
+    }
+
+    /// Whether `point`, seen from above, is on the surface, its edge included.
+    pub fn contains(&self, point: Vec3) -> bool {
+        match self {
+            &Self::Rectangle { centre, half, yaw } => {
+                let local = within(point, centre, yaw);
+                local.x.abs() <= half.x && local.y.abs() <= half.y
+            }
+            &Self::Disc { centre, radius } => {
                 Vec2::new(point.x - centre.x, point.z - centre.z).length() <= radius
             }
+            &Self::Sector {
+                centre,
+                inner,
+                outer,
+                from,
+                sweep,
+            } => {
+                let offset = Vec2::new(point.x - centre.x, point.z - centre.z);
+                let radius = offset.length();
+                // The centre faces no way: it is on a wedge that reaches it.
+                let round = if radius == 0.0 {
+                    0.0
+                } else {
+                    ((-offset.x).atan2(-offset.y) - from).rem_euclid(std::f32::consts::TAU)
+                };
+                // A sweep of nothing holds nothing, rather than the line along its start.
+                sweep > 0.0 && (inner..=outer).contains(&radius) && round <= sweep
+            }
+            Self::Polygon {
+                outline,
+                origin,
+                yaw,
+            } => outline.contains(within(point, *origin, *yaw)),
         }
     }
 }
@@ -1493,7 +1730,7 @@ mod tests {
         let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
         let carried = deck.carried(&carriage);
         assert_eq!(carried.ceiling(), Some(5.5));
-        let surface = carried.surfaces()[0];
+        let surface = &carried.surfaces()[0];
         assert!(surface.height().abs() < 1e-5);
         assert!(surface.contains(Vec3::new(0.0, 0.0, -9.9)));
         assert!(surface.contains(Vec3::new(0.4, 0.0, -8.0)));
@@ -1511,6 +1748,523 @@ mod tests {
         assert_eq!(Locomotion::None.carried(&carriage), Locomotion::None);
         let discs = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 1.0)]).carried(&carriage);
         assert!(discs.surfaces()[0].contains(Vec3::new(0.0, 0.0, -8.5)));
+    }
+
+    /// An L-shaped deck 3 m up: 4 m square, to the right of home, its near right quarter cut away.
+    fn ell() -> Surface {
+        let corners = [
+            (2.0, -2.0),
+            (6.0, -2.0),
+            (6.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 2.0),
+            (2.0, 2.0),
+        ];
+        Surface::polygon(corners.map(|(x, z)| Vec2::new(x, z)), 3.0).unwrap()
+    }
+
+    /// A crescent at `height`, 4 m deep at its middle, 4 m ahead of home, its horns 8 m to either side.
+    fn crescent(height: f32) -> Surface {
+        Surface::polygon(outline::crescent(), height).unwrap()
+    }
+
+    /// A curved deck at `height`: 2 m deep, a third of the way round, 6 m ahead of `centre` at its middle.
+    fn curve(centre: Vec3) -> Surface {
+        let third = std::f32::consts::FRAC_PI_3;
+        Surface::sector(centre, 6.0, 8.0, -third, third)
+    }
+
+    /// The point `radius` from `centre` in the direction `angle`, a turn about the vertical from −Z.
+    fn bearing(centre: Vec3, angle: f32, radius: f32) -> Vec3 {
+        centre + radius * (Quat::from_rotation_y(angle) * Vec3::NEG_Z)
+    }
+
+    /// A grid of points at `height`, an eighth of a metre apart and `offset` from the whole eighths, from `low` to
+    /// `high` on X and Z.
+    fn grid(low: f32, high: f32, offset: f32, height: f32) -> impl Iterator<Item = Vec3> {
+        let (low, high) = ((low * 8.0) as i32, (high * 8.0) as i32);
+        (low..=high).flat_map(move |x| {
+            (low..=high)
+                .map(move |z| Vec3::new(x as f32 / 8.0 + offset, height, z as f32 / 8.0 + offset))
+        })
+    }
+
+    #[test]
+    fn a_rectangle_declared_as_four_corners_is_that_rectangle() {
+        let centre = Vec3::new(1.5, 2.0, -3.25);
+        let size = Vec2::new(4.0, 2.5);
+        let rectangle = Surface::rectangle(centre, size);
+        let corners = [(-0.5, -4.5), (3.5, -4.5), (3.5, -2.0), (-0.5, -2.0)];
+        let polygon = Surface::polygon(corners.map(|(x, z)| Vec2::new(x, z)), centre.y).unwrap();
+        assert_eq!(polygon.height(), rectangle.height());
+        // Every point of a grid, those on its edges and corners among them, is on both or neither.
+        for point in grid(-6.0, 6.0, 0.0, centre.y) {
+            assert_eq!(
+                polygon.contains(point),
+                rectangle.contains(point),
+                "{point}"
+            );
+        }
+        let held = |surface: &Surface| {
+            grid(-6.0, 6.0, 0.0, centre.y)
+                .filter(|point| surface.contains(*point))
+                .count()
+        };
+        assert_eq!(held(&polygon), 33 * 21);
+        assert_eq!(held(&rectangle), 33 * 21);
+        // Rays land on both alike, and backsteps go as far along both.
+        let rectangles = Locomotion::teleport(vec![rectangle]);
+        let polygons = Locomotion::teleport(vec![polygon]);
+        let eye = centre + Vec3::new(0.3, 2.0, 0.4);
+        let mut landed = 0;
+        for point in grid(-6.0, 6.0, 0.0625, centre.y) {
+            let aim = ray(eye, point);
+            assert_eq!(polygons.landing(&aim), rectangles.landing(&aim), "{point}");
+            landed += usize::from(polygons.landing(&aim).is_some());
+            for facing in [Vec3::X, Vec3::NEG_Z, Vec3::new(1.0, 0.0, 1.0)] {
+                assert_eq!(
+                    polygons.backstep(point, facing, centre.y),
+                    rectangles.backstep(point, facing, centre.y),
+                    "{point} facing {facing}"
+                );
+            }
+        }
+        assert_eq!(landed, 32 * 20);
+        // It steps back as far as the outline goes, as a rectangle's edge stops it.
+        let step = polygons
+            .backstep(Vec3::new(3.0, 3.7, -3.0), Vec3::NEG_X, centre.y)
+            .unwrap();
+        assert!(close(step, Vec3::new(0.5, 0.0, 0.0)), "{step}");
+    }
+
+    #[test]
+    fn a_ray_lands_on_a_polygon_and_a_sector_as_on_any_surface() {
+        let floor = Surface::rectangle(Vec3::ZERO, Vec2::new(40.0, 40.0));
+        let floors =
+            Locomotion::teleport(vec![floor.clone(), ell(), curve(Vec3::new(0.0, 5.4, 0.0))]);
+        // From above the deck, onto each of its arms.
+        let above = Vec3::new(3.0, 4.6, 0.0);
+        for arm in [Vec3::new(5.0, 3.0, -1.0), Vec3::new(3.0, 3.0, 1.5)] {
+            assert!(close(floors.landing(&ray(above, arm)).unwrap(), arm));
+        }
+        // Through its notch, onto the floor beneath, which the deck hides elsewhere.
+        let over = Vec3::new(5.0, 6.0, 1.0);
+        let through = floors
+            .landing(&ray(over, Vec3::new(5.2, 0.0, 1.2)))
+            .unwrap();
+        assert!(close(through, Vec3::new(5.2, 0.0, 1.2)));
+        let hidden = floors
+            .landing(&ray(above, Vec3::new(3.5, 0.0, 0.5)))
+            .unwrap();
+        assert_eq!(hidden.y, 3.0);
+        assert!(floors.surface_crossed(&ray(above, Vec3::new(3.5, 0.0, 0.5)), 4.0));
+        assert!(!floors.surface_crossed(&ray(over, Vec3::new(5.2, 0.0, 1.2)), 5.9));
+        // From beneath, it is not met, and the floor beyond it is; just above it, it is too near, and still hides.
+        let eye = Vec3::new(0.0, 1.5, 0.0);
+        let beneath = floors.landing(&ray(eye, Vec3::new(3.0, 0.0, 0.0))).unwrap();
+        assert_eq!(beneath.y, 0.0);
+        let low = Vec3::new(3.0, 3.1, 0.0);
+        assert_eq!(floors.landing(&ray(low, Vec3::new(3.1, 3.0, 0.0))), None);
+        // The curved deck, from above it: onto it, through the hollow within it and past its ends onto the floor.
+        let high = Vec3::new(0.0, 7.0, -5.0);
+        let middle = Vec3::new(0.0, 5.4, -7.0);
+        assert!(close(floors.landing(&ray(high, middle)).unwrap(), middle));
+        let hollow = floors
+            .landing(&ray(high, Vec3::new(0.0, 0.0, -3.0)))
+            .unwrap();
+        assert_eq!(hollow.y, 0.0);
+        let past = floors
+            .landing(&ray(Vec3::new(7.0, 7.0, 0.0), Vec3::new(7.0, 0.0, -1.0)))
+            .unwrap();
+        assert_eq!(past.y, 0.0);
+        // Flying lands on them as teleporting does.
+        let fly = Locomotion::fly(vec![floor, ell()], 6.0);
+        let landing = fly.landing(&ray(above, Vec3::new(5.0, 3.0, -1.0))).unwrap();
+        assert!(close(landing, Vec3::new(5.0, 3.0, -1.0)));
+        // A backstep goes along the deck's arm, and stops at its notch.
+        let step = floors
+            .backstep(Vec3::new(4.5, 4.7, -1.0), Vec3::NEG_X, 3.0)
+            .unwrap();
+        assert!(close(step, Vec3::new(BACKSTEP, 0.0, 0.0)), "{step}");
+        let step = floors
+            .backstep(Vec3::new(3.0, 4.7, -0.3), Vec3::new(-1.0, 0.0, -1.0), 3.0)
+            .unwrap();
+        assert!(
+            close(step, Vec3::new(0.3, 0.0, 0.3) * 2.0_f32.sqrt()),
+            "{step}"
+        );
+    }
+
+    #[test]
+    fn aiming_at_a_crescent_lands_on_it_and_not_in_its_hollow() {
+        let dais = Locomotion::teleport(vec![crescent(0.5)]);
+        let mut travel = Travel::default();
+        let eye = Vec3::new(0.3, 1.2, -0.4);
+        // The hollow, between home and the crescent, is nowhere to land.
+        let hollow = Some(ray(eye, Vec3::new(0.0, 0.5, -3.0)));
+        let outcome = travel.update(input(&dais, Vec2::Y, hollow));
+        assert!(outcome.aiming);
+        assert_eq!(outcome.landing, None);
+        // Its middle, and one of its horns, are.
+        for landing in [Vec3::new(0.0, 0.5, -6.0), Vec3::new(-7.4, 0.5, -1.0)] {
+            let outcome = travel.update(input(&dais, Vec2::Y, Some(ray(eye, landing))));
+            assert!(close(outcome.landing.unwrap(), landing), "{landing}");
+        }
+        let outcome = travel.update(input(&dais, Vec2::ZERO, hollow));
+        assert!(outcome.teleported);
+        let head = travel.rig().matrix().transform_point3(HEAD);
+        assert!(close(head, Vec3::new(-7.4, HEAD.y + 0.5, -1.0)), "{head}");
+        assert_eq!(travel.rig().floor(), 0.5);
+    }
+
+    #[test]
+    fn a_sector_is_the_part_of_a_ring_between_its_angles() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+        let centre = Vec3::new(1.0, 2.0, -1.0);
+        let sector = Surface::sector(centre, 2.0, 4.0, -FRAC_PI_4, FRAC_PI_2);
+        assert_eq!(sector.height(), 2.0);
+        // Ahead of its centre, to the left as far as −X, and half as far to the right; seen from above, at any height.
+        for (angle, radius) in [
+            (0.0, 3.0),
+            (FRAC_PI_4, 3.0),
+            (FRAC_PI_2 - 0.01, 3.0),
+            (-FRAC_PI_4 + 0.01, 3.0),
+            (0.3, 2.01),
+            (0.3, 3.99),
+        ] {
+            let point = bearing(centre, angle, radius);
+            assert!(sector.contains(point), "{angle} {radius}");
+            assert!(sector.contains(point + Vec3::Y * 9.0), "{angle} {radius}");
+        }
+        assert!(sector.contains(centre + Vec3::new(-3.0, 0.0, -0.1)));
+        assert!(sector.contains(centre + Vec3::new(2.0, 0.0, -2.1)));
+        // Not within the ring, beyond it, past either end, or behind.
+        for (angle, radius) in [
+            (0.3, 1.9),
+            (0.3, 4.1),
+            (FRAC_PI_2 + 0.05, 3.0),
+            (-FRAC_PI_4 - 0.05, 3.0),
+            (PI, 3.0),
+            (0.0, 0.0),
+        ] {
+            assert!(
+                !sector.contains(bearing(centre, angle, radius)),
+                "{angle} {radius}"
+            );
+        }
+        // An end less than the start is a turn further round: this one is behind, a quarter turn about.
+        let behind = Surface::sector(centre, 2.0, 4.0, 3.0 * FRAC_PI_4, -3.0 * FRAC_PI_4);
+        for (angle, on) in [
+            (PI, true),
+            (PI - 0.7, true),
+            (-PI + 0.7, true),
+            (0.0, false),
+            (FRAC_PI_2, false),
+        ] {
+            assert_eq!(behind.contains(bearing(centre, angle, 3.0)), on, "{angle}");
+        }
+        // A full turn, or more, is the whole ring, with its hole.
+        for ring in [
+            Surface::sector(centre, 2.0, 4.0, 0.0, TAU),
+            Surface::sector(centre, 2.0, 4.0, 1.0, 9.0),
+        ] {
+            for step in 0..64 {
+                let angle = step as f32 / 64.0 * TAU - PI;
+                assert!(ring.contains(bearing(centre, angle, 3.0)), "{angle}");
+                assert!(!ring.contains(bearing(centre, angle, 1.9)), "{angle}");
+                assert!(!ring.contains(bearing(centre, angle, 4.1)), "{angle}");
+            }
+            assert!(!ring.contains(centre));
+        }
+        // Without an inner radius, it is a wedge of a disc, whose point is on it.
+        let wedge = Surface::sector(centre, 0.0, 4.0, -FRAC_PI_4, FRAC_PI_4);
+        assert!(wedge.contains(centre));
+        assert!(wedge.contains(bearing(centre, 0.0, 0.1)));
+        assert!(!wedge.contains(bearing(centre, PI, 0.1)));
+        // Its radii are taken without their signs, and in order.
+        assert_eq!(
+            Surface::sector(centre, -4.0, 2.0, -FRAC_PI_4, FRAC_PI_2),
+            sector
+        );
+        // Nonsense holds nothing, not even its centre.
+        for nonsense in [
+            Surface::sector(centre, f32::NAN, 4.0, 0.0, 1.0),
+            Surface::sector(centre, 0.0, f32::NAN, 0.0, 1.0),
+            Surface::sector(centre, 0.0, 4.0, f32::NAN, 1.0),
+            Surface::sector(centre, 0.0, 4.0, 0.0, f32::NAN),
+            Surface::sector(centre, 0.0, 4.0, 0.0, f32::INFINITY),
+            Surface::sector(centre, 0.0, 4.0, f32::NEG_INFINITY, 0.0),
+        ] {
+            for point in grid(-6.0, 6.0, 0.0, 2.0) {
+                assert!(!nonsense.contains(point), "{nonsense:?} {point}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sector_that_sweeps_nothing_holds_nothing() {
+        use std::f32::consts::TAU;
+        let centre = Vec3::new(1.0, 2.0, -1.0);
+        for (from, to) in [
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (TAU, 0.0),
+            (0.0, -TAU),
+            (-2.0, -2.0),
+        ] {
+            for inner in [0.0, 2.0] {
+                let none = Surface::sector(centre, inner, 4.0, from, to);
+                // Not even along the line where it starts, nor its centre.
+                for radius in [0.0, 1.0, 2.0, 3.0, 4.0] {
+                    for angle in [from, to, from.next_up(), from.next_down()] {
+                        let point = bearing(centre, angle, radius);
+                        assert!(!none.contains(point), "{from} {to} {inner} {point}");
+                    }
+                }
+                for point in grid(-6.0, 6.0, 0.0, 2.0) {
+                    assert!(!none.contains(point), "{from} {to} {point}");
+                }
+                assert!(none.sector_triangles(16).is_empty());
+            }
+        }
+        // A sweep of a thousandth of a radian still holds what is within it.
+        let sliver = Surface::sector(centre, 2.0, 4.0, 0.0, 1e-3);
+        assert!(sliver.contains(bearing(centre, 5e-4, 3.0)));
+    }
+
+    #[test]
+    fn a_sector_s_triangles_follow_its_arcs_within_the_chord_error() {
+        use std::f32::consts::{FRAC_PI_2, PI, TAU};
+        let centre = Vec3::new(1.0, 2.0, -1.0);
+        // Half a ring of 10 m, from −X round to +X through −Z, in 32 steps.
+        let half = Surface::sector(centre, 6.0, 10.0, FRAC_PI_2, FRAC_PI_2 + PI);
+        let floor = half.sector_triangles(32);
+        assert_eq!(floor.len(), 64);
+        // Every corner on one of its arcs, at its height, and the floor within it: each triangle's middle on it.
+        for triangle in &floor {
+            for corner in triangle {
+                assert_eq!(corner.y, 2.0);
+                let radius = (*corner - centre).length();
+                assert!(
+                    (radius - 6.0).abs() < 1e-4 || (radius - 10.0).abs() < 1e-4,
+                    "{radius}"
+                );
+            }
+            let middle = (triangle[0] + triangle[1] + triangle[2]) / 3.0;
+            assert!(half.contains(middle), "{middle}");
+        }
+        // The floor falls short of the outer arc, between corners, by the chord error, about 1.2 cm.
+        let error = 10.0 * (1.0 - (PI / 64.0).cos());
+        assert!((error - 0.012).abs() < 0.001, "{error}");
+        let chord = (floor[0][1] + floor[0][2]) / 2.0;
+        assert!(((chord - centre).length() - (10.0 - error)).abs() < 1e-4);
+        // A wedge without an inner radius is one triangle a step, from its point; a whole ring closes.
+        let wedge = Surface::sector(centre, 0.0, 4.0, 0.0, 1.0).sector_triangles(8);
+        assert_eq!(wedge.len(), 8);
+        assert!(wedge.iter().all(|triangle| triangle[0] == centre));
+        let ring = Surface::sector(centre, 2.0, 4.0, 0.0, TAU).sector_triangles(12);
+        let (first, last) = (ring[0][0], ring[23][2]);
+        assert!(close(first, last), "{first} {last}");
+        // Its steps are from 1 to the most there may be.
+        assert_eq!(half.sector_triangles(0).len(), 2);
+        assert_eq!(half.sector_triangles(usize::MAX).len(), 2 * MOST_SEGMENTS);
+        // Carried, its floor is carried with it.
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        let carried = half.carried(&carriage).sector_triangles(32);
+        for (there, here) in carried.iter().flatten().zip(floor.iter().flatten()) {
+            assert!(
+                there.distance(carriage.place(*here)) < 1e-3,
+                "{there} {here}"
+            );
+        }
+        // The other shapes, and nonsense, have none.
+        assert!(ell().sector_triangles(8).is_empty());
+        assert!(Surface::disc(centre, 4.0).sector_triangles(8).is_empty());
+        for nonsense in [
+            Surface::sector(centre, f32::NAN, 4.0, 0.0, 1.0),
+            Surface::sector(centre, 0.0, f32::NAN, 0.0, 1.0),
+            Surface::sector(centre, 0.0, 4.0, f32::NAN, 1.0),
+        ] {
+            assert!(nonsense.sector_triangles(8).is_empty(), "{nonsense:?}");
+        }
+    }
+
+    #[test]
+    fn a_rectangle_as_four_corners_carried_holds_the_same_up_to_rounding() {
+        let centre = Vec3::new(1.5, 2.0, -3.25);
+        let half = Vec2::new(2.0, 1.25);
+        let rectangle = Surface::rectangle(centre, 2.0 * half);
+        let corners = [(-0.5, -4.5), (3.5, -4.5), (3.5, -2.0), (-0.5, -2.0)];
+        let polygon = Surface::polygon(corners.map(|(x, z)| Vec2::new(x, z)), centre.y).unwrap();
+        // Near home, and nearly a kilometre away, turned.
+        for (at, towards) in [
+            ([8.0, 0.5, 0.0], [0.0, 0.5, 0.0]),
+            ([900.0, -3.0, -700.0], [905.0, -3.0, -690.0]),
+        ] {
+            let carriage = crate::anchors::Anchor::carriage(
+                &tomori_protocol::Pose::at(at).facing_towards(towards),
+            )
+            .unwrap();
+            let (rectangles, polygons) = (rectangle.carried(&carriage), polygon.carried(&carriage));
+            // Every point of a grid, but those within a millimetre of an edge, where rounding decides, is on both or
+            // neither; and a millimetre within each edge's middle and corner is on both, a millimetre beyond on
+            // neither.
+            let mut held = 0;
+            for point in grid(-6.0, 6.0, 0.0, centre.y) {
+                let local = (point - centre).abs();
+                if (local.x - half.x).abs() < 1e-3 || (local.z - half.y).abs() < 1e-3 {
+                    continue;
+                }
+                let there = carriage.place(point);
+                assert_eq!(
+                    polygons.contains(there),
+                    rectangles.contains(there),
+                    "{point}"
+                );
+                held += usize::from(polygons.contains(there));
+            }
+            assert_eq!(held, 31 * 19);
+            for (x, z) in [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                for direction in [Vec2::new(x, z), Vec2::new(-x, -z)] {
+                    let edge = centre + Vec3::new(direction.x * half.x, 0.0, direction.y * half.y);
+                    let outward = Vec3::new(direction.x, 0.0, direction.y) * 1e-3;
+                    for surface in [&rectangles, &polygons] {
+                        assert!(surface.contains(carriage.place(edge - outward)), "{edge}");
+                        assert!(!surface.contains(carriage.place(edge + outward)), "{edge}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_polygon_is_declared_by_its_outline_or_refused() {
+        let ell = ell();
+        assert_eq!(ell.height(), 3.0);
+        let outline = ell.outline().unwrap();
+        assert_eq!(outline.points().len(), 6);
+        assert_eq!(outline.triangles().count(), 4);
+        // Seen from above, at any height; its edge and the corner that turns inwards are on it, its notch is not.
+        assert!(ell.contains(Vec3::new(5.0, 9.0, -1.0)));
+        assert!(ell.contains(Vec3::new(4.0, 3.0, 0.0)));
+        assert!(ell.contains(Vec3::new(6.0, 3.0, -1.0)));
+        assert!(!ell.contains(Vec3::new(5.0, 3.0, 1.0)));
+        // The other shapes have no outline.
+        assert_eq!(Surface::disc(Vec3::ZERO, 1.0).outline(), None);
+        assert_eq!(curve(Vec3::ZERO).outline(), None);
+        // An outline that is not one is refused, saying why, and a height that is nonsense is never met.
+        let bow = [(0.0, 0.0), (2.0, 2.0), (2.0, 0.0), (0.0, 2.0)].map(|(x, z)| Vec2::new(x, z));
+        assert_eq!(
+            Surface::polygon(bow, 0.0),
+            Err(OutlineError::Crossing { edges: [0, 2] })
+        );
+        assert_eq!(
+            Surface::polygon([Vec2::ZERO, Vec2::X], 0.0),
+            Err(OutlineError::Count { points: 2 })
+        );
+        let adrift = Surface::polygon(outline.points().iter().copied(), f32::NAN).unwrap();
+        let adrift = Locomotion::teleport(vec![adrift]);
+        let above = Vec3::new(3.0, 4.6, 0.0);
+        assert_eq!(adrift.landing(&ray(above, Vec3::new(5.0, 3.0, -1.0))), None);
+    }
+
+    #[test]
+    fn polygons_and_sectors_carried_into_a_space_hold_the_same_places() {
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        let again = tomori_protocol::Pose::at([-3.0, -1.0, 2.0]).facing_towards([5.0, -1.0, 9.0]);
+        let again = crate::anchors::Anchor::carriage(&again).unwrap();
+        let ring = Surface::sector(
+            Vec3::new(-2.0, 1.0, 1.0),
+            1.0,
+            3.0,
+            2.0,
+            2.0 + std::f32::consts::TAU,
+        );
+        for surface in [ell(), crescent(5.4), curve(Vec3::new(1.0, 2.0, -1.0)), ring] {
+            // Carried once, and from there again.
+            let once = surface.carried(&carriage);
+            let twice = once.carried(&again);
+            assert!((once.height() - (surface.height() - 0.5)).abs() < 1e-5);
+            assert!((twice.height() - (surface.height() + 0.5)).abs() < 1e-5);
+            // Its outline is as it was declared, and shared rather than copied.
+            assert_eq!(twice.outline(), surface.outline());
+            // Every point of a grid, but those within a millimetre of its edge, where rounding decides, is on it
+            // wherever it is carried exactly where it was on it as declared.
+            let settled = |point: &Vec3| {
+                (0..16).all(|step| {
+                    let beside = bearing(*point, step as f32 * std::f32::consts::FRAC_PI_8, 1e-3);
+                    surface.contains(beside) == surface.contains(*point)
+                })
+            };
+            let (mut on, mut off) = (0, 0);
+            for point in grid(-10.0, 10.0, 0.0, surface.height()).filter(settled) {
+                let held = surface.contains(point);
+                let there = carriage.place(point);
+                assert_eq!(once.contains(there), held, "{surface:?} {point}");
+                assert_eq!(
+                    twice.contains(again.place(there)),
+                    held,
+                    "{surface:?} {point}"
+                );
+                on += usize::from(held);
+                off += usize::from(!held);
+            }
+            assert!(on > 500 && off > 500, "{on} {off}");
+            // Unmoved, it is as declared.
+            assert_eq!(surface.carried(&crate::anchors::Anchor::HOME), surface);
+        }
+        // A profile carries them with the rest, and a ray lands on them there: on the L's arm, and not in its notch.
+        let profile = Locomotion::fly(vec![ell(), crescent(5.4)], 8.0).carried(&carriage);
+        assert_eq!(profile.ceiling(), Some(7.5));
+        let arm = carriage.place(Vec3::new(5.0, 3.0, -1.0));
+        let landing = profile
+            .landing(&ray(arm + Vec3::new(0.5, 2.0, 0.5), arm))
+            .expect("lands");
+        assert!(landing.distance(arm) < 1e-3, "{landing}");
+        let notch = carriage.place(Vec3::new(5.0, 3.0, 1.0));
+        assert_eq!(
+            profile.landing(&ray(notch + Vec3::new(0.2, 2.0, 0.2), notch)),
+            None
+        );
+    }
+
+    #[test]
+    fn pads_stand_on_polygons_and_sectors_as_on_any_surface() {
+        let deck = Vec3::new(0.0, 5.4, 0.0);
+        let pair = |pad: Pad| {
+            Locomotion::teleport(vec![
+                Surface::rectangle(Vec3::ZERO, Vec2::new(30.0, 30.0)),
+                ell(),
+                curve(deck),
+            ])
+            .with_pads([[Pad::at(Vec3::new(0.0, 0.0, 1.0)), pad]])
+        };
+        // On the L's arms, on its edge and on the corner that turns inwards, as a pad's centre on a rectangle's edge
+        // is; and on the curved deck.
+        for good in [
+            Vec3::new(5.0, 3.0, -1.0),
+            Vec3::new(3.0, 3.0, 1.5),
+            Vec3::new(6.0, 3.0, -1.0),
+            Vec3::new(4.0, 3.0, 0.0),
+            Vec3::new(0.0, 5.4, -7.0),
+            Vec3::new(-5.0, 5.4, -5.0),
+        ] {
+            assert_eq!(pair(Pad::at(good)).pads().count(), 1, "{good}");
+        }
+        // In the L's notch, above it, beside it, in the curved deck's hollow, past its end and behind it: the pair is
+        // not used.
+        for bad in [
+            Vec3::new(5.0, 3.0, 1.0),
+            Vec3::new(5.0, 3.5, -1.0),
+            Vec3::new(7.0, 3.0, -1.0),
+            Vec3::new(0.0, 5.4, -5.0),
+            Vec3::new(-7.0, 5.4, 0.0),
+            Vec3::new(0.0, 5.4, 7.0),
+        ] {
+            assert_eq!(pair(Pad::at(bad)).pads().count(), 0, "{bad}");
+        }
     }
 
     /// A main floor and racks 4.5 m below it, with a pad on each, the racks' facing −X.
