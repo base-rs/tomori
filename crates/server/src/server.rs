@@ -2995,6 +2995,7 @@ mod tests {
                         closed_order: None,
                         placements: Default::default(),
                         stage: Default::default(),
+                        places: Default::default(),
                         active: None,
                     }])
                 })

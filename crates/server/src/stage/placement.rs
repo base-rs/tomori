@@ -37,6 +37,9 @@ pub enum Placement {
     /// `wall WALL`: onto the wall with that identity, or that name, such as `Tomori wall` or `added wall 1`; and, with
     /// `slot N` after it, into that slot, numbered from 0 as `presence` numbers them, if it is free.
     Wall(String, Option<u32>),
+    /// `anchor NAME`: floating in the cluster of the cluster anchor of that name, as `presence` lists them, a member of
+    /// it while it floats there.
+    Anchor(String),
 }
 
 impl Placement {
@@ -51,6 +54,7 @@ impl Placement {
     /// looking:Bob     -> Looking(Some("Bob"))
     /// wall added wall 1 -> Wall("added wall 1", None)
     /// wall added wall 1 slot 2 -> Wall("added wall 1", Some(2))
+    /// anchor rack/a12 -> Anchor("rack/a12")
     /// ```
     pub fn parse(value: &str) -> Option<Self> {
         let value = tomori_protocol::text::one_line(value, PLACE_CHARS);
@@ -69,6 +73,7 @@ impl Placement {
                 let (wall, slot) = slotted(&named);
                 Self::Wall(wall.to_owned(), slot)
             }),
+            "anchor" => named.map(Self::Anchor),
             _ => None,
         }
     }

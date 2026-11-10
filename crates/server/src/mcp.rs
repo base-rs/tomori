@@ -315,6 +315,24 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
 const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\", or, where someone else in the space shares their name, their id from presence, such as Ada#23. Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
 
 /// Every tool, as `tools/list` describes it.
+/// The `place_worker` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
+fn place_worker_tool(change: &Value) -> Value {
+    json!({
+        "name": "place_worker",
+        "description": "Place one of your space's workers where its work is, for everyone in it, so that whoever looks there sees something working on it: worker is its session or title, as workers lists it; place is anchor NAME, in the cluster at one of the anchors presence lists, such as a rack that is alerting; object ID, by the anchor that object stands by, by the id Tomori gives it; wall WALL, just beyond the end of that wall nearer whoever asked, by a chart it is reading; near NAME or beside NAME, to that person's right; or home, back where workers stand by default. When you start a worker on something that has a place here, put it there; when nothing relevant has one, leave it at home. Place each worker once, as it starts, and move it again only when its work moves or someone asks: Tomori refuses a worker placed again within a minute, or three times in ten, and the space's beyond twelve a minute. Never move a worker a participant placed unless they ask, naming them in requested_by. Say where you put it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worker": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed to move a worker a participant placed, and frees a placement from the limits on your own. {REQUESTED_BY}") },
+            },
+            "required": ["worker", "place"],
+        },
+        "annotations": change,
+    })
+}
+
 fn tools() -> Value {
     let read = json!({ "readOnlyHint": true, "openWorldHint": false });
     let change = json!({
@@ -324,7 +342,8 @@ fn tools() -> Value {
         "openWorldHint": false,
     });
     let layouts = layout_tools(&change);
-    json!([
+    let place_worker = place_worker_tool(&change);
+    let mut tools = json!([
         {
             "name": "server",
             "description": "This Tomori server's name, version and the environments a space can be in.",
@@ -408,7 +427,7 @@ fn tools() -> Value {
         },
         {
             "name": "move_panel",
-            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is beside NAME, floating beside them, to their right or left, clear of what floats there; near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating straight in front of them; or wall WALL, by its identity or name, such as status wall, or wall WALL slot N, into its slot N, numbered from 0 as presence lists them. beside, near, looking and front alone are about whoever asked; NAME is a name as presence lists it, or, where two share it, the id presence gives, such as Ada#23. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
+            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is beside NAME, floating beside them, to their right or left, clear of what floats there; near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating straight in front of them; or wall WALL, by its identity or name, such as status wall, or wall WALL slot N, into its slot N, numbered from 0 as presence lists them; or anchor NAME, floating at one of the anchors presence lists, such as a rack, beside what stands there. beside, near, looking and front alone are about whoever asked; NAME is a name as presence lists it, or, where two share it, the id presence gives, such as Ada#23. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -486,11 +505,12 @@ fn tools() -> Value {
         layouts[1],
         {
             "name": "move_agent",
-            "description": "Move yourself, the agent, in your space, for everyone in it: place is home, back to the home the space's environment gives you; stay, staying where you stand, following nobody and not going home on your own until someone sends you home; or near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked. Where the space has you follow the speaker, you already go to whoever you answer, so don't call this for that: call it when someone asks you to stay, to go home or to come to someone, and say where you go. Your voice comes from where you stand. presence says where you are and how you move.",
+            "description": "Move yourself, the agent, in your space, for everyone in it: place is home, back to the home the space's environment gives you; stay, staying where you stand, following nobody and not going home on your own until someone sends you home; near NAME or front NAME, standing in front of them, facing them; near or front alone mean whoever asked; or anchor NAME, into the cluster at one of the anchors presence lists, facing whoever watches it, as when someone asks you to go to a rack. Where the space has you follow the speaker, you already go to whoever you answer, so don't call this for that: call it when someone asks you to stay, to go home, to come to someone or to go to a place, and say where you go. Of your own accord, you move to an anchor at most once every 20 seconds and six times in ten minutes; requested_by, naming whoever asked, frees it. Your voice comes from where you stand. presence says where you are and how you move.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES },
                 },
                 "required": ["place"],
             },
@@ -623,7 +643,15 @@ fn tools() -> Value {
                 "openWorldHint": false,
             },
         },
-    ])
+    ]);
+    // Beside move_agent, the other tool that moves something by its place.
+    let list = tools.as_array_mut().expect("a list");
+    let after = list
+        .iter()
+        .position(|tool| tool["name"] == "move_agent")
+        .expect("move_agent is listed");
+    list.insert(after + 1, place_worker);
+    tools
 }
 
 /// A tool's result: its structured content, with the same as text for clients that read only text.
@@ -757,6 +785,7 @@ async fn call(
         "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
         "move_agent" => session.and_then(|session| move_agent(hub, session, arguments)),
+        "place_worker" => session.and_then(|session| place_worker(hub, session, arguments)),
         "panels" => session.and_then(|session| panels(hub, session, arguments)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
@@ -824,11 +853,22 @@ fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
     hub.agent_move_panel(session, panel, place).map(structured)
 }
 
+/// The `place_worker` tool.
+fn place_worker(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let worker = text(arguments, "worker")?;
+    let place = text(arguments, "place")?;
+    crate::limits::check(worker, crate::limits::IDENTIFIER_BYTES, "worker")?;
+    crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
+    hub.agent_place_worker(session, worker, place, requested_by(arguments)?)
+        .map(structured)
+}
+
 /// The `move_agent` tool.
 fn move_agent(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
     let place = text(arguments, "place")?;
     crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
-    hub.agent_move_agent(session, place).map(structured)
+    hub.agent_move_agent(session, place, requested_by(arguments)?)
+        .map(structured)
 }
 
 /// The optional text argument `name` of `arguments`, of at most `limit` bytes.

@@ -178,12 +178,18 @@ impl Hub {
         let record = state.space(&space).expect("found above");
         self.reports_workers(&record.model.backend)?;
         let now = crate::cards::unix_now();
+        let environments = self.environments();
+        let seating = record.seated(&environments);
         let listed: Vec<Value> = record
             .model
             .workers()
             .iter()
             .map(|worker| {
                 let finished = worker_finished(worker.state);
+                // Where it stands, the anchor it was placed at or stands at with its parent, and who placed it.
+                let at = seating
+                    .seat_of(&crate::seating::Member::Worker(worker.id.clone()))
+                    .map_or(tomori_protocol::cluster::HOME, |(at, _)| at);
                 json!({
                     "session": worker.id,
                     // Written by whatever named the worker, so on one line and bounded; see `design/mcp.md`.
@@ -196,6 +202,8 @@ impl Hub {
                         .worker_finished_at(&worker.id)
                         .map(|at| now.saturating_sub(at)),
                     "parent": worker.parent,
+                    "at": at,
+                    "placed_by": record.placed_by(&worker.id),
                 })
             })
             .collect();

@@ -392,6 +392,7 @@ impl Stage {
             created: now,
             updated: None,
             placed: 0,
+            anchor: None,
             place: Placed::Free {
                 pose: Pose::default(),
             },

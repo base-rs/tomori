@@ -52,6 +52,10 @@ pub struct KeptSpace {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "Stage::is_empty")]
     pub stage: Stage,
+    /// Where its workers were placed, at the anchors of each environment, by environment. See
+    /// `design/environments.md`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub places: crate::places::Kept,
     /// When the space was last active, in seconds since the Unix epoch, to the minute, if known. See
     /// `design/arrival.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +208,7 @@ mod tests {
             closed_order: None,
             placements: Default::default(),
             stage: Stage::default(),
+            places: Default::default(),
             active: None,
         }
     }

@@ -336,6 +336,58 @@ pub fn slot_centres(wall: &Wall) -> Vec<[f32; 3]> {
     slots(wall).iter().map(|slot| slot.middle).collect()
 }
 
+/// How far beyond the end of a wall a worker placed by it stands, in metres, from the edge of its last slot: half a
+/// worker's sign and a little more, so that its sign stands clear of the wall.
+const BEYOND: f32 = 0.9;
+
+/// Where a worker placed by `wall` stands: just beyond the end of it nearer whoever's eyes are at `eyes`, or its right
+/// end without them, at its slots' height, facing as it faces, so that it stands by the chart it is reading.
+pub(crate) fn beyond(wall: &Wall, eyes: Option<[f32; 3]>) -> Pose {
+    let slots = slots(wall);
+    let first = slots[0];
+    let right = first.right;
+    let along = |point: Vec3| dot(sub(point, wall.pose.position), right);
+    let (low, high) = slots
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), slot| {
+            let middle = along(slot.middle);
+            (
+                low.min(middle - slot.half.0),
+                high.max(middle + slot.half.0),
+            )
+        });
+    let height = slots.iter().map(|slot| slot.middle[1]).sum::<f32>() / slots.len() as f32;
+    let at = |side: f32| {
+        let point = add(wall.pose.position, scale(right, side));
+        [point[0], height, point[2]]
+    };
+    let (left_end, right_end) = (at(low - BEYOND), at(high + BEYOND));
+    let distance = |point: Vec3, eyes: Vec3| length(sub(point, eyes));
+    let end = match eyes {
+        Some(eyes) if distance(left_end, eyes) < distance(right_end, eyes) => left_end,
+        _ => right_end,
+    };
+    let facing = rotate(wall.pose.orientation, [0.0, 0.0, 1.0]);
+    Pose::upright_facing(end, [end[0] + facing[0], end[1], end[2] + facing[2]])
+}
+
+/// How far to someone's right a worker placed beside them stands, in metres, from their eyes, measured level.
+const RIGHT_OF: f32 = 1.5;
+
+/// Where a worker placed beside someone whose head is at `head` stands: [`RIGHT_OF`] to their right of the way they
+/// face, as the agent stands to their left, a little below their eyes, facing them; placed from their head once, never
+/// chasing it.
+pub(crate) fn right_of(head: &Pose) -> Pose {
+    let ahead = forward(head);
+    let (x, z) = match ahead[0].hypot(ahead[2]) {
+        level if level > 1e-3 => (ahead[0] / level, ahead[2] / level),
+        _ => (0.0, -1.0),
+    };
+    let [px, py, pz] = head.position;
+    let at = [px - z * RIGHT_OF, py - 0.2, pz + x * RIGHT_OF];
+    Pose::upright_facing(at, [px, at[1], pz])
+}
+
 /// What `wall` of `projection` is called, as the agent is told and may name it: the space's own status wall, `status
 /// wall (the Tomori wall)`, as it was called; an environment's wall by the name its environment gave it, if it did, or
 /// else, and an added wall, by its number among those of its kind, from 1; and an environment's wall in the status role
@@ -1112,6 +1164,11 @@ pub(crate) fn which_wall(
         Placement::Wall(named, _) => {
             return Err(format!("There is no wall called {named:?} here."));
         }
+        Placement::Anchor(_) => {
+            return Err(
+                "anchor names no wall: say which wall, or looking or near someone.".to_owned(),
+            );
+        }
     };
     let head = head_of(name.as_deref(), asker, people)?;
     // The wall they are looking at, if they are, or else the one nearest them; there is always the status wall.
@@ -1162,6 +1219,10 @@ pub(crate) fn destination(
         Placement::Looking(name) => looking_at(&whose(name)?, projection, solids),
         Placement::Front(name) => in_front(&whose(name)?),
         Placement::Beside(name) => beside(&whose(name)?, solids),
+        // The hub finds a slot at an anchor, as only it knows the space's anchors.
+        Placement::Anchor(name) => {
+            return Err(format!("There is no anchor called {name:?} here."));
+        }
         Placement::Wall(named, slot) => {
             let named = named.trim();
             let named = named
@@ -1221,6 +1282,7 @@ pub(crate) fn agent(
     summoned: Option<Pose>,
     pinned: bool,
     movement: tomori_protocol::AgentMovement,
+    anchor: Option<&str>,
 ) -> Value {
     let home = crate::hub::agent_home(anchors);
     let at = summoned.unwrap_or(home);
@@ -1237,39 +1299,46 @@ pub(crate) fn agent(
         tomori_protocol::Movement::Home => "stays home",
         _ => "moves only when asked",
     };
-    json!({
+    let mut agent = json!({
         "position": position(at.position),
         "facing_yaw": round(angles(facing).0, 0),
         "at_home": summoned.is_none(),
         "home": position(home.position),
         "mode": mode,
         "movement": movement,
-    })
+    });
+    if let Some(anchor) = anchor {
+        agent["anchor"] = json!(anchor);
+    }
+    agent
 }
 
 /// The space's cluster anchors, `home` first, as the `presence` tool tells its agent of them, so that it finds the
 /// place it means by its kind and label rather than by coordinates: each one's name, kind and label, where its point
 /// is and the way it faces, the room its cluster takes, whether the environment placed it as it runs, the id the agent
-/// may inspect the object it stands by by, among the objects of `environment`, and the workers standing there, by
-/// session and title, in the order of their slots, those gathered into its "+N more" sign saying so. See
-/// `design/mcp.md`.
+/// may inspect the object it stands by by, among the objects of `environment`, and what stands there, in the order of
+/// their slots: the workers, by session and title, those gathered into its "+N more" sign saying so, and whoever
+/// `placed_by` says placed each, where a participant did; the panels, by identity; and the agent. See `design/mcp.md`.
 pub(crate) fn anchors(
     anchors: &[tomori_protocol::cluster::Anchor],
     seating: &crate::seating::Seating,
     workers: &[tomori_protocol::Worker],
     environment: &str,
+    placed_by: &dyn Fn(&str) -> Option<String>,
 ) -> Value {
+    use crate::seating::Member;
     let listed: Vec<Value> = anchors
         .iter()
         .map(|anchor| {
             let gathered = seating.gathered(anchor);
-            let mut members: Vec<&(crate::seating::Member, usize)> =
-                seating.members(&anchor.name).iter().collect();
+            let mut members: Vec<&(Member, usize)> = seating.members(&anchor.name).iter().collect();
             members.sort_by_key(|(_, slot)| *slot);
-            let standing: Vec<Value> = members
-                .into_iter()
-                .map(|(member, _)| match member {
-                    crate::seating::Member::Worker(session) => {
+            let mut standing = Vec::new();
+            let mut panels = Vec::new();
+            let mut agent = false;
+            for (member, _) in members {
+                match member {
+                    Member::Worker(session) => {
                         let title = workers
                             .iter()
                             .find(|worker| &worker.id == session)
@@ -1281,10 +1350,15 @@ pub(crate) fn anchors(
                         if gathered.contains(&member) {
                             listed["gathered"] = json!(true);
                         }
-                        listed
+                        if let Some(by) = placed_by(session) {
+                            listed["placed_by"] = json!(by);
+                        }
+                        standing.push(listed);
                     }
-                })
-                .collect();
+                    Member::Panel(panel) => panels.push(json!(panel)),
+                    Member::Agent => agent = true,
+                }
+            }
             let facing = rotate(anchor.pose.orientation, [0.0, 0.0, 1.0]);
             let mut listed = json!({
                 "name": anchor.name,
@@ -1292,6 +1366,12 @@ pub(crate) fn anchors(
                 "facing_yaw": round(angles(facing).0, 0),
                 "workers": standing,
             });
+            if !panels.is_empty() {
+                listed["panels"] = json!(panels);
+            }
+            if agent {
+                listed["agent"] = json!(true);
+            }
             if let Some(kind) = &anchor.kind {
                 listed["kind"] = json!(kind);
             }

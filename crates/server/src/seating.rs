@@ -10,10 +10,12 @@ use std::collections::BTreeMap;
 
 use tomori_protocol::cluster::{Anchor, Cluster, Layout};
 
-/// What stands in a cluster: a worker, by its session.
+/// What stands in a cluster: a worker, by its session; a floating panel, by its identity; or the agent.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Member {
     Worker(String),
+    Panel(String),
+    Agent,
 }
 
 /// One cluster's members, in order of arrival, each with its slot, and the span it is laid out for.
@@ -73,6 +75,46 @@ impl Seating {
         *self != before
     }
 
+    /// The anchor `member` stands at, by name, and its slot there, if it stands at one.
+    pub(crate) fn seat_of(&self, member: &Member) -> Option<(&str, usize)> {
+        self.clusters.iter().find_map(|(name, seated)| {
+            seated
+                .seats
+                .iter()
+                .find(|(seated, _)| seated == member)
+                .map(|(_, slot)| (name.as_str(), *slot))
+        })
+    }
+
+    /// Where `member` stands, in the space, as its cluster among `anchors` lays it out, and the eyes of whoever that
+    /// cluster gathers about, if it stands at one.
+    pub(crate) fn position(
+        &self,
+        anchors: &[Anchor],
+        member: &Member,
+    ) -> Option<([f32; 3], [f32; 3])> {
+        let (name, slot) = self.seat_of(member)?;
+        let anchor = anchors.iter().find(|anchor| anchor.name == name)?;
+        let cluster = Cluster::new(anchor);
+        let at = cluster.slot(&cluster.arrange(self.laid(name)), slot);
+        Some((at.position, cluster.audience()))
+    }
+
+    /// Where a member would stand at the anchor `anchor`, arriving there now among those already seated, after `before`
+    /// others arriving with it: in the lowest free slot left, as [`Self::seat`] would seat it, in the cluster laid out
+    /// for it; and the eyes of whoever it gathers about.
+    pub(crate) fn arriving(&self, anchor: &Anchor, before: usize) -> ([f32; 3], [f32; 3]) {
+        let taken = self.members(&anchor.name);
+        let free = (0..)
+            .filter(|slot| !taken.iter().any(|(_, taken)| taken == slot))
+            .nth(before)
+            .expect("a free slot");
+        let cluster = Cluster::new(anchor);
+        let laid = Cluster::settle(self.laid(&anchor.name), free + 1);
+        let at = cluster.slot(&cluster.arrange(laid), free);
+        (at.position, cluster.audience())
+    }
+
     /// The members standing at the anchor `name`, in order of arrival, each with its slot.
     pub(crate) fn members(&self, name: &str) -> &[(Member, usize)] {
         self.clusters
@@ -108,7 +150,10 @@ impl Seating {
                 let mut workers: Vec<(&str, usize)> = seated
                     .seats
                     .iter()
-                    .map(|(Member::Worker(session), slot)| (session.as_str(), *slot))
+                    .filter_map(|(member, slot)| match member {
+                        Member::Worker(session) => Some((session.as_str(), *slot)),
+                        _ => None,
+                    })
                     .collect();
                 workers.sort_by_key(|(_, slot)| *slot);
                 workers.into_iter().fold(

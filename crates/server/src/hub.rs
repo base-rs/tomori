@@ -35,6 +35,7 @@ use crate::workspace::SpaceSlots;
 pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
+mod agent_places;
 pub(crate) mod agent_workers;
 mod anchors;
 mod following;
@@ -793,6 +794,15 @@ struct SpaceRecord {
     /// Where whatever stands at the space's cluster anchors stands: each member's slot, and the span each cluster is
     /// laid out for, seated afresh as it is sent, for this run only. See `design/environments.md`.
     seating: std::cell::RefCell<crate::seating::Seating>,
+    /// Where its workers were placed, at the anchors of each environment, by environment, kept with the space.
+    places: crate::places::Kept,
+    /// When the space was last bound to its environment, from which a placement at an anchor its environment's side
+    /// has not placed again waits [`crate::places::GRACE`].
+    anchored: Instant,
+    /// The anchor the agent went to of its own accord, by name, and where it stands there, while it still stands there.
+    agent_at: Option<(String, tomori_protocol::Pose)>,
+    /// How often the agent has placed workers and moved itself of its own accord, for this run only.
+    rates: crate::places::Rates,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -1417,6 +1427,7 @@ impl HubState {
                     closed_order: space.closed.filter(|_| !space.kept_open),
                     placements: space.placements.clone(),
                     stage: space.stage.clone(),
+                    places: space.places.clone(),
                     active: space.active,
                 }
             })
@@ -2490,8 +2501,11 @@ impl Hub {
         }
         // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
         record.stage.leave(&left);
-        // The agent appears at the new environment's home for it, wherever it was summoned to in the last.
+        // The agent appears at the new environment's home for it, wherever it was summoned to in the last, and that
+        // environment's placements wait for its anchors from now.
         record.summoned = None;
+        record.agent_at = None;
+        record.anchored = Instant::now();
         record.partner = None;
         // Nor does it follow anyone there, nor stay pinned.
         record.following = following::Following::default();
@@ -3157,6 +3171,7 @@ impl Hub {
         // Panel updates an environment's side made too soon, now that they may be made, and its anchors' changes.
         self.flush_publishes(now);
         self.flush_anchors(now);
+        self.sweep_places(now);
         // Such as after a closed space was forgotten.
         self.keep();
     }
@@ -5566,6 +5581,10 @@ impl Hub {
             partner: None,
             following: following::Following::default(),
             seating: Default::default(),
+            places: Default::default(),
+            anchored: Instant::now(),
+            agent_at: None,
+            rates: Default::default(),
             active: None,
         });
         // Created now, it is active from now.
@@ -5725,6 +5744,10 @@ impl Hub {
                     partner: None,
                     following: following::Following::default(),
                     seating: Default::default(),
+                    places: kept.places,
+                    anchored: Instant::now(),
+                    agent_at: None,
+                    rates: Default::default(),
                     active: kept.active,
                 });
             }
@@ -5972,19 +5995,31 @@ impl Hub {
         let solids = environments.solids(&record.model.environment);
         for (contents, origin) in replies {
             let projection = record.stage.view(space, &walls, now);
+            // How many of the reply's panels went to each anchor before, so that each takes a slot of its own there.
+            let mut anchored: Vec<String> = Vec::new();
             let placed = contents
                 .into_iter()
                 .map(|(content, place)| {
-                    // A placement that names someone who has not reported, or a wall not here, is as none.
+                    // A placement that names someone who has not reported, or a wall or anchor not here, is as none.
                     let said = place.and_then(|place| {
-                        crate::presence::destination(
-                            &place,
-                            origin.as_ref(),
-                            &people,
-                            &projection,
-                            &solids,
-                        )
-                        .ok()
+                        let before = match &place {
+                            crate::stage::Placement::Anchor(name) => {
+                                anchored.push(name.clone());
+                                anchored.iter().filter(|went| *went == name).count() - 1
+                            }
+                            _ => 0,
+                        };
+                        record
+                            .panel_destination(
+                                &environments,
+                                &place,
+                                before,
+                                origin.as_ref(),
+                                &people,
+                                &projection,
+                                &solids,
+                            )
+                            .ok()
                     });
                     // A block with the id of a panel someone is carrying updates it in their hand, where it stays.
                     let held = content
@@ -6007,6 +6042,8 @@ impl Hub {
                 }
             }
         }
+        // Those put at an anchor stand in its cluster, which may lay it out again.
+        record.settle(&environments);
         state.touch_projection(space);
         drop(state);
         self.keep();
