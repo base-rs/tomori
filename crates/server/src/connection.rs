@@ -150,6 +150,7 @@ fn encode(message: &ServerMessage, output: &mut Vec<u8>, limit: usize) {
             error: "A message from the server was too large to send.".to_owned(),
             space: None,
             panel: None,
+            wall: None,
         })
         .encode_into(output);
     }
@@ -483,6 +484,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: true,
+            live_panels: false,
             limits,
         })
         .encode()
@@ -566,6 +568,7 @@ mod tests {
             error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
             space: None,
             panel: None,
+            wall: None,
         };
         body.outbox.message(message.clone());
         body.outbox.close();
@@ -693,6 +696,7 @@ mod tests {
             error: "x".repeat(30_000_000),
             space: None,
             panel: None,
+            wall: None,
         };
         let speech = Frame::audio(&tomori_protocol::AudioFrame {
             gate: tomori_protocol::Gate::Agent,
@@ -726,6 +730,7 @@ mod tests {
             error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
             space: None,
             panel: None,
+            wall: None,
         };
         // Too large for today's limit, which an older client is sent within.
         let mut output = Vec::new();

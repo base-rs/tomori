@@ -677,6 +677,7 @@ mod tests {
                 error: format!("error {index}"),
                 space: None,
                 panel: None,
+                wall: None,
             });
         }
         outbox.message(ServerMessage::LEFT);
@@ -688,6 +689,7 @@ mod tests {
             error: "again".into(),
             space: None,
             panel: None,
+            wall: None,
         });
         assert_eq!(drain(&outbox).len(), 1);
     }

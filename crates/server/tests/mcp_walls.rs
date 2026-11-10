@@ -377,3 +377,119 @@ fn the_agent_changes_no_locked_wall_and_locks_unlocks_and_puts_one_back_only_whe
         "{removed}"
     );
 }
+
+#[test]
+fn a_change_to_a_wall_from_a_version_since_changed_is_refused_and_redone_from_the_version_read_again()
+ {
+    let server = TestServer::with_tokens_and_tools(false, |server| server);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
+    let mut ada = TestClient::open_with(
+        server.address,
+        &[("Authorization", &format!("Bearer {owner}"))],
+    );
+    ada.hello_projected("ada", "Ada");
+    ada.create_space("Studio");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&server.backend.started()[0]);
+    let tool = |name: &str, arguments: Value| call(&server, &token, &session, name, arguments);
+    let version = || {
+        eventually(|| {
+            tool("presence", json!({}))["structuredContent"]["walls"][0]["version"].as_u64()
+        })
+    };
+    // The agent reads the Tomori wall's version, the one its participants are sent.
+    let read = version();
+    let sent = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => {
+            projection.wall("tomori").map(|wall| wall.version)
+        }
+        _ => None,
+    });
+    assert_eq!(read, sent);
+    // Ada tilts it with its hinge, from the version she took hold of it at: it applies.
+    let tilt = |tilt: f32, revision: u64| ClientMessage::SetWall {
+        wall: "tomori".into(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(tilt),
+        revision: Some(revision),
+    };
+    ada.send(&tilt(10.0, read));
+    let tilted = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .wall("tomori")
+            .filter(|wall| wall.tilt == Some(10.0))
+            .map(|wall| wall.version),
+        _ => None,
+    });
+    assert!(tilted > read);
+    // The agent's change from the version it read is refused, saying the version now, and changes nothing.
+    let refused = failure(&tool(
+        "set_wall",
+        json!({"wall": "Tomori wall", "columns": 4, "version": read}),
+    ));
+    assert!(
+        refused.contains(&format!("changed since version {read}")),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&format!("at version {tilted} now")),
+        "{refused}"
+    );
+    assert!(refused.contains("Read it again with presence"), "{refused}");
+    assert_eq!(
+        failure(&tool(
+            "set_wall",
+            json!({"wall": "Tomori wall", "columns": 4, "version": -1}),
+        )),
+        "version is the wall's version, a whole number, as you last read it."
+    );
+    // Read again, and redone from it, it applies, and says the version it made.
+    assert_eq!(version(), tilted);
+    let changed = tool(
+        "set_wall",
+        json!({"wall": "Tomori wall", "columns": 4, "version": tilted}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(changed["changed"], true);
+    let widened = changed["version"].as_u64().unwrap();
+    assert!(widened > tilted);
+    // Ada, still holding the wall as it was before the agent widened it, tilts it again: refused, naming the wall, so
+    // that her client cues it, and the projection sent again shows the wall as it is, the agent's change kept.
+    ada.send(&tilt(20.0, tilted));
+    let (error, wall) = ada.wait_for(|message| match message {
+        ServerMessage::Error { error, wall, .. } => Some((error.clone(), wall.clone())),
+        _ => None,
+    });
+    assert_eq!(error, "That wall changed as you changed it; look again.");
+    assert_eq!(wall.as_deref(), Some("tomori"));
+    let shown = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .wall("tomori")
+            .filter(|wall| wall.version == widened)
+            .cloned(),
+        _ => None,
+    });
+    assert_eq!((shown.grid().columns, shown.tilt), (4, Some(10.0)));
+    // A change that says no version, as carrying a wall or an older client's, goes by what it says alone.
+    ada.send(&ClientMessage::SetWall {
+        wall: "tomori".into(),
+        grid: None,
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: Some(20.0),
+        revision: None,
+    });
+    ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .wall("tomori")
+            .filter(|wall| wall.tilt == Some(20.0))
+            .map(|_| ()),
+        _ => None,
+    });
+}

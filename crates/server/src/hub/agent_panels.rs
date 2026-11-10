@@ -31,9 +31,9 @@ pub(crate) struct Update {
     pub uncheck: Vec<Item>,
     /// Where it moves, in the forms a `place` header takes.
     pub place: Option<String>,
-    /// The panel's revision the agent last read, as `panels` gives it: where the panel has changed since, as when a
+    /// The panel's version the agent last read, as `panels` gives it: where the panel has changed since, as when a
     /// participant ticked an item, the update is refused, so that an item named by its number is never another.
-    pub revision: Option<u64>,
+    pub version: Option<u64>,
 }
 
 /// The identity of the panel `panel` names in `projection`: by the id the agent gave it, by its identity, or by its
@@ -148,6 +148,7 @@ fn described(
         "kind": kind,
         "pinned": panel.pinned,
         "projected_seconds_ago": panel.age,
+        "version": panel.version,
     });
     // An environment's panel says so, with its environment's id for it and the id the agent may inspect it by.
     if let Some((id, reference)) = published {
@@ -180,7 +181,6 @@ fn described(
         None => {
             described["body"] = json!(panel.body);
             described["items"] = items(&panel.body);
-            described["revision"] = json!(panel.revision);
         }
     }
     described
@@ -198,7 +198,7 @@ impl Hub {
             .walls(&record.model.environment)
             .travelling(record.travel);
         let now = crate::cards::unix_now();
-        let projection = record.stage.view(&space, &walls, now);
+        let projection = record.versioned(&environments, now);
         let panels: Vec<Value> = projection
             .panels
             .iter()
@@ -253,7 +253,7 @@ impl Hub {
             .walls(&record.model.environment)
             .travelling(record.travel);
         let now = crate::cards::unix_now();
-        let projection = record.stage.view(&space, &walls, now);
+        let projection = record.versioned(&environments, now);
         let id = find(&projection, &update.panel)?;
         if record.stage.published(walls.environment, &id).is_some() {
             return Err(
@@ -265,13 +265,13 @@ impl Hub {
             .content(&walls, &id)
             .cloned()
             .ok_or("A code panel cannot be updated in place: project a new one.")?;
-        // Changed since the revision the agent read, the update is refused, rather than tick another item than it named.
-        let current = record.stage.revision(&walls, &id).expect("a panel shown");
-        if let Some(read) = update.revision
+        // Changed since the version the agent read, the update is refused, rather than tick another item than it named.
+        let current = projection.panel(&id).expect("a panel found").version;
+        if let Some(read) = update.version
             && read != current
         {
             return Err(format!(
-                "That panel has changed since revision {read}, as someone ticked an item or its text was updated; it is at revision {current} now. Read it again with panels, and redo the update from what it shows."
+                "That panel has changed since version {read}, as someone ticked an item, moved it or its text was updated; it is at version {current} now. Read it again with panels, and redo the update from what it shows, with version {current} if it still applies."
             ));
         }
         if let Some(title) = &update.title {
@@ -324,7 +324,7 @@ impl Hub {
             .stage
             .revise(&walls, &id, content, to.as_ref(), now)
             .expect("a text panel shown is updated");
-        let shown = record.stage.view(&space, &walls, now);
+        let shown = record.versioned(&environments, now);
         let panel = shown.panel(&id).expect("a panel updated is shown");
         let mut result = json!({
             "space": space,
@@ -332,7 +332,7 @@ impl Hub {
             "changed": changed,
             "place": panel.place,
             "items": items(&panel.body),
-            "revision": panel.revision,
+            "version": panel.version,
         });
         if let Some(slug) = &panel.slug {
             result["id"] = json!(slug);

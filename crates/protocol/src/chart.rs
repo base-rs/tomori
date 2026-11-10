@@ -549,6 +549,60 @@ impl Chart {
         Ok(self)
     }
 
+    /// Whether it and `other` are the same chart but for their live data, [`Chart::same_data`]: their points, labels,
+    /// value axis, reference lines, shaded regions and legend, and their series' names, colours, styles, widths and
+    /// dashes, in the same order. A panel's version covers these, and its data seq the rest. See
+    /// `design/projection.md`.
+    pub fn same_structure(&self, other: &Chart) -> bool {
+        let Chart {
+            points,
+            labels,
+            axis,
+            series,
+            references,
+            shades,
+            legend,
+            badge: _,
+            status: _,
+        } = self;
+        *points == other.points
+            && *labels == other.labels
+            && *axis == other.axis
+            && *references == other.references
+            && *shades == other.shades
+            && *legend == other.legend
+            && series.len() == other.series.len()
+            && series.iter().zip(&other.series).all(|(a, b)| {
+                let Series {
+                    name,
+                    colour,
+                    style,
+                    width,
+                    dashed,
+                    values: _,
+                    breaks: _,
+                } = a;
+                *name == b.name
+                    && *colour == b.colour
+                    && *style == b.style
+                    && *width == b.width
+                    && *dashed == b.dashed
+            })
+    }
+
+    /// Whether it and `other` show the same live data, as an environment's server side changes it from moment to
+    /// moment: each series' values and breaks, in order, its badge and its status line.
+    pub fn same_data(&self, other: &Chart) -> bool {
+        self.badge == other.badge
+            && self.status == other.status
+            && self.series.len() == other.series.len()
+            && self
+                .series
+                .iter()
+                .zip(&other.series)
+                .all(|(a, b)| a.values == b.values && a.breaks == b.breaks)
+    }
+
     /// What the chart shows now, in plain text, for a reader that cannot draw it, as an older client, and for the
     /// agent: each series' latest value, or that it has none, each reference line, its badge and its status, a line
     /// each; or that it has no data.

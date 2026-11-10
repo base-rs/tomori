@@ -175,9 +175,6 @@ fn an_environment_publishes_onto_its_own_walls_updates_in_place_and_retracts() {
     );
     assert_eq!(view.panels[0].body, "greatest: 1.3 now\ntarget: 1");
     assert_eq!(stage.updated("yard", &id), Some(200));
-    // Each change of what it shows is a revision of it, as an agent's update is; the same again is none.
-    assert_eq!(view.panels[0].revision, 2);
-    assert_eq!(stage.revision(&walls, &id), Some(2));
     // Moved by a participant, an update leaves it where they put it.
     stage
         .place(&walls, &id, Target::Slot("environment-0".into(), 4))
@@ -592,8 +589,7 @@ fn an_environment_s_panel_stays_in_its_environment_and_only_it_changes_what_it_s
     // Neither the agent's update nor a participant's tick changes it.
     let content = crate::stage::Content::parse("title: Mine\n---\nx").unwrap();
     assert!(stage.revise(&walls, &id, content, None, 0).is_err());
-    assert!(stage.tick_item(&walls, &id, 0, true, None).is_err());
-    assert!(stage.tick_item(&walls, &id, 0, true, Some(1)).is_err());
+    assert!(stage.tick_item(&walls, &id, 0, true).is_err());
     // An agent's panel still goes onto the Tomori wall.
     let notes = stage.project(
         &walls,
@@ -770,10 +766,7 @@ fn a_locked_wall_takes_its_environment_s_panels_their_updates_and_participants_m
     );
     assert_eq!(stage.publish(&walls, chart(1.2), 10), Ok(Change::Updated));
     let view = stage.view("s", &walls, 10);
-    assert_eq!(
-        (&view.panels[0].place, view.panels[0].revision),
-        (&on("environment-0", 1), 2)
-    );
+    assert_eq!(&view.panels[0].place, &on("environment-0", 1));
     // Filled to its last slot, each panel published goes up, and one more is refused only as a full wall is.
     for slot in 0..5 {
         let panel = Panel::text(format!("n{slot}"), "", "b").on_wall(0, None);
@@ -990,4 +983,96 @@ fn a_chart_s_update_is_patched_as_that_panel_alone() {
     });
     assert!(patched < PUBLISHED_BYTES, "{patched} bytes");
     assert!(whole - patched > 400, "{patched} of {whole} bytes");
+}
+
+/// A pressure chart of 15 minutes at 5 seconds, 181 points, `polls` polls in: each poll moves its points along one.
+fn window(polls: usize) -> Chart {
+    let values = (polls..polls + 181)
+        .map(|at| (at % 37 != 0).then(|| 0.5 + (at % 17) as f32 / 20.0))
+        .collect();
+    Chart::new(181)
+        .with_labels(vec![
+            AxisLabel::new(0, "-15 min"),
+            AxisLabel::new(180, "now"),
+        ])
+        .with_series(Series::new(
+            "greatest",
+            Colour::Amber,
+            SeriesStyle::Line,
+            values,
+        ))
+        .with_reference(Reference::new(1.0, "target", Colour::White))
+}
+
+#[test]
+fn a_live_chart_s_next_point_is_appended_apart_from_its_version() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let chart =
+        |polls| Panel::chart("pressure", "Scaling pressure", window(polls)).on_wall(1, None);
+    stage.publish(&walls, publishing(chart(0)), 0).unwrap();
+    // Versioned as the hub versions what it sends.
+    let mut versions = crate::versions::Versions::default();
+    let revision = std::cell::Cell::new(1);
+    let mut versioned = |stage: &Stage| {
+        let mut shown = stage.view("s", &walls, 10);
+        versions.stamp(&mut shown, &revision);
+        shown.with_revision(revision.get())
+    };
+    let before = versioned(&stage);
+    // The next poll moves its points along one, and changes its summary: its data alone.
+    assert_eq!(
+        stage.publish(&walls, publishing(chart(1)), 5),
+        Ok(Change::Updated)
+    );
+    revision.set(2);
+    let after = versioned(&stage);
+    let (was, now) = (&before.panels[0], &after.panels[0]);
+    assert_eq!((now.version, now.data_seq), (was.version, 2));
+    let live = tomori_protocol::ProjectionPatch::between_live(&before, &after);
+    let [
+        tomori_protocol::PatchOp::ChartAppend {
+            values, from, seq, ..
+        },
+    ] = live.ops.as_slice()
+    else {
+        unreachable!("{:?}", live.ops);
+    };
+    assert_eq!((values.len(), values[0].len(), *from, *seq), (1, 1, 1, 2));
+    let mut applied = before.clone();
+    live.apply(&mut applied).unwrap();
+    assert_eq!(applied, after);
+    // An older client is sent the panel whole, as before.
+    let older = tomori_protocol::ProjectionPatch::between(&before, &after);
+    assert!(matches!(
+        older.ops.as_slice(),
+        [tomori_protocol::PatchOp::Panel { .. }]
+    ));
+    let size = |patch: tomori_protocol::ProjectionPatch| {
+        serde_json::to_vec(&tomori_protocol::ServerMessage::ProjectionPatch {
+            patch: Box::new(patch),
+        })
+        .unwrap()
+        .len()
+    };
+    let (appended, whole) = (size(live), size(older));
+    println!("A live chart's next point: {appended} bytes appended, {whole} bytes whole.");
+    assert!(appended < 400, "{appended} bytes");
+    assert!(appended * 4 < whole, "{appended} of {whole} bytes");
+    // Retitled, its version changes, and it is sent whole to every client.
+    let mut retitled = Panel::chart("pressure", "Pressure", window(1)).on_wall(1, None);
+    retitled = retitled.on_wall(1, None);
+    stage.publish(&walls, publishing(retitled), 6).unwrap();
+    revision.set(3);
+    let titled = versioned(&stage);
+    assert_eq!(
+        (titled.panels[0].version, titled.panels[0].data_seq),
+        (3, 2)
+    );
+    assert!(matches!(
+        tomori_protocol::ProjectionPatch::between_live(&after, &titled)
+            .ops
+            .as_slice(),
+        [tomori_protocol::PatchOp::Panel { .. }]
+    ));
 }

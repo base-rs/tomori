@@ -352,10 +352,7 @@ impl Hub {
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
         let environments = self.environments();
-        let walls = environments
-            .walls(&record.model.environment)
-            .travelling(record.travel);
-        let projection = record.stage.view(&space, &walls, crate::cards::unix_now());
+        let projection = record.versioned(&environments, crate::cards::unix_now());
         let now = std::time::Instant::now();
         let people: Vec<crate::presence::Person<'_>> = record
             .model
@@ -490,6 +487,7 @@ impl Hub {
         place: Option<&str>,
         joining: Option<Joining>,
         lock: Lock<'_>,
+        version: Option<u64>,
     ) -> Result<Value, String> {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
@@ -510,11 +508,21 @@ impl Hub {
             .walls(&record.model.environment)
             .travelling(record.travel);
         let now = crate::cards::unix_now();
-        let projection = record.stage.view(&space, &walls, now);
+        let projection = record.versioned(&environments, now);
         let origin = record.model.origin();
         let id = crate::presence::which_wall(wall, origin.as_ref(), &people, &projection)?;
         let before = projection.wall(&id).expect("a wall named is shown").clone();
         let name = crate::presence::wall_name(&projection, &before);
+        // Changed since the version the agent read, as by a participant's handles, the change is refused, rather than
+        // undo theirs.
+        if let Some(read) = version
+            && read != before.version
+        {
+            return Err(format!(
+                "The {name} has changed since version {read}, as someone changed it; it is at version {} now. Read it again with presence, and redo the change from how it is, with version {} if it still applies.",
+                before.version, before.version
+            ));
+        }
         // Columns or rows alone keep the other as the wall has it.
         if columns.is_some() || rows.is_some() {
             let grid = before.grid();
@@ -645,7 +653,7 @@ impl Hub {
                 .expect("a wall shown locks");
         }
         changed |= relocked;
-        let after = record.stage.view(&space, &walls, now);
+        let after = record.versioned(&environments, now);
         let shown = after.wall(&id).expect("a wall changed is shown").clone();
         let name = crate::presence::wall_name(&after, &shown);
         let mut described = describe_wall(&shown);
@@ -686,6 +694,7 @@ impl Hub {
             "name": name,
             "changed": changed,
             "locked": shown.is_locked(),
+            "version": shown.version,
             "now": described,
             "next": if changed {
                 format!("Tell everyone in the space that you changed the {name}: {described}.")

@@ -72,7 +72,7 @@ fn panel(index: usize, place: Place) -> Panel {
             Panel::new(&id, "Scaling pressure", chart.summary(), place).with_chart(chart)
         }
     };
-    panel.with_meta(meta).with_age(300).with_revision(1)
+    panel.with_meta(meta).with_age(300).with_version(1)
 }
 
 /// The Tomori wall and twelve walls of six slots about home, every slot full, and twelve panels floating before them.

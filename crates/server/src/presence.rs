@@ -656,7 +656,7 @@ pub(crate) fn report(
 
 /// `projection`'s walls, and the panels floating in it, as the `presence` tool describes them, so that the agent can
 /// reason about where to put what it shows: each wall's identity, name, kind, where it stands, faces and tilts, its
-/// size, whether it is locked, and which of its slots hold which panels and which are free.
+/// size, whether it is locked, its version, and which of its slots hold which panels and which are free.
 pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
     let walls = projection
         .walls
@@ -725,6 +725,7 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 "rows": grid.rows,
                 "slot_size": [round(wall.slot_size().0, 2), round(wall.slot_size().1, 2)],
                 "locked": wall.is_locked(),
+                "version": wall.version,
                 "used": used,
                 "free": free,
             });

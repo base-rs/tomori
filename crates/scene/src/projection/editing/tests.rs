@@ -29,6 +29,7 @@ fn added() -> Wall {
         WallKind::Added,
         Pose::upright_facing([0.0, 1.5, -2.5], HOME.to_array()),
     )
+    .with_version(7)
 }
 
 /// The Tomori wall where it stands by default.
@@ -904,6 +905,8 @@ fn the_hinge_moved_down_tilts_a_wall_towards_the_participant_within_the_travel_a
             pose: None,
             tilt: Some(layout::MOST_TILT),
             join: None,
+            // Made against the wall as its hinge was taken hold of, at its version then.
+            version: Some(7),
         })
     );
     // From the most it tilts down, one movement up of the travel takes it to the most it tilts up, upright on the way,

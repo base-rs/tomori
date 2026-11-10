@@ -86,6 +86,7 @@ impl Client {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         });
     }
@@ -235,6 +236,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     let errors = client.errors();
@@ -1935,6 +1937,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     client.read()
@@ -3153,6 +3156,7 @@ fn presenting(
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     client.read();
@@ -4110,6 +4114,7 @@ impl Client {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         });
         client.read();
@@ -4275,7 +4280,7 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
     assert_eq!(projection.space, space);
     assert_eq!(projection.environment, "sky");
     assert_eq!(
-        projection.walls,
+        unversioned(projection.clone()).walls,
         [tomori_protocol::Wall::new(
             tomori_protocol::TOMORI_WALL,
             tomori_protocol::WallKind::Tomori,
@@ -4874,6 +4879,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
             shape,
             pose: None,
             tilt: None,
+            revision: None,
         }
     };
     // A visitor changes nothing.
@@ -4900,6 +4906,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
         shape: None,
         pose: None,
         tilt: None,
+        revision: None,
     });
     assert_eq!(
         cy.errors(),
@@ -4996,6 +5003,7 @@ fn only_owners_lock_and_unlock_walls_and_a_locked_wall_changes_for_nobody() {
         shape: None,
         pose: Some(pose),
         tilt: None,
+        revision: None,
     };
     let lock = |locked: bool, reset: bool| ClientMessage::LockWall {
         wall: environment.clone(),
@@ -5153,8 +5161,27 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
         environment: "sky".to_owned(),
     });
     ada.read();
-    // At a later revision of the space's projection, as any change is.
-    assert_eq!(ada.projection().with_revision(in_sky.revision), in_sky);
+    // At a later revision of the space's projection, as any change is, and each wall and panel at the version it came
+    // back at, the revision it was shown again at.
+    let back = ada.projection();
+    assert!(back.walls.iter().all(|wall| wall.version > in_sky.revision));
+    assert_eq!(
+        unversioned(back.with_revision(in_sky.revision)),
+        unversioned(in_sky)
+    );
+}
+
+/// `projection`, without its walls' and panels' versions and its panels' data seqs, which say only when each last
+/// changed.
+fn unversioned(mut projection: tomori_protocol::Projection) -> tomori_protocol::Projection {
+    for wall in &mut projection.walls {
+        wall.version = 0;
+    }
+    for panel in &mut projection.panels {
+        panel.version = 0;
+        panel.data_seq = 0;
+    }
+    projection
 }
 
 #[test]
@@ -5212,6 +5239,7 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         shape: None,
         pose: None,
         tilt: Some(-10.0),
+        revision: None,
     });
     let edited = ada.projection();
     assert_eq!(edited.walls[0].pose, beneath);
@@ -5290,6 +5318,7 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         shape: None,
         pose: None,
         tilt: Some(-15.0),
+        revision: None,
     });
     let home = ada.projection();
     assert_eq!(home.walls[0].pose, crate::stage::default_stage());
@@ -5360,6 +5389,7 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         shape: None,
         pose: Some(upright([3.0, 1.0, -2.0])),
         tilt: None,
+        revision: None,
     });
     assert_eq!(
         ada.errors(),
@@ -5375,6 +5405,7 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         shape: None,
         pose: None,
         tilt: None,
+        revision: None,
     });
     assert_eq!(ada.projection().walls[0].pose, wall.pose);
     // Summoned to the same place again, nothing moves and nobody is told.
@@ -5567,6 +5598,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             shape: Some(tomori_protocol::WallShape::Arc { radius: 3.0 }),
             pose: None,
             tilt: None,
+            revision: None,
         });
         ada.send(ClientMessage::SetWall {
             wall: tomori_protocol::TOMORI_WALL.to_owned(),
@@ -5576,6 +5608,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             shape: None,
             pose: None,
             tilt: None,
+            revision: None,
         });
         // And whether an owner locked it.
         ada.send(ClientMessage::LockWall {
@@ -5612,12 +5645,12 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
     ada.join(&shown.0);
     // The agent and its wall are at home again.
     let mut restored = ada.projection();
-    // Only its age has moved on, and its revision, counted for each run.
+    // Only its age has moved on, and its revision and versions, counted for each run.
     for (panel, before) in restored.panels.iter_mut().zip(&shown.1.panels) {
         panel.age = before.age;
     }
     restored.revision = shown.1.revision;
-    assert_eq!(restored, shown.1);
+    assert_eq!(unversioned(restored), unversioned(shown.1));
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -6089,6 +6122,7 @@ impl Client {
             speech_held: false,
             images: true,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         });
         client.read();

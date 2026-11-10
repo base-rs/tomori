@@ -400,6 +400,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         };
         let audio = AudioFrame {
@@ -562,6 +563,7 @@ mod tests {
             error: "x".repeat(3 * MAX_FRAME_BYTES),
             space: None,
             panel: None,
+            wall: None,
         };
         // Written straight into the output, after what is already there, as the server writes a projection.
         let mut bytes = vec![1, 0, 0, 0, 0];

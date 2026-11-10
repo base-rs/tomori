@@ -372,6 +372,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));

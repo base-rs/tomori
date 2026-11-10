@@ -345,7 +345,7 @@ fn tools() -> Value {
         },
         {
             "name": "presence",
-            "description": "Where the people in your space are, as their devices last reported, in the space's coordinates: each participant's and visitor's name, which others may share, and id, their name and tag, such as Ada#23, which no one else has, role, engagement and device; their head's position, yaw and pitch; on a headset, both hands' or controllers' positions and where the right controller points; what they are looking and pointing at, a wall, a slot, a panel or a person; the wall nearest them and the walls in their view; and how long ago they were reported, marked stale when their device has stopped reporting. Also the space's walls, where each stands and faces, its size and which slots hold which panels and which are free, and the panels floating. Visitors report no position.",
+            "description": "Where the people in your space are, as their devices last reported, in the space's coordinates: each participant's and visitor's name, which others may share, and id, their name and tag, such as Ada#23, which no one else has, role, engagement and device; their head's position, yaw and pitch; on a headset, both hands' or controllers' positions and where the right controller points; what they are looking and pointing at, a wall, a slot, a panel or a person; the wall nearest them and the walls in their view; and how long ago they were reported, marked stale when their device has stopped reporting. Also the space's walls, where each stands and faces, its size, its version, which set_wall takes, and which slots hold which panels and which are free, and the panels floating. Visitors report no position.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },
@@ -364,13 +364,13 @@ fn tools() -> Value {
         },
         {
             "name": "panels",
-            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, and how long ago it was projected and last updated; and, for a text panel, its body, its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text, and its revision, which counts each change of its content. Read a list here before changing it.",
+            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, how long ago it was projected and last updated, and its version, which changes whenever anything about it but its live chart data changes, its text, a tick or where it is; and, for a text panel, its body and its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text. Read a list here before changing it.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },
         {
             "name": "update_panel",
-            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; revision is the panel's revision you last read, as panels gives it: give it whenever you name items by number, and if the panel has changed since, as when a participant ticked an item, the update is refused with its current revision, so read it again with panels and redo the update; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
+            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; version is the panel's version you last read, as panels gives it: give it whenever you name items by number or rewrite the body from what you read, and if the panel has changed since, as when a participant ticked an item or moved it, the update is refused with its current version, so read it again with panels and redo the update from what it shows; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,10 +390,10 @@ fn tools() -> Value {
                         "description": "Items to untick, each by its number from 1 or its text.",
                     },
                     "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
-                    "revision": {
+                    "version": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "The panel's revision you last read, as panels gives it; refused if it has changed since.",
+                        "description": "The panel's version you last read, as panels gives it; refused if it has changed since.",
                     },
                 },
                 "required": ["panel"],
@@ -415,7 +415,7 @@ fn tools() -> Value {
         },
         {
             "name": "set_wall",
-            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added, or an environment's own once unlocked, in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands. A locked wall, as presence says, is changed by nobody, and an environment's own walls, such as a notice board, are locked until an owner unlocks them: locked true or false locks or unlocks a wall, and reset true puts an environment's own back where and as the environment has it, locked, each only when an owner asks, named in requested_by. Only when someone in the space asks; then tell them.",
+            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as Tomori wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added, or an environment's own once unlocked, in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The Tomori wall stays one row of at most 6, its slots their size, where it stands. A locked wall, as presence says, is changed by nobody, and an environment's own walls, such as a notice board, are locked until an owner unlocks them: locked true or false locks or unlocks a wall, and reset true puts an environment's own back where and as the environment has it, locked, each only when an owner asks, named in requested_by. version is the wall's version you last read, as presence gives it: give it when you change the wall from how you read it, such as a column more or a tilt further, and if it has changed since, as when a participant changed it, the change is refused with its current version, so read it again with presence and redo the change from how it is. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -435,6 +435,11 @@ fn tools() -> Value {
                     "locked": { "type": "boolean", "description": "Lock the wall, true, or unlock it, false. Only when an owner asks, named in requested_by." },
                     "reset": { "type": "boolean", "description": "Put an environment's own wall back where and as the environment has it, locked. Only when an owner asks, named in requested_by." },
                     "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed with locked or reset. {REQUESTED_BY}") },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The wall's version you last read, as presence gives it; refused if it has changed since.",
+                    },
                 },
                 "required": ["wall"],
             },
@@ -855,21 +860,15 @@ fn items(arguments: &Value, name: &str) -> Result<Vec<agent_panels::Item>, Strin
 fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
     let panel = text(arguments, "panel")?;
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
-    let update =
-        Update {
-            panel: panel.to_owned(),
-            title: optional_text(arguments, "title", crate::limits::IDENTIFIER_BYTES)?,
-            body: optional_text(arguments, "body", crate::stage::BLOCK_BYTES)?,
-            check: items(arguments, "check")?,
-            uncheck: items(arguments, "uncheck")?,
-            place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
-            revision: match arguments.get("revision") {
-                None | Some(Value::Null) => None,
-                Some(value) => Some(value.as_u64().ok_or(
-                    "revision is the panel's revision, a whole number, as panels gives it.",
-                )?),
-            },
-        };
+    let update = Update {
+        panel: panel.to_owned(),
+        title: optional_text(arguments, "title", crate::limits::IDENTIFIER_BYTES)?,
+        body: optional_text(arguments, "body", crate::stage::BLOCK_BYTES)?,
+        check: items(arguments, "check")?,
+        uncheck: items(arguments, "uncheck")?,
+        place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
+        version: version(arguments, "panel")?,
+    };
     hub.agent_update_panel(session, update).map(structured)
 }
 
@@ -1000,8 +999,25 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         place,
         joining,
         lock,
+        version(arguments, "wall")?,
     )
     .map(structured)
+}
+
+/// The `version` of a wall or panel, `what`, that `arguments` say the agent last read, if they say one: or, for a
+/// panel, its `revision`, as `update_panel` named it before versions.
+fn version(arguments: &Value, what: &str) -> Result<Option<u64>, String> {
+    let given = match arguments.get("version") {
+        None | Some(Value::Null) => arguments.get("revision").filter(|value| !value.is_null()),
+        given => given,
+    };
+    given
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                format!("version is the {what}'s version, a whole number, as you last read it.")
+            })
+        })
+        .transpose()
 }
 
 /// What `arguments` ask of a wall's group: `attach`, `{ to, edge, align }`, its edge `left`, `right`, `top` or `bottom`

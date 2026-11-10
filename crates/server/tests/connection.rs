@@ -175,6 +175,7 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     }));
     request.extend(chunk(&ClientMessage::Join {

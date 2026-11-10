@@ -185,6 +185,12 @@ pub struct Wall {
     /// slots stand in [`Wall::frame`], its pose tilted so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tilt: Option<f32>,
+    /// Its version: the space's projection revision, [`Projection::revision`], at which it last changed in anything it
+    /// says, so that a change a client asks for, as by a wall's handles, says the version it saw, and the server refuses
+    /// it where the wall changed since. Sent as `revision`, as a panel's is; 0, and absent, from older servers. See
+    /// `design/projection.md`.
+    #[serde(rename = "revision", default, skip_serializing_if = "is_zero")]
+    pub version: u64,
 }
 
 impl Wall {
@@ -202,7 +208,22 @@ impl Wall {
             joined: Vec::new(),
             locked: false,
             tilt: None,
+            version: 0,
         }
+    }
+
+    /// The wall at `version`, the projection revision at which it last changed.
+    pub fn with_version(mut self, version: u64) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Whether it and `other` say the same, but for their versions.
+    pub fn same_but_version(&self, other: &Wall) -> bool {
+        Wall {
+            version: other.version,
+            ..self.clone()
+        } == *other
     }
 
     /// The wall, locked or not.
@@ -621,11 +642,21 @@ pub struct Panel {
     /// the panel as a text panel saying that it is an image, with its caption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
-    /// How many times its content has changed, from 1 as it was projected: its title, body or items, by the agent's
-    /// block with the same id, its `update_panel` or a participant's tick. A client says the revision it saw when it ticks
-    /// an item, so that a tick never lands on another item of a body changed since. 0, and absent, from older servers.
+    /// Its version: the space's projection revision, [`Projection::revision`], at which it last changed, in anything but
+    /// its age and its live data ([`Panel::data_seq`]): its title, body, metadata, kind, id, chart's structure, where it
+    /// is and whether it is pinned there. A client keeps it as each projection and patch sends it, and says the version
+    /// it saw when it ticks an item, so that the server refuses a tick, or an agent's update, made against a panel that
+    /// changed since. Sent as `revision`, the name a client that ticks has always sent back; 0, and absent, from older
+    /// servers. See `design/projection.md`.
+    #[serde(rename = "revision", default, skip_serializing_if = "is_zero")]
+    pub version: u64,
+    /// The projection revision at which its live data last changed, for a panel written only by its environment's server
+    /// side, as a chart panel's points are: each series' values and breaks, its badge, status line and summary, which a
+    /// patch's [`PatchOp::ChartAppend`] and [`PatchOp::ChartReplace`] change without changing its version, so that
+    /// live data never refuses anyone's edit. A client applies such an op only where it is newer than what it holds. 0,
+    /// and absent, for a panel with no live data, and from older servers.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub revision: u64,
+    pub data_seq: u64,
     /// What makes it a chart panel, if it is one: its chart, which its environment's server side published. Its body is
     /// a summary of what the chart shows now, in plain text, which an older client, which knows no charts, draws as a
     /// text panel's. See `design/projection.md`.
@@ -656,15 +687,67 @@ impl Panel {
             pinned: false,
             slug: None,
             image: None,
-            revision: 0,
+            version: 0,
+            data_seq: 0,
             chart: None,
         }
     }
 
-    /// The panel at `revision` of its content.
-    pub fn with_revision(mut self, revision: u64) -> Self {
-        self.revision = revision;
+    /// The panel at `version`, the projection revision at which it last changed.
+    pub fn with_version(mut self, version: u64) -> Self {
+        self.version = version;
         self
+    }
+
+    /// The panel, its live data last changed at the projection revision `seq`.
+    pub fn with_data_seq(mut self, seq: u64) -> Self {
+        self.data_seq = seq;
+        self
+    }
+
+    /// Whether it and `other` are alike in everything its version covers but where they are: their identity, title,
+    /// metadata, kind, id, code, image and chart's structure, and, but for a chart panel, whose body is a summary of its
+    /// live data, their body. See [`Panel::version`].
+    pub fn same_structure(&self, other: &Panel) -> bool {
+        let Panel {
+            id,
+            title,
+            body,
+            meta,
+            age: _,
+            place: _,
+            code,
+            pinned: _,
+            slug,
+            image,
+            version: _,
+            data_seq: _,
+            chart,
+        } = self;
+        let charts = match (chart, &other.chart) {
+            (None, None) => true,
+            (Some(chart), Some(other)) => chart.same_structure(other),
+            _ => false,
+        };
+        *id == other.id
+            && *title == other.title
+            && (chart.is_some() || *body == other.body)
+            && *meta == other.meta
+            && *code == other.code
+            && *slug == other.slug
+            && *image == other.image
+            && charts
+    }
+
+    /// Whether it and `other` show the same live data: for chart panels, their charts' data and their summaries, the
+    /// bodies; for any other, always. See [`Panel::data_seq`].
+    pub fn same_data(&self, other: &Panel) -> bool {
+        match (&self.chart, &other.chart) {
+            (Some(chart), Some(other_chart)) => {
+                chart.same_data(other_chart) && self.body == other.body
+            }
+            _ => true,
+        }
     }
 
     /// The panel, a chart panel of `chart`, its body a summary of it.
@@ -1084,6 +1167,7 @@ mod tests {
                     shape: Some(WallShape::Arc { radius: 3.0 }),
                     pose: None,
                     tilt: None,
+                    revision: None,
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "grid": [4, 1],
                     "shape": {"kind": "arc", "radius": 3.0}}),
@@ -1097,6 +1181,7 @@ mod tests {
                     shape: Some(WallShape::Grid),
                     pose: Some(pose),
                     tilt: Some(-12.0),
+                    revision: None,
                 },
                 serde_json::json!({"type": "set_wall", "wall": "wall-2", "scale": 1.5,
                     "aspect": 0.5625, "shape": {"kind": "grid"}, "pose": pose_json, "tilt": -12.0}),
@@ -1129,7 +1214,8 @@ mod tests {
                     "checked": false}),
             ),
         ];
-        // A panel's revision is sent from a server that keeps one, and read as 0 from an older one.
+        // A panel's version is sent as its revision, the name a client that ticks sends back, from a server that keeps
+        // one, and read as 0 from an older one; so is a wall's, and a live panel's data seq.
         let panel = Panel::new(
             "panel-1",
             "Agenda",
@@ -1139,14 +1225,26 @@ mod tests {
                 slot: 0,
             },
         )
-        .with_revision(3);
+        .with_version(3)
+        .with_data_seq(4);
         let json = serde_json::to_value(&panel).unwrap();
-        assert_eq!(json["revision"], 3);
+        assert_eq!(
+            (&json["revision"], &json["data_seq"]),
+            (&serde_json::json!(3), &serde_json::json!(4))
+        );
         let mut older = json.clone();
         older.as_object_mut().unwrap().remove("revision");
-        assert_eq!(serde_json::from_value::<Panel>(older).unwrap().revision, 0);
+        older.as_object_mut().unwrap().remove("data_seq");
+        let older = serde_json::from_value::<Panel>(older).unwrap();
+        assert_eq!((older.version, older.data_seq), (0, 0));
+        let unversioned = serde_json::to_value(panel.with_version(0).with_data_seq(0)).unwrap();
+        assert!(unversioned.get("revision").is_none() && unversioned.get("data_seq").is_none());
+        let wall = Wall::new("wall-1", WallKind::Added, Pose::default()).with_version(7);
+        let json = serde_json::to_value(&wall).unwrap();
+        assert_eq!(json["revision"], 7);
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), wall);
         assert!(
-            serde_json::to_value(panel.with_revision(0))
+            serde_json::to_value(wall.with_version(0))
                 .unwrap()
                 .get("revision")
                 .is_none()
@@ -1156,6 +1254,7 @@ mod tests {
             error: "That panel has changed.".into(),
             space: None,
             panel: Some("panel-1".into()),
+            wall: None,
         };
         let json = serde_json::to_value(&refused).unwrap();
         assert_eq!(json["panel"], "panel-1");
@@ -1168,6 +1267,7 @@ mod tests {
                 error: "x".into(),
                 space: None,
                 panel: None,
+                wall: None,
             })
             .unwrap()
             .get("panel")
@@ -1311,6 +1411,7 @@ mod tests {
         .unwrap();
         let ClientMessage::Hello {
             projection_patches: true,
+            live_panels: false,
             limits: Some(limits),
             ..
         } = hello
@@ -1320,6 +1421,59 @@ mod tests {
         assert_eq!(
             limits,
             crate::Limits::TODAY.with_projection(13, 500, 12, 90)
+        );
+        // A newer client says it applies data ops too.
+        let hello: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "projection": true,
+            "projection_patches": true, "live_panels": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            hello,
+            ClientMessage::Hello {
+                live_panels: true,
+                ..
+            }
+        ));
+        // A wall's change says the version it was made against, as `revision`, which an older client says not, and a
+        // refusal for it names the wall, which an older client ignores.
+        let change = ClientMessage::SetWall {
+            wall: "wall-1".into(),
+            grid: None,
+            scale: None,
+            aspect: None,
+            shape: None,
+            pose: None,
+            tilt: Some(10.0),
+            revision: Some(7),
+        };
+        let json = serde_json::to_value(&change).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "set_wall", "wall": "wall-1", "tilt": 10.0, "revision": 7})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            change
+        );
+        assert!(matches!(
+            serde_json::from_value::<ClientMessage>(
+                serde_json::json!({"type": "set_wall", "wall": "wall-1", "tilt": 10.0})
+            )
+            .unwrap(),
+            ClientMessage::SetWall { revision: None, .. }
+        ));
+        let refused = ServerMessage::Error {
+            error: "That wall changed as you changed it; look again.".into(),
+            space: None,
+            panel: None,
+            wall: Some("wall-1".into()),
+        };
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(json["wall"], "wall-1");
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            refused
         );
         // An older server's Welcome states no limits.
         let welcome: ServerMessage = serde_json::from_value(serde_json::json!({

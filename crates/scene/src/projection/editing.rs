@@ -221,6 +221,10 @@ pub struct Change {
     pub join: Option<Joining>,
     /// How far it tilts from upright, in degrees, `0` for upright.
     pub tilt: Option<f32>,
+    /// The wall's version as it was taken hold of, for a change made against how it was, as by a handle, so that the
+    /// server refuses it where the wall changed since; `None` for a change that is the participant's own whatever the
+    /// wall was, as carrying it, or snapping it.
+    pub version: Option<u64>,
 }
 
 /// A handle being dragged, and the wall as it was when it was taken hold of.
@@ -1747,6 +1751,7 @@ impl Editor {
                                 pose: None,
                                 join: None,
                                 tilt: None,
+                                version: Some(wall.version),
                             });
                             self.pending = Some((changed, input.now));
                         }
@@ -2049,7 +2054,9 @@ impl Editor {
                 .and_then(|id| input.projection.wall(id))
                 .cloned();
             let carried = self.carry.take().is_some();
-            let dragged = self.drag.take().is_some();
+            // The version of the wall as its handle was taken hold of.
+            let held = self.drag.take().map(|drag| drag.start.version);
+            let dragged = held.is_some();
             let moved = std::mem::take(&mut self.moved);
             let detached = std::mem::take(&mut self.detached);
             self.members.clear();
@@ -2080,6 +2087,7 @@ impl Editor {
                         attach: Attach::new(snapping.to, snapping.snap.edge, snapping.snap.align),
                         alone: detached,
                     }),
+                    version: None,
                 });
                 self.pending = Some((placed(&after), input.now));
                 self.moved_pending = moved.iter().map(placed).collect();
@@ -2107,6 +2115,9 @@ impl Editor {
                                 > 1e-3))
                         .then_some(after.pose),
                     join: None,
+                    // Dragged by a handle, it is changed from how it was taken hold of; carried, it is the
+                    // participant's own wherever it was.
+                    version: held,
                 };
                 // Pulled out of its group, it leaves it where it was let go; otherwise its group moves with it.
                 let change = if detached {

@@ -282,6 +282,7 @@ mod tests {
                 error: "pair to join".into(),
                 space: None,
                 panel: None,
+                wall: None,
             }),
             &mut connected,
             "host:1",

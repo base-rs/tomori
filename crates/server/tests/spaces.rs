@@ -145,6 +145,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         speech_held: false,
         images: false,
         projection_patches: false,
+        live_panels: false,
         limits: None,
     });
     let offered = ada.wait_for(|message| match message {
