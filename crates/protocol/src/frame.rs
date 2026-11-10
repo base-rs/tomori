@@ -269,6 +269,13 @@ impl FrameDecoder {
         self.limit = frame_limit(limit);
     }
 
+    /// Take frames of up to `limit`, however small, and never more than [`MOST_FRAME_BYTES`], from the next whose
+    /// header is read: as a server takes from a client only as long a frame as the client's role sends, whatever
+    /// the connection's frame limit for what the server sends it. See `design/security.md`.
+    pub fn set_exact_limit(&mut self, limit: usize) {
+        self.limit = limit.min(MOST_FRAME_BYTES);
+    }
+
     pub fn push(&mut self, mut data: &[u8]) {
         if let Some(direct) = &mut self.direct {
             let taken = data.len().min(direct.length - direct.payload.len());
@@ -540,6 +547,19 @@ mod tests {
             MOST_FRAME_BYTES
         );
         assert_eq!(FrameDecoder::with_limit(16).limit(), MAX_FRAME_BYTES);
+        // An exact limit has no floor, as a server reading a visitor sets, and is refused from the header, with
+        // nothing of the frame's payload yet arrived.
+        let mut exact = FrameDecoder::new();
+        exact.set_exact_limit(16);
+        assert_eq!(exact.limit(), 16);
+        decoder = FrameDecoder::new();
+        decoder.set_exact_limit(16);
+        decoder.push(&header(16));
+        decoder.push(&[b' '; 16]);
+        assert_eq!(decoder.next_frame().unwrap().unwrap().payload.len(), 16);
+        assert!(refused(&mut exact, 17));
+        exact.set_exact_limit(usize::MAX);
+        assert_eq!(exact.limit(), MOST_FRAME_BYTES);
         assert_eq!(frame_limit(4 * MAX_FRAME_BYTES), 4 * MAX_FRAME_BYTES);
         // An encoder keeps within the connection's limit too, leaving the output as it was otherwise.
         let long = Frame {

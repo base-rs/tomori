@@ -308,8 +308,8 @@ fn fragmented_input_is_not_lost_while_output_streams() {
         })
     };
 
-    // Ada sends numbered pings in small fragments that split chunk headers and frames anywhere, so request reads are dropped part way through both.
-    const COUNT: u64 = 2000;
+    // Ada sends numbered pings in small fragments that split chunk headers and frames anywhere, so request reads are dropped part way through both: with the messages before them, fewer than the 1,000 a participant may send at once beyond their rate, so that the server takes every one. See `design/security.md`.
+    const COUNT: u64 = 900;
     let mut upload = Vec::new();
     for nonce in 1..=COUNT {
         upload.extend(chunk(&ClientMessage::Ping { nonce }));
