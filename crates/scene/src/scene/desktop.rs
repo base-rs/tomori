@@ -314,7 +314,9 @@ impl Desktop {
     }
 
     /// The mouse's wheel turned `lines` notches, up where more than none, as winit counts them: it scrolls the panel the
-    /// mouse points at by [`WHEEL_ROWS`] rows a notch, down for a turn towards the participant. See `design/desktop.md`.
+    /// mouse points at by [`WHEEL_ROWS`] rows a notch, down for a turn towards the participant, or pushes an
+    /// environment's object that takes the right stick as the stick would to scroll a panel as far. See
+    /// `design/desktop.md`.
     pub fn wheel(&mut self, lines: f32) {
         if lines.is_finite() {
             self.input.scroll -= lines * WHEEL_ROWS;

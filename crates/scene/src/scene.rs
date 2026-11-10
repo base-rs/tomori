@@ -58,7 +58,9 @@ pub struct Buttons {
     pub left_stick: Vec2,
     pub right_stick: Vec2,
     /// How many rows the mouse's wheel scrolled the panel pointed at since the last frame: down, or up where fewer
-    /// than none. A headset scrolls with the right stick instead.
+    /// than none. Pointing at an environment's object that takes the right stick, it pushes the object as the stick
+    /// does, as far as it would scroll a panel, at most at the stick's rate. A headset scrolls with the right stick
+    /// instead.
     pub scroll: f32,
 }
 
@@ -251,6 +253,13 @@ enum RightStick {
     /// Nothing of Tomori's took it, in a space with an environment's client side: the push is the client side's. See
     /// `design/environments.md`.
     Environment,
+    /// Nothing of Tomori's took it, and the ray pointed at this object of the client side's, which takes the right
+    /// stick: the push is the object's, told as the client side's `Input::scroll` with the push's number, which no other
+    /// push shares. See `design/environments.md`.
+    Object(String, u64),
+    /// The push was an object's when focus was lost or its client side went: it is nobody's until it returns to the
+    /// middle, telling the next client side nothing.
+    Abandoned,
 }
 
 impl RightStick {
@@ -308,10 +317,76 @@ struct Client {
     /// What the trigger and B did for it since its last frame, which it is told on its next.
     select: Option<crate::client_side::Select>,
     back: bool,
+    /// The object of its that the ray pointed at last frame, if it takes the right stick, which a push takes.
+    scrollable: Option<String>,
+    /// The pushes of the right stick, and turns of the wheel, it has been told of.
+    scroller: crate::client_side::Scroller,
 }
 
 /// How near the middle the right stick returns to end a push.
 const STICK_CENTRE: f32 = 0.2;
+
+/// The most rows of a panel a turn of the wheel that an object takes keeps to push it by: as far as the stick scrolls
+/// a panel in 0.4 seconds, two notches, so that a fast spin ends soon after the wheel stops. See `design/desktop.md`.
+const WHEEL_BACKLOG: f32 = crate::projection::SCROLL_SPEED * 0.4;
+
+/// How long a turn of the wheel that an object takes stays one push once it has pushed all it was turned, in seconds,
+/// so that a slow scroll of a touchpad, a fraction of a notch a frame, is one push rather than many.
+const WHEEL_LINGER: f32 = 0.1;
+
+/// A turn of the desktop's wheel that an object takes, as a push of the right stick: the rows it was turned, which the
+/// push scrolls as the stick would a panel, at most [`crate::projection::SCROLL_SPEED`] rows a second, for as long as
+/// they last and [`WHEEL_LINGER`] more.
+#[derive(Debug)]
+struct WheelPush {
+    object: String,
+    /// The push's number, which no other push shares.
+    number: u64,
+    /// The rows still to push, forward, as the stick forward scrolls a panel up, where more than none, at most
+    /// [`WHEEL_BACKLOG`] either way.
+    rows: f32,
+    /// How long it has had no rows to push, in seconds.
+    idle: f32,
+}
+
+impl WheelPush {
+    fn new(object: &str, number: u64) -> Self {
+        Self {
+            object: object.to_owned(),
+            number,
+            rows: 0.0,
+            idle: 0.0,
+        }
+    }
+
+    /// The wheel turned `scrolled` rows, down where more than none, as it scrolls a panel.
+    fn turn(&mut self, scrolled: f32) {
+        self.rows = (self.rows - scrolled).clamp(-WHEEL_BACKLOG, WHEEL_BACKLOG);
+    }
+
+    /// The stick's axis for a frame of `dt` seconds: as far forward or back as scrolls a panel the rows still to push,
+    /// at most all the way, or zero once there are none, or `None` once it has had none for [`WHEEL_LINGER`], when the
+    /// push ends.
+    fn advance(&mut self, dt: f32) -> Option<Vec2> {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        if self.rows == 0.0 {
+            self.idle += dt;
+            return (self.idle < WHEEL_LINGER).then_some(Vec2::ZERO);
+        }
+        self.idle = 0.0;
+        let reach = crate::projection::SCROLL_SPEED * dt;
+        if reach == 0.0 {
+            return Some(Vec2::ZERO);
+        }
+        let forward = (self.rows / reach).clamp(-1.0, 1.0);
+        self.rows = if forward.abs() < 1.0 {
+            0.0
+        } else {
+            self.rows - forward * reach
+        };
+        Some(Vec2::new(0.0, forward))
+    }
+}
 
 /// The panel to scroll this frame, and by how many rows: the one the right stick scrolls, `stick`, pushed so far
 /// forward, for `dt` seconds, at [`crate::projection::scroll_rate`], and the rows the wheel scrolled since the last
@@ -389,6 +464,12 @@ pub struct Step {
     travel_stick: Vec2,
     /// Whose the right stick's push is, from when it left the middle until it returns.
     right_stick: RightStick,
+    /// The right stick, while its push is an object's, from the last buttons.
+    scroll_axis: Vec2,
+    /// A turn of the desktop's wheel that an object takes, as a push of the right stick. See `design/desktop.md`.
+    wheel_push: Option<WheelPush>,
+    /// How many pushes have been an object's, which numbers each.
+    pushes: u64,
     /// The right stick, while a panel carried takes it, from the last buttons, and whether it was clicked since the last
     /// frame, which turns the panel back to square.
     carry_stick: Vec2,
@@ -466,6 +547,9 @@ impl Default for Step {
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
             right_stick: RightStick::Free,
+            scroll_axis: Vec2::ZERO,
+            wheel_push: None,
+            pushes: 0,
             carry_stick: Vec2::ZERO,
             straighten: false,
             scroll_stick: None,
@@ -504,7 +588,11 @@ impl Step {
         self.highlighted = None;
         self.presentation_navigation.release();
         self.cancel_travel();
-        self.right_stick = RightStick::Free;
+        // A push that was an object's is nobody's until it returns to the middle, so that it does not begin again.
+        self.abandon_scroll();
+        if self.right_stick != RightStick::Abandoned {
+            self.right_stick = RightStick::Free;
+        }
         self.carry_stick = Vec2::ZERO;
         self.straighten = false;
         self.scroll_stick = None;
@@ -518,6 +606,17 @@ impl Step {
         if let Some(client) = self.client.as_mut() {
             client.back = false;
         }
+    }
+
+    /// A push of the right stick or a turn of the wheel that is an object's ends, as focus is lost or its client side
+    /// goes: the push is nobody's until it returns to the middle, and the client side, if it is still there, is told it
+    /// ended on its next frame.
+    fn abandon_scroll(&mut self) {
+        if matches!(self.right_stick, RightStick::Object(..)) {
+            self.right_stick = RightStick::Abandoned;
+        }
+        self.wheel_push = None;
+        self.scroll_axis = Vec2::ZERO;
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -608,33 +707,55 @@ impl Step {
             .pointed_panel
             .as_deref()
             .filter(|panel| !wrist_active && self.projector.scrollable(panel));
+        // An object of the environment's that takes the right stick, pointed at, has a push that nothing of Tomori's
+        // takes, with its identity. See `design/environments.md`.
+        let object = self
+            .client
+            .as_ref()
+            .and_then(|client| client.scrollable.as_deref());
+        let rung = precedence::Right::first(|rung| match rung {
+            precedence::Right::Carried => carrying,
+            precedence::Right::Transcript => wrist_active,
+            precedence::Right::Scroll => scrolls.is_some(),
+            precedence::Right::Tomori => {
+                matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
+            }
+            precedence::Right::Object => object.is_some(),
+            precedence::Right::Environment => environment,
+            precedence::Right::Cards => true,
+        });
+        let number = self.pushes + 1;
         self.right_stick =
-            std::mem::take(&mut self.right_stick).update(buttons.right_stick, || {
-                match precedence::Right::first(|rung| match rung {
-                    precedence::Right::Carried => carrying,
-                    precedence::Right::Transcript => wrist_active,
-                    precedence::Right::Scroll => scrolls.is_some(),
-                    precedence::Right::Tomori => {
-                        matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
-                    }
-                    precedence::Right::Environment => environment,
-                    precedence::Right::Cards => true,
-                }) {
-                    precedence::Right::Carried => RightStick::Carried,
-                    precedence::Right::Scroll => scrolls.map_or(RightStick::Other, |panel| {
-                        RightStick::Scrolled(panel.to_owned())
-                    }),
-                    precedence::Right::Environment => RightStick::Environment,
-                    precedence::Right::Transcript
-                    | precedence::Right::Tomori
-                    | precedence::Right::Cards => RightStick::Other,
-                }
+            std::mem::take(&mut self.right_stick).update(buttons.right_stick, || match rung {
+                precedence::Right::Carried => RightStick::Carried,
+                precedence::Right::Scroll => scrolls.map_or(RightStick::Other, |panel| {
+                    RightStick::Scrolled(panel.to_owned())
+                }),
+                // A push begun without focus is nobody's, so that it never begins an object's.
+                precedence::Right::Object => match object {
+                    Some(object) if focused => RightStick::Object(object.to_owned(), number),
+                    _ => RightStick::Abandoned,
+                },
+                precedence::Right::Environment => RightStick::Environment,
+                precedence::Right::Transcript
+                | precedence::Right::Tomori
+                | precedence::Right::Cards => RightStick::Other,
             });
+        if let RightStick::Object(_, number) = &self.right_stick {
+            self.pushes = *number;
+            self.wheel_push = None;
+        }
         let (carry_stick, right, environment_right) = match self.right_stick {
             RightStick::Carried => (buttons.right_stick, Vec2::ZERO, Vec2::ZERO),
-            RightStick::Scrolled(_) => (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
+            RightStick::Scrolled(_) | RightStick::Object(..) | RightStick::Abandoned => {
+                (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO)
+            }
             RightStick::Environment => (Vec2::ZERO, Vec2::ZERO, buttons.right_stick),
             RightStick::Free | RightStick::Other => (Vec2::ZERO, buttons.right_stick, Vec2::ZERO),
+        };
+        self.scroll_axis = match self.right_stick {
+            RightStick::Object(..) => buttons.right_stick,
+            _ => Vec2::ZERO,
         };
         self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
         self.scroll_stick = match &self.right_stick {
@@ -658,6 +779,29 @@ impl Step {
                 Some((scrolled, rows)) if scrolled == panel => *rows += buttons.scroll,
                 wheel => *wheel = Some((panel.clone(), buttons.scroll)),
             }
+        }
+        // Pointing at an object that takes the right stick, where the stick's push would be its own, a turn of the wheel
+        // is a push of the stick, forward for a turn away from the participant, that scrolls as a panel would the rows
+        // the wheel turned, as fast as the stick scrolls one at most, and goes on while it is turned. See
+        // `design/desktop.md`.
+        if let Some(object) = object
+            && rung == precedence::Right::Object
+            && focused
+            && self.right_stick == RightStick::Free
+            && buttons.scroll.is_finite()
+            && buttons.scroll != 0.0
+        {
+            let wheel = match self.wheel_push.take() {
+                Some(wheel) if wheel.object == object => wheel,
+                _ => {
+                    self.pushes += 1;
+                    WheelPush::new(object, self.pushes)
+                }
+            };
+            self.wheel_push.insert(wheel).turn(buttons.scroll);
+        }
+        if !focused {
+            self.abandon_scroll();
         }
         // B pressed while a panel is carried is the panel's, and nothing else's until it is let go: let go soon enough,
         // while the panel is still carried, it throws the panel away for everyone; held longer, it does nothing, and
@@ -1279,13 +1423,17 @@ impl Step {
                         focus: None,
                         select: None,
                         back: false,
+                        scrollable: None,
+                        scroller: Default::default(),
                     });
                     self.selector.abandon();
+                    self.abandon_scroll();
                 }
             }
             _ => {
                 if self.client.take().is_some() {
                     self.selector.abandon();
+                    self.abandon_scroll();
                 }
             }
         }
@@ -1383,6 +1531,11 @@ impl Step {
             client.focus = object
                 .as_ref()
                 .filter(|picked| picked.selectable)
+                .map(|picked| picked.object.clone());
+            // What a push of the right stick takes next frame.
+            client.scrollable = object
+                .as_ref()
+                .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
                 .map(|picked| picked.object.clone());
         }
         // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
@@ -1521,12 +1674,34 @@ impl Step {
                         .unplace(Vec3::from_array(pose.position))
                 });
                 let (left, right) = self.environment_sticks;
+                // The push an object of its takes now, of the right stick or else of the wheel, which moves on only
+                // once it is told, after the push before it has been told its end.
+                let wheeled = match self.wheel_push.as_mut() {
+                    Some(wheel) if client.scroller.tells(wheel.number) => Some(wheel.advance(dt)),
+                    _ => None,
+                };
+                if wheeled == Some(None) {
+                    self.wheel_push = None;
+                }
+                let push = match (&self.right_stick, &self.wheel_push) {
+                    (RightStick::Object(object, number), _) => {
+                        Some((object.as_str(), *number, self.scroll_axis))
+                    }
+                    (_, Some(wheel)) => Some((
+                        wheel.object.as_str(),
+                        wheel.number,
+                        wheeled.flatten().unwrap_or_default(),
+                    )),
+                    _ => None,
+                };
+                let scroll = client.scroller.update(push);
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(object.as_ref().map(|picked| picked.object.as_str()), head)
                         .with_select(client.select.take())
                         .with_back(std::mem::take(&mut client.back))
-                        .with_sticks(left, right),
+                        .with_sticks(left, right)
+                        .with_scroll(scroll),
                 );
                 for intent in output.intents {
                     conversation.environment_intent(
@@ -8113,4 +8288,7 @@ mod tests {
         assert!(card.model.is_some());
         assert_eq!(badge, &Sheet::default());
     }
+
+    /// The right stick's push for an object of an environment's that takes it.
+    mod scroll;
 }

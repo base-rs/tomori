@@ -14,6 +14,8 @@ A client polls its `tomori_client::connection::Connection` with its `conversatio
 
 An environment's client side, `client_side::ClientSide`, registered beside its scenery, may mark what it picks as selectable with `Picked::selectable`, and is told each frame, in its `client_side::Input`, what the participant selects with the trigger or A (`select`, one at a time, A where nothing before it in A's order takes the press), backs out of with B (`back`) and pushes the sticks to (`left_stick`, `right_stick`), only where nothing else takes them.
 
+An object it picks may also take the right stick, with `Picked::handles(client_side::Actions::SCROLL)`: a push that begins on it, where nothing of Tomori's takes the push, is told as `Input::scroll`, a `client_side::Scroll` naming the object, with the stick's axis and its `client_side::Phase`, began once, changed while held and ended once, rather than as `right_stick`.
+
 The `testing` feature adds a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, for other crates' tests.
 
 Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).

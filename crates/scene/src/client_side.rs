@@ -47,6 +47,10 @@ pub struct Input<'a> {
     /// The left and right sticks, each axis from -1 to 1, where nothing else takes them, and zero otherwise.
     pub left_stick: Vec2,
     pub right_stick: Vec2,
+    /// A push of the right stick that began on an object of its that takes it, by the object's identity, from its
+    /// beginning to its end: see [`Picked::handles`] and [`Scroll`]. `right_stick` is zero while a push is an object's,
+    /// so that one push is told once.
+    pub scroll: Option<Scroll>,
 }
 
 impl<'a> Input<'a> {
@@ -60,6 +64,7 @@ impl<'a> Input<'a> {
             back: false,
             left_stick: Vec2::ZERO,
             right_stick: Vec2::ZERO,
+            scroll: None,
         }
     }
 
@@ -88,6 +93,12 @@ impl<'a> Input<'a> {
         self.right_stick = right;
         self
     }
+
+    /// This input, with an object's push of the right stick, if any.
+    pub fn with_scroll(mut self, scroll: Option<Scroll>) -> Self {
+        self.scroll = scroll;
+        self
+    }
 }
 
 /// The trigger or A on a selectable object: pressed on it, then let go, each once a pull or a press, naming the object
@@ -110,6 +121,8 @@ pub struct Picked {
     pub label: String,
     pub distance: f32,
     pub selectable: bool,
+    /// The actions it takes beyond selecting, such as the right stick's push. See [`Picked::handles`].
+    pub actions: Actions,
 }
 
 impl Picked {
@@ -119,6 +132,7 @@ impl Picked {
             label: label.into(),
             distance,
             selectable: false,
+            actions: Actions::NONE,
         }
     }
 
@@ -129,6 +143,112 @@ impl Picked {
     pub fn selectable(mut self) -> Self {
         self.selectable = true;
         self
+    }
+
+    /// This object, taking `actions` too, beside those it took: with [`Actions::SCROLL`], a push of the right stick
+    /// that begins on it, where nothing of Tomori's takes the push, is its own until the stick returns to the middle,
+    /// told as [`Input::scroll`] rather than [`Input::right_stick`]. See `design/environments.md`.
+    pub fn handles(mut self, actions: Actions) -> Self {
+        self.actions = self.actions | actions;
+        self
+    }
+}
+
+/// Which actions an object a client side picks takes, beyond selecting it: none, unless it says so with
+/// [`Picked::handles`]. See `design/responders.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Actions(u8);
+
+impl Actions {
+    /// No action.
+    pub const NONE: Self = Self(0);
+    /// The right stick's push, and the desktop's keys and wheel that stand for it: [`Input::scroll`].
+    pub const SCROLL: Self = Self(1);
+
+    /// Whether these actions include every one of `other`.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for Actions {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+/// A push of the right stick that began on an object that takes it ([`Actions::SCROLL`]): the object it began on, by
+/// the identity [`ClientSide::pick`] gave it, which it stays with until it ends, wherever the ray goes; the stick's
+/// axis, each from -1 to 1, forward and right positive, zero once it ends; and where in the push it is.
+///
+/// The desktop's wheel pushes as the stick does, as far as it would scroll a panel, so its axis may be small, as for a
+/// slow scroll of a touchpad, or zero while its push lingers after it has pushed all it was turned: a client side that
+/// applies a dead zone of its own drops those.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Scroll {
+    pub object: String,
+    pub axis: Vec2,
+    pub phase: Phase,
+}
+
+impl Scroll {
+    pub fn new(object: impl Into<String>, axis: Vec2, phase: Phase) -> Self {
+        Self {
+            object: object.into(),
+            axis,
+            phase,
+        }
+    }
+}
+
+/// Where in a push of the right stick a [`Scroll`] is: each push is told `Began` once, `Changed` on each later frame
+/// while it is held, and `Ended` once, as the stick returns to the middle or focus is lost. `Began` is told on the frame
+/// the push leaves the middle, unless it replaced a push that had not been told its end, as when a push of the stick
+/// begins in the frame a turn of the wheel ends: that push is told `Ended` on that frame, and the new one `Began` on the
+/// next, so that a frame tells one. `Changed` may tell a small axis, or zero, for the desktop's wheel (see [`Scroll`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Phase {
+    Began,
+    Changed,
+    Ended,
+}
+
+/// Which push of the right stick, or turn of the desktop's wheel, a client side has been told of, so that each is told
+/// `Began` once and `Ended` once. See [`Scroll`].
+#[derive(Debug, Default)]
+pub(crate) struct Scroller {
+    /// The object and the number of the push told `Began`, until it is told `Ended`.
+    told: Option<(String, u64)>,
+}
+
+impl Scroller {
+    /// Whether the push numbered `number` is told this frame: it is the one told already, or none is, so that a push
+    /// that replaces another waits for the other's end.
+    pub(crate) fn tells(&self, number: u64) -> bool {
+        self.told.as_ref().is_none_or(|(_, told)| *told == number)
+    }
+
+    /// What to tell the client side this frame, with `push` the object's push now, if any, by the object, its number,
+    /// which no other push shares, and the axis. A push that replaces another is told `Began` on the frame after the
+    /// other is told `Ended`, so that a frame tells one.
+    pub(crate) fn update(&mut self, push: Option<(&str, u64, Vec2)>) -> Option<Scroll> {
+        match (self.told.take(), push) {
+            (Some((object, number)), Some((_, now, axis))) if number == now => {
+                let scroll = Scroll::new(object.clone(), axis, Phase::Changed);
+                self.told = Some((object, number));
+                Some(scroll)
+            }
+            (Some((object, _)), _) => Some(Scroll::new(object, Vec2::ZERO, Phase::Ended)),
+            (None, Some((object, number, axis))) => {
+                self.told = Some((object.to_owned(), number));
+                Some(Scroll::new(object, axis, Phase::Began))
+            }
+            (None, None) => None,
+        }
     }
 }
 
@@ -349,6 +469,125 @@ mod tests {
         let picked = Picked::new("lamp", "the lamp", 2.0);
         assert!(!picked.selectable);
         assert!(picked.selectable().selectable);
+    }
+
+    #[test]
+    fn nothing_picked_takes_the_right_stick_unless_it_says_so() {
+        let picked = Picked::new("globe", "the globe", 2.0);
+        assert_eq!(picked.actions, Actions::NONE);
+        assert!(!picked.actions.contains(Actions::SCROLL));
+        assert!(picked.actions.contains(Actions::NONE));
+        // Taking it adds to what it took, and selecting is apart from it.
+        let picked = picked.handles(Actions::SCROLL).handles(Actions::NONE);
+        assert!(picked.actions.contains(Actions::SCROLL));
+        assert!(!picked.selectable);
+        assert!(picked.selectable().actions.contains(Actions::SCROLL));
+        assert_eq!(Actions::default() | Actions::SCROLL, Actions::SCROLL);
+    }
+
+    #[test]
+    fn an_input_is_told_a_push_only_when_built_with_one() {
+        let now = Instant::now();
+        assert_eq!(Input::new(Vec::new(), now).scroll, None);
+        let push = Scroll::new("globe", Vec2::Y, Phase::Began);
+        assert_eq!(
+            (push.object.as_str(), push.axis, push.phase),
+            ("globe", Vec2::Y, Phase::Began)
+        );
+        let input = Input::new(Vec::new(), now).with_scroll(Some(push.clone()));
+        assert_eq!(input.scroll, Some(push));
+    }
+
+    /// What `scroller` tells across `frames`, each the push now, as the object and the push's number, with the axis.
+    fn scrolls(
+        scroller: &mut Scroller,
+        frames: &[Option<(&str, u64, f32)>],
+    ) -> Vec<Option<Scroll>> {
+        frames
+            .iter()
+            .map(|push| {
+                scroller.update(push.map(|(object, number, y)| (object, number, Vec2::new(0.0, y))))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_push_is_told_began_once_changed_while_held_and_ended_once() {
+        use Phase::*;
+        let at = |object: &str, y: f32, phase| Some(Scroll::new(object, Vec2::new(0.0, y), phase));
+        let globe = |number, y| Some(("globe", number, y));
+        let moon = |number, y| Some(("moon", number, y));
+        // Each case: the pushes frame by frame, and what is told.
+        type Pushes<'a> = Vec<Option<(&'a str, u64, f32)>>;
+        let cases: [(Pushes, Vec<Option<Scroll>>); 7] = [
+            // Nothing, nothing told.
+            (vec![None, None], vec![None, None]),
+            // One push: began, changed with its axis, ended once, then nothing.
+            (
+                vec![globe(1, 0.5), globe(1, 1.0), globe(1, -0.3), None, None],
+                vec![
+                    at("globe", 0.5, Began),
+                    at("globe", 1.0, Changed),
+                    at("globe", -0.3, Changed),
+                    at("globe", 0.0, Ended),
+                    None,
+                ],
+            ),
+            // A push of one frame is still began and ended.
+            (
+                vec![globe(1, 1.0), None],
+                vec![at("globe", 1.0, Began), at("globe", 0.0, Ended)],
+            ),
+            // Another push of the same object, without a frame between, ends the first before beginning.
+            (
+                vec![globe(1, 1.0), globe(2, -1.0), globe(2, -1.0), None],
+                vec![
+                    at("globe", 1.0, Began),
+                    at("globe", 0.0, Ended),
+                    at("globe", -1.0, Began),
+                    at("globe", 0.0, Ended),
+                ],
+            ),
+            // A push of another object, likewise: never two told at once.
+            (
+                vec![globe(1, 1.0), moon(2, 0.5), moon(2, 0.5), None],
+                vec![
+                    at("globe", 1.0, Began),
+                    at("globe", 0.0, Ended),
+                    at("moon", 0.5, Began),
+                    at("moon", 0.0, Ended),
+                ],
+            ),
+            // A push named as it began, whatever it is called meanwhile: it is the number that counts.
+            (
+                vec![globe(1, 1.0), moon(1, 0.5), None],
+                vec![
+                    at("globe", 1.0, Began),
+                    at("globe", 0.5, Changed),
+                    at("globe", 0.0, Ended),
+                ],
+            ),
+            // At rest, it begins on the next push.
+            (
+                vec![None, globe(3, 0.2), None],
+                vec![None, at("globe", 0.2, Began), at("globe", 0.0, Ended)],
+            ),
+        ];
+        for (frames, told) in cases {
+            let mut scroller = Scroller::default();
+            assert_eq!(scrolls(&mut scroller, &frames), told, "{frames:?}");
+        }
+    }
+
+    #[test]
+    fn a_push_is_told_only_once_the_push_before_it_has_been_told_its_end() {
+        let mut scroller = Scroller::default();
+        assert!(scroller.tells(1) && scroller.tells(2));
+        scroller.update(Some(("globe", 1, Vec2::Y)));
+        assert!(scroller.tells(1));
+        assert!(!scroller.tells(2));
+        scroller.update(Some(("globe", 2, Vec2::Y)));
+        assert!(scroller.tells(2));
     }
 
     /// What `selector` is told across `frames`, each the object the ray is on and the trigger.
