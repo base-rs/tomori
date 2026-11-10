@@ -378,6 +378,81 @@ pub struct SpaceState {
     /// See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<crate::cluster::Layout>,
+    /// The space's timers, scheduled notes its agent set itself, in the order they were set, for a client to draw
+    /// beside the workers and point at as [`crate::Resource::Timer`]. Empty from older servers and where there are none.
+    /// See `design/timers.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timers: Vec<Timer>,
+}
+
+/// One of a space's timers as a client draws it: its name, its schedule and condition in short words, when it next
+/// fires and how it stands now. See `design/timers.md`.
+///
+/// ```
+/// use tomori_protocol::{Timer, TimerState};
+///
+/// let timer = Timer::new("status", "every hour", "when present", Some(1_800_000_000), TimerState::Paused);
+/// assert_eq!(
+///     serde_json::to_value(&timer).unwrap(),
+///     serde_json::json!({
+///         "name": "status",
+///         "schedule": "every hour",
+///         "condition": "when present",
+///         "next": 1_800_000_000,
+///         "state": "paused",
+///     })
+/// );
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Timer {
+    /// Its name, which tells it from the space's other timers.
+    pub name: String,
+    /// Its schedule in short words, as `every hour` or `weekdays at 09:00`.
+    pub schedule: String,
+    /// Its condition in short words: `always`, `when present` or `when present or on arrival`.
+    pub condition: String,
+    /// When it next fires, in seconds since the Unix epoch, for a countdown; absent while it waits for someone to
+    /// arrive with no occurrence ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<u64>,
+    pub state: TimerState,
+}
+
+impl Timer {
+    pub fn new(
+        name: impl Into<String>,
+        schedule: impl Into<String>,
+        condition: impl Into<String>,
+        next: Option<u64>,
+        state: TimerState,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            schedule: schedule.into(),
+            condition: condition.into(),
+            next,
+            state,
+        }
+    }
+}
+
+/// How a timer stands now, for a distinct look of each.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerState {
+    /// Counting down to its next occurrence.
+    Waiting,
+    /// It fires only while someone is present, and nobody is.
+    Paused,
+    /// An occurrence fell while nobody was present, and it fires as the first participant arrives.
+    Awaiting,
+    /// It fired within the last minute.
+    Fired,
+    /// A state a newer server sends that this build does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
@@ -823,6 +898,38 @@ pub struct Participant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timers_are_carried_in_the_state_and_absent_from_an_older_server() {
+        let older: SpaceState =
+            serde_json::from_value(serde_json::to_value(SpaceState::default()).unwrap()).unwrap();
+        assert!(older.timers.is_empty());
+        assert!(
+            serde_json::to_value(SpaceState::default())
+                .unwrap()
+                .get("timers")
+                .is_none()
+        );
+        let state = SpaceState {
+            timers: vec![Timer::new(
+                "status",
+                "every hour",
+                "always",
+                None,
+                TimerState::Fired,
+            )],
+            ..SpaceState::default()
+        };
+        let read: SpaceState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(read.timers, state.timers);
+        // A state a newer server sends, unknown here.
+        let timer: Timer = serde_json::from_value(serde_json::json!({
+            "name": "x", "schedule": "every hour", "condition": "always", "state": "snoozing"
+        }))
+        .unwrap();
+        assert_eq!((timer.next, timer.state), (None, TimerState::Unknown));
+    }
 
     fn modes(current: Option<&str>) -> SpaceState {
         SpaceState {

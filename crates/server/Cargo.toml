@@ -103,6 +103,8 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 gethostname = "1.1"
 # Decoding the files the agent shows as image panels, with pure Rust decoders, and encoding them again for clients.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Timers' times of day in IANA time zones, through daylight saving. See `design/timers.md`.
+jiff = "0.2"
 log = "0.4"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }

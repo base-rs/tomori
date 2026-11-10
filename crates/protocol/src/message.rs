@@ -205,6 +205,10 @@ pub enum Resource {
     /// skips it, as a kind it does not know. See `design/interaction.md`.
     #[non_exhaustive]
     Gathered { gathered: String },
+    /// One of the space's timers, by its [`crate::Timer::name`]: the server describes it from its own timers, as it
+    /// stands now. An older server skips it, as a kind it does not know. See `design/timers.md`.
+    #[non_exhaustive]
+    Timer { timer: String },
     #[serde(other)]
     Unknown,
 }
@@ -230,6 +234,22 @@ impl Resource {
     pub fn worker(worker: impl Into<String>) -> Self {
         Self::Worker {
             worker: worker.into(),
+        }
+    }
+
+    /// The space's timer whose [`crate::Timer::name`] is `timer`.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::timer("status")).unwrap(),
+    ///     serde_json::json!({"kind": "timer", "timer": "status"})
+    /// );
+    /// ```
+    pub fn timer(timer: impl Into<String>) -> Self {
+        Self::Timer {
+            timer: timer.into(),
         }
     }
 
@@ -1283,6 +1303,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(gathered, begin(vec![Resource::gathered("home")]));
+        // A timer, by its name, which an older server skips too.
+        let timer: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "utterance_begin", "utterance": "u", "attention": [{"kind": "timer", "timer": "status"}]
+        }))
+        .unwrap();
+        assert_eq!(timer, begin(vec![Resource::timer("status")]));
     }
 
     #[test]
