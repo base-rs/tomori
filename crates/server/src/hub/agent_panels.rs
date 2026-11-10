@@ -236,8 +236,8 @@ fn listed(
 
 /// `panel`, as `panels` describes the one panel the agent names: what [`summarized`] says of it, and what it shows,
 /// once: an environment's list its rows, each with its id, the id the agent may inspect it by, whether it is
-/// highlighted and its text; any other text or chart panel its body, as participants see it, and its list items; a
-/// code panel only its language, as before.
+/// highlighted, its tone, in a word, its value against its limit, from 0 to 1, or null, and its text; any other text
+/// or chart panel its body, as participants see it, and its list items; a code panel only its language, as before.
 fn detailed(
     projection: &Projection,
     panel: &Panel,
@@ -258,6 +258,8 @@ fn detailed(
                         }),
                         "highlighted": highlighted == Some(row.id.as_str()),
                         "choosable": row.choosable,
+                        "tone": row.tone_word().unwrap_or("neutral"),
+                        "value": row.value.map(|value| (f64::from(value) * 1000.0).round() / 1000.0),
                         "text": row.text,
                     })
                 })

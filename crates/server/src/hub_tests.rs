@@ -4110,8 +4110,9 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     };
     let ada = Client::projecting(&hub, Access::open(), "ada");
     ada.join(&id);
-    // The largest list there can be: as many rows as it may have, each with the longest id and reference, their text
-    // as long as a body holds of them all, in characters of four bytes, and the longest title.
+    // The largest list there can be: as many rows as it may have, each with the longest id and reference, choosable,
+    // in a tone and with a value of three decimals, their text as long as a body holds of them all, in characters of
+    // four bytes, and the longest title.
     let list = |panel: usize| {
         let rows = (0..tomori_environment::ROW_LIMIT)
             .map(|row| {
@@ -4119,6 +4120,9 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
                 assert_eq!(name.len(), tomori_environment::ROW_ID_BYTES);
                 tomori_environment::Row::new(name.clone(), "\u{1F600}".repeat(38))
                     .with_reference(name)
+                    .choosable()
+                    .with_tone(tomori_environment::chart::Tone::Warn)
+                    .with_value(0.123)
             })
             .collect();
         tomori_environment::Panel::list(format!("list-{panel}"), "\u{1F600}".repeat(80), rows)
@@ -4209,8 +4213,9 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
             == panels.len()
     });
     assert_eq!(excerpts, [false, true]);
-    // It reads one whole by naming it: its rows, each with its id, its inspect id and its text, once, with neither
-    // its body nor its items, which say the same; the largest list there can be is 11 KB, 23 KB as sent.
+    // It reads one whole by naming it: its rows, each with its id, its inspect id, its tone in a word, its value and its
+    // text, once, with neither its body nor its items, which say the same; the largest list there can be is 12 KB, 25 KB
+    // as sent.
     let published = identities(&listed);
     let named = published[3].clone();
     let read = hub.tool_panels("session", Some(&named), 0).unwrap();
@@ -4222,6 +4227,10 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     assert_eq!(rows[2]["text"], "\u{1F600}".repeat(38));
     assert!(rows[2]["inspect_id"].as_str().unwrap().starts_with("yard:"));
     assert_eq!(rows[2]["highlighted"], false);
+    assert_eq!(
+        (&rows[2]["tone"], &rows[2]["value"]),
+        (&serde_json::json!("warning"), &serde_json::json!(0.123))
+    );
     let absent = ["body", "items", "row_count", "item_count", "line_count"];
     assert!(absent.iter().all(|key| read[0].get(key).is_none()));
     assert_eq!(

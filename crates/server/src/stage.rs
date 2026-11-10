@@ -716,15 +716,21 @@ impl Kept {
             .as_ref()
             .and_then(|published| published.chart.clone())
             .map(Box::new);
-        // A list's rows, by which a client names the row it points at and the one it chooses.
-        if let Some(rows) = self
-            .published
-            .as_ref()
-            .and_then(|published| published.rows.as_ref())
+        // A list's rows, by which a client names the row it points at and the one it chooses, and draws each as a row:
+        // the one highlighted on its bar, in its tone, with its value.
+        if let Some(published) = &self.published
+            && let Some(rows) = &published.rows
         {
+            let highlighted = published.highlighted.as_deref();
             panel = panel.with_rows(
                 rows.iter()
-                    .map(|row| tomori_protocol::ListRow::new(row.id.clone(), row.choosable))
+                    .map(|row| {
+                        let mut sent = tomori_protocol::ListRow::new(row.id.clone(), row.choosable)
+                            .with_highlight(highlighted == Some(row.id.as_str()))
+                            .with_tone(row.tone);
+                        sent.value = row.value;
+                        sent
+                    })
                     .collect(),
             );
         }
@@ -2642,7 +2648,8 @@ impl Stage {
             ));
         }
         // The row pointed at of an environment's list, each row a line of its body, from the server's own copy: its
-        // number, whether it is highlighted, its id to inspect it by and its text, in quotes, as it is the environment's.
+        // number, whether it is highlighted, its tone and its value, each in the server's own words, its id to inspect
+        // it by and its text, in quotes, as it is the environment's.
         let items = checklist::items(&panel.body);
         if let Some((rows, highlighted)) = self.rows(walls.environment, &panel.id) {
             let found = match row {
@@ -2666,8 +2673,14 @@ impl Stage {
                         crate::space::inspectable(walls.environment, reference)
                     )
                 });
+                let tone = row
+                    .tone_word()
+                    .map_or(String::new(), |tone| format!(", tone {tone}"));
+                let value = row.percent().map_or(String::new(), |percent| {
+                    format!(", at {percent}% of its limit")
+                });
                 details.push_str(&format!(
-                    "; row {} of {}{highlighted}{id}: \"{}\"",
+                    "; row {} of {}{highlighted}{tone}{value}{id}: \"{}\"",
                     index + 1,
                     rows.len(),
                     crate::space::one_line(&row.text, blocks::META_VALUE_CHARS)

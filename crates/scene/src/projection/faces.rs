@@ -12,7 +12,9 @@ use tomori_protocol::Panel;
 
 use super::{
     CODE_PADDING, CODE_PIXEL, CodeLayout, Fit, chart, code_columns, code_face, fitted, image,
-    item_in, sized, text_face,
+    item_in,
+    list::{Marked, RowMarks},
+    sized, text_face,
 };
 use crate::{
     board,
@@ -58,6 +60,9 @@ enum Change {
     Same,
     /// Only its chart's data, so that its faces are drawn again, but its size and its text kept.
     Plot,
+    /// Only its list's rows' tones and values, as the server changed them, so that its lines are kept, their marks
+    /// changed, and its faces drawn again, in its turn.
+    Restyle,
     /// What it shows, as the server changed it, so that it is laid out again, in its turn.
     Content,
     /// What it shows, as this client changed it itself, or as a server that versions nothing sent it, so that it is laid
@@ -81,7 +86,9 @@ impl Key {
         let versioned =
             |panel: &Panel| panel.version != 0 && (panel.chart.is_none() || panel.data_seq != 0);
         if versioned(&self.0) && versioned(panel) {
-            return if self.0.version != panel.version
+            return if super::list::restyled(&self.0, panel) {
+                Change::Restyle
+            } else if self.0.version != panel.version
                 || self.0.id != panel.id
                 || self.0.chart.is_some() != panel.chart.is_some()
             {
@@ -126,6 +133,9 @@ pub(super) struct Faces {
     /// yet come: it shows what it showed, and none of its items is pointed at, since its lines are no longer the
     /// panel's.
     behind: bool,
+    /// For a list laid out again as it changed, the row that stood at the top of its face, by its id, and how many lines
+    /// into it, by which its scroll is found again among its rows as they are now. See [`super::list::anchor`].
+    pub(super) anchor: Option<(String, f32)>,
 }
 
 impl Faces {
@@ -135,6 +145,7 @@ impl Faces {
             sizes: Vec::new(),
             limit: None,
             behind: false,
+            anchor: None,
         }
     }
 
@@ -142,10 +153,12 @@ impl Faces {
     /// where only its chart's data changed, and all of it laid out again where what it shows changed. Where the server
     /// changed it and `turn` is false, as when this frame has laid out as many panels as it may, it is left as it was,
     /// showing what it showed, to be followed in a later frame; what this client changed itself is followed whatever
-    /// `turn` is. Returns whether it took a turn: whether the server's change of it was followed.
-    pub(super) fn follow(&mut self, panel: &Panel, turn: bool) -> bool {
+    /// `turn` is. Returns whether it took a turn: whether the server's change of it was followed. A list laid out again
+    /// keeps, as its [`Faces::anchor`], the row at the top of its face, scrolled `scroll` rows down, so that its scroll
+    /// follows that row wherever the list now puts it.
+    pub(super) fn follow(&mut self, panel: &Panel, turn: bool, scroll: f32) -> bool {
         let change = self.key.change(panel);
-        self.behind = matches!(change, Change::Plot | Change::Content) && !turn;
+        self.behind = matches!(change, Change::Plot | Change::Restyle | Change::Content) && !turn;
         if change == Change::Same || self.behind {
             return false;
         }
@@ -153,11 +166,30 @@ impl Faces {
             self.sizes
                 .iter_mut()
                 .for_each(|layout| layout.replot(panel));
+        } else if change == Change::Restyle {
+            self.sizes.iter_mut().for_each(|layout| {
+                super::list::retone(&mut layout.lines, &panel.rows);
+                layout.face = None;
+            });
         } else {
+            self.anchor = self
+                .sizes
+                .first()
+                .and_then(|layout| super::list::anchor(&self.key.0.rows, &layout.lines, scroll));
             self.sizes.clear();
         }
         self.key = Key::of(panel);
         change != Change::Own
+    }
+
+    /// How far down to scroll it, laid out as `fit` says, so that the row its [`Faces::anchor`] names stands at the top
+    /// of its face as it did, within `limit` rows: none where it has no anchor, or the list no longer has that row. Its
+    /// anchor is taken.
+    pub(super) fn anchored(&mut self, fit: Fit, limit: usize) -> Option<f32> {
+        let anchor = self.anchor.take()?;
+        self.at(fit);
+        super::list::anchored(&self.key.0.rows, &self.sizes[0].lines, &anchor)
+            .map(|scroll| scroll.min(limit as f32))
     }
 
     /// Its layout sized as `fit` says, of the panel as it was last followed, laid out now if it was not already, kept
@@ -173,11 +205,19 @@ impl Faces {
         &mut self.sizes[0]
     }
 
-    /// Its face sized as `fit` says, scrolled `scroll` rows down and framed in `border`, of the panel as it was last
-    /// followed, as [`Layout::face`] draws or keeps it.
-    pub(super) fn face(&mut self, fit: Fit, scroll: usize, border: [f32; 4]) -> Arc<Canvas> {
+    /// Its face sized as `fit` says, scrolled `scroll` rows down, its rows marked as this participant's `marks` say, and
+    /// framed in `border`, of the panel as it was last followed, as [`Layout::face`] draws or keeps it. The marks are
+    /// found among the rows of the panel it draws, so that a list waiting its turn to be laid out again, reordered,
+    /// marks the row named, where it now stands in what is drawn, never another.
+    pub(super) fn face(
+        &mut self,
+        fit: Fit,
+        (scroll, marks): (usize, &RowMarks),
+        border: [f32; 4],
+    ) -> Arc<Canvas> {
         self.at(fit);
-        self.sizes[0].face(&self.key.0, scroll, border)
+        let marked = marks.of(&self.key.0);
+        self.sizes[0].face(&self.key.0, (scroll, marked), border)
     }
 
     /// The line of its body that the list item where the ray meets it begins on, sized as `fit` says, as
@@ -211,10 +251,10 @@ pub(super) struct Layout {
     face: Option<Face>,
 }
 
-/// A face drawn: the scroll and frame it was drawn with.
+/// A face drawn: the scroll, the rows marked and the frame it was drawn with.
 #[derive(Clone, Debug)]
 struct Face {
-    scroll: usize,
+    view: (usize, Marked),
     border: [f32; 4],
     canvas: Arc<Canvas>,
 }
@@ -288,12 +328,13 @@ impl Layout {
         self.face = None;
     }
 
-    /// `panel`'s face as laid out here, scrolled `scroll` rows down and framed in `border`: the one last drawn, if it
-    /// was drawn so; recoloured, if only its frame was another colour; or else drawn now, from what is laid out.
-    fn face(&mut self, panel: &Panel, scroll: usize, border: [f32; 4]) -> Arc<Canvas> {
+    /// `panel`'s face as laid out here, scrolled and its rows marked as `view` says, and framed in `border`: the one
+    /// last drawn, if it was drawn so; recoloured, if only its frame was another colour; or else drawn now, from what is
+    /// laid out.
+    fn face(&mut self, panel: &Panel, view: (usize, Marked), border: [f32; 4]) -> Arc<Canvas> {
         let face = match self.face.take() {
-            Some(face) if face.scroll == scroll && face.border == border => face,
-            Some(face) if face.scroll == scroll => {
+            Some(face) if face.view == view && face.border == border => face,
+            Some(face) if face.view == view => {
                 let mut canvas = Canvas::clone(&face.canvas);
                 canvas.border = Some(border);
                 Face {
@@ -303,9 +344,9 @@ impl Layout {
                 }
             }
             _ => Face {
-                scroll,
+                view,
                 border,
-                canvas: Arc::new(self.draw(panel, scroll, border)),
+                canvas: Arc::new(self.draw(panel, view, border)),
             },
         };
         let canvas = face.canvas.clone();
@@ -314,7 +355,7 @@ impl Layout {
     }
 
     /// `panel`'s face drawn from what is laid out here, as [`super::scrolled_face`] draws it.
-    fn draw(&self, panel: &Panel, scroll: usize, border: [f32; 4]) -> Canvas {
+    fn draw(&self, panel: &Panel, (scroll, marked): (usize, Marked), border: [f32; 4]) -> Canvas {
         count(0, 1);
         let border = Some(border);
         match (&self.code, &panel.chart, &panel.image) {
@@ -325,7 +366,9 @@ impl Layout {
             }
             (None, Some(chart), _) => chart::face(panel, chart, self.fit, border),
             (None, None, Some(image)) => image::face(panel, image, self.fit, border),
-            (None, None, None) => text_face(panel, self.cells, &self.lines, scroll, border),
+            (None, None, None) => {
+                text_face(panel, self.cells, &self.lines, (scroll, marked), border)
+            }
         }
     }
 

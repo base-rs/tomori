@@ -703,30 +703,104 @@ pub struct Panel {
     /// What makes it a list panel, if its environment's server side published it as one: each of its rows, in order,
     /// the first on the first line of its body and each on the next, with the environment's id for it and whether a
     /// participant may choose it, by which a client says which row it points at and which it chose
-    /// ([`crate::ClientMessage::ChoosePanelRow`]). An older client ignores it, and draws the body as any list. See
+    /// ([`crate::ClientMessage::ChoosePanelRow`]), and whether it is highlighted, its tone and its value, by which a
+    /// client draws it as a row. An older client ignores it, and draws the body as any list. See
     /// `design/panel-actions.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<ListRow>,
 }
 
 /// A row of a list panel, [`Panel::rows`]: its environment's id for it, at most 64 bytes of ASCII letters, digits,
-/// `-`, `_`, `.` and `/`, and whether a participant may choose it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `-`, `_`, `.` and `/`, whether a participant may choose it, and how a client that draws rows draws it: whether it is
+/// the row its environment highlights, on a bar of its own, its tone, as a strip at its start and a mark in place of
+/// its bullet, and a value from 0 to 1, as a thin bar under its text. An older client reads none of the three, and
+/// draws the body's list as it is. See `design/panel-actions.md`.
+///
+/// ```
+/// use tomori_protocol::{ListRow, chart::Tone};
+///
+/// let row = ListRow::new("pod112", true).with_highlight(true).with_tone(Tone::Warn).with_value(0.45);
+/// assert_eq!(
+///     serde_json::to_string(&row).unwrap(),
+///     r#"{"id":"pod112","choosable":true,"highlighted":true,"tone":"warn","value":0.45}"#
+/// );
+/// // A row that says none of them is as an older server sent it.
+/// assert_eq!(serde_json::to_value(ListRow::new("pod7", false)).unwrap(), serde_json::json!({"id": "pod7"}));
+/// // A tone a newer server sends reads as neutral, and a value is drawn within 0 to 1, or not at all.
+/// let newer: ListRow = serde_json::from_str(r#"{"id": "pod9", "tone": "urgent", "value": 7.5}"#).unwrap();
+/// assert_eq!((newer.tone, newer.fraction()), (Tone::Neutral, Some(1.0)));
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ListRow {
     pub id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub choosable: bool,
+    /// Whether it is the row its environment highlights, which the body marks with its pointer too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub highlighted: bool,
+    /// How it reads: neutral, good, a warning or bad, named for what it means rather than a colour. One a client
+    /// does not know reads as neutral.
+    #[serde(default, skip_serializing_if = "is_neutral")]
+    pub tone: crate::chart::Tone,
+    /// A value against its limit, from 0 to 1, such as how full a queue is, if it has one: read with
+    /// [`ListRow::fraction`], which holds whatever was sent within that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f32>,
 }
 
 impl ListRow {
-    /// The row `id`, which a participant may choose where `choosable` says.
+    /// The row `id`, which a participant may choose where `choosable` says, neutral, not highlighted and without a
+    /// value.
     pub fn new(id: impl Into<String>, choosable: bool) -> Self {
         Self {
             id: id.into(),
             choosable,
+            highlighted: false,
+            tone: crate::chart::Tone::Neutral,
+            value: None,
         }
     }
+
+    /// The row, highlighted by its environment where `highlighted` says.
+    pub fn with_highlight(mut self, highlighted: bool) -> Self {
+        self.highlighted = highlighted;
+        self
+    }
+
+    /// The row, in `tone`.
+    pub fn with_tone(mut self, tone: crate::chart::Tone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// The row, with `value` of its limit, as [`row_value`] holds it: none where it is not finite.
+    pub fn with_value(mut self, value: f32) -> Self {
+        self.value = row_value(value);
+        self
+    }
+
+    /// Its value as it is drawn, from 0 to 1: none where it has none, or one that is not finite, as a number too
+    /// large for the wire's reader is.
+    pub fn fraction(&self) -> Option<f32> {
+        self.value.and_then(row_value)
+    }
+}
+
+/// `value` as a row's value, held within 0 to 1, or none where it is not finite.
+///
+/// ```
+/// use tomori_protocol::row_value;
+///
+/// assert_eq!([row_value(0.45), row_value(-2.0), row_value(7.5)], [Some(0.45), Some(0.0), Some(1.0)]);
+/// assert_eq!([row_value(f32::NAN), row_value(f32::INFINITY)], [None, None]);
+/// ```
+pub fn row_value(value: f32) -> Option<f32> {
+    value.is_finite().then(|| value.clamp(0.0, 1.0))
+}
+
+fn is_neutral(tone: &crate::chart::Tone) -> bool {
+    *tone == crate::chart::Tone::Neutral
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1660,5 +1734,63 @@ mod tests {
         assert_eq!(text.row_on(0), None);
         assert!(!list.same_structure(&text));
         assert!(list.same_structure(&list.clone().with_age(9)));
+    }
+
+    #[test]
+    fn a_row_s_highlight_tone_and_value_are_sent_only_where_it_has_them() {
+        use crate::chart::Tone;
+        let row = ListRow::new("pod112", true)
+            .with_highlight(true)
+            .with_tone(Tone::Bad)
+            .with_value(0.5);
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"id": "pod112", "choosable": true, "highlighted": true, "tone": "bad", "value": 0.5})
+        );
+        assert_eq!(serde_json::from_value::<ListRow>(json).unwrap(), row);
+        // A row that says none of them is sent as an older server sent it, and read so from one.
+        let plain = ListRow::new("pod7", false);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"id": "pod7"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ListRow>(serde_json::json!({"id": "pod7"})).unwrap(),
+            plain
+        );
+        assert_eq!(plain.fraction(), None);
+        // A tone a newer server sends is neutral, and a value is held within 0 to 1, or left out.
+        let newer: ListRow =
+            serde_json::from_str(r#"{"id": "pod9", "tone": "urgent", "value": -3.0}"#).unwrap();
+        assert_eq!((newer.tone, newer.fraction()), (Tone::Neutral, Some(0.0)));
+        let mut odd = ListRow::new("pod9", false);
+        odd.value = Some(f32::NAN);
+        assert_eq!(odd.fraction(), None);
+        assert_eq!(
+            ListRow::new("pod9", false).with_value(f32::INFINITY).value,
+            None
+        );
+        assert_eq!(
+            [
+                row_value(0.45),
+                row_value(-2.0),
+                row_value(7.5),
+                row_value(f32::NAN)
+            ],
+            [Some(0.45), Some(0.0), Some(1.0), None]
+        );
+        // Its highlight, tone and value are part of what the panel's version covers.
+        let place = Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0,
+        };
+        let list = |row: ListRow| {
+            Panel::new("panel-1", "Queue", "- pod7", place.clone()).with_rows(vec![row])
+        };
+        let before = list(ListRow::new("pod7", false));
+        assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_tone(Tone::Good))));
+        assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_value(0.1))));
+        assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_highlight(true))));
     }
 }

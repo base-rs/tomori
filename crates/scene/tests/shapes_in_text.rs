@@ -32,6 +32,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "the queue's and the tool chips' states, icons inline with their text beside a tick",
     ),
     (
+        "scene/src/projection/list.rs",
+        "▸",
+        "the pointer the server writes before a list's highlighted row, which is found to be left out, not drawn",
+    ),
+    (
         "scene/src/projection/editing.rs",
         "●◠",
         "the knob's icon on its handle and in the hint, and the curve in its readout",

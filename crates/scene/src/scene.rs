@@ -418,6 +418,9 @@ pub struct Step {
     indicator: Indicator,
     pointer: Pointer<arrival::Key>,
     hover: feedback::Hover,
+    /// The choosable row of a list the ray is on, which ticks as it is entered, apart from its panel, so that leaving it
+    /// for the rest of the panel ticks nothing.
+    row_hover: feedback::Hover,
     /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
     /// `design/avatars.md`.
     coordinator: crate::avatar::Coordinator,
@@ -537,6 +540,7 @@ impl Default for Step {
             indicator: Indicator::default(),
             pointer: Pointer::default(),
             hover: feedback::Hover::default(),
+            row_hover: feedback::Hover::default(),
             coordinator: crate::avatar::Coordinator::default(),
             signals: interaction::Signals::default(),
             motion: arrival_motion::Motion::default(),
@@ -1371,6 +1375,14 @@ impl Step {
             .ray
             .filter(|_| travel_active && !travel.aiming && !self.projector.carrying())
             .and_then(|ray| crate::pads::pick(&locomotion, &ray));
+        // A list's choosable row pointed at last frame is marked where A or the trigger would choose it for this
+        // participant, and the row just chosen for as long as the label says so.
+        self.projector.mark_rows(crate::projection::RowMarks {
+            hovered: conversation.pointed_row().filter(|_| conversation.ticks()),
+            chosen: conversation
+                .chosen_row()
+                .map(|(panel, row)| (panel.to_owned(), row.to_owned())),
+        });
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
@@ -1605,8 +1617,18 @@ impl Step {
                 .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
                 .map(|picked| picked.object.clone());
         }
-        // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
-        // While a teleport is aimed, only finding a landing ticks, even with a panel carried.
+        // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next, or, a
+        // list's choosable row, chooses: a target of its own.
+        let item = match (&panel, &projected.pointed, self.projector.held()) {
+            (Some(panel), Some((pointed, ..)), None) if pointed == panel => {
+                projected.item.map(|line| (panel.clone(), line))
+            }
+            _ => None,
+        };
+        conversation.point_item(item.clone());
+        // Entering a new target, an arrival object, a hand menu row, a card, a worker, a panel or a list's choosable row on
+        // it, ticks very lightly, but not while the trigger pulls the swarm; leaving a row for the rest of its panel does
+        // not. While a teleport is aimed, only finding a landing ticks, even with a panel carried.
         let target = if travel.aiming {
             travel.landing.map(|_| feedback::key("landing"))
         } else {
@@ -1619,7 +1641,16 @@ impl Step {
                 .or_else(|| panel.as_ref().map(feedback::key))
                 .or_else(|| pad.map(|(key, _, _)| feedback::key(&("pad", key))))
         };
-        if self.hover.update(target, attracting) {
+        let row = conversation
+            .pointed_row()
+            .filter(|_| {
+                conversation.ticks()
+                    && target.is_some()
+                    && target == panel.as_ref().map(feedback::key)
+            })
+            .map(|row| feedback::key(&row));
+        let entered_row = self.row_hover.update(row, attracting);
+        if self.hover.update(target, attracting) | entered_row {
             feedback.emit(feedback::Event::Hover, now);
         }
         // The ray ends on what it meets, of every kind it may point at, the nearest, or on what is held: a card or a
@@ -1645,14 +1676,6 @@ impl Step {
                 pad.map(|(_, distance, point)| crate::pointing::End::new(distance, point));
             crate::pointing::end([card_end, projected.hit, object_end, worker_end, pad_end])
         });
-        // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next.
-        let item = match (&panel, &projected.pointed, self.projector.held()) {
-            (Some(panel), Some((pointed, ..)), None) if pointed == panel => {
-                projected.item.map(|line| (panel.clone(), line))
-            }
-            _ => None,
-        };
-        conversation.point_item(item.clone());
         // The label on the ray names the panel pointed at, not one carried, and says how to tick the item it meets.
         let mut projection = projected.sheets;
         if let (Some(panel), Some((_, _, point)), None) =
@@ -6179,6 +6202,90 @@ mod tests {
             }
         }
         found.map(|senses| senses.expect("each row"))
+    }
+
+    /// The widths of the outlines the queue's face in `frame` draws: the row pointed at's, or the row just chosen's.
+    fn queue_marks(frame: &Frame<'_>) -> Vec<f32> {
+        let face = frame
+            .projection
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref())
+            .find(|canvas| canvas.plain().starts_with("Queue") && canvas.rows.len() > 4)
+            .expect("the queue's face");
+        [1.0, 2.0]
+            .into_iter()
+            .filter(|width| {
+                face.shapes.iter().any(|shape| {
+                    matches!(shape, crate::shapes::Shape::Rect { outline: Some(outline), .. } if outline == width)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_choosable_row_pointed_at_ticks_as_it_is_entered_and_is_drawn_pointed_at_then_chosen() {
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        for (role, marks) in [
+            (ConnectionRole::Collaborator, true),
+            (ConnectionRole::Visitor, false),
+        ] {
+            let mut conversation = lobby(role);
+            show_queue(&mut conversation, ahead, arrival::HOME);
+            let mut step = Step::default();
+            let [unchoosable, choosable, other] = queue_rows(&mut step, &mut conversation, ahead);
+            let now = Instant::now();
+            let mut feedback = felt();
+            // Whether a frame pointing as `senses` says ticked, and the queue's marks it drew.
+            // Each a tenth of a second after the last, so that hovering ticks as often as it may.
+            let frames = std::cell::Cell::new(0);
+            let ticks = |senses: &Senses,
+                         step: &mut Step,
+                         conversation: &mut Conversation,
+                         feedback: &mut Feedback| {
+                frames.set(frames.get() + 1);
+                let now = now + Duration::from_millis(100 * frames.get());
+                let frame = step.update(senses, conversation, feedback, now, FRAME);
+                // Pointing at the queue, the ray's label names it.
+                assert!(label_hint(&frame.projection).is_some());
+                let marks = queue_marks(&frame);
+                (!felt_on(feedback, Side::Right, now).is_empty(), marks)
+            };
+            ticks(&unchoosable, &mut step, &mut conversation, &mut feedback);
+            // Entering a choosable row ticks, for a participant who may choose it; staying on it does not; and the next
+            // frame draws it pointed at.
+            let (felt, _) = ticks(&choosable, &mut step, &mut conversation, &mut feedback);
+            assert_eq!(felt, marks, "{role:?}");
+            let (felt, drawn) = ticks(&choosable, &mut step, &mut conversation, &mut feedback);
+            assert!(!felt);
+            let pointed: &[f32] = if marks { &[1.0] } else { &[] };
+            assert_eq!(drawn, pointed, "{role:?}");
+            let (felt, _) = ticks(&other, &mut step, &mut conversation, &mut feedback);
+            assert_eq!(felt, marks, "{role:?}");
+            // Leaving a row for one not choosable, or for the panel's metadata above its rows, on the same panel, ticks
+            // nothing; entering a choosable row again does.
+            let above = {
+                let ray = unchoosable.ray.expect("a ray");
+                let at = ray.origin + ray.direction * (2.0 / -ray.direction.z) + Vec3::Y * 0.03;
+                Senses {
+                    ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                    ..unchoosable
+                }
+            };
+            let (felt, _) = ticks(&unchoosable, &mut step, &mut conversation, &mut feedback);
+            assert!(!felt, "{role:?}");
+            let (felt, _) = ticks(&above, &mut step, &mut conversation, &mut feedback);
+            assert!(!felt, "{role:?}");
+            let (felt, _) = ticks(&choosable, &mut step, &mut conversation, &mut feedback);
+            assert_eq!(felt, marks, "{role:?}");
+            if !marks {
+                continue;
+            }
+            // Chosen, it is drawn with the brighter, thicker outline, for as long as the label says so.
+            step.buttons(&a_down(), true, &mut conversation, &mut feedback, now);
+            ticks(&choosable, &mut step, &mut conversation, &mut feedback);
+            let (_, drawn) = ticks(&choosable, &mut step, &mut conversation, &mut feedback);
+            assert_eq!(drawn, [2.0]);
+        }
     }
 
     #[test]
