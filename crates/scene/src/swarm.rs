@@ -8,6 +8,9 @@ use glam::Vec3;
 pub const AGENT_COUNT: usize = 128;
 pub const CENTER: Vec3 = Vec3::new(0.0, 1.4, -2.3);
 
+/// How fast its agents fly at most while the swarm stays where it is, in metres a second.
+pub const FLIGHT: f32 = 0.85;
+
 #[derive(Clone, Copy)]
 pub struct Agent {
     pub position: Vec3,
@@ -22,6 +25,8 @@ pub struct Swarm {
     /// Where its middle stands and which way its eye faces: [`Anchor::AGENT`] unless the joined space's environment
     /// puts the agent elsewhere. See `design/environments.md`.
     anchor: Anchor,
+    /// How far its middle moved since the last step, so that its agents keep up with it as it glides or streams.
+    moved: f32,
 }
 
 impl Default for Swarm {
@@ -45,6 +50,7 @@ impl Default for Swarm {
             visual: Visual::default(),
             time: 0.0,
             anchor: Anchor::AGENT,
+            moved: 0.0,
         }
     }
 }
@@ -63,10 +69,19 @@ impl Swarm {
         self.visual = visual;
     }
 
-    /// Stand at `anchor` from now on: the agents glide there, as they move between shapes, as when a participant
-    /// summons the agent or sends it home.
+    /// Stand at `anchor` from now on: the agents glide there, as they move between shapes, as when the agent goes to
+    /// someone or home, keeping up with its middle as it moves.
     pub fn set_anchor(&mut self, anchor: Anchor) {
+        self.moved += anchor.position.distance(self.anchor.position);
         self.anchor = anchor;
+    }
+
+    /// How fast its agents fly at most over `dt` seconds: [`FLIGHT`], or a quarter faster than its middle moved, so that
+    /// they keep up with it as it streams.
+    fn fastest(&mut self, dt: f32) -> f32 {
+        let pace = if dt > 0.0 { self.moved / dt } else { 0.0 };
+        self.moved = 0.0;
+        FLIGHT.max(pace * 1.25)
     }
 
     /// Appear at `anchor` from now on: the agents are carried there at once, in the shape they have, turned with it,
@@ -99,6 +114,7 @@ impl Swarm {
         // Bound stalls (sleep/resume) rather than launching agents across the room.
         let dt = dt.clamp(0.0, 1.0 / 30.0);
         self.time += dt;
+        let fastest = self.fastest(dt);
         let target = attractor
             .unwrap_or_else(|| self.at(Vec3::new((self.time * 0.3).sin() * 0.35, 0.0, 0.0)));
         if self.visual.mode != Mode::Neutral && attractor.is_none() {
@@ -129,7 +145,7 @@ impl Swarm {
                 ));
                 let force = (goal - agent.position) * 5.0 - agent.velocity * 3.8;
                 agent.velocity =
-                    (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(0.85);
+                    (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(fastest);
                 agent.position += agent.velocity * dt;
             }
             return;
@@ -166,7 +182,7 @@ impl Swarm {
             // Keep agents above the floor even when a controller is lowered.
             force.y += (0.35 - agent.position.y).max(0.0) * 5.0;
             let velocity =
-                (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(0.85);
+                (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(fastest);
             self.next[i] = Agent {
                 position: agent.position + velocity * dt,
                 velocity,

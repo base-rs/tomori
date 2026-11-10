@@ -133,7 +133,7 @@ fn clear(
 }
 
 /// `vector` turned by the quaternion `rotation`.
-pub(super) fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
+pub(crate) fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
     let length = (x * x + y * y + z * z + w * w).sqrt().max(f32::EPSILON);
     let (x, y, z, w) = (x / length, y / length, z / length, w / length);
     // v + 2w(q × v) + 2q × (q × v)
@@ -174,7 +174,7 @@ fn corners(slot: &tomori_protocol::wall::SlotFrame, wall: &Pose) -> ([f32; 3], [
 }
 
 /// The box about each slot of `wall`, where it stands, tilted as it tilts, aligned with the space's axes.
-pub(super) fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
+pub(crate) fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
     wall.slot_frames().into_iter().map(move |slot| {
         let (middle, corners) = corners(&slot, &wall.frame());
         corners

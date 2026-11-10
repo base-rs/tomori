@@ -1182,14 +1182,30 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     };
     let below = before(&down);
     assert!((below.position[2] + 2.3).abs() < 1e-5, "{below:?}");
-    // At home by default, or where it was summoned.
-    let home = agent(&tomori_protocol::Anchors::new(), None);
+    // At home by default, or where it went, following, pinned or asked to go, as the space lets it move.
+    let anchors = tomori_protocol::Anchors::new();
+    let asked = tomori_protocol::AgentMovement::default();
+    let follow = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, None);
+    let kept = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Home, None);
+    let home = agent(&anchors, None, false, asked);
     assert_eq!(home["at_home"], true);
     assert_eq!(home["position"], json!([0.0, 1.4, -2.3]));
     assert_eq!(home["facing_yaw"], 180.0);
-    let away = agent(&tomori_protocol::Anchors::new(), Some(ahead));
+    assert_eq!(
+        (home["mode"].as_str(), home["movement"].as_str()),
+        (Some("home"), Some("moves only when asked"))
+    );
+    let away = agent(&anchors, Some(ahead), false, asked);
     assert_eq!(away["at_home"], false);
     assert_eq!(away["position"], json!([1.0, 1.9, -2.3]));
+    assert_eq!(away["mode"], "away");
+    let following = agent(&anchors, Some(ahead), false, follow);
+    assert_eq!(
+        (following["mode"].as_str(), following["movement"].as_str()),
+        (Some("following"), Some("follows the speaker"))
+    );
+    assert_eq!(agent(&anchors, Some(ahead), true, follow)["mode"], "pinned");
+    assert_eq!(agent(&anchors, None, false, kept)["movement"], "stays home");
 }
 
 #[test]

@@ -2989,6 +2989,7 @@ mod tests {
                         environment: "sky".to_owned(),
                         attribution: true,
                         brief: false,
+                        movement: None,
                         instructions: String::new(),
                         closed: None,
                         closed_order: None,

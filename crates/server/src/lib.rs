@@ -20,6 +20,7 @@ mod door;
 mod environments;
 #[cfg(unix)]
 mod exit;
+mod follow;
 mod highlighting;
 mod hub;
 mod images;

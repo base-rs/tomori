@@ -5265,13 +5265,24 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
 }
 
 #[test]
-fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_cannot() {
+fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_cannot() {
     let (hub, _jobs) = hub();
     let (space, _commands) = idle(&hub);
     let ada = Client::greeted(&hub, Access::open(), "ada");
-    // Outside a space, nowhere to summon it to.
+    // Outside a space, nowhere to call it to.
+    ada.send(ClientMessage::CallAgent);
     ada.send(ClientMessage::PlaceAgent { at: None });
-    assert_eq!(ada.errors(), ["Join a space first."]);
+    ada.send(ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::default(),
+    });
+    assert_eq!(
+        ada.errors(),
+        [
+            "Join a space first.",
+            "Join a space first.",
+            "Join a space first."
+        ]
+    );
     ada.send(ClientMessage::Join {
         space: space.clone(),
     });
@@ -5282,28 +5293,45 @@ fn a_participant_summons_the_agent_and_sends_it_home_for_everyone_and_a_visitor_
             .read()
             .into_iter()
             .filter_map(|message| match message {
-                ServerMessage::Space { state } => Some(state.summoned),
+                ServerMessage::Space { state } => {
+                    Some((state.summoned, state.pinned, state.summons))
+                }
                 _ => None,
             })
             .next_back()
     };
-    summoned(&ada);
+    // The server keeps no summons, so a client's trigger sends none, and one sent anyway changes nothing.
+    assert_eq!(summoned(&ada), Some((None, false, false)));
     summoned(&vic);
-    // Summoned, everyone sees it there; the same again changes nothing and tells nobody.
-    let beside = upright([1.0, 1.4, -1.5]);
-    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
-    assert_eq!(summoned(&vic), Some(Some(beside)));
-    ada.send(ClientMessage::PlaceAgent { at: Some(beside) });
+    ada.send(ClientMessage::PlaceAgent {
+        at: Some(upright([1.0, 1.4, -1.5])),
+    });
     assert_eq!(summoned(&vic), None);
-    // A visitor watches, but summons nothing.
+    // Before Ada says where she is, Tomori cannot come to her.
+    ada.send(ClientMessage::CallAgent);
+    assert_eq!(ada.errors(), ["Tomori does not know where you are yet."]);
+    // Called, everyone sees it before her, pinned there.
+    ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, -3.0]));
+    ada.send(ClientMessage::CallAgent);
+    let (at, pinned, _) = summoned(&vic).expect("told");
+    assert!(pinned);
+    assert!((at.expect("away").position[2] + 2.3).abs() < 1e-4);
+    // A visitor watches, but calls nothing and sends nothing home.
+    vic.send(ClientMessage::CallAgent);
     vic.send(ClientMessage::PlaceAgent { at: None });
     assert_eq!(
         vic.errors(),
-        ["Visitors can watch, but not act in a space."]
+        [
+            "Visitors can watch, but not act in a space.",
+            "Visitors can watch, but not act in a space."
+        ]
     );
-    // Sent home, everyone sees it at home again.
+    // Sent home, everyone sees it at home again, unpinned.
     ada.send(ClientMessage::PlaceAgent { at: None });
-    assert_eq!(summoned(&vic), Some(None));
+    assert_eq!(summoned(&vic), Some((None, false, false)));
+    // Home already, sending it home tells nobody.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(summoned(&vic), None);
 }
 
 /// The horizontal distance between `a` and `b`.
@@ -5334,15 +5362,13 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
     let home = ada.projection();
     assert_eq!(home.walls[0].pose, crate::stage::default_stage());
     vic.read();
-    // Ada stands 3 m to the right of home, facing +X, and summons the agent 1.5 m ahead of her, level with her eyes, as
-    // a client from before the agent stood further and higher leaves it: it stands 2.3 m ahead of her, a little above
-    // her eyes, with room for its wall beneath it and its workers on the arc through it.
+    // Ada stands 3 m to the right of home, facing +X, and calls the agent, which moves only when asked: it stands 2.3 m
+    // ahead of her, a little above her eyes, with room for its wall beneath it and its workers on the arc through it.
     let eyes = [3.0, 1.6, 0.0];
     ada.send(looking(eyes, [5.0, 1.6, 0.0]));
-    let drawn = tomori_protocol::Pose::at([4.5, 1.6, 0.0]).facing_towards(eyes);
-    ada.send(ClientMessage::PlaceAgent { at: Some(drawn) });
+    ada.send(ClientMessage::CallAgent);
     let at = tomori_protocol::entourage::summoned(
-        drawn.position,
+        [4.5, 1.6, 0.0],
         eyes,
         tomori_protocol::entourage::FLOOR,
     );
@@ -5358,10 +5384,14 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         })
         .next_back()
         .expect("told of the summons");
-    assert_eq!(
-        (state.summoned, state.summoner),
-        (crate::stage::valid(&at), Some(eyes))
+    let summoned = state.summoned.expect("away");
+    assert!(
+        across(summoned.position, at.position) < 1e-4,
+        "{summoned:?}"
     );
+    assert!((summoned.yaw() - at.yaw()).abs() < 1e-4);
+    assert_eq!(state.summoner, Some(eyes));
+    let at = summoned;
     let away = messages
         .into_iter()
         .filter_map(|message| match message {
@@ -5419,9 +5449,9 @@ fn the_tomori_wall_goes_with_a_summoned_agent_and_its_panels_with_it_for_everyon
         revision: None,
     });
     assert_eq!(ada.projection().walls[0].pose, wall.pose);
-    // Summoned to the same place again, nothing moves and nobody is told.
+    // Called to the same place again, nothing moves.
     vic.read();
-    ada.send(ClientMessage::PlaceAgent { at: Some(at) });
+    ada.send(ClientMessage::CallAgent);
     assert!(vic.projections().is_empty());
     // Sent home, it goes home with the agent, as the space laid it out, for everyone.
     ada.send(ClientMessage::PlaceAgent { at: None });
@@ -5453,9 +5483,7 @@ fn the_tomori_wall_stays_home_where_no_travel_spot_is_clear_and_goes_home_as_the
     });
     let eyes = [6.0, 1.6, 0.0];
     ada.send(looking(eyes, [8.0, 1.6, 0.0]));
-    ada.send(ClientMessage::PlaceAgent {
-        at: Some(tomori_protocol::Pose::at([7.5, 1.6, 0.0]).facing_towards(eyes)),
-    });
+    ada.send(ClientMessage::CallAgent);
     // The agent goes; its wall, with nowhere clear to stand, stays home.
     assert!(hub.lock().space(&space).unwrap().summoned.is_some());
     assert_eq!(
@@ -5467,9 +5495,7 @@ fn the_tomori_wall_stays_home_where_no_travel_spot_is_clear_and_goes_home_as_the
         environment: "sky".to_owned(),
     });
     ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, 3.0]));
-    ada.send(ClientMessage::PlaceAgent {
-        at: Some(tomori_protocol::Pose::at([0.0, 1.6, 1.5]).facing_towards([0.0, 1.6, 0.0])),
-    });
+    ada.send(ClientMessage::CallAgent);
     // Beneath the agent, a little above her eyes, 2.3 m behind home, as far as its home stands from home.
     let travelled = ada.projection().walls[0].pose;
     assert!((travelled.position[2] - 2.3).abs() < 1e-4, "{travelled:?}");
@@ -5643,9 +5669,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
         let shown = ada.projection();
         // Summoned, the agent takes its Tomori wall with it, for this run only.
         ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, 3.0]));
-        ada.send(ClientMessage::PlaceAgent {
-            at: Some(tomori_protocol::Pose::at([0.0, 1.6, 1.5]).facing_towards([0.0, 1.6, 0.0])),
-        });
+        ada.send(ClientMessage::CallAgent);
         assert_ne!(ada.projection().walls[0].pose, shown.walls[0].pose);
         (space, shown)
     };
@@ -6497,5 +6521,7 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
     hub.shutdown();
 }
 
+#[path = "hub_tests/following.rs"]
+mod following;
 #[path = "hub_tests/patches.rs"]
 mod patches;

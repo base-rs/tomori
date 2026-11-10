@@ -33,6 +33,9 @@ pub struct KeptSpace {
     /// Whether a participant chose brief speech for the space. Speech is full otherwise, as for a space kept before the setting was stored, so that only a choice made since keeps a space brief. See `design/speech.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub brief: bool,
+    /// How the agent moves about the space, if an owner chose other than the default. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement: Option<tomori_protocol::AgentMovement>,
     /// The space's own instructions to the agent, if an owner gave any. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
@@ -195,6 +198,7 @@ mod tests {
             environment: "sky".into(),
             attribution: false,
             brief: false,
+            movement: None,
             instructions: String::new(),
             closed: None,
             closed_order: None,

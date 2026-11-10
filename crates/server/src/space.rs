@@ -105,6 +105,8 @@ pub struct SpaceModel {
     attribution: bool,
     /// How much of each reply is spoken; see `design/speech.md`.
     speech: SpeechSetting,
+    /// How the agent moves about the space, an owner's setting, kept with the space. See `design/environments.md`.
+    movement: tomori_protocol::AgentMovement,
     /// The modes the session offers and its current one, as the agent last reported them.
     modes: Modes,
     error: Option<String>,
@@ -745,6 +747,7 @@ impl SpaceModel {
             finished: HashMap::new(),
             attribution: true,
             speech: SpeechSetting::Full,
+            movement: tomori_protocol::AgentMovement::default(),
             modes: snapshot.modes,
             error: None,
             worker_error: snapshot.workers_incomplete,
@@ -1226,6 +1229,26 @@ impl SpaceModel {
             }
             SpeechSetting::Unknown => Err("Tomori does not know that speech setting."),
         }
+    }
+
+    /// How the agent moves about the space. See `design/environments.md`.
+    pub fn movement(&self) -> tomori_protocol::AgentMovement {
+        self.movement
+    }
+
+    /// Change how the agent moves about the space, its delay brought within bounds; whether it changed. An unknown
+    /// mode is refused.
+    pub fn set_movement(
+        &mut self,
+        movement: tomori_protocol::AgentMovement,
+    ) -> Result<bool, &'static str> {
+        if movement.mode == tomori_protocol::Movement::Unknown {
+            return Err("Tomori does not know that way for the agent to move.");
+        }
+        let movement = tomori_protocol::AgentMovement::new(movement.mode, movement.return_after);
+        let changed = self.movement != movement;
+        self.movement = movement;
+        Ok(changed)
     }
 
     /// Whether `mode` is one the space shows as offered, so a participant may choose it.
@@ -2130,6 +2153,12 @@ impl SpaceModel {
             summoned: None,
             summoner: None,
             summons: false,
+            movement: Some(self.movement),
+            // Set by the hub, which knows where the agent stands.
+            pinned: false,
+            facing: None,
+            via: None,
+            stream: false,
             // Set by the hub, which knows the backends.
             avatar: None,
             error: {

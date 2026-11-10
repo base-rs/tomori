@@ -107,6 +107,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::RemoveWall { .. }
         // Locking a wall changes what everyone else may do with it.
         | ClientMessage::LockWall { .. }
+        // How the agent moves changes it for everyone in the space. See `design/environments.md`.
+        | ClientMessage::SetAgentMovement { .. }
         // A space's title is how everyone, in it and in the lobby, tells it apart, typed or said. See `design/spaces.md`.
         | ClientMessage::RenameSpace { .. }
         | ClientMessage::UtteranceBegin { titling: true, .. }
@@ -140,6 +142,7 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::AttachWall { .. }
         // Visitors watch the agent, but summon it nowhere. See `design/environments.md`.
         | ClientMessage::PlaceAgent { .. }
+        | ClientMessage::CallAgent
         // Participants tick and untick checklist items for everyone, as they rearrange panels; visitors only watch.
         | ClientMessage::CheckPanelItem { .. } => participant,
     };
@@ -313,6 +316,11 @@ mod tests {
                 locked: false,
                 reset: false,
             },
+            ClientMessage::PlaceAgent { at: None },
+            ClientMessage::CallAgent,
+            ClientMessage::SetAgentMovement {
+                movement: tomori_protocol::AgentMovement::default(),
+            },
         ]
     }
 
@@ -402,6 +410,7 @@ mod tests {
                     && kind != "add_wall"
                     && kind != "remove_wall"
                     && kind != "lock_wall"
+                    && kind != "set_agent_movement"
                     && kind != "open_pairing"
                     && kind != "close_pairing"
             })

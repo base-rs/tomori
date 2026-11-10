@@ -36,10 +36,12 @@ pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 pub(crate) mod agent_workers;
+mod following;
 mod layouts;
 mod pairing_window;
 mod provenance;
 pub(crate) mod tools;
+pub(crate) use following::home as agent_home;
 
 pub(crate) use agent_pairing::Decision;
 pub use pairing_window::{
@@ -448,8 +450,9 @@ pub struct Hub {
     environments: RwLock<Environments>,
     /// The server sides of the environments, run for the spaces bound to them. See `design/environments.md`.
     server_sides: crate::server_sides::ServerSides,
-    /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
-    deferred_snapshot: Notify,
+    /// Notified when a space defers a snapshot, or an agent's next move is due sooner, so that the server's snapshot
+    /// timer can wake for it.
+    deferred_snapshot: Arc<Notify>,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
     counts_changed: Notify,
     /// Notified when someone starts watching the cards, so that the server reads them if they are due. See `design/github.md`.
@@ -526,6 +529,9 @@ struct HubState {
     counts: Counts,
     /// The cards the server shows in their environment's spaces, if it shows any. See `design/github.md`.
     board: Option<crate::cards::Board>,
+    /// Notified when an agent's next move is due sooner, so that the server's snapshot timer wakes for it: the hub's
+    /// own. See `design/environments.md`.
+    woken: Arc<Notify>,
 }
 
 struct ConnectionRecord {
@@ -751,6 +757,9 @@ struct SpaceRecord {
     /// See `design/projection.md`.
     summoner: Option<[f32; 3]>,
     travel: Option<tomori_protocol::Pose>,
+    /// How the agent follows whoever it is talking with, and whether it is pinned, for this run and this environment
+    /// only. See `design/environments.md`.
+    following: following::Following,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -1251,14 +1260,6 @@ impl HubState {
         changed
     }
 
-    /// Where the eyes of the participant `participant` are, as they last reported them.
-    fn eyes(&self, participant: &str) -> Option<[f32; 3]> {
-        self.participants
-            .get(participant)
-            .and_then(|record| record.seen.as_ref())
-            .map(|seen| seen.head.position)
-    }
-
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
@@ -1319,6 +1320,8 @@ impl HubState {
                     environment: model.environment.clone(),
                     attribution: model.attribution(),
                     brief: model.speech() == SpeechSetting::Brief,
+                    movement: Some(model.movement())
+                        .filter(|movement| *movement != tomori_protocol::AgentMovement::default()),
                     instructions: model.space_instructions().to_owned(),
                     closed: model
                         .closed_reason()
@@ -1397,10 +1400,14 @@ impl HubState {
         };
         if let Some(prompt) = space.model.next_prompt() {
             let key = prompt.key.clone();
+            let source = space.model.given().expect("given as it was taken").source;
             if space.commands.try_send(SpaceCommand::Send(prompt)).is_err() {
                 space
                     .model
                     .sent(&key, Err("the agent session has stopped".to_owned()));
+            } else {
+                // A following agent goes to whoever it begins answering.
+                self.agent_given(id, source, Instant::now());
             }
         }
     }
@@ -1953,8 +1960,15 @@ impl HubState {
             .get_mut(&connection)
             .and_then(|record| record.utterance.take())
         {
-            let ended = self.utterances.remove(&open.id);
-            self.recorded(ended.map(UtteranceRecord::recorder));
+            let ended = self
+                .utterances
+                .remove(&open.id)
+                .map(UtteranceRecord::recorder);
+            // A following agent's move for them stops where it is.
+            ended.iter().for_each(|(participant, space)| {
+                self.agent_cancelled(space, participant, Instant::now());
+            });
+            self.recorded(ended);
             deferred.push(Deferred::Cancel(open.id));
         }
     }
@@ -1992,9 +2006,11 @@ impl Hub {
         roots: Vec<WorkspaceRoot>,
         slots: Arc<SpaceSlots>,
     ) -> Arc<Self> {
+        let deferred_snapshot = Arc::new(Notify::new());
         let hub = Arc::new_cyclic(|this| Self {
             state: Mutex::new(HubState {
                 run: run_token(),
+                woken: deferred_snapshot.clone(),
                 ..HubState::default()
             }),
             backends,
@@ -2004,7 +2020,7 @@ impl Hub {
             roots: RwLock::new(roots),
             environments: RwLock::new(Environments::default()),
             server_sides: crate::server_sides::ServerSides::default(),
-            deferred_snapshot: Notify::new(),
+            deferred_snapshot,
             counts_changed: Notify::new(),
             cards_watched: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
@@ -2377,6 +2393,8 @@ impl Hub {
         record.summoned = None;
         record.summoner = None;
         record.travel = None;
+        // Nor does it follow anyone there, nor stay pinned.
+        record.following = following::Following::default();
         // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
         record.instruct(true);
         // Its server side, if it has one, runs for the space, and the previous environment's stops.
@@ -3623,6 +3641,8 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
+                // Words for the agent, rather than an answer, a name or a title, turn a following agent to them.
+                let question = answer.is_none() && !naming && !titling;
                 if let Some(open) = state
                     .connections
                     .get_mut(&connection)
@@ -3704,6 +3724,9 @@ impl Hub {
                     .expect("checked above")
                     .speech
                     .recording(participant);
+                if question && let Some(captured) = self.capture(state, &space, participant) {
+                    state.agent_pressed(&space, participant, captured, Instant::now());
+                }
                 deferred.push(Deferred::Begin(id));
             }
             ClientMessage::UtteranceEnd { utterance, .. }
@@ -3766,6 +3789,9 @@ impl Hub {
                     .utterances
                     .get(&open.id)
                     .map(|record| (record.participant.clone(), record.space.clone()));
+                if let Some((participant, space)) = &ended {
+                    state.agent_released(space, participant, Instant::now());
+                }
                 state.released(ended, Instant::now());
                 // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {
@@ -4771,36 +4797,46 @@ impl Hub {
                 );
                 deferred.push(Deferred::Keep);
             }
-            ClientMessage::PlaceAgent { at } => {
-                let at = match at.map(|at| crate::stage::valid(&at)) {
-                    Some(None) => {
-                        state.error(participant, "That is too far away for the agent to go.");
-                        return;
-                    }
-                    Some(Some(at)) => Some(at),
-                    None => None,
-                };
+            ClientMessage::PlaceAgent { at: Some(_) } => {
+                // The trigger no longer summons the agent: one from a client that ignores `summons` changes nothing.
+                log::debug!("A summons from {participant} was dropped, as this server keeps none.");
+            }
+            ClientMessage::PlaceAgent { at: None } => {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                // Its entourage gathers about whoever summoned it, the agent a little above their eyes, with room for
-                // its wall beneath it, as their client stands it.
-                let summoner = at.and_then(|_| state.eyes(participant));
-                let at = at.map(|at| {
-                    crate::stage::valid(&crate::presence::summoned(&at, summoner)).unwrap_or(at)
-                });
-                let record = state.space(&space).expect("in it");
-                let travel = at.and_then(|at| self.travel_spot(record, &at, summoner));
-                if state.summon(&space, at, summoner, travel) {
-                    let name = state
-                        .participants
-                        .get(participant)
-                        .map(|record| record.name.clone())
-                        .unwrap_or_default();
-                    match at {
-                        Some(_) => log::info!("{name} summoned the agent of space {space}."),
-                        None => log::info!("{name} sent the agent of space {space} home."),
+                let name = state.participants[participant].name.clone();
+                state.agent_home(&space, &format!("{name} sent it home"));
+            }
+            ClientMessage::CallAgent => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if let Err(error) = self.call_agent(state, &space, participant, Instant::now()) {
+                    state.error(participant, error);
+                }
+            }
+            ClientMessage::SetAgentMovement { movement } => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.model.set_movement(movement) {
+                    Ok(changed) => {
+                        if changed {
+                            let movement = record.model.movement();
+                            let name = state.participants[participant].name.clone();
+                            log::info!(
+                                "{name} set the agent of space {space} to move {:?}, going home after {:?} s.",
+                                movement.mode,
+                                movement.return_after
+                            );
+                            state.movement_changed(&space, &name, Instant::now());
+                            state.touch_space(&space);
+                            deferred.push(Deferred::Keep);
+                        }
                     }
+                    Err(error) => state.error(participant, error),
                 }
             }
             ClientMessage::SetSpeech { speech } => {
@@ -5078,6 +5114,10 @@ impl Hub {
                 "was transcribed"
             },
         );
+        // Words with nothing in them move a following agent nowhere: a move begun for them stops where it is.
+        if text.is_empty() {
+            state.agent_cancelled(&record.space, &record.participant, Instant::now());
+        }
         // Words that say the participant's new name rename them, wherever they are now, and are never queued. Renaming again to the same name, as a repeated finalization does, changes nothing. Words with no speech in them fail below, as any others do.
         if record.naming && !text.is_empty() {
             match limits::name(spoken_name(text)) {
@@ -5295,6 +5335,7 @@ impl Hub {
                 return;
             };
             record.log_outcome(utterance, "failed to transcribe");
+            state.agent_cancelled(&record.space, &record.participant, Instant::now());
             // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again. The transcriber is still told, as every utterance it began ends with an end or a cancel.
             let mut open = false;
             for connection in state.connections.values_mut() {
@@ -5371,6 +5412,7 @@ impl Hub {
             stage: crate::stage::Stage::default(),
             summoned: None,
             summoner: None,
+            following: following::Following::default(),
             travel: None,
             active: None,
         });
@@ -5457,6 +5499,15 @@ impl Hub {
                         .set_speech(SpeechSetting::Brief)
                         .expect("brief is a known setting");
                 }
+                // A setting this build does not know, from a newer server, leaves the default.
+                if let Some(movement) = kept.movement
+                    && model.set_movement(movement).is_err()
+                {
+                    log::warn!(
+                        "Space {} keeps a way for its agent to move that this server does not know.",
+                        kept.id
+                    );
+                }
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
                 let (commands, receiver) = async_channel::unbounded();
@@ -5514,6 +5565,7 @@ impl Hub {
                     stage,
                     summoned: None,
                     summoner: None,
+                    following: following::Following::default(),
                     travel: None,
                     active: kept.active,
                 });
@@ -5827,13 +5879,14 @@ impl Hub {
         *self.highlighter.write().expect("never left poisoned") = highlighter;
     }
 
-    /// When the earliest deferred snapshot is due, if any.
+    /// When the earliest deferred snapshot, or an agent's next move, is due, if any.
     pub fn snapshot_deadline(&self) -> Option<Instant> {
         let state = self.lock();
         state
             .spaces
             .iter()
             .filter_map(|space| space.deferred.get())
+            .chain(state.movement_deadline())
             .min()
     }
 
@@ -5888,9 +5941,11 @@ impl Hub {
         }
     }
 
-    /// Send the deferred snapshots that are due at `now`.
+    /// Send the deferred snapshots that are due at `now`, and make the agents' moves that are due.
     pub fn flush_snapshots(&self, now: Instant) {
-        let state = self.lock();
+        let mut state = self.lock();
+        // And the agents' moves that are due. See `design/environments.md`.
+        state.movements_due(now);
         let due: Vec<String> = state
             .spaces
             .iter()
@@ -6084,6 +6139,8 @@ impl Hub {
         let Some(record) = state.space_mut(space) else {
             return;
         };
+        // While the agent speaks, a following agent does not go home.
+        record.following.spoke(Instant::now(), item.duration());
         record.speech.record(reply, item);
         // A reply that starts while someone records is held for them, which the pacer tells them.
         if record.speech.held_changed() {
@@ -6232,7 +6289,13 @@ impl Hub {
                 state.anchors = environments.anchors(&space.model.environment);
                 state.summoned = space.summoned;
                 state.summoner = space.summoner;
-                state.summons = true;
+                // The trigger summons it nowhere: it follows, and is called with the hand menu. See
+                // `design/environments.md`.
+                state.summons = false;
+                state.pinned = space.following.pinned;
+                state.facing = space.following.faces();
+                state.via = space.following.via;
+                state.stream = space.following.stream;
                 // The avatar its environment names, or else its backend's, for everyone in it. See `design/avatars.md`.
                 state.avatar = environments
                     .avatar(&space.model.environment)

@@ -48,12 +48,13 @@ pub use projection::{
     TokenKind, WALL_SLOTS, Wall, WallKind, WallShape, hash_bytes, hash_text, valid_spans,
 };
 pub use space::{
-    AVATAR_BYTES, Activity, AgentInstructions, Anchors, Approval, ApprovalOption, Attention,
-    BackendInfo, ConnectionRole, Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest,
-    KnockState, Message, Mode, Participant, Presentation, PresentationKind, Question, QueueEntry,
-    QueueState, Renamer, Role, SessionSummary, SpaceState, SpaceSummary, SpeechSetting, Worker,
-    WorkerState, WorkspaceRoot, valid_avatar,
+    AVATAR_BYTES, Activity, AgentInstructions, AgentMovement, Anchors, Approval, ApprovalOption,
+    Attention, BackendInfo, ConnectionRole, Engagement, EnvironmentInfo, EnvironmentVersion,
+    KnockRequest, KnockState, Message, Mode, Movement, Participant, Presentation, PresentationKind,
+    Question, QueueEntry, QueueState, Renamer, Role, SessionSummary, SpaceState, SpaceSummary,
+    SpeechSetting, Worker, WorkerState, WorkspaceRoot, valid_avatar,
 };
+pub use space::{RETURN_AFTER, RETURN_CHOICES, RETURN_LONGEST, RETURN_SHORTEST};
 
 /// The identifier of the Minimal grid, the plain floor grid that every client draws, built in: outside any space, and in a space whose environment it cannot present at the version the space names. It is the protocol's fallback rather than an environment of its own, so its identity is here; every other environment, Tomori's own included, defines its identity in its own crate, and an application registers it. A server offers the grid only when it registers it, as Tomori's own does. See `design/environments.md`.
 pub const GRID: &str = "minimal";

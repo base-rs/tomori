@@ -1,8 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Where the agent stands: summoned by a participant, sent home by the agent through the `move_agent` tool when asked,
-//! told by `presence`, and back at home when the space changes environment, and never moved otherwise. See
+//! Where the agent stands: called by a participant, sent home or pinned by the agent through the `move_agent` tool
+//! when asked, kept home by an owner, told by `presence`, and back at home when the space changes environment, and
+//! never moved otherwise in a space whose agent moves only when asked. See
 //! `design/environments.md` and `design/mcp.md`.
 use std::sync::Arc;
 
@@ -62,7 +63,7 @@ fn close(a: [f32; 3], b: [f32; 3]) -> bool {
 }
 
 #[test]
-fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
+fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     let backend = FakeBackend::new();
     let server = start(&backend);
     let mut ada = TestClient::open(server.address);
@@ -76,23 +77,49 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
         instructions: None,
     });
     let state = ada.space(|state| state.title == "Yard");
-    // The space opens with the agent at home, and the server keeps where it is summoned to.
-    assert!(state.summons);
+    // The space opens with the agent at home, moving only when asked, and the server keeps no summons.
+    assert!(!state.summons);
+    assert_eq!(
+        state.movement,
+        Some(tomori_protocol::AgentMovement::default())
+    );
     assert_eq!(state.summoned, None);
     let token = eventually(|| server.tools_token());
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
     assert_eq!(presence["agent"]["at_home"], true);
     assert_eq!(presence["agent"]["position"], json!([0.0, 1.4, -2.3]));
+    assert_eq!(presence["agent"]["mode"], "home");
 
-    // Ada summons it beside her, to look at something together: everyone in the space sees it there.
-    let beside = Pose::at([2.0, 1.4, -1.0]).facing_towards([0.0, 1.6, 0.0]);
-    ada.send(&ClientMessage::PlaceAgent { at: Some(beside) });
-    let summoned = ada.space(|state: &SpaceState| state.summoned.is_some());
-    assert!(close(summoned.summoned.unwrap().position, beside.position));
+    // Ada calls it to her, to look at something together: everyone in the space sees it there, pinned. She stays where
+    // she is, since a client reports where it is only so often.
+    ada.send(&ClientMessage::Presence {
+        head: Pose::at([1.0, 1.6, 0.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+    });
+    // Once the server has heard where she is, it comes; before, it cannot.
+    let called = loop {
+        ada.send(&ClientMessage::CallAgent);
+        let answer = ada.wait_for(|message| match message {
+            tomori_protocol::ServerMessage::Space { state } if state.summoned.is_some() => {
+                Some(Some(state.clone()))
+            }
+            tomori_protocol::ServerMessage::Error { .. } => Some(None),
+            _ => None,
+        });
+        if let Some(state) = answer {
+            break state;
+        }
+    };
+    assert!(called.pinned);
+    assert!(close(called.summoned.unwrap().position, [1.0, 1.9, -2.3]));
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
     assert_eq!(presence["agent"]["at_home"], false);
-    assert_eq!(presence["agent"]["position"], json!([2.0, 1.4, -1.0]));
+    assert_eq!(presence["agent"]["mode"], "pinned");
+    assert_eq!(presence["agent"]["position"], json!([1.0, 1.9, -2.3]));
     assert_eq!(presence["agent"]["home"], json!([0.0, 1.4, -2.3]));
 
     // Nothing moves it of its own accord: it is still there a while later.
@@ -171,7 +198,7 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
             "move_agent",
             json!({"place": "wall Tomori"})
         ))
-        .contains("home, near NAME or front NAME")
+        .contains("home, stay, near NAME or front NAME")
     );
     assert!(
         failure(&call(
@@ -221,16 +248,70 @@ fn a_participant_summons_the_agent_and_the_agent_goes_home_when_asked() {
         true
     );
 
-    // A summons beyond the space's bounds is refused, and leaves it where it is.
-    ada.send(&ClientMessage::PlaceAgent {
-        at: Some(Pose::at([0.0, 1.4, -50.0])),
+    // Asked to stay, it is pinned where it stands, and says so.
+    let stay = content(&call(
+        &server,
+        &token,
+        &session,
+        "move_agent",
+        json!({"place": "stay here"}),
+    ))
+    .clone();
+    assert_eq!(
+        (stay["moved"].as_bool(), stay["agent"]["mode"].as_str()),
+        (Some(false), Some("pinned"))
+    );
+    ada.space(|state: &SpaceState| state.pinned);
+
+    // An owner keeps it home: it goes home, and neither the agent nor a participant moves it from there.
+    ada.send(&ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Home, Some(90)),
     });
+    let kept = ada.space(|state: &SpaceState| {
+        state
+            .movement
+            .is_some_and(|movement| movement.mode == tomori_protocol::Movement::Home)
+    });
+    assert_eq!((kept.summoned, kept.pinned), (None, false));
+    assert!(
+        failure(&call(
+            &server,
+            &token,
+            &session,
+            "move_agent",
+            json!({"place": "front Ada"})
+        ))
+        .contains("keeps you at home")
+    );
+    ada.send(&ClientMessage::CallAgent);
     ada.wait_for(|message| match message {
-        tomori_protocol::ServerMessage::Error { error, .. } if error.contains("too far") => {
+        tomori_protocol::ServerMessage::Error { error, .. } if error.contains("stays home") => {
             Some(())
         }
         _ => None,
     });
+    let home = content(&call(
+        &server,
+        &token,
+        &session,
+        "move_agent",
+        json!({"place": "home"}),
+    ))
+    .clone();
+    assert_eq!(home["agent"]["movement"], "stays home");
+    ada.send(&ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::default(),
+    });
+    ada.space(|state: &SpaceState| {
+        state.movement == Some(tomori_protocol::AgentMovement::default())
+    });
+    content(&call(
+        &server,
+        &token,
+        &session,
+        "move_agent",
+        json!({"place": "front Ada"}),
+    ));
 
     // A change of environment brings it home, to the new environment's home for it.
     ada.send(&ClientMessage::SetEnvironment {

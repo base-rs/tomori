@@ -275,6 +275,10 @@ impl LobbyStep {
     }
 }
 
+/// How near a participant's head, in metres, the agent pinned there counts as called to them already, so that the hand
+/// menu no longer offers to call it: within the distance at which it already serves them unmoved.
+pub const CALLED_NEAR: f32 = 3.0;
+
 pub struct Conversation {
     /// This participant's number on the connected server, from its Welcome, which the server records on their queued input. Kept while the connection is down, since a reconnect keeps it; see `design/security.md`.
     source: Option<u32>,
@@ -1695,7 +1699,12 @@ impl Conversation {
             muted: self.muted,
             pill: self.pill,
             travel: self.declared_locomotion().travels().then_some(self.travel),
-            agent_away: self.summons() && self.arrangement().summoned(),
+            agent_away: self.sends_agent_home()
+                && self
+                    .joined_space()
+                    .is_some_and(|(space, _)| space.summoned.is_some() || space.pinned),
+            calls: self.offers_call(),
+            movement: self.agent_movement(),
             pointed: None,
             feedback: self.feedback,
         }
@@ -1937,7 +1946,18 @@ impl Conversation {
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Travel => self.toggle_travel(),
-            crate::hand_menu::Choice::AgentHome => self.summon(None, None),
+            crate::hand_menu::Choice::AgentHome => self.send_agent_home(),
+            crate::hand_menu::Choice::CallAgent => self.call_agent(),
+            crate::hand_menu::Choice::AgentMovement => {
+                if let Some((movement, _)) = self.agent_movement() {
+                    self.set_agent_movement(movement.next_mode());
+                }
+            }
+            crate::hand_menu::Choice::AgentReturn => {
+                if let Some((movement, _)) = self.agent_movement() {
+                    self.set_agent_movement(movement.next_return());
+                }
+            }
             crate::hand_menu::Choice::AddWall => self.add_wall(),
             crate::hand_menu::Choice::RemoveWall => self.remove_wall(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
@@ -2346,9 +2366,10 @@ impl Conversation {
         lacks.then_some(avatar)
     }
 
-    /// Where the agent and the workers stand now: in a space, the agent where a participant summoned it, or else at
-    /// the home its state gives, the workers about it while it is summoned, gathered about whoever summoned it, or else
-    /// about the workers anchor, or else the agent's home, gathered about the eyes at home, each that is valid,
+    /// Where the agent and the workers stand now: in a space, the agent where it went or was called, facing whoever it
+    /// turned to, or else at the home its state gives, the workers about it while its entourage goes with it, gathered
+    /// about whoever it went to, or else about the workers anchor, or else the agent's home, gathered about the eyes at
+    /// home, as they stay while it follows the speaker, each that is valid,
     /// by the placement registered for its environment where this build draws it at the space's version; and the
     /// carriage of that environment's own coordinates into the space's, where it draws it. Otherwise, as outside a
     /// space, the default layout. See `design/environments.md`.
@@ -2365,9 +2386,27 @@ impl Conversation {
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
         arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
-        // Summoned, its workers go with it, gathered about whoever summoned it, or, from a server that does not say, about
-        // whoever it faces, 1.2 m before it, as a trigger leaves it.
-        if arrangement.summoned() {
+        // Turned to whoever began speaking to it, about the vertical. See `design/environments.md`.
+        if let Some(facing) = space
+            .facing
+            .map(glam::Vec3::from_array)
+            .filter(|eyes| eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH)
+        {
+            let at = arrangement.agent.position;
+            let turned =
+                tomori_protocol::Pose::at(at.to_array()).facing_towards([facing.x, at.y, facing.z]);
+            arrangement.agent.orientation = glam::Quat::from_array(turned.orientation).normalize();
+        }
+        arrangement.via = space
+            .via
+            .map(glam::Vec3::from_array)
+            .filter(|via| via.is_finite() && via.abs().max_element() <= crate::anchors::REACH);
+        arrangement.stream = space.stream;
+        // Away, its workers go with it, gathered about whoever it went to, or, from a server that does not say, about
+        // whoever it faces, 1.2 m before it, as a trigger leaves it; but not from a server that has it follow the
+        // speaker, which says so by sending how it moves and nobody they gather about: they stay home.
+        let entourage = space.summoner.is_some() || space.movement.is_none();
+        if space.summoned.is_some() && entourage {
             arrangement.workers = arrangement.agent;
             arrangement.audience = space
                 .summoner
@@ -2398,29 +2437,75 @@ impl Conversation {
         arrangement
     }
 
-    /// Whether this participant may summon the agent and send it home in the joined space: a participant, not a
-    /// visitor, on a server that keeps where it is summoned to. See `design/environments.md`.
-    pub fn summons(&self) -> bool {
-        self.joined_space()
-            .is_some_and(|(space, _)| space.summons && self.role.participates())
+    /// Whether this participant may send the agent home in the joined space: a participant, not a visitor, on a
+    /// server that keeps summons, as an older one does, or says how the agent moves. See `design/environments.md`.
+    pub fn sends_agent_home(&self) -> bool {
+        self.joined_space().is_some_and(|(space, _)| {
+            (space.summons || space.movement.is_some()) && self.role.participates()
+        })
     }
 
-    /// Summon the joined space's agent to `at`, in the space's coordinates, facing along its +Z, for everyone in the
-    /// space, by this participant, whose eyes are at `eyes`, or, without it, send it home; it stands there at once here,
-    /// its workers gathering about those eyes, as everyone else is told. Nothing where this participant may not. See
-    /// `design/environments.md`.
-    pub fn summon(&mut self, at: Option<tomori_protocol::Pose>, eyes: Option<[f32; 3]>) {
-        let participates = self.role.participates() && self.mode == Mode::Space;
-        let Some(space) = self
-            .space
-            .as_mut()
-            .filter(|space| participates && space.summons)
-        else {
+    /// How the joined space's agent moves, where the server says, and whether this participant may change it, as an
+    /// owner may. See `design/environments.md`.
+    pub fn agent_movement(&self) -> Option<(tomori_protocol::AgentMovement, bool)> {
+        self.joined_space().and_then(|(space, _)| {
+            space
+                .movement
+                .map(|movement| (movement, self.role == ConnectionRole::Owner))
+        })
+    }
+
+    /// Send the joined space's agent home, for everyone; it goes home at once here, as everyone else is told. Nothing
+    /// where this participant may not. See `design/environments.md`.
+    pub fn send_agent_home(&mut self) {
+        if !(self.sends_agent_home() && self.mode == Mode::Space) {
             return;
+        }
+        let space = self.space.as_mut().expect("in the space joined");
+        space.summoned = None;
+        space.summoner = None;
+        space.facing = None;
+        self.send(ClientMessage::PlaceAgent { at: None });
+    }
+
+    /// Whether the hand menu offers **Call Tomori here**: to a participant, where the space lets the agent move, unless
+    /// it is already pinned within [`CALLED_NEAR`] of them. See `design/hand-menu.md`.
+    fn offers_call(&self) -> bool {
+        let Some((space, _)) = self.joined_space() else {
+            return false;
         };
-        space.summoned = at;
-        space.summoner = at.and(eyes);
-        self.send(ClientMessage::PlaceAgent { at });
+        let movable = space
+            .movement
+            .is_some_and(|movement| movement.mode != tomori_protocol::Movement::Home);
+        let near = |at: &tomori_protocol::Pose| {
+            self.head.is_some_and(|head| {
+                glam::Vec3::from_array(head.position).distance(glam::Vec3::from_array(at.position))
+                    <= CALLED_NEAR
+            })
+        };
+        let here = space.pinned && space.summoned.as_ref().is_some_and(near);
+        movable && self.role.participates() && !here
+    }
+
+    /// Bring the joined space's agent to this participant and pin it there, for everyone, as **Call Tomori here** does:
+    /// where the space lets it move, on a server that says how it does. See `design/environments.md`.
+    pub fn call_agent(&mut self) {
+        if self.mode == Mode::Space
+            && self.role.participates()
+            && self
+                .agent_movement()
+                .is_some_and(|(movement, _)| movement.mode != tomori_protocol::Movement::Home)
+        {
+            self.send(ClientMessage::CallAgent);
+        }
+    }
+
+    /// Change how the joined space's agent moves to `movement`, for everyone, as an owner. See
+    /// `design/environments.md`.
+    pub fn set_agent_movement(&mut self, movement: tomori_protocol::AgentMovement) {
+        if self.mode == Mode::Space && self.agent_movement().is_some_and(|(_, owner)| owner) {
+            self.send(ClientMessage::SetAgentMovement { movement });
+        }
     }
 
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
@@ -7760,16 +7845,22 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_sends_the_summoned_agent_home_from_the_hand_menu() {
+    fn a_participant_sends_the_agent_home_and_calls_it_from_the_hand_menu() {
+        use tomori_protocol::{AgentMovement, Movement};
         let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
-        // At home, or on a server that keeps no summons, nothing is offered and nothing is sent.
+        // At home, or on a server that neither keeps summons nor says how the agent moves, nothing is offered and
+        // nothing is sent.
         let mut conversation = joined(|state| state.summons = true);
         assert!(!conversation.menu_model().agent_away);
         let mut older = joined(|state| state.summoned = Some(summoned));
-        assert!(!older.menu_model().agent_away);
-        older.summon(None, None);
+        let model = older.menu_model();
+        assert!(!model.agent_away && !model.calls && model.movement.is_none());
+        older.send_agent_home();
+        older.call_agent();
+        older.set_agent_movement(AgentMovement::default());
         assert!(sent(&mut older).is_empty());
-        // Summoned away, the Space section offers to send it home, which tells everyone and stands it there at once.
+        // Away, from an older server, the Space section offers to send it home, which tells everyone and stands it
+        // there at once.
         conversation.apply(space(|state| {
             state.summons = true;
             state.summoned = Some(summoned);
@@ -7782,6 +7873,90 @@ mod tests {
         );
         assert!(!conversation.arrangement().summoned());
         assert!(!conversation.menu_model().agent_away);
+        // From a server that says how it moves, it is called here, and an owner steps how it moves and how long it
+        // waits before going home.
+        let mut newer = joined(|state| state.movement = Some(AgentMovement::default()));
+        let model = newer.menu_model();
+        assert!(model.calls && !model.agent_away);
+        assert_eq!(model.movement, Some((AgentMovement::default(), true)));
+        newer.choose_menu(crate::hand_menu::Choice::CallAgent);
+        newer.choose_menu(crate::hand_menu::Choice::AgentMovement);
+        newer.choose_menu(crate::hand_menu::Choice::AgentReturn);
+        assert_eq!(
+            sent(&mut newer),
+            [
+                ClientMessage::CallAgent,
+                ClientMessage::SetAgentMovement {
+                    movement: AgentMovement::new(Movement::Follow, Some(90))
+                },
+                ClientMessage::SetAgentMovement {
+                    movement: AgentMovement::new(Movement::Asked, Some(120))
+                },
+            ]
+        );
+        // Pinned near them, it is not offered again, but sending it home is; pinned far, it is.
+        newer.observe_head(Some(tomori_protocol::Pose::at([0.0, 1.6, 0.0])));
+        let pinned = |at: [f32; 3]| {
+            space(move |state| {
+                state.movement = Some(AgentMovement::new(Movement::Follow, Some(90)));
+                state.summoned = Some(tomori_protocol::Pose::at(at));
+                state.pinned = true;
+            })
+        };
+        newer.apply(pinned([0.5, 1.6, -1.0]));
+        let model = newer.menu_model();
+        assert!(!model.calls && model.agent_away);
+        newer.apply(pinned([6.0, 1.6, -1.0]));
+        assert!(newer.menu_model().calls);
+        newer.choose_menu(crate::hand_menu::Choice::AgentHome);
+        assert_eq!(sent(&mut newer), [ClientMessage::PlaceAgent { at: None }]);
+        // Kept home, it is never called.
+        newer.apply(space(|state| {
+            state.movement = Some(AgentMovement::new(Movement::Home, Some(90)));
+        }));
+        assert!(!newer.menu_model().calls);
+        newer.call_agent();
+        assert!(sent(&mut newer).is_empty());
+        // A collaborator reads how it moves, but changes nothing.
+        newer.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Collaborator,
+        }));
+        assert_eq!(
+            newer.menu_model().movement.map(|(_, owner)| owner),
+            Some(false)
+        );
+        newer.choose_menu(crate::hand_menu::Choice::AgentMovement);
+        assert!(sent(&mut newer).is_empty());
+        // Outside a space, nothing.
+        let mut lobby = crate::test_support::conversation("Ada");
+        lobby.choose_menu(crate::hand_menu::Choice::AgentReturn);
+        lobby.choose_menu(crate::hand_menu::Choice::AgentMovement);
+        lobby.send_agent_home();
+        assert!(lobby.menu_model().movement.is_none());
+        assert!(!lobby.menu_model().calls);
+    }
+
+    #[test]
+    fn while_the_agent_follows_the_speaker_its_workers_stay_home_and_it_faces_whoever_it_turned_to()
+    {
+        let away = tomori_protocol::Pose::at([1.0, 1.7, -1.0]).facing_towards([0.0, 1.6, 0.0]);
+        // Gone to someone with nobody to gather about, from a server that says how it moves: its workers stay home.
+        let conversation = joined(|state| {
+            state.movement = Some(tomori_protocol::AgentMovement::default());
+            state.summoned = Some(away);
+        });
+        let arrangement = conversation.arrangement();
+        assert!(arrangement.summoned());
+        assert_eq!(arrangement.workers, arrangement.home);
+        assert_eq!(arrangement.audience, crate::anchors::EYES);
+        // With someone to gather about, they go with it, as a call stands it when it moves only when asked.
+        let conversation = joined(|state| {
+            state.movement = Some(tomori_protocol::AgentMovement::default());
+            state.summoned = Some(away);
+            state.summoner = Some([0.0, 1.6, 0.0]);
+        });
+        let arrangement = conversation.arrangement();
+        assert_eq!(arrangement.workers, arrangement.agent);
     }
 
     #[test]
