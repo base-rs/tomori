@@ -163,6 +163,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             error,
             space: None,
             panel: None,
+            wall: None,
         });
         self.outbox.close();
         self.input_ended = true;
@@ -670,6 +671,7 @@ mod tests {
             speech_held: false,
             images: false,
             projection_patches: false,
+            live_panels: false,
             limits: None,
         })
         .encode();
