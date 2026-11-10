@@ -125,7 +125,7 @@ pub(crate) struct Following {
     spoken: Vec<(String, Instant)>,
     /// Whether it is pinned where it stands.
     pub(super) pinned: bool,
-    /// Who pinned it, by name, where a participant did, with **Call Tomori here** or **Tomori: stay here**, rather than
+    /// Who pinned it, by their handle, where a participant did, with **Call Tomori here** or **Tomori: stay here**, rather than
     /// the agent itself: only someone's words free a participant's pin for the agent's own `follow`.
     pub(super) pinned_by: Option<String>,
     /// Where it was, and when, as it was sent home: it glides home from there.
@@ -400,7 +400,8 @@ impl Hub {
         state.summon(space, Some(at), Some(head.position));
         state.agent_moved(space, (from, was), at, route, now);
         let name = state.participants[participant].name.clone();
-        state.agent_pin(space, now, Some(name.clone()));
+        let handle = crate::presence::handle(&name, state.participants[participant].tag);
+        state.agent_pin(space, now, Some(handle));
         state
             .space_mut(space)
             .expect("found above")
@@ -800,7 +801,7 @@ impl HubState {
     }
 
     /// Pin the agent of `space` where it is going, or stands, so that it follows nobody and does not go home on its own,
-    /// as the participant `by`, by name, or else the agent itself, asked: a pin a participant made stays theirs as the
+    /// as the participant `by`, by their handle, or else the agent itself, asked: a pin a participant made stays theirs as the
     /// agent pins itself again.
     pub(super) fn agent_pin(&mut self, space: &str, now: Instant, by: Option<String>) {
         let following = &mut self
@@ -838,7 +839,8 @@ impl HubState {
         }
         let name = self.participants[participant].name.clone();
         if pinned {
-            self.agent_pin(space, now, Some(name.clone()));
+            let handle = crate::presence::handle(&name, self.participants[participant].tag);
+            self.agent_pin(space, now, Some(handle));
             log::info!("{name} asked the agent of space {space} to stay where it stands.");
         } else if mode == Movement::Follow {
             self.agent_unpin(space, Some(&name), None, now);
@@ -864,8 +866,11 @@ impl HubState {
         let following = &mut record.following;
         let pinned = std::mem::take(&mut following.pinned);
         following.pinned_by = None;
-        following.empty = None;
-        following.quiet = None;
+        // The way home is counted from the pin's end, and not put off again by asking to follow while it follows.
+        if pinned {
+            following.empty = None;
+            following.quiet = None;
+        }
         following.poll = Some(now + POLL);
         match name {
             Some(name) => {

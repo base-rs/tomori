@@ -1283,7 +1283,7 @@ pub(crate) struct AgentState {
     /// Where it has reached, while it is on its way somewhere, or home.
     pub at: Option<Pose>,
     pub pinned: bool,
-    /// Who pinned it, by name, where a participant did.
+    /// Who pinned it, by their handle, where a participant did.
     pub pinned_by: Option<String>,
     /// Whom it talks with now, or last did, by their handle.
     pub partner: Option<String>,

@@ -432,7 +432,7 @@ Left to the stages that meet them:
 - Should the swarm draw in up close (recommended), or should the conversation distance grow to suit its full size?
 - Left or right by default, or the side with more open space each time?
 - For the data centre: does its scene have aisles it can declare as open space, a natural place for a status strip, and room for a home anchor?
-- Should a pin from **Call Tomori here** survive the agent's own `follow`, or should only a participant release it?
+- Should a pin from **Call Tomori here** survive the agent's own `follow`, or should only a participant release it? (Stage 5: a participant's pin survives the agent's own `follow` and moves until someone's words ask, through `requested_by`.)
 - What the freed trigger does: selecting environment objects beyond those marked selectable, selecting a worker to see what it is doing, selecting an anchor's cluster, and selecting list items; and how each relates to A, which already chooses and ticks.
 - Should a status wall out of reading distance, as the farmyard's board, give a quiet cue when a notice arrives?
 - Should the agent place a worker automatically when the words that started it pointed at an object with an anchor, or always decide itself (recommended)?

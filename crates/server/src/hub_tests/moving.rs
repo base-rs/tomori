@@ -361,16 +361,26 @@ fn stay_pins_it_and_follow_lets_it_follow_again_only_where_it_follows_the_speake
     assert!(!hub.lock().space(&space).unwrap().following.pinned);
     // Called by Ada, it is hers: its own follow is refused until her words ask.
     ada.send(ClientMessage::CallAgent);
-    assert_eq!(agent(&hub)["pinned_by"], "ada");
+    assert!(
+        agent(&hub)["pinned_by"]
+            .as_str()
+            .unwrap()
+            .starts_with("ada#")
+    );
     let refused = hub.agent_move_agent("session", "follow", None).unwrap_err();
-    assert!(refused.contains("ada asked you to stay here"), "{refused}");
+    assert!(refused.contains(" asked you to stay here"), "{refused}");
     // Nor does pinning itself again make the pin its own, nor may it move itself from there unasked.
     hub.agent_move_agent("session", "stay", None).unwrap();
-    assert_eq!(agent(&hub)["pinned_by"], "ada");
+    assert!(
+        agent(&hub)["pinned_by"]
+            .as_str()
+            .unwrap()
+            .starts_with("ada#")
+    );
     assert!(
         hub.agent_move_agent("session", "front ada", None)
             .unwrap_err()
-            .contains("ada asked you to stay here")
+            .contains(" asked you to stay here")
     );
     assert!(hub.agent_move_agent("session", "follow", None).is_err());
     // Her words, as she holds X far from it, glance only while it is pinned; asked to follow, it goes to her.
@@ -594,7 +604,12 @@ fn a_participant_pins_it_and_lets_it_follow_again_from_the_hand_menu_and_always_
     ada.send(ClientMessage::PinAgent { pinned: false });
     assert_eq!(agent(&hub)["mode"], "home");
     ada.send(ClientMessage::PinAgent { pinned: true });
-    assert_eq!(agent(&hub)["pinned_by"], "ada");
+    assert!(
+        agent(&hub)["pinned_by"]
+            .as_str()
+            .unwrap()
+            .starts_with("ada#")
+    );
     // Kept home, neither.
     ada.send(ClientMessage::SetAgentMovement {
         movement: AgentMovement::new(Movement::Home, Some(90)),
