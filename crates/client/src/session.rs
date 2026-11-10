@@ -18,7 +18,7 @@ use base_scheduler_native::NativeScheduler;
 use futures_lite::future::{or, zip};
 use tomori_protocol::{
     AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
-    Keepalive, PROTOCOL_VERSION, ServerMessage,
+    Keepalive, Limits, PROTOCOL_VERSION, ServerMessage,
 };
 use tomori_security::{Fingerprint, Pinned};
 
@@ -345,16 +345,24 @@ async fn exchange(
             let received = Cell::new(context.scheduler.now());
             let mut reader = FrameReader {
                 body: &mut response.body,
+                // Frames of today's limit, which every server keeps within, until its Welcome states more.
                 decoder: FrameDecoder::new(),
                 ended: false,
                 lifetime,
                 scheduler: context.scheduler,
                 received: &received,
+                events: &context.shared.events,
+                reported: None,
             };
             let first = context
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
-            let source = welcome(context, first, certificate)?;
+            let (source, limits) = welcome(context, first, certificate)?;
+            // Read from the frame after the Welcome on, whatever is already buffered: an older server states nothing,
+            // and is read at today's limit. See `design/server.md`.
+            reader
+                .decoder
+                .set_limit(Limits::negotiate(context.options.limits, limits).frame_limit());
             // The first certificate seen is the one learned.
             context.learned.set(context.learned.get().or(certificate));
             welcomed.set(Some(context.scheduler.now()));
@@ -433,12 +441,13 @@ async fn keepalive<S: Timers>(
     }
 }
 
-/// Check the server's Welcome, returning this client's participant number. `certificate` is the server's, over TLS.
+/// Check the server's Welcome, returning this client's participant number and the limits the server states, if it states
+/// any. `certificate` is the server's, over TLS.
 fn welcome(
     context: &Context<'_>,
     frame: Frame,
     certificate: Option<Fingerprint>,
-) -> Result<u32, Disconnect> {
+) -> Result<(u32, Option<Limits>), Disconnect> {
     let message = frame
         .to_server_message()
         .map_err(|error| Disconnect::Protocol(error.to_string()))?;
@@ -453,7 +462,7 @@ fn welcome(
             environments,
             utterance_limit,
             name,
-            limits: _,
+            limits,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(
@@ -471,7 +480,7 @@ fn welcome(
                 utterance_limit: utterance_limit.map(|seconds| Duration::from_secs(seconds.into())),
                 name,
             });
-            Ok(source)
+            Ok((source, limits))
         }
         ServerMessage::Error { error, .. } => Err(Disconnect::Protocol(format!(
             "server refused the connection: {error}"
@@ -593,6 +602,10 @@ struct FrameReader<'a, 'scope> {
     scheduler: &'a NativeScheduler,
     /// When data last arrived: any data counts as liveness, even part of a frame.
     received: &'a Cell<Instant>,
+    /// Where [`Event::Receiving`] is reported.
+    events: &'a crate::Events,
+    /// The length of the long frame being received and the percent of it last reported, while one is.
+    reported: Option<(usize, usize)>,
 }
 
 impl FrameReader<'_, '_> {
@@ -601,8 +614,15 @@ impl FrameReader<'_, '_> {
         let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
         loop {
             if let Some(frame) = self.decoder.next_frame().map_err(protocol)? {
+                if let Some((length, _)) = self.reported.take() {
+                    self.events.push(Event::Receiving {
+                        received: length,
+                        length,
+                    });
+                }
                 return Ok(frame);
             }
+            self.report();
             if self.ended {
                 self.decoder.finish().map_err(protocol)?;
                 return Err(Disconnect::Closed);
@@ -616,6 +636,25 @@ impl FrameReader<'_, '_> {
                 BodyFrame::Headers { end, .. } => end,
                 BodyFrame::End => true,
             };
+        }
+    }
+
+    /// Report how much of a long frame has arrived, as each whole percent more does. See [`Event::Receiving`].
+    fn report(&mut self) {
+        let Some(progress) = self
+            .decoder
+            .progress()
+            .filter(|progress| progress.length >= crate::PROGRESS_BYTES)
+        else {
+            return;
+        };
+        let percent = progress.received * 100 / progress.length;
+        if self.reported != Some((progress.length, percent)) {
+            self.reported = Some((progress.length, percent));
+            self.events.push(Event::Receiving {
+                received: progress.received,
+                length: progress.length,
+            });
         }
     }
 }

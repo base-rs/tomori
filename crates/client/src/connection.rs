@@ -197,6 +197,13 @@ pub trait Session {
         false
     }
 
+    /// What the session reads and draws at most, which each connection states in its Hello; see
+    /// [`crate::Options::limits`]. By default, frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], which the connection
+    /// reads, and a projection within today's bounds, as one that does not say otherwise draws.
+    fn limits(&self) -> tomori_protocol::Limits {
+        tomori_protocol::Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+    }
+
     /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         let _ = (feedback, now);
@@ -1577,6 +1584,7 @@ impl Connection {
         options.pairing = link.pairing;
         options.environments = session.environments();
         options.projection_patches = session.projection_patches();
+        options.limits = session.limits();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

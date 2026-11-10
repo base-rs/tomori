@@ -69,6 +69,24 @@ fn beside(a: &Wall, b: &Wall) -> (f32, f32) {
 }
 
 #[test]
+fn a_wall_sent_without_the_wall_it_is_joined_to_is_sent_without_the_join() {
+    let (mut stage, ids) = added(&[((2, 2), 0.95), ((1, 1), 1.9)]);
+    assert!(
+        stage
+            .attach_wall(&SKY, &ids[1], right(&ids[0]), false, None)
+            .unwrap()
+    );
+    assert_eq!(shown(&view(&stage), &ids[0]).joined.len(), 1);
+    // A client that draws three walls is sent the Tomori wall, the environment's and the first added, its edge drawn.
+    let three = tomori_protocol::Limits::MOST.with_projection(3, 780, 120, 900);
+    let projection = stage.view_within("s", &SKY, 0, &three);
+    assert_eq!(projection.walls.len(), 3);
+    let first = shown(&projection, &ids[0]);
+    assert!(first.joined.is_empty());
+    assert_eq!(first.group.as_deref(), Some(ids[0].as_str()));
+}
+
+#[test]
 fn a_wall_snapped_beside_another_joins_it_a_gutter_apart_kept_with_the_space() {
     let (mut stage, ids) = added(&[((2, 2), 0.95), ((1, 1), 1.9)]);
     let (two, big) = (&ids[0], &ids[1]);

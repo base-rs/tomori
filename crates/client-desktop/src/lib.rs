@@ -102,6 +102,8 @@ pub fn connection(overrides: Overrides) -> (Conversation, Connection) {
     let store = identity::Store::new(None);
     let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
     let mut conversation = Conversation::new(&identity.name);
+    // A desktop machine draws more panels than a headset. See `design/clients.md`.
+    conversation.set_limits(tomori_scene::conversation::DESKTOP_LIMITS);
     let connection = Connection::new(
         identity,
         store,

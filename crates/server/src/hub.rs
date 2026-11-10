@@ -54,6 +54,11 @@ pub type Connected = (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>);
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
+/// What this server states in its `Welcome` that it sends at most, and sends each client within the lesser of and what
+/// the client states: the most any connection is bound by, as its stage holds a space's projection within. See
+/// `design/projection.md`.
+pub const LIMITS: Limits = Limits::MOST;
+
 /// The most closed spaces kept that nobody is in. Beyond this, the oldest are forgotten, so that sessions ending repeatedly cannot grow the server's memory without bound. See `design/spaces.md`.
 pub const CLOSED_SPACES: usize = 32;
 
@@ -556,7 +561,8 @@ struct ConnectionRecord {
     /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
     /// `design/projection.md`.
     patches: bool,
-    /// What the client said in Hello that it takes at most, within today's bounds. See `design/projection.md`.
+    /// What the connection is bound by: the lesser of what the client said in Hello that it takes at most, today's from an
+    /// older one, and [`LIMITS`]. See `design/projection.md`.
     limits: Limits,
     /// The projection this client was last sent, as it was sent, at its revision, which the next is sent as a patch
     /// from, for a client that takes patches: `None` until it is sent one, and once it asks for one whole again or
@@ -576,16 +582,30 @@ impl ConnectionRecord {
     }
 }
 
-/// Whether the HTTP server is writing a connection's output, shared by the connection body and the keepalive sweep.
+/// Whether the HTTP server is writing a connection's output, shared by the connection body and the keepalive sweep, and
+/// the connection's frame limit, which the hub sets from its Hello and the body reads and writes frames within.
 #[derive(Default)]
 pub struct Output {
     /// True from when the body hands out a chunk until the HTTP server asks for the next one, which it does once the chunk is written.
     pending: AtomicBool,
     /// Chunks written so far.
     written: AtomicU64,
+    /// The longest frame's payload each way, as negotiated from the client's Hello: 0, read as
+    /// [`tomori_protocol::MAX_FRAME_BYTES`], until it says Hello. See `design/server.md`.
+    frame_bytes: AtomicUsize,
 }
 
 impl Output {
+    /// The longest frame's payload, each way, on this connection: [`tomori_protocol::MAX_FRAME_BYTES`] until the client
+    /// says Hello, and then the lesser of what it and this server state.
+    pub fn frame_limit(&self) -> usize {
+        tomori_protocol::frame_limit(self.frame_bytes.load(Ordering::Acquire))
+    }
+
+    fn set_frame_limit(&self, limit: usize) {
+        self.frame_bytes.store(limit, Ordering::Release);
+    }
+
     /// The body handed out a chunk to write.
     pub fn handed_out(&self) {
         self.pending.store(true, Ordering::Release);
@@ -3074,9 +3094,14 @@ impl Hub {
                     record.speech_held = speech_held;
                     record.images = images;
                     record.patches = projection && projection_patches;
-                    // Kept, and sent within today's bounds whatever it says, as this server's `Welcome` states. See
-                    // `design/projection.md`.
-                    record.limits = limits.unwrap_or_default().meet(Limits::TODAY);
+                    // The lesser of what it and this server state, an older client's read as today's, whatever it
+                    // says, within the most any connection takes; frames each way from the next on. See
+                    // `design/projection.md` and `design/server.md`.
+                    record.limits = Limits::negotiate(LIMITS, limits);
+                    record
+                        .liveness
+                        .output
+                        .set_frame_limit(record.limits.frame_limit());
                 }
                 self.hello(
                     &mut state,
@@ -3282,8 +3307,9 @@ impl Hub {
                 .utterance_limit()
                 .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
             name: Some(state.participants[&participant].name.clone()),
-            // Today's bounds, whatever the client states. See `design/projection.md`.
-            limits: Some(Limits::TODAY),
+            // What this server sends at most, which each client is sent within the lesser of and what it states. See
+            // `design/projection.md`.
+            limits: Some(LIMITS),
         });
         self.tell_window_on_hello(state, connection);
         // The space they were in, unless it was forgotten meanwhile.
@@ -6150,10 +6176,17 @@ impl Hub {
                 let walls = environments
                     .walls(&space.model.environment)
                     .travelling(space.travel);
-                let mut projection =
-                    space
-                        .stage
-                        .view(&space.model.id, &walls, crate::cards::unix_now());
+                // Within what this connection takes, whatever the space holds. See `design/projection.md`.
+                let limits = state
+                    .connections
+                    .get(&connection)
+                    .map_or(Limits::TODAY, |record| record.limits);
+                let mut projection = space.stage.view_within(
+                    &space.model.id,
+                    &walls,
+                    crate::cards::unix_now(),
+                    &limits,
+                );
                 let revision = &space.projection_revision;
                 // A client that shows no images is sent each image panel as a text panel saying what it is.
                 let images = state

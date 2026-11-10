@@ -452,7 +452,7 @@ fn a_tick_refused_is_a_patch_that_changes_nothing_so_that_the_client_undoes_it()
 }
 
 #[test]
-fn hello_limits_are_kept_within_today_s_and_welcome_states_today_s() {
+fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
     let (hub, _jobs) = hub_waiting();
     let welcome = |client: &Client| {
         client.send(ClientMessage::Hello {
@@ -475,24 +475,48 @@ fn hello_limits_are_kept_within_today_s_and_welcome_states_today_s() {
         limits
     };
     let client = Client::connect(&hub, Access::open());
-    assert_eq!(welcome(&client), Some(Limits::TODAY));
+    assert_eq!(welcome(&client), Some(Limits::MOST));
     let kept = |client: &Client| {
         let state = hub.lock();
         let record = &state.connections[&client.connection];
+        assert_eq!(
+            record.liveness.output.frame_limit(),
+            record.limits.frame_bytes as usize
+        );
         (record.limits, record.patches)
     };
-    // A client that states none, or more, is kept within today's; one that states less, within that.
+    // A client that states none, as an older one, is kept within today's, frames of 1 MiB included.
     assert_eq!(kept(&client), (Limits::TODAY, false));
+    // One that states more is sent within what it states, up to the most.
     let more = Limits::TODAY
         .with_frame_bytes(8 * 1024 * 1024)
         .with_projection(40, 500, 60, 560);
     let larger = Client::patching_within(&hub, Access::open(), "larger", Some(more));
-    assert_eq!(kept(&larger), (Limits::TODAY, true));
+    assert_eq!(kept(&larger), (more, true));
+    let headset = Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32);
+    let quest = Client::patching_within(&hub, Access::open(), "quest", Some(headset));
+    assert_eq!(kept(&quest), (headset, true));
+    // A hostile one is held to the most.
+    let hostile = Limits::TODAY.with_frame_bytes(u32::MAX).with_projection(
+        u32::MAX,
+        u32::MAX,
+        u32::MAX,
+        u32::MAX,
+    );
+    let greedy = Client::patching_within(&hub, Access::open(), "greedy", Some(hostile));
+    assert_eq!(kept(&greedy), (Limits::MOST, true));
+    // One that states less is sent within that, but frames no shorter than every peer takes.
     let less = Limits::TODAY
         .with_frame_bytes(256 * 1024)
         .with_projection(4, 24, 4, 28);
     let smaller = Client::patching_within(&hub, Access::open(), "smaller", Some(less));
-    assert_eq!(kept(&smaller), (less, true));
+    assert_eq!(
+        kept(&smaller),
+        (
+            less.with_frame_bytes(tomori_protocol::MAX_FRAME_BYTES as u32),
+            true
+        )
+    );
     // Patches are only for a client that reads what is projected.
     let blind = Client::connect(&hub, Access::open());
     blind.send(ClientMessage::Hello {
@@ -513,7 +537,7 @@ fn hello_limits_are_kept_within_today_s_and_welcome_states_today_s() {
 }
 
 #[test]
-fn speech_queued_behind_a_patch_waits_for_far_less_than_behind_the_projection_whole() {
+fn speech_queued_goes_before_the_projection_and_a_patch_is_far_smaller_than_it_whole() {
     let (hub, _jobs) = hub_waiting();
     let (space, _commands) = idle(&hub);
     let ada = Client::patching(&hub, Access::open(), "ada");
@@ -529,32 +553,69 @@ fn speech_queued_behind_a_patch_waits_for_far_less_than_behind_the_projection_wh
     }
     held.read(&ada);
     old.read();
-    // A change, with agent speech queued after it: the projection goes first, as ever, then the speech, so nothing is
-    // reordered; what goes before the speech is the patch, far smaller than the projection whole an older client is
-    // sent.
+    // A change, with agent speech queued after it: the speech goes first, since the projection may be sent whole in
+    // one long frame, and nothing is ahead of it; then the projection, which for a client that takes patches is the
+    // patch, far smaller than the projection whole an older client is sent.
     let ahead = |client: &Client| {
         client.outbox.agent_audio(vec![0; 64]);
-        let mut bytes = 0;
-        loop {
-            let popped = client.outbox.pop();
-            if matches!(popped, Popped::Audio(_)) {
-                return bytes;
-            }
-            let Popped::Control(item) = popped else {
-                unreachable!("the speech is sent, not {popped:?}");
-            };
-            let message = hub
-                .render(client.connection, item)
-                .expect("only the projection is sent before the speech");
-            bytes += Frame::server(&message).encode().len();
-        }
+        let Popped::Audio(_) = client.outbox.pop() else {
+            unreachable!("the speech first");
+        };
+        let Popped::Control(item) = client.outbox.pop() else {
+            unreachable!("the projection is sent next");
+        };
+        let message = hub
+            .render(client.connection, item)
+            .expect("the projection is sent after the speech");
+        Frame::server(&message).encode().len()
     };
     ada.send(ClientMessage::AddWall {
         pose: upright([0.0, 1.5, -3.0]),
     });
     let (patched, whole) = (ahead(&ada), ahead(&old));
     assert!(patched > 0);
-    assert!(patched * 4 < whole, "{patched} bytes ahead against {whole}");
+    assert!(patched * 4 < whole, "{patched} bytes against {whole}");
+}
+
+#[test]
+fn in_a_space_of_more_walls_than_today_s_each_client_is_sent_what_it_takes() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    // The desktop window states the most, and an older client nothing.
+    let desktop = Client::patching_within(&hub, Access::open(), "desktop", Some(Limits::MOST));
+    let old = Client::projecting(&hub, Access::open(), "old");
+    let mut held = Held::default();
+    desktop.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    held.read(&desktop);
+    old.join(&space);
+    old.read();
+    // Twenty walls added, more than the six of before.
+    for index in 0..20 {
+        let x = (index % 10) as f32 * 3.0 - 13.5;
+        let z = 4.0 + (index / 10) as f32 * 3.0;
+        desktop.send(ClientMessage::AddWall {
+            pose: upright([x, 1.5, z]),
+        });
+    }
+    held.read(&desktop);
+    let all = held.shown();
+    let older = without_ages(old.projections().pop().expect("sent the projection"));
+    let walls = all.walls.len();
+    assert!(walls >= 21, "{walls}");
+    // The older client is sent today's walls, the first of them, as before; the desktop window every one.
+    assert_eq!(older.walls.len(), Limits::TODAY.walls as usize);
+    assert_eq!(older.walls[..], all.walls[..older.walls.len()]);
+    // Each connection's frames are within what it negotiated.
+    let limit = |client: &Client| {
+        hub.lock().connections[&client.connection]
+            .liveness
+            .output
+            .frame_limit()
+    };
+    assert_eq!(limit(&desktop), tomori_protocol::MOST_FRAME_BYTES);
+    assert_eq!(limit(&old), tomori_protocol::MAX_FRAME_BYTES);
 }
 
 #[test]

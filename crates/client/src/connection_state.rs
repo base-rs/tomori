@@ -103,6 +103,14 @@ pub enum Event {
         hash: String,
         png: std::sync::Arc<[u8]>,
     },
+    /// Part of a long frame has arrived, as of the projection whole on joining a space or after asking for it again:
+    /// `received` bytes of the `length` its header declares, reported as each whole percent more arrives, and once more
+    /// when all of it has, just before what it carries. Only for frames of at least [`crate::PROGRESS_BYTES`]. A client
+    /// shows it as progress. See `design/clients.md`.
+    Receiving {
+        received: usize,
+        length: usize,
+    },
 }
 
 #[cfg(test)]

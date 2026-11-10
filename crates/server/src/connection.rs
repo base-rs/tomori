@@ -18,6 +18,12 @@ use crate::outbox::{Outbox, Popped};
 /// Outgoing data is batched into chunks of about this size when frames are already waiting.
 const CHUNK_TARGET: usize = 64 * 1024;
 
+/// Output longer than this, as a projection sent whole in one long frame, is handed to the HTTP server in pieces of this
+/// size, so that the connection reads its input between them, and the keepalive sweep sees each written, however slow the
+/// link: a frame cannot be interleaved with others, but the connection is not stalled while it is sent. See
+/// `design/server.md`.
+const PIECE_BYTES: usize = 256 * 1024;
+
 /// The most request reads applied before each outgoing chunk when both directions are busy.
 const INPUT_READS_PER_OUTPUT: usize = 8;
 
@@ -41,6 +47,9 @@ pub struct ConnectionBody<B: ReadableBody> {
     /// The request body. Its reads are raced against outgoing frames and dropped when those win, which the `ReadableBody` contract allows: a dropped read loses no input.
     request: B,
     decoder: FrameDecoder,
+    /// Output being handed out in pieces, and how much of it has been; see [`PIECE_BYTES`].
+    pending: Vec<u8>,
+    sent: usize,
     /// Request reads applied since the connection last yielded; see [`INPUT_READS_PER_YIELD`].
     reads: usize,
     /// Pending returns still to make before reading again; see [`YIELDS`]. Kept here so that a read dropped while yielding leaves the rest for the next.
@@ -66,6 +75,8 @@ impl<B: ReadableBody> ConnectionBody<B> {
             output,
             request,
             decoder: FrameDecoder::new(),
+            pending: Vec::new(),
+            sent: 0,
             reads: 0,
             yields: 0,
             input_ended: false,
@@ -75,11 +86,12 @@ impl<B: ReadableBody> ConnectionBody<B> {
 
     /// Append waiting outgoing frames to `output`, up to the chunk target. Returns false once the outbox is closed and drained.
     fn drain(&mut self, output: &mut Vec<u8>) -> bool {
+        let limit = self.output.frame_limit();
         while output.len() < CHUNK_TARGET {
             match self.outbox.pop() {
                 Popped::Control(item) => {
                     if let Some(message) = self.hub.render(self.id, item) {
-                        encode(&message, output);
+                        encode(&message, output, limit);
                     }
                 }
                 Popped::Audio(frame) | Popped::Image(frame) => output.extend_from_slice(&frame),
@@ -97,7 +109,12 @@ impl<B: ReadableBody> ConnectionBody<B> {
             // Any data counts as liveness, even part of a frame.
             self.received.store(true, Ordering::Release);
             self.decoder.push(data.as_ref());
-            while let Some(frame) = self.decoder.next_frame().map_err(BodyError::new)? {
+            loop {
+                // As the client's Hello negotiated it, from the frame after the Hello on.
+                self.decoder.set_limit(self.output.frame_limit());
+                let Some(frame) = self.decoder.next_frame().map_err(BodyError::new)? else {
+                    break;
+                };
                 self.hub.receive(self.id, frame);
             }
         }
@@ -125,9 +142,9 @@ impl<B: ReadableBody> ConnectionBody<B> {
     }
 }
 
-/// Append `message` as a frame. A message that would exceed the frame limit, which the server's size limits should prevent, is replaced by a short error so that the client is not disconnected by a frame it must reject.
-fn encode(message: &ServerMessage, output: &mut Vec<u8>) {
-    if let Err(error) = Frame::server(message).try_encode_into(output) {
+/// Append `message` as a frame, written straight into `output`. A message that would exceed the connection's frame limit, `limit`, which the server's size limits should prevent, is replaced by a short error so that the client is not disconnected by a frame it must reject.
+fn encode(message: &ServerMessage, output: &mut Vec<u8>, limit: usize) {
+    if let Err(error) = Frame::encode_control_within(message, output, limit) {
         log::error!("A server message was not sent: {error}.");
         Frame::server(&ServerMessage::Error {
             error: "A message from the server was too large to send.".to_owned(),
@@ -135,6 +152,21 @@ fn encode(message: &ServerMessage, output: &mut Vec<u8>) {
             panel: None,
         })
         .encode_into(output);
+    }
+}
+
+impl<B: ReadableBody> ConnectionBody<B> {
+    /// The next piece of the output being handed out in pieces.
+    fn piece(&mut self) -> BodyFrame<Vec<u8>> {
+        let end = (self.sent + PIECE_BYTES).min(self.pending.len());
+        let data = self.pending[self.sent..end].to_vec();
+        self.sent = end;
+        if end == self.pending.len() {
+            self.pending = Vec::new();
+            self.sent = 0;
+        }
+        self.output.handed_out();
+        BodyFrame::Data { data, end: false }
     }
 }
 
@@ -149,7 +181,7 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
     type Error = BodyError;
 
     fn is_ready(&self) -> bool {
-        self.finished || self.outbox.is_ready()
+        self.finished || self.sent < self.pending.len() || self.outbox.is_ready()
     }
 
     fn may_have_trailers(&self) -> bool {
@@ -178,11 +210,21 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
                 futures_lite::future::yield_now().await;
             }
             self.take_ready_input(cancellation)?;
+            if self.sent < self.pending.len() {
+                return Ok(self.piece());
+            }
             // Listening before draining, so that a frame queued after the drain wakes the wait below.
             let listener = self.outbox.listen();
             let mut output = Vec::new();
             let open = self.drain(&mut output);
             if !output.is_empty() {
+                // Draining stops once the output reaches the chunk target, before it could find the outbox closed,
+                // so a response that ends does so after the last piece, as after any other output.
+                if output.len() > PIECE_BYTES {
+                    self.pending = output;
+                    self.sent = 0;
+                    return Ok(self.piece());
+                }
                 if !open {
                     self.finished = true;
                 }
@@ -379,7 +421,9 @@ mod tests {
             .expect("an open server admits the connection")
     }
 
-    fn read(body: &mut ConnectionBody<Script>) -> Result<BodyFrame<Vec<u8>>, BodyError> {
+    fn read<B: ReadableBody>(
+        body: &mut ConnectionBody<B>,
+    ) -> Result<BodyFrame<Vec<u8>>, BodyError> {
         futures_lite::future::block_on(body.read(&Cancellation::new()))
     }
 
@@ -425,17 +469,267 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    /// A Hello stating `limits`, encoded.
+    fn hello(limits: Option<tomori_protocol::Limits>) -> Vec<u8> {
+        Frame::client(&ClientMessage::Hello {
+            protocol: tomori_protocol::PROTOCOL_VERSION,
+            participant: "ada".into(),
+            name: "Ada".into(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: true,
+            pairing_window: false,
+            speech_held: false,
+            images: false,
+            projection_patches: true,
+            limits,
+        })
+        .encode()
+    }
+
+    /// A control frame of `length` bytes, a pong padded with spaces, which is valid JSON.
+    fn padded_pong(length: usize) -> Vec<u8> {
+        let mut payload = br#"{"type":"pong","nonce":1}"#.to_vec();
+        payload.resize(length, b' ');
+        let mut bytes = Vec::new();
+        Frame {
+            kind: tomori_protocol::FrameKind::Control,
+            payload,
+        }
+        .try_encode_within(&mut bytes, tomori_protocol::MOST_FRAME_BYTES)
+        .unwrap();
+        bytes
+    }
+
     #[test]
-    fn a_message_too_large_to_send_is_replaced_by_an_error_saying_so() {
-        let mut output = Vec::new();
-        encode(
-            &ServerMessage::Error {
-                error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
-                space: None,
-                panel: None,
-            },
-            &mut output,
+    fn a_client_s_frames_are_read_within_the_limit_its_hello_negotiates() {
+        let long = padded_pong(2 * tomori_protocol::MAX_FRAME_BYTES);
+        let ended = |bytes: &[u8]| {
+            Ok(BodyFrame::Data {
+                data: bytes.to_vec(),
+                end: true,
+            })
+        };
+        // Stating the most, as Tomori's own clients do, a frame longer than today's is read.
+        let mut body = scripted(
+            vec![
+                data(&hello(Some(tomori_protocol::Limits::MOST))),
+                ended(&long),
+            ],
+            false,
         );
+        let read_all = |body: &mut ConnectionBody<Script>| loop {
+            match read(body) {
+                Ok(BodyFrame::End) => return Ok(()),
+                Ok(_) => {}
+                Err(error) => return Err(format!("{error:?}")),
+            }
+        };
+        assert_eq!(read_all(&mut body), Ok(()));
+        assert_eq!(body.output.frame_limit(), tomori_protocol::MOST_FRAME_BYTES);
+        // Stating nothing, as an older client, it is refused, as before limits were stated; and so before Hello.
+        for first in [
+            hello(None),
+            Frame::client(&ClientMessage::Pong { nonce: 1 }).encode(),
+        ] {
+            let mut body = scripted(vec![data(&first), ended(&long)], false);
+            let error = read_all(&mut body).unwrap_err();
+            assert!(error.contains("TooLarge"), "{error}");
+            assert_eq!(body.output.frame_limit(), tomori_protocol::MAX_FRAME_BYTES);
+        }
+    }
+
+    #[test]
+    fn long_output_is_handed_out_in_pieces_and_a_closed_response_ends_after_them() {
+        let mut body = listening();
+        let pieces = |body: &mut ConnectionBody<Listening>| {
+            let mut bytes = Vec::new();
+            let mut sizes = Vec::new();
+            loop {
+                match read(body) {
+                    Ok(BodyFrame::Data { data, end }) => {
+                        sizes.push(data.len());
+                        bytes.extend(data);
+                        if end || !body.is_ready() {
+                            return (bytes, sizes, end);
+                        }
+                    }
+                    Ok(BodyFrame::End) => return (bytes, sizes, true),
+                    _ => unreachable!("data until the response ends"),
+                }
+            }
+        };
+        // The Welcome and what follows Hello.
+        pieces(&mut body);
+        let message = ServerMessage::Error {
+            error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
+            space: None,
+            panel: None,
+        };
+        body.outbox.message(message.clone());
+        body.outbox.close();
+        let (bytes, sizes, end) = pieces(&mut body);
+        assert!(end && body.finished);
+        // The pieces, then the end on its own.
+        assert_eq!(sizes.iter().sum::<usize>(), bytes.len());
+        assert!(
+            sizes.len() > 4 && sizes.iter().all(|size| *size <= PIECE_BYTES),
+            "{sizes:?}"
+        );
+        let mut decoder =
+            tomori_protocol::FrameDecoder::with_limit(tomori_protocol::MOST_FRAME_BYTES);
+        decoder.push(&bytes);
+        assert_eq!(
+            decoder
+                .next_frame()
+                .unwrap()
+                .unwrap()
+                .to_server_message()
+                .unwrap(),
+            message
+        );
+        decoder.finish().unwrap();
+        let Ok(BodyFrame::End) = read(&mut body) else {
+            unreachable!("ended");
+        };
+        // Closing the response closes the request.
+        body.close(None);
+    }
+
+    /// A request body that says Hello, stating the most, and then nothing, as a client that is listening.
+    struct Listening {
+        hello: Option<Vec<u8>>,
+    }
+
+    impl ReadableBody for Listening {
+        type Data = Vec<u8>;
+        type Error = std::io::Error;
+
+        fn close(&mut self, _error: Option<Self::Error>) {}
+
+        async fn read(
+            &mut self,
+            _cancellation: &Cancellation,
+        ) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
+            match self.hello.take() {
+                Some(data) => Ok(BodyFrame::Data { data, end: false }),
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// A connection whose client has said Hello, stating the most, and listens.
+    fn listening() -> ConnectionBody<Listening> {
+        let (jobs, _) = async_channel::unbounded();
+        let hub = Hub::new(
+            Backends::new(),
+            Arc::new(NullTranscriber::new()),
+            jobs,
+            Vec::new(),
+            SpaceSlots::new(DEFAULT_MAX_SPACES),
+        );
+        let request = Listening {
+            hello: Some(hello(Some(tomori_protocol::Limits::MOST))),
+        };
+        ConnectionBody::new(hub, request, Cancellation::new(), Access::open())
+            .expect("an open server admits the connection")
+    }
+
+    /// Measures how long agent speech queued just after a projection whole of 30 MB, the longest a frame may be near
+    /// enough, waits behind it on a link over loopback, as `design/server.md` reports:
+    /// `cargo test -p tomori-server --lib speech_behind -- --nocapture`.
+    #[test]
+    fn speech_behind_a_projection_whole_of_30_mb_waits_only_as_long_as_it_takes_to_send() {
+        use std::io::{Read, Write};
+        use std::time::Instant;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // The client reads at a frame limit of 32 MiB, noting when the long frame, then the speech, has arrived.
+        let client = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut decoder =
+                tomori_protocol::FrameDecoder::with_limit(tomori_protocol::MOST_FRAME_BYTES);
+            let mut buffer = vec![0; 1 << 20];
+            let mut long = None;
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "the speech never arrived");
+                decoder.push(&buffer[..read]);
+                while let Some(frame) = decoder.next_frame().unwrap() {
+                    match frame.kind {
+                        tomori_protocol::FrameKind::Audio => {
+                            return (long.expect("the long frame first"), Instant::now());
+                        }
+                        _ if frame.payload.len() > tomori_protocol::MAX_FRAME_BYTES => {
+                            long = Some(Instant::now());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        let mut body = listening();
+        let cancellation = Cancellation::new();
+        let write = |body: &mut ConnectionBody<Listening>, stream: &mut std::net::TcpStream| {
+            let mut largest = 0;
+            loop {
+                let Ok(BodyFrame::Data { data, .. }) =
+                    futures_lite::future::block_on(body.read(&cancellation))
+                else {
+                    unreachable!("data while there is any");
+                };
+                largest = data.len().max(largest);
+                stream.write_all(&data).unwrap();
+                if !body.is_ready() {
+                    return largest;
+                }
+            }
+        };
+        // The Welcome, and what follows Hello.
+        write(&mut body, &mut stream);
+        let message = ServerMessage::Error {
+            error: "x".repeat(30_000_000),
+            space: None,
+            panel: None,
+        };
+        let speech = Frame::audio(&tomori_protocol::AudioFrame {
+            gate: tomori_protocol::Gate::Agent,
+            source: tomori_protocol::AGENT_SOURCE,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: 24_000,
+            samples: vec![0; 480],
+        })
+        .encode();
+        let queued = Instant::now();
+        body.outbox.message(message);
+        body.outbox.agent_audio(speech);
+        let largest = write(&mut body, &mut stream);
+        let (long, heard) = client.join().unwrap();
+        let waited = heard - queued;
+        eprintln!(
+            "Speech queued just after a 30 MB frame arrived {:.0} ms later, {:.0} ms after the frame, in pieces of at most {} bytes.",
+            waited.as_secs_f64() * 1000.0,
+            (heard - long).as_secs_f64() * 1000.0,
+            largest,
+        );
+        assert!(largest <= PIECE_BYTES);
+        // Generous, for a loaded machine running every test at once; about 40 ms here.
+        assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+    }
+
+    #[test]
+    fn a_message_too_large_for_the_connection_is_replaced_by_an_error_saying_so() {
+        let message = ServerMessage::Error {
+            error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
+            space: None,
+            panel: None,
+        };
+        // Too large for today's limit, which an older client is sent within.
+        let mut output = Vec::new();
+        encode(&message, &mut output, tomori_protocol::MAX_FRAME_BYTES);
         let mut decoder = tomori_protocol::FrameDecoder::new();
         decoder.push(&output);
         let frame = decoder.next_frame().unwrap().unwrap();
@@ -443,5 +737,13 @@ mod tests {
             unreachable!("the replacement is an error");
         };
         assert_eq!(error, "A message from the server was too large to send.");
+        // Sent whole on a connection whose sides both state more.
+        let mut output = Vec::new();
+        encode(&message, &mut output, tomori_protocol::MOST_FRAME_BYTES);
+        let mut decoder =
+            tomori_protocol::FrameDecoder::with_limit(tomori_protocol::MOST_FRAME_BYTES);
+        decoder.push(&output);
+        let frame = decoder.next_frame().unwrap().unwrap();
+        assert_eq!(frame.to_server_message().unwrap(), message);
     }
 }

@@ -3,7 +3,7 @@
 
 //! Patches of what a stage projects: each change a participant or the agent makes is the patch it should be, patches
 //! applied in turn are the view sent whole, and how much smaller they are. See `design/projection.md`.
-use tomori_protocol::{PatchOp, ProjectionPatch, ServerMessage};
+use tomori_protocol::{PatchOp, ProjectionPatch, ServerMessage, WALL_SLOTS};
 
 use super::*;
 
@@ -12,6 +12,14 @@ fn pose(x: f32, z: f32) -> Pose {
         position: [x, 1.5, z],
         orientation: [0.0, 0.0, 0.0, 1.0],
     }
+}
+
+/// The `index`th of many poses within reach: twelve a row, three metres apart, from `z`, each row `step` on.
+fn spread(index: usize, z: f32, step: f32) -> Pose {
+    pose(
+        (index % 12) as f32 * 3.0 - 16.5,
+        z + (index / 12) as f32 * step,
+    )
 }
 
 const SKY: Walls<'static> = Walls {
@@ -119,14 +127,15 @@ fn kinds(patch: &ProjectionPatch) -> Vec<String> {
 
 #[test]
 fn the_stage_s_bounds_are_those_a_welcome_states() {
-    let limits = tomori_protocol::Limits::TODAY;
+    let limits = crate::hub::LIMITS;
     assert_eq!(1 + DECLARED_WALLS + ADDED_WALLS, limits.walls as usize);
-    assert_eq!(
-        WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS),
-        limits.slots as usize
-    );
+    assert_eq!(SLOTS, limits.slots as usize);
     assert_eq!(SLOTS + FLOATING, limits.panels as usize);
     assert_eq!(FLOATING, limits.floating as usize);
+    // Ten times today's, which an older client is sent within.
+    let today = tomori_protocol::Limits::TODAY;
+    assert_eq!(SLOTS, 10 * today.slots as usize);
+    assert_eq!(FLOATING, 10 * today.floating as usize);
 }
 
 #[test]
@@ -311,17 +320,17 @@ fn patches_are_far_smaller_than_the_projection_whole() {
         let origin = (index >= 3).then_some(pose(0.0, -4.0).position);
         typical.project(&SKY, prose(&format!("Notes {index}")), origin, 0);
     }
-    // A space at every limit: every slot of thirteen walls, and every floating panel, of the largest text panels.
+    // A space at every limit: every slot of sixty-seven walls, and every floating panel, of the largest text panels.
     let mut most = Stage::default();
     for index in 0..FLOATING {
         let id = most.project(&full, largest(), None, 0);
-        most.place(&full, &id, Target::Free(pose(index as f32, 0.0)))
+        most.place(&full, &id, Target::Free(spread(index, 0.0, 0.4)))
             .unwrap();
     }
     let mut added_most = Vec::new();
     for index in 0..ADDED_WALLS {
         added_most.push(
-            most.add_wall(&full, &pose(index as f32 - 3.0, 5.0), None)
+            most.add_wall(&full, &spread(index, 5.0, 2.5), None)
                 .unwrap(),
         );
     }
@@ -329,7 +338,7 @@ fn patches_are_far_smaller_than_the_projection_whole() {
         declared
             .iter()
             .map(|declared| declared.pose.position)
-            .chain((0..ADDED_WALLS).map(|index| pose(index as f32 - 3.0, 5.0).position))
+            .chain((0..ADDED_WALLS).map(|index| spread(index, 5.0, 2.5).position))
             .map(Some),
     );
     for origin in origins {
@@ -341,7 +350,7 @@ fn patches_are_far_smaller_than_the_projection_whole() {
     let agenda_most = most.project(&full, agenda(), None, 0);
     assert_eq!(
         most.view("s", &full, 0).panels.len(),
-        tomori_protocol::PROJECTION_PANELS as usize
+        WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS) + FLOATING
     );
 
     let mut rows = Vec::new();

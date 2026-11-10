@@ -34,6 +34,37 @@ pub fn welcome_frame() -> Vec<u8> {
     Frame::server(&welcome_message(None)).encode()
 }
 
+/// A Welcome stating `limits`, as a server that negotiates frames does.
+pub fn welcome_stating(limits: Option<tomori_protocol::Limits>) -> Vec<u8> {
+    let ServerMessage::Welcome {
+        protocol,
+        server,
+        source,
+        role,
+        backends,
+        roots,
+        environments,
+        utterance_limit,
+        name,
+        ..
+    } = welcome_message(None)
+    else {
+        unreachable!("a welcome");
+    };
+    message(&ServerMessage::Welcome {
+        protocol,
+        server,
+        source,
+        role,
+        backends,
+        roots,
+        environments,
+        utterance_limit,
+        name,
+        limits,
+    })
+}
+
 fn welcome_message(utterance_limit: Option<u32>) -> ServerMessage {
     ServerMessage::Welcome {
         protocol: tomori_protocol::PROTOCOL_VERSION,
