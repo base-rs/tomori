@@ -72,6 +72,22 @@ fn pressure(space: &Space, mean: Vec<Option<f32>>, greatest: Vec<Option<f32>>) {
 
 The server bounds and cleans what it is given, shows a panel's updates about once a second, the latest winning, and shows a panel only while the side runs, keeping where it was for when the side publishes it again; participants move and dismiss it as any panel, and a dismissed one stays away until the side retracts it. Older clients show a chart's title and a summary of its latest values. See Tomori's `design/environments.md` and `design/projection.md`.
 
+A list panel shows rows the side names, such as a queue, and highlights one by its id; each row may carry a reference, so that the agent can inspect the row a participant points at, through the side's inspector, as it inspects an object:
+
+```rust
+use tomori_environment::{Panel, Row, Space};
+
+fn queue(space: &Space) {
+    let rows = vec![
+        Row::new("pod7", "pod7 · 3 waiting").with_reference("pod/7"),
+        Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112"),
+    ];
+    let _ = space.publish(Panel::list("queue", "Queue", rows).highlighting("pod112"));
+}
+```
+
+Every client draws it as a list, the highlighted row with a bold pointer before it, and scrolls it where it has more rows than its face shows. At most 30 rows, each id unique and at most 64 bytes of letters, digits, `-`, `_`, `.` and `/`; rows past a panel's body bound are left out whole. See Tomori's `design/panel-actions.md`.
+
 ## Where participants arrive, the agent lives and the Tomori wall stands
 
 An environment's registration gives fixed homes, each a pose in the environment's own coordinates, as its scenery is drawn, facing along its +Z, the way it looks, which `tomori_protocol::Pose::at(spot).facing_towards(target)` makes: where participants arrive, with `Environment::with_arrival`, and the agent's home, with `Environment::with_agent`, at least 1.4 m above the floor, beneath which the Tomori wall's home stands by default, 0.88 m below the swarm's middle, facing the way the agent faces (`tomori_protocol::entourage::wall_beneath`), or, only where the wall must stand elsewhere, as beneath an agent too high or far to read it there, the Tomori wall's, with `Environment::with_stage`; and, if it likes, the middle of its delegated workers' arrangement, with `Environment::with_workers`, otherwise the agent's home. A space's coordinates always have home, where participants arrive, at their origin facing −Z, so Tomori carries the environment's scenery, walkable surfaces, client side, anchors and walls into them; the environment's crates never see the space's coordinates. The Tomori wall stays at its home, and the agent appears at its home and stays there until a participant summons it, its wall going beneath it. Check, in the environment's tests, that the wall can be read and the agent seen from the arrival with `tomori_environment::sightlines`, the wall where `entourage::wall_beneath` stands it, on the arrival's floor, unless you give a `stage`:

@@ -9,9 +9,9 @@
 //!
 //! Through its [`Space`], a side keeps state for the clients in the space that present the environment, sends them events, describes what they can point at for the space's agent, and takes the intents their participants send it. The state, events and intents are the environment's own JSON, which only its own crates read: the server carries them without reading them. An object it describes may carry a reference, which the agent can inspect for structured details that the side's [`Inspector`] gives.
 //!
-//! A side may also publish panels onto its environment's own walls, text or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`].
+//! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`].
 //!
-//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], and what it publishes by [`PANEL_ID_BYTES`] and [`PANEL_LIMIT`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
+//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], and what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -22,7 +22,10 @@ use base_scheduler::Cancellation;
 mod panel;
 pub mod sightlines;
 
-pub use panel::{PANEL_ID_BYTES, PANEL_LIMIT, Panel, valid_panel_id};
+pub use panel::{
+    PANEL_ID_BYTES, PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_panel_id,
+    valid_row_id,
+};
 /// A chart panel's native chart, as [`Panel::chart`] takes it.
 pub use tomori_protocol::chart;
 
@@ -493,7 +496,8 @@ impl Space {
     ///
     /// The server refuses, saying why: an id [`valid_panel_id`] refuses; a wall the environment does not declare, or a
     /// slot it does not have, or a full wall; a chart [`chart::Chart::cleaned`] refuses; more than [`PANEL_LIMIT`], 8,
-    /// panels in the space;
+    /// panels in the space; a list panel of more than [`ROW_LIMIT`] rows, a row id [`valid_row_id`] refuses or that
+    /// another of its rows has, or a highlight that names none of its rows or is not a list panel's;
     /// and more than 20 calls a second, after a burst of 40. It makes a panel's changes at most about once a second, and
     /// 4 changes, or 32 KiB of panels, a second in the space, after a burst of 8 or 128 KiB, counting only what changes:
     /// a side may publish more often, and an update that comes too soon waits, the newest replacing the one before, and
@@ -503,7 +507,9 @@ impl Space {
     /// longest goes, whoever's it is, so that the agent's panels can push away one of the side's a participant left
     /// floating, which then stays away as a dismissed one does. Once this side's `run` has returned, or it has
     /// failed, the server refuses every call, from any thread it left, and what it published rests until it runs again. It cleans and bounds what it keeps, as it does the agent's panels:
-    /// a title of 80 characters on one line, a body of 30 lines and 1,200 characters.
+    /// a title of 80 characters on one line, a body of 30 lines and 1,200 characters. A list panel's body is a list
+    /// item a row, which it writes, each row's text cleaned onto one line and cut after [`ROW_CHARS`], followed by `…`, a leading checkbox written with parentheses so that no row is a checklist item, and the row it
+    /// highlights with a pointer before it; rows past the body's bound are left out whole.
     ///
     /// ```
     /// use tomori_environment::{Panel, Space};

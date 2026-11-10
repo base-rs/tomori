@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Panels an environment's server side publishes onto its own walls, by ids it chooses: text panels and chart panels,
+//! Panels an environment's server side publishes onto its own walls, by ids it chooses: text, list and chart panels,
 //! kept with the space in that environment as the agent's panels are, moved, pointed at and dismissed as they are, but
 //! updated only by their environment. See `design/projection.md` and `design/environments.md`.
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,9 @@ use super::{Content, DECLARED_WALLS, Kept, Placed, Pose, Stage, Walls, blocks};
 pub const PUBLISHED: usize = tomori_environment::PANEL_LIMIT;
 
 /// What makes a kept panel one its environment published: the environment's id for it, the reference the agent can
-/// inspect it by, and its chart, if it is a chart panel. It is kept only while its environment's run in the space has
-/// published it, never written: what the space keeps of it is a [`Resting`] panel.
+/// inspect it by, its chart, if it is a chart panel, and its rows and the one it highlights, if it is a list panel. It
+/// is kept only while its environment's run in the space has published it, never written: what the space keeps of it
+/// is a [`Resting`] panel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Published {
     pub(super) id: String,
@@ -22,6 +23,108 @@ pub(super) struct Published {
     pub(super) reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) chart: Option<Chart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) rows: Option<Vec<Row>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) highlighted: Option<String>,
+}
+
+/// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
+/// id for it, its text, cleaned and cut, and the reference the agent can inspect it by, if it has one. See
+/// `design/panel-actions.md`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Row {
+    pub(crate) id: String,
+    pub(crate) text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference: Option<String>,
+}
+
+/// The pointer before the row a list panel highlights, bold, which every client draws as it draws any list.
+const POINTER: &str = "**▸** ";
+
+/// The body of a list panel of `rows`, highlighting the row `highlighted`, a list item a row, with the rows it shows
+/// and the one it highlights, if it shows it; or why it is refused: more than [`tomori_environment::ROW_LIMIT`] rows,
+/// a row id [`tomori_environment::valid_row_id`] refuses or another row has, or a highlight naming no row. Each row's
+/// text is cleaned onto one line and cut to [`tomori_environment::ROW_CHARS`], its id where that leaves nothing, and
+/// rows past a body's lines or characters left out whole; a reference refused, or an earlier row's, is left out. A
+/// text that begins with a checkbox, as `[ ] ` or `[x]`, has its brackets made parentheses, so that no row is ever a
+/// checklist item, which A would offer to tick.
+#[allow(clippy::type_complexity)]
+fn list(
+    rows: &[tomori_environment::Row],
+    highlighted: Option<String>,
+) -> Result<(String, Vec<Row>, Option<String>), String> {
+    if rows.len() > tomori_environment::ROW_LIMIT {
+        return Err(format!(
+            "A list panel has at most {} rows.",
+            tomori_environment::ROW_LIMIT
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        if !tomori_environment::valid_row_id(row.id()) {
+            return Err(format!(
+                "A row's id is 1 to {} ASCII letters, digits, -, _, . and /.",
+                tomori_environment::ROW_ID_BYTES
+            ));
+        }
+        if !ids.insert(row.id()) {
+            return Err("Two rows of a list panel have the same id.".to_owned());
+        }
+    }
+    if highlighted
+        .as_deref()
+        .is_some_and(|highlighted| !ids.contains(highlighted))
+    {
+        return Err("A list panel highlights only a row it has.".to_owned());
+    }
+    let mut body = String::new();
+    let mut room = blocks::BODY_CHARS;
+    let mut shown: Vec<Row> = Vec::new();
+    for row in rows {
+        let mut text = tomori_protocol::text::one_line(row.text(), tomori_environment::ROW_CHARS)
+            .trim()
+            .to_owned();
+        if text.is_empty() {
+            text = row.id().to_owned();
+        }
+        if crate::stage::checklist::items(&format!("- {text}"))
+            .first()
+            .is_some_and(|item| item.checked.is_some())
+        {
+            text.replace_range(..3, &format!("({})", &text[1..2]));
+        }
+        let pointer = if highlighted.as_deref() == Some(row.id()) {
+            POINTER
+        } else {
+            ""
+        };
+        let line = format!("- {pointer}{text}");
+        let length = line.chars().count();
+        if shown.len() == blocks::BODY_LINES || length > room {
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+        room -= length;
+        let reference = row.reference().filter(|reference| {
+            tomori_environment::valid_reference(reference)
+                && !shown
+                    .iter()
+                    .any(|row| row.reference.as_deref() == Some(*reference))
+        });
+        shown.push(Row {
+            id: row.id().to_owned(),
+            text,
+            reference: reference.map(str::to_owned),
+        });
+    }
+    let highlighted =
+        highlighted.filter(|highlighted| shown.iter().any(|row| &row.id == highlighted));
+    Ok((body, shown, highlighted))
 }
 
 /// A panel its environment published that no run of its side has published since the space came back to the
@@ -103,13 +206,17 @@ pub struct Publishing {
     wall: u32,
     slot: Option<u32>,
     reference: Option<String>,
+    rows: Option<Vec<Row>>,
+    highlighted: Option<String>,
 }
 
 impl Publishing {
     /// `panel`, cleaned and bounded as the agent's panels are, its chart cleaned as [`Chart::cleaned`] cleans it and its
-    /// body, for a chart panel, the chart's summary; or why it is refused. A reference that
-    /// [`tomori_environment::valid_reference`] refuses is left out, as an object's is.
+    /// body, for a chart panel, the chart's summary, and, for a list panel, its rows; or why it is refused. A reference
+    /// that [`tomori_environment::valid_reference`] refuses is left out, as an object's is.
     pub fn new(panel: tomori_environment::Panel) -> Result<Self, String> {
+        let listed = panel.rows().map(<[_]>::to_vec);
+        let highlighted = panel.highlighted().map(str::to_owned);
         let (id, title, body, chart, wall, slot, reference) = panel.into_parts();
         if !tomori_environment::valid_panel_id(&id) {
             return Err(format!(
@@ -118,12 +225,25 @@ impl Publishing {
             ));
         }
         let chart = chart.map(Chart::cleaned).transpose()?;
-        let body = chart.as_ref().map_or(body, Chart::summary);
+        let (body, rows, highlighted) = match listed {
+            Some(listed) => {
+                let (body, rows, highlighted) = list(&listed, highlighted)?;
+                (body, Some(rows), highlighted)
+            }
+            None if highlighted.is_some() => {
+                return Err("Only a list panel highlights a row.".to_owned());
+            }
+            None => (
+                blocks::clean_body(&chart.as_ref().map_or(body, Chart::summary)),
+                None,
+                None,
+            ),
+        };
         let publishing = Self {
             id,
             content: Content {
                 title: blocks::title(&title),
-                body: blocks::clean_body(&body),
+                body,
                 meta: Vec::new(),
                 code: None,
                 slug: None,
@@ -133,6 +253,8 @@ impl Publishing {
             wall,
             slot,
             reference: reference.filter(|reference| tomori_environment::valid_reference(reference)),
+            rows,
+            highlighted,
         };
         Ok(publishing)
     }
@@ -229,6 +351,8 @@ impl Stage {
             chart,
             slot,
             reference,
+            rows,
+            highlighted,
             ..
         } = publishing;
         let room = self.room(walls.environment);
@@ -236,6 +360,8 @@ impl Stage {
             id: id.clone(),
             reference,
             chart,
+            rows,
+            highlighted,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -325,6 +451,7 @@ impl Stage {
                     published.id == publishing.id
                         && published.chart == publishing.chart
                         && published.reference == publishing.reference
+                        && published.rows == publishing.rows
                 }) && kept.content == publishing.content
             })
     }
@@ -376,28 +503,43 @@ impl Stage {
         Some((&published.id, published.reference.as_deref()))
     }
 
-    /// What the agent is told of the panel shown in `environment` that its environment published with `reference`, as
-    /// the `inspect` tool describes it: its title and what it shows, cleaned onto one line.
+    /// The rows of the list panel `panel` shown in `environment`, in order, and the id of the one it highlights, if
+    /// its environment published it as a list, even one of no rows.
+    pub(crate) fn rows(&self, environment: &str, panel: &str) -> Option<(&[Row], Option<&str>)> {
+        let published = self.kept(environment, panel)?.published.as_ref()?;
+        let rows = published.rows.as_deref()?;
+        Some((rows, published.highlighted.as_deref()))
+    }
+
+    /// What the agent is told of what its environment published with `reference` in `environment`, as the `inspect`
+    /// tool describes it: a panel's title and what it shows, or else a list panel's title and the row's text, cleaned
+    /// onto one line.
     pub(crate) fn referenced(&self, environment: &str, reference: &str) -> Option<String> {
-        self.rooms
-            .get(environment)?
-            .panels
-            .iter()
-            .find(|kept| {
-                kept.published
-                    .as_ref()
-                    .is_some_and(|published| published.reference.as_deref() == Some(reference))
+        let published = || {
+            self.rooms.get(environment).into_iter().flat_map(|room| {
+                room.panels.iter().filter_map(|kept| {
+                    kept.published
+                        .as_ref()
+                        .map(|published| (&kept.content, published))
+                })
             })
-            .map(|kept| {
-                crate::space::one_line(
-                    &format!(
-                        "{}: {}",
-                        kept.content.title,
-                        kept.content.body.replace('\n', "; ")
-                    ),
-                    blocks::BODY_CHARS,
-                )
+        };
+        let panel = published()
+            .find(|(_, published)| published.reference.as_deref() == Some(reference))
+            .map(|(content, _)| format!("{}: {}", content.title, content.body.replace('\n', "; ")));
+        let row = || {
+            published().find_map(|(content, published)| {
+                published
+                    .rows
+                    .iter()
+                    .flatten()
+                    .find(|row| row.reference.as_deref() == Some(reference))
+                    .map(|row| format!("{}: {}", content.title, row.text))
             })
+        };
+        panel
+            .or_else(row)
+            .map(|described| crate::space::one_line(&described, blocks::BODY_CHARS))
     }
 }
 

@@ -5,6 +5,8 @@
 //! [`crate::Space::publish`].
 use tomori_protocol::Chart;
 
+use crate::{REFERENCE_BYTES, valid_reference};
+
 /// The longest id of a published panel, in bytes.
 pub const PANEL_ID_BYTES: usize = 32;
 
@@ -30,8 +32,84 @@ pub fn valid_panel_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// The most rows of a list panel, [`Panel::list`], as many as a panel's body has lines: one with more is refused.
+pub const ROW_LIMIT: usize = 30;
+
+/// The longest id of a row of a list panel, in bytes, as long as a reference.
+pub const ROW_ID_BYTES: usize = REFERENCE_BYTES;
+
+/// The longest text of a row of a list panel, in characters, once the server has cleaned it onto one line: a longer one
+/// is cut to this many, followed by the `…` that marks it cut.
+pub const ROW_CHARS: usize = 80;
+
+/// Whether `id` is one a side may name a row of a list panel by: 1 to [`ROW_ID_BYTES`] ASCII letters, digits, `-`,
+/// `_`, `.` and `/`, as a reference is, so that it can be told to the agent and named in a message as it is.
+///
+/// ```
+/// use tomori_environment::valid_row_id;
+///
+/// assert!(valid_row_id("pod/112"));
+/// assert!(!valid_row_id(""));
+/// assert!(!valid_row_id("pod 112"));
+/// assert!(!valid_row_id("observe:pod"));
+/// ```
+pub fn valid_row_id(id: &str) -> bool {
+    valid_reference(id)
+}
+
+/// A row of a list panel, [`Panel::list`]: an id the side chooses, unique among the panel's rows, by which it
+/// highlights the row, its text, a line of Markdown-lite, drawn as text and never as HTML, and, optionally, a reference
+/// the space's agent may inspect the row by, as an [`crate::Object`]'s. See `design/panel-actions.md`.
+///
+/// ```
+/// use tomori_environment::Row;
+///
+/// let row = Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112");
+/// assert_eq!((row.id(), row.text(), row.reference()), ("pod112", "pod112 · 41 waiting", Some("pod/112")));
+/// assert_eq!(Row::new("pod7", "pod7").reference(), None);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Row {
+    id: String,
+    text: String,
+    reference: Option<String>,
+}
+
+impl Row {
+    /// The row `id`, showing `text`.
+    pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            reference: None,
+        }
+    }
+
+    /// The row, which the space's agent can inspect by `reference`, as an object's: one that [`valid_reference`]
+    /// refuses, or that an earlier row of the panel has, is left out by the server, which keeps the row without it.
+    pub fn with_reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(reference.into());
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The reference the agent can inspect it by, if it has one.
+    pub fn reference(&self) -> Option<&str> {
+        self.reference.as_deref()
+    }
+}
+
 /// A panel a side publishes onto one of its environment's own walls, by an id it chooses: a text panel, its body
-/// Markdown-lite text, drawn as text and never as HTML, or a chart panel, with its [`Chart`]. It names the wall by its
+/// Markdown-lite text, drawn as text and never as HTML, a list panel, of [`Row`]s, one of which it may highlight, or a
+/// chart panel, with its [`Chart`]. It names the wall by its
 /// place in the order the environment declares its walls, from 0, and may say which slot it prefers. See
 /// `design/environments.md`.
 ///
@@ -56,6 +134,8 @@ pub struct Panel {
     wall: u32,
     slot: Option<u32>,
     reference: Option<String>,
+    rows: Option<Vec<Row>>,
+    highlighted: Option<String>,
 }
 
 impl Panel {
@@ -69,6 +149,8 @@ impl Panel {
             wall: 0,
             slot: None,
             reference: None,
+            rows: None,
+            highlighted: None,
         }
     }
 
@@ -79,6 +161,33 @@ impl Panel {
             chart: Some(chart),
             ..Self::text(id, title, "")
         }
+    }
+
+    /// The list panel `id`, titled `title`, showing `rows`, in order, on the environment's first wall: its body is a list
+    /// item a row, which the server writes. At most [`ROW_LIMIT`] rows, each with an id [`valid_row_id`] takes and no
+    /// other row has; the server refuses one that is not, saying why. See `design/panel-actions.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Panel, Row};
+    ///
+    /// let queue = Panel::list("queue", "Queue", vec![Row::new("pod7", "pod7 · 3"), Row::new("pod112", "pod112 · 41")])
+    ///     .highlighting("pod112");
+    /// assert_eq!(queue.rows().map(<[Row]>::len), Some(2));
+    /// assert_eq!(queue.highlighted(), Some("pod112"));
+    /// assert_eq!(Panel::text("rota", "Rota", "").rows(), None);
+    /// ```
+    pub fn list(id: impl Into<String>, title: impl Into<String>, rows: Vec<Row>) -> Self {
+        Self {
+            rows: Some(rows),
+            ..Self::text(id, title, "")
+        }
+    }
+
+    /// The panel, highlighting its row `row`, by its id: the server draws that row with a pointer before it. Only a list
+    /// panel highlights, and only a row it has; the server refuses any other highlight, saying why.
+    pub fn highlighting(mut self, row: impl Into<String>) -> Self {
+        self.highlighted = Some(row.into());
+        self
     }
 
     /// The panel, on the environment's own wall `wall`, from 0 in the order it declares them, in `slot` if it is free.
@@ -124,6 +233,16 @@ impl Panel {
     /// The reference the agent can inspect it by, if it has one.
     pub fn reference(&self) -> Option<&str> {
         self.reference.as_deref()
+    }
+
+    /// Its rows, if it is a list panel.
+    pub fn rows(&self) -> Option<&[Row]> {
+        self.rows.as_deref()
+    }
+
+    /// The id of the row it highlights, if it highlights one.
+    pub fn highlighted(&self) -> Option<&str> {
+        self.highlighted.as_deref()
     }
 
     /// Its parts, to keep: its id, title, body, chart, wall, slot and reference.
@@ -180,6 +299,32 @@ mod tests {
             (panel.wall(), panel.slot(), panel.id()),
             (2, Some(1), "rota")
         );
+    }
+
+    #[test]
+    fn a_list_panel_is_what_it_was_given() {
+        let rows = vec![
+            Row::new("a", "A").with_reference("row/a"),
+            Row::new("b", "B"),
+        ];
+        let list = Panel::list("queue", "Queue", rows.clone()).highlighting("b");
+        assert_eq!(list.rows(), Some(rows.as_slice()));
+        assert_eq!((list.highlighted(), list.body()), (Some("b"), ""));
+        assert_eq!(Panel::text("rota", "", "").highlighted(), None);
+        let row = &list.rows().unwrap()[0];
+        assert_eq!(
+            (row.id(), row.text(), row.reference()),
+            ("a", "A", Some("row/a"))
+        );
+        let plain = Row::new("b", "B");
+        assert_eq!(
+            (plain.id(), plain.text(), plain.reference()),
+            ("b", "B", None)
+        );
+        assert_eq!(Panel::list("empty", "", Vec::new()).rows(), Some(&[][..]));
+        assert!(valid_row_id(&"a".repeat(ROW_ID_BYTES)));
+        assert!(!valid_row_id(&"a".repeat(ROW_ID_BYTES + 1)));
+        assert_eq!((ROW_LIMIT, ROW_ID_BYTES, ROW_CHARS), (30, 64, 80));
     }
 
     #[test]

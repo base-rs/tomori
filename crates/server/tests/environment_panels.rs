@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tomori_environment::chart::{
     AxisLabel, Chart, Colour, Edge, Note, Reference, Series, SeriesStyle, Shade, Tone, ValueAxis,
 };
-use tomori_environment::{Panel, Result, ServerSide, Space};
+use tomori_environment::{Panel, Result, Row, ServerSide, Space};
 use tomori_protocol::{ClientMessage, Place, Projection, ServerMessage};
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend};
 use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
@@ -98,7 +98,31 @@ impl ServerSide for Gauges {
     }
 }
 
-/// A server serving Tomori's tools, offering Sky and Gauges, with one wall of its own.
+/// An example environment's side that publishes a queue of pods as a list panel, highlighting one, and answers the
+/// agent's inspection of a pod. See `design/panel-actions.md`.
+struct Queue;
+
+impl ServerSide for Queue {
+    fn run(&self, space: &Space) -> Result<()> {
+        space.inspect_with(|reference: &str| -> Result<Option<String>> {
+            Ok(reference
+                .strip_prefix("pod/")
+                .map(|pod| json!({"pod": pod, "waiting": 41}).to_string()))
+        });
+        let rows = vec![
+            Row::new("pod7", "pod7 · 3 waiting").with_reference("pod/7"),
+            Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112"),
+            Row::new("pod9", "pod9 · 1 waiting"),
+        ];
+        space.publish(Panel::list("queue", "Queue", rows).highlighting("pod112"))?;
+        while !space.cancellation().is_cancelled() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+}
+
+/// A server serving Tomori's tools, offering Sky, Gauges and Queue, each of the last two with one wall of its own.
 fn start(backend: &FakeBackend) -> TestServer {
     TestServer::with_tools(backend.clone(), |backends| {
         Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(vec![
@@ -110,6 +134,11 @@ fn start(backend: &FakeBackend) -> TestServer {
                 .with_server_side(Gauges {
                     newest: Arc::default(),
                 }),
+            Environment::new("queue", "Queue")
+                .with_walls([
+                    tomori_protocol::Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])
+                ])
+                .with_server_side(Queue),
         ])
     })
 }
@@ -267,4 +296,55 @@ fn an_environment_s_live_chart_is_on_its_wall_for_everyone_and_the_agent_reads_i
         _ => None,
     });
     assert!(elsewhere.panels.is_empty());
+}
+
+#[test]
+fn an_environment_s_list_highlights_a_row_and_the_agent_inspects_a_row() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Queue".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("queue".to_owned()),
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Queue");
+    // Every client is sent a list, the highlighted row with its pointer.
+    let body = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Queue")
+            .map(|panel| panel.body.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        body,
+        "- pod7 · 3 waiting\n- **▸** pod112 · 41 waiting\n- pod9 · 1 waiting"
+    );
+    // The agent reads its rows back, and inspects one by its id.
+    let session = tomori_backend::Session::id(&backend.started()[0]);
+    let token = token(&backend);
+    let panels = call(&server, &token, &session, "panels", json!({}));
+    assert_eq!(
+        panels["panels"][0]["rows"],
+        json!([
+            {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false},
+            {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true},
+            {"id": "pod9", "inspect_id": null, "highlighted": false},
+        ])
+    );
+    let inspected = call(
+        &server,
+        &token,
+        &session,
+        "inspect",
+        json!({"id": "queue:pod/112"}),
+    );
+    assert_eq!(inspected["details"], json!({"pod": "112", "waiting": 41}));
+    assert_eq!(inspected["description"], "Queue: pod112 · 41 waiting");
 }
