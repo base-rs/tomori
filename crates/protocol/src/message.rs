@@ -392,6 +392,16 @@ pub enum ClientMessage {
         /// sent one, and are sent an image panel as a text panel of its caption instead. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         images: bool,
+        /// Whether this client applies [`ServerMessage::ProjectionPatch`] to the projection it holds, asking with
+        /// [`ClientMessage::ResyncProjection`] for the whole projection when it cannot. Absent from older clients, which
+        /// would refuse a patch and are sent the whole [`ServerMessage::Projection`] whenever it changes, as before. See
+        /// `design/projection.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        projection_patches: bool,
+        /// What this client reads and draws at most. Absent from older clients, and read as [`crate::Limits::TODAY`];
+        /// a field left out is today's bound too. See `design/projection.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<crate::Limits>,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
@@ -655,6 +665,14 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<u64>,
     },
+    /// Send the whole projection of the client's space again, as [`ServerMessage::Projection`]: the client holds
+    /// `revision`, and was sent a [`ServerMessage::ProjectionPatch`] it could not apply, as one from another revision,
+    /// after missing one, or naming what it does not have. Only a client whose `Hello` sets `projection_patches` sends
+    /// it, so never to an older server; the server ignores it from a client in no space. See `design/projection.md`.
+    ResyncProjection {
+        #[serde(default)]
+        revision: u64,
+    },
     /// Send the image `image`, by the [`crate::Image::hash`] of an image panel in the client's space, as
     /// [`crate::FrameKind::Image`] frames. Only a client whose `Hello` sets `images` sends it, for an image it does not
     /// have; the server refuses one no panel shown in the client's space has.
@@ -788,6 +806,10 @@ pub enum ServerMessage {
         /// The display name the server knows this participant by: the one kept with their token, or for a connection without one the name Hello suggested. Absent from older servers, which take the name Hello gives and do not rename. See `design/security.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// What the server sends at most. Absent from older servers, and read as [`crate::Limits::TODAY`]. See
+        /// `design/projection.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<crate::Limits>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
@@ -883,6 +905,12 @@ pub enum ServerMessage {
     /// set `projection`. See `design/projection.md`.
     Projection {
         projection: Box<crate::Projection>,
+    },
+    /// What changed in the current space's projection since the revision the client holds, sent in place of the whole
+    /// [`ServerMessage::Projection`] whenever it changes, only to a client whose Hello set `projection_patches`. See
+    /// [`crate::ProjectionPatch`] and `design/projection.md`.
+    ProjectionPatch {
+        patch: Box<crate::ProjectionPatch>,
     },
     /// The server's random value for a pairing, as 64 hexadecimal digits, sent once the device has committed to its own.
     PairNonce {
@@ -1597,6 +1625,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -1711,6 +1741,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -1783,6 +1815,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -1822,6 +1856,8 @@ mod tests {
             pairing_window: true,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap()["pairing_window"],
@@ -1879,6 +1915,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1903,6 +1941,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             }
         );
 

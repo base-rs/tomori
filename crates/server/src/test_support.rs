@@ -524,6 +524,8 @@ impl TestClient {
             pairing_window,
             speech_held: false,
             images,
+            projection_patches: false,
+            limits: None,
         });
         // The welcome is the first reply to hello.
         let environments;

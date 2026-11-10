@@ -153,6 +153,8 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         pairing_window: false,
         speech_held: false,
         images: false,
+        projection_patches: false,
+        limits: None,
     });
     let (backends, environments) = client.wait_for(|message| match message {
         ServerMessage::Welcome {

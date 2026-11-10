@@ -371,6 +371,8 @@ fn hello_is_reserved_and_closing_drains_control() {
         pairing_window: false,
         speech_held: false,
         images: false,
+        projection_patches: false,
+        limits: None,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

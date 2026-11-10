@@ -154,6 +154,7 @@ impl<B: ReadableBody> Session<B> {
                             environments: vec![],
                             utterance_limit: None,
                             name: Some("Ada Lovelace".into()),
+                            limits: None,
                         });
                     }
                     ClientMessage::Join { space } => self.reply(ServerMessage::Space {

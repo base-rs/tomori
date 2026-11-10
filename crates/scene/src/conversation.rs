@@ -957,6 +957,9 @@ impl Conversation {
                     self.projection = Some(*projection);
                 }
             }
+            // Not yet applied: this client's Hello takes no patches, so a server sends it none, and one sent regardless
+            // is ignored, the projection whole following each change. See `design/projection.md`.
+            ServerMessage::ProjectionPatch { .. } => {}
             // Only the joined space's cards are kept; a late update from a space left is ignored.
             ServerMessage::Cards { cards } => {
                 if self
@@ -12916,6 +12919,26 @@ mod tests {
                     ]),
             ),
         })
+    }
+
+    #[test]
+    fn a_patch_this_client_did_not_ask_for_changes_nothing() {
+        let mut conversation = joined(|space| space.projection = true);
+        conversation.apply(projected(SPACE));
+        let before = conversation.projection().cloned();
+        conversation.apply(Event::Message(ServerMessage::ProjectionPatch {
+            patch: Box::new(tomori_protocol::ProjectionPatch::new(
+                SPACE,
+                "sky",
+                0,
+                1,
+                vec![tomori_protocol::PatchOp::RemovePanel {
+                    panel: "panel-1".into(),
+                }],
+            )),
+        }));
+        assert_eq!(conversation.projection().cloned(), before);
+        assert!(sent(&mut conversation).is_empty());
     }
 
     #[test]

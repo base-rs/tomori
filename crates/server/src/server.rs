@@ -2442,6 +2442,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,

@@ -77,6 +77,8 @@ impl Participant {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

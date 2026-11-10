@@ -34,6 +34,7 @@ pub mod offline;
 mod option;
 mod outbox;
 mod pages;
+mod patches;
 pub mod presence;
 mod process;
 mod projection;

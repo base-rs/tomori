@@ -16,8 +16,8 @@ use tomori_backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use tomori_discovery::{AttentionCounts, Counts};
 use tomori_protocol::{
     Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, EnvironmentVersion, Frame,
-    FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
-    WorkspaceRoot,
+    FrameKind, Gate, Keepalive, Limits, PROTOCOL_VERSION, Participant, ServerMessage,
+    SpeechSetting, WorkspaceRoot,
 };
 use tomori_security::pairing::ChosenName;
 
@@ -541,6 +541,15 @@ struct ConnectionRecord {
     speech_held: bool,
     /// Whether the client said in Hello that it shows image panels, fetching their images. See `design/projection.md`.
     images: bool,
+    /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
+    /// `design/projection.md`.
+    patches: bool,
+    /// What the client said in Hello that it takes at most, within today's bounds. See `design/projection.md`.
+    limits: Limits,
+    /// The projection this client was last sent, as it was sent, at its revision, which the next is sent as a patch
+    /// from, for a client that takes patches: `None` until it is sent one, and once it asks for one whole again or
+    /// joins another space. See `design/projection.md`.
+    projected: Option<tomori_protocol::Projection>,
 }
 
 impl ConnectionRecord {
@@ -666,6 +675,10 @@ struct SpaceRecord {
     channel: Option<crate::channel::Channel>,
     /// The space's projection walls and the panels on them. See `design/projection.md`.
     stage: crate::stage::Stage,
+    /// The space's projection revision, raised with each change to what it projects, which patches are sent from and
+    /// to; for this run only, since a client sent one connects again, and is sent the projection whole, after a
+    /// restart. A cell, because raising it only needs shared access to the state. See `design/projection.md`.
+    projection_revision: Cell<u64>,
     /// Where a participant or the agent summoned the agent to, in the space's coordinates, while it is not at its home:
     /// for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
@@ -1046,19 +1059,22 @@ impl HubState {
     /// Send what is projected in `space` again to everyone in it whose client reads it, participants and visitors alike.
     /// See `design/projection.md`.
     fn touch_projection(&self, space: &str) {
-        for member in self
-            .space(space)
-            .into_iter()
-            .flat_map(|record| record.model.members())
-        {
-            if let Some(connection) = self
-                .participants
-                .get(member)
-                .and_then(|participant| participant.connection)
-                .and_then(|connection| self.connections.get(&connection))
-                .filter(|connection| connection.projection)
-            {
-                connection.outbox.projection();
+        // Every change is a revision, even one that leaves the projection as it was, so that a client that showed a
+        // change at once, such as a tick the server refused, is sent a patch that undoes it.
+        for record in self.space(space).into_iter() {
+            record
+                .projection_revision
+                .set(record.projection_revision.get() + 1);
+            for member in record.model.members() {
+                if let Some(connection) = self
+                    .participants
+                    .get(member)
+                    .and_then(|participant| participant.connection)
+                    .and_then(|connection| self.connections.get(&connection))
+                    .filter(|connection| connection.projection)
+                {
+                    connection.outbox.projection();
+                }
             }
         }
     }
@@ -1446,14 +1462,15 @@ impl HubState {
         }
         self.forget_closed();
         self.touch_space(space);
-        // After the space's state, what is projected in it, for a client that reads it.
-        if self
+        // After the space's state, what is projected in it, whole, for a client that reads it.
+        if let Some(connection) = self
             .participants
             .get(participant)
             .and_then(|record| record.connection)
-            .and_then(|connection| self.connections.get(&connection))
-            .is_some_and(|connection| connection.projection)
+            .and_then(|connection| self.connections.get_mut(&connection))
+            .filter(|connection| connection.projection)
         {
+            connection.projected = None;
             outbox.projection();
         }
         // After the space's state, the state its environment's side keeps for it, so that the client knows which space and environment it is for.
@@ -2566,6 +2583,9 @@ impl Hub {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                patches: false,
+                limits: Limits::TODAY,
+                projected: None,
             },
         );
         Some((id, outbox, received, output))
@@ -2795,6 +2815,8 @@ impl Hub {
                 pairing_window,
                 speech_held,
                 images,
+                projection_patches,
+                limits,
             } = message
             {
                 // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
@@ -2804,6 +2826,10 @@ impl Hub {
                     record.pairing_window = pairing_window;
                     record.speech_held = speech_held;
                     record.images = images;
+                    record.patches = projection && projection_patches;
+                    // Kept, and sent within today's bounds whatever it says, as this server's `Welcome` states. See
+                    // `design/projection.md`.
+                    record.limits = limits.unwrap_or_default().meet(Limits::TODAY);
                 }
                 self.hello(
                     &mut state,
@@ -3009,6 +3035,8 @@ impl Hub {
                 .utterance_limit()
                 .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
             name: Some(state.participants[&participant].name.clone()),
+            // Today's bounds, whatever the client states. See `design/projection.md`.
+            limits: Some(Limits::TODAY),
         });
         self.tell_window_on_hello(state, connection);
         // The space they were in, unless it was forgotten meanwhile.
@@ -4151,6 +4179,20 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            // A client that could not apply a patch is sent the projection whole, at the space's revision now; one in no
+            // space, or that reads no projection, is sent nothing, as a patch on its way as it left asks innocently.
+            ClientMessage::ResyncProjection { .. } => {
+                if space.is_some()
+                    && let Some(record) = state
+                        .connections
+                        .get_mut(&connection)
+                        .filter(|record| record.projection)
+                {
+                    log::debug!("A client asked for the projection whole.");
+                    record.projected = None;
+                    record.outbox.projection();
+                }
+            }
             // Only an image a panel shown in the client's space has: what a client may see is what its space shows. A
             // refusal is not said, since it happens innocently, as when the panel is dismissed while its image is asked
             // for, and the participant can do nothing about it; the client gives up after a few tries.
@@ -4918,6 +4960,7 @@ impl Hub {
             model,
             commands,
             touched: Cell::new(None),
+            projection_revision: Cell::new(1),
             deferred: Cell::new(None),
             closed: None,
             kept_open: false,
@@ -5058,6 +5101,7 @@ impl Hub {
                     model,
                     commands,
                     touched: Cell::new(None),
+                    projection_revision: Cell::new(1),
                     deferred: Cell::new(None),
                     closed,
                     kept_open: false,
@@ -5848,7 +5892,7 @@ impl Hub {
                 })
             }
             Outgoing::Projection => {
-                let state = self.lock();
+                let mut state = self.lock();
                 // Nothing for a connection that does not read it, or that has left its space since it was queued.
                 let space = state
                     .member(connection)
@@ -5868,6 +5912,7 @@ impl Hub {
                     space
                         .stage
                         .view(&space.model.id, &walls, crate::cards::unix_now());
+                let revision = &space.projection_revision;
                 // A client that shows no images is sent each image panel as a text panel saying what it is.
                 let images = state
                     .connections
@@ -5880,9 +5925,26 @@ impl Hub {
                         .map(crate::stage::without_image)
                         .collect();
                 }
-                Some(ServerMessage::Projection {
-                    projection: Box::new(projection),
-                })
+                let projected = state
+                    .connections
+                    .get(&connection)
+                    .filter(|record| record.patches)
+                    .and_then(|record| record.projected.as_ref());
+                // Each message is a revision of its own, even where nothing was touched since the last, as when it is
+                // sent whole again on joining, so that a patch always goes from one revision to a later one.
+                if projected.is_some_and(|projected| projected.revision >= revision.get()) {
+                    revision.set(revision.get() + 1);
+                }
+                let projection = projection.with_revision(revision.get());
+                let message = crate::patches::message(projected, &projection);
+                if let Some(record) = state
+                    .connections
+                    .get_mut(&connection)
+                    .filter(|record| record.patches)
+                {
+                    record.projected = Some(projection);
+                }
+                Some(message)
             }
             Outgoing::Spaces => {
                 let state = self.lock();
@@ -5984,6 +6046,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -6085,6 +6149,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             },
         );
         connection
@@ -6156,6 +6222,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -6194,6 +6262,8 @@ mod tests {
                     pairing_window: false,
                     speech_held: false,
                     images: false,
+                    projection_patches: false,
+                    limits: None,
                 },
             );
             connection
@@ -6395,6 +6465,8 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                projection_patches: false,
+                limits: None,
             },
         );
         hub.handle(

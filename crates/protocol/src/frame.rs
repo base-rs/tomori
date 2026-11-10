@@ -240,6 +240,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,

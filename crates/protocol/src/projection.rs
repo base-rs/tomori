@@ -13,9 +13,11 @@ use crate::Pose;
 
 pub mod group;
 pub mod layout;
+mod patch;
 
 pub use group::{Align, Attach, Edge, Join};
 pub use layout::{Grid, SlotFrame};
+pub use patch::{PatchError, PatchOp, ProjectionPatch};
 
 /// How many panels a wall holds unless it says otherwise, in slots numbered from 0, the most prominent first: a flat
 /// wall's three columns of two rows, read left to right and then down, as seen from in front of the wall, or a curved
@@ -26,10 +28,14 @@ pub const WALL_SLOTS: u32 = 6;
 /// environment.
 pub const TOMORI_WALL: &str = "tomori";
 
-/// What the participants of a space see projected in it, sent whenever it changes, complete each time: a client
-/// replaces what it had. It is the projection as seen in the space's current environment: the Tomori wall, the
-/// environment's walls, and the panels on them or floating free. The walls and floating panels of other environments
-/// the space has been in are kept by the server, hidden, and sent again when the space returns to them.
+/// What the participants of a space see projected in it, complete: a client replaces what it had. It is the
+/// projection as seen in the space's current environment: the Tomori wall, the environment's walls, and the panels on
+/// them or floating free. The walls and floating panels of other environments the space has been in are kept by the
+/// server, hidden, and sent again when the space returns to them.
+///
+/// It is sent on joining, on a client's [`crate::ClientMessage::ResyncProjection`], and to a client that does not apply
+/// patches, whenever it changes; a client that does is sent a [`ProjectionPatch`] from its [`Projection::revision`]
+/// instead. See `design/projection.md`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Projection {
@@ -40,6 +46,11 @@ pub struct Projection {
     /// The Tomori wall first, then the environment's own walls, then those its owners added.
     pub walls: Vec<Wall>,
     pub panels: Vec<Panel>,
+    /// The space's projection revision this is: a count the server raises with every change to what the space
+    /// projects, so that a [`ProjectionPatch`] says the revision it applies to. 0, and absent, from older servers, which
+    /// send no patches.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
 }
 
 impl Projection {
@@ -50,7 +61,14 @@ impl Projection {
             environment: environment.into(),
             walls: Vec::new(),
             panels: Vec::new(),
+            revision: 0,
         }
+    }
+
+    /// The projection at `revision` of its space's.
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
     }
 
     /// The projection with `walls`.
@@ -1241,5 +1259,89 @@ mod tests {
         .unwrap();
         assert!(!state.projection);
         assert!(!state.walls);
+    }
+
+    #[test]
+    fn revisions_patches_and_limits_are_absent_from_older_peers() {
+        use crate::{ClientMessage, ServerMessage};
+        // An older server's projection has no revision, and an older client's Hello takes no patches and states no
+        // limits, which read as today's.
+        let older: Projection = serde_json::from_value(serde_json::json!({
+            "space": "s", "environment": "sky", "walls": [], "panels": []
+        }))
+        .unwrap();
+        assert_eq!(older.revision, 0);
+        assert_eq!(
+            serde_json::to_value(Projection::new("s", "sky").with_revision(7)).unwrap(),
+            serde_json::json!({
+                "space": "s", "environment": "sky", "walls": [], "panels": [], "revision": 7
+            })
+        );
+        let hello: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "projection": true
+        }))
+        .unwrap();
+        let ClientMessage::Hello {
+            projection_patches,
+            limits,
+            ..
+        } = hello
+        else {
+            unreachable!("a hello");
+        };
+        assert!(!projection_patches);
+        assert_eq!(limits.unwrap_or_default(), crate::Limits::TODAY);
+        let hello: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "projection": true,
+            "projection_patches": true, "limits": {"slots": 500}
+        }))
+        .unwrap();
+        let ClientMessage::Hello {
+            projection_patches: true,
+            limits: Some(limits),
+            ..
+        } = hello
+        else {
+            unreachable!("a hello taking patches");
+        };
+        assert_eq!(
+            limits,
+            crate::Limits::TODAY.with_projection(13, 500, 12, 90)
+        );
+        // An older server's Welcome states no limits.
+        let welcome: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "welcome", "protocol": 2, "server": "tomori", "source": 1, "backends": [], "roots": []
+        }))
+        .unwrap();
+        let ServerMessage::Welcome { limits, .. } = welcome else {
+            unreachable!("a welcome");
+        };
+        assert_eq!(limits, None);
+        // A patch and a resync have their own types.
+        let patch = ServerMessage::ProjectionPatch {
+            patch: Box::new(ProjectionPatch::new("s", "sky", 1, 2, Vec::new())),
+        };
+        let json = serde_json::to_value(&patch).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "projection_patch",
+                "patch": {"space": "s", "environment": "sky", "from": 1, "to": 2}
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            patch
+        );
+        let resync = ClientMessage::ResyncProjection { revision: 4 };
+        let json = serde_json::to_value(&resync).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "resync_projection", "revision": 4})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            resync
+        );
     }
 }

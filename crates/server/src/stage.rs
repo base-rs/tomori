@@ -56,7 +56,7 @@ pub const DECLARED_WALLS: usize = 6;
 
 /// The most panels left floating in one environment of a space; leaving another floating takes away the one that has
 /// floated longest.
-pub const FLOATING: usize = 12;
+pub const FLOATING: usize = tomori_protocol::PROJECTION_FLOATING as usize;
 
 /// The most environments of one space whose walls and panels are kept; going to another forgets those of the
 /// environment left longest ago.
@@ -65,7 +65,7 @@ pub const ROOMS: usize = 8;
 /// The most slots the walls shown in one environment of a space have together: as many as the Tomori wall and each of
 /// [`DECLARED_WALLS`] and [`ADDED_WALLS`] walls have unless they say otherwise, so that a projection at every limit fits
 /// in one frame however its walls are laid out. A change to a wall, or a new one, that would take them past it is
-/// refused.
+/// refused. Today's bound, which a `Welcome` states as [`tomori_protocol::Limits::slots`].
 pub const SLOTS: usize = WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS);
 
 /// The most panels kept for a space, shown or hidden. A space shows at most [`SLOTS`] on its walls and [`FLOATING`]
@@ -4879,3 +4879,6 @@ mod tests {
         assert!(laid.add_wall(&SKY, &pose(0.0, 3.0), Some(bad)).is_err());
     }
 }
+
+#[cfg(test)]
+mod patch_tests;
