@@ -440,6 +440,13 @@ fn presence_says_its_mode_whom_it_talks_with_and_when_it_goes_home() {
     };
     assert_eq!(report["returns_home_in_s"], 60);
     assert!(report.get("moving").is_none() && report.get("now_at").is_none());
+    // Asked to follow while it follows, it does not put off going home.
+    hub.agent_move_agent("session", "follow", None).unwrap();
+    let report = {
+        let state = hub.lock();
+        Hub::agent_report(&state, &hub.environments(), &space, later)
+    };
+    assert_eq!(report["returns_home_in_s"], 60);
     // Sent home, it is going home, and then home.
     let sent = hub.agent_move_agent("session", "home", None).unwrap();
     assert_eq!(
