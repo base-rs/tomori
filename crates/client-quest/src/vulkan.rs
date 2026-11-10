@@ -167,7 +167,8 @@ impl Gpu {
     }
 
     /// Borrow XR-owned images. These wrappers MUST be dropped before swapchain
-    /// destruction, and the GPU must finish work before xrReleaseSwapchainImage.
+    /// destruction, after the GPU has finished with them, and an image's commands
+    /// must be submitted to the session's queue before xrReleaseSwapchainImage.
     pub fn import_images(
         &self,
         swapchain: &xr::Swapchain<xr::Vulkan>,
