@@ -373,8 +373,9 @@ pub struct Conversation {
     object_labels: std::collections::HashMap<String, String>,
     /// The cards of the space, in a space whose environment shows them. See `design/github.md`.
     cards: Option<tomori_protocol::Cards>,
-    /// What is projected in the joined space, as the server last sent it. See `design/projection.md`.
-    projection: Option<tomori_protocol::Projection>,
+    /// What is projected in the joined space, as the server last sent it whole and patched it since. See
+    /// `design/projection.md`.
+    projection: crate::patched::Held,
     /// The images of image panels fetched and held, and those asked for. See `design/projection.md`.
     images: crate::images::Images,
     /// Where the participant's head is in the space's scene, as the frame step last said: where a wall is added, and
@@ -523,7 +524,7 @@ impl Conversation {
             pointed_item: None,
             object_labels: std::collections::HashMap::new(),
             cards: None,
-            projection: None,
+            projection: crate::patched::Held::default(),
             images: crate::images::Images::default(),
             head: None,
             channel: crate::channel::Replica::default(),
@@ -954,12 +955,21 @@ impl Conversation {
                     .as_ref()
                     .is_some_and(|space| space.id == projection.space)
                 {
-                    self.projection = Some(*projection);
+                    self.projection.whole(*projection, Instant::now());
                 }
             }
-            // Not yet applied: this client's Hello takes no patches, so a server sends it none, and one sent regardless
-            // is ignored, the projection whole following each change. See `design/projection.md`.
-            ServerMessage::ProjectionPatch { .. } => {}
+            // A change to it, from the revision held; one that does not apply asks for it whole, once. A late one from a
+            // space left is ignored. See `design/projection.md`.
+            ServerMessage::ProjectionPatch { patch } => {
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.id == patch.space)
+                    && let Some(revision) = self.projection.patch(&patch, Instant::now())
+                {
+                    self.send(ClientMessage::ResyncProjection { revision });
+                }
+            }
             // Only the joined space's cards are kept; a late update from a space left is ignored.
             ServerMessage::Cards { cards } => {
                 if self
@@ -1478,7 +1488,7 @@ impl Conversation {
         self.forget_turn();
         self.space = None;
         self.cards = None;
-        self.projection = None;
+        self.projection.clear();
         self.channel.clear();
         self.watching = None;
         self.joining = None;
@@ -3533,17 +3543,11 @@ impl Conversation {
         }) {
             return false;
         }
-        let shown = self
-            .projection
-            .as_mut()
-            .and_then(|projection| projection.panels.iter_mut().find(|shown| shown.id == panel))
-            .expect("the panel of an item A ticks is shown");
-        shown.body = tomori_protocol::checklist::set(
-            &shown.body,
+        self.projection.tick(
+            panel,
             usize::try_from(line).expect("a line of a body shown is a usize"),
             checked,
-        )
-        .expect("an item A ticks is on its line");
+        );
         true
     }
 
@@ -3618,7 +3622,7 @@ impl Conversation {
 
     /// What is projected in the joined space, while the server projects there. See `design/projection.md`.
     pub fn projection(&self) -> Option<&tomori_protocol::Projection> {
-        self.projection.as_ref().filter(|projection| {
+        self.projection.projection().filter(|projection| {
             self.joined_space()
                 .is_some_and(|(space, _)| space.id == projection.space && space.projection)
         })
@@ -5376,6 +5380,11 @@ impl Session for Conversation {
 
     fn environments(&self) -> Option<Vec<tomori_protocol::EnvironmentVersion>> {
         Some(self.presented())
+    }
+
+    /// The conversation applies patches to the projection it holds. See `design/projection.md`.
+    fn projection_patches(&self) -> bool {
+        true
     }
 
     fn report(&mut self, report: Report) {
@@ -12921,23 +12930,60 @@ mod tests {
         })
     }
 
+    /// What `space` projects, as [`projected`] says, at `revision`.
+    fn projected_at(space: &str, revision: u64) -> tomori_protocol::Projection {
+        let Event::Message(ServerMessage::Projection { projection }) = projected(space) else {
+            unreachable!("a projection");
+        };
+        projection.with_revision(revision)
+    }
+
     #[test]
-    fn a_patch_this_client_did_not_ask_for_changes_nothing() {
+    fn the_joined_space_s_projection_is_patched_from_its_revision_and_asked_for_whole_after_a_gap()
+    {
         let mut conversation = joined(|space| space.projection = true);
-        conversation.apply(projected(SPACE));
-        let before = conversation.projection().cloned();
-        conversation.apply(Event::Message(ServerMessage::ProjectionPatch {
-            patch: Box::new(tomori_protocol::ProjectionPatch::new(
-                SPACE,
-                "sky",
-                0,
-                1,
-                vec![tomori_protocol::PatchOp::RemovePanel {
-                    panel: "panel-1".into(),
-                }],
-            )),
-        }));
-        assert_eq!(conversation.projection().cloned(), before);
+        assert!(Session::projection_patches(&conversation));
+        let whole = |projection: tomori_protocol::Projection| {
+            Event::Message(ServerMessage::Projection {
+                projection: Box::new(projection),
+            })
+        };
+        let patch = |before: &tomori_protocol::Projection, after: &tomori_protocol::Projection| {
+            Event::Message(ServerMessage::ProjectionPatch {
+                patch: Box::new(tomori_protocol::ProjectionPatch::between(before, after)),
+            })
+        };
+        let first = projected_at(SPACE, 3);
+        conversation.apply(whole(first.clone()));
+        // A panel dismissed, as a patch from the revision held.
+        let mut second = first.clone().with_revision(4);
+        second.panels.remove(1);
+        conversation.apply(patch(&first, &second));
+        assert_eq!(conversation.projection(), Some(&second));
+        assert!(sent(&mut conversation).is_empty());
+        // Another space's, as one on its way as the participant left it, is ignored.
+        let elsewhere = projected_at("elsewhere", 4);
+        conversation.apply(patch(&elsewhere, &elsewhere.clone().with_revision(5)));
+        assert!(sent(&mut conversation).is_empty());
+        // One from a revision after a patch missed is not applied, and the projection is asked for whole, once.
+        let third = second.clone().with_revision(5);
+        let mut fourth = third.clone().with_revision(6);
+        fourth.panels[0].title = "Build status, green".into();
+        conversation.apply(patch(&third, &fourth));
+        conversation.apply(patch(&third, &fourth));
+        assert_eq!(conversation.projection(), Some(&second));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::ResyncProjection { revision: 4 }]
+        );
+        // Sent whole, it is patched from there again.
+        conversation.apply(whole(fourth.clone()));
+        let mut fifth = fourth.clone().with_revision(7);
+        fifth.panels[0].place = tomori_protocol::Place::Free {
+            pose: tomori_protocol::Pose::default(),
+        };
+        conversation.apply(patch(&fourth, &fifth));
+        assert_eq!(conversation.projection(), Some(&fifth));
         assert!(sent(&mut conversation).is_empty());
     }
 
@@ -12997,7 +13043,7 @@ mod tests {
         conversation.apply(space(|space| space.projection = true));
         assert!(conversation.projection().is_some());
         conversation.apply(Event::Message(ServerMessage::LEFT));
-        assert!(conversation.projection.is_none());
+        assert!(conversation.projection.projection().is_none());
     }
 
     #[test]

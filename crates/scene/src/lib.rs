@@ -36,6 +36,7 @@ mod markdown_lite;
 pub mod microphone_request;
 pub mod panel;
 mod panel_anchor;
+mod patched;
 pub mod pill;
 pub mod playback;
 pub mod pointing;

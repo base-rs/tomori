@@ -263,6 +263,29 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
+fn hello_says_whether_the_session_applies_projection_patches_and_states_today_s_limits() {
+    for patches in [false, true] {
+        let server = MiniServer::start(localhost(), Mode::Normal);
+        let mut options = options(server.address);
+        options.projection_patches = patches;
+        let client = Client::connect(options).unwrap();
+        assert_eq!(wait_connected(&client), 1);
+        let Some(Received::Message(ClientMessage::Hello {
+            projection_patches,
+            limits,
+            ..
+        })) = server.received(1).first().cloned()
+        else {
+            unreachable!("Hello comes first");
+        };
+        assert_eq!(
+            (projection_patches, limits),
+            (patches, Some(tomori_protocol::Limits::TODAY))
+        );
+    }
+}
+
+#[test]
 fn an_image_asked_for_arrives_whole_and_checked_and_one_that_is_not_what_its_hash_says_never_does()
 {
     let server = MiniServer::start(localhost(), Mode::Normal);

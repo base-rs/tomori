@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use tomori_protocol::{EnvironmentVersion, Keepalive};
+use tomori_protocol::{EnvironmentVersion, Keepalive, Limits};
 
 use crate::Backoff;
 
@@ -59,6 +59,14 @@ pub struct Options {
     /// it only those. `None`, the default, lists nothing, and the server offers every environment, as to a client from
     /// before versions. See `design/environments.md`.
     pub environments: Option<Vec<EnvironmentVersion>>,
+    /// Whether the session applies patches to the projection it holds, as `ServerMessage::ProjectionPatch` sends them,
+    /// asking with `ClientMessage::ResyncProjection` for the projection whole when one does not apply, which each
+    /// connection says in its Hello. `false`, the default, is sent the projection whole at every change, as a session
+    /// that does not apply them needs. See `design/projection.md`.
+    pub projection_patches: bool,
+    /// What this client reads and draws at most, which each connection states in its Hello: today's bounds,
+    /// [`tomori_protocol::Limits::TODAY`], by default. See `design/projection.md`.
+    pub limits: Limits,
 }
 
 /// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
@@ -84,6 +92,8 @@ impl std::fmt::Debug for Options {
                 &self.microphone_rearm_on_disconnect,
             )
             .field("environments", &self.environments)
+            .field("projection_patches", &self.projection_patches)
+            .field("limits", &self.limits)
             .finish()
     }
 }
@@ -110,6 +120,8 @@ impl Options {
             incoming_audio_limit: 256,
             microphone_rearm_on_disconnect: false,
             environments: None,
+            projection_patches: false,
+            limits: Limits::TODAY,
         }
     }
 }

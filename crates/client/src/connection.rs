@@ -190,6 +190,13 @@ pub trait Session {
         None
     }
 
+    /// Whether the session applies patches to the projection it holds, which each connection says in its Hello; see
+    /// [`crate::Options::projection_patches`]. A session that does not, as one that shows no projection, is sent it whole
+    /// at every change.
+    fn projection_patches(&self) -> bool {
+        false
+    }
+
     /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         let _ = (feedback, now);
@@ -1569,6 +1576,7 @@ impl Connection {
         options.token = link.token.clone();
         options.pairing = link.pairing;
         options.environments = session.environments();
+        options.projection_patches = session.projection_patches();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {
