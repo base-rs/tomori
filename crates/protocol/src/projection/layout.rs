@@ -68,6 +68,19 @@ pub const MOST_SLOTS: u32 = 24;
 /// a standard one from 3 m. An older client, which took at most twice, draws a larger wall at twice.
 pub const SCALES: (f32, f32) = (0.5, 5.0);
 
+/// The least and most a wall's panels' content is scaled within its slots, as a proportion of the text its slots' scale
+/// gives them: from half, each slot showing about twice as many lines of twice as many columns, to twice, half as many,
+/// for reading from further away. See [`Wall::content_scale`].
+pub const CONTENT_SCALES: (f32, f32) = (0.5, 2.0);
+
+/// The smallest a wall's text is drawn, as a proportion of a standard slot's, at the distance the wall is read from: a
+/// wall of the least scale's, [`SCALES`]'s half, so that the content scale makes no text smaller, as seen from where
+/// its wall is read, than a wall may already have. A wall of a standard slot's size or smaller is read from as far as a
+/// standard one is, and a bigger one from as many times further as its slots are larger (see `design/projection.md`),
+/// so that a wall's text is at least half a standard slot's on a wall of scale 1 or larger, and at least as large as a
+/// standard slot's on a wall of half its size.
+pub const LEAST_TEXT: f32 = SCALES.0;
+
 /// The widest and tallest a wall is, in metres: a cinema's screen, 16 m by 9 m.
 pub const MOST_SIZE: (f32, f32) = (16.0, 9.0);
 
@@ -144,8 +157,8 @@ impl Grid {
 
 /// Where one of a wall's slots stands in the wall's own frame, that of its pose, as the middle of a panel in it: its
 /// position, in metres, how far it is turned about the vertical, in radians, anticlockwise as seen from above, how
-/// large its text is, as a proportion of a standard slot's, and its width and height, in metres, which a slot of a
-/// wall's own [`Wall::aspect`] makes wider or taller than [`SLOT_SIZE`] at that scale.
+/// large its text is, as a proportion of a standard slot's, its wall's [`Wall::text_scale`], and its width and height,
+/// in metres, which a slot of a wall's own [`Wall::aspect`] makes wider or taller than [`SLOT_SIZE`] at its scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct SlotFrame {
@@ -306,6 +319,32 @@ impl Wall {
         }
     }
 
+    /// The least its panels' content may be scaled within its slots, as [`LEAST_TEXT`] allows at the distance it is
+    /// read from: half on a wall of scale 1 or larger, and on a smaller one as much more as keeps its text at least
+    /// half a standard slot's, rounded up to a hundredth, as content scales are kept, so that on the Tomori wall's, of
+    /// 0.7, it is 0.72, and on a wall of the least scale 1, as it was.
+    pub fn least_content_scale(&self) -> f32 {
+        ((LEAST_TEXT / self.scale().min(1.0) * 100.0 - 1e-3).ceil() / 100.0).max(CONTENT_SCALES.0)
+    }
+
+    /// How large its panels' content is drawn within its slots, as a proportion of the text its slots' scale gives
+    /// them: as it says, from [`Wall::least_content_scale`] to the most of [`CONTENT_SCALES`], or else 1.
+    pub fn content_scale(&self) -> f32 {
+        match self.content_scale {
+            Some(scale) if scale.is_finite() => {
+                scale.clamp(self.least_content_scale(), CONTENT_SCALES.1)
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// How large the text in its slots is drawn, as a proportion of a standard slot's: its slots' [`Wall::scale`] by
+    /// its [`Wall::content_scale`], so that each slot holds as many more or fewer cells of it as that is smaller or
+    /// larger than its scale.
+    pub fn text_scale(&self) -> f32 {
+        self.scale() * self.content_scale()
+    }
+
     /// The angle between the middles of neighbouring columns of a wall curved at `radius`, in radians.
     fn pitch(&self, radius: f32) -> f32 {
         let scale = self.scale();
@@ -358,6 +397,9 @@ impl Wall {
     pub fn slot_frames(&self) -> Vec<SlotFrame> {
         let grid = self.grid();
         let scale = self.scale();
+        // A panel in a slot is drawn at its text's size, which its content scale makes smaller or larger than the
+        // slot's.
+        let text = self.text_scale();
         let (slot_width, slot_height) = self.slot_size();
         let size = [slot_width, slot_height];
         let Some(radius) = self.radius() else {
@@ -370,7 +412,7 @@ impl Wall {
                     SlotFrame {
                         position: [x * scale, y * scale, LIFT],
                         yaw: 0.0,
-                        scale,
+                        scale: text,
                         size,
                     }
                 })
@@ -392,7 +434,7 @@ impl Wall {
                         radius * (1.0 - cos) + LIFT * cos,
                     ],
                     yaw: -angle,
-                    scale,
+                    scale: text,
                     size,
                 }
             })
@@ -840,6 +882,90 @@ mod tests {
                 .name,
             None
         );
+    }
+
+    #[test]
+    fn a_wall_s_content_scale_sizes_its_text_within_slots_it_leaves_as_they_are() {
+        // For every grid, scale, shape and curve, and every content scale, its slots stand where they stood and are as
+        // large, and only the text in them is drawn larger or smaller, within its bounds.
+        for grid in [(1, 1), (3, 2), (6, 1), (4, 4), (8, 3)] {
+            for scale in [0.5, 0.7, 1.0, 1.35, 2.0, 5.0] {
+                for aspect in [None, Some(0.5625), Some(4.0)] {
+                    for shape in [WallShape::Grid, WallShape::Arc { radius: 12.0 }] {
+                        let plain = Wall::new("w", WallKind::Added, level())
+                            .with_grid(Grid::from(grid))
+                            .with_scale(scale)
+                            .with_aspect(aspect)
+                            .with_shape(shape);
+                        assert_eq!(plain.content_scale(), 1.0);
+                        assert_eq!(plain.text_scale(), plain.scale());
+                        let least = plain.least_content_scale();
+                        // Never below half, nor so far that its text is smaller than half a standard slot's.
+                        assert!(
+                            (CONTENT_SCALES.0..=1.0).contains(&least),
+                            "{scale}: {least}"
+                        );
+                        assert!(
+                            plain.scale() * least >= LEAST_TEXT * plain.scale().min(1.0) - 1e-6
+                        );
+                        for asked in [0.1, 0.5, 0.6, 0.8, 1.0, 1.3, 2.0, 3.0] {
+                            let scaled = plain.clone().with_content_scale(Some(asked));
+                            let content = scaled.content_scale();
+                            assert!((least..=CONTENT_SCALES.1).contains(&content));
+                            if (least..=CONTENT_SCALES.1).contains(&asked) {
+                                assert_eq!(content, asked);
+                            }
+                            assert_eq!(
+                                (scaled.size(), scaled.slot_size()),
+                                (plain.size(), plain.slot_size())
+                            );
+                            assert_eq!(scaled.board(), plain.board());
+                            assert_eq!(scaled.slots(), plain.slots());
+                            for (before, after) in
+                                plain.slot_frames().iter().zip(scaled.slot_frames())
+                            {
+                                assert_eq!(
+                                    (before.position, before.yaw, before.size),
+                                    (after.position, after.yaw, after.size)
+                                );
+                                assert!((after.scale - plain.scale() * content).abs() < 1e-6);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // On a standard wall, from half to twice; on the Tomori wall's, of 0.7, never below 0.72; on the smallest,
+        // never below 1, as it was.
+        let wall = |scale: f32| Wall::new("w", WallKind::Added, level()).with_scale(scale);
+        assert_eq!(wall(1.0).least_content_scale(), 0.5);
+        assert_eq!(wall(5.0).least_content_scale(), 0.5);
+        assert_eq!(wall(0.7).least_content_scale(), 0.72);
+        assert_eq!(wall(0.5).least_content_scale(), 1.0);
+        assert_eq!(wall(0.5).with_content_scale(Some(0.5)).content_scale(), 1.0);
+        // Nonsense is 1; beyond its bounds, the nearest it may be.
+        for nonsense in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                wall(1.0).with_content_scale(Some(nonsense)).content_scale(),
+                1.0
+            );
+        }
+        assert_eq!(wall(1.0).with_content_scale(Some(9.0)).text_scale(), 2.0);
+        // Said only where it says one, and an older server's wall says none, drawn as it was.
+        let plain = wall(1.0);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("content_scale")
+                .is_none()
+        );
+        let scaled = plain.clone().with_content_scale(Some(0.8));
+        let json = serde_json::to_value(&scaled).unwrap();
+        assert!((json["content_scale"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), scaled);
+        let mut older = serde_json::to_value(&scaled).unwrap();
+        older.as_object_mut().unwrap().remove("content_scale");
+        assert_eq!(serde_json::from_value::<Wall>(older).unwrap(), plain);
     }
 
     #[test]

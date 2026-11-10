@@ -757,7 +757,8 @@ pub(crate) fn report(
 
 /// `projection`'s walls, and the panels floating in it, as the `presence` tool describes them, so that the agent can
 /// reason about where to put what it shows: each wall's identity, name, kind, where it stands, faces and tilts, its
-/// size, whether it is locked, its version, and which of its slots hold which panels and which are free.
+/// size, how large its panels' content is drawn within its slots and against a standard slot's, whether it is locked,
+/// its version, and which of its slots hold which panels and which are free.
 pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
     let walls = projection
         .walls
@@ -825,6 +826,8 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
                 "columns": grid.columns,
                 "rows": grid.rows,
                 "slot_size": [round(wall.slot_size().0, 2), round(wall.slot_size().1, 2)],
+                "content_scale": round(wall.content_scale(), 2),
+                "text_scale": round(wall.text_scale(), 2),
                 "locked": wall.is_locked(),
                 "version": wall.version,
                 "used": used,
@@ -890,11 +893,12 @@ fn beside(head: &Pose, solids: &[Solid]) -> Destination {
 pub(crate) const READING: f32 = 4.0;
 
 /// How far from someone's eyes `wall` may be for the agent's panel to be put on it for them by where they look:
-/// [`READING`], or as many times further as its slots' text is larger than a standard slot's, since its text is as
-/// legible from that far, so that a wall five times as large is read from 20 m. A smaller wall keeps [`READING`],
-/// since walls stand nearer than it from home. See `design/projection.md`.
+/// [`READING`], or as many times further as its slots' text, as its content scale draws it, is larger than a standard
+/// slot's, since its text is as legible from that far, so that a wall five times as large is read from 20 m, and at
+/// half its content scale from 10 m. A wall of smaller text keeps [`READING`], since walls stand nearer than it from
+/// home. See `design/projection.md`.
 pub(crate) fn reading(wall: &Wall) -> f32 {
-    READING * wall.scale().max(1.0)
+    READING * wall.text_scale().max(1.0)
 }
 
 /// How far off the ray from someone's eyes a wall's slot may be, in degrees, for them to be looking at the wall: a head

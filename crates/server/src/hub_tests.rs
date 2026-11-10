@@ -5502,6 +5502,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
             shape,
             pose: None,
             tilt: None,
+            content_scale: None,
             revision: None,
         }
     };
@@ -5529,6 +5530,7 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
         shape: None,
         pose: None,
         tilt: None,
+        content_scale: None,
         revision: None,
     });
     assert_eq!(
@@ -5626,6 +5628,7 @@ fn only_owners_lock_and_unlock_walls_and_a_locked_wall_changes_for_nobody() {
         shape: None,
         pose: Some(pose),
         tilt: None,
+        content_scale: None,
         revision: None,
     };
     let lock = |locked: bool, reset: bool| ClientMessage::LockWall {
@@ -5862,6 +5865,7 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         shape: None,
         pose: None,
         tilt: Some(-10.0),
+        content_scale: None,
         revision: None,
     });
     let edited = ada.projection();
@@ -6003,6 +6007,7 @@ fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked
         shape: None,
         pose: Some(upright([3.0, 1.0, -2.0])),
         tilt: None,
+        content_scale: None,
         revision: None,
     });
     assert_eq!(
@@ -6284,6 +6289,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             shape: Some(tomori_protocol::WallShape::Arc { radius: 3.0 }),
             pose: None,
             tilt: None,
+            content_scale: None,
             revision: None,
         });
         ada.send(ClientMessage::SetWall {
@@ -6294,6 +6300,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             shape: None,
             pose: None,
             tilt: None,
+            content_scale: None,
             revision: None,
         });
         // And whether an owner locked it.

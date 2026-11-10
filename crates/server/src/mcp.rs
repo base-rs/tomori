@@ -332,6 +332,43 @@ fn place_worker_tool(change: &Value) -> Value {
     })
 }
 
+/// The `set_wall` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
+fn set_wall_tool(change: &Value) -> Value {
+    json!({
+        "name": "set_wall",
+        "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as status wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; content_scale draws the content of the panels in its slots, their text, tables, code and charts' labels, that many times the size its slots give it, from 0.5 to 2, 1 as by default, its slots and their number unchanged: below 1 each slot shows more and longer lines before they are cut off or scroll, so that \"fit more on this wall\" is a content_scale of about 0.7, and above 1 fewer, larger, to read from further, though never smaller than half a standard slot's text, as presence's content_scale and text_scale say; place, front or front NAME, stands a wall someone added, or an environment's own once unlocked, in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The status wall stays where it stands, and beneath the agent's home one row of at most 6, its slots their size. A locked wall, as presence says, is changed by nobody, and an environment's own walls, such as a notice board, are locked until an owner unlocks them: locked true or false locks or unlocks a wall, and reset true puts an environment's own back where and as the environment has it, locked, each only when an owner asks, named in requested_by. version is the wall's version you last read, as presence gives it: give it when you change the wall from how you read it, such as a column more or a tilt further, and if it has changed since, as when a participant changed it, the change is refused with its current version, so read it again with presence and redo the change from how it is. Only when someone in the space asks; then tell them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wall": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "columns": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_COLUMNS },
+                "rows": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_ROWS },
+                "scale": { "type": "number", "minimum": tomori_protocol::wall::SCALES.0, "maximum": tomori_protocol::wall::SCALES.1 },
+                "width": { "type": "number", "exclusiveMinimum": 0 },
+                "aspect": { "type": ["number", "string"], "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "slot_width": { "type": "number", "exclusiveMinimum": 0 },
+                "slot_height": { "type": "number", "exclusiveMinimum": 0 },
+                "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
+                "content_scale": { "type": "number", "minimum": tomori_protocol::wall::CONTENT_SCALES.0, "maximum": tomori_protocol::wall::CONTENT_SCALES.1 },
+                "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "attach": attach_schema(),
+                "detach": { "type": "boolean" },
+                "locked": { "type": "boolean", "description": "Lock the wall, true, or unlock it, false. Only when an owner asks, named in requested_by." },
+                "reset": { "type": "boolean", "description": "Put an environment's own wall back where and as the environment has it, locked. Only when an owner asks, named in requested_by." },
+                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed with locked or reset. {REQUESTED_BY}") },
+                "version": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The wall's version you last read, as presence gives it; refused if it has changed since.",
+                },
+            },
+            "required": ["wall"],
+        },
+        "annotations": change,
+    })
+}
+
 /// Every tool, as `tools/list` describes it.
 fn tools() -> Value {
     let read = json!({ "readOnlyHint": true, "openWorldHint": false });
@@ -343,6 +380,7 @@ fn tools() -> Value {
     });
     let layouts = layout_tools(&change);
     let place_worker = place_worker_tool(&change);
+    let set_wall = set_wall_tool(&change);
     let mut tools = json!([
         {
             "name": "server",
@@ -438,38 +476,7 @@ fn tools() -> Value {
             },
             "annotations": change,
         },
-        {
-            "name": "set_wall",
-            "description": "Change a wall in your space, for everyone in it, as someone asks, such as \"make this wall four panels wide and one high\": wall is the wall, by its identity or name as presence lists it, such as status wall or added wall 1, or looking or near, with a name or for whoever asked, for the wall someone is looking at or is nearest; columns and rows are its grid of slots, from 1 to 8 columns and 1 to 4 rows, at most 24 slots; scale is the size of its slots and their text against a standard 60 by 36 cm slot, from 0.5 to 5, a large scale making a big wall to read from far away, such as a dashboard across the yard, as legible at 15 m when 5 as a standard wall at 3 m, or width picks it to make the wall that many metres wide, at most 16 m wide and 9 m tall; aspect is its slots' shape, their width over their height, a number or a ratio such as 9:16 for tall slots or 16:9 for wide ones, from 1:4 to 4:1, or standard, their text staying its size and a slot holding more rows or columns; or slot_width and slot_height, in metres, give its slots that size, either kept as it is where left out, instead of scale and aspect; radius curves it along an arc of that many metres about the people in front of it, from 1 to 50, or 0 makes it flat, and bends its whole group alike; tilt tips it about its horizontal middle line, in degrees from -45 to 45, positive tipping its top towards the people in front of it so that it faces down, as for a wall above them, negative tipping it back to face up, as for a wall below them, and 0 stands it upright, so that \"tilt this wall down a bit\" is wall looking with a tilt of about 10 more than it has; place, front or front NAME, stands a wall someone added, or an environment's own once unlocked, in front of them; attach, { to, edge, align }, snaps a wall someone added beside another, the wall to, by identity or name, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, a gutter apart, so that they read as one board and move together, and detach takes it out of its group again. Leave out what stays. A panel keeps its column and row, or goes into the nearest free slot, or floats where it was: none is lost. The status wall stays where it stands, and beneath the agent's home one row of at most 6, its slots their size. A locked wall, as presence says, is changed by nobody, and an environment's own walls, such as a notice board, are locked until an owner unlocks them: locked true or false locks or unlocks a wall, and reset true puts an environment's own back where and as the environment has it, locked, each only when an owner asks, named in requested_by. version is the wall's version you last read, as presence gives it: give it when you change the wall from how you read it, such as a column more or a tilt further, and if it has changed since, as when a participant changed it, the change is refused with its current version, so read it again with presence and redo the change from how it is. Only when someone in the space asks; then tell them.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "wall": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
-                    "columns": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_COLUMNS },
-                    "rows": { "type": "integer", "minimum": 1, "maximum": tomori_protocol::wall::MOST_ROWS },
-                    "scale": { "type": "number", "minimum": tomori_protocol::wall::SCALES.0, "maximum": tomori_protocol::wall::SCALES.1 },
-                    "width": { "type": "number", "exclusiveMinimum": 0 },
-                    "aspect": { "type": ["number", "string"], "maxLength": crate::limits::IDENTIFIER_BYTES },
-                    "slot_width": { "type": "number", "exclusiveMinimum": 0 },
-                    "slot_height": { "type": "number", "exclusiveMinimum": 0 },
-                    "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
-                    "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
-                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
-                    "attach": attach_schema(),
-                    "detach": { "type": "boolean" },
-                    "locked": { "type": "boolean", "description": "Lock the wall, true, or unlock it, false. Only when an owner asks, named in requested_by." },
-                    "reset": { "type": "boolean", "description": "Put an environment's own wall back where and as the environment has it, locked. Only when an owner asks, named in requested_by." },
-                    "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Needed with locked or reset. {REQUESTED_BY}") },
-                    "version": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "The wall's version you last read, as presence gives it; refused if it has changed since.",
-                    },
-                },
-                "required": ["wall"],
-            },
-            "annotations": change,
-        },
+        set_wall,
         {
             "name": "add_wall",
             "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked, a big wall, of a scale above 2, as many times further as its scale is above 2; columns, rows, scale, aspect or slot_width and slot_height, radius and tilt lay it out as set_wall does, by default three columns of two rows of standard slots, flat and upright. At most six are added in each environment. Only when someone in the space asks; then tell them.",
@@ -990,6 +997,16 @@ fn optional_tilt(arguments: &Value) -> Result<Option<Option<f32>>, String> {
     Ok(tilt.map(|tilt| (tilt != 0.0).then_some(tilt)))
 }
 
+/// How large `arguments` ask a wall's panels' content to be drawn within its slots, as `content_scale`: 1 for as large
+/// as its slots give it, as `Some(None)`; left out, `None`. Its bounds are the stage's to refuse, saying why.
+fn optional_content_scale(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+    let scale = optional_number(arguments, "content_scale")?;
+    if scale.is_some_and(|scale| !scale.is_finite()) {
+        return Err("content_scale is a number, from 0.5 to 2.".to_owned());
+    }
+    Ok(scale.map(|scale| (scale != 1.0).then_some(scale)))
+}
+
 /// The sizes in metres `arguments` ask for: the wall's `width`, and its slots' `slot_width` and `slot_height`.
 fn metres(arguments: &Value) -> Result<crate::hub::tools::Metres, String> {
     Ok(crate::hub::tools::Metres {
@@ -1033,6 +1050,7 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         radius,
         pose: None,
         tilt: optional_tilt(arguments)?,
+        content_scale: optional_content_scale(arguments)?,
     };
     let joining = joining(arguments)?;
     if joining.is_some() && place.is_some() {
@@ -1139,6 +1157,7 @@ fn new_layout(arguments: &Value) -> Result<(crate::stage::Layout, Option<f32>, b
         aspect,
         radius: radius.unwrap_or(flat.radius),
         tilt: optional_tilt(arguments)?.flatten(),
+        content_scale: None,
     };
     let sized = sized
         || metres.width.is_some()

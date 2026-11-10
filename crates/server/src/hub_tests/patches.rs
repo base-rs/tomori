@@ -185,6 +185,7 @@ fn a_client_that_applies_patches_holds_what_an_older_client_is_sent_whole() {
                 shape: None,
                 pose: None,
                 tilt: Some(12.0),
+                content_scale: None,
                 revision: None,
             })
         }),
@@ -768,6 +769,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             shape: None,
                             pose: None,
                             tilt: Some(random.below(30) as f32),
+                            content_scale: None,
                             revision: None,
                         });
                         true
@@ -781,6 +783,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             shape: None,
                             pose: Some(upright([random.below(6) as f32 - 3.0, 1.5, 3.0])),
                             tilt: None,
+                            content_scale: None,
                             revision: None,
                         });
                         true
@@ -977,6 +980,7 @@ fn a_panel_s_and_a_wall_s_version_is_the_revision_of_their_last_change() {
         shape: None,
         pose: None,
         tilt: Some(10.0),
+        content_scale: None,
         revision: Some(wall.version),
     });
     held.read(&ada);
@@ -1056,6 +1060,7 @@ fn of_two_participants_changing_a_panel_or_a_wall_from_one_version_one_wins_and_
         shape: None,
         pose: None,
         tilt: None,
+        content_scale: None,
         revision: Some(wall.version),
     };
     bob.send(change(4));
@@ -1247,6 +1252,7 @@ fn a_client_sent_less_holds_each_wall_at_the_version_every_client_has_and_hears_
         shape: None,
         pose: None,
         tilt: Some(10.0),
+        content_scale: None,
         revision: Some(unsent.version),
     });
     all.read(&desktop);

@@ -5258,6 +5258,7 @@ mod tests {
             pose: None,
             join: None,
             tilt: None,
+            content_scale: None,
             version: Some(7),
         };
         assert!(!conversation.set_wall(change.clone()));

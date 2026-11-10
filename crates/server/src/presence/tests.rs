@@ -1124,6 +1124,19 @@ fn a_big_wall_is_read_as_much_further_away_as_its_text_is_larger() {
     assert_eq!(reading(&wall.clone().with_scale(5.0)), 20.0);
     assert_eq!(reading(&wall.clone().with_scale(0.5)), READING);
     assert_eq!(reading(&wall), READING);
+    // Its text drawn smaller within its slots, it is read from as much nearer, but never nearer than a standard wall.
+    assert_eq!(
+        reading(&wall.clone().with_scale(5.0).with_content_scale(Some(0.5))),
+        10.0
+    );
+    assert_eq!(
+        reading(&wall.clone().with_content_scale(Some(0.5))),
+        READING
+    );
+    assert_eq!(
+        reading(&wall.clone().with_content_scale(Some(2.0))),
+        2.0 * READING
+    );
 }
 
 #[test]

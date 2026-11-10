@@ -168,7 +168,9 @@ impl Fit {
 
 /// The cells a panel's face has in a wall's slot, at the size of the wall's text: a text panel's columns and rows of
 /// body, and a code panel's columns and rows of code. A slot taller or wider than a standard one, of a wall's own
-/// [`Wall::aspect`], holds more rows or more columns, so that its text wraps to its width and fills its height.
+/// [`Wall::aspect`], holds more rows or more columns, so that its text wraps to its width and fills its height; and a
+/// wall's [`Wall::content_scale`] below 1 draws its text smaller, so that each slot holds more and longer lines, and
+/// above 1 larger, holding fewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Cells {
     pub columns: usize,
@@ -186,7 +188,18 @@ impl Cells {
         code_rows: SLOT_CODE_ROWS,
     };
 
-    /// A slot of `wall`'s: as many cells as fit in it at its text's size, and never fewer than a standard slot's.
+    /// The fewest a slot holds, at the most a wall's content is scaled, so that a face always has room for a few words
+    /// of its body and for code beside its line numbers.
+    const LEAST: Cells = Cells {
+        columns: 12,
+        body: 2,
+        code_columns: GUTTER + CODE_ROOM,
+        code_rows: 3,
+    };
+
+    /// A slot of `wall`'s: as many cells as fit in it at its text's size, its [`Wall::text_scale`], and never fewer
+    /// than a standard slot's where its content is drawn as large as its slots give it or smaller, nor than
+    /// [`Cells::LEAST`] where larger.
     pub fn of(wall: &Wall) -> Cells {
         let (width, height) = slot_unit(wall);
         let (width, height) = (width / PIXEL, height / PIXEL);
@@ -199,19 +212,25 @@ impl Cells {
             .floor() as usize;
         let code_rows = ((height * code - 2.0 * CODE_PADDING.1 as f32) / CELL_HEIGHT as f32 + 1e-3)
             .floor() as usize;
+        let least = if wall.content_scale() <= 1.0 {
+            Cells::STANDARD
+        } else {
+            Cells::LEAST
+        };
         Cells {
-            columns: columns.max(COLUMNS),
-            body: rows.saturating_sub(3).max(BODY_ROWS),
-            code_columns: code_columns.max(CODE_COLUMNS),
-            code_rows: code_rows.saturating_sub(4).max(SLOT_CODE_ROWS),
+            columns: columns.max(least.columns),
+            body: rows.saturating_sub(3).max(least.body),
+            code_columns: code_columns.max(least.code_columns),
+            code_rows: code_rows.saturating_sub(4).max(least.code_rows),
         }
     }
 }
 
-/// A slot of `wall`'s, in metres at its text's size, scale 1: as a slot's frame, scaled by it, measures it.
+/// A slot of `wall`'s, in metres at its text's size, scale 1: as a slot's frame, scaled by its
+/// [`Wall::text_scale`], measures it.
 fn slot_unit(wall: &Wall) -> (f32, f32) {
     let (width, height) = wall.slot_size();
-    let scale = wall.scale();
+    let scale = wall.text_scale();
     (width / scale, height / scale)
 }
 

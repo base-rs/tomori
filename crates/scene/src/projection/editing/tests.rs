@@ -224,12 +224,12 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     let now = Instant::now();
     let mut projector = holding(&projection, &wall, ADJUST, now);
     let output = projector.update(frame(&projection, None, 0.0, ADJUST, now));
-    // Twelve handles and the hint, after the wall's own sheets.
+    // Thirteen handles and the hint, after the wall's own sheets.
     let faces: Vec<String> = output
         .sheets
         .iter()
         .rev()
-        .take(13)
+        .take(14)
         .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
         .collect();
     let hint = &faces[0];
@@ -241,12 +241,14 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
         "↔ bend",
         "hinge",
         "↕ tilt",
+        "aA",
+        "↔ text size",
         "carry it",
         "done",
     ] {
         assert!(hint.contains(row), "{row}: {hint}");
     }
-    assert_eq!(handles(&wall, LockControls::default()).len(), 12);
+    assert_eq!(handles(&wall, LockControls::default()).len(), 13);
     assert!(faces[1..].iter().any(|face| face.contains('●')));
     // A handle the ray meets is highlighted, ticks, and ends the ray.
     let bend = handle(&wall, Handle::Bend);
@@ -261,9 +263,10 @@ fn handles_show_on_a_wall_taken_hold_of_with_a_hint_and_a_squeeze_at_nothing_or_
     let mut projector = holding(&projection, &wall, ADJUST, now);
     assert!(projector.stop_editing());
     assert!(!projector.stop_editing());
-    // The Tomori wall has no corners or rows to change, its slots its own size in its one row.
+    // The Tomori wall has no corners or rows to change, its slots its own size in its one row, but its text handle.
     let tomori = tomori();
-    assert_eq!(handles(&tomori, LockControls::default()).len(), 5);
+    assert_eq!(handles(&tomori, LockControls::default()).len(), 6);
+    assert!(handles(&tomori, LockControls::default()).contains(&Handle::Text));
     let hint = super::hint(Controls::Controllers, &tomori, false, false, None).plain();
     assert!(
         !hint.contains("size and shape") && !hint.contains("carry it"),
@@ -904,6 +907,7 @@ fn the_hinge_moved_down_tilts_a_wall_towards_the_participant_within_the_travel_a
             shape: None,
             pose: None,
             tilt: Some(layout::MOST_TILT),
+            content_scale: None,
             join: None,
             // Made against the wall as its hinge was taken hold of, at its version then.
             version: Some(7),
@@ -2291,7 +2295,7 @@ fn an_environment_s_own_wall_unlocked_is_carried_and_put_down_but_never_removed_
     let projector_frame = frame(&projection, None, 0.0, LOCKER, now);
     projector.update(projector_frame);
     let (points, size) = handle_points_with(&wall, frame_of, HOME, LockControls::of(&wall, LOCKER));
-    assert_eq!(points.len(), 14);
+    assert_eq!(points.len(), 15);
     let reset = points
         .iter()
         .find(|(handle, _)| *handle == Handle::Reset)
@@ -2340,7 +2344,7 @@ fn an_environment_s_own_wall_unlocked_is_carried_and_put_down_but_never_removed_
         HOME,
         LockControls::of(&tomori, LOCKER),
     );
-    assert_eq!(points.len(), 6);
+    assert_eq!(points.len(), 7);
 }
 
 #[test]
@@ -2559,4 +2563,217 @@ fn every_handle_stands_near_its_wall_s_edge_flat_curved_tightly_or_tilted_howeve
         }
     }
     assert!(checked > 100, "{checked}");
+}
+
+#[test]
+fn the_text_handle_moved_across_scales_a_wall_s_content_within_its_slots_in_steps_and_sends_it_from_its_version()
+ {
+    let wall = added();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let full = TRAVEL + DEAD_ZONE;
+    // Moved to the left step by step through half the travel, its text is drawn smaller at every step, from as large as
+    // its slots give it to half, in tenths, its slots as they were, each showing more and longer lines.
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let half = DEAD_ZONE + TRAVEL / 2.0;
+    let moves: Vec<Vec3> = (1..=20)
+        .map(|step| -Vec3::X * half * step as f32 / 20.0)
+        .collect();
+    let (drawn, ticks, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Text,
+        &moves,
+        Controls::Controllers,
+        now,
+    );
+    let scales: Vec<f32> = drawn.iter().map(Wall::content_scale).collect();
+    assert!(
+        scales.windows(2).all(|pair| pair[1] <= pair[0]),
+        "{scales:?}"
+    );
+    assert_eq!(scales[19], layout::CONTENT_SCALES.0);
+    assert!(
+        scales
+            .iter()
+            .all(|scale| ((scale * 10.0).round() - scale * 10.0).abs() < 1e-4),
+        "{scales:?}"
+    );
+    for drawn in &drawn {
+        assert_eq!(drawn.slot_frames().len(), wall.slot_frames().len());
+        for (before, after) in wall.slot_frames().iter().zip(drawn.slot_frames()) {
+            assert_eq!((before.position, before.size), (after.position, after.size));
+        }
+    }
+    let (standard, smaller) = (Cells::of(&wall), Cells::of(&drawn[19]));
+    assert!(
+        smaller.columns >= 2 * standard.columns && smaller.body >= 2 * standard.body,
+        "{smaller:?}"
+    );
+    // Reaching the least ticks, as a stop, never in between.
+    let least = scales
+        .iter()
+        .position(|scale| *scale == layout::CONTENT_SCALES.0)
+        .unwrap();
+    assert!(
+        ticks[least] && ticks.iter().filter(|tick| **tick).count() == 1,
+        "{ticks:?}"
+    );
+    // Let go, only its content scale is sent, made against the wall as its handle was taken hold of.
+    assert_eq!(
+        sent,
+        Some(Change {
+            wall: "wall-1".into(),
+            grid: None,
+            scale: None,
+            aspect: None,
+            shape: None,
+            pose: None,
+            tilt: None,
+            content_scale: Some(layout::CONTENT_SCALES.0),
+            join: None,
+            version: Some(7),
+        })
+    );
+    // Drawn so until the server agrees, or, refused as made against a version since changed, at once as it has it.
+    assert_eq!(projector.editor.walls(&projection)[0].content_scale(), 0.5);
+    let agreed = shown(vec![wall.clone().with_content_scale(Some(0.5))], Vec::new());
+    projector.update(frame(&agreed, None, 0.0, ADJUST, now));
+    assert!(projector.editor.pending.is_none());
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Text,
+        &[-Vec3::X * 0.1],
+        Controls::Controllers,
+        now,
+    );
+    assert!(projector.editor.walls(&projection)[0].content_scale() < 1.0);
+    projector.refused_wall(&wall.id);
+    assert_eq!(projector.editor.walls(&projection)[0], wall);
+    // From half, about one movement of the travel to the right, as the participant sees it at the handle beside the
+    // wall's left corner, takes it to twice, through as large as its slots give it, which ticks, its slots then showing
+    // fewer, larger lines.
+    let small = wall.clone().with_content_scale(Some(0.5));
+    let projection = shown(vec![small.clone()], Vec::new());
+    let mut projector = holding(&projection, &small, ADJUST, now);
+    let moves: Vec<Vec3> = (1..=40)
+        .map(|step| Vec3::X * 1.1 * full * step as f32 / 40.0)
+        .collect();
+    let (drawn, ticks, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &small,
+        Handle::Text,
+        &moves,
+        Controls::Controllers,
+        now,
+    );
+    let scales: Vec<f32> = drawn.iter().map(Wall::content_scale).collect();
+    assert!(
+        scales.windows(2).all(|pair| pair[1] >= pair[0]),
+        "{scales:?}"
+    );
+    assert_eq!(scales[39], layout::CONTENT_SCALES.1);
+    let same = scales.iter().position(|scale| *scale == 1.0).unwrap();
+    let most = scales
+        .iter()
+        .position(|scale| *scale == layout::CONTENT_SCALES.1)
+        .unwrap();
+    assert!(
+        ticks[same] && ticks[most] && ticks.iter().filter(|tick| **tick).count() == 2,
+        "{ticks:?}"
+    );
+    assert_eq!(sent.and_then(|change| change.content_scale), Some(2.0));
+    let larger = Cells::of(&drawn[39]);
+    assert!(larger.columns < standard.columns && larger.body < standard.body);
+    assert!(larger.columns >= 12 && larger.body >= 2, "{larger:?}");
+    // Within the dead zone, or moving up or down, it is as it was and nothing is sent; drifting so while moving across
+    // scales it as far as without.
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let mut projector = holding(&projection, &wall, ADJUST, now);
+    let (drawn, _, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &wall,
+        Handle::Text,
+        &[Vec3::X * 0.008, Vec3::Y * 0.3, -Vec3::Y * 0.3],
+        Controls::Controllers,
+        now,
+    );
+    assert!(drawn.iter().all(|wall| wall.content_scale.is_none()) && sent.is_none());
+    let scale_by = |moved: Vec3, controls: Controls| {
+        let mut projector = holding(&projection, &wall, ADJUST, now);
+        move_hand(
+            &mut projector,
+            &projection,
+            &wall,
+            Handle::Text,
+            &[moved],
+            controls,
+            now,
+        )
+        .0[0]
+            .content_scale()
+    };
+    assert_eq!(
+        scale_by(-Vec3::X * 0.06, Controls::Controllers),
+        scale_by(-Vec3::X * 0.06 + Vec3::Y * 0.1, Controls::Controllers)
+    );
+    // In the desktop window, dragging it right draws the text larger too.
+    assert!(scale_by(Vec3::X * 0.06, Controls::Keyboard) > 1.0);
+    assert_eq!(content_scaled(&wall, f32::NAN), 1.0);
+    // The Tomori wall has its text handle too, beside its hinge, but its text never smaller than half a standard
+    // slot's: at its 0.7, 0.72.
+    let tomori = tomori().with_version(3);
+    let projection = shown(vec![tomori.clone()], Vec::new());
+    let mut projector = holding(&projection, &tomori, ADJUST, now);
+    let (drawn, _, sent) = move_hand(
+        &mut projector,
+        &projection,
+        &tomori,
+        Handle::Text,
+        &[-Vec3::X * full],
+        Controls::Controllers,
+        now,
+    );
+    assert_eq!(drawn[0].content_scale(), 0.72);
+    assert_eq!(sent.and_then(|change| change.content_scale), Some(0.72));
+    let hinge = handle(&tomori, Handle::Tilt);
+    let text = handle(&tomori, Handle::Text);
+    assert!(text.x < hinge.x, "{text} {hinge}");
+    // A locked wall shows its padlock alone, so no text handle; an owner unlocks it first.
+    let padlock = LockControls {
+        padlock: true,
+        reset: false,
+    };
+    assert_eq!(
+        handles(&wall.clone().with_locked(true), padlock),
+        vec![Handle::Lock]
+    );
+    assert!(handles(&wall, padlock).contains(&Handle::Text));
+    // Its readout says how large its text is, and how many columns and rows of a panel's body each slot shows.
+    assert_eq!(
+        readout(Handle::Text, &wall).plain().trim(),
+        format!(
+            "Text 100% · {} columns × {} rows",
+            crate::projection::COLUMNS,
+            crate::projection::BODY_ROWS
+        )
+    );
+    let eighty = wall.clone().with_content_scale(Some(0.8));
+    let cells = Cells::of(&eighty);
+    assert_eq!(
+        readout(Handle::Text, &eighty).plain().trim(),
+        format!("Text 80% · {} columns × {} rows", cells.columns, cells.body)
+    );
+    // Its hint names it, in the desktop window by its key.
+    let keys = super::hint(Controls::Keyboard, &wall, false, false, None).plain();
+    assert!(
+        keys.contains("G aA") && keys.contains("↔ text size"),
+        "{keys}"
+    );
 }

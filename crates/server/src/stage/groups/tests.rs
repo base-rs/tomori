@@ -37,6 +37,7 @@ fn added(grids: &[((u32, u32), f32)]) -> (Stage, Vec<String>) {
                 aspect: None,
                 radius: None,
                 tilt: None,
+                content_scale: None,
             };
             stage
                 .add_wall(&SKY, &ahead(index as f32 * 3.0 - 3.0), Some(layout))

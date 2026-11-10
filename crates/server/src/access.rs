@@ -300,6 +300,7 @@ mod tests {
                 shape: None,
                 pose: None,
                 tilt: None,
+                content_scale: None,
                 revision: None,
             },
             ClientMessage::CheckPanelItem {
