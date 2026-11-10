@@ -44,6 +44,7 @@ pub(crate) use published::Change;
 #[cfg(test)]
 pub(crate) use published::PUBLISHED;
 pub use published::Publishing;
+pub(crate) use published::Row;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -2244,9 +2245,33 @@ impl Stage {
                 crate::space::one_line(&meta.value, blocks::META_VALUE_CHARS)
             ));
         }
-        // The item pointed at, in quotes, as it is the agent's text.
+        // The row pointed at of an environment's list, each row a line of its body, from the server's own copy: its
+        // number, whether it is highlighted, its id to inspect it by and its text, in quotes, as it is the environment's.
         let items = checklist::items(&panel.body);
-        if panel.code.is_none()
+        if let Some((rows, highlighted)) = self.rows(walls.environment, &panel.id) {
+            if let Some((index, row)) = line
+                .and_then(|line| usize::try_from(line).ok())
+                .and_then(|line| rows.get(line).map(|row| (line, row)))
+            {
+                let highlighted = if highlighted == Some(row.id.as_str()) {
+                    ", highlighted"
+                } else {
+                    ""
+                };
+                let id = row.reference.as_deref().map_or(String::new(), |reference| {
+                    format!(
+                        ", id {}",
+                        crate::space::inspectable(walls.environment, reference)
+                    )
+                });
+                details.push_str(&format!(
+                    "; row {} of {}{highlighted}{id}: \"{}\"",
+                    index + 1,
+                    rows.len(),
+                    crate::space::one_line(&row.text, blocks::META_VALUE_CHARS)
+                ));
+            }
+        } else if panel.code.is_none()
             && let Some(line) = line
             && let Some((index, item)) = items
                 .iter()

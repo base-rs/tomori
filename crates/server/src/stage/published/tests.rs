@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use tomori_environment::Panel;
 use tomori_environment::chart::{
     AxisLabel, Chart, Colour, Edge, Reference, Series, SeriesStyle, Shade,
 };
+use tomori_environment::{Panel, Row};
 use tomori_protocol::{Place, TOMORI_WALL};
 
 use super::*;
@@ -1075,4 +1075,256 @@ fn a_live_chart_s_next_point_is_appended_apart_from_its_version() {
             .as_slice(),
         [tomori_protocol::PatchOp::Panel { .. }]
     ));
+}
+
+/// A queue of `count` rows, `pod0` and on, each inspectable by `pod/N`.
+fn queue(count: usize) -> Vec<Row> {
+    (0..count)
+        .map(|index| {
+            Row::new(
+                format!("pod{index}"),
+                format!("pod{index} · {index} waiting"),
+            )
+            .with_reference(format!("pod/{index}"))
+        })
+        .collect()
+}
+
+#[test]
+fn a_list_panel_s_body_is_a_list_item_a_row_its_highlight_a_pointer() {
+    let list = publishing(Panel::list("queue", "Queue", queue(3)).highlighting("pod1"));
+    assert_eq!(
+        list.content.body,
+        "- pod0 · 0 waiting\n- **▸** pod1 · 1 waiting\n- pod2 · 2 waiting"
+    );
+    assert_eq!(list.highlighted.as_deref(), Some("pod1"));
+    assert_eq!(
+        list.rows
+            .iter()
+            .flatten()
+            .map(|row| (row.id.as_str(), row.reference.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("pod0", Some("pod/0")),
+            ("pod1", Some("pod/1")),
+            ("pod2", Some("pod/2"))
+        ]
+    );
+    // Every row is an item of its body, on its own line, as clients find what they point at.
+    let items = crate::stage::checklist::items(&list.content.body);
+    assert_eq!(
+        items.iter().map(|item| item.line).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    // Its text cleaned onto one line and cut, its id where that leaves nothing; a reference refused or repeated left
+    // out, the row kept.
+    let cleaned = publishing(Panel::list(
+        "q",
+        "",
+        vec![
+            Row::new("a", "one\ntwo \u{202e}").with_reference("no spaces"),
+            Row::new("b", "\u{200b} ").with_reference("ref/b"),
+            Row::new("c", "x".repeat(200)).with_reference("ref/b"),
+        ],
+    ));
+    assert_eq!(
+        cleaned.content.body,
+        format!("- one two\n- b\n- {}…", "x".repeat(80))
+    );
+    assert_eq!(
+        cleaned
+            .rows
+            .iter()
+            .flatten()
+            .map(|row| row.reference.as_deref())
+            .collect::<Vec<_>>(),
+        [None, Some("ref/b"), None]
+    );
+    // Rows past the body's lines, or its characters, are left out whole, and a highlight of one left out highlights
+    // nothing.
+    let long = (0..30)
+        .map(|index| Row::new(format!("r{index}"), "x".repeat(60)))
+        .collect();
+    let long = publishing(Panel::list("q", "", long).highlighting("r29"));
+    assert_eq!(long.rows.as_ref().unwrap().len(), 19);
+    assert_eq!(
+        long.content.body.lines().count(),
+        long.rows.as_ref().unwrap().len()
+    );
+    assert!(!long.content.body.contains('…'));
+    assert!(long.content.body.chars().filter(|c| *c != '\n').count() <= blocks::BODY_CHARS);
+    assert_eq!(long.highlighted, None);
+    let short = (0..30)
+        .map(|index| Row::new(format!("r{index}"), "x"))
+        .collect();
+    let short = publishing(Panel::list("q", "", short));
+    assert_eq!(short.rows.as_ref().unwrap().len(), blocks::BODY_LINES);
+    // An empty list is still a list, of no rows.
+    let empty = publishing(Panel::list("q", "", Vec::new()));
+    assert_eq!(
+        (empty.content.body.as_str(), empty.rows),
+        ("", Some(Vec::new()))
+    );
+    // A row that begins with a checkbox is never a checklist item: its brackets are parentheses.
+    let boxed = publishing(Panel::list(
+        "q",
+        "",
+        vec![
+            Row::new("a", "[ ] open"),
+            Row::new("b", "[x] done"),
+            Row::new("c", "[X]"),
+            Row::new("d", "[x]done"),
+        ],
+    ));
+    assert_eq!(
+        boxed.content.body,
+        "- ( ) open\n- (x) done\n- (X)\n- [x]done"
+    );
+    assert!(
+        crate::stage::checklist::items(&boxed.content.body)
+            .iter()
+            .all(|item| item.checked.is_none())
+    );
+}
+
+#[test]
+fn a_list_panel_is_refused_past_its_rows_ids_and_highlight() {
+    let refused = |panel: Panel| Publishing::new(panel).unwrap_err();
+    assert_eq!(
+        refused(Panel::list("q", "", queue(31))),
+        "A list panel has at most 30 rows."
+    );
+    assert_eq!(
+        refused(Panel::list("q", "", vec![Row::new("a b", "")])),
+        "A row's id is 1 to 64 ASCII letters, digits, -, _, . and /."
+    );
+    assert_eq!(
+        refused(Panel::list(
+            "q",
+            "",
+            vec![Row::new("a", "1"), Row::new("a", "2")]
+        )),
+        "Two rows of a list panel have the same id."
+    );
+    assert_eq!(
+        refused(Panel::list("q", "", queue(2)).highlighting("pod9")),
+        "A list panel highlights only a row it has."
+    );
+    assert_eq!(
+        refused(Panel::text("q", "", "- a").highlighting("a")),
+        "Only a list panel highlights a row."
+    );
+    assert!(Publishing::new(Panel::list("a b", "", queue(1))).is_err());
+}
+
+#[test]
+fn a_list_panel_s_highlight_moves_in_place_and_its_rows_are_found() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let list = |highlighted: &str| {
+        publishing(
+            Panel::list("queue", "Queue", queue(3))
+                .highlighting(highlighted)
+                .with_reference("panel/queue"),
+        )
+    };
+    assert_eq!(stage.publish(&walls, list("pod0"), 0), Ok(Change::Added));
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    assert_eq!(
+        stage.publish(&walls, list("pod0"), 1),
+        Ok(Change::Unchanged)
+    );
+    assert_eq!(stage.publish(&walls, list("pod2"), 2), Ok(Change::Updated));
+    let (rows, highlighted) = stage.rows("yard", &id).unwrap();
+    assert_eq!((rows.len(), highlighted), (3, Some("pod2")));
+    assert!(
+        stage
+            .view("s", &walls, 2)
+            .panel(&id)
+            .unwrap()
+            .body
+            .ends_with("- **▸** pod2 · 2 waiting")
+    );
+    // A row's reference changing alone updates it too.
+    let mut changed = queue(3);
+    changed[1] = Row::new("pod1", "pod1 · 1 waiting").with_reference("pod/one");
+    let changed = Panel::list("queue", "Queue", changed)
+        .highlighting("pod2")
+        .with_reference("panel/queue");
+    assert_eq!(
+        stage.publish(&walls, publishing(changed), 3),
+        Ok(Change::Updated)
+    );
+    // The panel's reference is found before a row's; a row's is described by the panel's title and its text.
+    assert_eq!(
+        stage.referenced("yard", "pod/one").unwrap(),
+        "Queue: pod1 · 1 waiting"
+    );
+    assert!(
+        stage
+            .referenced("yard", "panel/queue")
+            .unwrap()
+            .starts_with("Queue: - pod0")
+    );
+    assert!(stage.referenced("yard", "pod/1").is_none());
+    // A panel that is not a list, or not its environment's, has no rows.
+    stage
+        .publish(&walls, publishing(Panel::text("rota", "Rota", "- a")), 0)
+        .unwrap();
+    let rota = stage
+        .view("s", &walls, 0)
+        .panels
+        .into_iter()
+        .find(|panel| panel.title == "Rota")
+        .unwrap()
+        .id;
+    assert!(stage.rows("yard", &rota).is_none());
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("empty", "Empty", Vec::new())),
+            0,
+        )
+        .unwrap();
+    let empty = stage
+        .view("s", &walls, 0)
+        .panels
+        .into_iter()
+        .find(|panel| panel.title == "Empty")
+        .unwrap()
+        .id;
+    assert_eq!(stage.rows("yard", &empty), Some((&[][..], None)));
+    assert!(stage.rows("yard", "panel-0").is_none());
+    assert!(stage.rows("elsewhere", &id).is_none());
+}
+
+#[test]
+fn pointing_at_a_row_of_a_list_panel_describes_the_row() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let mut rows = queue(2);
+    rows.push(Row::new("pod2", "pod2 \"held\""));
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("queue", "Queue", rows).highlighting("pod1")),
+            0,
+        )
+        .unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    let describe = |line: Option<u32>| stage.describe(&walls, &id, line, 0).unwrap();
+    assert_eq!(
+        describe(Some(1)),
+        "panel \"Queue\" (on a wall, published just now; the yard environment's; row 2 of 3, highlighted, id \
+         yard:pod/1: \"pod1 · 1 waiting\")"
+    );
+    assert!(describe(Some(0)).ends_with("; row 1 of 3, id yard:pod/0: \"pod0 · 0 waiting\")"));
+    // A row without a reference has no id, and its text is cleaned as an item's is.
+    assert!(describe(Some(2)).ends_with("; row 3 of 3: \"pod2 'held'\")"));
+    // Past its rows, or nowhere on them, the panel alone.
+    assert_eq!(
+        describe(Some(3)),
+        "panel \"Queue\" (on a wall, published just now; the yard environment's)"
+    );
+    assert_eq!(describe(None), describe(Some(3)));
 }

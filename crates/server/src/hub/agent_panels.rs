@@ -134,6 +134,7 @@ fn described(
     panel: &Panel,
     updated: Option<u64>,
     published: Option<(&str, Option<&str>)>,
+    rows: Option<(&[crate::stage::Row], Option<&str>)>,
 ) -> Value {
     let kind = if panel.code.is_some() {
         "code"
@@ -157,6 +158,22 @@ fn described(
             reference
                 .map(|reference| crate::space::inspectable(&projection.environment, reference))
         );
+    }
+    // An environment's list panel gives its rows, each with its id, the id the agent may inspect it by and whether it is
+    // highlighted, so that the agent can inspect a row nobody points at.
+    if let Some((rows, highlighted)) = rows {
+        described["rows"] = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "id": row.id,
+                    "inspect_id": row.reference.as_deref().map(|reference| {
+                        crate::space::inspectable(&projection.environment, reference)
+                    }),
+                    "highlighted": highlighted == Some(row.id.as_str()),
+                })
+            })
+            .collect();
     }
     if let Some(slug) = &panel.slug {
         described["id"] = json!(slug);
@@ -208,7 +225,8 @@ impl Hub {
                     .updated(walls.environment, &panel.id)
                     .map(|updated| now.saturating_sub(updated));
                 let published = record.stage.published(walls.environment, &panel.id);
-                described(&projection, panel, updated, published)
+                let rows = record.stage.rows(walls.environment, &panel.id);
+                described(&projection, panel, updated, published, rows)
             })
             .collect();
         Ok(json!({
