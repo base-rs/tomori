@@ -68,12 +68,11 @@ pub fn farmyard_agent() -> tomori_protocol::Pose {
 }
 
 /// The farmyard's `home` cluster anchor: its workers stand in a ring about the agent's home, on the ring drawn there,
-/// in the room its layout gives them, rather than on the arc about the arrival. See `design/farmyard.md`.
+/// rather than on the arc about the arrival. It gives no room, so that an older client, which would lay the arc's steps
+/// out in it, keeps today's arc; the layout's tests check that the ring fits the yard. See `design/farmyard.md`.
 pub fn farmyard_home() -> tomori_protocol::cluster::Anchor {
-    let [width, height, depth] = tomori_environment_farmyard::layout::HOME_ROOM;
     tomori_protocol::cluster::Anchor::new(tomori_protocol::cluster::HOME, farmyard_agent())
         .with_formation(tomori_protocol::cluster::Formation::Ring)
-        .with_extent(width, height, depth)
 }
 
 /// The farmyard's notice board, a projection wall of its own, two slots wide and one high, on the board against the
@@ -158,7 +157,8 @@ mod tests {
             ]
         );
         // Sky and the grid keep today's arc about the arrival, a theatre about whoever sits with the agent; the farmyard's
-        // workers stand in a ring about the agent's home, on the ring drawn there, in its room.
+        // workers stand in a ring about the agent's home, on the ring drawn there, without room, which an older client
+        // would lay the arc out in.
         let formations: Vec<Option<tomori_protocol::cluster::Formation>> = builder
             .environments()
             .iter()
@@ -170,11 +170,7 @@ mod tests {
         );
         let home = super::farmyard_home();
         assert_eq!(home.pose, super::farmyard_agent());
-        assert_eq!(
-            home.extent
-                .map(|room| [room.width, room.height, room.depth]),
-            Some(tomori_environment_farmyard::layout::HOME_ROOM)
-        );
+        assert_eq!(home.extent, None);
     }
 
     #[test]

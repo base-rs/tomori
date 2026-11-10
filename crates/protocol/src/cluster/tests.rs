@@ -349,20 +349,21 @@ fn a_ring_stands_evenly_about_the_agent_the_sides_first_clear_of_it() {
         (few.step(), few.compact(), few.more()),
         (Step::Ring, false, None)
     );
-    // Seven to a row, three rows without room: eighteen at full size, each in a slot of its own.
-    assert_eq!(few.capacity(), Some(21));
-    let eighteen = cluster.slots(18);
-    assert!(eighteen.iter().all(|slot| slot.scale == 1.0 && !slot.more));
-    for slot in &eighteen {
+    // Seven to a row, two rows below the highest a ring rises without room: fourteen at full size, each in a slot of its
+    // own.
+    assert_eq!(few.capacity(), Some(14));
+    let fourteen = cluster.slots(14);
+    assert!(fourteen.iter().all(|slot| slot.scale == 1.0 && !slot.more));
+    for slot in &fourteen {
         let (radius, _) = about(slot.position);
         assert!((radius - RING).abs() < 1e-4, "{slot:?}");
     }
     // The first two at the agent's right and left, as the arrival sees them, the same way round, nearer before further.
-    let (right, left) = (eighteen[0].position, eighteen[1].position);
+    let (right, left) = (fourteen[0].position, fourteen[1].position);
     assert!(right[0] > 1.0 && (right[0] + left[0]).abs() < 1e-4);
     assert!((right[2] - left[2]).abs() < 1e-4 && right[2] > -4.0);
     // Its first row, a little below the agent's middle, seven evenly about it, one straight behind and none before it.
-    let mut row: Vec<f32> = eighteen[..7]
+    let mut row: Vec<f32> = fourteen[..7]
         .iter()
         .map(|slot| {
             assert!((slot.position[1] - (1.5 - ROW_BELOW)).abs() < 1e-5);
@@ -381,27 +382,39 @@ fn a_ring_stands_evenly_about_the_agent_the_sides_first_clear_of_it() {
     );
     // In order, the sides first.
     let side = |slot: &Slot| about(slot.position).1.cos().abs();
-    for pair in eighteen[..7].windows(2) {
+    for pair in fourteen[..7].windows(2) {
         assert!(side(&pair[0]) <= side(&pair[1]) + 1e-4);
     }
     // The row above stands a footprint higher, each place straight above the one below, as today's arc's rows do.
-    let above = eighteen[7];
+    let above = fourteen[7];
     assert!((above.position[1] - (1.5 - ROW_BELOW + ROW_APART)).abs() < 1e-5);
     assert!(
         (above.position[0] - right[0]).abs() < 1e-5 && (above.position[2] - right[2]).abs() < 1e-5
     );
     // Each reaches as far, turned any way, as it is seen from every side.
-    let (low, high) = cluster.reach(&eighteen[0]);
+    let (low, high) = cluster.reach(&fourteen[0]);
     let half = WORKER.width.hypot(WORKER.depth) / 2.0;
     assert!(
         (high[0] - low[0] - 2.0 * half).abs() < 1e-4
             && (high[2] - low[2] - 2.0 * half).abs() < 1e-4
     );
-    // Beyond its rows, compact, then the rest gathered into one sign at its last slot.
-    let compact = cluster.arrange(22);
+    // Beyond its rows, compact, in three rows, none above the highest a ring rises, then the rest gathered into one
+    // sign at its last slot.
+    let compact = cluster.arrange(15);
     assert!(compact.compact() && compact.more().is_none() && compact.step() == Step::Ring);
     let most = compact.capacity().unwrap();
     assert_eq!(most, 33);
+    let heights: std::collections::BTreeSet<u32> = cluster
+        .slots(most)
+        .iter()
+        .map(|slot| (slot.position[1] * 1000.0).round() as u32)
+        .collect();
+    assert_eq!(heights.len(), 3);
+    assert!(
+        heights
+            .iter()
+            .all(|&height| height as f32 / 1000.0 <= RING_HIGHEST)
+    );
     let over = cluster.arrange(most + 4);
     assert_eq!(over.more(), Some(most - 1));
     assert!(cluster.slot(&over, most + 2).more);
@@ -415,10 +428,17 @@ fn a_ring_in_room_rises_as_its_height_allows_and_where_it_holds_none_the_room_s_
     let compact = low.arrange(8);
     assert!(compact.compact() && compact.capacity() == Some(11));
     assert_eq!(low.arrange(12).more(), Some(10));
-    // Room for four rows: twenty-eight at full size.
+    // Room for four rows: still two at full size, the highest a ring rises, fourteen.
     let tall = Cluster::new(&ringed().with_extent(4.0, 6.0, 4.0));
-    assert_eq!(tall.arrange(28).capacity(), Some(28));
-    assert!(!tall.arrange(28).compact());
+    assert_eq!(tall.arrange(14).capacity(), Some(14));
+    assert!(!tall.arrange(14).compact());
+    // A ring about a raised point stands its first row there, however high, and none above it, whatever its room.
+    let raised = Anchor::new("loft", Pose::at([0.0, 3.0, -4.0]))
+        .with_formation(Formation::Ring)
+        .with_extent(4.0, 6.0, 4.0);
+    let raised = Cluster::new(&raised);
+    assert_eq!(raised.arrange(1).capacity(), Some(7));
+    assert!((raised.slots(1)[0].position[1] - (3.0 - ROW_BELOW)).abs() < 1e-5);
     // A slim room that holds one place, straight behind the agent, at full size and compact alike: the rest gather
     // into the sign there, at full size.
     let slim = Cluster::new(&ringed().with_extent(1.4, 1.0, 4.0));
@@ -452,9 +472,9 @@ fn a_ring_s_sweep_leaves_the_side_away_from_its_audience_clear() {
     assert!(towards[1] > 0.99, "{towards:?}");
     let arrangement = cluster.arrange(1);
     let held = arrangement.capacity().unwrap();
-    // Four of the seven places in each row, those before and beside the agent, are within 120° of the way to the
-    // arrival; those behind it, and the one straight behind, are not.
-    assert_eq!(held, 12);
+    // Four of the seven places in each of its two rows, those before and beside the agent, are within 120° of the way
+    // to the arrival; those behind it, and the one straight behind, are not.
+    assert_eq!(held, 8);
     for slot in cluster.slots(held) {
         let (_, angle) = about(slot.position);
         assert!(angle.abs() <= 120f32.to_radians() + 1e-4, "{slot:?}");
@@ -593,6 +613,15 @@ fn every_cluster_keeps_its_members_apart_within_its_room() {
                         cluster.within(&extent, slot.position, slot.scale) || slots.len() == 1,
                         "{cluster:?} {span} {index}"
                     );
+                    // A ring's rows above its first no higher than it rises.
+                    if arrangement.step() == Step::Ring {
+                        let first = (cluster.point[1] - ROW_BELOW).max(LOWEST);
+                        assert!(
+                            (slot.position[1] - first).abs() < 1e-4
+                                || slot.position[1] <= RING_HIGHEST + 1e-4,
+                            "{cluster:?} {span} {index}"
+                        );
+                    }
                     let footprint = cluster.footprint().scaled(slot.scale);
                     for other in &slots[..index] {
                         let level = (slot.position[0] - other.position[0])

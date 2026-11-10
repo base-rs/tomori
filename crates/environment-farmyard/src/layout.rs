@@ -118,13 +118,6 @@ pub const ARRIVAL_FACING: Vec3 = Vec3::new(-1.6, 0.0, -7.0);
 /// eyes, so that it reads from the arrival.
 pub const AGENT_HOME: Vec3 = Vec3::new(-1.0, 1.5, -5.6);
 
-/// The room the agent's workers take about its home, which Tomori's own server gives the farmyard's `home` cluster
-/// anchor, standing in a ring there: across, up and along, in metres, a box about the agent's home. The ring, 1.4 m
-/// about the swarm's middle, and the workers' signs, turned whichever way, need 4 m across and along; three rows, from a
-/// little below the swarm's middle, 4.4 m up, so that eighteen workers stand on the ring in slots of their own, clear of
-/// the coop's corner, 2.1 m from home. See `design/farmyard.md`.
-pub const HOME_ROOM: [f32; 3] = [4.0, 4.4, 4.0];
-
 /// The notice board's footprint on the ground, its posts and its back, which nobody lands on and nothing walks through.
 pub fn noticeboard() -> Footprint {
     let half = NOTICEBOARD_POST * 0.5;
@@ -282,18 +275,37 @@ mod tests {
             .into_iter()
             .map(|(low, high)| Solid::new(low, high))
             .collect();
-        // The farmyard's home anchor stands its workers in a ring about the agent's home, in its room, gathered about
-        // the eyes at the arrival, as Tomori's own server registers it.
+        // The farmyard's home anchor stands its workers in a ring about the agent's home, gathered about the eyes at the
+        // arrival, as Tomori's own server registers it: without room, which an older client would lay the arc's steps
+        // out in, so that it keeps today's arc; the ring's rows fit the yard, which `fits` checks.
         let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(arrival.eyes());
-        let [width, height, depth] = HOME_ROOM;
-        let anchor = Anchor::new(HOME, agent)
-            .with_formation(Formation::Ring)
-            .with_extent(width, height, depth);
+        let anchor = Anchor::new(HOME, agent).with_formation(Formation::Ring);
         let home = Cluster::new(&anchor).with_audience(arrival.eyes());
         assert_eq!(home.arrange(18).step(), Step::Ring);
-        assert!(!home.arrange(18).compact());
+        assert!(!home.arrange(14).compact() && home.arrange(15).compact());
         assert_eq!(fits(&home, ARRIVAL.y, &solids), Ok(()));
-        // Today's arc, which it stood in before, fits too, should a build stand it there.
+        // Its signs read and are pointed at from the yard: none of eighteen above 2.5 m, and the notice board seen past
+        // them from the arrival.
+        for slot in home.slots(18) {
+            assert!(
+                slot.position[1] <= tomori_protocol::cluster::RING_HIGHEST,
+                "{slot:?}"
+            );
+        }
+        let reach: Vec<Solid> = home
+            .slots(18)
+            .iter()
+            .map(|slot| {
+                let (low, high) = home.reach(slot);
+                Solid::new(low, high)
+            })
+            .collect();
+        assert!(
+            !reach
+                .iter()
+                .any(|worker| worker.blocks(arrival.eyes(), NOTICEBOARD.to_array()))
+        );
+        // Today's arc, which it stood in before and an older client still stands it in, fits too.
         let arc = Cluster::new(&Anchor::new(HOME, agent)).with_audience(arrival.eyes());
         assert_eq!(arc.arrange(18).step(), Step::Home);
         assert_eq!(fits(&arc, ARRIVAL.y, &solids), Ok(()));

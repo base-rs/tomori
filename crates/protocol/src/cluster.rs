@@ -22,7 +22,7 @@
 //!
 //! An anchor may choose its [`Formation`] instead: a **ring**, its members evenly about the point on a circle
 //! [`RING`] from it, the agent's at `home`, the sides first as seen from its audience, in rows up from a little below
-//! the point, then compact, then the "+N more" sign ([`Step::Ring`]). The arc is the default.
+//! the point to [`RING_HIGHEST`], then compact, then the "+N more" sign ([`Step::Ring`]). The arc is the default.
 //!
 //! At `home`, the point is the agent's own, kept for it while it is away, so that workers stand either side of it. The
 //! steps depend only on the anchor, its audience and the span it is laid out for, the highest slot taken, kept a slot
@@ -115,8 +115,10 @@ pub const COLUMNS: usize = 8;
 /// looks at it, reaches another; the radius of the home ring drawn on the floor where the home anchor is a ring.
 pub const RING: f32 = 1.4;
 
-/// How many rows a ring stands in, one above another, where its anchor gives it no room.
-pub const RING_ROWS: usize = 3;
+/// The highest a ring's rows above its first stand, their middles above the floor, in metres: so that every sign is read
+/// and pointed at from the floor about it, not over a head, and stands below a coop's roof or a notice board's top
+/// rather than over them; two rows at full size and three compact about a home at the swarm's usual height.
+pub const RING_HIGHEST: f32 = 2.5;
 
 /// The least and the most of its ring an anchor's ring may take, in degrees, about the way to its audience.
 pub const LEAST_SWEEP: f32 = 90.0;
@@ -157,7 +159,8 @@ impl Extent {
 ///   at `home`, so that workers hang about the agent's home, on the perimeter of the ring drawn there, as in the
 ///   farmyard. Its slots fill the sides first as seen from its audience, alternately right and left, nearer before
 ///   further, so that the first neither hide the agent nor stand behind it; then rows above, each place straight above
-///   the one below, as today's arc's rows stand; then compact; then the "+N more" sign.
+///   the one below, as today's arc's rows stand, no higher than [`RING_HIGHEST`]; then compact; then the "+N more"
+///   sign.
 ///
 /// A newer formation this build does not know is read as [`Formation::Unknown`], laid out as the arc.
 ///
@@ -1036,8 +1039,8 @@ impl Cluster {
     /// The slots of its ring at `scale`, in order: on the circle [`RING`] about the point, as many as stand a
     /// footprint's reach, turned any way, apart along it, evenly; in rows up from [`ROW_BELOW`] below the point, never
     /// nearer the floor than [`LOWEST`], a footprint's height apart, each place straight above the one below, so that a
-    /// room clear about the first row is clear about every row, as many as its room's height holds, or [`RING_ROWS`]
-    /// without room; and in each row, those within its sweep, the sides first as seen from its audience, then nearer
+    /// room clear about the first row is clear about every row, as many as its room's height holds, those above the
+    /// first no higher than [`RING_HIGHEST`]; and in each row, those within its sweep, the sides first as seen from its audience, then nearer
     /// before further, right before left, each within its room.
     fn ring(&self, scale: f32) -> Vec<[f32; 3]> {
         let footprint = self.footprint.scaled(scale);
@@ -1068,12 +1071,12 @@ impl Cluster {
         let mut places = Vec::new();
         for row in 0..TRIES {
             let lift = lowest - self.point[1] + row as f32 * footprint.height;
-            let rises = match &self.extent {
-                Some(extent) => {
+            let low_enough =
+                row == 0 || self.point[1] + lift <= crate::entourage::FLOOR + RING_HIGHEST + 1e-4;
+            let rises = low_enough
+                && self.extent.is_none_or(|extent| {
                     lift - footprint.base + footprint.height <= extent.height / 2.0 + 1e-4
-                }
-                None => row < RING_ROWS,
-            };
+                });
             if !rises {
                 break;
             }

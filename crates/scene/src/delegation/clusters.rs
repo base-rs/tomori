@@ -650,7 +650,8 @@ fn workers_stand_in_a_ring_about_the_agent_s_home_on_its_ring_the_sides_first_an
     let mut scene = Scene::new();
     scene.arrange_as(Anchor::AGENT, EYES, None, ring, None);
     let mut before = BTreeMap::new();
-    for count in 1..=18 {
+    // Fourteen at full size, in two rows, the most the ring holds below the highest it rises.
+    for count in 1..=14 {
         settle(&mut scene, &workers(count));
         let standing = own(&scene);
         assert_eq!(standing.len(), count);
