@@ -597,17 +597,16 @@ impl Scene {
                 if worker.slot != slot {
                     worker.slot = slot;
                     self.slots.insert(id.clone(), slot);
-                    if let Some(mote) = self.motes.iter_mut().find(|mote| mote.id == *id) {
-                        mote.slot = slot;
-                    }
                     moved = true;
                 }
             }
             for (entry, slot) in arriving.iter_mut().zip(slots) {
-                if entry.0 != slot {
-                    entry.0 = slot;
-                    self.slots.insert(entry.1.to_owned(), slot);
-                }
+                entry.0 = slot;
+                self.slots.insert(entry.1.to_owned(), slot);
+            }
+            // The satellites keep to their workers' slots.
+            for mote in &mut self.motes {
+                mote.slot = self.slots.get(&mote.id).copied().unwrap_or(mote.slot);
             }
         }
         members.sort_unstable();
