@@ -97,6 +97,8 @@ struct Input {
     looking: bool,
     talk: bool,
     back_held: bool,
+    /// A, held.
+    a_held: bool,
     /// Presses since the last frame, which it consumes.
     a: bool,
     back: bool,
@@ -130,6 +132,7 @@ impl Input {
     fn take(&mut self) -> Buttons {
         Buttons {
             a: std::mem::take(&mut self.a),
+            a_held: self.a_held,
             back: std::mem::take(&mut self.back),
             back_held: self.back_held,
             y: std::mem::take(&mut self.y),
@@ -347,7 +350,10 @@ impl Desktop {
                 input.back_held = pressed;
                 input.back |= press;
             }
-            Key::A => input.a |= press,
+            Key::A => {
+                input.a_held = pressed;
+                input.a |= press;
+            }
             Key::Y => input.y |= press,
             Key::Mute => input.mute |= press,
             Key::Replay => input.replay |= press,
@@ -578,7 +584,7 @@ mod tests {
     fn keys_press_once_hold_while_down_and_ignore_repeats() {
         let mut conversation = joined();
         let mut desktop = desktop(&mut conversation);
-        for key in [Key::A, Key::Y, Key::Mute, Key::Replay] {
+        for key in [Key::Y, Key::Mute, Key::Replay] {
             desktop.key(key, true, true, &mut conversation);
         }
         assert_eq!(
@@ -586,6 +592,17 @@ mod tests {
             Buttons::default(),
             "repeats are not presses"
         );
+        // A repeat of a key held is still held, and no new press of A.
+        desktop.key(Key::A, true, true, &mut conversation);
+        assert_eq!(
+            desktop.input.take(),
+            Buttons {
+                a_held: true,
+                ..Buttons::default()
+            }
+        );
+        desktop.key(Key::A, false, false, &mut conversation);
+        assert_eq!(desktop.input.take(), Buttons::default());
         desktop.key(Key::Back, true, false, &mut conversation);
         for key in [Key::A, Key::Y, Key::Mute, Key::Replay, Key::Talk, Key::Grip] {
             desktop.key(key, true, false, &mut conversation);
@@ -596,6 +613,7 @@ mod tests {
         }
         let expected = Buttons {
             a: true,
+            a_held: true,
             back: true,
             back_held: true,
             y: true,
@@ -626,6 +644,7 @@ mod tests {
         assert_eq!(desktop.input.take().left_stick, Vec2::ZERO);
         // Releasing a key lets go of what it holds.
         for key in [
+            Key::A,
             Key::Talk,
             Key::Back,
             Key::Grip,
@@ -996,5 +1015,82 @@ mod tests {
             now += Duration::from_millis(16);
             desktop.frame(&mut conversation, &mut felt(), now, SIZE);
         }
+    }
+
+    #[test]
+    fn enter_selects_the_selectable_object_the_mouse_points_at_as_a_does_and_never_beside_the_left_button()
+     {
+        use crate::client_side::Select;
+        let (mut conversation, done) = crate::scene::tests::lamp(Default::default(), true);
+        let mut desktop = desktop(&mut conversation);
+        // Down the middle of the window, the mouse points at the lamp, which is selectable.
+        desktop.cursor_moved(SIZE * 0.5);
+        let mut now = Instant::now();
+        let mut frame = |desktop: &mut Desktop, conversation: &mut Conversation| {
+            now += Duration::from_millis(100);
+            desktop.frame(conversation, &mut felt(), now, SIZE);
+            done.lock()
+                .unwrap()
+                .drain(..)
+                .filter_map(|told| told.0)
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..40 {
+            frame(&mut desktop, &mut conversation);
+        }
+        assert!(desktop.step.client.is_some());
+        let lamp = || "lamp".to_owned();
+        // Held across frames, Enter presses once, and lets go as it is let go, wherever the mouse is then.
+        desktop.key(Key::A, true, false, &mut conversation);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        desktop.key(Key::A, true, true, &mut conversation);
+        assert!(frame(&mut desktop, &mut conversation).is_empty());
+        desktop.cursor_left();
+        desktop.key(Key::A, false, false, &mut conversation);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        assert!(frame(&mut desktop, &mut conversation).is_empty());
+        desktop.cursor_moved(SIZE * 0.5);
+        frame(&mut desktop, &mut conversation);
+        // Struck and let go between two frames, it presses on the one and lets go on the next.
+        tap(&mut desktop, Key::A, &mut conversation);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        // The left button, the trigger, keeps the select it began: Enter meanwhile selects nothing more.
+        desktop.mouse(Button::Left, true);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        tap(&mut desktop, Key::A, &mut conversation);
+        assert!(frame(&mut desktop, &mut conversation).is_empty());
+        desktop.mouse(Button::Left, false);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        // Losing the window's focus lets go, once.
+        desktop.key(Key::A, true, false, &mut conversation);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        desktop.set_focused(false, &mut conversation);
+        assert_eq!(
+            frame(&mut desktop, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        assert!(frame(&mut desktop, &mut conversation).is_empty());
     }
 }

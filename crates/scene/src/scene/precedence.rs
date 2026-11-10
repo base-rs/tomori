@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Whose the trigger and each stick are: one ordered list of rungs for each, the first that claims the control as it
+//! Whose the trigger, A and each stick are: one ordered list of rungs for each, the first that claims the control as it
 //! begins taking it. Whatever the participant points at gets the input, Tomori's own interface first: an environment's
 //! client side is reached only after every rung of Tomori's declines, which, since one of them claims anything of
 //! Tomori's the ray is on, is only while the ray is on something of the environment's or on nothing of Tomori's. A
@@ -27,8 +27,9 @@ pub(crate) trait Ladder: Copy + Eq + std::fmt::Debug + 'static {
     /// The rungs, first to last.
     const ORDER: &'static [Self];
 
-    /// The first rung, in [`Self::ORDER`], that `claims` the control, or else the last.
-    fn first(claims: impl Fn(Self) -> bool) -> Self {
+    /// The first rung, in [`Self::ORDER`], that `claims` the control, or else the last. A rung is asked only if none
+    /// before it claimed, so that asking may be what acts, as A's conversation does.
+    fn first(mut claims: impl FnMut(Self) -> bool) -> Self {
         let last = *Self::ORDER.last().expect("a ladder has rungs");
         Self::ORDER
             .iter()
@@ -115,6 +116,43 @@ impl Ladder for Trigger {
     ];
 }
 
+/// Whose a press of A is, decided as it is pressed. A press that the environment takes is a select, until it is let go
+/// (see [`crate::client_side::Selector`]). A is the environment's only after every rung before it declines it, so that
+/// it never reaches what the environment shows while something of Tomori's wants it, nor changes what it did elsewhere.
+/// This is the one place that orders them; the frame step's `Step::buttons` asks each in turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum A {
+    /// A hand menu row the ray is on: the press chooses it.
+    MenuRow,
+    /// Anything else while the hand menu shows: the press does nothing.
+    Menu,
+    /// The right wrist's transcript while it shows: the press expands or collapses a turn, confirms the focused choice,
+    /// or removes the focused queue entry or undoes that.
+    Transcript,
+    /// What the conversation's A takes: the list of modes, a request that has just appeared, which A refuses for 0.6
+    /// seconds, a checklist item pointed at, a request to decide, a queue entry to cancel or keep, and outside a space
+    /// what the lobby and arrival offer.
+    Conversation,
+    /// Anything else of Tomori's the ray is on, such as a panel, a wall, a card or a worker: the press does nothing.
+    Tomori,
+    /// A selectable object of the environment's client side: the press selects it.
+    Environment,
+    /// Nothing else: the press does nothing, and in a space never resets the swarm.
+    Nothing,
+}
+
+impl Ladder for A {
+    const ORDER: &'static [Self] = &[
+        Self::MenuRow,
+        Self::Menu,
+        Self::Transcript,
+        Self::Conversation,
+        Self::Tomori,
+        Self::Environment,
+        Self::Nothing,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +178,18 @@ mod tests {
         each_rung_wins_over_the_ones_after_it::<Right>();
         each_rung_wins_over_the_ones_after_it::<Left>();
         each_rung_wins_over_the_ones_after_it::<Trigger>();
+        each_rung_wins_over_the_ones_after_it::<A>();
+    }
+
+    #[test]
+    fn a_rung_is_asked_only_while_none_before_it_has_claimed() {
+        let mut asked = Vec::new();
+        let rung = A::first(|rung| {
+            asked.push(rung);
+            rung == A::Conversation
+        });
+        assert_eq!(rung, A::Conversation);
+        assert_eq!(asked, [A::MenuRow, A::Menu, A::Transcript, A::Conversation]);
     }
 
     #[test]
@@ -167,9 +217,24 @@ mod tests {
         ] {
             assert!(before(rung, Trigger::Environment), "{rung:?}");
         }
+        for rung in [
+            A::MenuRow,
+            A::Menu,
+            A::Transcript,
+            A::Conversation,
+            A::Tomori,
+        ] {
+            assert!(before(rung, A::Environment), "{rung:?}");
+        }
         // The environment comes before only the fallback that does nothing, or attracts the swarm.
         assert_eq!(Right::ORDER.last(), Some(&Right::Cards));
         assert_eq!(Left::ORDER.last(), Some(&Left::Nothing));
         assert_eq!(Trigger::ORDER.last(), Some(&Trigger::Swarm));
+        assert_eq!(A::ORDER.last(), Some(&A::Nothing));
+        assert_eq!(
+            A::ORDER[A::ORDER.len() - 2],
+            A::Environment,
+            "the environment's is the last rung that wants A"
+        );
     }
 }

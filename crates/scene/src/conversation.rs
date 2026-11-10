@@ -2836,6 +2836,12 @@ impl Conversation {
         }
     }
 
+    /// Let the request shown have been there for longer than [`REQUEST_GRACE`], as tests of the frame step cannot wait for.
+    #[cfg(test)]
+    pub(crate) fn settle_request(&mut self) {
+        self.request_at = None;
+    }
+
     /// Whether the last press of A was refused, saying why, as just after a request appears, so that it is not felt as a choice. See `design/feedback.md`.
     pub fn a_refused(&self) -> bool {
         self.refused

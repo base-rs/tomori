@@ -40,6 +40,9 @@ const POINTING: f32 = 0.2;
 pub struct Buttons {
     /// A was pressed.
     pub a: bool,
+    /// A is held. With a press, it is what lets an environment's select be let go once A is. A press that is not held
+    /// is one let go within the frame, which is let go on the next.
+    pub a_held: bool,
     /// B was pressed.
     pub back: bool,
     /// B is held.
@@ -410,9 +413,11 @@ pub struct Step {
     environment_sticks: (Vec2, Vec2),
     /// Whose the left stick's push is, from when it left the middle until it returns.
     left_stick: LeftStick,
-    /// The pulls of the trigger on the client side's selectable objects, which outlive a client side, so that a pull
-    /// begun for one is nobody's once it has gone. See `design/environments.md`.
+    /// The pulls of the trigger and the presses of A on the client side's selectable objects, which outlive a client
+    /// side, so that a pull begun for one is nobody's once it has gone. See `design/environments.md`.
     selector: crate::client_side::Selector,
+    /// What A did, from the last buttons, which the selector is told with the trigger.
+    a_press: crate::client_side::Press,
     /// Whose the last press of B was, for tests that check the order.
     #[cfg(test)]
     last_back: Option<crate::conversation::Back>,
@@ -467,6 +472,7 @@ impl Default for Step {
             environment_sticks: (Vec2::ZERO, Vec2::ZERO),
             left_stick: LeftStick::Free,
             selector: crate::client_side::Selector::default(),
+            a_press: crate::client_side::Press::default(),
             #[cfg(test)]
             last_back: None,
             agent_home: crate::anchors::Anchor::AGENT,
@@ -498,6 +504,7 @@ impl Step {
         self.removing = None;
         self.environment_sticks = (Vec2::ZERO, Vec2::ZERO);
         self.left_stick = LeftStick::Free;
+        self.a_press = crate::client_side::Press::default();
         if let Some(client) = self.client.as_mut() {
             client.back = false;
         }
@@ -774,26 +781,56 @@ impl Step {
                 conversation.refresh();
             }
         }
-        // A chooses the object the ray highlighted last frame, as the trigger does; with nothing highlighted it accepts. Inside a space it never resets the swarm; see `design/interaction.md`.
-        match &self.highlighted {
+        // Whose a press of A is, in the order of `precedence::A`, the one place that orders them: a hand menu row the ray
+        // is on, which it chooses, as the trigger does; anything else while the hand menu shows, where it does nothing,
+        // and while the transcript shows, only that; the conversation's, which accepts, or in a space chooses from the
+        // list, ticks the item pointed at, decides or cancels, and never resets the swarm there; anything else of
+        // Tomori's the ray is on, where it does nothing; and last, a selectable object of the environment's client side
+        // that the ray pointed at last frame, which it selects. See `design/interaction.md`.
+        let focus = self.client.as_ref().and_then(|client| client.focus.clone());
+        let mut chose = false;
+        let rung = buttons.a.then(|| {
+            precedence::A::first(|rung| match rung {
+                precedence::A::MenuRow => matches!(self.highlighted, Some(arrival::Key::Menu(_))),
+                precedence::A::Menu => self.menu_was_shown,
+                precedence::A::Transcript => wrist_active,
+                precedence::A::Conversation => {
+                    let nothing = conversation.press_a(self.highlighted.as_ref());
+                    chose = !nothing && !conversation.a_refused();
+                    !nothing
+                }
+                precedence::A::Tomori => aim == precedence::Aim::Tomori,
+                precedence::A::Environment => focused && focus.is_some(),
+                precedence::A::Nothing => true,
+            })
+        });
+        match (rung, &self.highlighted) {
             // The ray only meets rows that can be chosen.
-            Some(arrival::Key::Menu(key)) if buttons.a => {
+            (Some(precedence::A::MenuRow), Some(arrival::Key::Menu(key))) => {
                 feedback.emit(feedback::Event::Choose, now);
                 if let Some(choice) = self.hand_menu.choose(key) {
                     conversation.choose_menu(choice);
                 }
             }
-            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval; and while the transcript shows, only in that.
-            _ if self.menu_was_shown || wrist_active => {}
-            _ if buttons.a => {
-                let chose =
-                    !conversation.press_a(self.highlighted.as_ref()) && !conversation.a_refused();
-                if chose {
-                    feedback.emit(feedback::Event::Choose, now);
-                }
+            (Some(precedence::A::Conversation), _) if chose => {
+                feedback.emit(feedback::Event::Choose, now);
             }
             _ => {}
         }
+        // A selects the object the environment's client side had in focus, as the trigger would, and is let go with A,
+        // wherever the ray is then, or on losing focus. It is told with the trigger's pulls, in `update`, which does
+        // not run on every frame the buttons are read, as on the headset when nothing is drawn: a press waits there,
+        // the first of any since, until `update` takes it, as a press of B does, and what is held is as the latest
+        // buttons found it, so that a press and its release across such frames are still pressed and let go once.
+        self.a_press = crate::client_side::Press {
+            on: self
+                .a_press
+                .on
+                .take()
+                .or_else(|| focus.filter(|_| rung == Some(precedence::A::Environment)))
+                .filter(|_| focused),
+            held: focused && buttons.a_held,
+        };
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
         if focused && !buttons.talk {
             self.talk_blocked = false;
@@ -974,6 +1011,17 @@ impl Step {
         let select = self.selector.update(
             focus.filter(|_| rung == precedence::Trigger::Environment),
             senses.trigger,
+            // A press is told once; A held is as the last buttons found it, until the next. A press in the frame the hand
+            // menu or the transcript appears is theirs, as a pull of the trigger is, though A's own rungs, which are
+            // decided before this frame finds them, have always gone by what showed the frame before.
+            crate::client_side::Press {
+                on: self
+                    .a_press
+                    .on
+                    .take()
+                    .filter(|_| !menu_shown && !wrist_active),
+                held: self.a_press.held,
+            },
         );
         if let Some(client) = self.client.as_mut() {
             client.select = client.select.take().or(select);
@@ -1987,11 +2035,13 @@ mod tests {
     struct Lamp {
         done: Done,
         selectable: bool,
+        /// How far along the ray it is.
+        distance: f32,
     }
 
     impl crate::client_side::ClientSide for Lamp {
         fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
-            let lamp = crate::client_side::Picked::new("lamp", "the lamp", 1.0);
+            let lamp = crate::client_side::Picked::new("lamp", "the lamp", self.distance);
             (ray.direction.z < 0.0).then(|| {
                 if self.selectable {
                     lamp.selectable()
@@ -2018,6 +2068,15 @@ mod tests {
         locomotion: crate::locomotion::Locomotion,
         selectable: bool,
     ) -> (Conversation, Done) {
+        lamp_at(locomotion, selectable, 1.0)
+    }
+
+    /// As [`lamp`], with the lamp `distance` along any ray ahead.
+    fn lamp_at(
+        locomotion: crate::locomotion::Locomotion,
+        selectable: bool,
+        distance: f32,
+    ) -> (Conversation, Done) {
         let done = Done::default();
         let factory: crate::client_side::Factory = {
             let done = done.clone();
@@ -2025,6 +2084,7 @@ mod tests {
                 Box::new(Lamp {
                     done: done.clone(),
                     selectable,
+                    distance,
                 }) as Box<dyn crate::client_side::ClientSide>
             })
         };
@@ -2487,6 +2547,785 @@ mod tests {
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(done.lock().unwrap().iter().all(|done| !done.1));
         assert_eq!(conversation.notice(), Some("Hold B to leave the space."));
+    }
+
+    /// The press and hold of A, as the controller reports it.
+    fn a_down() -> Buttons {
+        press(|buttons| {
+            buttons.a = true;
+            buttons.a_held = true;
+        })
+    }
+
+    /// A held, no new press.
+    fn a_held() -> Buttons {
+        press(|buttons| buttons.a_held = true)
+    }
+
+    /// What A is heard to do, by the choosing cue, of a frame step with `feedback`.
+    fn chose(feedback: &mut Feedback) -> bool {
+        earcons(feedback).contains(&Earcon::Choose)
+    }
+
+    #[test]
+    fn a_goes_to_the_first_rung_that_wants_it_and_to_the_environment_only_when_none_does() {
+        use crate::hand_menu::MenuKey;
+        use precedence::A;
+        use tomori_protocol::{Approval, ApprovalOption, QueueEntry, QueueState, SpeechSetting};
+        /// Whether what A would do, were it the rung's, was done.
+        type Effect = Box<dyn Fn(&mut Conversation, &mut Feedback) -> bool>;
+        type Setup = fn(&mut Conversation, &mut Step, &mut Senses, Instant) -> Effect;
+        /// What is set up after the last frame before A, which a frame would undo.
+        type Late = fn(&mut Conversation);
+        fn nothing(_: &mut Conversation) {}
+        fn request(conversation: &mut Conversation) {
+            conversation.apply(space(|state| {
+                state.approval = Some(Approval {
+                    id: "request-1".into(),
+                    title: "Bash".into(),
+                    text: "cargo test".into(),
+                    options: vec![ApprovalOption {
+                        id: "once".into(),
+                        label: "Allow once".into(),
+                    }],
+                });
+            }));
+            conversation.take_actions();
+        }
+        /// The hand menu pinned with Y and shown, with the ray on the Mute row, or beside every row.
+        fn menu(
+            conversation: &mut Conversation,
+            step: &mut Step,
+            senses: &mut Senses,
+            now: Instant,
+            row: bool,
+        ) {
+            step.buttons(
+                &press(|buttons| buttons.y = true),
+                true,
+                conversation,
+                &mut felt(),
+                now,
+            );
+            senses.left_palm = Some(left_palm_up(0.0));
+            let scene = step
+                .update(senses, conversation, &mut felt(), now, FRAME)
+                .arrival
+                .expect("the pinned menu")
+                .scene;
+            if row {
+                let mute = arrival::Key::Menu(MenuKey::Mute);
+                senses.ray = aim_at(target(&scene, &mute).shape);
+                senses.beam = true;
+                step.update(senses, conversation, &mut felt(), now, FRAME);
+                assert_eq!(step.highlighted, Some(mute));
+            }
+        }
+        let rows: [(A, &str, Setup, Late); 12] = [
+            (
+                A::MenuRow,
+                "a hand menu row",
+                |conversation, step, senses, now| {
+                    menu(conversation, step, senses, now, true);
+                    let muted = conversation.menu_model().muted;
+                    Box::new(move |conversation, _| conversation.menu_model().muted != muted)
+                },
+                nothing,
+            ),
+            (
+                A::Menu,
+                "the hand menu, off its rows",
+                |conversation, step, senses, now| {
+                    // A request waiting, which A would decide were it not for the menu, which A chooses only in.
+                    request(conversation);
+                    conversation.settle_request();
+                    menu(conversation, step, senses, now, false);
+                    assert!(step.highlighted.is_none());
+                    Box::new(|conversation, _| {
+                        conversation.take_actions().is_empty() && !conversation.a_refused()
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Transcript,
+                "the transcript",
+                |conversation, step, senses, now| {
+                    conversation.apply(space(|state| {
+                        state.messages = [
+                            (tomori_protocol::Role::User, "Fix the parser."),
+                            (tomori_protocol::Role::Assistant, "The parser is fixed."),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (role, text))| tomori_protocol::Message {
+                            id: format!("message-{index}"),
+                            role,
+                            text: text.into(),
+                            completed: true,
+                        })
+                        .collect();
+                    }));
+                    senses.right_palm = Some(palm_up(0.0));
+                    wrist_after(step, conversation, senses, now);
+                    assert!(step.wrist.state().active());
+                    // The right stick moves the focus onto a turn, which A then expands, heard.
+                    step.buttons(
+                        &press(|buttons| buttons.right_stick = Vec2::new(0.0, 1.0)),
+                        true,
+                        conversation,
+                        &mut felt(),
+                        now,
+                    );
+                    step.buttons(&Buttons::default(), true, conversation, &mut felt(), now);
+                    Box::new(|_, feedback| chose(feedback))
+                },
+                nothing,
+            ),
+            (
+                A::Conversation,
+                "the list of modes",
+                |conversation, _, _, _| {
+                    conversation.apply(space(|state| state.speech = SpeechSetting::Full));
+                    conversation.refresh();
+                    Box::new(|conversation, feedback| {
+                        chose(feedback)
+                            && conversation.take_actions().contains(&Action::Send(
+                                tomori_protocol::ClientMessage::SetSpeech {
+                                    speech: SpeechSetting::Brief,
+                                },
+                            ))
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Conversation,
+                "a request that has just appeared",
+                |conversation, _, _, _| {
+                    request(conversation);
+                    Box::new(|conversation, feedback| {
+                        conversation.a_refused()
+                            && conversation.notice() == Some("Read the request before choosing.")
+                            && !chose(feedback)
+                            && conversation.take_actions().is_empty()
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Conversation,
+                "a checklist item pointed at",
+                |conversation, _, _, _| {
+                    // Behind the lamp, which the ray meets first.
+                    let behind = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+                    show_checklist(conversation, behind, arrival::HOME);
+                    Box::new(|conversation, feedback| {
+                        chose(feedback)
+                            && conversation.take_actions()
+                                == [Action::Send(
+                                    tomori_protocol::ClientMessage::CheckPanelItem {
+                                        panel: "panel-1".into(),
+                                        line: 2,
+                                        checked: false,
+                                        revision: Some(4),
+                                    },
+                                )]
+                    })
+                },
+                |conversation| conversation.point_item(Some(("panel-1".into(), 2))),
+            ),
+            (
+                A::Conversation,
+                "a request to turn the right wrist to decide",
+                |conversation, _, _, _| {
+                    conversation.decide_on_wrist();
+                    request(conversation);
+                    conversation.settle_request();
+                    Box::new(|conversation, feedback| {
+                        conversation.a_refused()
+                            && conversation.notice() == Some("Turn your right wrist to decide.")
+                            && !chose(feedback)
+                            && conversation.take_actions().is_empty()
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Conversation,
+                "a request to decide",
+                |conversation, _, _, _| {
+                    request(conversation);
+                    conversation.settle_request();
+                    Box::new(|conversation, feedback| {
+                        chose(feedback)
+                            && conversation.take_actions()
+                                == [Action::Send(tomori_protocol::ClientMessage::Decide {
+                                    request: "request-1".into(),
+                                    decision: tomori_protocol::Decision::AllowOnce,
+                                    option: None,
+                                })]
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Conversation,
+                "a selected queue entry",
+                |conversation, _, _, _| {
+                    conversation.apply(space(|state| {
+                        state.queue = vec![QueueEntry {
+                            id: "entry-1".into(),
+                            source: 1,
+                            speaker: "Ada".into(),
+                            text: "Fix the parser.".into(),
+                            state: QueueState::Queued,
+                        }]
+                    }));
+                    conversation.select_queued(1);
+                    Box::new(|conversation, feedback| {
+                        chose(feedback) && conversation.text().contains("cancelling, A undoes")
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Tomori,
+                "a wall in front of the lamp",
+                |conversation, step, senses, now| {
+                    let middle = arrival::HOME + Vec3::new(0.0, -0.3, -0.6);
+                    fixtures::show_editable_walls(
+                        conversation,
+                        vec![tomori_protocol::Wall::new(
+                            "wall-1",
+                            tomori_protocol::WallKind::Added,
+                            tomori_protocol::Pose::upright_facing(
+                                middle.to_array(),
+                                [arrival::HOME.x, middle.y, arrival::HOME.z],
+                            ),
+                        )],
+                        Vec::new(),
+                    );
+                    grow(step, conversation, senses, now);
+                    Box::new(|conversation, feedback| {
+                        conversation.take_actions().is_empty() && !chose(feedback)
+                    })
+                },
+                nothing,
+            ),
+            (
+                A::Environment,
+                "the lamp, with nothing before it",
+                |_, _, _, _| Box::new(|_, feedback| !chose(feedback)),
+                nothing,
+            ),
+            (
+                A::Nothing,
+                "the ray on nothing",
+                |conversation, step, senses, now| {
+                    senses.ray = Ray::new(arrival::HOME, Vec3::Z);
+                    step.update(senses, conversation, &mut felt(), now, FRAME);
+                    Box::new(|conversation, feedback| {
+                        conversation.take_actions().is_empty() && !chose(feedback)
+                    })
+                },
+                nothing,
+            ),
+        ];
+        // The rows are in the order `A` declares its rungs, which is A's order.
+        let position = |rung: A| A::ORDER.iter().position(|other| *other == rung).unwrap();
+        assert!(
+            rows.windows(2)
+                .all(|pair| position(pair[0].0) <= position(pair[1].0))
+        );
+        for rung in A::ORDER {
+            assert!(rows.iter().any(|row| row.0 == *rung), "{rung:?}");
+        }
+        for (rung, label, setup, late) in rows {
+            let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+            let now = Instant::now();
+            let effect = setup(&mut conversation, &mut step, &mut senses, now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            late(&mut conversation);
+            let focus = |step: &Step| step.client.as_ref().unwrap().focus.clone();
+            // The rungs of the frame step take A while the ray is not the environment's, so the lamp is not in focus
+            // there; forcing it in shows that A goes first to them, as it would on the frame the menu or the
+            // transcript appears, before the frame step has found what is pointed at. Everywhere else the lamp is
+            // pointed at, as the frame before found it.
+            if matches!(rung, A::MenuRow | A::Menu | A::Transcript) {
+                step.client.as_mut().unwrap().focus = Some("lamp".into());
+            }
+            assert_eq!(
+                focus(&step).as_deref(),
+                (rung != A::Nothing).then_some("lamp"),
+                "{label}"
+            );
+            assert_eq!(
+                step.aim == precedence::Aim::Tomori,
+                matches!(rung, A::MenuRow | A::Menu | A::Transcript | A::Tomori),
+                "{label}"
+            );
+            done.lock().unwrap().clear();
+            // Pressed and held, A goes to the rung, and to the lamp only if no rung before it wants it.
+            let mut feedback = felt();
+            step.buttons(&a_down(), true, &mut conversation, &mut feedback, now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            let wanted = effect(&mut conversation, &mut feedback);
+            assert!(wanted, "{label}");
+            // The environment's own is told that the lamp was pressed and, once A is let go, that it was let go.
+            assert_eq!(
+                selects(&done),
+                if rung == A::Environment {
+                    vec![crate::client_side::Select::Pressed("lamp".into())]
+                } else {
+                    Vec::new()
+                },
+                "{label}"
+            );
+            step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert!(selects(&done).is_empty(), "{label}");
+            step.buttons(
+                &Buttons::default(),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            assert_eq!(
+                selects(&done),
+                if rung == A::Environment {
+                    vec![crate::client_side::Select::Released("lamp".into())]
+                } else {
+                    Vec::new()
+                },
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selects_only_a_selectable_object_pointed_at_and_only_with_input() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        // An object that is not selectable, as the farmyard's chickens are not, is not selected by A.
+        let (mut conversation, done) = lamp(Default::default(), false);
+        let mut step = Step::default();
+        let senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            ..senses()
+        };
+        grow(&mut step, &mut conversation, &senses, now);
+        assert_eq!(step.aim, precedence::Aim::Environment);
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(selects(&done).is_empty());
+        // Without a client side, A does what it always did, and nothing is told.
+        let mut conversation = joined();
+        let mut step = Step::default();
+        grow(&mut step, &mut conversation, &senses, now);
+        assert!(step.client.is_none());
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.a_press.on, None);
+        // Without focus, a press selects nothing, and one held is let go.
+        let (mut conversation, mut step, senses, done) = lit(Default::default());
+        step.buttons(&a_down(), false, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(selects(&done).is_empty());
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        step.buttons(&a_held(), false, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Released("lamp".into())]);
+        // Losing focus, as the platform reports it, lets go once, whether or not buttons are read between.
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        step.blur(&mut conversation);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Released("lamp".into())]);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(selects(&done).is_empty());
+        // Pressed and let go within a frame, it is let go on the next.
+        let click = press(|buttons| buttons.a = true);
+        step.buttons(&click, true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Released("lamp".into())]);
+    }
+
+    #[test]
+    fn a_never_draws_the_swarm_and_the_trigger_and_a_select_one_at_a_time() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        let lamp = || "lamp".to_owned();
+        let frame = |step: &mut Step,
+                     conversation: &mut Conversation,
+                     senses: &Senses,
+                     buttons: Buttons| {
+            step.buttons(&buttons, true, conversation, &mut felt(), now);
+            step.update(senses, conversation, &mut felt(), now, FRAME)
+                .attracting
+        };
+        // A pull of the trigger pressed on the lamp keeps the select: a press of A is ignored, and letting go of it,
+        // or of the pull, tells nothing more than the pull's own release.
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        senses.trigger = Some(1.0);
+        assert!(!frame(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Buttons::default()
+        ));
+        assert_eq!(selects(&done), [Select::Pressed(lamp())]);
+        assert!(!frame(&mut step, &mut conversation, &senses, a_down()));
+        assert!(!frame(&mut step, &mut conversation, &senses, a_held()));
+        assert!(!frame(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Buttons::default()
+        ));
+        assert!(selects(&done).is_empty());
+        senses.trigger = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, a_down());
+        assert_eq!(selects(&done), [Select::Released(lamp())]);
+        frame(&mut step, &mut conversation, &senses, Buttons::default());
+        assert!(selects(&done).is_empty());
+        // A press of A on the lamp keeps it: a pull of the trigger that begins meanwhile is nobody's, so that it
+        // selects nothing, and, begun on the lamp, never attracts the swarm either, even once A is let go.
+        senses.trigger = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, a_down());
+        assert_eq!(selects(&done), [Select::Pressed(lamp())]);
+        senses.trigger = Some(1.0);
+        assert!(!frame(&mut step, &mut conversation, &senses, a_held()));
+        assert!(!frame(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Buttons::default()
+        ));
+        assert_eq!(selects(&done), [Select::Released(lamp())]);
+        assert!(!frame(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Buttons::default()
+        ));
+        senses.trigger = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, Buttons::default());
+        senses.trigger = Some(1.0);
+        frame(&mut step, &mut conversation, &senses, Buttons::default());
+        assert_eq!(selects(&done), [Select::Pressed(lamp())]);
+        senses.trigger = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, Buttons::default());
+        assert_eq!(selects(&done), [Select::Released(lamp())]);
+        // A pull that begins on nothing attracts the swarm as ever, and a press of A across the lamp selects it, as
+        // letting go of the pull does nothing to it.
+        let away = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::Z),
+            ..senses
+        };
+        frame(&mut step, &mut conversation, &away, Buttons::default());
+        let mut pulling = away;
+        pulling.trigger = Some(1.0);
+        assert!(frame(
+            &mut step,
+            &mut conversation,
+            &pulling,
+            Buttons::default()
+        ));
+        let mut across = senses;
+        across.trigger = Some(1.0);
+        frame(&mut step, &mut conversation, &across, Buttons::default());
+        assert!(selects(&done).is_empty());
+        frame(&mut step, &mut conversation, &across, a_down());
+        assert_eq!(selects(&done), [Select::Pressed(lamp())]);
+        assert!(frame(&mut step, &mut conversation, &across, a_held()));
+        across.trigger = Some(0.0);
+        frame(&mut step, &mut conversation, &across, Buttons::default());
+        assert_eq!(selects(&done), [Select::Released(lamp())]);
+    }
+
+    #[test]
+    fn a_press_that_outlives_its_client_side_is_let_go_without_telling_the_next() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        let (mut conversation, mut step, senses, done) = lit(Default::default());
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+        // The space moves to an environment with no client side, and back, with A held throughout.
+        for environment in ["minimal", "sky"] {
+            conversation.apply(space(|state| state.environment = environment.into()));
+            for _ in 0..400 {
+                step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            }
+        }
+        assert!(step.client.is_some());
+        assert!(selects(&done).is_empty());
+        // Let go, it tells the new client side nothing; the next press selects its lamp.
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(selects(&done).is_empty());
+        step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(selects(&done), [Select::Pressed("lamp".into())]);
+    }
+
+    #[test]
+    fn a_press_waits_for_a_frame_that_is_drawn_and_is_told_once() {
+        use crate::client_side::Select;
+        let now = Instant::now();
+        let lamp = || "lamp".to_owned();
+        let (mut conversation, mut step, senses, done) = lit(Default::default());
+        let read = |step: &mut Step, conversation: &mut Conversation, buttons: Buttons, focus| {
+            step.buttons(&buttons, focus, conversation, &mut felt(), now)
+        };
+        let draw = |step: &mut Step, conversation: &mut Conversation| {
+            step.update(&senses, conversation, &mut felt(), now, FRAME);
+            selects(&done)
+        };
+        // The headset reads its buttons on frames it does not draw: a press, and A held after it, wait.
+        read(&mut step, &mut conversation, a_down(), true);
+        read(&mut step, &mut conversation, a_held(), true);
+        read(&mut step, &mut conversation, a_held(), true);
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        assert!(draw(&mut step, &mut conversation).is_empty());
+        read(&mut step, &mut conversation, Buttons::default(), true);
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        // Pressed and let go before the next frame drawn: pressed there, and let go on the one after.
+        read(&mut step, &mut conversation, a_down(), true);
+        read(&mut step, &mut conversation, Buttons::default(), true);
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        assert!(draw(&mut step, &mut conversation).is_empty());
+        // Pressed twice, it is still one select, as held and let go as it is.
+        read(&mut step, &mut conversation, a_down(), true);
+        read(&mut step, &mut conversation, a_down(), true);
+        read(&mut step, &mut conversation, a_held(), true);
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Pressed(lamp())]
+        );
+        read(&mut step, &mut conversation, Buttons::default(), true);
+        assert_eq!(
+            draw(&mut step, &mut conversation),
+            [Select::Released(lamp())]
+        );
+        // A press that waits is forgotten on losing focus, as the platform reports it or with `blur`.
+        read(&mut step, &mut conversation, a_down(), true);
+        read(&mut step, &mut conversation, a_held(), false);
+        assert!(draw(&mut step, &mut conversation).is_empty());
+        read(&mut step, &mut conversation, a_down(), true);
+        step.blur(&mut conversation);
+        assert!(draw(&mut step, &mut conversation).is_empty());
+        // A held through a long skip, then drawn, is pressed once however many frames it was read on.
+        for _ in 0..100 {
+            read(&mut step, &mut conversation, a_held(), true);
+        }
+        assert!(draw(&mut step, &mut conversation).is_empty());
+        read(&mut step, &mut conversation, Buttons::default(), true);
+        assert!(draw(&mut step, &mut conversation).is_empty());
+    }
+
+    #[test]
+    fn a_pressed_in_the_frame_the_hand_menu_appears_selects_nothing() {
+        let now = Instant::now();
+        let (mut conversation, mut step, mut senses, done) = lit(Default::default());
+        // Y pins the menu, which shows as this frame is drawn, as A is pressed: the menu's, as the trigger's would be.
+        step.buttons(
+            &press(|buttons| {
+                buttons.y = true;
+                buttons.a = true;
+                buttons.a_held = true;
+            }),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        senses.left_palm = Some(left_palm_up(0.0));
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(step.menu_was_shown);
+        assert!(selects(&done).is_empty());
+        // Held, then let go, it tells nothing, and the press is not kept for when the menu goes.
+        step.buttons(&a_held(), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        senses.left_palm = None;
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(selects(&done).is_empty());
+    }
+
+    #[test]
+    fn a_pointing_at_something_of_tomori_s_in_front_of_a_selectable_object_is_tomori_s() {
+        use tomori_protocol::{Card, CardKind, Checks, Panel, Place};
+        let now = Instant::now();
+        let ahead_of_home = Ray::new(arrival::HOME, Vec3::NEG_Z);
+        // Each thing stands nearer than the lamp, 8 m along the ray, which the ray also meets, so that A goes to what is
+        // nearer first, as the frame before found it. The checklist's item is real pointing, ticked by A, which the
+        // conversation takes ahead of what else of Tomori's is pointed at.
+        type Setup = fn(&mut Conversation, &mut Step, &mut Senses, Instant);
+        let rows: [(&str, Setup); 5] = [
+            ("a panel", |conversation, _, _, _| {
+                fixtures::show_projection(
+                    conversation,
+                    Vec::new(),
+                    vec![Panel::new(
+                        "panel-1",
+                        "Build status",
+                        "Green.",
+                        Place::Free {
+                            pose: tomori_protocol::Pose::upright_facing(
+                                (arrival::HOME + Vec3::new(0.0, 0.0, -2.0)).to_array(),
+                                arrival::HOME.to_array(),
+                            ),
+                        },
+                    )],
+                );
+            }),
+            ("a checklist item", |conversation, step, senses, now| {
+                let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+                fixtures::show_checklist(conversation, ahead, arrival::HOME);
+                grow(step, conversation, senses, now);
+                *senses = ray_on_item(step, conversation, ahead, "A  untick").expect("the item");
+            }),
+            ("a card", |conversation, _, _, _| {
+                let at = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+                let (_, rotation, _) = crate::recording::facing(at, arrival::HOME, 1.0)
+                    .to_scale_rotation_translation();
+                fixtures::show_cards(
+                    conversation,
+                    vec![Card {
+                        id: "github://o/r/issues/1".into(),
+                        number: 1,
+                        kind: CardKind::Issue,
+                        title: "A card".into(),
+                        author: "ada".into(),
+                        labels: Vec::new(),
+                        checks: Checks::None,
+                        age: 0,
+                        placement: Some(tomori_protocol::Pose {
+                            position: at.to_array(),
+                            orientation: rotation.to_array(),
+                        }),
+                    }],
+                );
+            }),
+            ("a worker", |conversation, step, senses, now| {
+                conversation.apply(space(|state| {
+                    state.workers = vec![tomori_protocol::Worker {
+                        id: "ses_a".into(),
+                        parent: None,
+                        title: "Review".into(),
+                        state: tomori_protocol::WorkerState::Running,
+                    }];
+                }));
+                let worker = step
+                    .update(senses, conversation, &mut felt(), now, FRAME)
+                    .stations[0]
+                    .position;
+                senses.ray = Ray::new(arrival::HOME, Vec3::from_array(worker) - arrival::HOME);
+            }),
+            ("a panel carried", |conversation, step, senses, now| {
+                fixtures::show_projection(
+                    conversation,
+                    Vec::new(),
+                    vec![Panel::new(
+                        "panel-1",
+                        "Build status",
+                        "Green.",
+                        Place::Free {
+                            pose: tomori_protocol::Pose::upright_facing(
+                                (arrival::HOME + Vec3::new(0.0, 0.0, -2.0)).to_array(),
+                                arrival::HOME.to_array(),
+                            ),
+                        },
+                    )],
+                );
+                senses.grip = Some(1.0);
+                grow(step, conversation, senses, now);
+                assert!(step.projector.held().is_some());
+            }),
+        ];
+        for (label, setup) in rows {
+            let (mut conversation, done) = lamp_at(Default::default(), true, 8.0);
+            let mut step = Step::default();
+            let mut senses = Senses {
+                ray: ahead_of_home,
+                beam: true,
+                ..senses()
+            };
+            grow(&mut step, &mut conversation, &senses, now);
+            setup(&mut conversation, &mut step, &mut senses, now);
+            grow(&mut step, &mut conversation, &senses, now);
+            assert_eq!(step.aim, precedence::Aim::Tomori, "{label}");
+            conversation.take_actions();
+            done.lock().unwrap().clear();
+            step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            step.buttons(
+                &Buttons::default(),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            // The environment is told nothing; A ticks the item pointed at, and does nothing else on the rest.
+            assert!(selects(&done).is_empty(), "{label}");
+            let tick = [Action::Send(
+                tomori_protocol::ClientMessage::CheckPanelItem {
+                    panel: "panel-1".into(),
+                    line: 2,
+                    checked: false,
+                    revision: Some(4),
+                },
+            )];
+            let actions = conversation.take_actions();
+            if label == "a checklist item" {
+                assert_eq!(actions, tick, "{label}");
+            } else {
+                assert!(actions.is_empty(), "{label}: {actions:?}");
+            }
+        }
     }
 
     /// The sticks a [`Lamp`] is told after `buttons`, `focused` or not, and a frame as `senses` find it.
