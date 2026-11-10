@@ -1931,6 +1931,7 @@ impl Peer {
                     environments: vec![],
                     utterance_limit: None,
                     name: None,
+                    limits: None,
                 };
                 let mut response =
                     b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();

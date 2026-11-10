@@ -1226,6 +1226,8 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         });
         client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
         client.create_space("Studio");

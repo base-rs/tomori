@@ -322,6 +322,8 @@ async fn exchange(
             speech_held: true,
             // And receives image panels' images, which it checks and hands on as events, for its session to fetch and show.
             images: true,
+            projection_patches: false,
+            limits: None,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -450,6 +452,7 @@ fn welcome(
             environments,
             utterance_limit,
             name,
+            limits: _,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(

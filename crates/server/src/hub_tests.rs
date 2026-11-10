@@ -85,6 +85,8 @@ impl Client {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         });
     }
 
@@ -232,6 +234,8 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         pairing_window: false,
         speech_held: false,
         images: false,
+        projection_patches: false,
+        limits: None,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -1930,6 +1934,8 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         pairing_window: false,
         speech_held: false,
         images: false,
+        projection_patches: false,
+        limits: None,
     });
     client.read()
 }
@@ -3146,6 +3152,8 @@ fn presenting(
         pairing_window: false,
         speech_held: false,
         images: false,
+        projection_patches: false,
+        limits: None,
     });
     client.read();
     client
@@ -3649,6 +3657,8 @@ impl Client {
             pairing_window: false,
             speech_held: false,
             images: false,
+            projection_patches: false,
+            limits: None,
         });
         client.read();
         client
@@ -4691,7 +4701,8 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
         environment: "sky".to_owned(),
     });
     ada.read();
-    assert_eq!(ada.projection(), in_sky);
+    // At a later revision of the space's projection, as any change is.
+    assert_eq!(ada.projection().with_revision(in_sky.revision), in_sky);
 }
 
 #[test]
@@ -5149,10 +5160,11 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
     ada.join(&shown.0);
     // The agent and its wall are at home again.
     let mut restored = ada.projection();
-    // Only its age has moved on.
+    // Only its age has moved on, and its revision, counted for each run.
     for (panel, before) in restored.panels.iter_mut().zip(&shown.1.panels) {
         panel.age = before.age;
     }
+    restored.revision = shown.1.revision;
     assert_eq!(restored, shown.1);
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -5624,6 +5636,8 @@ impl Client {
             pairing_window: false,
             speech_held: false,
             images: true,
+            projection_patches: false,
+            limits: None,
         });
         client.read();
         client
@@ -5985,3 +5999,6 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
     }
     hub.shutdown();
 }
+
+#[path = "hub_tests/patches.rs"]
+mod patches;

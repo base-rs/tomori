@@ -14,6 +14,7 @@ pub mod checklist;
 pub mod entourage;
 mod frame;
 mod keepalive;
+mod limits;
 mod message;
 mod presence;
 mod projection;
@@ -25,6 +26,9 @@ pub use cards::{Card, CardKind, Cards, Checks, Label, MAX_CARDS};
 pub use channel::{MESSAGE_LIMIT, Payload, STATE_LIMIT};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
+pub use limits::{
+    Limits, PROJECTION_FLOATING, PROJECTION_PANELS, PROJECTION_SLOTS, PROJECTION_WALLS,
+};
 pub use message::{
     ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, NO_SPEECH,
     PAIRING_CLOSED, Pose, Resource, ServerMessage, SpaceDeletion, TranscriptPart, TranscriptStage,
@@ -34,9 +38,9 @@ pub use projection::group;
 pub use projection::layout as wall;
 pub use projection::{
     Align, Attach, CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Edge, Grid, IMAGE_BYTES,
-    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, Meta, Panel, Place,
-    Projection, SlotFrame, Span, TOMORI_WALL, TokenKind, WALL_SLOTS, Wall, WallKind, WallShape,
-    hash_bytes, hash_text, valid_spans,
+    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, Meta, Panel,
+    PatchError, PatchOp, Place, Projection, ProjectionPatch, SlotFrame, Span, TOMORI_WALL,
+    TokenKind, WALL_SLOTS, Wall, WallKind, WallShape, hash_bytes, hash_text, valid_spans,
 };
 pub use space::{
     AVATAR_BYTES, Activity, AgentInstructions, Anchors, Approval, ApprovalOption, Attention,
