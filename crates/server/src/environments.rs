@@ -1018,9 +1018,6 @@ impl Environments {
             .map_or_else(Vec::new, Environment::carried_solids)
     }
 
-    /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a
-    /// space's state carries them: its arrival, in its own coordinates, when it gives a valid one; and the agent and
-    /// workers anchors it gives, carried into the space's coordinates, those then finite, within
     /// `pose`, in the environment `id`'s own coordinates, carried into a space's, as its anchors are: finite, within
     /// [`crate::stage::REACH`] of home and with an orientation, made upright; or none, as for one it does not offer.
     pub(crate) fn carry(
@@ -1045,6 +1042,9 @@ impl Environments {
         names
     }
 
+    /// Where the environment `id` has participants arrive and puts the agent's home and the workers' arrangement, as a
+    /// space's state carries them: its arrival, in its own coordinates, when it gives a valid one; and the agent and
+    /// workers anchors it gives, carried into the space's coordinates, those then finite, within
     /// [`crate::stage::REACH`] of home and with an orientation, each made upright, with its `home` cluster anchor
     /// carried there too where it gives its room, and its other cluster anchors, carried and bounded alike; none when it
     /// is not offered. See `design/environments.md`.
