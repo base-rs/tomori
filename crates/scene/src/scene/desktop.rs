@@ -14,8 +14,12 @@ use crate::{
 };
 use tomori_client::feedback::Feedback;
 
-/// The window's title, followed by any knock waiting.
-pub const TITLE: &str = "Tomori";
+/// The window's title: its name, then a short hint of the mouse's controls, which `desktop_participant.rs`'s `CONTROLS` gives in full; a knock waiting comes between them (see [`Drawn::title`]). The hint stays, since a title bar costs nothing.
+pub const TITLE: &str = "Tomori | mouse: point · left choose · right-drag look · M menu · Esc quit";
+/// The window's name, which starts [`TITLE`].
+const NAME: &str = "Tomori";
+/// The hint of the mouse's controls, which ends [`TITLE`].
+const HINT: &str = "mouse: point · left choose · right-drag look · M menu · Esc quit";
 /// How far the head turns, in radians, for each pixel the mouse is dragged.
 const LOOK_SPEED: f32 = 0.004;
 /// The longest step, in seconds, so that a window hidden for a while does not jump.
@@ -206,7 +210,7 @@ impl Head {
 /// What a desktop frame draws and reports.
 pub struct Drawn<'a> {
     pub frame: Frame<'a>,
-    /// The window's new title, when the knocks waiting change.
+    /// The window's new title, when the knocks waiting change: [`TITLE`], or, with a knock waiting, the window's name, the first knock, which needs attention, and then the hint of the controls.
     pub title: Option<String>,
     /// The head's view and projection, in the participant's room.
     pub view_projection: Mat4,
@@ -406,7 +410,7 @@ impl Desktop {
             match conversation.knocks().first() {
                 Some(knock) => {
                     format!(
-                        "{TITLE} — {}{} is knocking: + admits, - declines",
+                        "{NAME} — {}{} is knocking: + admits, - declines | {HINT}",
                         knock.name,
                         crate::hand_menu::VISITOR
                     )
@@ -679,6 +683,21 @@ mod tests {
     }
 
     #[test]
+    fn the_title_names_the_window_then_hints_at_the_mouse_controls_in_a_title_bars_width() {
+        assert_eq!(TITLE, format!("{NAME} | {HINT}"));
+        for control in [
+            "mouse: point",
+            "left choose",
+            "right-drag look",
+            "M menu",
+            "Esc quit",
+        ] {
+            assert!(HINT.contains(control), "{control}");
+        }
+        assert!(TITLE.chars().count() <= 80);
+    }
+
+    #[test]
     fn knocks_are_admitted_or_declined_first_come_and_announced_in_the_title() {
         let mut conversation = joined();
         let mut desktop = desktop(&mut conversation);
@@ -697,7 +716,9 @@ mod tests {
             .title;
         assert_eq!(
             title.as_deref(),
-            Some("Tomori — Grace (visitor) is knocking: + admits, - declines")
+            Some(
+                "Tomori — Grace (visitor) is knocking: + admits, - declines | mouse: point · left choose · right-drag look · M menu · Esc quit"
+            )
         );
         assert!(
             desktop
