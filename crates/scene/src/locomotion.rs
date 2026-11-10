@@ -4,7 +4,7 @@
 //! Travel beyond the room: the locomotion profile an environment declares, its walkable surfaces and where a ray lands on them, the participant's [`Rig`], and [`Travel`], which turns the left stick and the ray into teleports, snap turns, backsteps and rising. Pure, so that it is tested without a device; the frame step applies the rig to every pose. See `design/locomotion.md`.
 use glam::{Mat4, Quat, Vec2, Vec3};
 
-use crate::{environment::Environment, pointing::Ray};
+use crate::{anchors::Anchor, environment::Environment, pointing::Ray};
 
 /// How far a snap turn turns, in radians.
 pub const SNAP_TURN: f32 = std::f32::consts::PI / 6.0;
@@ -34,6 +34,14 @@ const CENTRE: f32 = 0.2;
 pub const BLINK: f32 = 0.2;
 /// How far below the horizontal a ray must point to land anywhere, as the sine of the angle.
 const DOWNWARDS: f32 = 0.02;
+/// A teleport pad's radius unless it is declared with another, in metres.
+pub const PAD_RADIUS: f32 = 0.5;
+/// The widest a teleport pad may be, in metres: a pair with a wider pad is ignored.
+pub const WIDEST_PAD: f32 = 2.0;
+/// The most characters of a pad's name that are kept.
+pub const LONGEST_NAME: usize = 24;
+/// The most pairs of pads a profile uses: those declared after them are ignored.
+pub const MOST_PAIRS: usize = 8;
 
 /// A horizontal surface a participant may land on, in the space's scene coordinates. Made with [`Surface::rectangle`] and [`Surface::disc`], so that it can grow, as with colliders or rotated surfaces, without breaking:
 ///
@@ -124,10 +132,128 @@ impl Surface {
     }
 }
 
-/// How an environment lets its participants travel beyond the room. Made with [`Locomotion::teleport`] and [`Locomotion::fly`], so that it can grow, as with a fly speed, without breaking; a variant's fields cannot be given directly outside this crate:
+/// A teleport pad: a disc at a height, in the space's scene coordinates, which transports a participant who steps onto
+/// it, or points at it and presses, to the pad it is paired with, as [`Locomotion::with_pads`] pairs them. Tomori draws
+/// it, so an environment says only where it is; it may say how wide it is, which way a participant arriving on it
+/// faces, and its name, which the label on the pad paired with it shows. See `design/locomotion.md`.
+///
+/// ```
+/// use glam::{Vec2, Vec3};
+/// use tomori_scene::locomotion::{Locomotion, Pad, Surface};
+///
+/// let floor = Surface::rectangle(Vec3::ZERO, Vec2::new(20.0, 20.0));
+/// let racks = Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::new(20.0, 20.0));
+/// let profile = Locomotion::fly(vec![floor, racks], 6.0).with_pads([[
+///     Pad::at(Vec3::new(3.0, 0.0, -2.0)).named("Main floor"),
+///     Pad::at(Vec3::new(3.0, -4.5, -2.0)).named("Racks").facing(Vec3::NEG_X),
+/// ]]);
+/// assert_eq!(profile.pads().count(), 1);
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pad {
+    centre: Vec3,
+    radius: f32,
+    /// Which way a participant arriving on it faces, as a turn about the vertical from −Z, as [`Rig`] turns, or `None`
+    /// for the way they faced.
+    yaw: Option<f32>,
+    name: Option<std::sync::Arc<str>>,
+}
+
+impl Pad {
+    /// A pad centred at `centre`, at its height, [`PAD_RADIUS`] across, unnamed, where a participant arriving keeps
+    /// facing the way they faced.
+    pub fn at(centre: Vec3) -> Self {
+        Self {
+            centre,
+            radius: PAD_RADIUS,
+            yaw: None,
+            name: None,
+        }
+    }
+
+    /// The pad, `radius` across instead.
+    pub fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius.abs();
+        self
+    }
+
+    /// The pad, where a participant arriving faces `direction`, horizontally. A direction with no horizontal part
+    /// leaves them facing the way they faced.
+    pub fn facing(mut self, direction: Vec3) -> Self {
+        self.yaw = Vec3::new(direction.x, 0.0, direction.z)
+            .try_normalize()
+            .map(|level| (-level.x).atan2(-level.z));
+        self
+    }
+
+    /// The pad, called `name`, which the label on the pad paired with it shows, as "Racks ↓". Control characters are
+    /// dropped and the name kept to its first [`LONGEST_NAME`] characters; a name left with none is no name.
+    pub fn named(mut self, name: impl AsRef<str>) -> Self {
+        let name: String = name
+            .as_ref()
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(LONGEST_NAME)
+            .collect();
+        self.name = (!name.is_empty()).then(|| name.into());
+        self
+    }
+
+    /// Where it is, at its height.
+    pub fn centre(&self) -> Vec3 {
+        self.centre
+    }
+
+    /// How far across it is from its centre.
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// Which way a participant arriving on it faces, as a turn about the vertical from −Z, if it says.
+    pub fn yaw(&self) -> Option<f32> {
+        self.yaw
+    }
+
+    /// What it is called, if anything.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The pad, declared in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
+    /// turned with it.
+    pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
+        Self {
+            centre: carriage.place(self.centre),
+            yaw: self.yaw.map(|yaw| yaw + carriage.yaw()),
+            ..self.clone()
+        }
+    }
+
+    /// Whether `point`, seen from above, is within `margin` of it.
+    pub fn reaches(&self, point: Vec3, margin: f32) -> bool {
+        Vec2::new(point.x - self.centre.x, point.z - self.centre.z).length() <= self.radius + margin
+    }
+
+    /// Whether a participant may be taken to it and from it: finite, no wider than [`WIDEST_PAD`], within
+    /// [`crate::anchors::REACH`] of home on each axis, as the environment's anchors are, and standing on one of
+    /// `surfaces`, so that whoever arrives on it stands on a floor.
+    fn usable(&self, surfaces: &[Surface]) -> bool {
+        self.centre.is_finite()
+            && self.centre.abs().max_element() <= crate::anchors::REACH
+            && self.radius > 0.0
+            && self.radius <= WIDEST_PAD
+            && self.yaw.is_none_or(f32::is_finite)
+            && surfaces.iter().any(|surface| {
+                (surface.height() - self.centre.y).abs() <= STANDING
+                    && surface.contains(self.centre)
+            })
+    }
+}
+
+/// How an environment lets its participants travel beyond the room. Made with [`Locomotion::teleport`] and [`Locomotion::fly`], and given pairs of teleport pads with [`Locomotion::with_pads`], so that it can grow, as with a fly speed, without breaking; a variant's fields cannot be given directly outside this crate:
 ///
 /// ```compile_fail
-/// let _ = tomori_scene::locomotion::Locomotion::Teleport { surfaces: Vec::new() };
+/// let _ = tomori_scene::locomotion::Locomotion::Teleport { surfaces: Vec::new(), pads: Vec::new() };
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
@@ -135,26 +261,64 @@ pub enum Locomotion {
     /// Room scale, as before: no artificial travel.
     #[default]
     None,
-    /// Teleport onto the walkable `surfaces`, and turn in snaps. Made with [`Locomotion::teleport`].
+    /// Teleport onto the walkable `surfaces`, and turn in snaps, and between each pair of `pads`. Made with
+    /// [`Locomotion::teleport`].
     #[non_exhaustive]
-    Teleport { surfaces: Vec<Surface> },
-    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes. Made with [`Locomotion::fly`].
+    Teleport {
+        surfaces: Vec<Surface>,
+        pads: Vec<[Pad; 2]>,
+    },
+    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes, and between each
+    /// pair of `pads`. Made with [`Locomotion::fly`].
     #[non_exhaustive]
     Fly {
         surfaces: Vec<Surface>,
         ceiling: f32,
+        pads: Vec<[Pad; 2]>,
     },
 }
 
 impl Locomotion {
     /// Teleport onto `surfaces`, and turn in snaps.
     pub fn teleport(surfaces: Vec<Surface>) -> Self {
-        Self::Teleport { surfaces }
+        Self::Teleport {
+            surfaces,
+            pads: Vec::new(),
+        }
     }
 
     /// Teleport onto `surfaces`, turn in snaps, and rise up to `ceiling`.
     pub fn fly(surfaces: Vec<Surface>, ceiling: f32) -> Self {
-        Self::Fly { surfaces, ceiling }
+        Self::Fly {
+            surfaces,
+            ceiling,
+            pads: Vec::new(),
+        }
+    }
+
+    /// The profile, with `pairs` of teleport pads as well, each pad taking a participant to the other, both ways. A
+    /// profile of none has no pads, since nothing travels there. Only the first [`MOST_PAIRS`] pairs whose pads may be
+    /// used are, as [`Self::pads`] gives them.
+    pub fn with_pads(mut self, pairs: impl IntoIterator<Item = [Pad; 2]>) -> Self {
+        if let Self::Teleport { pads, .. } | Self::Fly { pads, .. } = &mut self {
+            pads.extend(pairs);
+        }
+        self
+    }
+
+    /// The pairs of teleport pads a participant may use: the first [`MOST_PAIRS`] of those declared whose pads are
+    /// both finite, no wider than [`WIDEST_PAD`], within [`crate::anchors::REACH`] of home on each axis and standing
+    /// on a declared surface.
+    pub fn pads(&self) -> impl Iterator<Item = &[Pad; 2]> {
+        let (surfaces, pads): (&[Surface], &[[Pad; 2]]) = match self {
+            Self::None => (&[], &[]),
+            Self::Teleport { surfaces, pads } | Self::Fly { surfaces, pads, .. } => {
+                (surfaces, pads)
+            }
+        };
+        pads.iter()
+            .filter(move |pair| pair.iter().all(|pad| pad.usable(surfaces)))
+            .take(MOST_PAIRS)
     }
 
     /// Whether the participant travels at all.
@@ -184,20 +348,58 @@ impl Locomotion {
                 .map(|surface| surface.carried(carriage))
                 .collect()
         };
+        let pairs = |pads: &[[Pad; 2]]| -> Vec<[Pad; 2]> {
+            pads.iter()
+                .map(|pair| pair.each_ref().map(|pad| pad.carried(carriage)))
+                .collect()
+        };
         match self {
             Self::None => Self::None,
-            Self::Teleport { surfaces } => Self::teleport(carry(surfaces)),
-            Self::Fly { surfaces, ceiling } => {
-                Self::fly(carry(surfaces), ceiling + carriage.position.y)
+            Self::Teleport { surfaces, pads } => {
+                Self::teleport(carry(surfaces)).with_pads(pairs(pads))
             }
+            Self::Fly {
+                surfaces,
+                ceiling,
+                pads,
+            } => Self::fly(carry(surfaces), ceiling + carriage.position.y).with_pads(pairs(pads)),
         }
     }
 
-    fn surfaces(&self) -> &[Surface] {
+    pub(crate) fn surfaces(&self) -> &[Surface] {
         match self {
             Self::None => &[],
-            Self::Teleport { surfaces } | Self::Fly { surfaces, .. } => surfaces,
+            Self::Teleport { surfaces, .. } | Self::Fly { surfaces, .. } => surfaces,
         }
+    }
+
+    /// Whether a declared surface crosses `ray`, in either direction, before `distance` along it: what hides a pad
+    /// beneath a deck from above, and one on top of it from below.
+    pub(crate) fn surface_crossed(&self, ray: &Ray, distance: f32) -> bool {
+        if ray.direction.y.abs() < f32::EPSILON {
+            return false;
+        }
+        self.surfaces().iter().any(|surface| {
+            let crossed = (surface.height() - ray.origin.y) / ray.direction.y;
+            crossed >= 0.0 && crossed < distance && surface.contains(ray.at(crossed))
+        })
+    }
+
+    /// How far along `ray` it first meets a surface from above, however near or far, and where, at the surface's
+    /// height.
+    pub(crate) fn surface_hit(&self, ray: &Ray) -> Option<(f32, Vec3)> {
+        if ray.direction.y > -DOWNWARDS {
+            return None;
+        }
+        self.surfaces()
+            .iter()
+            .filter_map(|surface| {
+                let distance = (surface.height() - ray.origin.y) / ray.direction.y;
+                let point = ray.at(distance);
+                (distance >= 0.0 && surface.contains(point))
+                    .then_some((distance, Vec3::new(point.x, surface.height(), point.z)))
+            })
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
     }
 
     /// Where a backstep from `head` goes, facing `facing`, horizontal, with the room's floor at `floor`: [`BACKSTEP`] straight back, horizontally. Where the profile teleports, it steps only along the surface it stands on, at the floor's height, as far as that goes without a gap, checked every 5 cm, or nowhere when that is less than [`SHORTEST_BACKSTEP`]; where it flies, the participant may hover, so it goes the whole way. `None` for a profile of none, or where it steps nowhere.
@@ -206,7 +408,7 @@ impl Locomotion {
         let distance = match self {
             Self::None => return None,
             Self::Fly { .. } => BACKSTEP,
-            Self::Teleport { surfaces } => {
+            Self::Teleport { surfaces, .. } => {
                 let walkable = |distance: f32| {
                     let point = head + back * distance;
                     surfaces.iter().any(|surface| {
@@ -226,19 +428,7 @@ impl Locomotion {
 
     /// Where `ray` lands: on the first surface it meets from above, if that is at least [`NEAREST`] along it and at most [`REACH`] from its origin horizontally, or `None`. A surface nearer than that still hides those beneath it.
     pub fn landing(&self, ray: &Ray) -> Option<Vec3> {
-        if ray.direction.y > -DOWNWARDS {
-            return None;
-        }
-        let (distance, point) = self
-            .surfaces()
-            .iter()
-            .filter_map(|surface| {
-                let distance = (surface.height() - ray.origin.y) / ray.direction.y;
-                let point = ray.at(distance);
-                (distance >= 0.0 && surface.contains(point))
-                    .then_some((distance, Vec3::new(point.x, surface.height(), point.z)))
-            })
-            .min_by(|(a, _), (b, _)| a.total_cmp(b))?;
+        let (distance, point) = self.surface_hit(ray)?;
         let across = Vec2::new(point.x - ray.origin.x, point.z - ray.origin.z).length();
         (distance >= NEAREST && across <= REACH).then_some(point)
     }
@@ -285,6 +475,30 @@ impl Rig {
     pub fn ascend(&mut self, distance: f32, ceiling: f32) {
         self.translation.y = (self.translation.y + distance).min(ceiling.max(self.translation.y));
     }
+
+    /// `anchor`, in the room, in the scene: moved and turned with the room. At home, it is `anchor` itself.
+    pub fn place(&self, anchor: Anchor) -> Anchor {
+        if *self == Self::default() {
+            return anchor;
+        }
+        let turn = Quat::from_rotation_y(self.yaw);
+        Anchor {
+            position: self.translation + turn * anchor.position,
+            orientation: turn * anchor.orientation,
+        }
+    }
+
+    /// `anchor`, in the scene, in the room: where [`Self::place`] would take it from.
+    pub fn unplace(&self, anchor: Anchor) -> Anchor {
+        if *self == Self::default() {
+            return anchor;
+        }
+        let back = Quat::from_rotation_y(-self.yaw);
+        Anchor {
+            position: back * (anchor.position - self.translation),
+            orientation: back * anchor.orientation,
+        }
+    }
 }
 
 /// Which way a head turned by `orientation` faces, horizontally: its forward, levelled, or, looking nearly straight up or down, the way the top of the head leans. `None` for an orientation that is nonsense.
@@ -322,6 +536,9 @@ pub(crate) struct Input<'a> {
     pub facing: Option<Vec3>,
     /// Nothing else takes the stick and the ray: in a space, focused, neither the hand menu nor the transcript showing, and no card carried. A panel carried does not stop travel, which carries it along.
     pub active: bool,
+    /// The teleport pad the participant chose with the ray this frame, if any, as `crate::pads` keys it among the
+    /// profile's pairs.
+    pub chosen: Option<crate::pads::Key>,
     /// Seconds since the last frame.
     pub dt: f32,
 }
@@ -339,6 +556,8 @@ pub(crate) struct Outcome {
     pub turned: bool,
     /// It stepped back this frame.
     pub stepped: bool,
+    /// A teleport pad took the participant to the pad paired with it this frame.
+    pub transported: bool,
     /// How dark the view is, from 1, as a teleport lands or a backstep steps, back to 0 over [`BLINK`] seconds.
     pub blink: f32,
 }
@@ -369,6 +588,8 @@ pub(crate) struct Travel {
     landing: Option<Vec3>,
     /// How dark the view is after a teleport or a backstep.
     blink: f32,
+    /// Which teleport pad the participant stands on, for how long, and whether it is disarmed.
+    stepping: crate::pads::Stepping,
 }
 
 impl Travel {
@@ -410,7 +631,31 @@ impl Travel {
         self.blink = (self.blink - dt / BLINK).max(0.0);
         if !input.locomotion.travels() || !input.active {
             self.cancel();
+            self.stepping.pause();
             return Outcome {
+                blink: self.blink,
+                ..Outcome::default()
+            };
+        }
+        // A teleport pad stepped on for long enough, or chosen with the ray, takes the participant to the pad paired with
+        // it, as the frame's poses were placed, before the stick moves anything, and nothing else moves them this frame.
+        let pairs: Vec<&[Pad; 2]> = input.locomotion.pads().collect();
+        let stepped = self
+            .stepping
+            .update(&pairs, input.head, self.rig.floor(), dt);
+        if let (Some(key), Some(head)) = (input.chosen.or(stepped), input.head)
+            && let Some(partner) = crate::pads::lookup(&pairs, key.partner())
+        {
+            self.rig.teleport(partner.centre(), head);
+            if let (Some(yaw), Some(facing)) = (partner.yaw(), input.facing) {
+                let faced = (-facing.x).atan2(-facing.z);
+                self.rig.turn(yaw - faced, partner.centre().with_y(head.y));
+            }
+            self.stepping.arrive(key.partner());
+            self.cancel();
+            self.blink = 1.0;
+            return Outcome {
+                transported: true,
                 blink: self.blink,
                 ..Outcome::default()
             };
@@ -655,6 +900,7 @@ mod tests {
             head: Some(HEAD),
             facing: Some(Vec3::NEG_Z),
             active: true,
+            chosen: None,
             dt: 0.5,
         }
     }
@@ -1265,5 +1511,250 @@ mod tests {
         assert_eq!(Locomotion::None.carried(&carriage), Locomotion::None);
         let discs = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 1.0)]).carried(&carriage);
         assert!(discs.surfaces()[0].contains(Vec3::new(0.0, 0.0, -8.5)));
+    }
+
+    /// A main floor and racks 4.5 m below it, with a pad on each, the racks' facing −X.
+    fn storeys() -> Locomotion {
+        Locomotion::teleport(vec![
+            Surface::rectangle(Vec3::ZERO, Vec2::new(20.0, 20.0)),
+            Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::new(20.0, 20.0)),
+        ])
+        .with_pads([[
+            Pad::at(Vec3::new(0.3, 0.0, -0.2)).named("Main floor"),
+            Pad::at(Vec3::new(5.0, -4.5, 1.0))
+                .named("Racks")
+                .facing(Vec3::new(-2.0, 7.0, 0.0)),
+        ]])
+    }
+
+    #[test]
+    fn pads_are_declared_where_they_are_and_may_say_more() {
+        let pad = Pad::at(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(pad.centre(), Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(pad.radius(), PAD_RADIUS);
+        assert_eq!((pad.yaw(), pad.name()), (None, None));
+        let pad = pad
+            .with_radius(-0.8)
+            .named("Deck")
+            .facing(Vec3::new(1.0, -5.0, 0.0));
+        assert_eq!(pad.radius(), 0.8);
+        assert_eq!(pad.name(), Some("Deck"));
+        // Facing +X, a quarter turn to the right of −Z, as the rig turns.
+        let yaw = pad.yaw().unwrap();
+        assert!(close(Quat::from_rotation_y(yaw) * Vec3::NEG_Z, Vec3::X));
+        // Straight up or down faces the way they faced.
+        assert_eq!(pad.clone().facing(Vec3::Y).yaw(), None);
+        // Within its radius and a margin, seen from above.
+        assert!(pad.reaches(Vec3::new(1.7, -9.0, 3.3), 0.0));
+        assert!(!pad.reaches(Vec3::new(1.9, 2.0, 3.0), 0.0));
+        assert!(pad.reaches(Vec3::new(1.9, 2.0, 3.0), 0.15));
+    }
+
+    #[test]
+    fn only_pads_that_stand_on_a_surface_within_bounds_are_used() {
+        let floor = || vec![Surface::disc(Vec3::ZERO, 30.0)];
+        let pair = |a: Pad, b: Pad| Locomotion::teleport(floor()).with_pads([[a, b]]);
+        let good = || Pad::at(Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(pair(good(), good()).pads().count(), 1);
+        // Off every surface, above one, too wide, beyond 20 m of home, nonsense: the pair is not used.
+        for bad in [
+            Pad::at(Vec3::new(2.0, 0.5, 0.0)),
+            Pad::at(Vec3::new(2.0, 0.0, 0.0)).with_radius(2.5),
+            Pad::at(Vec3::new(2.0, 0.0, 0.0)).with_radius(0.0),
+            Pad::at(Vec3::new(20.5, 0.0, 0.0)),
+            Pad::at(Vec3::new(f32::NAN, 0.0, 0.0)),
+            Pad {
+                yaw: Some(f32::INFINITY),
+                ..good()
+            },
+        ] {
+            assert_eq!(pair(good(), bad.clone()).pads().count(), 0, "{bad:?}");
+            assert_eq!(pair(bad.clone(), good()).pads().count(), 0, "{bad:?}");
+        }
+        // Flying, as teleporting; no more than eight pairs; and a profile of none has none.
+        let many = Locomotion::fly(floor(), 5.0).with_pads((0..10).map(|_| [good(), good()]));
+        assert_eq!(many.pads().count(), MOST_PAIRS);
+        assert_eq!(
+            Locomotion::None.with_pads([[good(), good()]]),
+            Locomotion::None
+        );
+        assert_eq!(Locomotion::None.pads().count(), 0);
+    }
+
+    #[test]
+    fn pads_are_carried_into_the_space_with_the_profile() {
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        for profile in [storeys(), Locomotion::fly(Vec::new(), 1.0)] {
+            let declared: Vec<_> = profile.pads().cloned().collect();
+            let carried = profile.carried(&carriage);
+            for (pair, declared) in carried.pads().zip(&declared) {
+                for (pad, declared) in pair.iter().zip(declared) {
+                    assert!(close(pad.centre(), carriage.place(declared.centre())));
+                    assert_eq!(pad.name(), declared.name());
+                }
+            }
+        }
+        let carried = storeys().carried(&carriage);
+        let [floor, racks] = carried.pads().next().unwrap();
+        assert!(close(floor.centre(), Vec3::new(0.2, -0.5, -7.7)));
+        assert_eq!(floor.yaw(), None);
+        // Facing −X in the environment, the way participants arrive facing, it faces −Z in the space.
+        let facing = Quat::from_rotation_y(racks.yaw().unwrap()) * Vec3::NEG_Z;
+        assert!(close(facing, Vec3::NEG_Z), "{facing}");
+    }
+
+    #[test]
+    fn standing_on_a_pad_takes_the_participant_to_its_partner_once_and_back_once_stepped_off() {
+        let storeys = storeys();
+        let mut travel = Travel::default();
+        let short = |head: Vec3| Input {
+            head: Some(head),
+            dt: 0.125,
+            ..input(&storeys, Vec2::ZERO, None)
+        };
+        let beside = HEAD + Vec3::X * 2.0;
+        // Found on it first, as on arriving in the space, the pad is disarmed until stepped off.
+        for _ in 0..5 {
+            assert!(!travel.update(short(HEAD)).transported);
+        }
+        travel.update(short(beside));
+        // Stood on for 0.4 s, it takes them; walking across it does not.
+        travel.update(short(HEAD));
+        travel.update(short(beside));
+        travel.update(short(HEAD));
+        for _ in 0..3 {
+            assert!(!travel.update(short(HEAD)).transported);
+        }
+        let outcome = travel.update(short(HEAD));
+        assert!(outcome.transported && !outcome.teleported);
+        assert_eq!(outcome.blink, 1.0, "it blinks as a teleport does");
+        // On the racks, at the same height above the floor, facing −X, where the racks' pad faces.
+        let rig = travel.rig();
+        let head = rig.matrix().transform_point3(HEAD);
+        assert!(close(head, Vec3::new(5.0, HEAD.y - 4.5, 1.0)), "{head}");
+        assert_eq!(rig.floor(), -4.5);
+        assert!(close(
+            rig.matrix().transform_vector3(Vec3::NEG_Z),
+            Vec3::NEG_X
+        ));
+        // Standing there, and swaying within 15 cm of its edge, it does not take them back.
+        let racks = |offset: Vec3| short(rig.matrix().transform_point3(HEAD + offset));
+        for offset in [Vec3::ZERO, Vec3::Z * 0.6, Vec3::ZERO] {
+            for _ in 0..4 {
+                assert!(!travel.update(racks(offset)).transported, "{offset}");
+            }
+        }
+        // Once stepped off, back on, it does, facing as they faced, since the main floor's pad says nothing.
+        travel.update(racks(Vec3::Z * 0.7));
+        for _ in 0..4 {
+            assert!(!travel.update(racks(Vec3::ZERO)).transported);
+        }
+        let facing = travel.rig().matrix().transform_vector3(Vec3::NEG_Z);
+        assert!(travel.update(racks(Vec3::ZERO)).transported);
+        let head = travel.rig().matrix().transform_point3(HEAD);
+        assert!(close(head, Vec3::new(0.3, HEAD.y, -0.2)), "{head}");
+        assert!(close(
+            travel.rig().matrix().transform_vector3(Vec3::NEG_Z),
+            facing
+        ));
+    }
+
+    #[test]
+    fn a_pad_chosen_with_the_ray_takes_the_participant_from_anywhere_while_travel_is_active() {
+        let storeys = storeys();
+        let racks = crate::pads::Key { pair: 0, end: 1 };
+        let mut travel = Travel::default();
+        let away = HEAD + Vec3::new(-3.0, 0.0, 2.0);
+        let chose = |chosen, active: bool, head: Option<Vec3>| Input {
+            chosen,
+            active,
+            head,
+            ..input(&storeys, Vec2::ZERO, None)
+        };
+        // Inactive, as while the hand menu shows, without a head, or a pad not among the profile's, it goes nowhere.
+        for nowhere in [
+            chose(Some(racks), false, Some(away)),
+            chose(Some(racks), true, None),
+            chose(Some(crate::pads::Key { pair: 3, end: 0 }), true, Some(away)),
+        ] {
+            assert!(!travel.update(nowhere).transported);
+        }
+        assert_eq!(travel.rig(), Rig::default());
+        // Pointed at the racks' pad and chosen, it takes them to the main floor's, where they stand: back where they
+        // stand on the floor, a step from where they were, without stepping onto it.
+        let outcome = travel.update(chose(Some(racks), true, Some(away)));
+        assert!(outcome.transported);
+        let head = travel.rig().matrix().transform_point3(away);
+        assert!(close(head, Vec3::new(0.3, HEAD.y, -0.2)), "{head}");
+        // Arrived on it, it is disarmed: standing there takes them nowhere.
+        for _ in 0..4 {
+            assert!(!travel.update(chose(None, true, Some(head))).transported);
+        }
+        // A push aimed before it lands nothing after it, until the stick returns to the middle.
+        let aim = Some(ray(head, Vec3::new(2.0, 0.0, -3.0)));
+        travel.update(input(&storeys, Vec2::Y, aim));
+        travel.update(Input {
+            chosen: Some(crate::pads::Key { pair: 0, end: 0 }),
+            ..input(&storeys, Vec2::Y, aim)
+        });
+        assert!(!travel.update(input(&storeys, Vec2::ZERO, aim)).teleported);
+    }
+
+    #[test]
+    fn a_pad_stood_on_while_travel_was_inactive_or_before_joining_takes_nobody_until_stepped_off_and_on()
+     {
+        let storeys = storeys();
+        let beside = HEAD + Vec3::X * 2.0;
+        let at = |head: Vec3, active: bool| Input {
+            head: Some(head),
+            active,
+            dt: 0.125,
+            ..input(&storeys, Vec2::ZERO, None)
+        };
+        let mut travel = Travel::default();
+        travel.update(at(beside, true));
+        // Stood on for part of the dwell, the hand menu opens: however long it shows, and after, the pad takes nobody.
+        for _ in 0..3 {
+            travel.update(at(HEAD, true));
+        }
+        for _ in 0..8 {
+            assert!(!travel.update(at(HEAD, false)).transported);
+        }
+        for _ in 0..8 {
+            assert!(!travel.update(at(HEAD, true)).transported);
+        }
+        // Stepped off and on, it does.
+        travel.update(at(beside, true));
+        let taken = (0..6).filter(|_| travel.update(at(HEAD, true)).transported);
+        assert_eq!(taken.count(), 1);
+        // Leaving and joining again standing on it: the same.
+        let racks = travel.rig().matrix().transform_point3(HEAD);
+        travel.update(Input {
+            place: None,
+            ..at(racks, true)
+        });
+        for _ in 0..8 {
+            assert!(!travel.update(at(HEAD, true)).transported);
+        }
+    }
+
+    #[test]
+    fn a_pad_s_name_is_kept_short_and_plain() {
+        let name = |name: &str| Pad::at(Vec3::ZERO).named(name).name().map(str::to_owned);
+        assert_eq!(name("Racks"), Some("Racks".into()));
+        assert_eq!(name("Ra\ncks\u{7}\t"), Some("Racks".into()));
+        assert_eq!(name(&"x".repeat(100)), Some("x".repeat(LONGEST_NAME)));
+        assert_eq!(name(&"あ".repeat(100)), Some("あ".repeat(LONGEST_NAME)));
+        assert_eq!(name(""), None);
+        assert_eq!(name("\n\u{0}"), None);
+        // Carried, a name is shared rather than copied.
+        let pad = Pad::at(Vec3::ZERO).named("Racks");
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carried = pad.carried(&crate::anchors::Anchor::carriage(&street).unwrap());
+        assert!(std::ptr::eq(
+            pad.name().unwrap().as_ptr(),
+            carried.name().unwrap().as_ptr()
+        ));
     }
 }

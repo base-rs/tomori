@@ -314,7 +314,9 @@ impl Desktop {
     }
 
     /// The mouse's wheel turned `lines` notches, up where more than none, as winit counts them: it scrolls the panel the
-    /// mouse points at by [`WHEEL_ROWS`] rows a notch, down for a turn towards the participant. See `design/desktop.md`.
+    /// mouse points at by [`WHEEL_ROWS`] rows a notch, down for a turn towards the participant, or pushes an
+    /// environment's object that takes the right stick as the stick would to scroll a panel as far. See
+    /// `design/desktop.md`.
     pub fn wheel(&mut self, lines: f32) {
         if lines.is_finite() {
             self.input.scroll -= lines * WHEEL_ROWS;
@@ -950,6 +952,128 @@ mod tests {
                 .iter()
                 .any(|object| object.position.distance(palm) < 0.5)
         );
+    }
+
+    #[test]
+    fn a_click_or_enter_on_a_pad_the_mouse_points_at_takes_the_participant_to_its_partner() {
+        use crate::locomotion::{Locomotion, Pad, Surface};
+        let forward = Head::default()
+            .transform()
+            .transform_vector3(-Vec3::Z)
+            .with_y(0.0)
+            .normalize();
+        let pad = forward * 2.0;
+        let racks = pad + Vec3::new(0.0, -4.5, 0.0);
+        for click in [true, false] {
+            let mut conversation = joined();
+            conversation.set_locomotion(vec![(
+                crate::test_support::SKY,
+                Locomotion::teleport(vec![
+                    Surface::rectangle(Vec3::ZERO, Vec2::splat(20.0)),
+                    Surface::rectangle(Vec3::new(0.0, -4.5, 0.0), Vec2::splat(20.0)),
+                ])
+                .with_pads([[Pad::at(pad), Pad::at(racks).named("Racks")]]),
+            )]);
+            let mut desktop = desktop(&mut conversation);
+            let mut start = Instant::now();
+            for _ in 0..40 {
+                start += Duration::from_millis(100);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+            }
+            // Down the middle of the window, the mouse comes to the pad, whose label names the click.
+            let on_pad = (0..400).find(|row| {
+                desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.5 + *row as f32));
+                let drawn = desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+                drawn.frame.pads.first().is_some_and(|pad| pad.highlighted)
+                    && drawn.frame.projection.iter().any(|sheet| {
+                        sheet.canvas.as_deref().unwrap().plain() == "Racks ↓\nClick  go"
+                    })
+            });
+            assert!(on_pad.is_some(), "the mouse meets the pad");
+            // A click, or Enter, as A, takes them down to the racks.
+            if click {
+                desktop.mouse(Button::Left, true);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+                desktop.mouse(Button::Left, false);
+            } else {
+                tap(&mut desktop, Key::A, &mut conversation);
+                desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+            }
+            let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD, SIZE);
+            let head = Vec3::from_array(drawn.frame.presence.unwrap().head.position);
+            assert!(
+                head.distance(racks + Vec3::Y * arrival::HOME.y) < 1e-3,
+                "{click} {head}"
+            );
+        }
+    }
+
+    #[test]
+    fn holding_b_after_travelling_leaves_with_the_environment_and_agent_where_the_window_saw_them()
+    {
+        use crate::locomotion::{Locomotion, Surface};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(
+            crate::test_support::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+        )]);
+        // Participants arrive 8 m along +X, facing the environment's origin, and the agent has its own home.
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new()
+                .with_arrival(tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]))
+                .with_agent(
+                    tomori_protocol::Pose::at([1.0, 1.4, -3.0]).facing_towards([0.0, 1.6, 0.0]),
+                );
+        }));
+        let mut desktop = desktop(&mut conversation);
+        let mut now = Instant::now();
+        for _ in 0..40 {
+            now += Duration::from_millis(100);
+            desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        }
+        // Teleported a little ahead.
+        desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.95));
+        desktop.key(Key::Left(Direction::Up), true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        desktop.key(Key::Left(Direction::Up), false, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        // What the window shows, in the participant's room: the environment's carriage and the agent.
+        let seen = |drawn: &Drawn<'_>| {
+            let carriage = drawn.scene_to_space
+                * Mat4::from_rotation_translation(
+                    drawn.frame.carriage.orientation,
+                    drawn.frame.carriage.position,
+                );
+            let agent = drawn.frame.swarm.anchor();
+            let agent = drawn.scene_to_space
+                * Mat4::from_rotation_translation(agent.orientation, agent.position);
+            (carriage, agent)
+        };
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_ne!(drawn.scene_to_space, Mat4::IDENTITY, "travelled");
+        let (carriage, agent) = seen(&drawn);
+        // B held for a second leaves, and the environment shrinks away as the rig goes home, with nothing moving.
+        desktop.key(Key::Back, true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        let mut shrinking = 0;
+        loop {
+            now += Duration::from_millis(50);
+            let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            if conversation.joined_space().is_some() {
+                continue;
+            }
+            if drawn.frame.scenery.environment == crate::environment::Environment::MINIMAL {
+                assert_eq!(drawn.frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
+                break;
+            }
+            shrinking += 1;
+            assert_eq!(drawn.scene_to_space, Mat4::IDENTITY, "home");
+            let (now_carriage, now_agent) = seen(&drawn);
+            assert!(now_carriage.abs_diff_eq(carriage, 1e-4), "{shrinking}");
+            assert!(now_agent.abs_diff_eq(agent, 1e-4), "{shrinking}");
+        }
+        assert!(shrinking > 5, "{shrinking}");
+        desktop.key(Key::Back, false, false, &mut conversation);
     }
 
     #[test]

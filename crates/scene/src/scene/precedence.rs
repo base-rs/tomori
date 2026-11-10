@@ -18,6 +18,9 @@ pub(crate) enum Aim {
     /// a projected panel pointed at or carried, a wall's board or handles where walls may be taken hold of, or a wall
     /// carried, a card pointed at or carried, a worker, or a teleport being aimed.
     Tomori,
+    /// A teleport pad, nearer than anything else of Tomori's or the environment's (see `design/locomotion.md`). It is
+    /// Tomori's, as the sticks take it, but the trigger chooses it rather than attracting the swarm.
+    Pad,
     /// Something the environment's client side picks, nearer than anything of Tomori's.
     Environment,
 }
@@ -51,6 +54,9 @@ pub(crate) enum Right {
     /// Anything else of Tomori's the ray is on, such as a panel that shows all it has, a card or a worker: the push is
     /// Tomori's, which pages result cards, as ever, and so nothing in a space.
     Tomori,
+    /// An object of the environment's client side pointed at that takes the right stick
+    /// ([`crate::client_side::Actions::SCROLL`]): the push is that object's, told with its identity.
+    Object,
     /// The environment's client side, with the ray on something of its own or on nothing of Tomori's.
     Environment,
     /// Nothing else: the push pages result cards, as ever, and so nothing in a space.
@@ -63,6 +69,7 @@ impl Ladder for Right {
         Self::Transcript,
         Self::Scroll,
         Self::Tomori,
+        Self::Object,
         Self::Environment,
         Self::Cards,
     ];
@@ -99,6 +106,9 @@ pub(crate) enum Trigger {
     /// Anything else of Tomori's the ray is on, such as a panel, a card or a worker: the pull attracts the swarm, as
     /// ever, and never reaches the environment behind it.
     Tomori,
+    /// A teleport pad: the pull chooses it, taking the participant to the pad paired with it, without attracting the
+    /// swarm (see `design/locomotion.md`).
+    Pad,
     /// A selectable object of the environment's client side: the pull selects it.
     Environment,
     /// Nothing else: the pull attracts the swarm.
@@ -111,6 +121,7 @@ impl Ladder for Trigger {
         Self::Transcript,
         Self::CarriedWall,
         Self::Tomori,
+        Self::Pad,
         Self::Environment,
         Self::Swarm,
     ];
@@ -130,8 +141,9 @@ pub(crate) enum A {
     /// or removes the focused queue entry or undoes that.
     Transcript,
     /// What the conversation's A takes: the list of modes, a request that has just appeared, which A refuses for 0.6
-    /// seconds, a checklist item pointed at, a request to decide, a queue entry to cancel or keep, and outside a space
-    /// what the lobby and arrival offer.
+    /// seconds, a checklist item pointed at, a request to decide, a queue entry to cancel or keep, then, the last of
+    /// them, a teleport pad pointed at, which the press chooses (see `design/locomotion.md`), and outside a space what
+    /// the lobby and arrival offer.
     Conversation,
     /// Anything else of Tomori's the ray is on, such as a panel, a wall, a card or a worker: the press does nothing.
     Tomori,
@@ -156,6 +168,21 @@ impl Ladder for A {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_object_that_takes_the_right_stick_comes_after_every_rung_of_tomori_s_and_before_its_client_side()
+     {
+        let at = |rung| Right::ORDER.iter().position(|other| *other == rung);
+        for rung in [
+            Right::Carried,
+            Right::Transcript,
+            Right::Scroll,
+            Right::Tomori,
+        ] {
+            assert!(at(rung) < at(Right::Object), "{rung:?}");
+        }
+        assert_eq!(at(Right::Object).map(|at| at + 1), at(Right::Environment));
+    }
 
     /// With every rung from each one on claiming, that rung wins, and with none claiming, the last does.
     fn each_rung_wins_over_the_ones_after_it<L: Ladder>() {
@@ -214,6 +241,7 @@ mod tests {
             Trigger::Transcript,
             Trigger::CarriedWall,
             Trigger::Tomori,
+            Trigger::Pad,
         ] {
             assert!(before(rung, Trigger::Environment), "{rung:?}");
         }

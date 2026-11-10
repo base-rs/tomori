@@ -23,13 +23,20 @@ fn builder() -> tomori::Builder {
         .scenery("observe", my_scenery)
         // `observe --help` names its own program rather than `tomori`.
         .program_name("observe")
-        // Teleport onto a floor 40 m across, and turn in snaps of 30°; of Tomori's own environments, only the farmyard declares one. Provisional, until environments have server sides to declare it.
+        // Teleport onto a floor 40 m across, or the racks 4.5 m below it, and turn in snaps of 30°, with a pair of teleport
+        // pads between them that Tomori draws: step onto one, or point at it and pull the trigger, to go to the other. Of
+        // Tomori's own environments, only the farmyard declares a profile. Provisional, until environments have server
+        // sides to declare it.
         .locomotion(
             "observe",
-            tomori::Locomotion::teleport(vec![tomori::Surface::rectangle(
-                glam::Vec3::ZERO,
-                glam::Vec2::splat(40.0),
-            )]),
+            tomori::Locomotion::teleport(vec![
+                tomori::Surface::rectangle(glam::Vec3::ZERO, glam::Vec2::splat(40.0)),
+                tomori::Surface::rectangle(glam::Vec3::new(0.0, -4.5, 0.0), glam::Vec2::splat(40.0)),
+            ])
+            .with_pads([[
+                tomori::Pad::at(glam::Vec3::new(3.0, 0.0, -2.0)).named("Main floor"),
+                tomori::Pad::at(glam::Vec3::new(3.0, -4.5, -2.0)).named("Racks"),
+            ]]),
         )
 }
 
