@@ -315,3 +315,90 @@ fn workers_at_home_are_pointed_at_from_afar_while_the_agent_is_away_and_its_sate
     };
     assert_eq!(scene.point(Some(at_mote)), None);
 }
+
+#[test]
+fn gaps_close_so_that_nobody_is_gathered_or_compact_beside_room_left_by_those_who_went() {
+    let (compact, more) = thresholds();
+    let mut scene = Scene::new();
+    scene.arrange(Anchor::AGENT, EYES, Some(ROOM), None);
+    let all = workers(more + 3);
+    settle(&mut scene, &all);
+    // The last worker gathered into the sign takes the first slot of its own that frees, alone moving.
+    let gone = "w00";
+    let before = own(&scene);
+    let first = scene
+        .workers
+        .iter()
+        .filter(|(_, worker)| worker.more)
+        .max_by_key(|(_, worker)| worker.slot)
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    assert_eq!(scene.workers[gone].slot, 0);
+    let fewer = Workspace {
+        nodes: all.nodes[1..].to_vec(),
+        ..Default::default()
+    };
+    // With the agent away, its satellites keep to their workers' slots, the first eight.
+    scene.set_agent(Some((Vec3::new(3.0, 1.5, -1.0), 0.4)));
+    settle(&mut scene, &fewer);
+    assert_eq!(scene.satellites().len(), MOTES);
+    assert!(
+        scene
+            .motes
+            .iter()
+            .all(|mote| mote.slot == scene.slots[&mote.id])
+    );
+    assert!(
+        scene
+            .motes
+            .iter()
+            .any(|mote| mote.id == first && mote.slot == 0)
+    );
+    let after = own(&scene);
+    assert!(!scene.workers[&first].more);
+    assert_eq!(scene.slots[&first], 0);
+    for (id, was) in &before {
+        if id != gone {
+            assert_eq!(after.get(id), Some(was), "{id}");
+        }
+    }
+    // All but the last gone, it stands in a slot of its own, at full size, rather than alone in a "+1 more" sign.
+    let last = all.nodes.last().unwrap().clone();
+    let alone = Workspace {
+        nodes: vec![last.clone()],
+        ..Default::default()
+    };
+    settle(&mut scene, &alone);
+    assert_eq!(scene.slots[&last.id], 0);
+    assert!(!scene.workers[&last.id].more && scene.workers[&last.id].scale == 1.0);
+    assert!(scene.stations().iter().all(|station| station.more == 0));
+    // Children that would stand beside their parent further along take the gaps, so the cluster compacts only as it
+    // fills.
+    let mut scene = Scene::new();
+    scene.arrange(Anchor::AGENT, EYES, Some(ROOM), None);
+    let mut family = workers(compact - 2);
+    let parent = family.nodes.last().unwrap().id.clone();
+    let mut child = node("child", State::Running);
+    child.parent_id = Some(parent);
+    family.nodes.push(child);
+    settle(&mut scene, &family);
+    assert!(own(&scene).values().all(|(_, scale)| *scale == 1.0));
+    let mut taken: Vec<usize> = scene.workers.values().map(|worker| worker.slot).collect();
+    taken.sort_unstable();
+    assert_eq!(taken, (0..compact - 1).collect::<Vec<_>>());
+}
+
+#[test]
+fn one_arriving_far_along_takes_a_gap_rather_than_compact_the_cluster() {
+    let (compact, _) = thresholds();
+    let mut scene = Scene::new();
+    scene.arrange(Anchor::AGENT, EYES, Some(ROOM), None);
+    settle(&mut scene, &workers(1));
+    // A worker given a slot well beyond those taken, as one beside its parent may be, takes the first gap.
+    let late = node("late", State::Running);
+    let far = compact + 4;
+    let mut arriving = [(far, "late", &late)];
+    scene.reslot(&mut arriving, &[]);
+    assert_eq!((arriving[0].0, scene.slots["late"]), (1, 1));
+    assert!(!scene.layout.compact());
+}

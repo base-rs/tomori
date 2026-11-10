@@ -62,9 +62,10 @@ const ORBIT_SECONDS: f32 = 12.0;
 /// How far beyond the agent's reach the satellites orbit, in metres.
 const ORBIT_CLEARANCE: f32 = 0.15;
 
-/// A satellite: the slot of the worker it stands for, its colour, its angle about the agent once shown, and how long
-/// it has pulsed for, once its worker finished.
+/// A satellite: the identity and slot of the worker it stands for, its colour, its angle about the agent once shown,
+/// and how long it has pulsed for, once its worker finished.
 struct Mote {
+    id: String,
     slot: usize,
     color: Vec3,
     angle: Option<f32>,
@@ -475,9 +476,12 @@ pub struct Scene {
     /// Where the agent stands while it is away from home, and how far it reaches, which its satellites orbit.
     away: Option<(Vec3, f32)>,
     /// The satellites orbiting the agent while it is away, one for each worker still working, by identity.
-    motes: BTreeMap<String, Mote>,
+    motes: Vec<Mote>,
     /// The satellites as they are drawn this frame, also among [`Self::cubes`].
     satellites: Vec<Cube>,
+    /// The slots the home cluster's live and leaving workers took as it was last laid out, so that it is laid out again
+    /// only as they change.
+    reslotted: Option<(Vec<usize>, Vec<usize>)>,
     /// How workers are placed about it: by the joined space's environment's registered placement, or the default arc.
     placement: Option<Placement>,
     /// The placements that have panicked, which this scene never calls again: at most one for each environment the
@@ -512,8 +516,9 @@ impl Scene {
             layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
             pointed_more: false,
             away: None,
-            motes: BTreeMap::new(),
+            motes: Vec::new(),
             satellites: Vec::with_capacity(MOTES),
+            reslotted: None,
             placement: None,
             poisoned: Vec::new(),
         }
@@ -554,7 +559,66 @@ impl Scene {
         self.placement = placement;
         self.cluster = crate::anchors::cluster(origin, audience, extent);
         self.layout = self.cluster.arrange(self.span(&[]));
+        self.reslotted = None;
         self.place_live();
+    }
+
+    /// Close the gaps among the home cluster's slots, given room and no placement, as
+    /// [`tomori_protocol::cluster::Cluster::reslot`] does, among the live workers and those `arriving`, keeping clear of
+    /// the slots of those leaving and of the `absent` parents it remembers, and lay it out for the slots then taken, only
+    /// as its workers come and go.
+    fn reslot(&mut self, arriving: &mut [(usize, &str, &Node)], absent: &[usize]) {
+        let live = |worker: &&Worker| worker.retired.is_none();
+        let mut members: Vec<usize> = self
+            .workers
+            .values()
+            .filter(live)
+            .map(|worker| worker.slot)
+            .chain(arriving.iter().map(|(slot, ..)| *slot))
+            .collect();
+        let mut held: Vec<usize> = self
+            .workers
+            .values()
+            .filter(|worker| worker.retired.is_some())
+            .map(|worker| worker.slot)
+            .chain(absent.iter().copied())
+            .collect();
+        let bounded = self.extent.is_some() && self.placement.is_none();
+        let changed = bounded && self.cluster.reslot(&mut members, &held, &self.layout);
+        let mut moved = false;
+        if changed {
+            let mut slots = members.iter().copied();
+            for (id, worker) in self
+                .workers
+                .iter_mut()
+                .filter(|(_, worker)| worker.retired.is_none())
+            {
+                let slot = slots.next().expect("a slot for each live worker");
+                if worker.slot != slot {
+                    worker.slot = slot;
+                    self.slots.insert(id.clone(), slot);
+                    if let Some(mote) = self.motes.iter_mut().find(|mote| mote.id == *id) {
+                        mote.slot = slot;
+                    }
+                    moved = true;
+                }
+            }
+            for (entry, slot) in arriving.iter_mut().zip(slots) {
+                if entry.0 != slot {
+                    entry.0 = slot;
+                    self.slots.insert(entry.1.to_owned(), slot);
+                }
+            }
+        }
+        members.sort_unstable();
+        held.sort_unstable();
+        let key = (members, held);
+        if !changed && self.reslotted.as_ref() == Some(&key) {
+            return;
+        }
+        let span = key.0.last().map_or(0, |slot| slot + 1);
+        self.reslotted = Some(key);
+        self.fit(span, moved);
     }
 
     /// How many slots the home cluster lays out for: up to the highest that a live worker, or one of `arriving`, takes.
@@ -568,11 +632,11 @@ impl Scene {
             .map_or(0, |slot| slot + 1)
     }
 
-    /// Lay the home cluster out for `span` slots, placing every live worker again if that changes how it stands, and
-    /// no placement is registered, which places each worker only as it arrives.
-    fn fit(&mut self, span: usize) {
+    /// Lay the home cluster out for `span` slots, placing every live worker again if that changes how it stands, or a
+    /// live worker took another slot, and no placement is registered, which places each worker only as it arrives.
+    fn fit(&mut self, span: usize, moved: bool) {
         let layout = self.cluster.arrange(span);
-        if layout != self.layout {
+        if layout != self.layout || moved {
             self.layout = layout;
             if self.placement.is_none() {
                 self.place_live();
@@ -740,7 +804,7 @@ impl Scene {
             let working =
                 worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting);
             let finished = worker.retired.is_none() && is_terminal(worker.state);
-            match self.motes.get_mut(id) {
+            match self.motes.iter_mut().find(|mote| mote.id == *id) {
                 Some(mote) if working => {
                     mote.color = palette(worker.state);
                     mote.pulse = None;
@@ -750,37 +814,34 @@ impl Scene {
                     mote.pulse = Some(0.0);
                 }
                 None if working => {
-                    self.motes.insert(
-                        id.clone(),
-                        Mote {
-                            slot: worker.slot,
-                            color: palette(worker.state),
-                            angle: None,
-                            pulse: None,
-                        },
-                    );
+                    self.motes.push(Mote {
+                        id: id.clone(),
+                        slot: worker.slot,
+                        color: palette(worker.state),
+                        angle: None,
+                        pulse: None,
+                    });
                 }
                 _ => {}
             }
         }
         // A mote stays while its worker works, or for its one pulse.
         let workers = &self.workers;
-        self.motes.retain(|id, mote| match &mut mote.pulse {
+        self.motes.retain_mut(|mote| match &mut mote.pulse {
             Some(pulse) => {
                 *pulse += dt;
                 *pulse < PULSE_SECONDS
             }
-            None => workers.get(id).is_some_and(|worker| {
+            None => workers.get(&mote.id).is_some_and(|worker| {
                 worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting)
             }),
         });
-        let mut shown: Vec<&mut Mote> = self.motes.values_mut().collect();
-        shown.sort_by_key(|mote| mote.slot);
-        shown.truncate(MOTES);
-        let count = shown.len();
+        // In the order of their slots, sorted in place, so that drawing them allocates nothing.
+        self.motes.sort_unstable_by_key(|mote| mote.slot);
+        let count = self.motes.len().min(MOTES);
         let spin = (self.time / f64::from(ORBIT_SECONDS)).fract() as f32 * std::f32::consts::TAU;
         let radius = reach.max(0.2) + ORBIT_CLEARANCE;
-        for (index, mote) in shown.into_iter().enumerate() {
+        for (index, mote) in self.motes.iter_mut().take(MOTES).enumerate() {
             // Evenly about it, each easing round to its place as others come and go.
             let target = index as f32 * std::f32::consts::TAU / count as f32;
             let angle = mote.angle.get_or_insert(target);
@@ -1366,10 +1427,19 @@ impl Scene {
             .filter(|(id, _)| !self.workers.contains_key(**id))
             .map(|(&id, &node)| (self.slots[id], id, node))
             .collect();
-        // The home cluster lays out for the slots taken now, those arriving with them, placing every live worker again
-        // only where that changes how it stands.
-        let slots: Vec<usize> = arriving.iter().map(|(slot, ..)| *slot).collect();
-        self.fit(self.span(&slots));
+        // The home cluster's gaps close where that moves nobody who would not move anyway, and it lays out for the slots
+        // taken now, those arriving with them, placing every live worker again only where that changes how it stands.
+        let absent: Vec<usize> = nodes
+            .values()
+            .filter_map(|node| node.parent_id.as_deref())
+            .filter(|parent| {
+                *parent != root
+                    && !nodes.contains_key(parent)
+                    && !self.workers.contains_key(*parent)
+            })
+            .filter_map(|parent| self.slots.get(parent).copied())
+            .collect();
+        self.reslot(&mut arriving, &absent);
         if arriving.is_empty() {
             return;
         }

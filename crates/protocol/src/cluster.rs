@@ -6,7 +6,8 @@
 //! anchor is a named place, a pose whose point a single member stands at, facing along its +Z towards whoever watches
 //! it, and optionally an extent, the room its cluster may take, a box centred on the point. Its members stand in
 //! **slots**, in order of arrival, which they keep while they stay, so that nothing moves when another arrives, leaves
-//! or changes; the cluster's [`Arrangement`] is the first of its steps that holds every slot taken:
+//! or changes, but for the gaps [`Cluster::reslot`] closes where that moves nobody who would not move anyway; the
+//! cluster's [`Arrangement`] is the first of its steps that holds every slot taken:
 //!
 //! 1. at `home` without an extent, today's arc about the eyes at the arrival ([`home_arc`]), which holds any number;
 //!    at `home` with an extent, that arc while every slot taken fits the extent;
@@ -459,6 +460,76 @@ impl Cluster {
         (0..count)
             .map(|slot| self.slot(&arrangement, slot))
             .collect()
+    }
+
+    /// Close the gaps among `members`, the slot each of a cluster's members takes, where that moves nobody who would not
+    /// move anyway, as the cluster stands as `standing` now, none taking a slot in `held`, kept by those still leaving;
+    /// and whether any member's slot changed. A member gathered into the "+N more" sign takes a slot of its own as one
+    /// frees before the sign, the last gathered first, alone moving, so that nobody is gathered beside an empty slot.
+    /// Where as many members in the lowest free slots would stand otherwise than it stands, it passes a step, and every
+    /// member moves anyway: those beyond the lowest slots take the gaps among them, in slot order, so that gaps never
+    /// keep a cluster compact, or gathered, that its members would fit at full size. Where only the slots taken would
+    /// pass a step, as one arrives far along, the last take the first gaps until it stands as it stood, they alone moving.
+    /// Otherwise, a gap stays until the next to arrive fills it.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::cluster::{Anchor, Cluster};
+    ///
+    /// let home = Anchor::new("home", Pose::at([0.0, 1.4, -4.0]).facing_towards([0.0, 1.6, 0.0]));
+    /// let cluster = Cluster::new(&home.with_extent(4.2, 1.6, 2.0));
+    /// // Thirty came and all but the last went: it stands in a slot of its own, laid out for one.
+    /// let mut members = [29];
+    /// assert!(cluster.reslot(&mut members, &[], &cluster.arrange(30)));
+    /// assert_eq!(members, [0]);
+    /// ```
+    pub fn reslot(&self, members: &mut [usize], held: &[usize], standing: &Arrangement) -> bool {
+        let span = |members: &[usize]| members.iter().max().map_or(0, |slot| slot + 1);
+        // The free slots before `end`, in order.
+        let gaps = |members: &[usize], end: usize| -> Vec<usize> {
+            (0..end)
+                .filter(|slot| !held.contains(slot) && !members.contains(slot))
+                .collect()
+        };
+        // The members from slot `from` on, in the order of their slots.
+        let beyond = |members: &[usize], from: usize| -> Vec<usize> {
+            let mut beyond: Vec<usize> = (0..members.len())
+                .filter(|index| members[*index] >= from)
+                .collect();
+            beyond.sort_by_key(|index| members[*index]);
+            beyond
+        };
+        let mut changed = false;
+        if let Some(more) = self.arrange(span(members)).more() {
+            let open = gaps(members, more);
+            for (index, slot) in beyond(members, more).into_iter().rev().zip(open) {
+                members[index] = slot;
+                changed = true;
+            }
+        }
+        // The lowest slots as many members take, and how the cluster would stand in them.
+        let packed = (0..)
+            .filter(|slot| !held.contains(slot))
+            .take(members.len())
+            .last()
+            .map_or(0, |slot| slot + 1);
+        let open = gaps(members, packed);
+        let moving = beyond(members, packed);
+        if self.arrange(packed) != *standing {
+            for (index, slot) in moving.into_iter().zip(open) {
+                members[index] = slot;
+                changed = true;
+            }
+        } else {
+            for (index, slot) in moving.into_iter().rev().zip(open) {
+                if self.arrange(span(members)) == *standing {
+                    break;
+                }
+                members[index] = slot;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// The box, aligned with the axes, that the member in `slot` takes, facing whoever it gathers about.

@@ -358,3 +358,67 @@ fn members_keep_their_slots_as_others_come_and_go_and_every_client_lays_them_out
         }
     }
 }
+
+#[test]
+fn gaps_close_only_where_nobody_moves_who_would_not_anyway_and_never_keep_a_cluster_compact() {
+    let mut random = Random(0x9a95_c105_e5ed);
+    for _ in 0..60 {
+        let cluster = any(&mut random);
+        let mut members: Vec<usize> = Vec::new();
+        let mut held: Vec<usize> = Vec::new();
+        let mut standing = cluster.arrange(0);
+        for _ in 0..160 {
+            // Some leave, slowly, holding their slots a while; others arrive in the lowest free slot, or, as a child
+            // beside its parent may, further along.
+            held.retain(|_| random.next() < 0.5);
+            let arrives = random.next() < 0.55 || members.is_empty();
+            if arrives {
+                let free = |slot: &usize| !members.contains(slot) && !held.contains(slot);
+                let lowest = (0..).find(free).unwrap();
+                let slot = if random.next() < 0.2 {
+                    (lowest + 1 + (random.next() * 6.0) as usize..)
+                        .find(free)
+                        .unwrap()
+                } else {
+                    lowest
+                };
+                members.push(slot);
+            } else {
+                let index = (random.next() * members.len() as f32) as usize % members.len();
+                held.push(members.swap_remove(index));
+            }
+            let before = members.clone();
+            let changed = cluster.reslot(&mut members, &held, &standing);
+            assert_eq!(changed, before != members);
+            // Each in a slot of its own, none of them one still held.
+            for (index, slot) in members.iter().enumerate() {
+                assert!(!held.contains(slot) && !members[..index].contains(slot));
+            }
+            let span = members.iter().max().map_or(0, |slot| slot + 1);
+            let now = cluster.arrange(span);
+            // It stands as its members would in the lowest free slots, so that gaps never keep it compact.
+            let lowest: Vec<usize> = (0..)
+                .filter(|slot| !held.contains(slot))
+                .take(members.len())
+                .collect();
+            assert_eq!(
+                now,
+                cluster.arrange(lowest.last().map_or(0, |slot| slot + 1))
+            );
+            // Nobody is gathered into the sign beside a slot of its own that is free.
+            if let Some(more) = now.more()
+                && members.iter().any(|slot| *slot >= more)
+            {
+                assert!((0..more).all(|slot| members.contains(&slot) || held.contains(&slot)));
+            }
+            // Where it stands as it stood, only those that were gathered moved, besides one just arriving.
+            if now == standing {
+                let stayed = before.len() - usize::from(arrives);
+                for (was, is) in before[..stayed].iter().zip(&members) {
+                    assert!(was == is || standing.more().is_some_and(|more| *was >= more));
+                }
+            }
+            standing = now;
+        }
+    }
+}
