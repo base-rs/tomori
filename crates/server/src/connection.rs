@@ -9,10 +9,11 @@ use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_scheduler::Cancellation;
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
-use tomori_protocol::{Frame, FrameDecoder, ServerMessage};
+use tomori_protocol::{Frame, FrameDecoder, FrameError, ServerMessage};
 
 use crate::access::Access;
 use crate::hub::{ConnectionId, Hub, Output};
+use crate::inbound::{Pace, Verdict};
 use crate::outbox::{Outbox, Popped};
 
 /// Outgoing data is batched into chunks of about this size when frames are already waiting.
@@ -46,7 +47,10 @@ pub struct ConnectionBody<B: ReadableBody> {
     output: Arc<Output>,
     /// The request body. Its reads are raced against outgoing frames and dropped when those win, which the `ReadableBody` contract allows: a dropped read loses no input.
     request: B,
+    /// Reads the client's frames within what its role sends, [`Output::inbound`], whatever the server sends it.
     decoder: FrameDecoder,
+    /// How often the client sends; see `design/security.md`.
+    pace: Pace,
     /// Output being handed out in pieces, and how much of it has been; see [`PIECE_BYTES`].
     pending: Vec<u8>,
     sent: usize,
@@ -75,6 +79,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             output,
             request,
             decoder: FrameDecoder::new(),
+            pace: Pace::new(),
             pending: Vec::new(),
             sent: 0,
             reads: 0,
@@ -110,12 +115,37 @@ impl<B: ReadableBody> ConnectionBody<B> {
             self.received.store(true, Ordering::Release);
             self.decoder.push(data.as_ref());
             loop {
-                // As the client's Hello negotiated it, from the frame after the Hello on.
-                self.decoder.set_limit(self.output.frame_limit());
-                let Some(frame) = self.decoder.next_frame().map_err(BodyError::new)? else {
-                    break;
+                // As the client's Hello, or a knock admitting it, decides, from the frame after it on.
+                let inbound = self.output.inbound();
+                self.decoder.set_exact_limit(inbound.frame_bytes());
+                let frame = match self.decoder.next_frame() {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break,
+                    // Refused from its header, before any of it is held.
+                    Err(FrameError::TooLarge(length)) => {
+                        self.refuse(format!(
+                            "This server takes frames of at most {} bytes from {}, and refused one of {length} bytes.",
+                            inbound.frame_bytes(),
+                            inbound.whom(),
+                        ));
+                        return Ok(());
+                    }
+                    Err(error) => return Err(BodyError::new(error)),
                 };
-                self.hub.receive(self.id, frame);
+                match self
+                    .pace
+                    .take(inbound, frame.kind, std::time::Instant::now())
+                {
+                    Verdict::Take => self.hub.receive(self.id, frame),
+                    Verdict::Drop => {}
+                    Verdict::Refuse => {
+                        self.refuse(format!(
+                            "This connection sent more often than this server takes from {}, for too long.",
+                            inbound.whom(),
+                        ));
+                        return Ok(());
+                    }
+                }
             }
         }
         if end {
@@ -123,6 +153,21 @@ impl<B: ReadableBody> ConnectionBody<B> {
             self.input_ended = true;
         }
         Ok(())
+    }
+
+    /// Refuse what the client sends from now on, telling it `error`, and end the connection once what is queued for it
+    /// is sent, as for any other error that ends one.
+    fn refuse(&mut self, error: String) {
+        log::warn!("Connection {} was closed: {error}", self.id);
+        self.outbox.message(ServerMessage::Error {
+            error,
+            space: None,
+            panel: None,
+            wall: None,
+        });
+        self.outbox.close();
+        self.input_ended = true;
+        self.request.close(None);
     }
 
     /// Apply request data that has already arrived, without waiting. Output is only written when the HTTP server asks for it, so without this a connection whose outbox never empties would never read its input, and would look silent to the keepalive sweep.
@@ -406,6 +451,15 @@ mod tests {
         frames: Vec<Result<BodyFrame<Vec<u8>>, std::io::Error>>,
         waits: bool,
     ) -> ConnectionBody<Script> {
+        scripted_as(Access::open(), frames, waits)
+    }
+
+    /// A connection admitted as `access` whose client sends `frames` in turn, each after a wait if `waits`.
+    fn scripted_as(
+        access: Access,
+        frames: Vec<Result<BodyFrame<Vec<u8>>, std::io::Error>>,
+        waits: bool,
+    ) -> ConnectionBody<Script> {
         let (jobs, _) = async_channel::unbounded();
         let hub = Hub::new(
             Backends::new(),
@@ -418,8 +472,8 @@ mod tests {
             frames: frames.into(),
             waits,
         };
-        ConnectionBody::new(hub, request, Cancellation::new(), Access::open())
-            .expect("an open server admits the connection")
+        ConnectionBody::new(hub, request, Cancellation::new(), access)
+            .expect("the server admits the connection")
     }
 
     fn read<B: ReadableBody>(
@@ -504,42 +558,200 @@ mod tests {
         bytes
     }
 
-    #[test]
-    fn a_client_s_frames_are_read_within_the_limit_its_hello_negotiates() {
-        let long = padded_pong(2 * tomori_protocol::MAX_FRAME_BYTES);
-        let ended = |bytes: &[u8]| {
-            Ok(BodyFrame::Data {
-                data: bytes.to_vec(),
-                end: true,
+    fn admitted(
+        access: Access,
+        frames: Vec<Result<BodyFrame<Vec<u8>>, std::io::Error>>,
+    ) -> ConnectionBody<Script> {
+        scripted_as(access, frames, false)
+    }
+
+    /// Read `body` until its response ends, returning the messages it was sent.
+    fn sent_until_ended<B: ReadableBody>(body: &mut ConnectionBody<B>) -> Vec<ServerMessage> {
+        let mut decoder = FrameDecoder::with_limit(tomori_protocol::MOST_FRAME_BYTES);
+        loop {
+            match read(body) {
+                Ok(BodyFrame::Data { data, end }) => {
+                    decoder.push(&data);
+                    if end {
+                        break;
+                    }
+                }
+                Ok(BodyFrame::End) => break,
+                _ => unreachable!("data until the response ends"),
+            }
+        }
+        std::iter::from_fn(|| decoder.next_frame().unwrap())
+            .map(|frame| frame.to_server_message().unwrap())
+            .collect()
+    }
+
+    /// The errors `body` was sent until its response ended.
+    fn errors_until_ended<B: ReadableBody>(body: &mut ConnectionBody<B>) -> Vec<String> {
+        sent_until_ended(body)
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Error { error, .. } => Some(error),
+                _ => None,
             })
-        };
-        // Stating the most, as Tomori's own clients do, a frame longer than today's is read.
-        let mut body = scripted(
+            .collect()
+    }
+
+    fn ended(bytes: &[u8]) -> Result<BodyFrame<Vec<u8>>, std::io::Error> {
+        Ok(BodyFrame::Data {
+            data: bytes.to_vec(),
+            end: true,
+        })
+    }
+
+    /// The header of a control frame declaring `length` bytes, alone, as a client sends before any of its payload.
+    fn header(length: usize) -> Vec<u8> {
+        let mut bytes = vec![tomori_protocol::FrameKind::Control as u8];
+        bytes.extend_from_slice(&(length as u32).to_le_bytes());
+        bytes
+    }
+
+    fn refused(errors: &[String], limit: usize, whom: &str) -> bool {
+        errors.iter().any(|error| {
+            error.starts_with(&format!(
+                "This server takes frames of at most {limit} bytes from {whom}"
+            ))
+        })
+    }
+
+    #[test]
+    fn a_frame_longer_than_a_visitor_sends_is_refused_from_its_header() {
+        let watching = crate::inbound::WATCHING_FRAME_BYTES;
+        let whom = crate::inbound::Inbound::Watching.whom();
+        // Declaring the most a frame may be, with none of it sent: refused from the header, before any of it is held,
+        // the client told why and the response ended, the rest of the upload unread.
+        for access in [Access::visitor(), Access::pairing()] {
+            let mut body = admitted(
+                access,
+                vec![
+                    data(&hello(Some(tomori_protocol::Limits::MOST))),
+                    data(&header(tomori_protocol::MOST_FRAME_BYTES)),
+                ],
+            );
+            let errors = errors_until_ended(&mut body);
+            assert!(refused(&errors, watching, whom), "{errors:?}");
+            assert!(body.input_ended && body.finished && body.request.frames.is_empty());
+            // What it is sent is as long as it reads, however little it sends.
+            assert_eq!(body.output.frame_limit(), tomori_protocol::MOST_FRAME_BYTES);
+            assert_eq!(body.decoder.progress(), None);
+        }
+        // As long as a visitor sends is taken.
+        let mut body = admitted(
+            Access::visitor(),
             vec![
                 data(&hello(Some(tomori_protocol::Limits::MOST))),
-                ended(&long),
+                ended(&padded_pong(watching)),
             ],
-            false,
         );
-        let read_all = |body: &mut ConnectionBody<Script>| loop {
-            match read(body) {
-                Ok(BodyFrame::End) => return Ok(()),
-                Ok(_) => {}
-                Err(error) => return Err(format!("{error:?}")),
-            }
-        };
-        assert_eq!(read_all(&mut body), Ok(()));
-        assert_eq!(body.output.frame_limit(), tomori_protocol::MOST_FRAME_BYTES);
-        // Stating nothing, as an older client, it is refused, as before limits were stated; and so before Hello.
-        for first in [
-            hello(None),
-            Frame::client(&ClientMessage::Pong { nonce: 1 }).encode(),
-        ] {
-            let mut body = scripted(vec![data(&first), ended(&long)], false);
-            let error = read_all(&mut body).unwrap_err();
-            assert!(error.contains("TooLarge"), "{error}");
-            assert_eq!(body.output.frame_limit(), tomori_protocol::MAX_FRAME_BYTES);
+        assert!(errors_until_ended(&mut body).is_empty());
+        assert_eq!(body.output.inbound(), crate::inbound::Inbound::Watching);
+    }
+
+    #[test]
+    fn before_its_hello_any_connection_sends_only_as_long_as_a_visitor() {
+        let watching = crate::inbound::WATCHING_FRAME_BYTES;
+        let whom = crate::inbound::Inbound::Watching.whom();
+        let mut body = admitted(Access::open(), vec![ended(&padded_pong(watching + 1))]);
+        let errors = errors_until_ended(&mut body);
+        assert!(refused(&errors, watching, whom), "{errors:?}");
+        // As is the Hello itself.
+        let long_hello = Frame::client(&ClientMessage::Hello {
+            protocol: tomori_protocol::PROTOCOL_VERSION,
+            participant: "a".repeat(watching),
+            name: "Ada".into(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: false,
+            pairing_window: false,
+            speech_held: false,
+            images: false,
+            projection_patches: false,
+            live_panels: false,
+            limits: None,
+        })
+        .encode();
+        let mut body = admitted(Access::open(), vec![ended(&long_hello)]);
+        let errors = errors_until_ended(&mut body);
+        assert!(refused(&errors, watching, whom), "{errors:?}");
+    }
+
+    #[test]
+    fn an_owner_s_longest_frames_are_taken_and_longer_refused() {
+        let participating = crate::inbound::PARTICIPATING_FRAME_BYTES;
+        // The longest audio, 20 ms at 48 kHz, and the longest frame a participant may send.
+        let audio = Frame::audio(&tomori_protocol::AudioFrame {
+            gate: tomori_protocol::Gate::Live,
+            source: 0,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: 48_000,
+            samples: vec![0; 960],
+        })
+        .encode();
+        let mut body = admitted(
+            Access::open(),
+            vec![
+                data(&hello(Some(tomori_protocol::Limits::MOST))),
+                data(&audio),
+                ended(&padded_pong(participating)),
+            ],
+        );
+        assert!(errors_until_ended(&mut body).is_empty());
+        assert_eq!(
+            body.output.inbound(),
+            crate::inbound::Inbound::Participating
+        );
+        // One byte longer is refused, whatever the client reads, as is today's longest, which an older client could
+        // send.
+        for longer in [participating + 1, tomori_protocol::MAX_FRAME_BYTES] {
+            let mut body = admitted(
+                Access::open(),
+                vec![
+                    data(&hello(Some(tomori_protocol::Limits::MOST))),
+                    data(&header(longer)),
+                ],
+            );
+            let errors = errors_until_ended(&mut body);
+            assert!(
+                refused(&errors, participating, "an owner or a collaborator"),
+                "{errors:?}"
+            );
+            assert_eq!(body.output.frame_limit(), tomori_protocol::MOST_FRAME_BYTES);
         }
+        // From a client stating nothing, as an older one, the same is taken, and it is sent today's.
+        let mut body = admitted(
+            Access::open(),
+            vec![data(&hello(None)), ended(&padded_pong(participating))],
+        );
+        assert!(errors_until_ended(&mut body).is_empty());
+        assert_eq!(body.output.frame_limit(), tomori_protocol::MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn a_visitor_sending_too_often_for_too_long_is_closed() {
+        // Its burst, as many again dropped, and then refused, before the rest of its upload is read.
+        let ping = Frame::client(&ClientMessage::Ping { nonce: 1 }).encode();
+        let mut frames = vec![data(&hello(None))];
+        frames.extend((0..1000).map(|_| data(&ping)));
+        let mut body = admitted(Access::visitor(), frames);
+        let sent = sent_until_ended(&mut body);
+        assert!(
+            sent.iter().any(|message| matches!(message, ServerMessage::Error { error, .. } if error
+                == "This connection sent more often than this server takes from a visitor, a device pairing or a client before its Hello, for too long.")),
+            "{sent:?}"
+        );
+        assert!(body.input_ended && body.request.frames.is_empty());
+        // The pings within its burst answered, with the Hello, and those dropped not.
+        let pongs = sent
+            .iter()
+            .filter(|message| matches!(message, ServerMessage::Pong { .. }))
+            .count();
+        assert!((255..=260).contains(&pongs), "{pongs}");
     }
 
     #[test]

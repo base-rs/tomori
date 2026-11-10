@@ -121,13 +121,43 @@ fn each_client_is_offered_only_the_environments_it_presents_at_their_versions() 
     let (_bounded, offered) = present(&server, "bounded", Some(&long));
     assert_eq!(offered, owned(&[("sky", 1)]));
     // An identifier no environment could have, empty or longer than the server takes, is skipped before the list is
-    // bounded, so it takes no place in it.
+    // bounded, so it takes no place in it: were either kind counted, the list would be full before the last. As many
+    // as fit in a Hello, which is taken only as long as a visitor's frames, 16 KiB. See `design/security.md`.
     let oversized = "o".repeat(1025);
-    let mut odd: Vec<(&str, u32)> = vec![("", 1); ENVIRONMENT_LIMIT];
-    odd.extend([(oversized.as_str(), 1); ENVIRONMENT_LIMIT]);
+    let mut odd: Vec<(&str, u32)> = vec![("floor", 1); ENVIRONMENT_LIMIT - 10];
+    odd.extend([("", 1); 10]);
+    odd.extend([(oversized.as_str(), 1); 10]);
     odd.push(("sky", 1));
     let (_odd, offered) = present(&server, "odd", Some(&odd));
     assert_eq!(offered, owned(&[("sky", 1)]));
+}
+
+#[test]
+fn a_hello_longer_than_a_visitor_sends_is_refused() {
+    let server = server();
+    let oversized = "o".repeat(1025);
+    let long: Vec<(&str, u32)> = vec![(oversized.as_str(), 1); 16];
+    let mut client = TestClient::open(server.address);
+    client.send(&ClientMessage::Hello {
+        protocol: tomori_protocol::PROTOCOL_VERSION,
+        participant: "long".into(),
+        name: "Long".into(),
+        names: false,
+        environments: listed(Some(&long)),
+        environment_state: false,
+        projection: false,
+        pairing_window: false,
+        speech_held: false,
+        images: false,
+        projection_patches: false,
+        live_panels: false,
+        limits: None,
+    });
+    let error = client.error();
+    assert!(
+        error.starts_with("This server takes frames of at most 16384 bytes from a visitor"),
+        "{error}"
+    );
 }
 
 #[test]

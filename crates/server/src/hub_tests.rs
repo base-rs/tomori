@@ -652,6 +652,15 @@ fn a_knock_needs_a_server_that_admits_by_knocking() {
 fn a_visitor_who_knocks_again_before_being_admitted_is_admitted_once() {
     let store = Store::new("again");
     let (hub, id, owner, visitor) = knocked(&store);
+    // What it sends is taken as a visitor's, and as an owner's for the owner, until it is admitted.
+    let inbound = |client: &Client| {
+        hub.lock().connections[&client.connection]
+            .liveness
+            .output
+            .inbound()
+    };
+    assert_eq!(inbound(&visitor), crate::inbound::Inbound::Watching);
+    assert_eq!(inbound(&owner), crate::inbound::Inbound::Participating);
     // Answered, then knocked again before the admission is made.
     let knock = take_knock(&hub);
     visitor.send(ClientMessage::Knock);
@@ -666,6 +675,8 @@ fn a_visitor_who_knocks_again_before_being_admitted_is_admitted_once() {
             .any(|message| matches!(message, ServerMessage::Admitted { .. })),
         "{messages:?}"
     );
+    // A collaborator's from then on, on the same connection.
+    assert_eq!(inbound(&visitor), crate::inbound::Inbound::Participating);
     assert_eq!(hub.status().spaces[0].participants.len(), 2);
     let _ = id;
 }

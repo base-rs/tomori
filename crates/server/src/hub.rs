@@ -24,6 +24,7 @@ use tomori_security::pairing::ChosenName;
 use crate::access::{self, Access, Grant};
 use crate::backends::Backends;
 use crate::environments::Environments;
+use crate::inbound::Inbound;
 use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::retention::{Delivery, Item, Retention};
@@ -593,20 +594,39 @@ pub struct Output {
     pending: AtomicBool,
     /// Chunks written so far.
     written: AtomicU64,
-    /// The longest frame's payload each way, as negotiated from the client's Hello: 0, read as
+    /// The longest frame's payload the server sends, as negotiated from the client's Hello: 0, read as
     /// [`tomori_protocol::MAX_FRAME_BYTES`], until it says Hello. See `design/server.md`.
     frame_bytes: AtomicUsize,
+    /// Whether what the client sends is taken as an owner's or a collaborator's, [`Inbound::Participating`], from
+    /// when it says Hello, or a knock admits it; until then, and for a visitor or a connection admitted only to pair,
+    /// [`Inbound::Watching`]. See `design/security.md`.
+    participating: AtomicBool,
 }
 
 impl Output {
-    /// The longest frame's payload, each way, on this connection: [`tomori_protocol::MAX_FRAME_BYTES`] until the client
-    /// says Hello, and then the lesser of what it and this server state.
+    /// The longest frame's payload the server sends on this connection: [`tomori_protocol::MAX_FRAME_BYTES`] until the
+    /// client says Hello, and then the lesser of what it and this server state. What the server takes from the client
+    /// is [`Self::inbound`]'s, however long this is.
     pub fn frame_limit(&self) -> usize {
         tomori_protocol::frame_limit(self.frame_bytes.load(Ordering::Acquire))
     }
 
     fn set_frame_limit(&self, limit: usize) {
         self.frame_bytes.store(limit, Ordering::Release);
+    }
+
+    /// What the client's frames are taken as: how long they may be, and how often they may come.
+    pub fn inbound(&self) -> Inbound {
+        if self.participating.load(Ordering::Acquire) {
+            Inbound::Participating
+        } else {
+            Inbound::Watching
+        }
+    }
+
+    fn set_inbound(&self, inbound: Inbound) {
+        self.participating
+            .store(inbound == Inbound::Participating, Ordering::Release);
     }
 
     /// The body handed out a chunk to write.
@@ -1765,6 +1785,10 @@ impl HubState {
                 space: knock.space.clone(),
             },
         };
+        connection
+            .liveness
+            .output
+            .set_inbound(Inbound::greeted(&connection.access));
         connection.outbox.message(ServerMessage::Admitted { token });
         if let Some(space) = &space
             && let Some(record) = self.space_mut(space)
@@ -3155,6 +3179,12 @@ impl Hub {
                         .liveness
                         .output
                         .set_frame_limit(record.limits.frame_limit());
+                    // What it sends, by what it was admitted as, from the next frame on, whatever it reads. See
+                    // `design/security.md`.
+                    record
+                        .liveness
+                        .output
+                        .set_inbound(Inbound::greeted(&record.access));
                 }
                 self.hello(
                     &mut state,

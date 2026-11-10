@@ -21,8 +21,9 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
     let server = TestServer::start();
     let mut ada = server.connect("ada", "Ada");
 
-    // About a megabyte of JSON once escaped, which an echoing error reply could not carry.
-    let space: String = "\u{200b}".repeat(340_000);
+    // About 240 KB of JSON, within the longest frame a participant sends, which an echoing error reply could not
+    // carry within the snapshot budget.
+    let space: String = "\u{200b}".repeat(80_000);
     ada.send(&ClientMessage::Join { space });
     let error = ada.error();
     assert!(
@@ -31,7 +32,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
     );
 
     ada.send(&ClientMessage::CreateSpace {
-        title: "A".repeat(600_000),
+        title: "A".repeat(200_000),
         backend: "fake".into(),
         directory: "/tmp".into(),
         session: None,
@@ -43,7 +44,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
 
     ada.send(&ClientMessage::CreateSpace {
         title: "T".into(),
-        backend: "B".repeat(600_000),
+        backend: "B".repeat(200_000),
         directory: "/tmp".into(),
         session: None,
         environment: None,
