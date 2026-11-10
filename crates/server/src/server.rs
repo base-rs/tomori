@@ -15,7 +15,7 @@ use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationError, OperationResult, SocketAccept, SocketAddress, SocketBind,
     SocketClose, SocketListen, SocketOpen, SocketReuseAddress, SocketSetOption,
-    SocketStreamReading, SocketStreamWriting, SocketType, Timers,
+    SocketStreamReading, SocketStreamWriting, SocketType, TcpNoDelay, Timers,
 };
 use futures_lite::future::zip;
 use futures_util::future::{Either, select};
@@ -486,7 +486,12 @@ impl Server {
         cancellation: &Cancellation,
     ) -> Result<Statistics, Error>
     where
-        S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
+        S: SocketAccept
+            + SocketSetOption<TcpNoDelay>
+            + SocketStreamReading
+            + SocketStreamWriting
+            + SocketClose
+            + Timers,
         S::Socket: 'static,
     {
         self.run_serving(scheduler, listener, None, cancellation)
@@ -502,7 +507,12 @@ impl Server {
         cancellation: &Cancellation,
     ) -> Result<Statistics, Error>
     where
-        S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
+        S: SocketAccept
+            + SocketSetOption<TcpNoDelay>
+            + SocketStreamReading
+            + SocketStreamWriting
+            + SocketClose
+            + Timers,
         S::Socket: 'static,
     {
         // Environments' server sides may run now, for the spaces bound while the server was configured.
@@ -575,6 +585,7 @@ impl Server {
     ) -> Result<Statistics, Error>
     where
         S: SocketAccept
+            + SocketSetOption<TcpNoDelay>
             + SocketStreamReading
             + SocketStreamWriting
             + SocketClose
@@ -747,7 +758,9 @@ impl Server {
     ///
     /// Transient accept errors, such as a peer that reset before it was accepted or running out of descriptors, are logged and accepting continues, pausing for [`ACCEPT_BACKOFF`] when out of resources. Only cancellation or another accept error, such as a closed scheduler or a broken listener, ends serving. Either way, the listener is closed first, so that new peers are refused rather than left queued with nobody accepting, and then the connections are cancelled and given the drain timeout to finish before they are abandoned.
     ///
-    /// TODO(upstream): this follows `base_http_server::serve`, which passes every handler one cancellation shared by all connections. The keepalive sweep must end one silent connection, including a response write blocked on a peer that is gone, so each connection here gets its own child cancellation. Since base-http 0.3, `serve` keeps accepting after transient accept errors and closes its listener before draining, but it still joins its connections without a time limit. Use `serve` again once it offers per-connection cancellation and a bounded drain.
+    /// Each accepted socket has `TCP_NODELAY` set before it is served, as `base_http_server::serve` does, since `serve_connection` leaves a socket it is given as it is: with Nagle's algorithm on, small writes such as speech frames and patches can wait for the peer's acknowledgement of the last.
+    ///
+    /// TODO(upstream): this follows `base_http_server::serve`, which passes every handler one cancellation shared by all connections. The keepalive sweep must end one silent connection, including a response write blocked on a peer that is gone, so each connection here gets its own child cancellation. Since base-http 0.3, `serve` keeps accepting after transient accept errors and closes its listener before draining, but it still joins its connections without a time limit. Use `serve` again once it offers per-connection cancellation and a bounded drain, requested in base-rs/base-http#73.
     async fn serve<S, H>(
         &self,
         scheduler: &S,
@@ -757,7 +770,12 @@ impl Server {
         cancellation: &Cancellation,
     ) -> Result<Statistics, Error>
     where
-        S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
+        S: SocketAccept
+            + SocketSetOption<TcpNoDelay>
+            + SocketStreamReading
+            + SocketStreamWriting
+            + SocketClose
+            + Timers,
         S::Socket: 'static,
         H: base_http_server::Handler<Error = std::convert::Infallible>,
     {
@@ -860,6 +878,13 @@ impl Server {
                     watch,
                 };
                 connections.push(async move {
+                    // A latency hint only: the connection is served without it.
+                    if let Err(error) = scheduler
+                        .socket_set_option(&socket, TcpNoDelay, true, &connection)
+                        .await
+                    {
+                        log::debug!("Could not disable Nagle's algorithm for connection {serial}: {error}.");
+                    }
                     let outcome = match acceptor {
                         None => {
                             base_http_server::serve_connection(
@@ -1751,8 +1776,8 @@ mod tests {
     use std::time::Instant;
 
     use base_scheduler::{
-        BufferPool, BufferPoolOptions, BufferPooling, Clock, IoBuf, SocketLocalAddress,
-        SocketOperation, SocketStreamReader, SocketStreamWriter,
+        BufferPool, BufferPoolOptions, BufferPooling, Clock, IoBuf, SocketGetOption,
+        SocketLocalAddress, SocketOperation, SocketStreamReader, SocketStreamWriter,
     };
     use base_scheduler_native::{NativeOptions, NativeScheduler, NativeSocket};
     use futures_lite::future::block_on;
@@ -1774,6 +1799,10 @@ mod tests {
         after_wait: Option<Box<dyn Fn() + Send + Sync>>,
         /// Called each time accepting fails, before the failure is returned.
         after_accept_failure: Option<Box<dyn Fn() + Send + Sync>>,
+        /// Setting `TCP_NODELAY` fails, leaving the socket as it was.
+        failing_nodelay: bool,
+        /// Whether each accepted socket had `TCP_NODELAY`, as the operating system reports it when the socket is closed.
+        nodelay: Arc<Mutex<Vec<bool>>>,
     }
 
     impl Faulty {
@@ -1793,6 +1822,8 @@ mod tests {
                 failing_listener_close: false,
                 after_wait: None,
                 after_accept_failure: None,
+                failing_nodelay: false,
+                nodelay: Arc::default(),
             }
         }
     }
@@ -1838,6 +1869,14 @@ mod tests {
 
     impl SocketClose for Faulty {
         async fn socket_close(&self, socket: Tagged) -> io::Result<()> {
+            if socket.accepted {
+                let nodelay = self
+                    .inner
+                    .socket_get_option(&socket.socket, TcpNoDelay, &Cancellation::never())
+                    .await
+                    .unwrap();
+                self.nodelay.lock().unwrap().push(nodelay);
+            }
             if socket.accepted && self.stall_connection_closes {
                 let _held = socket;
                 return pending().await;
@@ -1852,6 +1891,23 @@ mod tests {
 
         async fn socket_close_submit(&self, socket: Tagged) -> io::Result<()> {
             self.inner.socket_close_submit(socket.socket).await
+        }
+    }
+
+    impl SocketSetOption<TcpNoDelay> for Faulty {
+        async fn socket_set_option(
+            &self,
+            socket: &Tagged,
+            option: TcpNoDelay,
+            value: bool,
+            cancellation: &Cancellation,
+        ) -> OperationResult<()> {
+            if self.failing_nodelay {
+                return Err(io::Error::other("the option is refused").into());
+            }
+            self.inner
+                .socket_set_option(&socket.socket, option, value, cancellation)
+                .await
         }
     }
 
@@ -2182,6 +2238,33 @@ mod tests {
             response.extend_from_slice(&buffer[..count]);
         }
         String::from_utf8(response).unwrap()
+    }
+
+    /// Serve `/health` once with `scheduler`, then stop, and return whether the accepted socket had `TCP_NODELAY` as it closed.
+    fn nodelay_serving_health(scheduler: Faulty) -> Vec<bool> {
+        let nodelay = scheduler.nodelay.clone();
+        let running = start_with(scheduler, |_| {});
+        assert!(health(running.address).contains("\"status\":\"ok\""));
+        running.cancellation.cancel();
+        let (result, _) = running.finished.recv().unwrap();
+        assert_eq!(result.unwrap().connections, 1);
+        nodelay.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn accepted_sockets_disable_nagle_s_algorithm() {
+        assert_eq!(nodelay_serving_health(Faulty::new()), [true]);
+    }
+
+    #[test]
+    fn a_socket_that_refuses_tcp_nodelay_is_still_served() {
+        // So that the debug message is written, whichever test runs first.
+        log::set_max_level(log::LevelFilter::Trace);
+        let scheduler = Faulty {
+            failing_nodelay: true,
+            ..Faulty::new()
+        };
+        assert_eq!(nodelay_serving_health(scheduler), [false]);
     }
 
     #[test]

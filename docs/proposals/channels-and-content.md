@@ -482,18 +482,19 @@ HTTP/2 and HTTP/3 will arrive on 0.4's interfaces, so this is the prerequisite f
 |---|---|---|
 | Long-lived duplex exchanges: request and response bodies streaming at once | yes. Pull bodies with independent upload and download progress ("duplex"); `/connect` relies on it today | none |
 | Long-lived chunked responses produced by the server (streams, the downlink of a browser's pair) | yes. Chunked framing; the driver pulls the body and flushes before awaiting more | none |
-| Back-pressure | yes. The driver pulls only as fast as it writes, and bounded queues are the application's | `TCP_NOTSENT_LOWAT` isn't one of the scheduler's socket options (only `TCP_NODELAY` is); useful for any socket that still mixes traffic |
+| Back-pressure | yes. The driver pulls only as fast as it writes, and bounded queues are the application's | `TCP_NOTSENT_LOWAT` isn't one of the scheduler's socket options (`TCP_NODELAY`, `SO_KEEPALIVE` and `SO_REUSEADDR` are); requested in base-rs/base-scheduler#132, and useful for any socket that still mixes traffic |
 | TLS with Tomori's own certificate and a pinning verifier | yes. rustls through `base-endpoint` | none |
 | ALPN and protocol selection | yes. `base-http-protocol` selects an engine, but offers only `http/1.1` | HTTP/2 (milestone M6) and HTTP/3 over native `base-quic` (in progress) |
 | Several connections to one server from the client (HTTP/1.1 channels) | yes. The pool admits one exchange per HTTP/1 connection and opens more | Tomori must bound the pool to its channel budget |
-| Range requests | not yet. "Field-specific date/range/authentication/negotiation… parsers remain follow-up work" | Tomori parses one `bytes=` range itself, or `base-http` adds `Range` and `Content-Range` |
-| `ETag`, `If-None-Match`, 304 | 304 framing is handled, but there are no conditional-request helpers | small; Tomori can do it, or `base-http` adds it |
+| Range requests | not yet. "Field-specific date/range/authentication/negotiation… parsers remain follow-up work" | Tomori parses one `bytes=` range itself, or `base-http` adds `Range` and `Content-Range`, requested in base-rs/base-http#72 |
+| `ETag`, `If-None-Match`, 304 | 304 framing is handled, but there are no conditional-request helpers | small; Tomori can do it, or `base-http` adds it, requested in base-rs/base-http#71 |
 | Cookies | none (listed as a separate follow-up) | Tomori already parses its own token cookie |
 | Stream scheduling by priority under HTTP/2 and HTTP/3 (RFC 9218 `Priority`) | not applicable yet | **a requirement to ask for in M6:** media must never wait behind content data, and flow-control windows must not let a big content response starve media |
 | HTTP datagrams (RFC 9297) over HTTP/3, for unreliable audio | not on the roadmap. Extended `CONNECT` exists as protocol intent | **ask for it** with `base-http3`; it is what makes live audio loss-tolerant |
 | UDP endpoints in `base-scheduler` | "packet endpoints, QUIC and HTTP/3 remain future work" | prerequisite of HTTP/3 |
 | WebSocket | managed upgrades exist; framing is a follow-up | only for a browser client's full participation |
 | Graceful drain (GOAWAY under HTTP/2) | HTTP/1 shutdown and drain are implemented | part of M6 |
+| Serving with a cancellation per connection, a request-head idle timeout and a bounded drain | no. `serve` shares one cancellation among its connections and drains without a bound, so Tomori keeps its own accept loop, which must set `TCP_NODELAY` itself, as `serve` does, since `serve_connection` leaves a socket it is given as it is | requested in base-rs/base-http#73 |
 
 ## 8. Compatibility and migration
 

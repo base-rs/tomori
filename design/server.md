@@ -6,7 +6,7 @@ This describes the target design for the Rust server that replaces `bridge/`, an
 
 The PC server is a Rust program built on `base-http-server`, from `base-http` 0.4, running on `base-scheduler` 0.5's native backend, with TLS from `base-endpoint` 0.3 (see `crates.md`). It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
 
-Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`.
+Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`. Every TCP connection, accepted by the server or opened by a client, disables Nagle's algorithm with `TCP_NODELAY`, so that small frames, such as speech audio and projection patches, are sent at once rather than held back for the peer's acknowledgement; a socket that refuses it is served without it.
 
 Initially, audio travels over the same HTTP streaming connection. Later, audio moves to UDP datagrams so that a lost packet is dropped instead of stalling the audio behind it. Over UDP, audio is Opus-encoded with in-band forward error correction, so isolated losses are recovered without a round trip. Transcribed audio must still meet `speech.md`: the server requests any `agent` frame that error correction could not recover, and fails the utterance visibly if the frame does not arrive in time. Live playback never waits for a retransmission.
 
@@ -48,6 +48,7 @@ The server crate, the protocol crate, the shared client crate and network config
 
 - Inspect dependencies: the server uses `base-http-server` 0.4, and every crate the same versions of `base-http`, `base-scheduler` and `base-endpoint`; client and server wire types come from the protocol crate.
 - Test a client session over one connection carrying control messages, events and audio concurrently.
+- Test that an accepted connection has `TCP_NODELAY` set, as the operating system reports it, and that one refusing it is still served.
 - Confirm that a headset can connect over the local network without USB.
 - Test that a space or worker state a client does not know is read as unknown.
 - Test that a space keeps its workers in the order it first saw them, whatever order a backend lists them in, that the OpenCode backend lists a session's workers in the order they were created rather than by identifier, and that trimming then drops the oldest and marks the list non-authoritative.
