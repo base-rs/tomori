@@ -519,18 +519,13 @@ mod tests {
             coordinator.choose(None);
             coordinator.update(&input);
             swarm.set_visual(input.visual, input.dt);
-            let anchor = glide.step(
+            swarm.set_anchor(glide.step(
                 input.anchor,
                 input.via,
                 input.stream,
                 input.appearing,
                 input.dt,
-            );
-            if input.appearing {
-                swarm.appear_at(anchor);
-            } else {
-                swarm.set_anchor(anchor);
-            }
+            ));
             swarm.step(input.dt, input.attractor);
             let agents: Vec<[f32; 3]> = swarm
                 .agents

@@ -1400,12 +1400,12 @@ impl HubState {
         };
         if let Some(prompt) = space.model.next_prompt() {
             let key = prompt.key.clone();
-            let source = space.model.given().map(|given| given.source);
+            let source = space.model.given().expect("given as it was taken").source;
             if space.commands.try_send(SpaceCommand::Send(prompt)).is_err() {
                 space
                     .model
                     .sent(&key, Err("the agent session has stopped".to_owned()));
-            } else if let Some(source) = source {
+            } else {
                 // A following agent goes to whoever it begins answering.
                 self.agent_given(id, source, Instant::now());
             }
@@ -1964,9 +1964,10 @@ impl HubState {
                 .utterances
                 .remove(&open.id)
                 .map(UtteranceRecord::recorder);
-            if let Some((participant, space)) = &ended {
+            // A following agent's move for them stops where it is.
+            ended.iter().for_each(|(participant, space)| {
                 self.agent_cancelled(space, participant, Instant::now());
-            }
+            });
             self.recorded(ended);
             deferred.push(Deferred::Cancel(open.id));
         }
@@ -6138,6 +6139,8 @@ impl Hub {
         let Some(record) = state.space_mut(space) else {
             return;
         };
+        // While the agent speaks, a following agent does not go home.
+        record.following.spoke(Instant::now(), item.duration());
         record.speech.record(reply, item);
         // A reply that starts while someone records is held for them, which the pacer tells them.
         if record.speech.held_changed() {
@@ -6181,14 +6184,6 @@ impl Hub {
             sequence: frame.sequence,
             timestamp: frame.timestamp,
         };
-        // While the agent speaks, a following agent does not go home.
-        if frame.sample_rate > 0
-            && let Some(record) = self.lock().space_mut(space)
-        {
-            let duration =
-                Duration::from_secs_f64(frame.samples.len() as f64 / f64::from(frame.sample_rate));
-            record.following.spoke(Instant::now(), duration);
-        }
         self.live_speech(space, reply, item, |outbox| {
             outbox.agent_audio(encoded.clone())
         });

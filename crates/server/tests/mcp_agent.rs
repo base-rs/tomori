@@ -91,9 +91,10 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     assert_eq!(presence["agent"]["position"], json!([0.0, 1.4, -2.3]));
     assert_eq!(presence["agent"]["mode"], "home");
 
-    // Ada calls it to her, to look at something together: everyone in the space sees it there, pinned.
+    // Ada calls it to her, to look at something together: everyone in the space sees it there, pinned. She stays where
+    // she is, since a client reports where it is only so often.
     ada.send(&ClientMessage::Presence {
-        head: Pose::at([2.0, 1.6, 0.0]),
+        head: Pose::at([1.0, 1.6, 0.0]),
         left: None,
         right: None,
         hands: None,
@@ -114,11 +115,11 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         }
     };
     assert!(called.pinned);
-    assert!(close(called.summoned.unwrap().position, [2.0, 1.9, -2.3]));
+    assert!(close(called.summoned.unwrap().position, [1.0, 1.9, -2.3]));
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
     assert_eq!(presence["agent"]["at_home"], false);
     assert_eq!(presence["agent"]["mode"], "pinned");
-    assert_eq!(presence["agent"]["position"], json!([2.0, 1.9, -2.3]));
+    assert_eq!(presence["agent"]["position"], json!([1.0, 1.9, -2.3]));
     assert_eq!(presence["agent"]["home"], json!([0.0, 1.4, -2.3]));
 
     // Nothing moves it of its own accord: it is still there a while later.

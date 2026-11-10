@@ -434,6 +434,10 @@ fn a_move_for_words_that_came_to_nothing_stops_where_it_has_reached() {
     let before = agent(&hub, &space).0;
     hub.lock().agent_cancelled(&space, "nobody", Instant::now());
     assert_eq!(agent(&hub, &space).0, before);
+    // As for words in a space since forgotten, or given for someone who has since left.
+    hub.lock().agent_cancelled("gone", "ada", Instant::now());
+    hub.lock().agent_given(&space, 999, Instant::now());
+    assert_eq!(agent(&hub, &space).0, before);
     heard(&hub, "");
     assert_ne!(agent(&hub, &space).0, before);
     // A failed transcript does the same, here with nothing under way.

@@ -2046,8 +2046,71 @@ mod tests {
             .position(|row| row.key == MenuKey::AgentHome)
             .expect("offered");
         assert_eq!(rows[home].text, "Send Tomori home");
+        assert_eq!(rows[home - 1].text, "Tomori, for everyone");
         assert_eq!(rows[home + 1].text, "On this headset");
         assert_eq!(menu.choose(&MenuKey::AgentHome), Some(Choice::AgentHome));
+        model.agent_away = false;
+        // On a server that says how the agent moves: anyone reads it, an owner steps it, and how long it waits, quiet,
+        // before going home while it follows; and Call Tomori here, where it is offered, before sending it home.
+        use tomori_protocol::{AgentMovement, Movement};
+        let tomori = |model: &Model| -> Vec<(MenuKey, MenuKind, String)> {
+            let rows = items(Some(Section::Space), model);
+            let heading = rows
+                .iter()
+                .position(|row| row.text == "Tomori, for everyone")
+                .expect("headed");
+            rows[heading + 1..]
+                .iter()
+                .take_while(|row| row.text != "On this headset")
+                .map(|row| (row.key.clone(), row.kind, row.text.clone()))
+                .collect()
+        };
+        model.movement = Some((AgentMovement::default(), false));
+        assert_eq!(
+            tomori(&model)
+                .iter()
+                .map(|(_, kind, text)| (*kind, text.as_str()))
+                .collect::<Vec<_>>(),
+            [(MenuKind::Text, "Moves: only when asked")]
+        );
+        model.movement = Some((AgentMovement::new(Movement::Follow, Some(90)), true));
+        model.calls = true;
+        model.agent_away = true;
+        let named = tomori(&model);
+        assert_eq!(
+            named
+                .iter()
+                .map(|(key, _, text)| (key.clone(), text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (MenuKey::AgentMovement, "Moves: follows the speaker"),
+                (MenuKey::AgentReturn, "Goes home after 90 s quiet"),
+                (MenuKey::CallAgent, "Call Tomori here"),
+                (MenuKey::AgentHome, "Send Tomori home"),
+            ]
+        );
+        for (delay, said) in [
+            (Some(30), "Goes home after 30 s quiet"),
+            (Some(300), "Goes home after 5 min quiet"),
+            (None, "Goes home: never"),
+        ] {
+            model.movement = Some((AgentMovement::new(Movement::Follow, delay), false));
+            let named = tomori(&model);
+            assert_eq!((named[1].1, named[1].2.as_str()), (MenuKind::Text, said));
+        }
+        model.movement = Some((AgentMovement::new(Movement::Home, None), true));
+        assert_eq!(tomori(&model)[0].2, "Moves: stays home");
+        assert_eq!(menu.choose(&MenuKey::CallAgent), Some(Choice::CallAgent));
+        assert_eq!(
+            menu.choose(&MenuKey::AgentMovement),
+            Some(Choice::AgentMovement)
+        );
+        assert_eq!(
+            menu.choose(&MenuKey::AgentReturn),
+            Some(Choice::AgentReturn)
+        );
+        model.movement = None;
+        model.calls = false;
         model.agent_away = false;
         // An owner adds walls, and removes the nearest added one where there is one, before this headset's settings.
         assert!(!rows.iter().any(|row| row.key == MenuKey::AddWall));

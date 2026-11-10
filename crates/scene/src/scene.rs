@@ -1270,10 +1270,7 @@ impl Step {
                 .speaking(conversation.speech().playing)
                 .head(senses.head_pose.map(|pose| Vec3::from_array(pose.position)))
                 .attracted(attractor)
-                .going(
-                    arrangement.via.filter(|_| in_a_space),
-                    arrangement.stream && in_a_space,
-                ),
+                .going(arrangement.via, arrangement.stream),
         );
         let marker = match senses.marker {
             Marker::Always => senses.attractor,
@@ -6960,6 +6957,14 @@ mod tests {
                 conversation.arrangement().agent,
                 crate::anchors::Anchor::AGENT
             );
+            // Away, it is sent home from the hand menu instead, from either.
+            conversation.apply(space(|state| {
+                state.summons = older;
+                state.movement = (!older).then(tomori_protocol::AgentMovement::default);
+                state.summoned = Some(tomori_protocol::Pose::at([1.0, 1.4, -1.0]));
+            }));
+            conversation.send_agent_home();
+            assert_eq!(placed(&mut conversation), [None]);
         }
     }
 

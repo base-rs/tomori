@@ -53,7 +53,8 @@ pub enum Item {
 }
 
 impl Item {
-    fn duration(&self) -> Duration {
+    /// How long it plays.
+    pub(crate) fn duration(&self) -> Duration {
         match self {
             Item::Frame {
                 sample_rate,

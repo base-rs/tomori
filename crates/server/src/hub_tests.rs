@@ -5272,7 +5272,17 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     // Outside a space, nowhere to call it to.
     ada.send(ClientMessage::CallAgent);
     ada.send(ClientMessage::PlaceAgent { at: None });
-    assert_eq!(ada.errors(), ["Join a space first.", "Join a space first."]);
+    ada.send(ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::default(),
+    });
+    assert_eq!(
+        ada.errors(),
+        [
+            "Join a space first.",
+            "Join a space first.",
+            "Join a space first."
+        ]
+    );
     ada.send(ClientMessage::Join {
         space: space.clone(),
     });

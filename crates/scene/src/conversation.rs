@@ -2393,11 +2393,9 @@ impl Conversation {
             .filter(|eyes| eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH)
         {
             let at = arrangement.agent.position;
-            if let Some(turned) = anchor(Some(
-                tomori_protocol::Pose::at(at.to_array()).facing_towards([facing.x, at.y, facing.z]),
-            )) {
-                arrangement.agent.orientation = turned.orientation;
-            }
+            let turned =
+                tomori_protocol::Pose::at(at.to_array()).facing_towards([facing.x, at.y, facing.z]);
+            arrangement.agent.orientation = glam::Quat::from_array(turned.orientation).normalize();
         }
         arrangement.via = space
             .via
@@ -2463,11 +2461,10 @@ impl Conversation {
         if !(self.sends_agent_home() && self.mode == Mode::Space) {
             return;
         }
-        if let Some(space) = self.space.as_mut() {
-            space.summoned = None;
-            space.summoner = None;
-            space.facing = None;
-        }
+        let space = self.space.as_mut().expect("in the space joined");
+        space.summoned = None;
+        space.summoner = None;
+        space.facing = None;
         self.send(ClientMessage::PlaceAgent { at: None });
     }
 
@@ -7933,6 +7930,7 @@ mod tests {
         // Outside a space, nothing.
         let mut lobby = crate::test_support::conversation("Ada");
         lobby.choose_menu(crate::hand_menu::Choice::AgentReturn);
+        lobby.choose_menu(crate::hand_menu::Choice::AgentMovement);
         lobby.send_agent_home();
         assert!(lobby.menu_model().movement.is_none());
         assert!(!lobby.menu_model().calls);

@@ -1146,6 +1146,73 @@ mod tests {
     }
 
     #[test]
+    fn how_the_agent_moves_is_sent_only_by_newer_servers_and_steps_through_its_choices() {
+        let state = SpaceState {
+            movement: Some(AgentMovement::new(Movement::Follow, Some(120))),
+            pinned: true,
+            facing: Some([1.0, 1.6, 2.0]),
+            via: Some([0.0, 2.5, -1.0]),
+            stream: true,
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["movement"]["mode"], "follow");
+        assert_eq!(json["movement"]["return_after"], 120);
+        assert_eq!(
+            (json["pinned"].as_bool(), json["stream"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert_eq!(json["facing"][2], 2.0);
+        assert_eq!(json["via"][1], 2.5);
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        // From an older server, none of it, and none of it is written.
+        let plain = serde_json::to_value(SpaceState::default()).unwrap();
+        for field in ["movement", "pinned", "facing", "via", "stream"] {
+            assert!(plain.get(field).is_none(), "{field}");
+        }
+        // A way a newer server names reads as unknown; never going home is no delay.
+        let newer: AgentMovement =
+            serde_json::from_value(serde_json::json!({ "mode": "wander" })).unwrap();
+        assert_eq!((newer.mode, newer.return_after), (Movement::Unknown, None));
+        assert_eq!(
+            serde_json::from_value::<AgentMovement>(serde_json::json!({}))
+                .unwrap()
+                .mode,
+            Movement::Asked
+        );
+        // A client steps the mode round, and the delay through its choices to never and round again.
+        let follow = AgentMovement::new(Movement::Follow, Some(90));
+        assert_eq!(follow.next_mode().mode, Movement::Asked);
+        assert_eq!(follow.next_mode().next_mode().mode, Movement::Home);
+        assert_eq!(newer.next_mode().mode, Movement::Follow);
+        assert_eq!(follow.next_mode().next_mode().next_mode(), follow);
+        let mut delays = Vec::new();
+        let mut stepped = AgentMovement::new(Movement::Follow, Some(RETURN_SHORTEST));
+        for _ in 0..7 {
+            delays.push(stepped.return_after);
+            stepped = stepped.next_return();
+        }
+        assert_eq!(
+            delays,
+            [
+                Some(30),
+                Some(60),
+                Some(90),
+                Some(120),
+                Some(300),
+                Some(600),
+                None
+            ]
+        );
+        assert_eq!(stepped.return_after, Some(30));
+        assert_eq!(
+            AgentMovement::new(Movement::Follow, Some(9000)).return_after,
+            Some(RETURN_LONGEST)
+        );
+        assert_eq!(AgentMovement::default().return_after, Some(RETURN_AFTER));
+    }
+
+    #[test]
     fn avatars_are_sent_only_when_named_and_absent_from_older_servers() {
         let state = SpaceState {
             avatar: Some("river".into()),
