@@ -177,6 +177,19 @@ mod tests {
                 &[]
             };
             assert_eq!(seen(&spot(arrival), &spot(agent), solids), Ok(()), "{id}");
+            // One to eighteen workers stand in its home cluster, about its home anchor, or else about its agent's home,
+            // clear of its solids and seen from the eyes at the arrival.
+            let home = environment
+                .home()
+                .cloned()
+                .unwrap_or_else(|| tomori_protocol::cluster::Anchor::new("home", agent));
+            let cluster =
+                tomori_protocol::cluster::Cluster::new(&home).with_audience(spot(arrival).eyes());
+            assert_eq!(
+                tomori_environment::sightlines::fits(&cluster, arrival.position[1], solids),
+                Ok(()),
+                "{id}"
+            );
             // One of its own walls in the role, as the farmyard's notice board, of at least two slots, is read by walking
             // up to it, and seen from where participants arrive.
             if let Some(index) = environment.status_wall().and_then(|status| status.index()) {

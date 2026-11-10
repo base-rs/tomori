@@ -694,7 +694,12 @@ fn layout(
     }
     if workspace.truncated {
         notices.push("Workspace discovery truncated [LIMIT]".into());
-    } else if stations.len() < stations_count_hint(workspace) {
+    } else if stations
+        .iter()
+        .map(|station| station.more.clamp(1, 64))
+        .sum::<usize>()
+        < stations_count_hint(workspace)
+    {
         notices.push("Workspace station projection incomplete".into());
     }
     let results = results(workspace);
@@ -782,15 +787,21 @@ fn station_panel(
     state: State,
     viewer: Option<[f32; 3]>,
 ) -> Panel {
-    let (state_text, accent) = state_label(&state);
+    // A sign for those gathered into a cluster's "+N more" says how many, listing them while it is pointed at.
+    let more = (station.more > 0).then(|| format!("+{} more", station.more));
+    let (state_text, accent) = match &more {
+        Some(more) => (more.as_str(), MORE_ACCENT),
+        None => state_label(&state),
+    };
     let [sx, sy, sz] = position;
     // Facing this client's viewer, wherever they walk, or whoever the agent faces, the eyes at home unless it is
     // summoned; upright, turning only about its own upright, so that it never leans.
     let face = viewer.unwrap_or(station.facing);
     let normal = facing_from(position, face, station.facing);
     let right = [normal[2], 0.0, -normal[0]];
-    // Beyond reading distance from them, drawn larger in proportion, so that it reads as one there does.
-    let scale = sign_scale(station.position, station.facing);
+    // Beyond reading distance from them, drawn larger in proportion, so that it reads as one there does; in a compact
+    // cluster, smaller as its worker's footprint is.
+    let scale = sign_scale(station.position, station.facing) * compact(station);
     let pixel = SIGN_PIXEL * scale;
     let lines = label_lines(&station.title, state_text);
     // As wide as its widest row, its title's or its pill's, so that its rows stand centred above its worker.
@@ -821,6 +832,18 @@ fn station_panel(
             scale,
         }),
         rule: None,
+    }
+}
+
+/// The accent of the sign for the workers gathered into a cluster's "+N more".
+const MORE_ACCENT: [f32; 3] = [0.7, 0.75, 0.85];
+
+/// How large `station`'s sign is drawn, as a share of its full size, as its cluster says: within 0.1 and 1.
+fn compact(station: &Station) -> f32 {
+    if station.scale.is_finite() {
+        station.scale.clamp(0.1, 1.0)
+    } else {
+        1.0
     }
 }
 
@@ -916,11 +939,11 @@ fn sign_scale(station: [f32; 3], facing: [f32; 3]) -> f32 {
 /// membership changes; when stations move, as when the workers' arrangement changes or the agent is summoned and they
 /// glide after it, every moved station's sign is forgotten before any is placed again, so that none is pushed aside by
 /// where a neighbour's stood. A post preserves association. Kept by identity: the sign's place, then the station's
-/// place and whom it faces that it was worked out for.
+/// place, whom it faces and how large it is drawn that it was worked out for.
 #[derive(Default)]
 struct LabelPlacement(
     std::collections::BTreeMap<String, [f32; 3]>,
-    std::collections::BTreeMap<String, ([f32; 3], [f32; 3])>,
+    std::collections::BTreeMap<String, ([f32; 3], [f32; 3], f32)>,
 );
 
 impl LabelPlacement {
@@ -930,7 +953,8 @@ impl LabelPlacement {
             stations
                 .binary_search_by(|s| s.id.as_str().cmp(id.as_str()))
                 .is_ok_and(|index| {
-                    self.1.get(id) == Some(&(stations[index].position, stations[index].facing))
+                    let station = stations[index];
+                    self.1.get(id) == Some(&(station.position, station.facing, compact(station)))
                 })
         };
         let kept: std::collections::BTreeSet<String> =
@@ -945,7 +969,8 @@ impl LabelPlacement {
         }
         let own = glam::Vec3::from_array(station.position);
         let viewer = glam::Vec3::new(station.facing[0], 0.0, station.facing[2]);
-        let scale = sign_scale(station.position, station.facing);
+        // Spaced as it is drawn: larger far off, smaller in a compact cluster.
+        let scale = sign_scale(station.position, station.facing) * compact(station);
         let from = own - viewer;
         // The angle about whoever it faces between columns, a column apart at the station's distance, or half a turn
         // nearer.
@@ -963,11 +988,9 @@ impl LabelPlacement {
         };
         let clear = |candidate: &glam::Vec3| {
             self.0.iter().all(|(id, other)| {
-                let apart = scale.max(
-                    self.1
-                        .get(id)
-                        .map_or(1.0, |(station, facing)| sign_scale(*station, *facing)),
-                );
+                let apart = scale.max(self.1.get(id).map_or(1.0, |(station, facing, compact)| {
+                    sign_scale(*station, *facing) * compact
+                }));
                 let other = glam::Vec3::from_array(*other);
                 (candidate.y - other.y).abs() >= SIGN_APART[0] * apart
                     || (candidate.x - other.x).hypot(candidate.z - other.z) >= SIGN_APART[1] * apart
@@ -984,8 +1007,10 @@ impl LabelPlacement {
         candidates.sort_by(|a, b| a.distance_squared(own).total_cmp(&b.distance_squared(own)));
         let position = candidates.into_iter().find(clear).unwrap_or(own).to_array();
         self.0.insert(station.id.clone(), position);
-        self.1
-            .insert(station.id.clone(), (station.position, station.facing));
+        self.1.insert(
+            station.id.clone(),
+            (station.position, station.facing, compact(station)),
+        );
         position
     }
 }
@@ -1563,6 +1588,88 @@ mod tests {
     }
 
     #[test]
+    fn a_compact_sign_is_drawn_and_spaced_smaller_and_a_gathered_sign_says_how_many_it_stands_for()
+    {
+        let station = Station {
+            facing: crate::delegation::HOME_EYES,
+            id: "w0".into(),
+            title: "Investigate the coop".into(),
+            state: State::Running,
+            position: [0.0, 1.25, -2.8],
+            opacity: 1.0,
+            scale: 1.0,
+            more: 0,
+        };
+        let full = station_panel(&station, station.position, State::Running, None);
+        let small = Station {
+            scale: tomori_protocol::cluster::COMPACT,
+            ..station.clone()
+        };
+        let compacted = station_panel(&small, small.position, State::Running, None);
+        assert!((compacted.pixel - full.pixel * tomori_protocol::cluster::COMPACT).abs() < 1e-7);
+        assert_eq!(
+            compacted.sign.as_ref().unwrap().scale,
+            tomori_protocol::cluster::COMPACT
+        );
+        // Out of bounds, as from a spectator's frame, within them.
+        for (scale, drawn) in [(f32::NAN, 1.0), (0.0, 0.1), (3.0, 1.0)] {
+            assert_eq!(
+                compact(&Station {
+                    scale,
+                    ..station.clone()
+                }),
+                drawn
+            );
+        }
+        // Signs of a compact cluster, its columns 0.735 m apart, each stand above their own station.
+        let mut placements = LabelPlacement::default();
+        let beside = Station {
+            id: "w1".into(),
+            position: [0.735, 1.25, -2.8],
+            ..small.clone()
+        };
+        assert_eq!(placements.position(&small), small.position);
+        assert_eq!(placements.position(&beside), beside.position);
+        placements.retain(&[&small, &beside]);
+        assert_eq!(placements.position(&beside), beside.position);
+        // The sign for four workers gathered into a cluster's "+N more" says so in its pill.
+        let gathered = Station {
+            title: String::new(),
+            more: 4,
+            ..small.clone()
+        };
+        let sign = station_panel(&gathered, gathered.position, State::Running, None);
+        assert_eq!(sign.lines.last().unwrap(), "+4 more");
+        assert_eq!(sign.accent, MORE_ACCENT);
+        // Standing for those it gathers, it leaves the projection complete; without it, it is not.
+        let nodes = (0..5)
+            .map(|i| crate::delegation::Node {
+                id: format!("w{i}"),
+                parent_id: Some("root".into()),
+                title: String::new(),
+                state: State::Running,
+            })
+            .collect();
+        let workspace = Workspace {
+            nodes,
+            ..Default::default()
+        };
+        let incomplete = |panels: &[Panel]| {
+            panels
+                .iter()
+                .any(|panel| panel.lines.iter().any(|line| line.contains("incomplete")))
+        };
+        let gathered = Station {
+            id: "w1".into(),
+            ..gathered
+        };
+        let (panels, _) = test_layout(&workspace, &[station.clone(), gathered], 0, 0);
+        assert!(!incomplete(&panels));
+        let (panels, _) = test_layout(&workspace, &[station], 0, 0);
+        assert!(incomplete(&panels));
+    }
+
+    #[test]
     fn signs_and_cards_cut_japanese_and_mixed_titles_by_the_cells_they_take() {
         use crate::ui_text::width;
         let titles = [
@@ -1600,6 +1707,8 @@ mod tests {
                 state: State::Completed,
                 position: [0.0, 1.25, -2.8],
                 opacity: 1.0,
+                scale: 1.0,
+                more: 0,
             };
             let sign = station_panel(&station, station.position, State::Completed, None);
             assert_eq!(
@@ -1712,6 +1821,8 @@ mod tests {
                         },
                         state: State::Completed,
                         opacity: 1.0,
+                        scale: 1.0,
+                        more: 0,
                     })
                     .collect();
                 let mut placements = LabelPlacement::default();
@@ -1823,6 +1934,8 @@ mod tests {
                         position,
                         state: State::Unknown,
                         opacity: 1.0,
+                        scale: 1.0,
+                        more: 0,
                     },
                     position,
                     State::Unknown,
@@ -1846,6 +1959,8 @@ mod tests {
             state: State::Running,
             opacity: 1.0,
             position,
+            scale: 1.0,
+            more: 0,
         };
         let mut placements = LabelPlacement::default();
         // Placed by an environment off the default arc, or near home, a sign stands above its own station.
@@ -1916,6 +2031,8 @@ mod tests {
             state: State::Running,
             opacity: 1.0,
             position,
+            scale: 1.0,
+            more: 0,
         };
         // 64 at one spot 2 m ahead, and 64 at one spot just ahead of home, where columns cannot part them.
         for spot in [[0.0, 1.2, -2.0], [0.0, 1.2, -0.3]] {
@@ -1950,6 +2067,8 @@ mod tests {
             state: State::Running,
             opacity: 1.0,
             position: [0.0, 1.2, -3.0],
+            scale: 1.0,
+            more: 0,
         };
         // Where its leader ends: the lowest point of its mesh, its dot about the station's middle.
         let leader_end = |sign: [f32; 3], viewer: Option<[f32; 3]>| {
@@ -2029,7 +2148,7 @@ mod tests {
                 &mut placements,
                 None,
             );
-            scene.arrange(arrangement, tomori_scene::anchors::EYES, None);
+            scene.arrange(arrangement, tomori_scene::anchors::EYES, None, None);
             scene.update(Some("root"), &workspace, 0.0);
             layout(
                 &workspace,
@@ -2081,7 +2200,7 @@ mod tests {
             position: tomori_scene::swarm::CENTER + glam::Vec3::new(0.0, 0.0, -6.0),
             ..Anchor::AGENT
         };
-        scene.arrange(away, tomori_scene::anchors::EYES, None);
+        scene.arrange(away, tomori_scene::anchors::EYES, None, None);
         // Its workers glide there, their signs with them.
         for _ in 0..400 {
             scene.update(Some("root"), &workspace, 1.0 / 60.0);
@@ -2104,7 +2223,7 @@ mod tests {
             assert!((home[id][2] - origin[2]).abs() > 2.0, "{id}");
         }
         // And back, where they were.
-        scene.arrange(Anchor::AGENT, tomori_scene::anchors::EYES, None);
+        scene.arrange(Anchor::AGENT, tomori_scene::anchors::EYES, None, None);
         for _ in 0..400 {
             scene.update(Some("root"), &workspace, 1.0 / 60.0);
         }
@@ -2126,6 +2245,8 @@ mod tests {
                     state: State::Running,
                     opacity: 1.0,
                     position,
+                    scale: 1.0,
+                    more: 0,
                 })
                 .collect();
             let mut placements = LabelPlacement::default();
@@ -2257,6 +2378,8 @@ mod tests {
             state: State::Running,
             position: [1.0, 1.0, -2.0],
             opacity: 1.0,
+            scale: 1.0,
+            more: 0,
         };
         let full = test_layout(&workspace, std::slice::from_ref(&station), 0, 0)
             .0
@@ -2368,6 +2491,8 @@ mod tests {
             position,
             state,
             opacity: 1.0,
+            scale: 1.0,
+            more: 0,
         };
         station_panel(&station, position, state, None)
     }
@@ -2414,6 +2539,8 @@ mod tests {
             state: State::Completed,
             position: [0.0, 1.4, -3.0],
             opacity: 1.0,
+            scale: 1.0,
+            more: 0,
         };
         let panel = test_layout(&workspace, &[old_snapshot], 0, 0).0.remove(0);
         assert_eq!(panel.lines[1], "Error");
@@ -2498,6 +2625,8 @@ mod tests {
                 state: State::Running,
                 position: [bad, 1.4, -2.0],
                 opacity: 1.0,
+                scale: 1.0,
+                more: 0,
             };
             assert!(
                 test_layout(&workspace, &[station], 0, 0)
@@ -2640,6 +2769,8 @@ mod tests {
             position: [0.0, 1.4, -2.7],
             state: State::Waiting,
             opacity: 1.0,
+            scale: 1.0,
+            more: 0,
         };
         for (at, viewer) in [
             ([0.0, 1.4, -2.7], [2.0, 1.6, -1.0]),
@@ -2946,6 +3077,8 @@ mod tests {
                     state: State::Completed,
                     position: [0.0, 1.25, -2.8],
                     opacity: 1.0,
+                    scale: 1.0,
+                    more: 0,
                 };
                 // Rendering fixture deliberately exercises a centered arbitrary
                 // plane. Real placement is tested separately with 128 labels below.
@@ -3425,6 +3558,8 @@ mod tests {
                         position: crate::delegation::slot_position(i).to_array(),
                         state: State::Unknown,
                         opacity: 1.0,
+                        scale: 1.0,
+                        more: 0,
                     })
                     .collect();
                 graphics.update(&device, &queue, &Workspace::default(), &stations, None);
@@ -3552,6 +3687,8 @@ mod tests {
             state: State::Completed,
             position: [0.0, 1.25, -2.8],
             opacity: 1.0,
+            scale: 1.0,
+            more: 0,
         };
         let sign = station_panel(&station, station.position, State::Completed, None);
         let card = Panel {
@@ -3643,6 +3780,8 @@ mod tests {
                 state: State::Running,
                 opacity: 1.0,
                 position: HomeArc::at(Anchor::AGENT, EYES, slot).to_array(),
+                scale: 1.0,
+                more: 0,
             })
             .collect();
         let middle = glam::Vec3::new(0.0, 1.2, -3.2);
@@ -3770,6 +3909,8 @@ mod tests {
                     state: State::Running,
                     opacity: 1.0,
                     position: HomeArc::at(origin, audience, slot).to_array(),
+                    scale: 1.0,
+                    more: 0,
                 })
                 .collect();
             let centre = stations
@@ -3884,6 +4025,8 @@ mod tests {
                     state: State::Running,
                     opacity: 1.0,
                     position: HomeArc::at(origin, audience, slot).to_array(),
+                    scale: 1.0,
+                    more: 0,
                 })
                 .collect();
             let mut placements = LabelPlacement::default();

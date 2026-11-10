@@ -51,6 +51,27 @@ pub const POINTING_REACH: f32 = 3.0;
 pub fn pointing_radius(origin: Vec3, center: Vec3) -> f32 {
     POINTING_RADIUS * (origin.distance(center) / POINTING_REACH).max(1.0)
 }
+/// The most satellites that orbit the agent while it is away from home.
+pub const MOTES: usize = 8;
+/// How large a satellite is, in metres across.
+pub const MOTE_SIDE: f32 = 0.05;
+/// How long a finished worker's satellite pulses and fades for, in seconds.
+pub const PULSE_SECONDS: f32 = 1.5;
+/// How long the satellites take to go once round the agent, in seconds.
+const ORBIT_SECONDS: f32 = 12.0;
+/// How far beyond the agent's reach the satellites orbit, in metres.
+const ORBIT_CLEARANCE: f32 = 0.15;
+
+/// A satellite: the identity and slot of the worker it stands for, its colour, its angle about the agent once shown,
+/// and how long it has pulsed for, once its worker finished.
+struct Mote {
+    id: String,
+    slot: usize,
+    color: Vec3,
+    angle: Option<f32>,
+    pulse: Option<f32>,
+}
+
 /// How much paler the worker pointed at is drawn, towards white.
 const HIGHLIGHT_WHITENING: f32 = 0.45;
 /// How much larger the worker pointed at is drawn.
@@ -319,6 +340,16 @@ pub struct Station {
     /// it.
     #[serde(default = "home_eyes")]
     pub facing: [f32; 3],
+    /// How large its sign is drawn, as a share of its full size: smaller in a compact cluster.
+    #[serde(default = "full_opacity")]
+    pub scale: f32,
+    /// How many workers its sign stands for, gathered into a cluster's "+N more" sign, or 0 for its own worker's.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more: usize,
+}
+
+fn is_zero(more: &usize) -> bool {
+    *more == 0
 }
 
 /// Where the eyes are at home, which a station's sign faces unless the agent is summoned.
@@ -347,6 +378,9 @@ impl Station {
                 .all(|v| v.is_finite() && v.abs() <= 100.0)
             && self.opacity.is_finite()
             && (0.0..=1.0).contains(&self.opacity)
+            && self.scale.is_finite()
+            && (0.1..=1.0).contains(&self.scale)
+            && self.more <= MAX_WORKERS
     }
 }
 
@@ -365,6 +399,10 @@ struct Worker {
     anchor: Vec3,
     /// Where it was placed, which it glides to when the arrangement changes.
     place: Vec3,
+    /// How large its sign is drawn, as a share of its full size: smaller in a compact cluster.
+    scale: f32,
+    /// Whether it is gathered into its cluster's "+N more" sign, rather than standing in a slot of its own.
+    more: bool,
     particles: [Vec3; PARTICLES],
     particle_scales: [Vec3; PARTICLES],
     flight_start: [Vec3; PARTICLES],
@@ -426,6 +464,24 @@ pub struct Scene {
     origin: Anchor,
     /// Where the eyes are of whoever the agent faces, whom the workers gather about.
     audience: Vec3,
+    /// The room the home cluster may take, as the joined space's environment gives it, or none for today's arc.
+    extent: Option<tomori_protocol::cluster::Extent>,
+    /// The home cluster, about the origin, gathered about the audience, in the extent.
+    cluster: tomori_protocol::cluster::Cluster,
+    /// How the home cluster stands for the slots its live workers take: it changes only as the highest slot taken
+    /// crosses what one of its steps holds, when every live worker is placed again.
+    layout: tomori_protocol::cluster::Arrangement,
+    /// Whether the ray points at the workers gathered into the "+N more" sign.
+    pointed_more: bool,
+    /// Where the agent stands while it is away from home, and how far it reaches, which its satellites orbit.
+    away: Option<(Vec3, f32)>,
+    /// The satellites orbiting the agent while it is away, one for each worker still working, by identity.
+    motes: Vec<Mote>,
+    /// The satellites as they are drawn this frame, also among [`Self::cubes`].
+    satellites: Vec<Cube>,
+    /// The slots the home cluster's live and leaving workers took as it was last laid out, so that it is laid out again
+    /// only as they change.
+    reslotted: Option<(Vec<usize>, Vec<usize>)>,
     /// How workers are placed about it: by the joined space's environment's registered placement, or the default arc.
     placement: Option<Placement>,
     /// The placements that have panicked, which this scene never calls again: at most one for each environment the
@@ -455,16 +511,30 @@ impl Scene {
             hit_point: None,
             origin: Anchor::AGENT,
             audience: crate::anchors::EYES,
+            extent: None,
+            cluster: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None),
+            layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
+            pointed_more: false,
+            away: None,
+            motes: Vec::new(),
+            satellites: Vec::with_capacity(MOTES),
+            reslotted: None,
             placement: None,
             poisoned: Vec::new(),
         }
     }
 
-    /// Arrange the workers about `origin`, gathered about whoever's eyes are at `audience`, by `placement`, or by the
-    /// default arc without one, from now on. Each live worker is placed again, in the order of its slot, only when the
-    /// arrangement changes, as when the agent is summoned or sent home, and glides there, its sign with it; otherwise
-    /// nothing moves. See `design/environments.md`.
-    pub fn arrange(&mut self, origin: Anchor, audience: Vec3, placement: Option<Placement>) {
+    /// Arrange the workers about `origin`, gathered about whoever's eyes are at `audience`, by `placement`, or without
+    /// one in the home cluster fitted to `extent`, or on the default arc without that, from now on. Each live worker is
+    /// placed again, in the order of its slot, only when the arrangement changes, as when the space changes
+    /// environment, and glides there, its sign with it; otherwise nothing moves. See `design/environments.md`.
+    pub fn arrange(
+        &mut self,
+        origin: Anchor,
+        audience: Vec3,
+        extent: Option<tomori_protocol::cluster::Extent>,
+        placement: Option<Placement>,
+    ) {
         // One that has panicked is never called again: its workers stand on the arc.
         let placement = placement.filter(|placement| {
             !self
@@ -474,6 +544,7 @@ impl Scene {
         });
         let same = self.origin == origin
             && self.audience == audience
+            && self.extent == extent
             && match (&self.placement, &placement) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -484,7 +555,96 @@ impl Scene {
         }
         self.origin = origin;
         self.audience = audience;
+        self.extent = extent;
         self.placement = placement;
+        self.cluster = crate::anchors::cluster(origin, audience, extent);
+        self.layout = self.cluster.arrange(self.span(&[]));
+        self.reslotted = None;
+        self.place_live();
+    }
+
+    /// Close the gaps among the home cluster's slots, given room and no placement, as
+    /// [`tomori_protocol::cluster::Cluster::reslot`] does, among the live workers and those `arriving`, keeping clear of
+    /// the slots of those leaving and of the `absent` parents it remembers, and lay it out for the slots then taken, only
+    /// as its workers come and go.
+    fn reslot(&mut self, arriving: &mut [(usize, &str, &Node)], absent: &[usize]) {
+        let live = |worker: &&Worker| worker.retired.is_none();
+        let mut members: Vec<usize> = self
+            .workers
+            .values()
+            .filter(live)
+            .map(|worker| worker.slot)
+            .chain(arriving.iter().map(|(slot, ..)| *slot))
+            .collect();
+        let mut held: Vec<usize> = self
+            .workers
+            .values()
+            .filter(|worker| worker.retired.is_some())
+            .map(|worker| worker.slot)
+            .chain(absent.iter().copied())
+            .collect();
+        let bounded = self.extent.is_some() && self.placement.is_none();
+        let changed = bounded && self.cluster.reslot(&mut members, &held, &self.layout);
+        let mut moved = false;
+        if changed {
+            let mut slots = members.iter().copied();
+            for (id, worker) in self
+                .workers
+                .iter_mut()
+                .filter(|(_, worker)| worker.retired.is_none())
+            {
+                let slot = slots.next().expect("a slot for each live worker");
+                if worker.slot != slot {
+                    worker.slot = slot;
+                    self.slots.insert(id.clone(), slot);
+                    moved = true;
+                }
+            }
+            for (entry, slot) in arriving.iter_mut().zip(slots) {
+                entry.0 = slot;
+                self.slots.insert(entry.1.to_owned(), slot);
+            }
+            // The satellites keep to their workers' slots.
+            for mote in &mut self.motes {
+                mote.slot = self.slots.get(&mote.id).copied().unwrap_or(mote.slot);
+            }
+        }
+        members.sort_unstable();
+        held.sort_unstable();
+        let key = (members, held);
+        if !changed && self.reslotted.as_ref() == Some(&key) {
+            return;
+        }
+        let span = key.0.last().map_or(0, |slot| slot + 1);
+        self.reslotted = Some(key);
+        self.fit(span, moved);
+    }
+
+    /// How many slots the home cluster lays out for: up to the highest that a live worker, or one of `arriving`, takes.
+    fn span(&self, arriving: &[usize]) -> usize {
+        self.workers
+            .values()
+            .filter(|worker| worker.retired.is_none())
+            .map(|worker| worker.slot)
+            .chain(arriving.iter().copied())
+            .max()
+            .map_or(0, |slot| slot + 1)
+    }
+
+    /// Lay the home cluster out for `span` slots, placing every live worker again if that changes how it stands, or a
+    /// live worker took another slot, and no placement is registered, which places each worker only as it arrives.
+    fn fit(&mut self, span: usize, moved: bool) {
+        let layout = self.cluster.arrange(span);
+        if layout != self.layout || moved {
+            self.layout = layout;
+            if self.placement.is_none() {
+                self.place_live();
+            }
+        }
+    }
+
+    /// Place every live worker again, in the order of its slot, each told of those placed before it.
+    fn place_live(&mut self) {
         let root = self.root.clone();
         let mut live: Vec<(usize, &str, Option<&str>, State)> = self
             .workers
@@ -500,6 +660,7 @@ impl Scene {
             .collect();
         live.sort_by_key(|(slot, ..)| *slot);
         let mut placed: Vec<Placed<'_>> = Vec::with_capacity(live.len());
+        let mut spots = Vec::with_capacity(live.len());
         let mut panicked = false;
         for (slot, id, parent, state) in live {
             let mut placing = Placing::new(id, slot);
@@ -508,21 +669,27 @@ impl Scene {
             placing.workers = &placed;
             placing.audience = self.audience;
             let placement = self.placement.as_ref().filter(|_| !panicked);
-            let (position, panic) = crate::anchors::place(self.origin, placement, &placing);
+            let (spot, panic) = crate::anchors::place(
+                self.origin,
+                placement,
+                &placing,
+                &self.cluster,
+                &self.layout,
+            );
             panicked |= panic;
             // Placed in the order of their slots, so those placed stay in that order.
-            placed.push(Placed::new(id, slot, state, position));
+            placed.push(Placed::new(id, slot, state, spot.position));
+            spots.push((id.to_owned(), spot));
         }
-        let anchors: Vec<(String, Vec3)> = placed
-            .iter()
-            .map(|placed| (placed.id.to_owned(), placed.position))
-            .collect();
         // Each glides there, its flock and its sign with it.
-        for (id, anchor) in anchors {
-            self.workers
+        for (id, spot) in spots {
+            let worker = self
+                .workers
                 .get_mut(&id)
-                .expect("each live worker was placed")
-                .place = anchor;
+                .expect("each live worker was placed");
+            worker.place = spot.position;
+            worker.scale = spot.scale;
+            worker.more = spot.more;
         }
         self.give_up(panicked);
     }
@@ -541,7 +708,7 @@ impl Scene {
     /// puts its slot about the origin, as for a parent that is not shown.
     fn standing(&self, id: &str, slot: usize) -> Vec3 {
         self.workers.get(id).map_or_else(
-            || crate::anchors::HomeArc::at(self.origin, self.audience, slot),
+            || Vec3::from_array(self.cluster.slot(&self.layout, slot).position),
             |worker| worker.place,
         )
     }
@@ -565,7 +732,9 @@ impl Scene {
     }
 
     /// Point at the workers with `ray`, or with nothing: highlight the nearest worker it meets and return its
-    /// identifier. Pointing only highlights; it never takes the trigger. See `design/interaction.md`.
+    /// identifier, or, for one gathered into the "+N more" sign, highlight them all and list them on it, naming none.
+    /// Pointing only highlights; it never takes the trigger. The satellites are never pointed at. See
+    /// `design/interaction.md`.
     pub fn point(&mut self, ray: Option<Ray>) -> Option<&str> {
         // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
         let mut hit: Option<(f32, &str, Vec3)> = None;
@@ -587,7 +756,11 @@ impl Scene {
         self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
             ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
         });
-        let hit = hit.map(|(_, id, _)| id);
+        // One gathered into the "+N more" sign is pointed at as the sign, which names none of them.
+        let more =
+            hit.is_some_and(|(_, id, _)| self.workers.get(id).is_some_and(|worker| worker.more));
+        self.pointed_more = more;
+        let hit = hit.map(|(_, id, _)| id).filter(|_| !more);
         if self.highlighted.as_deref() != hit {
             self.highlighted = hit.map(str::to_owned);
         }
@@ -601,6 +774,97 @@ impl Scene {
 
     pub fn cubes(&self) -> &[Cube] {
         &self.cubes
+    }
+
+    /// Say where the agent stands while it is `away` from home, its middle and how far it reaches, or `None` while it
+    /// is home: its satellites orbit it while it is away. Call before [`Self::update`]. See `design/interaction.md`.
+    pub fn set_agent(&mut self, away: Option<(Vec3, f32)>) {
+        self.away = away.filter(|(centre, reach)| {
+            centre.is_finite() && centre.abs().max_element() <= 90.0 && reach.is_finite()
+        });
+    }
+
+    /// The satellites drawn this frame, among [`Self::cubes`]: while the agent is away from home, a small mote for each
+    /// of at most [`MOTES`] workers still working, running or waiting, in the order of their slots, in its state's
+    /// colour, orbiting it; a worker finishing while it is away, its mote pulsing once and fading. They are never
+    /// pointed at and have no signs. See `design/interaction.md`.
+    pub fn satellites(&self) -> &[Cube] {
+        &self.satellites
+    }
+
+    /// Move the satellites on by `dt` seconds about the agent, and draw them.
+    fn orbit(&mut self, dt: f32) {
+        self.satellites.clear();
+        let Some((centre, reach)) = self.away else {
+            self.motes.clear();
+            return;
+        };
+        for (id, worker) in &self.workers {
+            let working =
+                worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting);
+            let finished = worker.retired.is_none() && is_terminal(worker.state);
+            match self.motes.iter_mut().find(|mote| mote.id == *id) {
+                Some(mote) if working => {
+                    mote.color = palette(worker.state);
+                    mote.pulse = None;
+                }
+                Some(mote) if finished && mote.pulse.is_none() => {
+                    mote.color = palette(worker.state);
+                    mote.pulse = Some(0.0);
+                }
+                None if working => {
+                    self.motes.push(Mote {
+                        id: id.clone(),
+                        slot: worker.slot,
+                        color: palette(worker.state),
+                        angle: None,
+                        pulse: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        // A mote stays while its worker works, or for its one pulse.
+        let workers = &self.workers;
+        self.motes.retain_mut(|mote| match &mut mote.pulse {
+            Some(pulse) => {
+                *pulse += dt;
+                *pulse < PULSE_SECONDS
+            }
+            None => workers.get(&mote.id).is_some_and(|worker| {
+                worker.retired.is_none() && matches!(worker.state, State::Running | State::Waiting)
+            }),
+        });
+        // In the order of their slots, sorted in place, so that drawing them allocates nothing.
+        self.motes.sort_unstable_by_key(|mote| mote.slot);
+        let count = self.motes.len().min(MOTES);
+        let spin = (self.time / f64::from(ORBIT_SECONDS)).fract() as f32 * std::f32::consts::TAU;
+        let radius = reach.max(0.2) + ORBIT_CLEARANCE;
+        for (index, mote) in self.motes.iter_mut().take(MOTES).enumerate() {
+            // Evenly about it, each easing round to its place as others come and go.
+            let target = index as f32 * std::f32::consts::TAU / count as f32;
+            let angle = mote.angle.get_or_insert(target);
+            let turn = (target - *angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            *angle += turn * (1.0 - (-4.0 * dt).exp());
+            let around = *angle + spin;
+            let size = MOTE_SIDE * mote.pulse.map_or(1.0, pulse);
+            let position = centre
+                + Vec3::new(
+                    around.cos() * radius,
+                    (around * 2.0).sin() * 0.05,
+                    around.sin() * radius,
+                );
+            let before = self.cubes.len();
+            push_cube(
+                &mut self.cubes,
+                position,
+                Vec3::splat(size),
+                mote.color,
+                Quat::IDENTITY,
+            );
+            self.satellites.extend(self.cubes[before..].iter().copied());
+        }
     }
 
     #[cfg(test)]
@@ -733,6 +997,7 @@ impl Scene {
         // partial hierarchy cannot remove workers, but can report their states.
         let time = self.time;
         let mut retiring_stations = Vec::new();
+        let mut gathered: Vec<(usize, Station)> = Vec::new();
         for (id, worker) in &mut self.workers {
             // Only a fully fitted completed form rotates as a rigid body. Its
             // hidden partition follows exactly, so splitting never snaps back
@@ -872,8 +1137,9 @@ impl Scene {
             }
             let color = worker.color * (0.70 + 0.30 * worker.visual_opacity);
             // The worker pointed at glows paler and a little larger, so the participant sees what they would ask about.
-            let pointed =
-                worker.retired.is_none() && self.highlighted.as_deref() == Some(id.as_str());
+            let pointed = worker.retired.is_none()
+                && (self.highlighted.as_deref() == Some(id.as_str())
+                    || (worker.more && self.pointed_more));
             let (color, emphasis) = if pointed {
                 (color.lerp(Vec3::ONE, HIGHLIGHT_WHITENING), HIGHLIGHT_SCALE)
             } else {
@@ -914,13 +1180,37 @@ impl Scene {
                 state,
                 title: worker.title.clone(),
                 opacity,
+                scale: worker.scale,
+                more: 0,
             };
-            if worker.retired.is_none() {
+            if worker.more {
+                // Gathered into the "+N more" sign, it has none of its own.
+                if worker.retired.is_none() {
+                    gathered.push((worker.slot, station));
+                }
+            } else if worker.retired.is_none() {
                 self.stations.push(station);
             } else {
                 retiring_stations.push(station);
             }
         }
+        // One sign for those gathered, where the first of them stands, listing them while it is pointed at.
+        gathered.sort_by_key(|(slot, _)| *slot);
+        if let Some((_, first)) = gathered.first() {
+            let mut sign = first.clone();
+            sign.more = gathered.len();
+            sign.title = if self.pointed_more {
+                let titles: Vec<&str> = gathered
+                    .iter()
+                    .map(|(_, station)| station.title.as_str())
+                    .collect();
+                titles.join(" · ").chars().take(160).collect()
+            } else {
+                String::new()
+            };
+            self.stations.push(sign);
+        }
+        self.orbit(dt);
         // Prefer live stations when departures and arrivals overlap.
         let remaining = MAX_WORKERS.saturating_sub(self.stations.len());
         self.stations
@@ -1136,6 +1426,19 @@ impl Scene {
             .filter(|(id, _)| !self.workers.contains_key(**id))
             .map(|(&id, &node)| (self.slots[id], id, node))
             .collect();
+        // The home cluster's gaps close where that moves nobody who would not move anyway, and it lays out for the slots
+        // taken now, those arriving with them, placing every live worker again only where that changes how it stands.
+        let absent: Vec<usize> = nodes
+            .values()
+            .filter_map(|node| node.parent_id.as_deref())
+            .filter(|parent| {
+                *parent != root
+                    && !nodes.contains_key(parent)
+                    && !self.workers.contains_key(*parent)
+            })
+            .filter_map(|parent| self.slots.get(parent).copied())
+            .collect();
+        self.reslot(&mut arriving, &absent);
         if arriving.is_empty() {
             return;
         }
@@ -1159,15 +1462,22 @@ impl Scene {
             placing.workers = &placed;
             placing.audience = self.audience;
             let placement = self.placement.as_ref().filter(|_| !panicked);
-            let (position, panic) = crate::anchors::place(self.origin, placement, &placing);
+            let (spot, panic) = crate::anchors::place(
+                self.origin,
+                placement,
+                &placing,
+                &self.cluster,
+                &self.layout,
+            );
             panicked |= panic;
             let at = placed.partition_point(|placed| placed.slot < slot);
-            placed.insert(at, Placed::new(id, slot, node.state, position));
-            anchors.push(position);
+            placed.insert(at, Placed::new(id, slot, node.state, spot.position));
+            anchors.push(spot);
         }
         drop(placed);
         self.give_up(panicked);
-        for (&(slot, id, node), &anchor) in arriving.iter().zip(&anchors) {
+        for (&(slot, id, node), &spot) in arriving.iter().zip(&anchors) {
+            let anchor = spot.position;
             let parent_id = node.parent_id.as_deref().expect("nodes name their parent");
             // A parent arriving too stands where it was just placed.
             let origin = if parent_id == root {
@@ -1178,7 +1488,7 @@ impl Scene {
                     .position(|(_, arriving, _)| *arriving == parent_id)
                     .map_or_else(
                         || self.standing(parent_id, self.slots[parent_id]),
-                        |index| anchors[index],
+                        |index| anchors[index].position,
                     )
             };
             // A cached missing-parent slot preserves provenance, but is not an
@@ -1231,6 +1541,8 @@ impl Scene {
                     origin,
                     anchor,
                     place: anchor,
+                    scale: spot.scale,
+                    more: spot.more,
                     particles,
                     particle_scales,
                     flight_start: particles,
@@ -1301,21 +1613,13 @@ pub fn slot_position(slot: usize) -> Vec3 {
     crate::anchors::HomeArc::at(crate::anchors::Anchor::AGENT, crate::anchors::EYES, slot)
 }
 
-/// The side of `slot`'s column, -1 on the left and 1 on the right, its column, from the nearest the middle, and its
-/// row. Fill two comfortable front columns and two rows before wrapping around the observer. Slot identity is
-/// permanent, independent of membership size.
-pub(crate) fn slot_lane(slot: usize) -> (f32, usize, usize) {
-    let lane = slot % 4 + (slot % 32) / 8 * 4;
-    let side = if lane.is_multiple_of(2) { -1.0 } else { 1.0 };
-    (side, lane / 2, (slot / 32) * 2 + (slot % 8) / 4)
-}
+/// The side of `slot`'s column on the default arc, its column and its row, as [`tomori_protocol::cluster::lane`] says.
+#[cfg(test)]
+pub(crate) use tomori_protocol::cluster::lane as slot_lane;
 
-/// How far a column stands from the agent, about whoever watches, on an arc [`crate::anchors::ARC_RADIUS`] from them or
-/// further, in radians. Keep the entire coordinator cone clear, including the last columns: sixteen columns span the
-/// remaining 280 degrees, including the rear gap.
-pub(crate) fn slot_angle(column: usize) -> f32 {
-    (40.0 + column as f32 * (280.0 / 15.0)).to_radians()
-}
+/// How far a column of the default arc stands from the agent, as [`tomori_protocol::cluster::column_angle`] says.
+#[cfg(test)]
+pub(crate) use tomori_protocol::cluster::column_angle as slot_angle;
 
 fn sample(samples: &[Vec3; MAX_COORDINATOR_SAMPLES], count: usize, id: &str, i: usize) -> Vec3 {
     if count == 0 {
@@ -1343,6 +1647,13 @@ fn flight_duration(start: &[Vec3; PARTICLES], end: &[Vec3; PARTICLES], minimum: 
     // Smoothstep's peak derivative is 1.5. Allow room for the arcing path
     // and flock offsets, even for an unusually distant coordinator sample.
     minimum.max((distance + 0.2) * 1.5 / 4.0)
+}
+
+/// How large a satellite pulsing for `elapsed` seconds is drawn, as a share of its size: growing to nearly twice it
+/// and back over its first half second, then shrinking away by [`PULSE_SECONDS`].
+fn pulse(elapsed: f32) -> f32 {
+    let grow = 1.0 + 0.9 * (std::f32::consts::PI * (elapsed / 0.5).min(1.0)).sin();
+    grow * (1.0 - smooth(((elapsed - 0.5) / (PULSE_SECONDS - 0.5)).clamp(0.0, 1.0)))
 }
 
 fn smooth(t: f32) -> f32 {
@@ -2278,6 +2589,8 @@ mod tests {
             state: State::Waiting,
             title: "A worker".into(),
             opacity: 0.4,
+            scale: 1.0,
+            more: 0,
         };
         assert!(station.valid());
         let encoded = serde_json::to_string(&station).unwrap();
@@ -2290,7 +2603,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.opacity, 1.0);
+        assert_eq!((old.scale, old.more), (1.0, 0));
         assert!(old.valid());
+        assert!(!encoded.contains("more"));
+        // A compact sign, and one for those gathered into a cluster's "+N more", are kept, within bounds.
+        let gathered = Station {
+            scale: tomori_protocol::cluster::COMPACT,
+            more: 3,
+            ..station.clone()
+        };
+        let read: Station =
+            serde_json::from_str(&serde_json::to_string(&gathered).unwrap()).unwrap();
+        assert_eq!((read.scale, read.more), (gathered.scale, 3));
+        for (scale, more) in [(0.05, 0), (f32::NAN, 0), (1.2, 0), (1.0, MAX_WORKERS + 1)] {
+            assert!(
+                !Station {
+                    scale,
+                    more,
+                    ..station.clone()
+                }
+                .valid()
+            );
+        }
         for bad in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
             assert!(
                 !Station {
@@ -3344,7 +3678,7 @@ mod tests {
         let origin = turned(Vec3::new(1.0, 0.0, -6.0));
         let mut scene = Scene::new();
         // Arranged the same way as by default, nothing changes.
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None);
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None, None);
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         for (id, position) in anchors(&scene) {
@@ -3352,7 +3686,7 @@ mod tests {
         }
         // Moved and turned, every live worker is placed again, about the anchor, glides there, its sign with it, and
         // points at it there.
-        scene.arrange(origin, crate::anchors::EYES, None);
+        scene.arrange(origin, crate::anchors::EYES, None, None);
         scene.update(Some("root"), &w, 0.0);
         let before = anchors(&scene);
         for (id, position) in &before {
@@ -3404,7 +3738,7 @@ mod tests {
             orientation: Quat::IDENTITY,
         };
         let mut scene = Scene::new();
-        scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
+        scene.arrange(origin, crate::anchors::EYES, None, Some(placement.clone()));
         let mut w = workspace(vec![node("a", "root"), node("b", "a")]);
         settle(&mut scene, &w);
         // Each was told of the workers already standing, its parent, but not the root, its state and its slot.
@@ -3425,11 +3759,11 @@ mod tests {
         w.nodes[1].state = State::Waiting;
         w.nodes.push(node("c", "root"));
         for _ in 0..3 {
-            scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
+            scene.arrange(origin, crate::anchors::EYES, None, Some(placement.clone()));
             scene.update(Some("root"), &w, 1.0 / 60.0);
         }
         w.nodes.retain(|node| node.id != "b");
-        scene.arrange(origin, crate::anchors::EYES, Some(placement.clone()));
+        scene.arrange(origin, crate::anchors::EYES, None, Some(placement.clone()));
         scene.update(Some("root"), &w, 1.0 / 60.0);
         let after = anchors(&scene);
         assert_eq!(after["a"], before["a"]);
@@ -3453,7 +3787,7 @@ mod tests {
         // The worker leaving returns to its parent where it was placed.
         assert!(scene.workers["b"].return_end.iter().all(|p| *p == a));
         // Another arrangement places every live worker again, in the order of their slots.
-        scene.arrange(Anchor::HOME, crate::anchors::EYES, Some(placement));
+        scene.arrange(Anchor::HOME, crate::anchors::EYES, None, Some(placement));
         let replaced: Vec<String> = line.told.lock().unwrap()[3..]
             .iter()
             .map(|told| told.0.clone())
@@ -3464,7 +3798,7 @@ mod tests {
             Vec3::new(scene.slots["c"] as f32, 1.5, -3.0)
         );
         // Back to the default, the arc again.
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None);
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None, None);
         assert_eq!(scene.workers["a"].place, slot_position(scene.slots["a"]));
     }
 
@@ -3472,7 +3806,7 @@ mod tests {
     fn a_child_arriving_with_its_parent_launches_from_where_the_parent_is_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None, Some(placement));
         // Trusted twice, so that the next arrivals launch.
         let empty = workspace(Vec::new());
         scene.update(Some("root"), &empty, 0.0);
@@ -3509,7 +3843,12 @@ mod tests {
         let slots = std::sync::Arc::new(Slots::default());
         let placement: Placement = slots.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
+        scene.arrange(
+            Anchor::AGENT,
+            crate::anchors::EYES,
+            None,
+            Some(placement.clone()),
+        );
         // Identities that sort against their slots: "z" takes slot 0, "a" slot 1, "m" slot 2.
         let first = workspace(vec![node("z", "root"), node("a", "z")]);
         scene.update(Some("root"), &first, 0.0);
@@ -3523,7 +3862,12 @@ mod tests {
         // Arriving: those standing, in slot order, with each just placed among them.
         assert_eq!(told[3].len(), 3);
         // Placed again: the same order.
-        scene.arrange(turned(Vec3::ZERO), crate::anchors::EYES, Some(placement));
+        scene.arrange(
+            turned(Vec3::ZERO),
+            crate::anchors::EYES,
+            None,
+            Some(placement),
+        );
         let again = slots.0.lock().unwrap()[4..].to_vec();
         assert_eq!(again.last().unwrap().len(), 3);
         for workers in &again {
@@ -3549,7 +3893,12 @@ mod tests {
         let panics = std::sync::Arc::new(Panics::default());
         let placement: Placement = panics.clone();
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
+        scene.arrange(
+            Anchor::AGENT,
+            crate::anchors::EYES,
+            None,
+            Some(placement.clone()),
+        );
         let w = workspace(vec![node("a", "root"), node("b", "root")]);
         scene.update(Some("root"), &w, 0.0);
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
@@ -3559,12 +3908,17 @@ mod tests {
             node("c", "root"),
         ]);
         for _ in 0..3 {
-            scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement.clone()));
+            scene.arrange(
+                Anchor::AGENT,
+                crate::anchors::EYES,
+                None,
+                Some(placement.clone()),
+            );
             scene.update(Some("root"), &more, 0.0);
         }
         // Moved elsewhere with it, still not called.
         let away = turned(Vec3::new(0.0, 0.0, -3.0));
-        scene.arrange(away, crate::anchors::EYES, Some(placement.clone()));
+        scene.arrange(away, crate::anchors::EYES, None, Some(placement.clone()));
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(
@@ -3575,13 +3929,13 @@ mod tests {
         // Placing again: the first call panics, and the rest stand on the arc.
         let again = std::sync::Arc::new(Panics::default());
         let fresh: Placement = again.clone();
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(fresh));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None, Some(fresh));
         assert_eq!(again.0.load(Ordering::Relaxed), 1);
         for id in ["a", "b", "c"] {
             assert_eq!(scene.workers[id].anchor, slot_position(scene.slots[id]));
         }
         // Neither is called again.
-        scene.arrange(away, crate::anchors::EYES, Some(placement));
+        scene.arrange(away, crate::anchors::EYES, None, Some(placement));
         assert_eq!(panics.0.load(Ordering::Relaxed), 1);
         assert_eq!(scene.poisoned.len(), 2);
     }
@@ -3590,7 +3944,7 @@ mod tests {
     fn a_child_arriving_later_launches_from_where_its_parent_was_placed() {
         let placement: Placement = std::sync::Arc::new(Line::default());
         let mut scene = Scene::new();
-        scene.arrange(Anchor::AGENT, crate::anchors::EYES, Some(placement));
+        scene.arrange(Anchor::AGENT, crate::anchors::EYES, None, Some(placement));
         let parent = workspace(vec![node("lead", "root")]);
         scene.update(Some("root"), &parent, 0.0);
         scene.update(Some("root"), &parent, 0.0);
@@ -3612,7 +3966,7 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -6.0),
             orientation: Quat::IDENTITY,
         };
-        scene.arrange(away, crate::anchors::EYES, None);
+        scene.arrange(away, crate::anchors::EYES, None, None);
         const DT: f32 = 1.0 / 60.0;
         let mut previous: Vec<Vec3> = scene
             .cubes()
@@ -3659,6 +4013,7 @@ mod tests {
         scene.arrange(
             Anchor::AGENT,
             crate::anchors::EYES,
+            None,
             Some(std::sync::Arc::new(At(Vec3::splat(f32::NAN)))),
         );
         let w = workspace(vec![node("a", "root")]);
@@ -3669,6 +4024,7 @@ mod tests {
         above.arrange(
             Anchor::AGENT,
             crate::anchors::EYES,
+            None,
             Some(std::sync::Arc::new(At(Vec3::new(0.0, 2.0, 0.0)))),
         );
         let mut done = node("a", "root");
@@ -4144,7 +4500,7 @@ mod tests {
             orientation: Quat::IDENTITY,
         };
         let mut scene = Scene::new();
-        scene.arrange(origin, crate::anchors::EYES, None);
+        scene.arrange(origin, crate::anchors::EYES, None, None);
         let w = workspace(vec![node("a", "root")]);
         scene.update(Some("root"), &w, 0.0);
         let anchor = scene.workers["a"].anchor;
@@ -4497,3 +4853,6 @@ mod space_tests {
         assert_eq!(workspace.nodes[0].parent_id.as_deref(), Some("gone"));
     }
 }
+
+#[cfg(test)]
+mod clusters;

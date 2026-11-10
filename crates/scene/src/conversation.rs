@@ -2407,6 +2407,16 @@ impl Conversation {
             arrangement.home = home;
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
+        // The room the home cluster may take, where the environment gives it, with the home anchor where it says.
+        if let Some(home) = space
+            .anchors
+            .cluster(tomori_protocol::cluster::HOME)
+            .filter(|home| home.extent.is_some_and(|extent| extent.valid()))
+            && let Some(workers) = anchor(Some(home.pose))
+        {
+            arrangement.workers = workers;
+            arrangement.extent = home.extent;
+        }
         arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
         // Turned to whoever began speaking to it, about the vertical. See `design/environments.md`.
         if let Some(facing) = space
@@ -2436,6 +2446,7 @@ impl Conversation {
         let entourage = space.summoner.is_some() || space.movement.is_none();
         if space.summoned.is_some() && entourage {
             arrangement.workers = arrangement.agent;
+            arrangement.extent = None;
             arrangement.audience = space
                 .summoner
                 .map(glam::Vec3::from_array)
@@ -7933,11 +7944,63 @@ mod tests {
             state.summoner = Some([0.2, 1.4, 0.1]);
         }));
         let away = conversation.arrangement();
-        assert!(away.summoned());
+        assert!(away.summoned() && away.away());
         assert_eq!(away.agent, Anchor::from_pose(&summoned).unwrap());
         assert_eq!(away.home, Anchor::AGENT);
         assert_eq!(away.workers, away.agent);
         assert_eq!(away.audience, glam::Vec3::new(0.2, 1.4, 0.1));
+        // The home cluster's room, where the environment gives it, with its anchor where it says; one of room it may
+        // not have is today's arc at the workers anchor; and an older server's entourage takes no room.
+        let yard = tomori_protocol::Pose::at([0.0, 1.4, -5.0]).facing_towards([0.0, 1.6, 0.0]);
+        let room = tomori_protocol::cluster::Anchor::new("home", yard).with_extent(6.0, 2.5, 3.0);
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new()
+                .with_workers(agent)
+                .with_cluster(room.clone());
+        }));
+        let roomy = conversation.arrangement();
+        assert_eq!(roomy.workers, Anchor::from_pose(&yard).unwrap());
+        assert_eq!(
+            roomy.extent,
+            Some(tomori_protocol::cluster::Extent::new(6.0, 2.5, 3.0))
+        );
+        assert!(!roomy.away());
+        for (unusable, extent) in [
+            (room.clone().with_extent(0.1, 2.5, 3.0), true),
+            (tomori_protocol::cluster::Anchor::new("home", yard), false),
+        ] {
+            assert_eq!(unusable.extent.is_some(), extent);
+            conversation.apply(space(|state| {
+                state.environment = "sky".into();
+                state.anchors = Anchors::new()
+                    .with_workers(agent)
+                    .with_cluster(unusable.clone());
+            }));
+            let arc = conversation.arrangement();
+            assert_eq!(
+                (arc.workers, arc.extent),
+                (Anchor::from_pose(&agent).unwrap(), None)
+            );
+        }
+        let mut far = room.clone();
+        far.pose.position[0] = f32::NAN;
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new().with_workers(agent).with_cluster(far);
+        }));
+        assert_eq!(conversation.arrangement().extent, None);
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new().with_cluster(room.clone());
+            state.summoned = Some(summoned);
+            state.summoner = Some([0.2, 1.4, 0.1]);
+        }));
+        let entourage = conversation.arrangement();
+        assert_eq!(
+            (entourage.workers, entourage.extent),
+            (entourage.agent, None)
+        );
         // From a server that does not say whom, or says nonsense, about whoever it faces, 1.2 m before it.
         for summoner in [None, Some([f32::NAN, 0.0, 0.0]), Some([0.0, 0.0, 90.0])] {
             conversation.apply(space(|state| {

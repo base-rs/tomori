@@ -399,7 +399,7 @@ pub enum Renamer {
 /// assert!(anchors.workers.is_none());
 /// assert!(Anchors::new().is_empty());
 /// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Anchors {
     /// The agent's home: where the swarm's middle stands, its eye facing along the pose's +Z, until a participant
@@ -414,6 +414,12 @@ pub struct Anchors {
     /// environment that arrives elsewhere than its own origin facing −Z.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrival: Option<crate::Pose>,
+    /// The environment's cluster anchors that a client lays out, in the space's coordinates: for now, its `home`
+    /// anchor, where it gives the room the workers' arrangement may take, at [`Self::workers`] too, which an older
+    /// client keeps today's arc about. A client lays the workers out in that room by `tomori_protocol::cluster`. See
+    /// `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<crate::cluster::Anchor>,
 }
 
 impl Anchors {
@@ -440,9 +446,24 @@ impl Anchors {
         self
     }
 
+    /// These anchors, with the cluster anchor `anchor` too, in place of one of its name.
+    pub fn with_cluster(mut self, anchor: crate::cluster::Anchor) -> Self {
+        self.clusters.retain(|kept| kept.name != anchor.name);
+        self.clusters.push(anchor);
+        self
+    }
+
+    /// The cluster anchor named `name`, if it gives one.
+    pub fn cluster(&self, name: &str) -> Option<&crate::cluster::Anchor> {
+        self.clusters.iter().find(|anchor| anchor.name == name)
+    }
+
     /// Whether it says nothing, so that the default layout stands.
     pub fn is_empty(&self) -> bool {
-        self.agent.is_none() && self.workers.is_none() && self.arrival.is_none()
+        self.agent.is_none()
+            && self.workers.is_none()
+            && self.arrival.is_none()
+            && self.clusters.is_empty()
     }
 }
 
@@ -1154,6 +1175,48 @@ mod tests {
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());
+    }
+
+    #[test]
+    fn the_home_cluster_s_room_is_sent_beside_the_workers_anchor_and_an_older_client_ignores_it() {
+        use crate::cluster::{Anchor, Extent, HOME};
+        let pose = crate::Pose::at([0.0, 1.4, -4.0]);
+        let home = Anchor::new(HOME, pose).with_extent(5.0, 2.5, 2.0);
+        let anchors = Anchors::new()
+            .with_workers(pose)
+            .with_cluster(Anchor::new(HOME, pose))
+            .with_cluster(home.clone());
+        // One of a name: the last given.
+        assert_eq!(anchors.clusters, std::slice::from_ref(&home));
+        assert_eq!(
+            anchors.cluster(HOME).and_then(|home| home.extent),
+            Some(Extent::new(5.0, 2.5, 2.0))
+        );
+        assert_eq!(anchors.cluster("aisle-3"), None);
+        assert!(!Anchors::new().with_cluster(home).is_empty());
+        let json = serde_json::to_value(&anchors).unwrap();
+        assert_eq!(json["clusters"][0]["name"], "home");
+        assert_eq!(json["clusters"][0]["extent"]["width"], 5.0);
+        assert_eq!(
+            serde_json::from_value::<Anchors>(json.clone()).unwrap(),
+            anchors
+        );
+        // Without room, none is written; and a state from an older server, without them, reads as none.
+        let bare = serde_json::to_value(Anchor::new(HOME, pose)).unwrap();
+        assert!(bare.get("extent").is_none());
+        assert!(
+            serde_json::to_value(Anchors::new().with_workers(pose))
+                .unwrap()
+                .get("clusters")
+                .is_none()
+        );
+        // An older client, reading only what it knows, keeps the workers anchor.
+        #[derive(Deserialize)]
+        struct Older {
+            workers: Option<crate::Pose>,
+        }
+        let older: Older = serde_json::from_value(json).unwrap();
+        assert_eq!(older.workers, Some(pose));
     }
 
     #[test]
