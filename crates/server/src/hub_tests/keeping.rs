@@ -3,13 +3,13 @@
 
 //! The agent keeping with whoever it talks with through their exchange with it, driven through the hub with the times
 //! its timer would wake at: as they speak to it, while it thinks and while it replies, it turns to them as they move and,
-//! once they have stood still for a moment more than 3 m from it, follows them on; never closer, nor while they keep
-//! moving, nor once its reply is over, nor while pinned, moving only when asked, or for a visitor; waiting its dwell
+//! once they have stood still for a moment more than 3 m from it, or kept moving for 3 s, follows them on; never
+//! closer, nor once its reply is over, nor while pinned, moving only when asked, or for a visitor; waiting its dwell
 //! only for someone new; and serving a huddle from where it stands while the speaker moves within it. See
 //! `design/environments.md`.
 use super::following::{ADA, agent, cancel, following, heard, last_state, level, press, release};
 use super::*;
-use crate::hub::following::{COMMIT, DWELL, SETTLE};
+use crate::hub::following::{COMMIT, DWELL, RESTLESS, SETTLE};
 
 /// Ada, held past a tap, asks the agent something, and the agent, gone to her, thinks about it: its turn is running.
 fn asked(hub: &Hub, ada: &Client, commands: &async_channel::Receiver<SpaceCommand>, space: &str) {
@@ -17,6 +17,12 @@ fn asked(hub: &Hub, ada: &Client, commands: &async_channel::Receiver<SpaceComman
     hub.flush_snapshots(Instant::now() + COMMIT);
     release(ada, "u1");
     heard(hub, "What is this?");
+    sent(hub, commands, space);
+    arrived(hub, space);
+}
+
+/// The words last given to the agent of `space` are sent to it.
+fn sent(hub: &Hub, commands: &async_channel::Receiver<SpaceCommand>, space: &str) {
     let key = std::iter::from_fn(|| commands.try_recv().ok())
         .find_map(|command| match command {
             SpaceCommand::Send(prompt) => Some(prompt.key),
@@ -24,7 +30,6 @@ fn asked(hub: &Hub, ada: &Client, commands: &async_channel::Receiver<SpaceComman
         })
         .expect("given");
     hub.space_sent(space, &key, Ok(()));
-    arrived(hub, space);
 }
 
 /// The agent of `space` has arrived where it glides to.
@@ -184,6 +189,54 @@ fn within_3_m_it_only_turns_whichever_way_they_face_and_while_they_travel_it_wai
     let state = last_state(&ada).expect("told");
     assert!(state.stream);
     assert!((level(state.summoned.expect("followed").position, far) - 1.5).abs() < 1e-3);
+}
+
+#[test]
+fn someone_who_never_stands_still_beyond_3_m_is_followed_on_after_3_s() {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    asked(&hub, &ada, &commands, &space);
+    let for_ada = agent(&hub, &space).0.expect("gone to Ada");
+    stands(&ada, [3.0, 1.6, 5.0], [3.0, 1.6, 0.0]);
+    hub.flush_snapshots(Instant::now() + SETTLE / 2);
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    // She has walked on, or looked about, for 3 s, never still for long: it follows her on to where she is now.
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .restless(RESTLESS);
+    let on = [3.5, 1.6, 5.5];
+    stands(&ada, on, [3.5, 1.6, 0.0]);
+    hub.flush_snapshots(Instant::now());
+    let to_her = agent(&hub, &space).0.expect("followed");
+    assert!(
+        (level(to_her.position, on) - 1.5).abs() < 1e-3,
+        "{to_her:?}"
+    );
+}
+
+#[test]
+fn close_by_a_fresh_press_only_turns_it_though_she_looks_more_than_50_degrees_from_it() {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    asked(&hub, &ada, &commands, &space);
+    hub.drive_event(&space, Event::Idle);
+    let for_ada = agent(&hub, &space).0.expect("gone to Ada");
+    // It stands 45° to her left: she looks 10° further right, then away from it, and asks again each time.
+    for (turn, utterance) in [(10.0_f32, "u2"), (150.0, "u3")] {
+        let turn = turn.to_radians();
+        let target = [3.0 * turn.sin(), 1.6, ADA[2] - 3.0 * turn.cos()];
+        stands(&ada, ADA, target);
+        press(&ada, utterance);
+        hub.flush_snapshots(Instant::now() + COMMIT);
+        assert_eq!(agent(&hub, &space), (Some(for_ada), Some(ADA), false));
+        release(&ada, utterance);
+        heard(&hub, "And this?");
+        assert_eq!(agent(&hub, &space), (Some(for_ada), Some(ADA), false));
+        sent(&hub, &commands, &space);
+        hub.drive_event(&space, Event::Idle);
+    }
 }
 
 #[test]

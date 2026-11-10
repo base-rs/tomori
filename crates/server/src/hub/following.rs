@@ -57,6 +57,10 @@ const SPOKEN: Duration = Duration::from_millis(700);
 /// moves while they travel, as by a teleport, only once they arrive.
 pub(crate) const SETTLE: Duration = Duration::from_millis(750);
 
+/// How long whoever the agent keeps with may go on moving or looking about, never still for [`SETTLE`], before it
+/// checks anyway whether to follow them on, so that it is never left behind for long.
+pub(crate) const RESTLESS: Duration = Duration::from_secs(3);
+
 /// How far, in metres, a head may move and still stand still, for [`SETTLE`].
 pub(crate) const STILL: f32 = 0.25;
 
@@ -124,13 +128,15 @@ impl Glide {
 }
 
 /// Whom the agent keeps with through their exchange with it, as they speak to it, while it thinks and while it replies:
-/// where their head last stood still, the way it faced there, and, since it moved, when it will have stood still for
-/// [`SETTLE`], to be checked then whether the agent follows them on.
+/// where their head last stood still, the way it faced there, since when they have moved since it last checked, and
+/// when it checks whether it follows them on: once they have stood still for [`SETTLE`], or [`RESTLESS`] after they
+/// began moving.
 #[derive(Clone, Debug)]
 struct Keeping {
     who: String,
     at: [f32; 3],
     heading: f32,
+    since: Option<Instant>,
     due: Option<Instant>,
 }
 
@@ -186,6 +192,13 @@ impl Following {
     #[cfg(test)]
     pub(super) fn backdate(&mut self, by: Duration) {
         self.glide.as_mut().expect("gliding").started -= by;
+    }
+
+    /// Whoever it keeps with began moving `by` earlier, for tests of someone who never stands still.
+    #[cfg(test)]
+    pub(super) fn restless(&mut self, by: Duration) {
+        let keeping = self.keeping.as_mut().expect("kept with");
+        keeping.since = keeping.since.map(|since| since - by);
     }
 
     /// Where the agent turns to face, if anywhere: whomever it glances at, or whoever it turned to.
@@ -370,8 +383,8 @@ impl Hub {
 
     /// `participant`, in `space`, reported where they are at `now`: if the agent keeps with them, it turns to them
     /// once they stand more than [`FACE`] from the way it faces, unless it is on its way, and, once they move beyond
-    /// [`STILL`] or turn beyond [`STILL_TURN`], it waits for them to stand still for [`SETTLE`] before checking whether
-    /// to follow them on. It keeps with nobody once their exchange is over. See `design/environments.md`.
+    /// [`STILL`] or turn beyond [`STILL_TURN`], it waits for them to stand still for [`SETTLE`], or [`RESTLESS`] at most,
+    /// before checking whether to follow them on. It keeps with nobody once their exchange is over. See `design/environments.md`.
     pub(super) fn agent_seen(
         &self,
         state: &mut HubState,
@@ -403,7 +416,8 @@ impl Hub {
         {
             keeping.at = head.position;
             keeping.heading = heading;
-            keeping.due = Some(now + SETTLE);
+            let since = *keeping.since.get_or_insert(now);
+            keeping.due = Some((now + SETTLE).min(since + RESTLESS));
             woken.notify(usize::MAX);
         }
         if following.moving(record.summoned, home, now) {
@@ -430,7 +444,7 @@ impl Hub {
     }
 
     /// Follow on whoever the agents of the spaces keep with, where they have stood still for [`SETTLE`] by `now` since
-    /// they moved: where the agent no longer serves them, by the rules it went to them by, it goes to them again, or to
+    /// they moved, or kept moving for [`RESTLESS`]: where the agent no longer serves them, by the rules it went to them by, it goes to them again, or to
     /// the huddle they stand in, but stays where it serves a huddle they are still one of, and waits its [`DWELL`] for
     /// another partner as ever.
     pub(super) fn keep_up(&self, state: &mut HubState, now: Instant) {
@@ -452,6 +466,7 @@ impl Hub {
             let record = state.space_mut(&space).expect("listed above");
             let keeping = record.following.keeping.as_mut().expect("listed above");
             keeping.due = None;
+            keeping.since = None;
             let Some(participant) = keeps else {
                 record.following.keeping = None;
                 continue;
@@ -918,6 +933,7 @@ impl HubState {
             who: participant.to_owned(),
             at: eyes,
             heading: follow::heading(&speaker.head),
+            since: None,
             due: None,
         });
         let turn = |following: &mut Following| {
