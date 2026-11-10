@@ -803,14 +803,16 @@ impl HubState {
     }
 
     /// Pin the agent of `space` where it is going, or stands, so that it follows nobody and does not go home on its own,
-    /// as the participant `by`, by name, or else the agent itself, asked.
+    /// as the participant `by`, by name, or else the agent itself, asked: a pin a participant made stays theirs as the
+    /// agent pins itself again.
     pub(super) fn agent_pin(&mut self, space: &str, now: Instant, by: Option<String>) {
         let following = &mut self
             .space_mut(space)
             .expect("the caller found it")
             .following;
+        let theirs = following.pinned_by.take().filter(|_| following.pinned);
         following.pinned = true;
-        following.pinned_by = by;
+        following.pinned_by = by.or(theirs);
         following.pending = None;
         following.empty = None;
         following.poll.get_or_insert(now + POLL);

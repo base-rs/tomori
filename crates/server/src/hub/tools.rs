@@ -932,16 +932,25 @@ impl Hub {
                 format!(", as {} asked", asker.logged())
             })
         };
-        // Of its own accord, it moves itself only so often; asked, as often as it is asked.
+        // Of its own accord, it moves itself only so often, and never from where a participant pinned it; asked, as often
+        // as it is asked.
         let limited = |state: &mut HubState| -> Result<(), String> {
             if asked.is_some() {
                 return Ok(());
             }
-            state
-                .space_mut(&space)
-                .expect("found above")
-                .rates
-                .move_agent(now)
+            let record = state.space_mut(&space).expect("found above");
+            if let Some(by) = record
+                .following
+                .pinned_by
+                .as_ref()
+                .filter(|_| record.following.pinned)
+            {
+                return Err(format!(
+                    "{} asked you to stay here, so stay; move only when someone asks, naming them in requested_by.",
+                    crate::space::one_line(by, 40)
+                ));
+            }
+            record.rates.move_agent(now)
         };
         let environments = self.environments();
         let moved = match form {
@@ -963,10 +972,10 @@ impl Hub {
                     .following
                     .pinned_by
                     .as_ref()
-                    .filter(|_| asked.is_none())
+                    .filter(|_| asked.is_none() && record.following.pinned)
                 {
                     return Err(format!(
-                        "{} called you here, so stay; follow again only when someone asks, naming them in requested_by.",
+                        "{} asked you to stay here, so stay; follow again only when someone asks, naming them in requested_by.",
                         crate::space::one_line(by, 40)
                     ));
                 }

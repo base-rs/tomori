@@ -332,7 +332,16 @@ fn stay_pins_it_and_follow_lets_it_follow_again_only_where_it_follows_the_speake
     ada.send(ClientMessage::CallAgent);
     assert_eq!(agent(&hub)["pinned_by"], "ada");
     let refused = hub.agent_move_agent("session", "follow", None).unwrap_err();
-    assert!(refused.contains("ada called you here"), "{refused}");
+    assert!(refused.contains("ada asked you to stay here"), "{refused}");
+    // Nor does pinning itself again make the pin its own, nor may it move itself from there unasked.
+    hub.agent_move_agent("session", "stay", None).unwrap();
+    assert_eq!(agent(&hub)["pinned_by"], "ada");
+    assert!(
+        hub.agent_move_agent("session", "front ada", None)
+            .unwrap_err()
+            .contains("ada asked you to stay here")
+    );
+    assert!(hub.agent_move_agent("session", "follow", None).is_err());
     // Her words, as she holds X far from it, glance only while it is pinned; asked to follow, it goes to her.
     ada.send(looking([6.0, 1.6, 6.0], [6.0, 1.6, 0.0]));
     press(&ada, "u1", Vec::new());
