@@ -58,8 +58,9 @@ pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
 }
 
 /// The farmyard trail's named anchors: its viewpoints, `riverbank`, `pool-lookout` and `waterfall-rock`, beside the rock
-/// in the pool that participants teleport onto from the lookout, of kind `viewpoint`, and its exercise stations, `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent
-/// can suggest a walk, go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
+/// in the pool that participants teleport onto from the lookout, of kind `viewpoint`, and its exercise stations,
+/// `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent can suggest a walk,
+/// go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
 /// A station's anchor stands beside its clearing, opposite its post, facing the clearing, and tells the agent of whoever
 /// comes within `trail::STATION_RADIUS` of it, `notify_within`, its clearing and the trail beside it, but not where
 /// participants arrive, the gate or a pad. See `tomori-environment-farmyard`'s `context/trail.md`.
@@ -288,9 +289,9 @@ mod tests {
             );
             assert!(anchor.pose.position[1] >= 1.4, "{anchor:?}");
         }
-        // Its solids are the yard's, the trail's posts and seat, the waterfall rock and the plants and pines beside them, which the agent and
-        // the panels keep clear of; and one to eighteen workers placed at any of the trail's anchors stand in its
-        // cluster clear of them, above the trail.
+        // Its solids are the yard's, the trail's posts and seat, the waterfall rock and the plants and pines beside them,
+        // which the agent and the panels keep clear of; and one to eighteen workers placed at any of the trail's anchors
+        // stand in its cluster clear of them, above the trail.
         assert_eq!(farmyard.solids(), super::farmyard_solids());
         assert_eq!(
             farmyard.solids().len(),
