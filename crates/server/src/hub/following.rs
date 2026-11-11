@@ -52,6 +52,10 @@ pub(crate) const STREAMING: f32 = 6.0;
 /// pause before held speech plays.
 const SPOKEN: Duration = Duration::from_millis(700);
 
+/// How long speech still to come counts towards the agent's reply with nothing of it queued, sent or finished meanwhile,
+/// as when synthesis hangs: its reply then ends, so that it never keeps with someone, nor stays away from home, for ever.
+pub(crate) const STALLED: Duration = Duration::from_secs(60);
+
 /// How long whoever the agent keeps with, through their exchange with it, stands still before it follows them on, if
 /// they have gone beyond where it serves them: it waits for them to settle rather than chasing each step, and never
 /// moves while they travel, as by a teleport, only once they arrive.
@@ -183,6 +187,8 @@ pub(crate) struct Following {
     /// How many segments of its speech are queued for synthesis, or synthesized and not yet all sent: speech still to
     /// come, after its turn may have ended, which its reply lasts through as much as speech playing.
     unspoken: usize,
+    /// When its speech last made progress: a segment queued, a frame sent, or a segment sent whole.
+    progressed: Option<Instant>,
     /// The participant whose words it was last given, until its reply to them is over: its turn ended and its speech
     /// heard.
     answering: Option<String>,
@@ -228,20 +234,23 @@ impl Following {
     pub(super) fn spoke(&mut self, now: Instant, duration: Duration) {
         let until = now + duration + SPOKEN;
         self.speaking = Some(self.speaking.map_or(until, |was| was.max(until)));
+        self.progressed = Some(now);
         // Its speech starting puts off its return, however short, between one check and the next.
         self.quiet = None;
     }
 
     /// `segments` more segments of the agent's speech, at least one, were queued for synthesis: its reply goes on until
     /// they are sent, however long synthesis takes after its turn has ended, and its return is put off.
-    pub(super) fn queued(&mut self, segments: usize) {
+    pub(super) fn queued(&mut self, segments: usize, now: Instant) {
         self.unspoken += segments;
+        self.progressed = Some(now);
         self.quiet = None;
     }
 
     /// One segment queued for its speech has been sent whole, or could not be synthesized.
-    pub(super) fn sent(&mut self) {
+    pub(super) fn sent(&mut self, now: Instant) {
         self.unspoken = self.unspoken.saturating_sub(1);
+        self.progressed = Some(now);
     }
 
     /// Synthesis stopped: nothing more queued for its speech will be sent.
@@ -249,9 +258,13 @@ impl Following {
         self.unspoken = 0;
     }
 
-    /// Whether any of its speech is still to come: queued for synthesis, or synthesized and not yet all sent.
-    pub(super) fn unspoken(&self) -> bool {
+    /// Whether any of its speech is still to come at `now`: queued for synthesis, or synthesized and not yet all sent,
+    /// unless it has made no progress for [`STALLED`].
+    pub(super) fn unspoken(&self, now: Instant) -> bool {
         self.unspoken > 0
+            && self
+                .progressed
+                .is_some_and(|at| now.saturating_duration_since(at) < STALLED)
     }
 
     /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides,
@@ -1063,6 +1076,7 @@ impl HubState {
             tapped: std::mem::take(&mut record.following.tapped),
             speaking: record.following.speaking,
             unspoken: record.following.unspoken,
+            progressed: record.following.progressed,
             ..Following::default()
         };
         let moved = self.summon(space, None, None);
@@ -1200,7 +1214,7 @@ impl HubState {
             && record.model.waiting() == 0
             && matches!(record.model.activity(), Activity::Idle | Activity::Unknown)
             && record.speech.quiet()
-            && !record.following.unspoken()
+            && !record.following.unspoken(now)
             && record.following.speaking.is_none_or(|until| until <= now)
     }
 
@@ -1216,7 +1230,7 @@ impl HubState {
                 Activity::Running | Activity::Waiting
             )
             || !record.speech.quiet()
-            || record.following.unspoken()
+            || record.following.unspoken(now)
             || record.following.speaking.is_some_and(|until| until > now)
     }
 

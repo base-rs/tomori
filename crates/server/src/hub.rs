@@ -44,6 +44,8 @@ mod layouts;
 mod pairing_window;
 mod provenance;
 pub(crate) mod tools;
+#[cfg(all(test, feature = "speech"))]
+pub(crate) use following::STALLED as SPEECH_STALLED;
 pub(crate) use following::home as agent_home;
 
 pub(crate) use agent_pairing::Decision;
@@ -6480,7 +6482,7 @@ impl Hub {
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_queued(&self, space: &str, segments: usize) {
         if let Some(record) = self.lock().space_mut(space) {
-            record.following.queued(segments);
+            record.following.queued(segments, Instant::now());
         }
     }
 
@@ -6489,16 +6491,16 @@ impl Hub {
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_sent(&self, space: &str) {
         if let Some(record) = self.lock().space_mut(space) {
-            record.following.sent();
+            record.following.sent(Instant::now());
         }
     }
 
-    /// Whether any of the agent speech of `space` is still to come, queued for synthesis or not yet all sent.
+    /// Whether any of the agent speech of `space` is still to come at `now`, queued for synthesis or not yet all sent.
     #[cfg(all(test, feature = "speech"))]
-    pub(crate) fn speech_to_come(&self, space: &str) -> bool {
+    pub(crate) fn speech_to_come(&self, space: &str, now: Instant) -> bool {
         self.lock()
             .space(space)
-            .is_some_and(|record| record.following.unspoken())
+            .is_some_and(|record| record.following.unspoken(now))
     }
 
     /// Synthesis stopped for `space`: whatever of its speech was still queued will not be sent.

@@ -861,19 +861,19 @@ mod enabled {
             hub.speech_queued(&space, 6);
             let now = Instant::now();
             while let Some((reply, item)) = pacer.pending.pop_front() {
-                assert!(hub.speech_to_come(&space));
+                assert!(hub.speech_to_come(&space, Instant::now()));
                 assert!(pacer.send(reply, item, now));
             }
-            assert!(!hub.speech_to_come(&space));
+            assert!(!hub.speech_to_come(&space, Instant::now()));
             // Never fewer than nothing.
             hub.speech_sent(&space);
             hub.speech_queued(&space, 1);
-            assert!(hub.speech_to_come(&space));
+            assert!(hub.speech_to_come(&space, Instant::now()));
             // Speech for a space that is gone counts for nothing.
             hub.speech_queued("gone", 1);
             hub.speech_sent("gone");
             hub.speech_unqueued("gone");
-            assert!(!hub.speech_to_come("gone"));
+            assert!(!hub.speech_to_come("gone", Instant::now()));
         }
 
         #[test]
@@ -883,7 +883,7 @@ mod enabled {
             // Synthesis waits, as for a long paragraph after its turn has ended.
             let (release, held) = mpsc::channel::<()>();
             let mut voice = Voices::new(Held(held)).start(&hub, &space).unwrap();
-            assert!(!hub.speech_to_come(&space));
+            assert!(!hub.speech_to_come(&space, Instant::now()));
             voice.observe(&Event::MessageStarted {
                 message: "m".into(),
                 role: Role::Assistant,
@@ -895,7 +895,9 @@ mod enabled {
             voice.observe(&Event::MessageCompleted {
                 message: "m".into(),
             });
-            assert!(hub.speech_to_come(&space));
+            assert!(hub.speech_to_come(&space, Instant::now()));
+            // Synthesis that hangs ends the reply all the same, once nothing of its speech has moved for a minute.
+            assert!(!hub.speech_to_come(&space, Instant::now() + crate::hub::SPEECH_STALLED));
             // Synthesis stopping leaves nothing to come.
             let (mut stopped, _sender) = pacer(&hub, &space);
             stopped.disconnect();
@@ -903,7 +905,7 @@ mod enabled {
                 unreachable!("nothing more is to come after what it produced");
             };
             assert!(stopped.send(reply, Item::Unqueued, Instant::now()));
-            assert!(!hub.speech_to_come(&space));
+            assert!(!hub.speech_to_come(&space, Instant::now()));
             drop(release);
         }
 
