@@ -314,6 +314,23 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
 /// What `requested_by` is, as each tool that needs it describes it. See `design/security.md`.
 const REQUESTED_BY: &str = "The name of the participant whose words asked for this, as Tomori gave you their words, such as Ada for \"Ada: confirm the pairing\", or, where someone else in the space shares their name, their id from presence, such as Ada#23. Tomori checks that the words you were given last in this space are theirs, from the last 3 minutes, that nothing reached you since except through Tomori, and that they are here now and may ask for it, and refuses otherwise.";
 
+/// The `set_my_name` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
+fn set_my_name_tool(change: &Value) -> Value {
+    json!({
+        "name": "set_my_name",
+        "description": "Change the name the person who just spoke is shown as, on their own device, when they tell you it, as in \"my name is Ayoko\", \"call me Ayoko\" or \"it's Ayoko now\", such as when someone else puts on a headset: everyone in the space, the transcript and your next words from them use it, and it stays until they change it again. Only the speaker is renamed, never anyone else, and only their name: their role and what they may do stay as they are. An owner or a collaborator may, a few times a minute. Then greet them by it, briefly, as in \"Hi Ayoko\".",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": "The name alone, as they said it, such as Ayoko, at most 32 characters, on one line, without :, [ or ]." },
+                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Whoever said it, as Tomori gave you their words, before their new name. {REQUESTED_BY}") },
+            },
+            "required": ["name", "requested_by"],
+        },
+        "annotations": change,
+    })
+}
+
 /// The `place_worker` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
 fn place_worker_tool(change: &Value) -> Value {
     json!({
@@ -402,6 +419,7 @@ fn tools() -> Value {
     let place_worker = place_worker_tool(&change);
     let set_wall = set_wall_tool(&change);
     let act = act_tool();
+    let set_my_name = set_my_name_tool(&change);
     let mut tools = json!([
         {
             "name": "server",
@@ -682,6 +700,12 @@ fn tools() -> Value {
         .position(|tool| tool["name"] == "move_agent")
         .expect("move_agent is listed");
     list.insert(after + 1, place_worker);
+    // Beside rename_space, the other tool that renames.
+    let after = list
+        .iter()
+        .position(|tool| tool["name"] == "rename_space")
+        .expect("rename_space is listed");
+    list.insert(after + 1, set_my_name);
     tools
 }
 
@@ -948,6 +972,7 @@ async fn call(
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "rename_space" => session.and_then(|session| rename_space(hub, session, arguments)),
+        "set_my_name" => session.and_then(|session| set_my_name(hub, session, arguments)),
         "pairing" => session.and_then(|session| hub.tool_pairing(session).map(structured)),
         "confirm_pairing" => session.and_then(|session| confirm_pairing(hub, session, arguments)),
         "decline_pairing" => session.and_then(|session| {
@@ -1432,6 +1457,39 @@ fn rename_space(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
         format!("you renamed the space to {title}")
     };
     Ok(changed(result, ("title", &title), announcement))
+}
+
+/// The `set_my_name` tool: whoever spoke, renamed on their own device, and what the agent is to say. See `design/security.md`.
+fn set_my_name(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let name = text(arguments, "name")?;
+    crate::limits::check(name, crate::limits::NAME_BYTES, "name")?;
+    let renamed = hub.agent_set_my_name(session, name, requested_by(arguments)?)?;
+    let mut next = if renamed.changed {
+        format!(
+            "Greet them by their new name, briefly, as in \"Hi {}\".",
+            renamed.name
+        )
+    } else {
+        format!(
+            "They are already called {}, so nothing changed; say so briefly.",
+            renamed.name
+        )
+    };
+    if !renamed.sharing.is_empty() {
+        next.push_str(&format!(
+            " Someone else here is called {} too, so where you must name one of them, use their id from presence: {} is whoever you renamed, and {} is not.",
+            renamed.name,
+            renamed.id,
+            renamed.sharing.join(" or ")
+        ));
+    }
+    Ok(structured(json!({
+        "space": renamed.space,
+        "name": renamed.name,
+        "id": renamed.id,
+        "changed": renamed.changed,
+        "next": next,
+    })))
 }
 
 /// The flag `name` of `arguments`, if it is given.

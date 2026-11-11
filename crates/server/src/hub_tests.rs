@@ -7272,6 +7272,8 @@ mod following;
 mod keeping;
 #[path = "hub_tests/moving.rs"]
 mod moving;
+#[path = "hub_tests/naming.rs"]
+mod naming;
 #[path = "hub_tests/patches.rs"]
 mod patches;
 #[path = "hub_tests/placing.rs"]

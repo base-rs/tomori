@@ -460,6 +460,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "set_speech",
             "set_environment",
             "rename_space",
+            "set_my_name",
             "pairing",
             "confirm_pairing",
             "decline_pairing",
