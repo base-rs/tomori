@@ -5839,8 +5839,7 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_unlocks_a_locked_wall_with_its_padlock_for_everyone_while_others_only_see_it_locked()
-     {
+    fn an_owner_unlocks_a_locked_wall_with_its_padlock_for_everyone_while_others_see_no_padlock() {
         use crate::projection::editing::{LockChange, LockControls, handle_points_with};
         use tomori_protocol::{ClientMessage, Pose, Wall, WallKind};
         let wall = Wall::new(
@@ -5850,7 +5849,6 @@ mod tests {
         )
         .with_grid(tomori_protocol::Grid::from((2, 1)))
         .with_locked(true);
-        let board = Vec3::new(0.0, 1.5 + 0.2, -2.0);
         let frame_of = crate::board::model(&wall.pose).unwrap();
         let lock = LockControls {
             padlock: true,
@@ -5869,22 +5867,14 @@ mod tests {
             let start = Instant::now();
             let mut senses = Senses {
                 beam: true,
-                ray: Ray::new(arrival::HOME, board - arrival::HOME),
+                ray: Ray::new(arrival::HOME, padlock - arrival::HOME),
                 grip: Some(0.0),
                 ..senses()
             };
             for _ in 0..400 {
                 step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
             }
-            // Taken hold of by its board, it is held, not carried.
-            for grip in [1.0, 0.0] {
-                senses.grip = Some(grip);
-                step.update(&senses, &mut conversation, &mut felt(), start, FRAME);
-            }
-            assert_eq!(step.projector.editing_wall(), Some("environment-0"));
-            assert_eq!(step.projector.carried_wall(), None);
-            // Squeezed, its padlock unlocks it, for an owner.
-            senses.ray = Ray::new(arrival::HOME, padlock - arrival::HOME);
+            // Squeezed, its padlock, shown to an owner near it without taking hold of the wall, unlocks it.
             let mut hint = None;
             for grip in [0.0, 1.0, 0.0] {
                 senses.grip = Some(grip);
@@ -5896,7 +5886,7 @@ mod tests {
                         .filter_map(|sheet| {
                             sheet.canvas.as_deref().map(crate::canvas::Canvas::plain)
                         })
-                        .find(|text| text.contains("done"))
+                        .find(|text| text.contains("unlock") || text.contains("Locked"))
                 });
             }
             (conversation.take_actions(), hint)
@@ -5914,12 +5904,13 @@ mod tests {
         };
         let (sent, hint) = run(ConnectionRole::Owner, true);
         assert_eq!(unlocks(&sent), 1, "{sent:?}");
-        assert!(hint.unwrap().contains("unlock it to change it"));
-        // A collaborator sees it locked, told an owner can unlock it, and sends nothing.
+        let hint = hint.unwrap();
+        assert!(hint.contains("Grip  unlock this wall"), "{hint}");
+        // A collaborator sees no padlock, nor what the grip would do there, and sends nothing.
         let (sent, hint) = run(ConnectionRole::Collaborator, true);
         assert_eq!(unlocks(&sent), 0, "{sent:?}");
         assert!(sent.is_empty(), "{sent:?}");
-        assert!(hint.unwrap().contains("an owner can unlock it"));
+        assert_eq!(hint, None);
         // Where the server locks no walls, as an older one, there is no padlock to squeeze, and nothing is sent.
         let (sent, _) = run(ConnectionRole::Owner, false);
         assert_eq!(unlocks(&sent), 0, "{sent:?}");

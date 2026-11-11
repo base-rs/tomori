@@ -1900,11 +1900,12 @@ mod tests {
     }
 
     /// Set `TOMORI_WALL_LOCK_PREVIEW` to a PNG path to save what this renders: an environment's own wall, two slots wide
-    /// and one high, locked, taken hold of by an owner, its padlock alone, closed and warm, with the hint saying the grip
-    /// on it unlocks it; then unlocked with a squeeze on it, as it is before the server answers, its
-    /// padlock open, every handle around it and the control that puts it back above the padlock, with the hint.
+    /// and one high, locked, as an owner near it sees it, no bar and its padlock alone, closed and warm; then unlocked
+    /// with a squeeze on it, as it is before the server answers, taken hold of, its padlock open, every handle around it
+    /// and the control that puts it back above the padlock, with the hint.
     #[test]
-    fn a_locked_wall_shows_its_padlock_alone_and_once_unlocked_its_handles_with_the_padlock_open() {
+    fn a_locked_wall_shows_an_owner_its_padlock_alone_and_once_unlocked_its_handles_with_the_padlock_open()
+     {
         const WIDTH: u32 = 960;
         const HEIGHT: u32 = 720;
         use tomori_protocol::{Panel, Place, Wall, WallKind};
@@ -1991,11 +1992,7 @@ mod tests {
                 );
                 read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
             };
-            // Taken hold of with a squeeze on its board, beside its panel, and let go: its padlock pointed at.
-            let board = frame.transform_point3(Vec3::new(0.35, 0.0, 0.0));
-            capture(&mut step, &mut conversation, &senses(board, 1.0));
-            capture(&mut step, &mut conversation, &senses(board, 0.0));
-            // Drawn with the ray on its board, so that the ray's end hides nothing of the padlock.
+            // Drawn with the ray on its board, beside its panel, so that the ray's end hides nothing of the padlock.
             let aside = frame.transform_point3(Vec3::new(0.35, -0.1, 0.0));
             let locked = capture(&mut step, &mut conversation, &senses(aside, 0.0));
             // Squeezed, the padlock unlocks it, sent to the server and shown so at once.

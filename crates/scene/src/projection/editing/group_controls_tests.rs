@@ -540,3 +540,65 @@ fn a_wall_s_padlock_in_a_group_stands_clear_of_the_walls_joined_to_it_and_always
         [Handle::Lock]
     );
 }
+
+#[test]
+fn a_group_s_bar_goes_to_its_lowest_left_wall_unlocked_below_every_slot_and_none_when_all_are_locked()
+ {
+    let mut walls = stacked(ahead(2.5), 1.0);
+    // The wide wall at the bottom, which bears the bar, locked: the bar goes to the tall wall at its left end, the
+    // lowest left unlocked, below the wide wall's slots, within a centimetre of where it stood.
+    walls[0] = walls[0].clone().with_locked(true);
+    let all: Vec<&Wall> = walls.iter().collect();
+    let bars: Vec<(&Wall, Bar)> = walls
+        .iter()
+        .filter_map(|wall| group_bar(wall, model(&wall.pose).unwrap(), &all).map(|bar| (wall, bar)))
+        .collect();
+    assert_eq!(bars.len(), 1);
+    let (bearer, bar) = bars[0];
+    assert_eq!(bearer.id, "wall-2");
+    let unlocked = walls[0].clone().with_locked(false);
+    let alone: Vec<&Wall> = vec![&unlocked, &walls[1], &walls[2]];
+    let before = group_bar(&unlocked, model(&unlocked.pose).unwrap(), &alone).unwrap();
+    assert!(
+        (bar.middle - before.middle).length() < 0.01,
+        "{} {}",
+        bar.middle,
+        before.middle
+    );
+    for wall in &walls {
+        assert!(!over_slots(
+            wall,
+            &along(&bar),
+            (0.0, BAR_THICKNESS * bar.size / 2.0)
+        ));
+    }
+    // Nor do the handles of the wall bearing it stand over any wall's slots.
+    let (points, size) = handle_points_among(bearer, model(&bearer.pose).unwrap(), &all, None);
+    for (handle, at) in &points {
+        for wall in &walls {
+            assert!(
+                !over_slots(wall, &[*at], (size / 2.0, size / 2.0)),
+                "{handle:?} over {}",
+                wall.id
+            );
+        }
+    }
+    // Squeezed, it takes hold of that wall, which is not carried, as the locked wall anchors its group.
+    let projection = shown(walls.clone());
+    let mut projector = Projector::default();
+    projector.update(frame(&projection, at(bar.middle), 0.0));
+    projector.update(frame(&projection, at(bar.middle), 1.0));
+    assert_eq!(projector.editing_wall(), Some("wall-2"));
+    assert_eq!(projector.carried_wall(), None);
+    // Every wall of it locked, it shows none.
+    let locked: Vec<Wall> = walls
+        .iter()
+        .map(|wall| wall.clone().with_locked(true))
+        .collect();
+    let all: Vec<&Wall> = locked.iter().collect();
+    assert!(
+        locked
+            .iter()
+            .all(|wall| group_bar(wall, model(&wall.pose).unwrap(), &all).is_none())
+    );
+}
