@@ -17,7 +17,7 @@ They expect it may be difficult, and it is for later; what is wanted now is a cl
 ## The maintainer's decisions
 
 1. **Where:** a shingle beach by the `riverbank` anchor for cairns, and a **dam walling off a pool at the river's edge**, as children build, rather than a new brook.
-2. **Hands:** both grips and both triggers. The live microphone moves from the left grip to the left thumbstick's click (`live-on-stick-click`, #355), freeing both, as the left trigger is bound to nothing; symmetric two-handed rays, triggers and grips are a proposal of their own, `proposal-two-hands`, which this follows.
+2. **Hands:** both grips and both triggers. The live microphone moves from the left grip to the left thumbstick's click (`live-on-stick-click`, #355), freeing both, as the left trigger is bound to nothing; symmetric two-handed rays, triggers and grips are a proposal of their own, `two-handed-pointing.md` (#354), which this follows.
 3. **Reaching:** within reach of either hand, and either hand's ray pulling a stone to the hand from a few metres.
 4. **No magic stacking:** real rigid-body physics from the first stage.
 5. **Taking from another's hand** is allowed, a handover passing control from one holder to the other, unless it proves complicated; a swung stone can knock over a cairn.
@@ -54,7 +54,7 @@ They expect it may be difficult, and it is for later; what is wanted now is a cl
 
 The campsite built the right grip's rung (`precedence::Grab`, `within_reach`, `Input::grab`); this widens it:
 
-- **Both hands.** Once `live-on-stick-click` moves the live microphone to the left stick's click, both grips and both triggers are free, and `Input::grab` names either hand, each holding one object, with `Input::hands` giving the others' left hands too. Their order on each hand, and the triggers', is `proposal-two-hands`'s to declare; this asks only that each grip end, as the right does now, with the environment.
+- **Both hands.** Once `live-on-stick-click` moves the live microphone to the left stick's click, both grips and both triggers are free, and `Input::grab` names either hand, each holding one object, with `Input::hands` giving the others' left hands too. Their order on each hand, and the triggers', is `two-handed-pointing.md`'s (#354) to declare, its second stage alongside these; this asks only that each grip end, as the right does now, with the environment.
 - **Within reach**, an object's hull within 5 cm of the controller's grip pose, as the campsite's within reach comes after a panel under the ray.
 - **Pulled by the ray**: an object the ray meets within 3 m that takes the grip flies to the hand over a quarter of a second, kinematic, and is held where it arrives, so that a stone at the water's edge can be taken from the beach above it.
 - **The desktop window** grabs with G where the mouse points, within 3 m, carrying along the ray as cards are carried, the wheel pushing and pulling, so that every stage is testable through the shared frame step.
@@ -216,7 +216,7 @@ The campsite's sticks become bodies of the same world, so that one model covers 
 
 - Workspace: glam 0.30 to 0.33, in a pull request of its own first.
 - `tomori-physics` on Rapier, shared: bodies, colliders, the world, holding, snapshots, rests and wakes, its limits; opening with the **harness**: programmatically stacked cairns of 3 to 10 stones, run for ten simulated minutes, required to settle and sleep within seconds and never move after; one more stone dropped on, required to wake the cairn without bursting it; and releases with the poses and speeds a hand gives.
-- Core: the left grip for client sides once `live-on-stick-click` lands, following `proposal-two-hands`; the ray's pull; both of the others' hands; `Space::presence()` for server sides; the bound on announcing.
+- Core: the left grip for client sides once `live-on-stick-click` lands, following `two-handed-pointing.md`; the ray's pull; both of the others' hands; `Space::presence()` for server sides; the bound on announcing.
 - Farmyard: the beach, sloping to the water, its stones and surfaces; grab and release intents checked against presence; the holder's prediction and blend; throwing, and stones returned from the river; clacks and splashes.
 - Costs: Rapier and its dependencies in the server; server CPU, small and only while something moves; about 1,200 triangles; a farmyard version bump.
 - Risks: **stacking stability**, the biggest of the proposal; the grip's order on the left hand; the visible blend at release over a slow link.
@@ -248,12 +248,12 @@ The campsite's sticks become bodies of the same world, so that one model covers 
 
 ## Open questions
 
-None: the maintainer decided all ten (above). Hand tracking's grab, by closing the hand rather than a pinch, is assumed, and `proposal-two-hands` may revisit it.
+None: the maintainer decided all ten (above). Hand tracking's grab, by closing the hand rather than a pinch, is assumed, and `two-handed-pointing.md` may revisit it.
 
 ## Design changes this would make
 
 - `design/environments.md`: the left grip and the ray's pull for client sides; both of the others' hands; `Space::presence()`; a side's kept record; the bound on announcing; and `tomori-physics` as an optional crate environments build on, with physical and grabbable objects.
-- `design/interaction.md` and `design/responders.md`: the environment's rung on both grips, with `proposal-two-hands`; hand-tracked grabbing.
+- `design/interaction.md` and `design/responders.md`: the environment's rung on both grips, with `two-handed-pointing.md`; hand-tracked grabbing.
 - `design/farmyard.md`: the beach, its stones and cairns, `tidy`, the sticks on the general model with their trust in the client gone, and in stage 4 the dam and its pool; the backdrop's budget.
 - A new `design/physics.md` for `tomori-physics`.
 - `design/hand-menu.md`: **Return the stones** for owners.
