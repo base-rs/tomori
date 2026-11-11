@@ -5,7 +5,9 @@
 //! This deliberately has no dependency on the head-locked caption renderer.
 use crate::delegation::{State, Station, Workspace};
 use bytemuck::{Pod, Zeroable};
+use tomori_protocol::TimerState;
 use tomori_scene::cards::{COLUMNS, ContentCache, MAX_RESULTS, ROWS, clip, results};
+use tomori_scene::dials::Dial;
 use tomori_scene::shapes::Shape;
 use tomori_text::atlas::SOLID;
 
@@ -52,6 +54,9 @@ struct Sign {
     own: bool,
     /// How much larger it is drawn than one within [`SIGN_REACH`] of whoever it faces.
     scale: f32,
+    /// For a timer's dial rather than a worker, its state, whose symbol its pill shows, and how many rows its name
+    /// takes, the rows after them, its schedule and condition, drawn muted. See `design/timers.md`.
+    timer: Option<(TimerState, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -408,6 +413,8 @@ pub struct WorkspaceGraphics {
     content: ContentCache,
     placements: LabelPlacement,
     vertex_capacity: usize,
+    /// The space's timers' dials, whose signs the next [`Self::update`] draws.
+    dials: Vec<Dial>,
 }
 
 impl WorkspaceGraphics {
@@ -491,6 +498,15 @@ impl WorkspaceGraphics {
             content: ContentCache::default(),
             placements: LabelPlacement::default(),
             vertex_capacity: INITIAL_VERTICES,
+            dials: Vec::new(),
+        }
+    }
+
+    /// The space's timers' dials, whose signs the next [`Self::update`] draws, above each dial, as a worker's sign stands
+    /// above it. See `design/timers.md`.
+    pub fn set_dials(&mut self, dials: &[Dial]) {
+        if self.dials != dials {
+            self.dials = dials.to_vec();
         }
     }
 
@@ -525,7 +541,7 @@ impl WorkspaceGraphics {
         self.content_page = self
             .content_page
             .min(self.content.pages.len().saturating_sub(1));
-        let (panels, pages) = layout(
+        let (mut panels, pages) = layout(
             workspace,
             stations,
             self.page,
@@ -534,6 +550,10 @@ impl WorkspaceGraphics {
             &mut self.placements,
             viewer.map(|viewer| viewer.to_array()),
         );
+        panels.extend(dial_panels(
+            &self.dials,
+            viewer.map(|viewer| viewer.to_array()),
+        ));
         self.pages = pages;
         self.page = self.page.min(pages.saturating_sub(1));
         if self.cache.update(panels) && !self.cache.vertices.is_empty() {
@@ -832,6 +852,87 @@ fn station_panel(
             towards: facing_from(station.position, face, station.facing),
             own: position == station.position,
             scale,
+            timer: None,
+        }),
+        rule: None,
+    }
+}
+
+/// The cells across a timer's sign, narrower than a worker's, so that the signs of a row of dials stand clear of one
+/// another.
+const DIAL_COLUMNS: usize = 22;
+/// The most rows of a timer's name, and of its condition, on its sign; its schedule takes one.
+const DIAL_ROWS: usize = 2;
+/// How large a timer's sign is drawn, as a share of a worker's: about as large to the eye, since dials stand nearer
+/// whoever watches than the default arc's workers.
+const DIAL_SIGN: f32 = 0.8;
+/// How far above its dial's middle a timer's sign's bottom edge stands, in metres: clear of its face, its leader between.
+const DIAL_LIFT: f32 = tomori_scene::dials::RADIUS + tomori_scene::dials::SIGN_LIFT;
+
+/// The signs of `dials`, at most [`tomori_scene::dials::MOST`] of those valid, each standing above its dial, turned to
+/// face `viewer`, or else whoever the dials face: the timer's name, its schedule and its condition, each on a row of its
+/// own, muted, and its pill, saying its countdown or its state, in its state's colour. Each stands straight above its own dial,
+/// since the dials are placed clear of one another. See `design/timers.md`.
+fn dial_panels(dials: &[Dial], viewer: Option<[f32; 3]>) -> Vec<Panel> {
+    dials
+        .iter()
+        .filter(|dial| dial.valid() && dial.opacity > 0.0)
+        .take(tomori_scene::dials::MOST * 2)
+        .map(|dial| dial_panel(dial, viewer))
+        .collect()
+}
+
+fn dial_panel(dial: &Dial, viewer: Option<[f32; 3]>) -> Panel {
+    let position = dial.position;
+    let face = viewer.unwrap_or(dial.facing);
+    let normal = facing_from(position, face, dial.facing);
+    let right = [normal[2], 0.0, -normal[0]];
+    let scale = dial.scale * DIAL_SIGN;
+    let pixel = SIGN_PIXEL * scale;
+    let mut lines = crate::ui_text::lines(&clip(&dial.name, usize::MAX), DIAL_COLUMNS, DIAL_ROWS);
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let named = lines.len();
+    lines.push(clip(&dial.schedule, DIAL_COLUMNS));
+    lines.extend(crate::ui_text::lines(
+        &clip(&dial.condition, usize::MAX),
+        DIAL_COLUMNS,
+        DIAL_ROWS,
+    ));
+    lines.push(dial.pill.clone());
+    let pill = (pill_width(&dial.pill) / 9.0).ceil() as usize;
+    let columns = lines[..lines.len() - 1]
+        .iter()
+        .map(|line| crate::ui_text::width(line))
+        .chain([pill, SIGN_FEWEST_COLUMNS])
+        .max()
+        .unwrap_or(SIGN_FEWEST_COLUMNS)
+        .min(DIAL_COLUMNS);
+    let half_width = (columns * 9) as f32 * pixel * 0.5;
+    let height = (lines.len() * 11 + 4) as f32 * pixel;
+    let [x, y, z] = position;
+    Panel {
+        origin: [
+            x - normal[0] * SIGN_BEHIND - right[0] * half_width,
+            y + DIAL_LIFT * dial.scale + height,
+            z - normal[2] * SIGN_BEHIND - right[2] * half_width,
+        ],
+        pixel,
+        columns,
+        lines,
+        accent: tomori_scene::dials::color(dial.state),
+        opacity: dial.opacity,
+        sign: Some(Sign {
+            source_id: format!("timer\u{0}{}", dial.name),
+            right,
+            normal,
+            state: State::Unknown,
+            station: position,
+            towards: facing_from(position, face, dial.facing),
+            own: true,
+            scale,
+            timer: Some((dial.state, named)),
         }),
         rule: None,
     }
@@ -1229,6 +1330,63 @@ fn status_symbol(
     }
 }
 
+/// The symbol of a timer's `state`, drawn as [`status_symbol`] draws a worker's: a clock face while it waits, two bars
+/// while paused, an arrow through a doorway while it waits for an arrival, a burst just fired, and a diamond for a state
+/// this build does not know.
+fn timer_symbol(
+    mesh: &mut Vec<Vertex>,
+    state: TimerState,
+    centre: [f32; 2],
+    size: f32,
+    p: f32,
+    color: [f32; 4],
+) {
+    let mut line = |a: [f32; 2], b: [f32; 2]| {
+        let rule = Shape::Rule {
+            from: [centre[0] + a[0] * size, centre[1] - a[1] * size],
+            to: [centre[0] + b[0] * size, centre[1] - b[1] * size],
+            width: 1.4,
+            color,
+        };
+        shape(mesh, &rule, p, SIGN_TEXT);
+    };
+    match state {
+        TimerState::Waiting => {
+            let corner = |index: usize| {
+                let angle = (index as f32 + 0.5) * std::f32::consts::FRAC_PI_4;
+                [angle.sin() * 0.95, angle.cos() * 0.95]
+            };
+            for index in 0..8 {
+                line(corner(index), corner(index + 1));
+            }
+            line([0.0, 0.0], [0.0, 0.6]);
+            line([0.0, 0.0], [0.45, 0.0]);
+        }
+        TimerState::Paused => {
+            line([-0.4, -0.8], [-0.4, 0.8]);
+            line([0.4, -0.8], [0.4, 0.8]);
+        }
+        TimerState::Awaiting => {
+            line([0.7, -0.9], [0.7, 0.9]);
+            line([-0.9, 0.0], [0.4, 0.0]);
+            line([0.4, 0.0], [0.0, 0.4]);
+            line([0.4, 0.0], [0.0, -0.4]);
+        }
+        TimerState::Fired => {
+            line([0.0, -0.95], [0.0, 0.95]);
+            line([-0.95, 0.0], [0.95, 0.0]);
+            line([-0.65, -0.65], [0.65, 0.65]);
+            line([-0.65, 0.65], [0.65, -0.65]);
+        }
+        TimerState::Unknown => {
+            line([0.0, 0.95], [0.9, 0.0]);
+            line([0.9, 0.0], [0.0, -0.95]);
+            line([0.0, -0.95], [-0.9, 0.0]);
+            line([-0.9, 0.0], [0.0, 0.95]);
+        }
+    }
+}
+
 /// How a worker's sign is drawn, in font pixels from its text's top-left corner, y down: its plate reaches
 /// [`PLATE_MARGIN`] beyond its text across and down, its corners rounded by [`PLATE_RADIUS`]; its title in one colour,
 /// [`TITLE`], each row centred; its state as a pill, centred on its last row, [`PILL_HEIGHT`] tall, its symbol in its
@@ -1303,10 +1461,12 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
         .lines
         .split_last()
         .expect("a sign has its state's row");
-    // The title, every row in one colour.
+    // The title, every row in one colour; a timer's schedule and condition, after its name, muted.
+    let named = sign.timer.map_or(usize::MAX, |(_, named)| named);
     for (index, line) in title.iter().enumerate() {
         let across = crate::ui_text::width(line).min(panel.columns) as f32 * 9.0;
-        row(mesh, line, ((width - across) / 2.0).round(), index, TITLE);
+        let rgb = if index < named { TITLE } else { MUTED };
+        row(mesh, line, ((width - across) / 2.0).round(), index, rgb);
     }
     // Its state, a pill on the last row: tinted, its symbol, then its word, in the state's colour.
     let top = height - 11.0;
@@ -1326,14 +1486,11 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
         p,
         SIGN_PILL,
     );
-    status_symbol(
-        mesh,
-        sign.state,
-        [left + 1.0 + PILL_SYMBOL / 2.0, top + 5.5],
-        3.0,
-        p,
-        color(panel.accent, 1.0),
-    );
+    let centre = [left + 1.0 + PILL_SYMBOL / 2.0, top + 5.5];
+    match sign.timer {
+        Some((state, _)) => timer_symbol(mesh, state, centre, 3.0, p, color(panel.accent, 1.0)),
+        None => status_symbol(mesh, sign.state, centre, 3.0, p, color(panel.accent, 1.0)),
+    }
     row(
         mesh,
         status,
@@ -2459,6 +2616,129 @@ mod tests {
                 .iter()
                 .all(|p| p.columns != 28)
             );
+        }
+    }
+
+    #[test]
+    fn a_timer_s_sign_stands_above_its_dial_naming_it_its_schedule_condition_and_countdown() {
+        let dial = Dial {
+            name: "check the build".into(),
+            schedule: "every 15 minutes".into(),
+            condition: "when present or on arrival".into(),
+            pill: "Paused 12:05".into(),
+            state: TimerState::Paused,
+            position: [0.0, 1.95, -2.3],
+            facing: crate::delegation::HOME_EYES,
+            scale: 1.0,
+            opacity: 1.0,
+            pointed: false,
+        };
+        let panel = dial_panel(&dial, None);
+        // Its name, its schedule, its condition wrapped, then its pill, at most as wide as a timer's sign.
+        assert_eq!(
+            panel.lines,
+            [
+                "check the build",
+                "every 15 minutes",
+                "when present or on",
+                "arrival",
+                "Paused 12:05"
+            ]
+        );
+        assert!(panel.columns <= DIAL_COLUMNS);
+        assert_eq!(panel.accent, tomori_scene::dials::color(TimerState::Paused));
+        let sign = panel.sign.as_ref().unwrap();
+        assert_eq!(sign.timer, Some((TimerState::Paused, 1)));
+        assert_eq!(sign.station, dial.position);
+        assert!(sign.own);
+        // Above its dial's face, centred over it, facing home.
+        let bottom = panel.origin[1] - (panel.lines.len() * 11 + 4) as f32 * panel.pixel;
+        assert!(bottom > dial.position[1] + tomori_scene::dials::RADIUS);
+        assert!((panel.center().x - dial.position[0]).abs() < 1e-4);
+        assert!(sign.normal[2] > 0.99);
+        // Facing the viewer when there is one.
+        let turned = dial_panel(&dial, Some([2.0, 1.6, -2.3]));
+        assert!(turned.sign.unwrap().normal[0] > 0.99);
+        // Its schedule and condition muted, its name not; its pill with its state's symbol.
+        let mut mesh = Vec::new();
+        let surface = sign_mesh(&panel, sign, &mut mesh);
+        assert!(surface > 0);
+        let muted = |vertex: &&Vertex| vertex.color[..3] == MUTED;
+        assert!(mesh.iter().any(|vertex| muted(&vertex)));
+        assert!(mesh.iter().any(|vertex| vertex.color[..3] == TITLE));
+        // Dials that are not valid, or fully faded, have no sign; the rest one each.
+        let faded = Dial {
+            opacity: 0.0,
+            ..dial.clone()
+        };
+        let invalid = Dial {
+            name: String::new(),
+            ..dial.clone()
+        };
+        assert_eq!(dial_panels(&[dial.clone(), faded, invalid], None).len(), 1);
+        assert!(dial_panels(&vec![dial.clone(); 40], None).len() <= tomori_scene::dials::MOST * 2);
+        // No larger than the room the dials are placed for, at any size, with its most rows.
+        for scale in [0.5, 1.0, 2.0] {
+            let tallest = dial_panel(
+                &Dial {
+                    name: "the timer whose name runs on well past two rows".into(),
+                    condition: "when present or on arrival, or later".into(),
+                    scale,
+                    ..dial.clone()
+                },
+                None,
+            );
+            assert_eq!(tallest.lines.len(), 6);
+            let width = (tallest.columns * 9) as f32 * tallest.pixel;
+            let height = (tallest.lines.len() * 11 + 4) as f32 * tallest.pixel;
+            assert!(
+                width <= tomori_scene::dials::SIGN_WIDTH * scale + 1e-4,
+                "{width}"
+            );
+            assert!(
+                height <= tomori_scene::dials::SIGN_HEIGHT * scale + 1e-4,
+                "{height}"
+            );
+        }
+        // A name too long for two rows ends with an ellipsis.
+        let long = dial_panel(
+            &Dial {
+                name: "the timer whose name runs on well past two rows".into(),
+                ..dial.clone()
+            },
+            None,
+        );
+        assert!(long.lines[1].ends_with('…'));
+        // A name that takes no rows still has its row.
+        let blank = dial_panel(
+            &Dial {
+                name: " ".into(),
+                ..dial
+            },
+            None,
+        );
+        assert_eq!(blank.lines.len(), 5);
+    }
+
+    #[test]
+    fn each_timer_state_has_a_symbol_of_its_own() {
+        let meshes: Vec<Vec<[f32; 3]>> = [
+            TimerState::Waiting,
+            TimerState::Paused,
+            TimerState::Awaiting,
+            TimerState::Fired,
+            TimerState::Unknown,
+        ]
+        .into_iter()
+        .map(|state| {
+            let mut mesh = Vec::new();
+            timer_symbol(&mut mesh, state, [6.0, 5.5], 3.0, 0.004, [1.0; 4]);
+            assert!(!mesh.is_empty());
+            mesh.iter().map(|vertex| vertex.position).collect()
+        })
+        .collect();
+        for (index, mesh) in meshes.iter().enumerate() {
+            assert!(!meshes[..index].contains(mesh));
         }
     }
 

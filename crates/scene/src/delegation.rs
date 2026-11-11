@@ -513,6 +513,17 @@ pub struct Scene {
     /// The placements that have panicked, which this scene never calls again: at most one for each environment the
     /// build registers one for.
     poisoned: Vec<Placement>,
+    /// The joined space's timers and the time, in seconds since the Unix epoch, they count down from, as
+    /// [`Self::set_timers`] last said, and the room their dials may take about the agent's home, clear of what the home
+    /// cluster stands there at its every step. See `design/timers.md`.
+    timers: Vec<tomori_protocol::Timer>,
+    walls: Vec<tomori_protocol::Wall>,
+    now: f64,
+    room: crate::dials::Room,
+    /// The dials drawn for them, among [`Self::cubes`].
+    dials: crate::dials::Dials,
+    /// Whether the last [`Self::point`] met a dial nearer than any worker.
+    pointed_timer: bool,
 }
 
 impl Default for Scene {
@@ -523,7 +534,7 @@ impl Default for Scene {
 
 impl Scene {
     pub fn new() -> Self {
-        Self {
+        let mut scene = Self {
             root: None,
             slots: BTreeMap::new(),
             workers: BTreeMap::new(),
@@ -552,7 +563,87 @@ impl Scene {
             reslotted: None,
             placement: None,
             poisoned: Vec::new(),
+            timers: Vec::new(),
+            walls: Vec::new(),
+            now: 0.0,
+            room: crate::dials::Room::open(Anchor::AGENT, crate::anchors::EYES),
+            dials: crate::dials::Dials::default(),
+            pointed_timer: false,
+        };
+        scene.furnish();
+        scene
+    }
+
+    /// Show the joined space's `timers` as dials at the agent's `home`, clear of its reach about its middle, `agent`,
+    /// across, up and down, and deep, counting down at `now`, in seconds since the Unix epoch, by this client's clock,
+    /// from the next [`Self::update`]. See `design/timers.md`.
+    pub fn set_timers(
+        &mut self,
+        timers: &[tomori_protocol::Timer],
+        home: Anchor,
+        agent: Vec3,
+        now: f64,
+    ) {
+        if self.timers != timers {
+            self.timers = timers.to_vec();
         }
+        self.room.home = home;
+        // Placed for the agent's reach as it grows at once, and as it shrinks only once it has shrunk by SETTLE, so that
+        // an animated avatar's changing bounds do not move the dials back and forth.
+        let settled = self.room.agent;
+        if agent.cmpgt(settled).any() || (settled - agent).max_element() > crate::dials::SETTLE {
+            self.room.agent = agent;
+        }
+        self.now = now;
+    }
+
+    /// The walls the joined space shows, `walls`, whose slots the dials keep clear of, its status wall among them,
+    /// wherever it stands. See `design/timers.md`.
+    pub fn set_walls(&mut self, walls: &[tomori_protocol::Wall]) {
+        if self.walls != walls {
+            self.walls = walls.to_vec();
+            self.room.walls = crate::dials::Extent::walls(walls);
+        }
+    }
+
+    /// What the home cluster stands about its point at its every step, and so where the dials may not, and the ceiling
+    /// its formation keeps to, as the room for the dials.
+    fn furnish(&mut self) {
+        let mut extents: Vec<crate::dials::Extent> = Vec::new();
+        for span in [
+            1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 96, 128,
+            SLOT_COUNT,
+        ] {
+            let arrangement = self.cluster.arrange(span);
+            for slot in 0..span {
+                let slot = self.cluster.slot(&arrangement, slot);
+                let extent = crate::dials::Extent::worker(
+                    Vec3::from_array(slot.position),
+                    slot.scale,
+                    self.audience,
+                );
+                if !extents.iter().any(|known| {
+                    known.centre.distance(extent.centre) < 0.01 && known.radius >= extent.radius
+                }) {
+                    extents.push(extent);
+                }
+            }
+        }
+        self.room.audience = self.audience;
+        self.room.ceiling = (self.formation == tomori_protocol::cluster::Formation::Ring)
+            .then_some(tomori_protocol::entourage::FLOOR + tomori_protocol::cluster::RING_HIGHEST);
+        self.room.extents = extents;
+    }
+
+    /// The dials drawn this frame, their cubes among [`Self::cubes`], for their signs. See `design/timers.md`.
+    pub fn dials(&self) -> &[crate::dials::Dial] {
+        self.dials.dials()
+    }
+
+    /// The timer whose dial the last [`Self::point`] met, by name, where it was nearer than any worker. See
+    /// `design/timers.md`.
+    pub fn pointed_timer(&self) -> Option<&str> {
+        self.dials.pointed().filter(|_| self.pointed_timer)
     }
 
     /// Arrange the workers about `origin`, gathered about whoever's eyes are at `audience`, by `placement`, or without
@@ -619,6 +710,7 @@ impl Scene {
             .cluster
             .arrange(self.home_laid.unwrap_or_else(|| self.span(&[])));
         self.reslotted = None;
+        self.furnish();
         self.place_live();
     }
 
@@ -960,10 +1052,18 @@ impl Scene {
                 }
             }
         }
+        // A timer's dial nearer than any worker is pointed at instead.
+        let dial = self.dials.point(ray);
+        self.pointed_timer =
+            dial.is_some_and(|(distance, _)| hit.is_none_or(|(nearest, ..)| distance < nearest));
+        let hit = hit.filter(|_| !self.pointed_timer);
         // The ray ends among the worker's flock, where it passes nearest its anchor, rather than where it enters the pointing sphere.
         self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
             ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
         });
+        if self.pointed_timer {
+            self.hit_point = dial.map(|(_, point)| point);
+        }
         // One gathered into a "+N more" sign is pointed at as the sign, which stands for all of them.
         self.pointed_more = hit
             .and_then(|(_, id, _)| self.workers.get(id))
@@ -977,7 +1077,7 @@ impl Scene {
         self.highlighted.as_deref()
     }
 
-    /// Where the last [`Self::point`] met the worker it highlights, or `None` when it met none.
+    /// Where the last [`Self::point`] met the worker it highlights, or the dial, or `None` when it met neither.
     pub fn hit_point(&self) -> Option<Vec3> {
         self.hit_point
     }
@@ -1103,6 +1203,25 @@ impl Scene {
     /// no root identifier, so detached orphans cannot independently prove
     /// which root they belong to. A root change always clears prior state.
     pub fn update(&mut self, root: Option<&str>, workspace: &Workspace, dt: f32) {
+        let before = self.root.clone();
+        self.update_workers(root, workspace, dt);
+        // The timers' dials stand above the agent's home, among the workers' cubes, only in a space.
+        if self.root.is_none() || self.root != before {
+            self.dials.clear();
+        }
+        if self.root.is_some() {
+            self.dials.update(
+                &self.timers,
+                !workspace.stale,
+                &self.room,
+                self.now,
+                dt,
+                &mut self.cubes,
+            );
+        }
+    }
+
+    fn update_workers(&mut self, root: Option<&str>, workspace: &Workspace, dt: f32) {
         let root = root.filter(|id| valid_id(id));
         if self.root.as_deref() != root {
             self.root = root.map(str::to_owned);
@@ -5094,6 +5213,327 @@ mod space_tests {
         let workspace = Workspace::from_space(&state, true);
         assert!(workspace.valid());
         assert_eq!(workspace.nodes[0].parent_id.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn timers_stand_as_dials_above_the_agent_among_the_workers_and_the_nearer_is_pointed_at() {
+        use tomori_protocol::{Timer, TimerState};
+        const NOW: f64 = 1_800_000_000.0;
+        let timers: Vec<Timer> = (0..8)
+            .map(|index| {
+                Timer::new(
+                    format!("t{index}"),
+                    "every hour",
+                    "when present",
+                    Some(NOW as u64 + 600),
+                    TimerState::Waiting,
+                )
+            })
+            .collect();
+        // Many workers, and eight timers: the dials stand where they would with none, clear of every worker.
+        let mut state = space(
+            (0..MAX_NODES)
+                .map(|index| worker(&format!("w{index:02}"), None, WorkerState::Running))
+                .collect(),
+        );
+        state.timers = timers.clone();
+        let mut scene = Scene::new();
+        let mut workers = Workers::default();
+        let reach = crate::dials::SWARM_REACH;
+        scene.set_timers(&state.timers, Anchor::AGENT, reach, NOW);
+        scene.set_timers(&state.timers, Anchor::AGENT, reach, NOW);
+        show(&mut scene, &mut workers, Some((&state, true)));
+        for _ in 0..40 {
+            let (root, workspace) = workers.update(Some((&state, true)));
+            scene.update(root, workspace, 0.05);
+        }
+        assert_eq!(scene.dials().len(), 8);
+        let places = crate::dials::places(8, &scene.room);
+        for (dial, (place, _)) in scene.dials().iter().zip(&places) {
+            assert_eq!(Vec3::from_array(dial.position), *place);
+        }
+        assert!(scene.cubes().len() <= MAX_CUBES);
+        assert!(scene.cubes().len() > MAX_NODES * PARTICLES);
+        for station in scene.stations() {
+            for (place, _) in &places {
+                assert!(Vec3::from_array(station.position).distance(*place) > 0.75);
+            }
+        }
+        // The dial the ray meets, nearer than any worker, is pointed at, and the ray ends on it.
+        let first = places[0].0;
+        let eyes = crate::anchors::EYES;
+        assert_eq!(scene.point(Ray::new(eyes, first - eyes)), None);
+        assert_eq!(scene.pointed_timer(), Some("t0"));
+        assert!(scene.hit_point().unwrap().distance(first) < 1e-3);
+        // A worker nearer along the same ray is pointed at instead.
+        let (id, nearer) = scene
+            .workers
+            .iter()
+            .map(|(id, worker)| (id.clone(), worker.anchor))
+            .next()
+            .unwrap();
+        let behind = nearer + (nearer - eyes).normalize() * 0.5;
+        let mut close = Scene::new();
+        close
+            .workers
+            .insert(id.clone(), scene.workers.remove(&id).unwrap());
+        close.dials = std::mem::take(&mut scene.dials);
+        close.dials.update(
+            &timers[..1],
+            true,
+            &crate::dials::Room::open(
+                Anchor {
+                    position: behind
+                        - Vec3::Y * (reach.y + crate::dials::CLEAR + crate::dials::RADIUS),
+                    ..Anchor::AGENT
+                },
+                eyes,
+            ),
+            NOW,
+            1.0,
+            &mut Vec::new(),
+        );
+        for _ in 0..40 {
+            close.dials.update(
+                &timers[..1],
+                true,
+                &crate::dials::Room::open(
+                    Anchor {
+                        position: behind
+                            - Vec3::Y * (reach.y + crate::dials::CLEAR + crate::dials::RADIUS),
+                        ..Anchor::AGENT
+                    },
+                    eyes,
+                ),
+                NOW,
+                0.05,
+                &mut Vec::new(),
+            );
+        }
+        assert_eq!(
+            close.point(Ray::new(eyes, nearer - eyes)),
+            Some(id.as_str())
+        );
+        assert_eq!(close.pointed_timer(), None);
+        // Nothing pointed at, neither.
+        assert_eq!(scene.point(None), None);
+        assert_eq!(scene.pointed_timer(), None);
+        // An avatar's reach as it grows is taken at once, and as it shrinks only past SETTLE, so that an animated one
+        // does not move the dials back and forth.
+        let grown = reach + Vec3::Y * 0.2;
+        scene.set_timers(&timers, Anchor::AGENT, grown, NOW);
+        assert_eq!(scene.room.agent, grown);
+        scene.set_timers(&timers, Anchor::AGENT, grown - Vec3::Y * 0.1, NOW);
+        assert_eq!(scene.room.agent, grown);
+        scene.set_timers(&timers, Anchor::AGENT, reach, NOW);
+        assert_eq!(scene.room.agent, grown);
+        scene.set_timers(&timers, Anchor::AGENT, reach - Vec3::Y * 0.1, NOW);
+        assert_eq!(scene.room.agent, reach - Vec3::Y * 0.1);
+        scene.set_timers(&timers, Anchor::AGENT, reach, NOW);
+        // Outside a space, or in another, the dials are forgotten.
+        let (root, workspace) = workers.update(None);
+        scene.update(root, workspace, 0.05);
+        assert!(scene.dials().is_empty());
+        scene.set_timers(&timers, Anchor::AGENT, reach, NOW);
+        let other = SpaceState {
+            id: "space-2".into(),
+            timers: timers[..1].to_vec(),
+            ..Default::default()
+        };
+        let (root, workspace) = workers.update(Some((&other, true)));
+        scene.update(root, workspace, 0.05);
+        assert_eq!(scene.dials().len(), 8);
+        assert!(scene.dials()[0].opacity < 0.5, "growing in afresh");
+    }
+
+    /// The farmyard's home, its eyes at the arrival, and its ring, all but straight behind the agent.
+    const FARMYARD_HOME: Vec3 = Vec3::new(-2.5, 1.5, -0.84);
+    const FARMYARD_EYES: Vec3 = Vec3::new(0.6, 1.6, -2.4);
+
+    /// The dials and the workers in `scene`, with `workers` workers and eight timers, laid out by `arrange`, stand clear
+    /// of one another and their signs, and within the room's ceiling and floor.
+    fn clear_of_every_worker(
+        arrange: impl Fn(&mut Scene),
+        home: Anchor,
+        eyes: Vec3,
+        walls: &[tomori_protocol::Wall],
+    ) -> Vec<Vec3> {
+        use tomori_protocol::{Timer, TimerState};
+        const NOW: f64 = 1_800_000_000.0;
+        let timers: Vec<Timer> = (0..8)
+            .map(|index| {
+                Timer::new(
+                    format!("t{index}"),
+                    "every hour",
+                    "when present",
+                    Some(NOW as u64 + 600),
+                    TimerState::Waiting,
+                )
+            })
+            .collect();
+        let mut stood = Vec::new();
+        for count in [0, 8, MAX_NODES] {
+            let mut state = space(
+                (0..count)
+                    .map(|index| worker(&format!("w{index:02}"), None, WorkerState::Running))
+                    .collect(),
+            );
+            state.timers = timers.clone();
+            let mut scene = Scene::new();
+            arrange(&mut scene);
+            let mut workers = Workers::default();
+            for _ in 0..60 {
+                scene.set_timers(&state.timers, home, crate::dials::SWARM_REACH, NOW);
+                scene.set_walls(walls);
+                let (root, workspace) = workers.update(Some((&state, true)));
+                scene.update(root, workspace, 0.05);
+            }
+            assert_eq!(scene.dials().len(), 8);
+            let dials: Vec<crate::dials::Extent> = scene
+                .dials()
+                .iter()
+                .map(|dial| crate::dials::Extent::dial(Vec3::from_array(dial.position), dial.scale))
+                .collect();
+            for (index, dial) in dials.iter().enumerate() {
+                assert!(dial.low >= scene.room.floor - 1e-4);
+                assert!(
+                    scene
+                        .room
+                        .ceiling
+                        .is_none_or(|ceiling| dial.high <= ceiling + 1e-4)
+                );
+                // Clear of the agent's reach, above or below it.
+                assert!(
+                    dial.low >= home.position.y + crate::dials::SWARM_REACH.y
+                        || dial.high <= home.position.y - crate::dials::SWARM_REACH.y
+                );
+                for other in &dials[..index] {
+                    assert!(!dial.overlaps(other, 0.0));
+                }
+                for slot in crate::dials::Extent::walls(walls) {
+                    assert!(
+                        !dial.overlaps(&slot, 0.0),
+                        "{count} workers: a wall's slot at {} and a dial at {}",
+                        slot.centre,
+                        dial.centre
+                    );
+                }
+                for (id, worker) in &scene.workers {
+                    let extent = crate::dials::Extent::worker(worker.place, worker.scale, eyes);
+                    assert!(
+                        !dial.overlaps(&extent, 0.0),
+                        "{count} workers: {id} at {} and a dial at {}",
+                        worker.place,
+                        dial.centre
+                    );
+                }
+            }
+            stood = dials.iter().map(|dial| dial.centre).collect();
+        }
+        stood
+    }
+
+    #[test]
+    fn on_today_s_arc_the_dials_stand_above_the_agent_clear_of_every_worker() {
+        let stood = clear_of_every_worker(|_| {}, Anchor::AGENT, crate::anchors::EYES, &[]);
+        assert!(stood.iter().all(|at| at.y > Anchor::AGENT.position.y));
+        // With the status wall beneath the agent, where the server stands it by default.
+        let stood = clear_of_every_worker(
+            |_| {},
+            Anchor::AGENT,
+            crate::anchors::EYES,
+            &[status_wall(Anchor::AGENT.position, crate::anchors::EYES)],
+        );
+        assert!(stood.iter().all(|at| at.y > Anchor::AGENT.position.y));
+    }
+
+    #[test]
+    fn in_a_home_with_room_the_dials_stand_clear_of_the_arc_grid_and_compact_steps() {
+        let home = Anchor::AGENT;
+        let stood = clear_of_every_worker(
+            |scene| {
+                scene.arrange(
+                    home,
+                    crate::anchors::EYES,
+                    Some(tomori_protocol::cluster::Extent::new(4.2, 1.6, 2.0)),
+                    None,
+                );
+            },
+            home,
+            crate::anchors::EYES,
+            &[status_wall(home.position, crate::anchors::EYES)],
+        );
+        assert_eq!(stood.len(), 8);
+    }
+
+    /// The space's own status wall, the Tomori wall, where the server stands it by default: 0.88 m beneath the agent's
+    /// home `at`, curving about `eyes`.
+    fn status_wall(at: Vec3, eyes: Vec3) -> tomori_protocol::Wall {
+        let middle = at - Vec3::Y * 0.88;
+        tomori_protocol::Wall::new(
+            tomori_protocol::TOMORI_WALL,
+            tomori_protocol::WallKind::Tomori,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), [eyes.x, middle.y, eyes.z]),
+        )
+        .with_shape(tomori_protocol::WallShape::Arc { radius: 2.3 })
+    }
+
+    fn farmyard() -> (Anchor, impl Fn(&mut Scene)) {
+        let pose = tomori_protocol::Pose::at(FARMYARD_HOME.to_array())
+            .facing_towards(FARMYARD_EYES.to_array());
+        let home = Anchor::from_pose(&pose).unwrap();
+        (home, move |scene: &mut Scene| {
+            scene.arrange_as(
+                home,
+                FARMYARD_EYES,
+                None,
+                (tomori_protocol::cluster::Formation::Ring, Some(300.0)),
+                None,
+            );
+        })
+    }
+
+    #[test]
+    fn in_the_farmyard_s_ring_the_dials_stand_beneath_the_agent_within_its_height() {
+        // Its status wall is its notice board, one of its own walls, across the yard.
+        let board = tomori_protocol::Wall::new(
+            "noticeboard",
+            tomori_protocol::WallKind::Environment,
+            tomori_protocol::Pose::upright_facing([-4.0, 1.5, -6.0], FARMYARD_EYES.to_array()),
+        )
+        .with_status(true);
+        let (home, arrange) = farmyard();
+        let stood = clear_of_every_worker(arrange, home, FARMYARD_EYES, &[board]);
+        // Above the agent the ring keeps nothing over 2.5 m, so the dials stand beneath it.
+        assert!(stood.iter().all(|at| at.y < FARMYARD_HOME.y));
+    }
+
+    #[test]
+    fn in_a_ring_over_the_default_status_wall_the_dials_stand_clear_of_its_slots() {
+        let (home, arrange) = farmyard();
+        let wall = status_wall(FARMYARD_HOME, FARMYARD_EYES);
+        let stood =
+            clear_of_every_worker(arrange, home, FARMYARD_EYES, std::slice::from_ref(&wall));
+        assert_eq!(stood.len(), 8);
+        // And at the default home's height, lower over its floor.
+        let low = Vec3::new(FARMYARD_HOME.x, 1.4, FARMYARD_HOME.z);
+        let pose =
+            tomori_protocol::Pose::at(low.to_array()).facing_towards(FARMYARD_EYES.to_array());
+        let home = Anchor::from_pose(&pose).unwrap();
+        clear_of_every_worker(
+            |scene| {
+                scene.arrange_as(
+                    home,
+                    FARMYARD_EYES,
+                    None,
+                    (tomori_protocol::cluster::Formation::Ring, Some(300.0)),
+                    None,
+                );
+            },
+            home,
+            FARMYARD_EYES,
+            &[status_wall(low, FARMYARD_EYES)],
+        );
     }
 }
 

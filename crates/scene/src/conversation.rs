@@ -4008,6 +4008,11 @@ impl Conversation {
             Resource::Gathered { gathered, .. } => self
                 .joined_space()
                 .map(|_| format!("the workers gathered at {gathered}")),
+            // A timer's dial, by its name. See `design/timers.md`.
+            Resource::Timer { timer, .. } => self
+                .joined_space()
+                .filter(|(space, _)| space.timers.iter().any(|known| &known.name == timer))
+                .map(|_| format!("timer {timer}")),
             _ => None,
         }
     }

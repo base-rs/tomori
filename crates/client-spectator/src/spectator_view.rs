@@ -68,6 +68,7 @@ impl SpectatorView {
         input
             .renderer
             .set_presentation_content_page(frame.presentation_content_page);
+        input.renderer.set_dials(&frame.timer_dials);
         input.renderer.update_workspace(
             input.device,
             input.queue,
