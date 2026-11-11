@@ -316,6 +316,8 @@ pub struct Editor {
     /// Each wall's bar's face last drawn, by its wall's identity, with what it was drawn from, handed over again while
     /// that is the same, so that it is not drawn again and its mesh is kept.
     bars: std::collections::HashMap<String, (BarFace, std::sync::Arc<crate::canvas::Canvas>)>,
+    /// Each wall's handles and bar as laid out, used again while what they are laid out from is the same.
+    layouts: Layouts,
 }
 
 /// What the editor needs this frame.
@@ -518,10 +520,120 @@ pub fn group_bar(wall: &Wall, frame: Mat4, viewer: Vec3, walls: &[&Wall]) -> Opt
         .then(|| lay_out(wall, frame, viewer, &Around::of(wall, walls, None)).2)
 }
 
+/// How far the eyes move, in metres, before a wall's handles and bar, laid out for where they were, are laid out again:
+/// a centimetre, which moves none by more than a few hundredths of a degree as seen, a fiftieth of a handle, so that
+/// turning the head, which carries the eyes about the neck, lays them out only every few frames, and holding it still,
+/// not at all. See `design/projection.md`.
+const RELAYOUT: f32 = 0.01;
+
+/// Each wall's handles and bar as [`lay_out`] last laid them out this frame or the last, with what they were laid out
+/// from, used again while the wall, where it stands, and what stands about it are the same and the eyes have moved no
+/// more than [`RELAYOUT`]; those not used in a frame are forgotten.
+#[derive(Clone, Debug, Default)]
+struct Layouts {
+    kept: Vec<Layout>,
+}
+
+/// A wall's handles and bar as laid out, with what they were laid out from, and whether they were used this frame.
+#[derive(Clone, Debug)]
+struct Layout {
+    wall: Wall,
+    frame: Mat4,
+    around: Around,
+    viewer: Vec3,
+    points: Vec<(Handle, Vec3)>,
+    size: f32,
+    bar: Bar,
+    used: bool,
+}
+
+impl Layouts {
+    /// The layout of `wall` standing at `frame` among what stands `around` it, seen from `viewer`: as kept, or laid out
+    /// now and kept.
+    fn lay_out(&mut self, wall: &Wall, frame: Mat4, viewer: Vec3, around: Around) -> &Layout {
+        let index = match self.kept.iter().position(|kept| {
+            kept.frame == frame
+                && kept.viewer.distance(viewer) <= RELAYOUT
+                && kept.around == around
+                && kept.wall == *wall
+        }) {
+            Some(index) => index,
+            None => {
+                let (points, size, bar) = lay_out(wall, frame, viewer, &around);
+                self.kept.push(Layout {
+                    wall: wall.clone(),
+                    frame,
+                    around,
+                    viewer,
+                    points,
+                    size,
+                    bar,
+                    used: false,
+                });
+                self.kept.len() - 1
+            }
+        };
+        let kept = &mut self.kept[index];
+        kept.used = true;
+        kept
+    }
+
+    /// Where `wall`'s handles stand among `walls`, as [`handle_points_among_with`] says.
+    fn handles(
+        &mut self,
+        wall: &Wall,
+        frame: Mat4,
+        viewer: Vec3,
+        walls: &[&Wall],
+        keep: Option<Handle>,
+        controls: LockControls,
+    ) -> (Vec<(Handle, Vec3)>, f32) {
+        let mut around = Around::of(wall, walls, keep);
+        around.controls = controls;
+        let laid = self.lay_out(wall, frame, viewer, around);
+        (laid.points.clone(), laid.size)
+    }
+
+    /// Where `handle` of `wall` is drawn among `walls`, and how large, as [`handle_point_among`] says.
+    fn handle(
+        &mut self,
+        wall: &Wall,
+        frame: Mat4,
+        handle: Handle,
+        viewer: Vec3,
+        walls: &[&Wall],
+        keep: Option<Handle>,
+    ) -> (Vec3, f32) {
+        let laid = self.lay_out(wall, frame, viewer, Around::of(wall, walls, keep));
+        let at = laid
+            .points
+            .iter()
+            .find(|(shown, _)| *shown == handle)
+            .map_or(frame.transform_point3(Vec3::ZERO), |(_, at)| *at);
+        (at, laid.size)
+    }
+
+    /// Where `wall`'s grab bar stands among `walls`, if it shows one, as [`group_bar`] says.
+    fn bar(&mut self, wall: &Wall, frame: Mat4, viewer: Vec3, walls: &[&Wall]) -> Option<Bar> {
+        let around = Around::of(wall, walls, None);
+        around
+            .bar
+            .then(|| self.lay_out(wall, frame, viewer, around).bar)
+    }
+
+    /// Forget the layouts not used since this was last called.
+    fn forget_unused(&mut self) {
+        self.kept.retain(|kept| kept.used);
+        for kept in &mut self.kept {
+            kept.used = false;
+        }
+    }
+}
+
 /// What stands about a wall of a group, which its handles and bar keep clear of: the slots of the other walls of its
 /// group, as they stand on its surface, from its pose; the edges another wall of its group is joined across; the handle
 /// being dragged, which stays where it is; and whether it shows its group's bar.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Around {
     slots: Vec<group::Extent>,
     joined: Vec<Edge>,
@@ -634,26 +746,61 @@ const BAR_MOST: f32 = 5.0;
 /// so curved that it folds, where they are moved on.
 const BAR_ROWS: usize = 8;
 
-/// How much further than a handle's [`SPACING`] apart points `a` and `b`, as large as handles `size` across, stand as
-/// seen from `viewer` looking `ahead`, across or up, whichever is further, as an angle: at least none, so that the ray
-/// meeting one never meets the other, where they stand apart.
-fn seen_gap(a: Vec3, b: Vec3, size: f32, viewer: Vec3, ahead: Vec3) -> f32 {
-    let right = ahead.cross(Vec3::Y).normalize_or(Vec3::X);
-    let up = right.cross(ahead);
-    let seen = |point: Vec3| {
-        let to = point - viewer;
+/// Points as seen from the viewer looking ahead, so that how far apart two stand is measured as angles, each point seen
+/// once however many it is measured against.
+#[derive(Clone, Copy, Debug)]
+struct Sight {
+    viewer: Vec3,
+    ahead: Vec3,
+    right: Vec3,
+    up: Vec3,
+    /// How large a handle is.
+    size: f32,
+}
+
+/// A point as [`Sight`] sees it: across and up from ahead, as angles, and how large a handle there is seen, as one.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    angles: Vec2,
+    across: f32,
+}
+
+impl Sight {
+    /// Seen from `viewer` looking `ahead`, handles `size` across.
+    fn new(viewer: Vec3, ahead: Vec3, size: f32) -> Self {
+        let right = ahead.cross(Vec3::Y).normalize_or(Vec3::X);
+        Self {
+            viewer,
+            ahead,
+            right,
+            up: right.cross(ahead),
+            size,
+        }
+    }
+
+    /// Where `point` is seen.
+    fn seen(&self, point: Vec3) -> Seen {
+        #[cfg(test)]
+        SEEN.with(|seen| seen.set(seen.get() + 1));
+        let to = point - self.viewer;
         let distance = to.length().max(1e-3);
         let to = to / distance;
-        (
-            Vec2::new(
-                to.dot(right).atan2(to.dot(ahead)),
-                to.dot(up).clamp(-1.0, 1.0).asin(),
+        Seen {
+            angles: Vec2::new(
+                to.dot(self.right).atan2(to.dot(self.ahead)),
+                to.dot(self.up).clamp(-1.0, 1.0).asin(),
             ),
-            size / distance,
-        )
-    };
-    let ((a, across), (b, other)) = (seen(a), seen(b));
-    let reach = (across + other) / 2.0 * SPACING;
+            across: self.size / distance,
+        }
+    }
+}
+
+/// How much further than a handle's [`SPACING`] apart points `a` and `b`, as [`Sight`] sees them, stand, across or up,
+/// whichever is further, as an angle: at least none, so that the ray meeting one never meets the other, where they stand
+/// apart.
+fn seen_gap(a: Seen, b: Seen) -> f32 {
+    let reach = (a.across + b.across) / 2.0 * SPACING;
+    let (a, b) = (a.angles, b.angles);
     (a.x - b.x).abs().max((a.y - b.y).abs()) - reach
 }
 
@@ -885,29 +1032,39 @@ fn lay_out_handles(
     let outward = if below { -pv } else { pv };
     let (least, most) = (BAR_LEAST * ub / 2.0, BAR_MOST * ub / 2.0);
     let preferred = (width / 6.0).clamp(least, most);
-    // How far apart from `fixed` a bar `half` long either way along `row` stands, as seen, as [`seen_gap`] says of
-    // the nearest.
-    let gap = |fixed: &[Vec3], row: f32, half: f32| {
-        let samples = ((2.0 * half / (0.2 * size)).ceil() as usize).max(1);
-        (0..=samples)
-            .flat_map(|sample| {
-                let x = -half + 2.0 * half * sample as f32 / samples as f32;
-                let point = put(at(0.0, row)) + frame.transform_vector3(Vec3::X * x);
-                fixed
-                    .iter()
-                    .map(move |handle| seen_gap(point, *handle, size, viewer, ahead))
-            })
-            .fold(f32::INFINITY, f32::min)
+    // Each handle is seen once, and each point along the bar once, however many it is measured against.
+    let sight = Sight::new(viewer, ahead, size);
+    let seen_all = |points: &mut dyn Iterator<Item = Vec3>| -> Vec<Seen> {
+        points.map(|point| sight.seen(point)).collect()
     };
-    let clear = |fixed: &[Vec3], row: f32, half: f32| {
+    // How far apart from `fixed` a bar `half` long either way along `row` stands, as seen, as [`seen_gap`] says of
+    // the nearest, measured no further along it once one stands nearer than `until`.
+    let gap = |fixed: &[Seen], row: f32, half: f32, until: f32| {
+        let samples = ((2.0 * half / (0.2 * size)).ceil() as usize).max(1);
+        let middle = put(at(0.0, row));
+        let mut nearest = f32::INFINITY;
+        for sample in 0..=samples {
+            if fixed.is_empty() || nearest < until {
+                break;
+            }
+            let x = -half + 2.0 * half * sample as f32 / samples as f32;
+            let point = sight.seen(middle + frame.transform_vector3(Vec3::X * x));
+            nearest = fixed
+                .iter()
+                .map(|handle| seen_gap(point, *handle))
+                .fold(nearest, f32::min);
+        }
+        nearest
+    };
+    let clear = |fixed: &[Seen], row: f32, half: f32| {
         // The bar its group shows stands over none of its group's slots, as thick as it is drawn.
         (!around.bar || around.clear(0.0, row, (half, BAR_THICKNESS * size / 2.0)))
-            && gap(fixed, row, half) >= 0.0
+            && gap(fixed, row, half, 0.0) >= 0.0
     };
     // As long as it may be, nearest the wall, that stands clear of `fixed`; or else, where none does, as seen from
     // beside the end of a wall curved around the participant, whose handles there are near and large, the one that
     // stands furthest from them.
-    let choose = |fixed: &[Vec3]| {
+    let choose = |fixed: &[Seen]| {
         let candidates = (0..BAR_ROWS).flat_map(|lift| {
             (0..=4).map(move |step| {
                 (
@@ -920,10 +1077,14 @@ fn lay_out_handles(
             .clone()
             .find(|(row, half)| clear(fixed, *row, *half))
             .or_else(|| {
-                candidates.max_by(|a, b| gap(fixed, a.0, a.1).total_cmp(&gap(fixed, b.0, b.1)))
+                candidates
+                    .map(|(row, half)| ((row, half), gap(fixed, row, half, f32::NEG_INFINITY)))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(candidate, _)| candidate)
             })
             .unwrap_or((first, least))
     };
+    let fixed = seen_all(&mut fixed.into_iter());
     let (bar_row, bar_half) = choose(&fixed);
     // Along the top, a row beyond the bar where it stands there: the corners, the knob at the middle where it has room,
     // and the steppers towards the right corner.
@@ -1023,14 +1184,16 @@ fn lay_out_handles(
         Handle::Reset => 5,
     };
     let separate = |points: &mut Vec<(Handle, Vec3)>| {
+        // Each seen once, and again only as it moves.
+        let mut seen = seen_all(&mut points.iter().map(|(_, at)| *at));
         for _ in 0..8 {
             let mut moved = false;
             for first in 0..points.len() {
                 for second in first + 1..points.len() {
-                    let (a, b) = (points[first], points[second]);
-                    if apart(a.1, b.1, size, viewer, frame.transform_point3(Vec3::ZERO)) {
+                    if apart(seen[first], seen[second]) {
                         continue;
                     }
+                    let (a, b) = (points[first], points[second]);
                     // Corners are always apart, standing beyond the wall's corners at least the spacing apart.
                     let moving = if rank(a.0) >= rank(b.0) {
                         first
@@ -1039,6 +1202,7 @@ fn lay_out_handles(
                     };
                     let by = outward(points[moving].0, away[moving], points[moving].1);
                     points[moving].1 += by;
+                    seen[moving] = sight.seen(points[moving].1);
                     moved = true;
                 }
             }
@@ -1051,12 +1215,13 @@ fn lay_out_handles(
     // Handles moved on may come in line with the bar, seen from the side of a wall so curved that it folds: it is then
     // chosen again clear of them where they stand, and the knob and the steppers of its columns, beyond it, move with it.
     let top = lifts;
-    let others: Vec<Vec3> = points
-        .iter()
-        .zip(&top)
-        .filter(|(_, top)| !**top)
-        .map(|((_, at), _)| *at)
-        .collect();
+    let others = seen_all(
+        &mut points
+            .iter()
+            .zip(&top)
+            .filter(|(_, top)| !**top)
+            .map(|((_, at), _)| *at),
+    );
     let (bar_row, bar_half) = if clear(&others, bar_row, bar_half) {
         (bar_row, bar_half)
     } else {
@@ -1080,12 +1245,13 @@ fn lay_out_handles(
         })
         .collect();
     for _ in (0..BAR_ROWS).filter(|_| !below) {
-        let beyond: Vec<Vec3> = points
-            .iter()
-            .zip(&lifted)
-            .filter(|(_, lifted)| **lifted)
-            .map(|((_, at), _)| *at)
-            .collect();
+        let beyond = seen_all(
+            &mut points
+                .iter()
+                .zip(&lifted)
+                .filter(|(_, lifted)| **lifted)
+                .map(|((_, at), _)| *at),
+        );
         if clear(&beyond, bar_row, bar_half) {
             break;
         }
@@ -1126,26 +1292,11 @@ fn lay_out_handles(
     (points, size, bar)
 }
 
-/// Whether handles `size` across, with their middles at `a` and `b`, stand apart as seen from `viewer`, looking towards
-/// `middle`: their faces at least half a handle apart, across or up, as the eyes see them.
-fn apart(a: Vec3, b: Vec3, size: f32, viewer: Vec3, middle: Vec3) -> bool {
-    let ahead = (middle - viewer).normalize_or(Vec3::NEG_Z);
-    let right = ahead.cross(Vec3::Y).normalize_or(Vec3::X);
-    let up = right.cross(ahead);
-    let seen = |point: Vec3| {
-        let to = point - viewer;
-        let distance = to.length().max(1e-3);
-        let to = to / distance;
-        (
-            Vec2::new(
-                to.dot(right).atan2(to.dot(ahead)),
-                to.dot(up).clamp(-1.0, 1.0).asin(),
-            ),
-            size / distance,
-        )
-    };
-    let ((a, across), (b, other)) = (seen(a), seen(b));
-    let reach = (across + other) / 2.0 * 1.5;
+/// Whether handles at `a` and `b`, as [`Sight`] sees them, stand apart: their faces at least half a handle apart, across
+/// or up, as the eyes see them.
+fn apart(a: Seen, b: Seen) -> bool {
+    let reach = (a.across + b.across) / 2.0 * 1.5;
+    let (a, b) = (a.angles, b.angles);
     (a.x - b.x).abs() >= reach || (a.y - b.y).abs() >= reach
 }
 
@@ -1768,7 +1919,8 @@ impl Editor {
         {
             let controls = LockControls::of(wall, input.rights);
             let (points, size) =
-                handle_points_among_with(wall, *frame, input.viewer, &all, None, controls);
+                self.layouts
+                    .handles(wall, *frame, input.viewer, &all, None, controls);
             met = nearest_handle(&points, size, &ray);
         }
         let hovered = self
@@ -1785,7 +1937,8 @@ impl Editor {
                 walls
                     .iter()
                     .filter_map(|(wall, frame)| {
-                        group_bar(wall, *frame, input.viewer, &all)?
+                        self.layouts
+                            .bar(wall, *frame, input.viewer, &all)?
                             .hit(&ray)
                             .map(|along| (wall.id.clone(), along))
                     })
@@ -2284,7 +2437,8 @@ impl Editor {
             let keep = self.drag.as_ref().map(|drag| drag.handle);
             let controls = LockControls::of(wall, input.rights);
             let (points, _) =
-                handle_points_among_with(wall, *frame, input.viewer, &all, keep, controls);
+                self.layouts
+                    .handles(wall, *frame, input.viewer, &all, keep, controls);
             let at = points
                 .iter()
                 .find(|(shown, _)| *shown == handle)
@@ -2308,6 +2462,7 @@ impl Editor {
                 .map(|along| crate::pointing::End::new(along, ray.at(along)));
         }
         output.sheets = self.sheets(walls, &input);
+        self.layouts.forget_unused();
         output
     }
 
@@ -2327,7 +2482,7 @@ impl Editor {
                     _ => (*wall, *frame),
                 };
                 // A group shows one bar, above its top left wall.
-                let Some(bar) = group_bar(wall, frame, input.viewer, &all) else {
+                let Some(bar) = self.layouts.bar(wall, frame, input.viewer, &all) else {
                     continue;
                 };
                 let on = self.bar.as_deref() == Some(wall.id.as_str());
@@ -2412,8 +2567,9 @@ impl Editor {
         }
         let keep = self.drag.as_ref().map(|drag| drag.handle);
         let controls = LockControls::of(wall, input.rights);
-        let (points, size) =
-            handle_points_among_with(wall, frame, input.viewer, &all, keep, controls);
+        let (points, size) = self
+            .layouts
+            .handles(wall, frame, input.viewer, &all, keep, controls);
         if self.carry.is_none() {
             for (handle, at) in &points {
                 sheets.push(Sheet {
@@ -2451,7 +2607,9 @@ impl Editor {
         // Above the wall and its handles, clear of the status pill, which stands low in the view, facing the viewer at the
         // angle the hint beside a panel carried is drawn.
         let up = frame.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
-        let (knob, _) = handle_point_among(wall, frame, Handle::Bend, input.viewer, &all, keep);
+        let (knob, _) = self
+            .layouts
+            .handle(wall, frame, Handle::Bend, input.viewer, &all, keep);
         // In a group, above its other walls' slots and its bar too, so that it covers nothing the group shows.
         let slots = super::boards::members_slots(wall, &all)
             .into_iter()
@@ -2459,7 +2617,7 @@ impl Editor {
         let bars = walls
             .iter()
             .filter(|(other, _)| other.group.is_some() && other.group == wall.group)
-            .filter_map(|(other, at)| group_bar(other, *at, input.viewer, &all))
+            .filter_map(|(other, at)| self.layouts.bar(other, *at, input.viewer, &all))
             .map(|bar| bar.middle + up * bar.size * BAR_THICKNESS / 2.0);
         let top = points
             .iter()
@@ -2819,6 +2977,12 @@ pub fn hint_for(
     canvas
 }
 
+#[cfg(test)]
+thread_local! {
+    static SEEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+mod cost_tests;
 #[cfg(test)]
 mod group_controls_tests;
 #[cfg(test)]

@@ -3,7 +3,7 @@
 
 //! What each frame costs the frame thread, summarized once a minute beside the frame rate, as
 //! `design/client-logging.md` allows: the whole frame and each part of it a client times, such as polling the
-//! connection, the frame step, the projector within it, the renderer's update and its encoding of the eyes' draws, the
+//! connection, the frame step, the projector within it, the wall editor within that, the renderer's update and its encoding of the eyes' draws, the
 //! glyphs drawn into the atlas, and, apart, the waits for the GPU and the compositor, each as the mean, the 95th
 //! percentile and the longest; and how many faces were drawn, meshes built and glyphs drawn a frame. The headset and the
 //! desktop window each keep one. See `design/rendering.md`.
@@ -34,6 +34,8 @@ pub enum Segment {
     Step,
     /// The projector, within the frame step.
     Projection,
+    /// The wall editor, within the projector: the walls' grab bars and the handles of the wall taken hold of.
+    Editor,
     /// Applying the frame to the renderer: uploading the faces it changed, among the rest.
     Draw,
     /// Encoding and submitting the eyes' draws.
@@ -47,7 +49,7 @@ pub enum Segment {
 }
 
 impl Segment {
-    const ALL: [Segment; 15] = [
+    const ALL: [Segment; 16] = [
         Segment::Frame,
         Segment::Poll,
         Segment::Microphone,
@@ -58,6 +60,7 @@ impl Segment {
         Segment::Presence,
         Segment::Step,
         Segment::Projection,
+        Segment::Editor,
         Segment::Draw,
         Segment::Render,
         Segment::Glyphs,
@@ -78,6 +81,7 @@ impl Segment {
             Segment::Presence => "presence",
             Segment::Step => "step",
             Segment::Projection => "projection",
+            Segment::Editor => "editor",
             Segment::Draw => "draw",
             Segment::Render => "render",
             Segment::Glyphs => "glyphs",
@@ -97,12 +101,20 @@ impl Segment {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Work {
     pub projection: Duration,
+    /// The wall editor's part of it.
+    pub editor: Duration,
     pub faces: usize,
 }
 
 thread_local! {
     /// The projector's work on this thread since it was last taken: the frame loop's, which is one thread.
-    static WORK: Cell<Work> = const { Cell::new(Work { projection: Duration::ZERO, faces: 0 }) };
+    static WORK: Cell<Work> = const {
+        Cell::new(Work {
+            projection: Duration::ZERO,
+            editor: Duration::ZERO,
+            faces: 0,
+        })
+    };
 }
 
 /// Count `faces` more faces drawn on this thread.
@@ -125,6 +137,15 @@ pub(crate) fn projection(time: Duration) {
     WORK.with(|work| {
         let mut counted = work.get();
         counted.projection += time;
+        work.set(counted);
+    });
+}
+
+/// Count `time` more spent by the wall editor on this thread, within the projector's.
+pub(crate) fn editor(time: Duration) {
+    WORK.with(|work| {
+        let mut counted = work.get();
+        counted.editor += time;
         work.set(counted);
     });
 }
@@ -198,6 +219,7 @@ impl Timer {
     pub fn finish(mut self) -> Sample {
         let work = take();
         self.sample.add(Segment::Projection, work.projection);
+        self.sample.add(Segment::Editor, work.editor);
         self.sample.faces += work.faces;
         let (count, time) = tomori_text::atlas::drawn();
         self.sample
@@ -346,6 +368,7 @@ mod tests {
         timer.meshes(4);
         faces(2);
         projection(Duration::from_millis(3));
+        editor(Duration::from_millis(1));
         let mut atlas = tomori_text::atlas::Atlas::default();
         atlas.glyph('鳥');
         let sample = timer.finish();
@@ -356,6 +379,7 @@ mod tests {
             Duration::from_millis(3),
             "the work of a frame not finished is forgotten"
         );
+        assert_eq!(sample.time(Segment::Editor), Duration::from_millis(1));
         assert_eq!((sample.faces, sample.meshes, sample.glyphs), (2, 4, 1));
         assert!(sample.time(Segment::Glyphs) > Duration::ZERO);
         assert_eq!(take(), Work::default());
@@ -382,6 +406,7 @@ mod tests {
             "presence",
             "step",
             "projection",
+            "editor",
             "draw",
             "render",
             "glyphs",

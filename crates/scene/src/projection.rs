@@ -1808,6 +1808,7 @@ impl Projector {
             pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
         // The wall taken hold of, and its handles, take the squeeze first, a handle before a panel and a panel before the
         // wall it is on; a wall carried or a handle dragged is let go as the grip is.
+        let started_editing = std::time::Instant::now();
         let edited = self.editor.update(
             editing::Input {
                 projection,
@@ -1836,6 +1837,7 @@ impl Projector {
             },
             &pickable,
         );
+        crate::frame_timing::editor(started_editing.elapsed());
         output.wall = edited.change;
         output.lock = edited.lock;
         output.wall_ticked = edited.ticked;
