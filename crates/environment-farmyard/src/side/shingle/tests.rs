@@ -78,7 +78,7 @@ fn a_stone_taken_within_reach_and_thrown_is_said_to_move_at_most_twenty_times_a_
     let (_, out) = (beach::frame().1, beach::frame().2);
     assert!(shingle.ask(
         3,
-        &let_go(0, 1, at, [out.x * 3.0, 2.0, out.y * 3.0]),
+        &let_go(0, 1, at, [out.x * 6.0, 2.0, out.y * 6.0]),
         &[from]
     ));
     let mut updates = 0;
@@ -194,14 +194,70 @@ fn where_someone_was_seen_is_their_head_and_both_hands() {
 
 #[test]
 fn a_cairn_of_the_beach_s_own_stones_stands_on_the_shingle_and_never_moves_asleep() {
-    // The six largest, largest first, stacked a couple of millimetres apart on the flat shingle beside the trail.
-    let mut stones: Vec<usize> = (0..beach::STONES).collect();
+    // Six of its slabs, the cairn's own stones, largest first, stacked a couple of millimetres apart on the flat shingle
+    // beside the trail.
+    let mut stones: Vec<usize> = (0..beach::STONES)
+        .filter(|index| beach::kind(*index) == beach::Kind::Slab)
+        .collect();
     stones.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
+    stones = stones.into_iter().step_by(2).collect();
+    stones.truncate(6);
+    let (placed, rested) = cairn(&stones);
+    // Standing: each stone on the one below it, leaning only as their tilted tops lean it, and none fallen, sunk no
+    // more than the gaps it was placed with.
+    standing(&placed, &rested);
+}
+
+#[test]
+fn every_stone_of_the_beach_stands_on_a_big_slab_and_a_cobble_tops_a_cairn() {
+    let slab = (0..beach::STONES)
+        .find(|index| beach::kind(*index) == beach::Kind::Slab && beach::big(*index))
+        .unwrap();
+    for stone in (0..beach::STONES).filter(|stone| *stone != slab) {
+        let (placed, rested) = cairn(&[slab, stone]);
+        standing(&placed, &rested);
+    }
+    // Big slabs, then small ones, then a cobble on top.
+    let mut slabs: Vec<usize> = (0..beach::STONES)
+        .filter(|index| beach::kind(*index) == beach::Kind::Slab)
+        .collect();
+    slabs.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
+    let cobble = (0..beach::STONES)
+        .find(|index| beach::kind(*index) == beach::Kind::Cobble && !beach::big(*index))
+        .unwrap();
+    let mut stones = vec![slabs[0], slabs[3], slabs[7], slabs[10]];
+    stones.push(cobble);
+    let (placed, rested) = cairn(&stones);
+    standing(&placed, &rested);
+}
+
+/// Each stone in turn of `rested` on the one below it, as `placed`, leaning only as their tilted tops lean it, and none
+/// fallen, sunk no more than the gaps it was placed with.
+fn standing(placed: &[Placement], rested: &[Placement]) {
+    for (level, (placed, at)) in placed.iter().zip(rested).enumerate() {
+        assert!(
+            placed.position.y - at.position.y < 0.006 * (level + 1) as f32,
+            "stone {level} fell"
+        );
+        if level > 0 {
+            let below = at.position - rested[level - 1].position;
+            assert!(
+                below.with_y(0.0).length() < 0.03,
+                "stone {level} slid off the one below it"
+            );
+        }
+    }
+}
+
+/// A cairn of the beach's stones `stones`, from the bottom up, stacked a couple of millimetres apart on the flat
+/// shingle beside the trail, each turned its own way: where each was placed, and where each rests once it has settled,
+/// which it must within 5 s, and then for two simulated minutes after.
+fn cairn(stones: &[usize]) -> (Vec<Placement>, Vec<Placement>) {
     let foot = beach::at(beach::NEAR + 0.7, 0.0);
     let mut height = beach::height(foot).unwrap();
+    let count = stones.len() as u32;
     let bodies: Vec<Body> = stones
         .iter()
-        .take(6)
         .enumerate()
         .map(|(level, index)| {
             let hull = beach::stone(*index);
@@ -227,31 +283,20 @@ fn a_cairn_of_the_beach_s_own_stones_stands_on_the_shingle_and_never_moves_aslee
         bodies,
     )
     .unwrap();
-    assert!(world.settle(10.0));
+    assert!(world.settle(10.0), "{stones:?} never settled");
     let settled = world.clock();
-    assert!(settled < 5_000, "settled in {settled} ms");
-    let rested: Vec<Placement> = (0..6).map(|body| world.placement(body).unwrap()).collect();
-    // Standing: each stone on the one below it, leaning only as their tilted tops lean it, and none fallen, sunk no
-    // more than the gaps it was placed with.
-    let rested_all = rested.clone();
-    for (level, (placed, rested)) in placed.iter().zip(&rested).enumerate() {
-        assert!(
-            placed.position.y - rested.position.y < 0.006 * (level + 1) as f32,
-            "stone {level} fell"
-        );
-        if level > 0 {
-            let below = rested.position - rested_all[level - 1].position;
-            assert!(
-                below.with_y(0.0).length() < 0.03,
-                "stone {level} slid off the one below it"
-            );
-        }
-    }
+    assert!(settled < 5_000, "{stones:?} settled in {settled} ms");
+    let rested: Vec<Placement> = (0..count)
+        .map(|body| world.placement(body).unwrap())
+        .collect();
     for _ in 0..(120 * 4) {
-        assert!(world.step(0.25).is_empty());
+        assert!(world.step(0.25).is_empty(), "{stones:?} moved asleep");
     }
-    let after: Vec<Placement> = (0..6).map(|body| world.placement(body).unwrap()).collect();
+    let after: Vec<Placement> = (0..count)
+        .map(|body| world.placement(body).unwrap())
+        .collect();
     assert_eq!(after, rested);
+    (placed, rested)
 }
 
 #[test]

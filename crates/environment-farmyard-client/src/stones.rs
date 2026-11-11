@@ -269,11 +269,8 @@ impl Stones {
                     let (offset, pulled) = if reach(stone, &at, hand.position) <= REACH {
                         (hand.inverse().then(&at), None)
                     } else {
-                        let (width, _) = beach::size(stone as usize);
                         let turned = hand.rotation.inverse() * at.rotation;
-                        let palm =
-                            Placement::new(Vec3::new(0.0, 0.0, -(width * 0.3 + 0.03)), turned);
-                        (palm, Some((at, now)))
+                        (palm(stone, turned), Some((at, now)))
                     };
                     let offset = offset.snapped(Precision::Rest);
                     intents.push(Intent::Take(Take {
@@ -314,6 +311,7 @@ impl Stones {
                     holding.hand.push_back((now, hand));
                     let at = lifted(stone, holding.placement(now)).snapped(Precision::Rest);
                     let (velocity, spin) = holding.motion();
+                    let (velocity, spin) = (velocity * heft(stone), spin * heft(stone));
                     intents.push(Intent::LetGo(LetGo {
                         body: stone,
                         epoch: holding.epoch,
@@ -422,12 +420,41 @@ impl Stones {
     }
 }
 
-/// How far a hand at `hand` is from the hull of stone `stone` placed at `placement`, roughly, as from a sphere a
-/// little within it.
+/// How far a hand at `hand` is from the hull of stone `stone` placed at `placement`: from its faces, as
+/// [`beach::outside`] measures it, unless it is nowhere near.
 fn reach(stone: u32, placement: &Placement, hand: Vec3) -> f32 {
     let (width, height) = beach::size(stone as usize);
-    (hand.distance(placement.position) - (width * 0.5 + height * 0.5) * 0.5).max(0.0)
+    let near = hand.distance(placement.position) - width.max(height) * 0.6;
+    if near > REACH {
+        return near;
+    }
+    beach::outside(stone as usize, placement.inverse().transform_point(hand))
 }
+
+/// Where stone `stone`, turned `turned` in the hand, is held as it is pulled to it: in front of the fist, along its
+/// −Z, as far as the stone reaches back towards the hand that way, a little within it, as the fingers close round it,
+/// so that a big stone is held before the hand rather than through it.
+fn palm(stone: u32, turned: glam::Quat) -> Placement {
+    let back = beach::stone(stone as usize)
+        .into_iter()
+        .map(|point| (turned * point).z)
+        .fold(0.0, f32::max);
+    Placement::new(Vec3::new(0.0, 0.0, -(back * 0.8 + 0.02)), turned)
+}
+
+/// How much of the hand's speed stone `stone` leaves it with: all of it, for a stone of [`HEFTED`] or less, and less
+/// the heavier it is, down to [`HEAVIEST`], so that a big stone thrown as a small one is goes slower and less far, as
+/// it would.
+pub fn heft(stone: u32) -> f32 {
+    let mass = beach::volume(stone as usize) * GRANITE;
+    (HEFTED / mass).powf(0.3).clamp(HEAVIEST, 1.0)
+}
+
+/// Granite's density, in kilograms a cubic metre, which the beach's stones are of.
+const GRANITE: f32 = 2_650.0;
+/// The mass a hand throws as fast as it moves, in kilograms, and the least of the hand's speed a stone leaves it with.
+const HEFTED: f32 = 1.5;
+const HEAVIEST: f32 = 0.45;
 
 /// `placement` of stone `stone`, lifted so that none of it is below the beach's shingle, where there is shingle: so
 /// that a stone held is never drawn inside the beach, and is let go on it rather than in it.

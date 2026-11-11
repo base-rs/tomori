@@ -3,8 +3,8 @@
 
 //! The shingle beach beside the trail where it passes the river, by the `riverbank` viewpoint: a slope of grey shingle
 //! from the trail's edge down into the river's channel to the water's edge, the one surface that reaches its water, with
-//! river stones lying on it, flattish and of every size from a hand's breadth to two, which participants take with
-//! either hand, carry, throw and stack into cairns, simulated by the farmyard's server side with `tomori-physics` and
+//! river stones lying on it, slabs, cobbles, long and angular ones, from a hand's breadth across to as much as a hand
+//! might lift, which participants take with either hand, carry, throw and stack into cairns, simulated by the farmyard's server side with `tomori-physics` and
 //! drawn alike by every client. See `design/farmyard.md` and `docs/proposals/physics-and-stacking.md`.
 //!
 //! What both halves share is here: where the beach is and how high its surface stands; each stone's hull, from which
@@ -212,55 +212,143 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
 /// How many stones lie on the beach.
 pub const STONES: usize = 28;
 
-/// How many corners a stone's middle ring has, and its bottom's and top's: four, since Rapier rests a face of more than
-/// four corners on another unsteadily, so that a stone of them shakes off the one put on it. And so how many points its
-/// hull has.
-const SIDES: usize = 6;
-const FACE: usize = 4;
-pub const STONE_POINTS: usize = SIDES + FACE * 2;
+/// The kinds of stone the beach has, as a river's shingle sorts them: flat slabs and discs, which cairns are built of;
+/// rounded cobbles; long ones; and angular ones, broken rather than worn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Slab,
+    Cobble,
+    Long,
+    Angular,
+}
 
-/// How wide stone `index` is, a hand's breadth to two, and how high, a little over a third of that to a half, so that
-/// their masses are within a ratio of 1 to 10 of each other, as an iterative solver stacks well.
+/// Which kind stone `index` is: of every seven, three slabs, two cobbles, a long one and an angular one.
+pub fn kind(index: usize) -> Kind {
+    match index % 7 {
+        0 | 2 | 5 => Kind::Slab,
+        1 | 6 => Kind::Cobble,
+        3 => Kind::Long,
+        _ => Kind::Angular,
+    }
+}
+
+/// Whether stone `index` is one of the big ones, every other one, two to four hands' breadths across, as much as one
+/// hand holds; the rest a hand's breadth to two.
+pub fn big(index: usize) -> bool {
+    index % 2 == 1
+}
+
+/// How wide stone `index` is, its longest way across, 11.5 to 20 cm, or a big one, as its kind is, up to 37 cm for a
+/// slab or a long one and less for the rounder, heavier kinds, so that none is more than a hand might lift, about 15 kg;
+/// and how high, as its kind is: a slab a quarter to a third of its width, a cobble half to two thirds, a long or an
+/// angular one a third or more.
 pub fn size(index: usize) -> (f32, f32) {
-    let width = 0.115 + scatter(index as u32 * 7 + 3100) * 0.105;
-    let height = width * (0.38 + scatter(index as u32 * 7 + 3101) * 0.12);
-    (width, height)
-}
-
-/// Where each corner of a stone's rings is about its middle, as a fraction of a turn: its bottom's, its middle's and its
-/// top's, the faces turned half a corner from each other and from the middle.
-fn turns() -> [Vec<f32>; 3] {
-    let ring = |count: usize, offset: f32| {
-        (0..count)
-            .map(|corner| (corner as f32 + offset) / count as f32)
-            .collect()
+    let seed = index as u32 * 7 + 3100;
+    let kind = kind(index);
+    let (least, more) = match (big(index), kind) {
+        (false, _) => (0.115, 0.085),
+        (true, Kind::Slab | Kind::Long) => (0.28, 0.09),
+        (true, Kind::Angular) => (0.25, 0.08),
+        (true, Kind::Cobble) => (0.22, 0.06),
     };
-    [ring(FACE, 0.5), ring(SIDES, 0.0), ring(FACE, 0.0)]
+    let width = least + scatter(seed) * more;
+    let (least, more) = match kind {
+        Kind::Slab => (0.24, 0.09),
+        Kind::Cobble => (0.5, 0.15),
+        Kind::Long => (0.34, 0.1),
+        Kind::Angular => (0.36, 0.12),
+    };
+    (width, width * (least + scatter(seed + 1) * more))
 }
 
-/// The points of stone `index`'s hull, about its middle, the same every time: a broad ring of six about its middle, a
-/// little longer one way than the other, and a smaller face of four below and above it, its bottom flat and its top flat
-/// but a little tilted, each its own way, as stones chosen for a cairn are, so that it lies still where it is put and a
-/// stone put on it lies still on it. It is drawn from the same points, and collided as their convex hull.
+/// One ring of a stone's points, from its bottom up: how many corners, at what height, as a fraction of the stone's
+/// from its middle, how far out, as a fraction of its half width, and turned how far, as a fraction of a corner.
+struct Ring {
+    corners: usize,
+    level: f32,
+    reach: f32,
+    turned: f32,
+}
+
+/// The rings of a stone of `kind`: a face of four at the bottom, flat, and one at the top, flat but tilted, since Rapier
+/// rests a face of more than four corners on another unsteadily, so that a stone of them shakes off the one put on it;
+/// and between them a broad ring, or, a cobble's, three, rounding it.
+fn rings(kind: Kind) -> Vec<Ring> {
+    let ring = |corners, level, reach, turned| Ring {
+        corners,
+        level,
+        reach,
+        turned,
+    };
+    match kind {
+        Kind::Slab => vec![
+            ring(4, -0.5, 0.7, 0.5),
+            ring(6, 0.0, 1.0, 0.0),
+            ring(4, 0.5, 0.66, 0.0),
+        ],
+        Kind::Long => vec![
+            ring(4, -0.5, 0.64, 0.5),
+            ring(6, 0.0, 1.0, 0.0),
+            ring(4, 0.5, 0.6, 0.0),
+        ],
+        Kind::Cobble => vec![
+            ring(4, -0.5, 0.46, 0.5),
+            ring(6, -0.3, 0.87, 0.5),
+            ring(6, 0.0, 1.0, 0.0),
+            ring(6, 0.3, 0.87, 0.5),
+            ring(4, 0.5, 0.44, 0.0),
+        ],
+        Kind::Angular => vec![
+            ring(4, -0.5, 0.72, 0.3),
+            ring(5, 0.0, 1.0, 0.0),
+            ring(4, 0.5, 0.6, 0.6),
+        ],
+    }
+}
+
+/// How much each corner of a stone of `kind` is nudged in and along its ring, and up or down from it, as fractions;
+/// how much it is squashed across, at least and how much more; and how far its top is tilted.
+fn roughness(kind: Kind) -> (f32, f32, f32, (f32, f32), f32) {
+    match kind {
+        Kind::Slab => (0.08, 0.0, 0.0, (0.72, 0.22), 0.16),
+        Kind::Long => (0.08, 0.0, 0.0, (0.46, 0.14), 0.16),
+        Kind::Cobble => (0.05, 0.0, 0.0, (0.84, 0.13), 0.1),
+        Kind::Angular => (0.18, 0.12, 0.24, (0.66, 0.2), 0.3),
+    }
+}
+
+/// The points of stone `index`'s hull, about its middle, the same every time, ring by ring from its bottom up, as its
+/// kind's rings are, each corner nudged its own way, the whole squashed across, a little longer one way than the other
+/// or, a long one, much longer: its bottom flat and its top flat but a little tilted, each its own way, as stones chosen
+/// for a cairn are, so that it lies still where it is put and a stone put on it lies still on it. It is drawn from the
+/// same points, and collided as their convex hull, at most [`tomori_physics::HULL_POINTS`].
 pub fn stone(index: usize) -> Vec<Vec3> {
     let (width, height) = size(index);
+    let kind = kind(index);
     let radius = width * 0.5;
     let seed = index as u32 * 97 + 3200;
-    let squash = 0.72 + scatter(seed) * 0.2;
+    let (inward, along_ring, upward, (squashed, squash_more), tilting) = roughness(kind);
+    let squash = squashed + scatter(seed) * squash_more;
     let (x, z) = (scatter(seed + 70) - 0.5, scatter(seed + 71) - 0.5);
-    let mut points = Vec::with_capacity(STONE_POINTS);
-    for (ring, (turns, (level, reach))) in turns()
-        .iter()
-        .zip([(-0.5f32, 0.66f32), (0.0, 1.0), (0.5, 0.64)])
-        .enumerate()
-    {
-        for (corner, turn) in turns.iter().enumerate() {
-            let turn = turn * TAU;
-            let nudge = scatter(seed + (ring * SIDES + corner) as u32 + 1);
-            let reach = radius * reach * (0.92 + nudge * 0.08);
+    let rings = rings(kind);
+    let last = rings.len() - 1;
+    let mut points = Vec::new();
+    for (number, ring) in rings.iter().enumerate() {
+        for corner in 0..ring.corners {
+            let nudge = |offset: u32| scatter(seed + (number * 8 + corner) as u32 * 3 + offset + 1);
+            let face = number == 0 || number == last;
+            let turn = (corner as f32 + ring.turned + (nudge(1) - 0.5) * along_ring)
+                / ring.corners as f32
+                * TAU;
+            let reach = radius * ring.reach * (1.0 - inward + nudge(0) * inward);
             let (across, along) = (turn.cos() * reach, turn.sin() * reach * squash);
-            let tilt = if level > 0.0 {
-                (across * x + along * z) * 0.16
+            let level = if face {
+                ring.level
+            } else {
+                ring.level + (nudge(2) - 0.5) * upward
+            };
+            let tilt = if number == last {
+                (across * x + along * z) * tilting
             } else {
                 0.0
             };
@@ -270,54 +358,101 @@ pub fn stone(index: usize) -> Vec<Vec3> {
     points
 }
 
-/// The triangles each stone is drawn in, by the points of its hull, each turned outward: two across its bottom and two
-/// across its top, and a band from each face to its middle ring, zipped about them in turn.
-pub fn stone_triangles() -> Vec<[usize; 3]> {
-    let [bottom, middle, top] = turns();
-    let (low, mid, high) = (0, FACE, FACE + SIDES);
-    let mut triangles = vec![
-        [low, low + 1, low + 2],
-        [low, low + 2, low + 3],
-        [high, high + 1, high + 2],
-        [high, high + 2, high + 3],
-    ];
-    // A face's ring and the middle's, zipped: each step takes the next corner of whichever ring comes first round.
-    for (face, start) in [(&bottom, low), (&top, high)] {
-        let (mut i, mut j) = (0, 0);
-        while i < face.len() || j < middle.len() {
-            let next_face = face[0] + (i + 1) as f32 / face.len() as f32;
-            let next_middle = (j + 1) as f32 / middle.len() as f32;
-            let corner = |ring: usize, count: usize, index: usize| ring + index % count;
-            if j == middle.len() || (i < face.len() && next_face <= next_middle) {
-                triangles.push([
-                    corner(start, FACE, i),
-                    corner(start, FACE, i + 1),
-                    corner(mid, SIDES, j),
-                ]);
-                i += 1;
-            } else {
-                triangles.push([
-                    corner(start, FACE, i),
-                    corner(mid, SIDES, j + 1),
-                    corner(mid, SIDES, j),
-                ]);
-                j += 1;
+/// The faces of the convex hull of `points`, each its outward normal and its corners, in turn about it: every plane
+/// through three of them that has none of the rest beyond it, with every point on it.
+fn faces(points: &[Vec3]) -> Vec<(Vec3, Vec<usize>)> {
+    let scale = points
+        .iter()
+        .map(|point| point.length())
+        .fold(0.0, f32::max);
+    let close = scale * 1e-5;
+    let mut faces: Vec<(Vec3, Vec<usize>)> = Vec::new();
+    for a in 0..points.len() {
+        for b in a + 1..points.len() {
+            for c in b + 1..points.len() {
+                // Three in a line make no plane, every point on it, and so no face.
+                let normal = (points[b] - points[a])
+                    .cross(points[c] - points[a])
+                    .normalize_or_zero();
+                let beyond = |point: &Vec3| normal.dot(*point - points[a]);
+                let above = points.iter().any(|point| beyond(point) > close);
+                let below = points.iter().any(|point| beyond(point) < -close);
+                if above == below {
+                    continue;
+                }
+                let outward = if above { -normal } else { normal };
+                let on: Vec<usize> = (0..points.len())
+                    .filter(|point| beyond(&points[*point]).abs() <= close)
+                    .collect();
+                if faces.iter().any(|(_, corners)| {
+                    corners.len() == on.len() && on.iter().all(|point| corners.contains(point))
+                }) {
+                    continue;
+                }
+                // In turn about its middle, anticlockwise seen from outside.
+                let middle = on.iter().map(|point| points[*point]).sum::<Vec3>() / on.len() as f32;
+                let first = (points[on[0]] - middle).normalize();
+                let second = outward.cross(first);
+                let mut corners = on;
+                corners.sort_by(|p, q| {
+                    let angle = |point: usize| {
+                        let offset = points[point] - middle;
+                        offset.dot(second).atan2(offset.dot(first))
+                    };
+                    angle(*p).total_cmp(&angle(*q))
+                });
+                faces.push((outward, corners));
             }
         }
     }
-    // Each turned outward, as a stone's points show which way.
-    let points = stone(0);
-    triangles
+    faces
+}
+
+/// The triangles each face of `points`' hull is drawn in, a fan about its first corner, each turned outward.
+fn hull(points: &[Vec3]) -> Vec<[usize; 3]> {
+    faces(points)
         .into_iter()
-        .map(|[a, b, c]| {
-            let normal = (points[b] - points[a]).cross(points[c] - points[a]);
-            if normal.dot(points[a] + points[b] + points[c]) < 0.0 {
-                [a, c, b]
-            } else {
-                [a, b, c]
-            }
+        .flat_map(|(_, corners)| {
+            (1..corners.len() - 1)
+                .map(|corner| [corners[0], corners[corner], corners[corner + 1]])
+                .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The triangles stone `index` is drawn in, by the points of its hull, each turned outward, its convex hull's faces
+/// exactly, so that it is drawn as it collides; none for a stone the beach does not have.
+pub fn stone_triangles(index: usize) -> &'static [[usize; 3]] {
+    static HULLS: std::sync::OnceLock<Vec<Vec<[usize; 3]>>> = std::sync::OnceLock::new();
+    HULLS
+        .get_or_init(|| (0..STONES).map(|index| hull(&stone(index))).collect())
+        .get(index)
+        .map_or(&[], Vec::as_slice)
+}
+
+/// How much stone `index` holds, in cubic metres, from its triangles about its middle.
+pub fn volume(index: usize) -> f32 {
+    let points = stone(index);
+    stone_triangles(index)
+        .iter()
+        .map(|[a, b, c]| points[*a].dot(points[*b].cross(points[*c])) / 6.0)
+        .sum()
+}
+
+/// How far a point `local`, about stone `index`'s middle, is outside its hull: as far as it is beyond the plane of the
+/// face it is farthest beyond, or none within it, which is the distance to a face and a little less near an edge or a
+/// corner.
+pub fn outside(index: usize, local: Vec3) -> f32 {
+    let points = stone(index);
+    stone_triangles(index)
+        .iter()
+        .map(|[a, b, c]| {
+            let normal = (points[*b] - points[*a])
+                .cross(points[*c] - points[*a])
+                .normalize_or_zero();
+            normal.dot(local - points[*a])
+        })
+        .fold(0.0, f32::max)
 }
 
 /// The river's stones beside the beach, which its stones rest against and on, as the backdrop places them.
@@ -328,6 +463,9 @@ fn boulders() -> Vec<backdrop::Stone> {
         .filter(|stone| Vec2::new(stone.at.x, stone.at.z).distance(middle) < REGION)
         .collect()
 }
+
+/// How far out from the trail's middle the beach's gentle slope ends, and its steep bank begins, roughly.
+const GENTLE: f32 = NEAR + 2.6;
 
 /// How far from the beach's middle what the stones may rest on reaches: the ground, the trail, the river's bed and its
 /// far bank; beyond, a stone thrown is lost, and returns to where it began.
@@ -346,8 +484,12 @@ pub fn homes() -> Vec<Placement> {
         let mut attempt = 0u32;
         let point = loop {
             let seed = index as u32 * 131 + attempt * 7 + 5000;
-            let out = NEAR + 0.3 + (dry - NEAR - 0.5) * scatter(seed).sqrt();
-            let along = (scatter(seed + 1) - 0.5) * 2.0 * (HALF_WIDTH - 0.2);
+            // Clear of the trail's raised edge and the beach's own, however big; and a big one on the flat shingle or
+            // the gentle slope below it, not the steep bank, where its broad bottom would bridge the bend.
+            let farthest = if big(index) { GENTLE } else { dry - 0.2 };
+            let (nearest, farthest) = (NEAR + 0.15 + radius, farthest - radius);
+            let out = nearest + (farthest - nearest) * scatter(seed).sqrt();
+            let along = (scatter(seed + 1) - 0.5) * 2.0 * (HALF_WIDTH - 0.1 - radius);
             let point = at(out, along);
             attempt += 1;
             let clear = placed
@@ -499,13 +641,12 @@ pub fn stone_node(index: usize) -> String {
 
 /// The beach's stones, as a model of a node for each, about its middle, of which an instance shows one.
 pub fn stones_model() -> Model {
-    let triangles = stone_triangles();
     let mut nodes = Vec::with_capacity(STONES);
     let mut meshes = Vec::with_capacity(STONES);
     for index in 0..STONES {
         let points = stone(index);
         let mut shapes = Shapes::new();
-        for triangle in &triangles {
+        for triangle in stone_triangles(index) {
             let corners = triangle.map(|point| points[point]);
             let outward = (corners[0] + corners[1] + corners[2]) / 3.0;
             let light =
@@ -529,18 +670,19 @@ pub fn stones_model() -> Model {
 /// How far along the ray from `origin` going `direction`, a unit vector, it meets stone `index` placed at `placement`, by
 /// its triangles, if it does.
 pub fn met(origin: Vec3, direction: Vec3, index: usize, placement: &Placement) -> Option<f32> {
-    let (width, _) = size(index);
+    let (width, height) = size(index);
     // Nowhere near its sphere, nowhere near it.
     let offset = placement.position - origin;
     let along = offset.dot(direction);
-    if (offset - direction * along).length() > width * 0.5 || along < -width {
+    let bound = width.max(height) * 0.6;
+    if (offset - direction * along).length() > bound || along < -bound {
         return None;
     }
     let points: Vec<Vec3> = stone(index)
         .iter()
         .map(|point| placement.transform_point(*point))
         .collect();
-    stone_triangles()
+    stone_triangles(index)
         .iter()
         .filter_map(|[a, b, c]| crossing(origin, direction, [points[*a], points[*b], points[*c]]))
         .min_by(f32::total_cmp)

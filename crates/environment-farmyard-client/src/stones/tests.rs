@@ -658,6 +658,76 @@ fn a_stone_the_server_side_says_this_participant_holds_with_no_hand_of_theirs_is
     assert!(stones.holding[0].as_ref().is_some_and(|held| held.agreed));
 }
 
+#[test]
+fn a_big_stone_pulled_to_the_hand_is_held_before_it_and_thrown_slower_than_a_small_one() {
+    // Every stone, however turned in the hand, is held before the fist, reaching back into it no more than the fingers
+    // closing round it would, and within what the side lets a hand hold.
+    for stone in 0..beach::STONES as u32 {
+        for turn in 0..6 {
+            let turned = Quat::from_euler(glam::EulerRot::YXZ, turn as f32, turn as f32 * 0.7, 0.3);
+            let held = palm(stone, turned);
+            let back = beach::stone(stone as usize)
+                .into_iter()
+                .map(|point| held.transform_point(point).z)
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                back < 0.04,
+                "stone {stone} reaches {back} back into the hand"
+            );
+            assert!(held.position.length() <= tomori_physics::HOLD);
+        }
+    }
+    // The heaviest leaves the hand at under half its speed, a small one at all of it.
+    let heaviest = (0..beach::STONES as u32)
+        .max_by(|a, b| beach::volume(*a as usize).total_cmp(&beach::volume(*b as usize)))
+        .unwrap();
+    assert!(beach::big(heaviest as usize));
+    assert!((0.45..0.6).contains(&heft(heaviest)), "{}", heft(heaviest));
+    assert_eq!(heft(0), 1.0);
+    // Pulled along the ray and thrown as fast as a small one, it flies slower.
+    let mut stones = Stones::new();
+    let mut shared = state();
+    shared.bodies[0].body = heaviest;
+    stones.share(&shared);
+    let start = Instant::now();
+    stones.shown(&[], &[], start, 0);
+    let hand = hand_at(lying(0).position + Vec3::new(0.0, 1.0, 1.0));
+    let intents = stones.update(
+        [&grab(heaviest, hand, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    let [Intent::Take(take)] = intents[..] else {
+        panic!("{intents:?}")
+    };
+    assert!(take.offset.placement(Precision::Rest).position.z < -0.1);
+    let mut now = start;
+    for step in 1..=6 {
+        now += Duration::from_millis(20);
+        let moved = hand_at(hand.position + Vec3::new(0.04, 0.0, 0.0) * step as f32);
+        stones.update(
+            [&grab(heaviest, moved, Phase::Changed, Side::Right)].into_iter(),
+            Some(5),
+            now,
+            0,
+        );
+    }
+    now += Duration::from_millis(20);
+    let moved = hand_at(hand.position + Vec3::new(0.28, 0.0, 0.0));
+    let intents = stones.update(
+        [&grab(heaviest, moved, Phase::Ended, Side::Right)].into_iter(),
+        Some(5),
+        now,
+        200,
+    );
+    let [Intent::LetGo(let_go)] = intents[..] else {
+        panic!("{intents:?}")
+    };
+    let speed = Vec3::from(let_go.velocity).length();
+    assert!(speed > 0.8 && speed < 1.2, "{speed}");
+}
+
 /// The client side and the farmyard's own server side's stones, as one participant, 3, plays with them: what the client
 /// asks reaches the side `latency` later, unless it is dropped, as the server drops an intent beyond its rate, and what
 /// the side says reaches the client as long again.

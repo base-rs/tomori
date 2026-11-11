@@ -75,44 +75,88 @@ fn participants_walk_the_flat_shingle_where_the_backdrop_is_in_view_short_of_the
 }
 
 #[test]
-fn every_stone_is_a_flattish_hull_a_hand_s_breadth_to_two_across_their_masses_within_ten_times() {
-    let volumes: Vec<f32> = (0..STONES)
-        .map(|index| {
-            let (width, height) = size(index);
-            assert!((0.11..=0.23).contains(&width), "{width}");
-            assert!(
-                height > width / 3.0 && height < width * 0.55,
-                "{width} {height}"
-            );
-            let points = stone(index);
-            assert_eq!(points.len(), STONE_POINTS);
-            assert!(points.len() <= tomori_physics::HULL_POINTS);
-            Body::convex(index as u32, points).check().unwrap();
-            width * width * height
-        })
-        .collect();
-    let most = volumes.iter().copied().fold(0.0, f32::max);
-    let least = volumes.iter().copied().fold(f32::INFINITY, f32::min);
-    assert!(most / least <= 10.0, "{most} {least}");
-    // Each drawn from all of its points, every face turned outward.
-    let triangles = stone_triangles();
-    assert_eq!(triangles.len(), 24);
-    let mut used = [false; STONE_POINTS];
+fn the_stones_are_of_every_kind_and_size_each_a_hull_drawn_as_it_collides_its_faces_of_four_corners_at_most()
+ {
+    let mut kinds = std::collections::BTreeMap::new();
+    let mut masses = Vec::new();
     for index in 0..STONES {
+        let (width, height) = size(index);
+        let kind = kind(index);
+        *kinds.entry(format!("{kind:?}")).or_insert(0) += 1;
+        // Half of them big, as much as one hand holds; the rest a hand's breadth to two.
+        let widths = if big(index) { 0.22..=0.37 } else { 0.115..=0.2 };
+        assert!(widths.contains(&width), "{index}: {width}");
+        let (least, most) = match kind {
+            Kind::Slab => (0.24, 0.33),
+            Kind::Cobble => (0.5, 0.65),
+            Kind::Long => (0.34, 0.44),
+            Kind::Angular => (0.36, 0.48),
+        };
+        assert!(
+            height >= width * least && height <= width * most,
+            "{index}: {width} {height}"
+        );
         let points = stone(index);
-        for [a, b, c] in &triangles {
-            used[*a] = true;
-            used[*b] = true;
-            used[*c] = true;
+        assert!(points.len() <= tomori_physics::HULL_POINTS);
+        Body::convex(index as u32, points.clone()).check().unwrap();
+        // Every point on its hull, every face of four corners at most, its bottom one of them, flat, below the rest.
+        let faces = faces(&points);
+        assert!(
+            faces.iter().all(|(_, corners)| corners.len() <= 4),
+            "{index}: {:?}",
+            faces
+                .iter()
+                .map(|(_, corners)| corners.len())
+                .collect::<Vec<_>>()
+        );
+        let lowest = points
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min);
+        let bottom = faces
+            .iter()
+            .find(|(outward, _)| outward.y < -0.999)
+            .expect("a flat bottom");
+        assert_eq!(bottom.1.len(), 4, "{index}");
+        assert!(
+            bottom
+                .1
+                .iter()
+                .all(|corner| (points[*corner].y - lowest).abs() < 1e-5)
+        );
+        // Drawn from all of its points, as its hull's faces, every one turned outward, enclosing it.
+        let triangles = stone_triangles(index);
+        assert!(
+            (0..points.len())
+                .all(|point| triangles.iter().any(|triangle| triangle.contains(&point))),
+            "{index}"
+        );
+        for [a, b, c] in triangles {
             let normal = (points[*b] - points[*a]).cross(points[*c] - points[*a]);
-            let middle = (points[*a] + points[*b] + points[*c]) / 3.0;
             assert!(
-                normal.dot(middle) > 0.0,
+                normal.dot(points[*a]) > 0.0,
                 "stone {index}, triangle {a} {b} {c}"
             );
         }
+        assert!(volume(index) > 0.0);
+        assert!(outside(index, Vec3::ZERO) == 0.0);
+        assert!((outside(index, Vec3::Y * (height * 0.5 + 0.1)) - 0.1).abs() < 0.05);
+        masses.push(volume(index) * 2_650.0);
     }
-    assert!(used.iter().all(|used| *used));
+    assert!(stone_triangles(STONES).is_empty());
+    // Three slabs of every seven, two cobbles, a long one and an angular one; from a few hundred grams to a heavy armful.
+    assert_eq!(
+        kinds.into_iter().collect::<Vec<_>>(),
+        [
+            ("Angular".to_owned(), 4),
+            ("Cobble".to_owned(), 8),
+            ("Long".to_owned(), 4),
+            ("Slab".to_owned(), 12)
+        ]
+    );
+    let heaviest = masses.iter().copied().fold(0.0, f32::max);
+    let lightest = masses.iter().copied().fold(f32::INFINITY, f32::min);
+    assert!(lightest > 0.2 && heaviest < 16.0, "{lightest} {heaviest}");
 }
 
 #[test]
