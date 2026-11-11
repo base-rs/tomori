@@ -25,6 +25,8 @@ struct Stick {
     made: usize,
     takes: bool,
     there: Arc<AtomicBool>,
+    /// Whether it is selectable and takes the right stick too.
+    selectable: Arc<AtomicBool>,
     told: Told,
     left: ToldLeft,
 }
@@ -33,6 +35,11 @@ impl crate::client_side::ClientSide for Stick {
     fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
         let stick = crate::client_side::Picked::new("stick", "the stick", 1.0);
         (ray.direction.z < 0.0 && self.there.load(Ordering::Relaxed)).then(|| {
+            let stick = if self.selectable.load(Ordering::Relaxed) {
+                stick.selectable().handles(Actions::SCROLL)
+            } else {
+                stick
+            };
             if self.takes {
                 stick.handles(Actions::GRAB)
             } else {
@@ -87,6 +94,7 @@ struct Rig {
     told: Told,
     left: ToldLeft,
     there: Arc<AtomicBool>,
+    selectable: Arc<AtomicBool>,
     now: Instant,
 }
 
@@ -96,14 +104,21 @@ impl Rig {
         let told = Told::default();
         let left = ToldLeft::default();
         let there = Arc::new(AtomicBool::new(true));
+        let selectable = Arc::new(AtomicBool::new(false));
         let made = Arc::new(AtomicUsize::new(0));
         let factory: crate::client_side::Factory = {
-            let (told, left, there) = (told.clone(), left.clone(), there.clone());
+            let (told, left, there, selectable) = (
+                told.clone(),
+                left.clone(),
+                there.clone(),
+                selectable.clone(),
+            );
             Arc::new(move |_: &str| {
                 Box::new(Stick {
                     made: made.fetch_add(1, Ordering::Relaxed),
                     takes,
                     there: there.clone(),
+                    selectable: selectable.clone(),
                     told: told.clone(),
                     left: left.clone(),
                 }) as Box<dyn crate::client_side::ClientSide>
@@ -124,6 +139,7 @@ impl Rig {
             told,
             left,
             there,
+            selectable,
             now: Instant::now(),
         };
         for _ in 0..400 {
@@ -516,6 +532,39 @@ fn a_stick_at_one_s_feet_is_taken_by_either_hand_pointing_down_at_it_and_its_ray
     }
     assert_eq!(rig.step.hands.right.aim, precedence::Aim::Nothing);
     assert_eq!(rig.grip(1.0), None);
+}
+
+#[test]
+fn a_lowered_ray_on_an_object_that_also_selects_and_scrolls_gives_it_only_the_grip() {
+    let down = Ray::new(arrival::HOME, Vec3::new(0.0, -0.95, -0.3));
+    let mut rig = Rig::new(ConnectionRole::Owner, true);
+    rig.selectable.store(true, Ordering::Relaxed);
+    rig.senses.beam = true;
+    // Raised, it is the trigger's, B's and the right stick's as well as the grip's.
+    for _ in 0..3 {
+        rig.frame();
+    }
+    let client = rig.step.client.as_ref().unwrap();
+    assert_eq!(client.focus.as_deref(), Some("stick"));
+    assert_eq!(client.scrollable.as_deref(), Some("stick"));
+    // Hanging down, only the grip's.
+    rig.senses.ray = down;
+    for _ in 0..3 {
+        rig.frame();
+    }
+    assert!(rig.step.hands.right.lowered);
+    let client = rig.step.client.as_ref().unwrap();
+    assert_eq!(client.focus, None);
+    assert_eq!(client.scrollable, None);
+    assert_eq!(
+        client
+            .grabbable
+            .right
+            .as_ref()
+            .map(|(object, _)| object.as_str()),
+        Some("stick")
+    );
+    assert_eq!(rig.grip(1.0).map(|grab| grab.phase), Some(Phase::Began));
 }
 
 #[test]

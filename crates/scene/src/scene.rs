@@ -2023,7 +2023,8 @@ impl Step {
                 .or_else(|| worker.as_ref().or(timer.as_ref()).and(hit_point).map(reach))
                 .unwrap_or(f32::INFINITY);
             // A ray whose hand points down, which points at nothing else, still meets what the environment has that the
-            // grip takes, as a stone at one's feet, and shows while it does, as it does a pad.
+            // grip takes, as a stone at one's feet, and shows while it does, as it does a pad: for the grip alone, so that
+            // a hand hanging at one's side selects and scrolls nothing.
             let lowered = rays[side].filter(|_| ray.is_none() && self.hands[side].lowered);
             let picked = self
                 .client
@@ -2033,6 +2034,17 @@ impl Step {
                 .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)))
                 .filter(|picked| {
                     ray.is_some() || picked.actions.contains(crate::client_side::Actions::GRAB)
+                })
+                .map(|picked| {
+                    if ray.is_some() {
+                        picked
+                    } else {
+                        crate::client_side::Picked {
+                            selectable: false,
+                            actions: crate::client_side::Actions::GRAB,
+                            ..picked
+                        }
+                    }
                 });
             let object = picked.clone().filter(|picked| picked.distance < nearest);
             let (card, worker, timer) = if object.is_some() {
