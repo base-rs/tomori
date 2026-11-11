@@ -1126,6 +1126,24 @@ impl Hub {
                             crate::space::one_line(name.as_deref().unwrap_or("Whoever asked"), 40)
                         )
                     })?;
+                // Whoever asked walks with it, or an owner asks for someone else, so that nobody else is walked with
+                // unasked.
+                let theirs = state
+                    .space(&space)
+                    .and_then(|record| record.model.given())
+                    .is_some_and(|given| given.source == state.participants[&participant].source);
+                if !theirs {
+                    self.requester(
+                        &state,
+                        &space,
+                        requested_by,
+                        super::provenance::Needs::Owner,
+                    )
+                    .map_err(|_| {
+                        "Only an owner may ask you to walk with someone else: ask them to ask you themselves."
+                            .to_owned()
+                    })?;
+                }
                 let was = state.space(&space).expect("found above").summoned;
                 self.walk_with(
                     &mut state,

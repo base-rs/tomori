@@ -277,6 +277,34 @@ fn only_a_participant_s_words_or_menu_start_a_walk_and_never_where_it_stays_home
         hub.agent_move_agent("session", "with vic", Some("ada"))
             .is_err()
     );
+    // A collaborator walks with it themselves, but only an owner asks it to walk with someone else.
+    let cy = super::asking(
+        &hub,
+        &space,
+        "Cy",
+        Grant::Collaborator {
+            space: space.clone(),
+        },
+        Duration::ZERO,
+    );
+    cy.send(looking([-3.0, 1.6, 4.0], [-3.0, 1.6, -1.0]));
+    assert!(
+        hub.agent_move_agent("session", "with ada", Some("Cy"))
+            .unwrap_err()
+            .starts_with("Only an owner may ask you to walk with someone else")
+    );
+    assert_eq!(walker(&hub, &space), None);
+    hub.agent_move_agent("session", "with me", Some("Cy"))
+        .unwrap();
+    let theirs = hub
+        .lock()
+        .participants
+        .iter()
+        .find(|(_, participant)| participant.name == "Cy")
+        .map(|(key, _)| key.clone());
+    assert_eq!(walker(&hub, &space), theirs);
+    cy.send(ClientMessage::WalkAgent { walking: false });
+    assert_eq!(walker(&hub, &space), None);
     // Someone who has not said where they are is refused too, from the hand menu or by their words.
     let bob = Client::greeted(&hub, Access::open(), "bob");
     bob.join(&space);
