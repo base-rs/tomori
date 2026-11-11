@@ -98,6 +98,7 @@ fn input(projection: &Projection, viewer: Vec3, ray: Option<Ray>) -> Input<'_> {
         controls: Controls::Controllers,
         scroll: None,
         rights: editing::Rights::default(),
+        surfaces: None,
         left: crate::projection::Hold::default(),
         now: Instant::now(),
         dt: 1.0 / 72.0,

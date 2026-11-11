@@ -22,6 +22,7 @@ use crate::{
     board::{model, pose},
     canvas::Canvas,
     controller_ui::Sheet,
+    locomotion::Locomotion,
     manipulation::Manipulation,
     pointing::Ray,
     recording::facing,
@@ -92,6 +93,19 @@ const HANDLE_REACH: f32 = 0.8;
 /// How near the viewer a locked wall's padlock stands for an owner to see it, in metres: near enough to walk up to, so
 /// that walls far away show nothing.
 pub const PADLOCK_NEAR: f32 = 3.0;
+
+/// Whether a surface among `surfaces` stands between `from` and `to`, crossing the line between them, as the floor of a
+/// deck stands between a participant on it and a wall beneath it.
+fn hidden(surfaces: Option<&Locomotion>, from: Vec3, to: Vec3) -> bool {
+    surfaces
+        .zip(Ray::new(from, to - from))
+        .is_some_and(|(surfaces, ray)| surfaces.surface_crossed(&ray, from.distance(to) - 0.01))
+}
+
+/// Whether a surface among `surfaces` crosses `ray` before `along` it: what the ray meets there is beyond a floor.
+pub(super) fn beyond(surfaces: Option<&Locomotion>, ray: &Ray, along: f32) -> bool {
+    surfaces.is_some_and(|surfaces| surfaces.surface_crossed(ray, along - 0.01))
+}
 
 /// How long a press of B asking to remove a wall that holds panels waits for another to confirm it.
 pub const CONFIRM: Duration = Duration::from_secs(4);
@@ -361,6 +375,9 @@ pub struct Input<'a> {
     /// The trigger is held: a wall carried snaps to no other, so that let go it stays where it is.
     pub free: bool,
     pub viewer: Vec3,
+    /// The environment's declared surfaces, its floors and decks, which hide a padlock beyond them from the viewer and
+    /// stop the ray before a padlock, a handle, a bar or a wall beyond them; `None` where nothing is declared.
+    pub surfaces: Option<&'a Locomotion>,
     pub rights: Rights,
     pub controls: Controls,
     pub now: Instant,
@@ -1606,13 +1623,15 @@ impl Editor {
 
     /// The padlocks of the locked walls among `walls`, as drawn, that a participant with `rights` sees, each with its
     /// wall, as its face's model and size: for an owner, where the server locks walls, each standing within
-    /// [`PADLOCK_NEAR`] of `viewer`, where the padlock of the wall taken hold of stands. Anyone else, and an owner further
-    /// away, sees none, as a locked wall shows nothing else. Each is laid out once and kept until its wall, where it
-    /// stands or its group changes.
+    /// [`PADLOCK_NEAR`] of `viewer`, where the padlock of the wall taken hold of stands, with none of `surfaces` between
+    /// `viewer` and the padlock or the middle of its wall, so that a wall beneath a deck shows nothing to an owner on
+    /// it, however near. Anyone else, and an owner further away, sees none, as a locked wall shows nothing else. Each is
+    /// laid out once and kept until its wall, where it stands or its group changes.
     fn padlocks<'a>(
         &mut self,
         walls: &[(&'a Wall, Mat4)],
         viewer: Vec3,
+        surfaces: Option<&Locomotion>,
         rights: Rights,
     ) -> Vec<(&'a Wall, Mat4, f32)> {
         if !(rights.adjust && rights.locks && rights.lock) {
@@ -1651,10 +1670,16 @@ impl Editor {
                     (models, size)
                 }
             };
+            let middle = frame.w_axis.truncate();
             padlocks.extend(
                 models
                     .into_iter()
-                    .filter(|model| model.w_axis.truncate().distance(viewer) <= PADLOCK_NEAR)
+                    .filter(|model| {
+                        let padlock = model.w_axis.truncate();
+                        padlock.distance(viewer) <= PADLOCK_NEAR
+                            && !hidden(surfaces, viewer, padlock)
+                            && !hidden(surfaces, viewer, middle)
+                    })
                     .map(|model| (*wall, model, size)),
             );
         }
@@ -1728,7 +1753,8 @@ impl Editor {
         {
             let controls = LockControls::of(wall, input.rights);
             let (models, size) = handle_models(wall, *frame, &all, None, controls);
-            met = nearest_handle(&models, size, &ray);
+            met = nearest_handle(&models, size, &ray)
+                .filter(|(_, along)| !beyond(input.surfaces, &ray, *along));
         }
         let hovered = self
             .drag
@@ -1736,7 +1762,7 @@ impl Editor {
             .map(|drag| drag.handle)
             .or(met.map(|(handle, _)| handle));
         // The padlock of a locked wall the ray meets, where it meets no handle, nearest along it, for an owner near it.
-        let padlocks = self.padlocks(walls, input.viewer, input.rights);
+        let padlocks = self.padlocks(walls, input.viewer, input.surfaces, input.rights);
         let padlock_met = ray
             .filter(|_| met.is_none() && self.drag.is_none() && self.carry.is_none())
             .and_then(|ray| {
@@ -1747,6 +1773,7 @@ impl Editor {
                             .map(|(_, along)| (*wall, along))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .filter(|(_, along)| !beyond(input.surfaces, &ray, *along))
             });
         // The bar the ray meets, where it meets no handle, nearest along it, for a participant who may adjust walls.
         let bar_met = ray
@@ -1766,10 +1793,12 @@ impl Editor {
                             .map(|along| (wall.id.clone(), along))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .filter(|(_, along)| !beyond(input.surfaces, &ray, *along))
             });
         // Where the ray meets a locked wall nearer than anything else it would take, and no handle, padlock or bar: it
         // says the wall is locked and, to an owner too far to see its padlock, to come closer, so that it is clear why the
-        // grip takes nothing there.
+        // grip takes nothing there; not where a floor or deck hides its padlock or its wall, as coming closer would not
+        // show it.
         let locked_met = ray
             .filter(|_| {
                 input.rights.adjust
@@ -1790,9 +1819,22 @@ impl Editor {
                         wall.is_locked()
                             && *along < input.nearer
                             && *along < input.panel
+                            && !beyond(input.surfaces, &ray, *along)
                             && !padlocks.iter().any(|(near, ..)| near.id == wall.id)
                     })
-                    .map(|(_, along)| ray.at(along))
+                    .map(|(wall, along)| {
+                        let middle = walls
+                            .iter()
+                            .find(|(other, _)| other.id == wall.id)
+                            .map(|(_, frame)| frame.w_axis.truncate());
+                        let clear = middle
+                            .into_iter()
+                            .chain(self.padlock_layouts.get(&wall.id).into_iter().flat_map(
+                                |kept| kept.models.iter().map(|model| model.w_axis.truncate()),
+                            ))
+                            .all(|point| !hidden(input.surfaces, input.viewer, point));
+                        (ray.at(along), input.rights.lock && clear)
+                    })
             });
         let on_bar = bar_met.as_ref().map(|(wall, _)| wall.clone());
         let on_padlock = padlock_met.map(|(wall, _)| wall.id.clone());
@@ -1919,7 +1961,9 @@ impl Editor {
                     })
                     .filter(|(_, _, along)| *along < input.nearer && *along < input.panel)
                     .min_by(|a, b| a.2.total_cmp(&b.2))
-                    .filter(|(wall, _, _)| !wall.is_locked());
+                    .filter(|(wall, _, along)| {
+                        !wall.is_locked() && !beyond(input.surfaces, &ray, *along)
+                    });
                 match taken {
                     Some((wall, frame, along)) => {
                         output.took = true;
@@ -2337,15 +2381,12 @@ impl Editor {
                 .map(|along| crate::pointing::End::new(along, ray.at(along)));
         }
         output.sheets = self.sheets(walls, &padlocks, &input);
-        if let Some(point) = locked_met {
+        if let Some((point, closer)) = locked_met {
             // A little before the wall, towards the viewer, so that the wall hides none of it.
             let before = point + (input.viewer - point).normalize_or_zero() * LIFT;
-            output.sheets.push(hint_beside(
-                locked_label(input.rights.lock),
-                before,
-                input.viewer,
-                1.0,
-            ));
+            output
+                .sheets
+                .push(hint_beside(locked_label(closer), before, input.viewer, 1.0));
         }
         output
     }
@@ -2600,10 +2641,11 @@ pub fn bar_label(controls: Controls, wall: &Wall) -> Canvas {
     )
 }
 
-/// What a locked wall the ray meets says, faintly, where the grip takes nothing: that it is locked, and, to an `owner`,
-/// who sees its padlock only within [`PADLOCK_NEAR`], to come closer to unlock it.
-pub fn locked_label(owner: bool) -> Canvas {
-    let text = if owner {
+/// What a locked wall the ray meets says, faintly, where the grip takes nothing: that it is locked, and, where coming
+/// `closer` would show an owner its padlock, which they see only within [`PADLOCK_NEAR`] and in clear view, to come
+/// closer to unlock it.
+pub fn locked_label(closer: bool) -> Canvas {
+    let text = if closer {
         "Locked: come closer to unlock"
     } else {
         "Locked"

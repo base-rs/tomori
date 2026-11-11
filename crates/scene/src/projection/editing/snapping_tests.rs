@@ -74,6 +74,7 @@ fn frame<'a>(projection: &'a Projection, ray: Option<Ray>, grip: f32, rights: Ri
         controls: Controls::Controllers,
         scroll: None,
         rights,
+        surfaces: None,
         left: crate::projection::Hold::default(),
         now: Instant::now(),
         dt: 1.0 / 72.0,

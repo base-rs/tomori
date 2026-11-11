@@ -2704,6 +2704,14 @@ impl Conversation {
         }
     }
 
+    /// The joined space's environment's declared surfaces, its floors and decks, carried into the space's coordinates,
+    /// whether or not travel is turned off here: what hides a locked wall's padlock beneath a deck from an owner on it,
+    /// and stops the ray before what is beyond a floor. See `design/projection.md`.
+    pub fn surfaces(&self) -> Locomotion {
+        self.declared_locomotion()
+            .carried(&self.arrangement().carriage)
+    }
+
     /// Turn travel off on this headset, staying room scale wherever an environment allows it, or on again. See `design/locomotion.md`.
     pub fn toggle_travel(&mut self) {
         self.travel = !self.travel;
