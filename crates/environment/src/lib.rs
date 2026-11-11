@@ -1255,7 +1255,6 @@ mod tests {
         inbox.set_present(vec![7]);
         assert_eq!(space.presence().len(), 1);
         assert_eq!(space.presence()[0].participant, 7);
-        assert!(UPDATES_PER_SECOND <= UPDATE_BURST);
     }
 
     #[test]

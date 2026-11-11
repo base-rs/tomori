@@ -6,7 +6,7 @@
 //! costing nothing, once they rest. Behind the `simulation` feature.
 use std::collections::BTreeMap;
 
-use glam::{Quat, Vec3};
+use glam::Vec3;
 use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, PhysicsWorld, Pose3, QueryFilter, RigidBodyBuilder,
     RigidBodyHandle, RigidBodyType,
@@ -696,7 +696,7 @@ trait IntoPlacement {
 
 impl IntoPlacement for &Pose3 {
     fn into_placement(self) -> Placement {
-        Placement::new(self.translation, Quat::from(self.rotation))
+        Placement::new(self.translation, self.rotation)
     }
 }
 

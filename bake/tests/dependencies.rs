@@ -414,3 +414,40 @@ fn an_environments_server_crate_is_built_only_by_servers() {
         "no environment's common or client crate was found"
     );
 }
+
+/// Whether `name` simulates physics, which only a server does, as `design/physics.md` requires: Rapier and what it brings.
+fn simulates(name: &str) -> bool {
+    matches!(name, "rapier3d" | "parry3d" | "nalgebra")
+}
+
+#[test]
+fn physics_is_simulated_by_servers_and_never_by_a_client() {
+    assert!(simulates("rapier3d") && !simulates("tomori-physics"));
+    // The server simulates the farmyard's stones, so that the rule below checks something.
+    assert!(
+        tree("tomori-server-app", "normal,build", &[])
+            .iter()
+            .any(|name| simulates(name))
+    );
+    let mut checked = 0;
+    for package in packages() {
+        let name = package["name"].as_str().unwrap();
+        if !client(name) {
+            continue;
+        }
+        checked += 1;
+        // Every feature, on every target, so that the APK never grows with the engine; but an environment's common crate
+        // with its own, since its server side, which a server enables, is a feature of it.
+        let common = matches!(role(name), Role::Environment(Half::Common));
+        let features: &[&str] = if common { &[] } else { &["--all-features"] };
+        let engine: Vec<String> = tree(name, "normal,build", features)
+            .into_iter()
+            .filter(|dependency| simulates(dependency))
+            .collect();
+        assert!(
+            engine.is_empty(),
+            "{name} builds {engine:?}; physics is simulated on the server, and clients mirror what it sends"
+        );
+    }
+    assert!(checked >= 10, "only {checked} client crates were found");
+}

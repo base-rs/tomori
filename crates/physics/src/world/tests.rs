@@ -8,7 +8,7 @@
 use super::*;
 use crate::message::Intent;
 use crate::{Encoded, PULL, RELEASE_SPEED, Side};
-use glam::Vec2;
+use glam::{Quat, Vec2};
 
 /// A flattish stone's hull, as one chosen for a cairn: a broad, gently domed top and bottom about a ring, `width`
 /// across and `height` high, its points nudged by `seed`, its middle at its origin.
@@ -657,8 +657,10 @@ fn a_body_lost_below_the_world_or_beyond_its_reach_goes_back_where_it_began() {
         (Vec3::new(0.0, 1.0, 0.0), [0.0, 0.0, 8.0]),
         (Vec3::new(0.0, 1.2, 0.0), [0.0; 3]),
     ] {
-        let mut settings = Settings::default();
-        settings.lost_beyond = 2.0;
+        let settings = Settings {
+            lost_beyond: 2.0,
+            ..Settings::default()
+        };
         // The ground ends a metre and a half away, and it falls off there, or is thrown beyond reach.
         let edge = Static::cuboid(
             Vec3::new(-1.5, -0.5, -1.5),
