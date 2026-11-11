@@ -8,7 +8,8 @@
 //!
 //! What is near enough to walk towards, within the headset's far plane, 50 m from the eyes, is built here in code, in
 //! the yard's low-poly style and palette: the foothills' ground as one model ([`model`]), the plants as a model for each
-//! kind, placed where [`plants`] says, deterministically, so that every client draws the same bush. The ranges stand
+//! kind, placed where [`plants`] says, deterministically, so that every client draws the same bush, but its tree ferns,
+//! which are drawn as the ferns near the trail are ([`crate::ferns::bush`]). The ranges stand
 //! beyond the far plane, so they are directions rather than places ([`ranges`]), which the scenery draws at the sky's
 //! depth, behind everything; and the water is drawn by the scenery's own shader, which moves it ([`water`]). Where the
 //! river, the waterfall and the bush are is in [`layout`], which [`layout::sounds`] names for ambient sound. See the
@@ -54,10 +55,6 @@ pub mod colors {
     /// The grey shingle along the river, and the rock of the waterfall's cliff.
     pub const SHINGLE: Vec3 = Vec3::new(0.21, 0.2, 0.18);
     pub const ROCK: Vec3 = Vec3::new(0.11, 0.105, 0.1);
-    /// A tree fern's trunk, the skirt of dead fronds below its crown and its fronds.
-    pub const FERN_TRUNK: Vec3 = Vec3::new(0.08, 0.06, 0.045);
-    pub const DEAD_FROND: Vec3 = Vec3::new(0.16, 0.11, 0.06);
-    pub const FROND: Vec3 = Vec3::new(0.07, 0.16, 0.06);
     /// A cabbage tree's bark and its tufts of leaves.
     pub const CABBAGE_BARK: Vec3 = Vec3::new(0.14, 0.12, 0.09);
     pub const CABBAGE: Vec3 = Vec3::new(0.17, 0.21, 0.09);
@@ -343,10 +340,12 @@ pub fn model() -> Model {
     built("foothills", shapes)
 }
 
-/// The kinds of plant in the bush, each a model of its own, instanced where [`plants`] says.
+/// The kinds of plant in the bush, each a model of its own, instanced where [`plants`] says, but the tree ferns, drawn as
+/// the ferns near the trail are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// A tree fern, ponga or mamaku: a slender dark trunk, a skirt of dead fronds, and a crown of arching fronds.
+    /// A tree fern, ponga or mamaku, drawn with the ferns' meshes and their shader, which sways them
+    /// ([`crate::ferns::bush`]), as large as its size says.
     Fern,
     /// A cabbage tree, tī kōuka: a pale trunk branching into spiky tufts of leaves.
     CabbageTree,
@@ -379,14 +378,12 @@ impl Kind {
         }
     }
 
-    /// Its model, built in code, standing on its origin, its foot sunk a little so that it stands on a slope.
-    pub fn model(self) -> Model {
+    /// Its model, built in code, standing on its origin, its foot sunk a little so that it stands on a slope; or none
+    /// for a tree fern, which the ferns' meshes draw.
+    pub fn model(self) -> Option<Model> {
         let mut shapes = Shapes::new();
         let name = match self {
-            Kind::Fern => {
-                fern(&mut shapes);
-                "fern"
-            }
+            Kind::Fern => return None,
             Kind::CabbageTree => {
                 cabbage_tree(&mut shapes);
                 "cabbage tree"
@@ -404,7 +401,7 @@ impl Kind {
                 "canopy"
             }
         };
-        built(name, shapes)
+        Some(built(name, shapes))
     }
 }
 
@@ -444,59 +441,6 @@ fn blade(
             }
             None => facing(shapes, &[previous[0], previous[1], middle], up, color),
         }
-    }
-}
-
-/// How many fronds a tree fern's crown has, and how many dead ones hang in its skirt.
-const FRONDS: u32 = 18;
-const SKIRT: u32 = 9;
-
-fn fern(shapes: &mut Shapes) {
-    // The trunk, flaring to its matted roots, its top hidden in the crown.
-    let ring = |y: f32, radius: f32| -> Vec<Vec3> {
-        (0..5)
-            .map(|side| {
-                let yaw = side as f32 / 5.0 * TAU;
-                Vec3::new(yaw.sin() * radius, y, yaw.cos() * radius)
-            })
-            .collect()
-    };
-    let (foot, top) = (ring(-SUNK, 0.24), ring(3.3, 0.12));
-    for side in 0..5 {
-        let next = (side + 1) % 5;
-        let corners = [foot[side], foot[next], top[next], top[side]];
-        let outward = corners.iter().copied().sum::<Vec3>().with_y(0.0);
-        facing(shapes, &corners, outward, colors::FERN_TRUNK);
-    }
-    // The skirt: dead fronds hanging close about the trunk below the crown.
-    for frond in 0..SKIRT {
-        let yaw = (frond as f32 + scatter(frond + 280) * 0.6) / SKIRT as f32 * TAU;
-        blade(
-            shapes,
-            Vec3::new(0.0, 3.25, 0.0),
-            yaw,
-            (0.3 + scatter(frond + 290) * 0.12, 0.0, 1.35),
-            &[0.18],
-            colors::DEAD_FROND * (0.75 + scatter(frond + 295) * 0.35),
-        );
-    }
-    // The crown: many long, narrow fronds, arching up and out from the trunk's top and drooping at their tips, wide and
-    // flat as a parasol, the lower ones older, darker and drooping further.
-    for frond in 0..FRONDS {
-        let yaw = (frond as f32 + (scatter(frond + 300) - 0.5) * 0.6) / FRONDS as f32 * TAU;
-        let old = frond % 3 == 0;
-        let length = if old { 1.8 } else { 1.95 } + scatter(frond + 320) * 0.3;
-        let rise = if old { 0.15 } else { 0.45 } + scatter(frond + 340) * 0.2;
-        let droop = if old { 1.5 } else { 1.05 };
-        let shade = if old { 0.7 } else { 1.0 } + scatter(frond + 360) * 0.25;
-        blade(
-            shapes,
-            Vec3::new(0.0, 3.25, 0.0),
-            yaw,
-            (length, rise, droop),
-            &[0.02, 0.15, 0.1],
-            colors::FROND * shade,
-        );
     }
 }
 
@@ -1510,8 +1454,9 @@ pub fn water() -> Vec<Water> {
     triangles
 }
 
-/// How many triangles each part of the backdrop draws: the foothills' ground, every plant, the ranges, the water, the
-/// river's stones, the waterfall rock and the trail.
+/// How many triangles each part of the backdrop draws: the foothills' ground, every plant but the tree ferns, which are
+/// counted with the ferns ([`crate::ferns::triangles`]), the ranges, the water, the river's stones, the waterfall rock
+/// and the trail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Triangles {
     pub foothills: usize,
@@ -1539,8 +1484,9 @@ impl Triangles {
             foothills: count(&model()),
             plants: Kind::ALL
                 .iter()
-                .map(|kind| {
-                    count(&kind.model()) * plants.iter().filter(|plant| plant.kind == *kind).count()
+                .filter_map(|kind| {
+                    let model = kind.model()?;
+                    Some(count(&model) * plants.iter().filter(|plant| plant.kind == *kind).count())
                 })
                 .sum(),
             ranges: ranges().len() / 3,

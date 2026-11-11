@@ -383,9 +383,23 @@ fn the_bush_is_the_same_every_time_each_plant_turned_and_sized_its_own_way() {
             of.windows(2)
                 .all(|pair| pair[0].turn != pair[1].turn && pair[0].scale != pair[1].scale)
         );
-        // Its model is the same each time it is built, and stands about its origin within its size.
-        let model = kind.model();
-        let again = kind.model();
+        // Its model is the same each time it is built, and stands about its origin within its size; a tree fern, drawn
+        // with the ferns' meshes, reaches as far as it does and stands as tall, give or take a tenth.
+        let (Some(model), Some(again)) = (kind.model(), kind.model()) else {
+            let (reach, height) = kind.size();
+            let bush = crate::ferns::bush();
+            assert_eq!(bush.len(), count);
+            for (fern, plant) in bush.iter().zip(&of) {
+                assert_eq!((fern.at, fern.turn), (plant.at, plant.turn));
+                let (drawn, tall) = fern.size();
+                assert!((drawn - reach * plant.scale).abs() < 1e-3, "{fern:?}");
+                assert!(
+                    (tall / (height * plant.scale) - 1.0).abs() < 0.15,
+                    "{fern:?}"
+                );
+            }
+            continue;
+        };
         let primitive = &model.meshes[0].primitives[0];
         assert_eq!(primitive.positions, again.meshes[0].primitives[0].positions);
         let (reach, height) = kind.size();
@@ -473,15 +487,15 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 21 thousand triangles, which the scenery draws in eleven draws: the foothills, one for each
-    // kind of plant with all its instances, the river's stones, all instances of one, the waterfall rock, the trail, the
-    // water and the ranges; and the stations' plaques, five small draws of text.
+    // Under the budget, about 17 thousand triangles, which the scenery draws in ten draws: the foothills, one for each
+    // kind of plant with all its instances but the tree ferns, which the ferns draw, the river's stones, all instances of
+    // one, the waterfall rock, the trail, the water and the ranges; and the stations' plaques, five small draws of text.
     let triangles = Triangles::counted();
     assert_eq!(
         triangles,
         Triangles {
             foothills: 2880,
-            plants: 15_222,
+            plants: 10_862,
             ranges: 1184,
             water: 197,
             stones: 765,
@@ -490,18 +504,19 @@ fn the_backdrop_is_modest_for_the_quest() {
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 21_432);
+    assert_eq!(triangles.total(), 17_072);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
-    // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances.
+    // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the
+    // tree ferns, which the ferns draw and count.
+    assert_eq!(Kind::Fern.model(), None);
     for (kind, count) in [
         (Kind::Canopy, 18),
         (Kind::Podocarp, 112),
-        (Kind::Fern, 109),
         (Kind::CabbageTree, 145),
         (Kind::Flax, 39),
     ] {
-        let model = kind.model();
+        let model = kind.model().unwrap();
         assert_eq!(
             model.meshes[0].primitives[0].indices.len() / 3,
             count,

@@ -470,10 +470,10 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
 /// as the agent's swarm reaches, coming to 2 m from someone at the far side of a clearing.
 pub const BESIDE: f32 = 5.0;
 
-/// The backdrop's plants and pines within [`BESIDE`] of the trail or the waterfall rock, each as the box it stands
-/// within, from its foot to its top, as `(least, greatest)` corners: the agent, coming to someone on the trail or the
-/// rock, keeps clear of them as it does of the trail's [`solids`], swinging round them, so that it never stands in a tree
-/// fern or a pine, nor a panel floats in one.
+/// The backdrop's plants and pines, and the tree ferns' trunks and crowns ([`crate::ferns`]), within [`BESIDE`] of the
+/// trail or the waterfall rock, each as the box it stands within, as `(least, greatest)` corners: the agent, coming to
+/// someone on the trail or the rock, keeps clear of them as it does of the trail's [`solids`], swinging round them, so
+/// that it never stands in a tree fern or a pine, nor a panel floats in one.
 pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
     let line = line();
     let pines = crate::props::pines().into_iter().map(|(base, height)| {
@@ -490,6 +490,11 @@ pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
             (solid.low, solid.high)
         })
         .chain(pines)
+        .chain(
+            crate::ferns::solids()
+                .into_iter()
+                .map(|solid| (solid.low, solid.high)),
+        )
         .filter(|(low, high)| {
             let (low, high) = (Vec2::new(low[0], low[2]), Vec2::new(high[0], high[2]));
             let rock = Vec2::new(layout::WATERFALL_ROCK.x, layout::WATERFALL_ROCK.z);

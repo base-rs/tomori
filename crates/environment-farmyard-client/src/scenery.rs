@@ -4,12 +4,13 @@
 //! The farmyard's scenery, as Tomori's clients draw it in each eye's pass: the evening sky behind everything, then the
 //! yard and the coop, models drawn with `tomori-assets`, lit by the moon and the lanterns' warm light; beyond them the
 //! backdrop, its foothills and its bush, models too, its river and waterfall, drawn with a shader of its own that moves
-//! them, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the
-//! stations' plaques, their text drawn from the renderer's glyph atlas; the campsite by the pool, its bonfire's flames
+//! them, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the ferns
+//! about the trail, drawn with a shader of their own that sways them in the breeze; the stations' plaques, their text drawn from the renderer's glyph atlas; the campsite by the pool, its bonfire's flames
 //! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
 //! marshmallow sticks where its client side shows them; all of it growing out of the space through the reveal sphere as
 //! the space's environment does.
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
@@ -22,13 +23,15 @@ use wgpu::util::DeviceExt;
 use tomori_environment_farmyard::backdrop::{self, Kind};
 use tomori_environment_farmyard::campsite;
 use tomori_environment_farmyard::coop::{self, Coop};
+use tomori_environment_farmyard::ferns::{self, Detail, Fern};
 use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
 use tomori_environment_farmyard::trail;
 use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
 use tomori_scene::ui_text::{Row, Style};
 
-/// What the sky's, the ranges' and the water's shaders are told for each eye.
+/// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
+/// read how the farmyard is lit, at its end, as its models are.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SkyCamera {
@@ -38,6 +41,39 @@ struct SkyCamera {
     eye: [f32; 4],
     haze: [f32; 4],
     time: [f32; 4],
+    moon: [f32; 4],
+    moonlight: [f32; 4],
+    sky: [f32; 4],
+    ground: [f32; 4],
+    lamps: [[f32; 4]; 2 * tomori_assets::gpu::LAMPS],
+}
+
+/// A point of a fern's mesh, as its shader reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct FernVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    color: [f32; 3],
+    underside: [f32; 3],
+    sway: f32,
+}
+
+/// A fern placed, as its shader reads it: its foot and how it is turned, and how large it is and its phase.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct FernInstance {
+    foot: [f32; 4],
+    size: [f32; 4],
+}
+
+impl From<&Fern> for FernInstance {
+    fn from(fern: &Fern) -> Self {
+        Self {
+            foot: fern.at.extend(fern.turn).to_array(),
+            size: [fern.scale, fern.phase, 0.0, 0.0],
+        }
+    }
 }
 
 /// A point of the ranges, as their shader reads it.
@@ -460,6 +496,150 @@ impl Fire {
     }
 }
 
+/// Each fern mesh, by kind and detail, and its range of the ferns' vertices.
+pub(crate) type FernMeshes = Vec<((ferns::Kind, Detail), Range<u32>)>;
+
+/// The draws of the ferns' meshes: each mesh's range of vertices, and its range of instances.
+pub(crate) type FernDraws = Vec<(Range<u32>, Range<u32>)>;
+
+/// The ferns: every kind's mesh in each detail, in one buffer, and their instances in another, grouped by the mesh each
+/// is drawn with, as the eyes were when last placed; one draw for each mesh with instances, all with one pipeline,
+/// swaying in the breeze.
+struct Ferns {
+    pipeline: wgpu::RenderPipeline,
+    vertices: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    /// Each mesh, and its range of the vertices.
+    meshes: FernMeshes,
+    ferns: Vec<Fern>,
+    /// How each fern was drawn when last placed, and each mesh's range of vertices with its range of instances.
+    placed: Mutex<(Vec<Detail>, FernDraws)>,
+}
+
+impl Ferns {
+    fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
+        let device = target.device;
+        let shader = device.create_shader_module(wgpu::include_wgsl!("fern.wgsl"));
+        let pipeline = pipeline(
+            target,
+            layout,
+            &shader,
+            ("fern_vertex", "fern_fragment"),
+            &[
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<FernVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x3, 4 => Float32],
+                }),
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<FernInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![5 => Float32x4, 6 => Float32x4],
+                }),
+            ],
+            (true, wgpu::CompareFunction::Less),
+            "Farmyard ferns",
+        );
+        let (vertices, meshes) = fern_vertices();
+        let ferns = ferns::all();
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Farmyard fern instances"),
+            size: (size_of::<FernInstance>() * ferns.len().max(1)) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Farmyard fern meshes"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            instances,
+            meshes,
+            ferns,
+            placed: Mutex::new((Vec::new(), Vec::new())),
+        }
+    }
+
+    /// Group the ferns by the mesh each is drawn with for eyes at `eyes`, writing their instances only when that changes.
+    fn place(&self, queue: &wgpu::Queue, eyes: Vec3) {
+        let details: Vec<Detail> = self.ferns.iter().map(|fern| fern.detail(eyes)).collect();
+        let mut placed = self
+            .placed
+            .lock()
+            .expect("the ferns' placing is never poisoned");
+        if placed.0 == details && !placed.1.is_empty() {
+            return;
+        }
+        let (instances, draws) = fern_instances(&self.ferns, &details, &self.meshes);
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        *placed = (details, draws);
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let placed = self
+            .placed
+            .lock()
+            .expect("the ferns' placing is never poisoned");
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        for (vertices, instances) in &placed.1 {
+            pass.draw(vertices.clone(), instances.clone());
+        }
+    }
+}
+
+/// Every fern mesh's points, one after another, as their shader reads them, and each mesh's range of them.
+pub(crate) fn fern_vertices() -> (Vec<FernVertex>, FernMeshes) {
+    let mut vertices = Vec::new();
+    let meshes = ferns::drawn()
+        .into_iter()
+        .map(|(kind, detail)| {
+            let start = vertices.len() as u32;
+            vertices.extend(
+                ferns::mesh(kind, detail)
+                    .into_iter()
+                    .map(|point| FernVertex {
+                        position: point.position.to_array(),
+                        normal: point.normal.to_array(),
+                        color: point.color.to_array(),
+                        underside: point.underside.to_array(),
+                        sway: point.sway,
+                    }),
+            );
+            ((kind, detail), start..vertices.len() as u32)
+        })
+        .collect();
+    (vertices, meshes)
+}
+
+/// `ferns`' instances, each drawn in its detail of `details`, grouped by mesh in `meshes`' order, and each mesh with
+/// instances, its range of vertices with its range of instances.
+pub(crate) fn fern_instances(
+    ferns: &[Fern],
+    details: &[Detail],
+    meshes: &[((ferns::Kind, Detail), Range<u32>)],
+) -> (Vec<FernInstance>, FernDraws) {
+    let mut instances = Vec::with_capacity(ferns.len());
+    let mut draws = Vec::new();
+    for ((kind, detail), vertices) in meshes {
+        let start = instances.len() as u32;
+        instances.extend(
+            ferns
+                .iter()
+                .zip(details)
+                .filter(|(fern, drawn)| fern.kind == *kind && *drawn == detail)
+                .map(|(fern, _)| FernInstance::from(fern)),
+        );
+        if instances.len() as u32 > start {
+            draws.push((vertices.clone(), start..instances.len() as u32));
+        }
+    }
+    (instances, draws)
+}
+
 /// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the river's stones, the
 /// waterfall rock, the trail, the water and the ranges.
 struct Backdrop {
@@ -488,15 +668,17 @@ impl Backdrop {
             Mat4::IDENTITY,
         );
         let placed = backdrop::plants();
+        // Every kind but the tree ferns, which the ferns draw.
         let plants = Kind::ALL
             .iter()
-            .map(|kind| {
+            .filter_map(|kind| {
                 let placements: Vec<Mat4> = placed
                     .iter()
                     .filter(|plant| plant.kind == *kind)
                     .map(|plant| plant.transform())
                     .collect();
-                Drawn::placed(device, queue, models, &Arc::new(kind.model()), &placements)
+                let model = Arc::new(kind.model()?);
+                Some(Drawn::placed(device, queue, models, &model, &placements))
             })
             .collect();
         let stones: Vec<Mat4> = backdrop::stones()
@@ -691,6 +873,7 @@ pub struct Farmyard {
     campsite: Drawn,
     sticks: Drawn,
     fire: Fire,
+    ferns: Ferns,
     reveal: Option<(Vec3, f32)>,
 }
 
@@ -778,6 +961,7 @@ impl Farmyard {
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
         let fire = Fire::new(target, &pipeline_layout);
+        let ferns = Ferns::new(target, &pipeline_layout);
         Self {
             sky,
             cameras,
@@ -794,6 +978,7 @@ impl Farmyard {
             campsite,
             sticks,
             fire,
+            ferns,
             reveal: None,
         }
     }
@@ -865,10 +1050,13 @@ impl Scenery for Farmyard {
     }
 
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
-        // The bonfire's light flickers, once a frame, as the first eye is prepared.
+        // The bonfire's light flickers, once a frame, as the first eye is prepared, and the ferns are drawn in the detail
+        // its distance from them asks.
+        let seconds = self.clock.seconds(self.made);
+        let lit = lighting_at(seconds);
         if eye == 0 {
-            self.models
-                .set_lighting(queue, &lighting_at(self.clock.seconds(self.made)));
+            self.models.set_lighting(queue, &lit);
+            self.ferns.place(queue, self::eye(scene_to_clip));
         }
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
@@ -888,7 +1076,20 @@ impl Scenery for Farmyard {
             view_projection: scene_to_clip.to_cols_array(),
             eye: self::eye(scene_to_clip).extend(1.0).to_array(),
             haze: self.haze,
-            time: [self.clock.seconds(self.made), 0.0, 0.0, 0.0],
+            time: [seconds, 0.0, 0.0, 0.0],
+            moon: lit.sun_direction.normalize_or_zero().extend(0.0).to_array(),
+            moonlight: lit.sun.extend(0.0).to_array(),
+            sky: lit.sky.extend(0.0).to_array(),
+            ground: lit.ground.extend(0.0).to_array(),
+            lamps: std::array::from_fn(|index| {
+                lit.lamps.get(index / 2).map_or([0.0; 4], |lamp| {
+                    if index % 2 == 0 {
+                        lamp.position.extend(lamp.reach).to_array()
+                    } else {
+                        lamp.color.extend(0.0).to_array()
+                    }
+                })
+            }),
         };
         queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
     }
@@ -897,19 +1098,21 @@ impl Scenery for Farmyard {
         pass.set_pipeline(&self.sky);
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.draw(0..3, 0..1);
-        // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, then the
-        // foothills, the bush, the river's stones and the waterfall rock beyond, the water, and the ranges at the sky's
-        // depth, where nothing else has been drawn.
+        // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, the ferns
+        // about it, then the foothills, the bush, the river's stones and the waterfall rock beyond, the water, and the
+        // ranges at the sky's depth, where nothing else has been drawn.
         let backdrop = &self.backdrop;
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
             .flatten()
-            .chain([
-                &self.sticks,
-                &self.campsite,
-                &backdrop.trail,
-                &backdrop.foothills,
-            ])
+            .chain([&self.sticks, &self.campsite, &backdrop.trail])
+        {
+            self.models.draw(pass, eye, &drawn.model, &drawn.batch);
+        }
+        pass.set_bind_group(0, &self.bindings[eye], &[]);
+        self.ferns.draw(pass);
+        for drawn in [&backdrop.foothills]
+            .into_iter()
             .chain(&backdrop.plants)
             .chain([&backdrop.stones, &backdrop.rock])
         {
