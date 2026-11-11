@@ -353,6 +353,7 @@ mod tests {
     use std::time::Instant;
 
     mod cards;
+    mod chart_readout;
     mod image_sharpness;
     mod timers;
     mod turning;

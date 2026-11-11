@@ -842,3 +842,99 @@ fn a_chart_panel_sent_as_its_summary_is_laid_out_again_as_text_and_as_a_chart_ag
     assert_eq!(counts(), (laid + 2, drawn + 2));
     assert!(!face(&projector, "chart-0").shapes.is_empty());
 }
+
+#[test]
+fn scanning_a_chart_s_plot_reads_it_over_its_face_without_drawing_the_face_again() {
+    let shown = projection(panels());
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let walls: Vec<(&Wall, Mat4)> = shown
+        .walls
+        .iter()
+        .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
+        .collect();
+    let (panel_model, _) = projector
+        .stands(shown.panel("chart").unwrap(), &walls)
+        .unwrap();
+    let canvas = face(&projector, "chart");
+    let plot = projector.faces["chart"].sizes[0]
+        .face
+        .as_ref()
+        .and_then(|face| face.plot.clone())
+        .expect("a chart's face keeps where its plot is");
+    // The ray from home through a place on the face, in font pixels inside its padding.
+    let towards = |[x, y]: [f32; 2]| {
+        let (width, height) = canvas.size();
+        let local = Vec3::new(
+            (x + canvas.padding.0 as f32) * canvas.pixel - width / 2.0,
+            height / 2.0 - (y + canvas.padding.1 as f32) * canvas.pixel,
+            0.0,
+        );
+        Ray::new(HOME, panel_model.transform_point3(local) - HOME)
+    };
+    let middle = plot.top + plot.height / 2.0;
+    let counted = counts();
+    // Scanned from left to right, the readout follows, later at each step, drawn over the face, which is the same face.
+    let mut before = 0;
+    for step in 1..10 {
+        let x = plot.left + plot.width * step as f32 / 10.0;
+        let output = projector.update(input(&shown, HOME, towards([x, middle])));
+        let across = output.across.expect("on the plot");
+        assert!(across > before, "{across} after {before}");
+        assert!(
+            (f32::from(across) - 1000.0 * step as f32).abs() < 20.0,
+            "{across}"
+        );
+        before = across;
+        let readout = output.readout.expect("drawn while on the plot");
+        let overlay = readout.canvas.as_ref().unwrap();
+        assert_eq!(overlay.size(), canvas.size());
+        assert_eq!(
+            readout.model,
+            Some(panel_model * Mat4::from_translation(Vec3::Z * super::super::READOUT_LIFT))
+        );
+    }
+    assert_eq!(counts(), counted, "nothing laid out or drawn again");
+    // While the ray is still, the readout is the one drawn, handed over again.
+    let still = towards([plot.left + plot.width / 2.0, middle]);
+    let first = projector
+        .update(input(&shown, HOME, still))
+        .readout
+        .unwrap();
+    let again = projector
+        .update(input(&shown, HOME, still))
+        .readout
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        first.canvas.as_ref().unwrap(),
+        again.canvas.as_ref().unwrap()
+    ));
+    // So is it while the hand is nearly still, within a font pixel, but not once it moves a pixel on.
+    let pixel = (plot.left + plot.width / 2.0).round();
+    let mut near = |x: f32| {
+        projector
+            .update(input(&shown, HOME, towards([x, middle])))
+            .readout
+            .unwrap()
+            .canvas
+            .unwrap()
+    };
+    let a = near(pixel - 0.3);
+    let b = near(pixel + 0.3);
+    let c = near(pixel + 1.0);
+    assert!(Arc::ptr_eq(&a, &b));
+    assert!(!Arc::ptr_eq(&b, &c));
+    // Off its plot, on its title or its axis's labels, there is none, though the panel is pointed at.
+    for off in [[plot.left, 3.0], [plot.left - 4.0, middle]] {
+        let output = projector.update(input(&shown, HOME, towards(off)));
+        assert_eq!(
+            output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+            Some("chart")
+        );
+        assert_eq!((output.readout, output.across), (None, None));
+    }
+    // A panel of no chart has none.
+    let ray = Ray::new(HOME, slot_middle(&shown, 2) - HOME);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert_eq!((output.readout, output.across), (None, None));
+}

@@ -644,5 +644,400 @@ impl Chart {
     }
 }
 
+/// How many parts a chart's time axis is read in, from its oldest point at 0 to its newest at `ACROSS`, where a
+/// participant points at it: [`crate::Resource::Panel::across`], fine enough for every point of the longest chart, and
+/// whatever its count of points. See `design/projection.md`.
+pub const ACROSS: u16 = 10_000;
+
+/// The most characters of what a chart reads at a time, [`Chart::read_at`]: its time, and each series' name and value.
+pub const READING_CHARS: usize = 240;
+
+/// A time an axis label says, as [`Chart::time_at`] reads it: so many seconds from now, such as `-15 min`, `now` or `2 h
+/// ago`, written with its sign and unit; or, on a `clock`, in seconds since midnight, such as `14:05`, `precise` where it
+/// says its seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Time {
+    seconds: f64,
+    clock: bool,
+    precise: bool,
+    unit: (&'static str, f64),
+    minus: char,
+}
+
+impl Time {
+    fn relative(seconds: f64, unit: (&'static str, f64), minus: char) -> Self {
+        Self {
+            seconds,
+            clock: false,
+            precise: false,
+            unit,
+            minus,
+        }
+    }
+}
+
+/// The units a relative time is written in: the words read, and how a reading is written in each, with its seconds.
+const UNITS: [(&[&str], &str, f64); 4] = [
+    (&["s", "sec", "secs", "second", "seconds"], "s", 1.0),
+    (&["m", "min", "mins", "minute", "minutes"], "min", 60.0),
+    (&["h", "hr", "hrs", "hour", "hours"], "h", 3600.0),
+    (&["d", "day", "days"], "d", 86_400.0),
+];
+
+impl Time {
+    /// The time `text` says, if it says one.
+    fn read(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.eq_ignore_ascii_case("now") {
+            return Some(Self::relative(0.0, ("", 0.0), '-'));
+        }
+        if let Some(clock) = Self::clock(text) {
+            return Some(clock);
+        }
+        let (text, ago) = match text.strip_suffix(" ago") {
+            Some(text) => (text.trim_end(), true),
+            None => (text, false),
+        };
+        let first = text.chars().next()?;
+        let (sign, minus, text) = match first {
+            '-' | '−' => (-1.0, first, &text[first.len_utf8()..]),
+            '+' => (1.0, '-', &text[1..]),
+            _ => (if ago { -1.0 } else { 1.0 }, '-', text),
+        };
+        let digits = text
+            .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+            .unwrap_or(text.len());
+        let number: f64 = text[..digits].parse().ok()?;
+        let word = text[digits..].trim().to_ascii_lowercase();
+        let (_, written, size) = UNITS
+            .iter()
+            .find(|(words, ..)| words.contains(&word.as_str()))?;
+        Some(Self::relative(
+            sign * number * size,
+            (written, *size),
+            minus,
+        ))
+    }
+
+    /// The clock time `text` says, as `14:05` or `14:05:30`, if it says one.
+    fn clock(text: &str) -> Option<Self> {
+        let parts: Vec<&str> = text.split(':').collect();
+        if !(2..=3).contains(&parts.len())
+            || parts.iter().any(|part| {
+                part.is_empty() || part.len() > 2 || !part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            || parts[1..].iter().any(|part| part.len() != 2)
+        {
+            return None;
+        }
+        let values: Vec<f64> = parts.iter().filter_map(|part| part.parse().ok()).collect();
+        if values[0] >= 24.0 || values[1..].iter().any(|value| *value >= 60.0) {
+            return None;
+        }
+        Some(Self {
+            clock: true,
+            precise: values.len() == 3,
+            ..Self::relative(
+                values[0] * 3600.0 + values[1] * 60.0 + values.get(2).unwrap_or(&0.0),
+                ("", 0.0),
+                '-',
+            )
+        })
+    }
+
+    /// Whether `other` is of the same kind, so that a time between the two is read from both.
+    fn kin(self, other: Self) -> bool {
+        self.clock == other.clock
+    }
+}
+
+/// `seconds` written as so many of `unit`, with the rest in the next smaller unit where `fine`, as `-6 min 25 s`, or
+/// `now` at none.
+fn relative(seconds: f64, (written, size): (&str, f64), minus: char, fine: bool) -> String {
+    if size <= 0.0 {
+        return "now".to_owned();
+    }
+    let sign = if seconds < 0.0 {
+        minus.to_string()
+    } else {
+        "+".to_owned()
+    };
+    let smaller = UNITS
+        .iter()
+        .rev()
+        .find(|(.., each)| *each < size)
+        .map(|(_, written, each)| (*written, *each));
+    let whole = |unit: f64| (seconds.abs() / unit).round();
+    match smaller.filter(|_| fine) {
+        Some((rest, each)) => {
+            let total = whole(each);
+            let per = (size / each).round();
+            let (most, remainder) = ((total / per).floor(), total % per);
+            if most == 0.0 && remainder == 0.0 {
+                "now".to_owned()
+            } else if most == 0.0 {
+                format!("{sign}{remainder} {rest}")
+            } else if remainder == 0.0 {
+                format!("{sign}{most} {written}")
+            } else {
+                format!("{sign}{most} {written} {remainder} {rest}")
+            }
+        }
+        None if whole(size) == 0.0 => "now".to_owned(),
+        None => format!("{sign}{} {written}", whole(size)),
+    }
+}
+
+/// `value` as a reading says it, kept to [`SIGNIFICANT`] figures: `203,800`, `1,235,000,000`, `0.6834`, `7` or `-1.5`.
+pub fn figure(value: f32) -> String {
+    let Some(value) = rounded(value) else {
+        return "no data".to_owned();
+    };
+    let size = f64::from(value.abs());
+    if size < 1000.0 {
+        return format!("{value}");
+    }
+    let magnitude = size.log10().floor() as i32;
+    let kept = (size / 10f64.powi(magnitude - (SIGNIFICANT - 1))).round() as u64;
+    let digits = format!(
+        "{kept}{}",
+        "0".repeat((magnitude - (SIGNIFICANT - 1)).max(0) as usize)
+    );
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if value < 0.0 {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
+/// A round number at least `value`: 1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of ten.
+pub fn nice(value: f32) -> f32 {
+    if value <= 0.0 || !value.is_finite() {
+        return 1.0;
+    }
+    let magnitude = 10f32.powf(value.log10().floor());
+    [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        .into_iter()
+        .map(|step| step * magnitude)
+        .find(|step| *step >= value * 0.999)
+        .unwrap_or(10.0 * magnitude)
+}
+
+/// `value` held to [`CHART_MAGNITUDE`] either side of zero, or `None` where it is not a number.
+fn sane(value: f32) -> Option<f32> {
+    (!value.is_nan()).then(|| value.clamp(-CHART_MAGNITUDE, CHART_MAGNITUDE))
+}
+
+/// The most stretches a chart's bars are drawn in, and the most vertices of a series' line: a chart of more points
+/// draws a bar for each stretch of them, as tall as the one farthest from its base, which its readout reads.
+pub const STRETCHES: usize = 128;
+
+impl Chart {
+    /// The range of values `chart`'s plot spans, lowest and highest: each fixed where its axis says, or else from 0, or its
+    /// lowest value where one is below 0, to a round number above its highest value, or reference line's with a third to
+    /// spare, so that a target stands clearly inside the plot; and where its ends would be the same, or the wrong way
+    /// round, from its lowest to a tenth of its size, or at least 1, above it. Its values are held to
+    /// [`CHART_MAGNITUDE`], so that it is always finite.
+    pub fn range(&self) -> (f32, f32) {
+        let chart = self;
+        let values = chart.series.iter().flat_map(|series| {
+            series
+                .values
+                .iter()
+                .flatten()
+                .filter_map(|value| sane(*value))
+        });
+        let references = chart
+            .references
+            .iter()
+            .filter_map(|reference| sane(reference.value));
+        let lowest = values
+            .clone()
+            .chain(references.clone())
+            .fold(0.0_f32, f32::min);
+        let highest = values
+            .chain(references.map(|value| value * 1.3))
+            .fold(f32::MIN, f32::max);
+        let low = chart.axis.min.and_then(sane).unwrap_or(lowest);
+        let high = chart.axis.max.and_then(sane).unwrap_or_else(|| {
+            if highest > low {
+                low + nice(highest - low)
+            } else {
+                low + 1.0
+            }
+        });
+        let size = f64::from(low.abs()).max(f64::from(high.abs()));
+        if f64::from(high) - f64::from(low) > size * 1e-5 {
+            (low, high)
+        } else {
+            (low, low + (low.abs() * 0.1).max(1.0))
+        }
+    }
+
+    /// Where along its time axis `across`, in [`ACROSS`] parts, is: a point's index, or a share of the way between two.
+    pub fn at_across(&self, across: u16) -> f32 {
+        let last = self.points.max(2) - 1;
+        f32::from(across.min(ACROSS)) / f32::from(ACROSS) * last as f32
+    }
+
+    /// The value of the series `series` at `at`, a point's index or a share of the way between two, as it is drawn
+    /// there: between two points its line joins, a line's or an area's, the straight line between them, and nothing past
+    /// the last point of a run its line draws, before a gap or a break, but for a point that stands alone, drawn as a
+    /// dot, read within half a point of it; a step's held from its point to the next; and a bar's, the bar drawn for
+    /// the stretch of points nearest, as tall as the one of them farthest from its base where a chart of more than
+    /// [`STRETCHES`] points draws one for each stretch. `None` where it has no value there, a gap, never zero; kept to
+    /// [`SIGNIFICANT`] figures.
+    pub fn value_at(&self, series: usize, at: f32) -> Option<f32> {
+        let series = self.series.get(series)?;
+        let points = self.points.clamp(2, CHART_POINTS) as usize;
+        let last = (points - 1) as f32;
+        let at = if at.is_nan() {
+            0.0
+        } else {
+            at.clamp(0.0, last)
+        };
+        let value = |index: usize| series.values.get(index).copied().flatten();
+        // Whether the point `index` is joined to the next by its line.
+        let joined = |index: usize| {
+            value(index).is_some()
+                && value(index + 1).is_some()
+                && !series.breaks.contains(&(index as u32))
+        };
+        let index = at.floor() as usize;
+        let share = at - index as f32;
+        let nearest = at.round() as usize;
+        let value = match series.style {
+            SeriesStyle::Step => value(index),
+            SeriesStyle::Bars => {
+                let stretches = points.min(STRETCHES);
+                let stretch = (0..stretches)
+                    .find(|stretch| nearest < (stretch + 1) * points / stretches)
+                    .unwrap_or(stretches - 1);
+                let base = 0.0_f32.clamp(self.range().0, self.range().1);
+                series.values[(stretch * points / stretches).min(series.values.len())
+                    ..((stretch + 1) * points / stretches).min(series.values.len())]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .max_by(|a, b| (a - base).abs().total_cmp(&(b - base).abs()))
+            }
+            _ if share == 0.0 => value(index),
+            _ if joined(index) => {
+                let (from, to) = (
+                    value(index).unwrap_or_default(),
+                    value(index + 1).unwrap_or_default(),
+                );
+                Some(
+                    (f64::from(from) + (f64::from(to) - f64::from(from)) * f64::from(share)) as f32,
+                )
+            }
+            // A point alone, joined to neither neighbour, is drawn as a dot, read within half a point of it.
+            _ if !joined(nearest) && (nearest == 0 || !joined(nearest - 1)) => value(nearest),
+            _ => None,
+        };
+        value.and_then(rounded)
+    }
+
+    /// The time at `at`, a point's index or a share of the way between two, as its axis labels say it: read from the
+    /// two labels about it that say a time of one kind, or the two nearest it, and written as they are, `-6 min 25 s`
+    /// or `now` between `-10 min` and `-5 min`, or `14:03:25` between `14:00` and `14:05`, to the second where its points
+    /// are less than the unit apart; or else a label at the point nearest it, or which point it is, `point 121 of
+    /// 181`.
+    pub fn time_at(&self, at: f32) -> String {
+        let last = (self.points.max(2) - 1) as f32;
+        let at = if at.is_nan() {
+            0.0
+        } else {
+            at.clamp(0.0, last)
+        };
+        let mut times: Vec<(f32, Time)> = self
+            .labels
+            .iter()
+            .filter_map(|label| Time::read(&label.text).map(|time| (label.at as f32, time)))
+            .collect();
+        times.sort_by(|a, b| a.0.total_cmp(&b.0));
+        times.dedup_by(|a, b| a.0 == b.0);
+        // The pair about it, or else nearest it, of one kind.
+        let pairs = times.windows(2).filter(|pair| pair[0].1.kin(pair[1].1));
+        let pair = pairs.min_by(|a, b| {
+            let distance = |pair: &&[(f32, Time)]| (pair[0].0 - at).max(at - pair[1].0).max(0.0);
+            distance(a).total_cmp(&distance(b))
+        });
+        let nearest = (at.round() as u32).min(self.points.max(2) - 1);
+        let Some([(from_at, from), (to_at, to)]) = pair.map(|pair| [pair[0], pair[1]]) else {
+            return self
+                .labels
+                .iter()
+                .find(|label| label.at == nearest)
+                .map_or_else(
+                    || format!("point {} of {}", nearest + 1, self.points.max(2)),
+                    |label| label.text.clone(),
+                );
+        };
+        let (start, mut end) = (from.seconds, to.seconds);
+        if from.clock && end < start {
+            end += 86_400.0;
+        }
+        let step = (end - start) / f64::from(to_at - from_at);
+        let seconds = start + step * f64::from(at - from_at);
+        if from.clock {
+            let seconds = seconds.rem_euclid(86_400.0).round() as u64 % 86_400;
+            let (hours, minutes) = (seconds / 3600, seconds / 60 % 60);
+            return if from.precise || to.precise || step.abs() < 60.0 {
+                format!("{hours:02}:{minutes:02}:{:02}", seconds % 60)
+            } else {
+                format!("{hours:02}:{minutes:02}")
+            };
+        }
+        // In the larger unit of the two, `now` having none, and its sign.
+        let larger = if to.unit.1 > from.unit.1 { to } else { from };
+        relative(
+            seconds,
+            larger.unit,
+            larger.minus,
+            step.abs() < larger.unit.1,
+        )
+    }
+
+    /// How a value of the chart reads, `value` in its axis's unit, `203,800 a minute`; `no data` where it has none.
+    pub fn amount(&self, value: Option<f32>) -> String {
+        match value {
+            Some(value) if self.axis.unit.is_empty() => figure(value),
+            Some(value) => format!("{} {}", figure(value), self.axis.unit),
+            None => "no data".to_owned(),
+        }
+    }
+
+    /// What the chart reads at `at`, a point's index or a share of the way between two, in plain text: its time, and
+    /// each series' name and value there, `-6 min: admitted 203,800 a minute, rejected no data`, on one line of at
+    /// most [`READING_CHARS`].
+    pub fn read_at(&self, at: f32) -> String {
+        let values: Vec<String> = self
+            .series
+            .iter()
+            .take(CHART_SERIES)
+            .enumerate()
+            .map(|(index, series)| {
+                format!(
+                    "{} {}",
+                    one_line(&series.name, CHART_NAME_CHARS),
+                    self.amount(self.value_at(index, at))
+                )
+            })
+            .collect();
+        one_line(
+            &format!("{}: {}", self.time_at(at), values.join(", ")),
+            READING_CHARS,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests;

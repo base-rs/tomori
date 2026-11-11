@@ -33,6 +33,8 @@ use tomori_protocol::chart::{
 };
 use tomori_protocol::text::one_line;
 
+pub mod readout;
+
 use crate::canvas::Label;
 use crate::shapes::Shape;
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Rgba, Span, Style, cut};
@@ -54,7 +56,7 @@ const GRID_WIDTH: f32 = 0.75;
 const REFERENCE_WIDTH: f32 = 1.25;
 
 /// The most vertices of one series' line, its dashes and its bars, after merging and thinning.
-pub const LINE_VERTICES: usize = 128;
+pub const LINE_VERTICES: usize = tomori_protocol::chart::STRETCHES;
 /// The most quads of every shaded region and series' area of a chart together, shared alike among its regions: a
 /// region's columns across the plot are half as many as its share, and each piece of it is one quad, or two.
 pub const FILL_QUADS: usize = 512;
@@ -103,18 +105,7 @@ pub fn brief(value: f32) -> String {
     }
 }
 
-/// A round number at least `value`: 1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of ten.
-pub fn nice(value: f32) -> f32 {
-    if value <= 0.0 || !value.is_finite() {
-        return 1.0;
-    }
-    let magnitude = 10f32.powf(value.log10().floor());
-    [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
-        .into_iter()
-        .map(|step| step * magnitude)
-        .find(|step| *step >= value * 0.999)
-        .unwrap_or(10.0 * magnitude)
-}
+pub use tomori_protocol::chart::nice;
 
 /// `value` held to [`CHART_MAGNITUDE`] either side of zero, or `None` where it is not a number.
 fn sane(value: f32) -> Option<f32> {
@@ -193,44 +184,9 @@ pub fn bounded(chart: &Chart) -> Chart {
     bounded
 }
 
-/// The range of values `chart`'s plot spans, lowest and highest: each fixed where its axis says, or else from 0, or its
-/// lowest value where one is below 0, to a round number above its highest value, or reference line's with a third to
-/// spare, so that a target stands clearly inside the plot; and where its ends would be the same, or the wrong way
-/// round, from its lowest to a tenth of its size, or at least 1, above it. Its values are held to
-/// [`CHART_MAGNITUDE`], so that it is always finite.
+/// The range of values `chart`'s plot spans, lowest and highest, as [`Chart::range`] finds it.
 pub fn range(chart: &Chart) -> (f32, f32) {
-    let values = chart.series.iter().flat_map(|series| {
-        series
-            .values
-            .iter()
-            .flatten()
-            .filter_map(|value| sane(*value))
-    });
-    let references = chart
-        .references
-        .iter()
-        .filter_map(|reference| sane(reference.value));
-    let lowest = values
-        .clone()
-        .chain(references.clone())
-        .fold(0.0_f32, f32::min);
-    let highest = values
-        .chain(references.map(|value| value * 1.3))
-        .fold(f32::MIN, f32::max);
-    let low = chart.axis.min.and_then(sane).unwrap_or(lowest);
-    let high = chart.axis.max.and_then(sane).unwrap_or_else(|| {
-        if highest > low {
-            low + nice(highest - low)
-        } else {
-            low + 1.0
-        }
-    });
-    let size = f64::from(low.abs()).max(f64::from(high.abs()));
-    if f64::from(high) - f64::from(low) > size * 1e-5 {
-        (low, high)
-    } else {
-        (low, low + (low.abs() * 0.1).max(1.0))
-    }
+    chart.range()
 }
 
 /// Where a chart's plot is, in font pixels: its left and top edges, its width and its height.
@@ -242,11 +198,72 @@ pub struct Area {
     pub height: f32,
 }
 
-/// What draws a chart: its shapes, back to front, and its labels.
+/// What draws a chart: its shapes, back to front, its labels, and where its plot is, which its readout reads.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Drawing {
     pub shapes: Vec<Shape>,
     pub labels: Vec<Label>,
+    pub plot: Option<PlotArea>,
+}
+
+/// Where a chart's plot is drawn, in font pixels, its left and top edges, its width and its height, the range of
+/// values it spans, lowest and highest, and how many points it has along its time axis: what its readout needs to read
+/// the time and the values under a point on it, without laying the chart out again. See [`readout`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlotArea {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    pub range: (f32, f32),
+    pub points: u32,
+    /// The lines thinned to be drawn, as they are drawn, each series' by its index, a run of points, in font pixels,
+    /// for each part its line draws: those of more points than [`LINE_VERTICES`], which its readout reads where they
+    /// are drawn rather than where their points are.
+    pub thinned: Vec<(usize, Vec<Vec<[f32; 2]>>)>,
+}
+
+impl PlotArea {
+    /// Where along the time axis `point`, in font pixels, is, as a point's index or a share of the way between two;
+    /// `None` off the plot.
+    pub fn at(&self, [x, y]: [f32; 2]) -> Option<f32> {
+        let across = (x - self.left) / self.width;
+        let down = (y - self.top) / self.height;
+        ((0.0..=1.0).contains(&across) && (0.0..=1.0).contains(&down))
+            .then(|| across * (self.points.max(2) - 1) as f32)
+    }
+
+    /// Where `at`, a point's index or a share of the way between two, is across the plot.
+    pub fn x(&self, at: f32) -> f32 {
+        self.left + self.width * at / (self.points.max(2) - 1) as f32
+    }
+
+    /// The value at `y` down the plot, as [`PlotArea::y`] places it.
+    pub fn value(&self, y: f32) -> f32 {
+        let (low, high) = (f64::from(self.range.0), f64::from(self.range.1));
+        let share = 1.0 - (f64::from(y) - f64::from(self.top)) / f64::from(self.height);
+        (low + (high - low) * share) as f32
+    }
+
+    /// The value of the thinned line `runs` where it is drawn at `x`, between the two of its points about it; `None`
+    /// where none of its runs is drawn there.
+    pub fn drawn(&self, runs: &[Vec<[f32; 2]>], x: f32) -> Option<f32> {
+        runs.iter()
+            .flat_map(|run| run.windows(2))
+            .find(|pair| pair[0][0] <= x && x <= pair[1][0])
+            .map(|pair| {
+                let span = pair[1][0] - pair[0][0];
+                let share = ((x - pair[0][0]) / span.max(f32::EPSILON)).min(1.0);
+                self.value(pair[0][1] + (pair[1][1] - pair[0][1]) * share)
+            })
+    }
+
+    /// Where `value` is down the plot, held within it.
+    pub fn y(&self, value: f32) -> f32 {
+        let (low, high) = (f64::from(self.range.0), f64::from(self.range.1));
+        let share = ((f64::from(value) - low) / (high - low)).clamp(0.0, 1.0);
+        (f64::from(self.top) + f64::from(self.height) * (1.0 - share)) as f32
+    }
 }
 
 /// The cells of `text` in `color`.
@@ -850,6 +867,15 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         height: (area.height - 2.0 * row).max(1.0),
         range,
     };
+    drawing.plot = Some(PlotArea {
+        left: plot.left,
+        top: plot.top,
+        width: plot.width,
+        height: plot.height,
+        range,
+        points: chart.points,
+        thinned: Vec::new(),
+    });
     let shapes = &mut drawing.shapes;
     shapes.push(Shape::Fill {
         x: plot.left,
@@ -967,9 +993,12 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
             shapes.push(line(from, to, REFERENCE_WIDTH, color));
         }
     }
-    for series in chart.series.iter().rev() {
-        if series.style != SeriesStyle::Bars {
-            series_line(&plot, series, shapes);
+    for (index, series) in chart.series.iter().enumerate().rev() {
+        if series.style != SeriesStyle::Bars
+            && let Some(runs) = series_line(&plot, series, shapes)
+            && let Some(area) = drawing.plot.as_mut()
+        {
+            area.thinned.insert(0, (index, runs));
         }
     }
     // Its badge, at the plot's top right, on a backing of its tone.
@@ -1063,7 +1092,11 @@ type Part = ([f32; 2], [f32; 2], bool, bool);
 /// [`LINE_VERTICES`] points, thinned to each period's highest and lowest; or whole, its parts overlapping where they
 /// meet, or, where they turn by more than a right
 /// angle, rounded with a dot; and a dot for each lone point.
-fn series_line(plot: &Plot<'_>, series: &tomori_protocol::chart::Series, shapes: &mut Vec<Shape>) {
+fn series_line(
+    plot: &Plot<'_>,
+    series: &tomori_protocol::chart::Series,
+    shapes: &mut Vec<Shape>,
+) -> Option<Vec<Vec<[f32; 2]>>> {
     let color = ink(series.colour, 1.0);
     let width = series.width.unwrap_or(LINE_WIDTH);
     let stepped = series.style == SeriesStyle::Step;
@@ -1115,6 +1148,7 @@ fn series_line(plot: &Plot<'_>, series: &tomori_protocol::chart::Series, shapes:
             };
         }
     }
+    let thinned = (total > LINE_VERTICES && !stepped).then(|| lines.clone());
     let (top, bottom) = (plot.top, plot.bottom());
     let inside = |[_, y]: [f32; 2]| y >= top && y <= bottom;
     let mut markers = 0;
@@ -1170,7 +1204,7 @@ fn series_line(plot: &Plot<'_>, series: &tomori_protocol::chart::Series, shapes:
                 color,
             });
         }
-        return;
+        return thinned;
     }
     let mut joints = 0;
     for path in paths {
@@ -1213,6 +1247,7 @@ fn series_line(plot: &Plot<'_>, series: &tomori_protocol::chart::Series, shapes:
             }
         }
     }
+    thinned
 }
 
 /// The points that draw a step series through `points`: level from each to the next, then upright to it.

@@ -307,3 +307,243 @@ fn a_summary_says_each_latest_value_and_never_that_all_is_well_without_data() {
         None
     );
 }
+
+/// Root admissions a minute, as a line, at 5 seconds over 15 minutes, with a gap and a break; and rejections as bars.
+fn admissions() -> Chart {
+    let admitted = (0..181)
+        .map(|index| (!(40..44).contains(&index)).then_some(200_000.0 + 100.0 * index as f32))
+        .collect();
+    let rejected = (0..181)
+        .map(|index| (index % 2 == 0).then_some(index as f32))
+        .collect();
+    Chart::new(181)
+        .with_labels(vec![
+            AxisLabel::new(0, "-15 min"),
+            AxisLabel::new(60, "-10 min"),
+            AxisLabel::new(120, "-5 min"),
+            AxisLabel::new(180, "now"),
+        ])
+        .with_axis(ValueAxis::new(None, None, "a minute"))
+        .with_series(
+            Series::new("admitted", Colour::Blue, SeriesStyle::Line, admitted)
+                .with_breaks(vec![100]),
+        )
+        .with_series(Series::new(
+            "rejected",
+            Colour::Red,
+            SeriesStyle::Bars,
+            rejected,
+        ))
+}
+
+#[test]
+fn a_place_across_the_time_axis_is_a_point_or_between_two() {
+    let chart = admissions();
+    assert_eq!(chart.at_across(0), 0.0);
+    assert_eq!(chart.at_across(ACROSS), 180.0);
+    assert_eq!(chart.at_across(ACROSS / 2), 90.0);
+    // Beyond its end, it is its newest point; a chart of fewer than two points reads as two.
+    assert_eq!(chart.at_across(u16::MAX), 180.0);
+    assert_eq!(Chart::new(0).at_across(ACROSS), 1.0);
+}
+
+#[test]
+fn a_line_is_read_between_its_points_and_steps_and_bars_at_theirs_and_a_gap_never_as_zero() {
+    let chart = admissions();
+    // Between two points of a line, the straight line between them, kept to four figures.
+    assert_eq!(chart.value_at(0, 10.0), Some(201_000.0));
+    assert_eq!(chart.value_at(0, 10.5), Some(201_100.0));
+    // Within a gap, and past the last point drawn before one, none: never zero, and never a value the line does not draw.
+    assert_eq!(chart.value_at(0, 41.0), None);
+    assert_eq!(chart.value_at(0, 39.0), Some(203_900.0));
+    assert_eq!(chart.value_at(0, 39.4), None);
+    assert_eq!(chart.value_at(0, 39.6), None);
+    // Across a break, nothing either, as no line is drawn there.
+    assert_eq!(chart.value_at(0, 100.2), None);
+    assert_eq!(chart.value_at(0, 100.8), None);
+    // A point alone, drawn as a dot, is read within half a point of it.
+    let lone = Chart::new(5).with_series(Series::new(
+        "x",
+        Colour::Teal,
+        SeriesStyle::Line,
+        vec![None, Some(5.0), None, Some(1.0), Some(2.0)],
+    ));
+    assert_eq!(lone.value_at(0, 0.6), Some(5.0));
+    assert_eq!(lone.value_at(0, 1.4), Some(5.0));
+    assert_eq!(lone.value_at(0, 2.6), None);
+    assert_eq!(lone.value_at(0, 3.5), Some(1.5));
+    // Bars of a chart of more than 128 points are drawn one to a stretch, as tall as its farthest from the base, and
+    // read so; of fewer, at the nearest point, a missing one as none.
+    assert_eq!(chart.value_at(1, 9.4), Some(10.0));
+    assert_eq!(chart.value_at(1, 10.0), Some(10.0));
+    assert_eq!(chart.value_at(1, 103.0), None);
+    assert_eq!(chart.value_at(1, 180.0), Some(180.0));
+    let few = Chart::new(4).with_series(Series::new(
+        "bars",
+        Colour::Red,
+        SeriesStyle::Bars,
+        vec![Some(-3.0), None, Some(2.0), Some(1.0)],
+    ));
+    assert_eq!(few.value_at(0, 0.4), Some(-3.0));
+    assert_eq!(few.value_at(0, 1.2), None);
+    assert_eq!(few.value_at(0, 1.6), Some(2.0));
+    // The farthest from the base, below it too.
+    let mut many = Chart::new(256);
+    many.series.push(Series::new(
+        "bars",
+        Colour::Red,
+        SeriesStyle::Bars,
+        (0..256)
+            .map(|index| Some(if index % 2 == 0 { 1.0 } else { -4.0 }))
+            .collect(),
+    ));
+    assert_eq!(many.value_at(0, 0.0), Some(-4.0));
+    // A step holds its value from its point to the next.
+    let steps = Chart::new(3).with_series(Series::new(
+        "ready",
+        Colour::Green,
+        SeriesStyle::Step,
+        vec![Some(6.0), Some(8.0), None],
+    ));
+    assert_eq!(steps.value_at(0, 0.9), Some(6.0));
+    assert_eq!(steps.value_at(0, 1.5), Some(8.0));
+    assert_eq!(steps.value_at(0, 2.0), None);
+    // Beyond either end, its end; nonsense, the oldest; a series it lacks, none.
+    assert_eq!(chart.value_at(0, -5.0), Some(200_000.0));
+    assert_eq!(chart.value_at(0, 900.0), Some(218_000.0));
+    assert_eq!(chart.value_at(0, f32::NAN), Some(200_000.0));
+    assert_eq!(chart.value_at(4, 1.0), None);
+    // Fewer values than points, as from a server not to be trusted, reads none past them.
+    let short = Chart::new(4).with_series(Series::new(
+        "x",
+        Colour::Teal,
+        SeriesStyle::Area,
+        vec![Some(1.0)],
+    ));
+    assert_eq!(short.value_at(0, 0.0), Some(1.0));
+    assert_eq!(short.value_at(0, 2.5), None);
+}
+
+#[test]
+fn the_time_pointed_at_is_read_from_the_axis_labels_about_it_and_written_as_they_are() {
+    let chart = admissions();
+    // Six minutes and 25 seconds ago, between -10 min and -5 min, to the second, as its points are 5 s apart.
+    assert_eq!(chart.time_at(103.0), "-6 min 25 s");
+    assert_eq!(chart.time_at(108.0), "-6 min");
+    assert_eq!(chart.time_at(0.0), "-15 min");
+    assert_eq!(chart.time_at(179.0), "-5 s");
+    assert_eq!(chart.time_at(180.0), "now");
+    assert_eq!(chart.time_at(f32::NAN), "-15 min");
+    // Hours, to the minute where its points are minutes apart, and a minus sign kept as written.
+    let mut hours = admissions();
+    hours.labels = vec![AxisLabel::new(0, "−3 h"), AxisLabel::new(180, "now")];
+    assert_eq!(hours.time_at(30.0), "−2 h 30 min");
+    // Whole units where points are a unit or more apart, and `ago`, `+` and other words for units.
+    let mut days = admissions();
+    days.labels = vec![AxisLabel::new(0, "4 days ago"), AxisLabel::new(4, "+0 d")];
+    assert_eq!(days.time_at(1.0), "-3 d");
+    assert_eq!(days.time_at(4.2), "now");
+    let mut ahead = admissions();
+    ahead.labels = vec![AxisLabel::new(0, "now"), AxisLabel::new(180, "+15 minutes")];
+    assert_eq!(ahead.time_at(12.0), "+1 min");
+    // Seconds alone.
+    let mut seconds = admissions();
+    seconds.labels = vec![AxisLabel::new(0, "-180 sec"), AxisLabel::new(180, "now")];
+    assert_eq!(seconds.time_at(170.0), "-10 s");
+    // Clock times, past midnight too, to the second where points are less than a minute apart or a label says one.
+    let mut clock = admissions();
+    clock.labels = vec![AxisLabel::new(0, "23:55"), AxisLabel::new(60, "00:00")];
+    assert_eq!(clock.time_at(65.0), "00:00:25");
+    clock.labels = vec![AxisLabel::new(0, "9:00"), AxisLabel::new(3, "12:00")];
+    assert_eq!(clock.time_at(2.0), "11:00");
+    clock.labels = vec![AxisLabel::new(0, "9:00:00"), AxisLabel::new(3, "12:00")];
+    assert_eq!(clock.time_at(2.0), "11:00:00");
+    // Labels of two kinds read only from those of one; labels of no time, or one, say a label there or the point.
+    let mut mixed = admissions();
+    mixed.labels = vec![
+        AxisLabel::new(0, "09:00"),
+        AxisLabel::new(60, "-10 min"),
+        AxisLabel::new(180, "now"),
+    ];
+    assert_eq!(mixed.time_at(30.0), "-12 min 30 s");
+    for nonsense in [
+        "9:0",
+        "25:00",
+        "9:60",
+        "1:2:3:4",
+        "soon",
+        "-5 parsecs",
+        "",
+        "-x min",
+    ] {
+        let mut chart = admissions();
+        chart.labels = vec![AxisLabel::new(0, nonsense), AxisLabel::new(180, "now")];
+        assert_eq!(chart.time_at(1.0), "point 2 of 181", "{nonsense:?}");
+        assert_eq!(
+            chart.time_at(0.0),
+            if nonsense.is_empty() { "" } else { nonsense }
+        );
+    }
+    // Two labels saying now, at different points, read as now between them.
+    let mut nows = admissions();
+    nows.labels = vec![AxisLabel::new(0, "now"), AxisLabel::new(180, "NOW")];
+    assert_eq!(nows.time_at(90.0), "now");
+}
+
+#[test]
+fn a_reading_says_the_time_and_each_series_value_in_its_unit_or_that_it_has_none() {
+    let chart = admissions();
+    assert_eq!(
+        chart.read_at(103.0),
+        "-6 min 25 s: admitted 210,300 a minute, rejected no data"
+    );
+    assert_eq!(
+        chart.read_at(chart.at_across(ACROSS)),
+        "now: admitted 218,000 a minute, rejected 180 a minute"
+    );
+    let mut bare = admissions();
+    bare.axis.unit.clear();
+    assert_eq!(bare.amount(Some(0.25)), "0.25");
+    assert_eq!(bare.amount(None), "no data");
+    // Figures kept to four, grouped by thousands, either side of zero.
+    assert_eq!(figure(203_812.0), "203,800");
+    assert_eq!(figure(1_234_567_890.0), "1,235,000,000");
+    assert_eq!(figure(-1500.0), "-1,500");
+    assert_eq!(figure(0.683_449), "0.6834");
+    assert_eq!(figure(7.0), "7");
+    assert_eq!(figure(f32::NAN), "no data");
+    // Every series and name at its longest still reads on one bounded line.
+    let mut long = admissions();
+    long.series = (0..8)
+        .map(|_| {
+            Series::new(
+                "W".repeat(200),
+                Colour::Teal,
+                SeriesStyle::Line,
+                vec![Some(1.0e15); 181],
+            )
+        })
+        .collect();
+    long.axis.unit = "W".repeat(200);
+    let reading = long.read_at(5.0);
+    assert!(reading.chars().count() <= READING_CHARS + 1, "{reading}");
+    assert!(!reading.contains('\n'));
+}
+
+#[test]
+fn a_chart_s_range_is_fixed_where_its_axis_says_and_otherwise_round_above_what_it_shows() {
+    assert_eq!(
+        [nice(1.3), nice(7.0), nice(9.5), nice(0.0), nice(f32::NAN)],
+        [1.5, 8.0, 10.0, 1.0, 1.0]
+    );
+    // From zero to a round number above the highest value, or a reference line's with a third to spare.
+    assert_eq!(pressure().range(), (0.0, 2.0));
+    let mut fixed = pressure();
+    fixed.axis = ValueAxis::new(Some(-1.0), Some(3.0), "");
+    assert_eq!(fixed.range(), (-1.0, 3.0));
+    // Ends that would be the same are a tenth of its size apart, or at least one.
+    let mut flat = Chart::new(2);
+    flat.axis = ValueAxis::new(Some(5.0), Some(5.0), "");
+    assert_eq!(flat.range(), (5.0, 6.0));
+    assert_eq!(Chart::new(2).range(), (0.0, 1.0));
+}

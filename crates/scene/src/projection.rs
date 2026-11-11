@@ -23,6 +23,7 @@ use crate::{
     arrival::HOME,
     board::{Grip, model, pose},
     canvas::Canvas,
+    chart::readout as chart_readout,
     controller_ui::Sheet,
     manipulation::Manipulation,
     pointing::Ray,
@@ -76,6 +77,8 @@ const WALL_PADDING: (usize, usize) = (3, 3);
 const LABEL_INDENT: usize = 24;
 /// How far in front of its wall a panel stands, so that it is drawn over it.
 const LIFT: f32 = layout::LIFT;
+/// How far in front of a chart's face its readout is drawn, in the face's own units, so that it is drawn over it.
+const READOUT_LIFT: f32 = 0.002;
 
 /// How near a slot's plane a panel carried must come to dock there, as a share of how far the participant is from the
 /// slot, and the least and most it is, in metres: see [`capture`].
@@ -569,7 +572,7 @@ fn scrolled_face(
         return canvas;
     }
     if let Some(chart) = &panel.chart {
-        return chart::face(panel, chart, fit, border);
+        return chart::face(panel, chart, fit, border).0;
     }
     if let Some(image) = &panel.image {
         return image::face(panel, image, fit, border);
@@ -1661,6 +1664,11 @@ pub struct Output {
     pub lock: Option<editing::LockChange>,
     /// A wall was taken hold of, or the handle the ray meets changed, or the wall carried turned: to tick.
     pub wall_ticked: bool,
+    /// The readout over the chart pointed at, where the ray meets its plot, drawn in its plane over its face, in place
+    /// of the label on the ray; and where across its time axis that is, in [`tomori_protocol::chart::ACROSS`] parts,
+    /// which pointing says as the words begin. See `design/projection.md`.
+    pub readout: Option<Sheet>,
+    pub across: Option<u16>,
 }
 
 /// The panels across frames: the one carried, the slot it would be put in, and the one let go that the server has not
@@ -1695,6 +1703,9 @@ pub struct Projector {
     fold: f32,
     /// What this participant marks of the space's lists: the choosable row the ray points at, and the one just chosen.
     marks: list::RowMarks,
+    /// The readout last drawn over a chart pointed at, with the face it was drawn over and what it shows, handed over
+    /// again while it shows the same, as while the ray is still.
+    readout: Option<(Arc<Canvas>, chart_readout::Readout, Arc<Canvas>)>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -1998,6 +2009,46 @@ impl Projector {
             output.pointed.as_ref().map(|(id, ..)| id.as_str()),
         );
         output.sheets = self.sheets(&walls, &standing, &faces, viewer);
+        // Pointing at a chart's plot, not carrying a panel, its readout follows the ray, drawn over its face.
+        let read = pointed
+            .filter(|(panel, ..)| {
+                self.held.is_none()
+                    && output
+                        .pointed
+                        .as_ref()
+                        .is_some_and(|(id, ..)| *id == panel.id)
+            })
+            .and_then(|(panel, model, fit, _, point)| {
+                self.faces_for(panel)
+                    .readout(fit, model, point)
+                    .map(|read| (panel, model, read))
+            });
+        output.across = read.as_ref().map(|(panel, _, (at, ..))| {
+            let last = panel
+                .chart
+                .as_ref()
+                .map_or(1, |chart| chart.points.max(2) - 1);
+            (at / last as f32 * f32::from(tomori_protocol::chart::ACROSS)).round() as u16
+        });
+        output.readout = read.map(|(_, model, (_, face, readout))| {
+            let canvas = match self.readout.take() {
+                Some((kept_face, kept, canvas))
+                    if Arc::ptr_eq(&kept_face, &face) && kept == readout =>
+                {
+                    (kept_face, kept, canvas)
+                }
+                _ => {
+                    let canvas = crate::frame_timing::drawn(readout.overlay(&face));
+                    (face, readout, canvas)
+                }
+            };
+            let sheet = Sheet {
+                canvas: Some(canvas.2.clone()),
+                model: Some(model * Mat4::from_translation(Vec3::Z * READOUT_LIFT)),
+            };
+            self.readout = Some(canvas);
+            sheet
+        });
         // The handles of the wall taken hold of, and the hint below it, over the walls.
         output.sheets.extend(edited.sheets);
         // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,

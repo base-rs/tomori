@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use super::{BRIGHT, DIM, Fit, PADDING, PIXEL};
 use crate::canvas::Canvas;
-use crate::chart::{Area, Drawing, draw, legend, tone};
+use crate::chart::{Area, Drawing, PlotArea, draw, legend, tone};
 use crate::shapes::Mark;
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Row, Span, Style, cut};
 
@@ -84,8 +84,14 @@ pub(super) fn fit(fit: Fit) -> (usize, usize) {
 }
 
 /// `panel`'s face, a chart panel of `chart`, framed by `border` and sized as `fit` says: its title, bold, a row of its
-/// status, in its tone, and its unit, a rule, its legend, where it shows one, and its chart in the rows below.
-pub(super) fn face(panel: &Panel, chart: &Chart, fit: Fit, border: Option<[f32; 4]>) -> Canvas {
+/// status, in its tone, and its unit, a rule, its legend, where it shows one, and its chart in the rows below; and where
+/// its plot is drawn, which its readout reads.
+pub(super) fn face(
+    panel: &Panel,
+    chart: &Chart,
+    fit: Fit,
+    border: Option<[f32; 4]>,
+) -> (Canvas, Option<PlotArea>) {
     let chart = &crate::chart::bounded(chart);
     let (columns, body) = self::fit(fit);
     let mut canvas = Canvas::new(columns, PIXEL);
@@ -121,7 +127,7 @@ pub(super) fn face(panel: &Panel, chart: &Chart, fit: Fit, border: Option<[f32; 
     canvas.rows = rows;
     canvas.shapes = drawn.1.shapes.clone();
     canvas.labels = drawn.1.labels.clone();
-    canvas
+    (canvas, drawn.1.plot.clone())
 }
 
 #[cfg(test)]

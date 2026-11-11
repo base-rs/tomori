@@ -19,6 +19,7 @@ use super::{
 use crate::{
     board,
     canvas::Canvas,
+    chart::{PlotArea, readout::Readout},
     transcript::Line,
     ui_text::{CELL_HEIGHT, CELL_WIDTH},
 };
@@ -234,6 +235,18 @@ impl Faces {
         }
         self.at(fit).item(model, scroll, point)
     }
+
+    /// Its chart's readout where the ray meets its face, sized as `fit` says, as [`Layout::readout`] finds it, of the
+    /// panel as it was last followed, whose face is drawn.
+    pub(super) fn readout(
+        &mut self,
+        fit: Fit,
+        model: glam::Mat4,
+        point: glam::Vec3,
+    ) -> Option<(f32, Arc<Canvas>, Readout)> {
+        self.at(fit);
+        self.sizes[0].readout(&self.key.0, model, point)
+    }
 }
 
 /// A panel's face laid out at one size: its code, or its body's rows at the columns its face has, its columns and rows
@@ -251,12 +264,13 @@ pub(super) struct Layout {
     face: Option<Face>,
 }
 
-/// A face drawn: the scroll, the rows marked and the frame it was drawn with.
+/// A face drawn: the scroll, the rows marked and the frame it was drawn with, and, a chart's, where its plot is.
 #[derive(Clone, Debug)]
 struct Face {
     view: (usize, Marked),
     border: [f32; 4],
     canvas: Arc<Canvas>,
+    plot: Option<PlotArea>,
 }
 
 #[cfg(test)]
@@ -349,33 +363,80 @@ impl Layout {
                     ..face
                 }
             }
-            _ => Face {
-                view,
-                border,
-                canvas: Arc::new(self.draw(panel, view, border)),
-            },
+            _ => {
+                let (canvas, plot) = self.draw(panel, view, border);
+                Face {
+                    view,
+                    border,
+                    canvas: Arc::new(canvas),
+                    plot,
+                }
+            }
         };
         let canvas = face.canvas.clone();
         self.face = Some(face);
         canvas
     }
 
-    /// `panel`'s face drawn from what is laid out here, as [`super::scrolled_face`] draws it.
-    fn draw(&self, panel: &Panel, (scroll, marked): (usize, Marked), border: [f32; 4]) -> Canvas {
+    /// `panel`'s face drawn from what is laid out here, as [`super::scrolled_face`] draws it, and, a chart's, where its
+    /// plot is.
+    fn draw(
+        &self,
+        panel: &Panel,
+        (scroll, marked): (usize, Marked),
+        border: [f32; 4],
+    ) -> (Canvas, Option<PlotArea>) {
         count(0, 1);
         let border = Some(border);
         match (&self.code, &panel.chart, &panel.image) {
             (Some(layout), ..) => {
                 let mut canvas = code_face(panel, layout, self.fit, scroll);
                 canvas.border = border;
-                canvas
+                (canvas, None)
             }
             (None, Some(chart), _) => chart::face(panel, chart, self.fit, border),
-            (None, None, Some(image)) => image::face(panel, image, self.fit, border),
-            (None, None, None) => {
-                text_face(panel, self.cells, &self.lines, (scroll, marked), border)
-            }
+            (None, None, Some(image)) => (image::face(panel, image, self.fit, border), None),
+            (None, None, None) => (
+                text_face(panel, self.cells, &self.lines, (scroll, marked), border),
+                None,
+            ),
         }
+    }
+
+    /// The readout of its chart where the ray meets its face, at `point`, drawn with `model`: where along the time axis
+    /// that is, as a point's index or a share of the way between two, and the readout there, drawn from the face last
+    /// drawn and where its plot is, without laying anything out; `None` off its plot, or for a panel of no chart.
+    fn readout(
+        &self,
+        panel: &Panel,
+        model: glam::Mat4,
+        point: glam::Vec3,
+    ) -> Option<(f32, Arc<Canvas>, Readout)> {
+        // Every face pointed at is drawn, as the frame draws it first; only a chart's has a plot.
+        let (
+            Some(Face {
+                canvas,
+                plot: Some(plot),
+                ..
+            }),
+            Some(chart),
+        ) = (self.face.as_ref(), panel.chart.as_ref())
+        else {
+            return None;
+        };
+        let (width, height) = canvas.size();
+        let local = model.inverse().transform_point3(point);
+        // Across, to the nearest font pixel, so that a hand nearly still keeps the readout drawn.
+        let inside = [
+            ((local.x + width / 2.0) / canvas.pixel - canvas.padding.0 as f32).round(),
+            (height / 2.0 - local.y) / canvas.pixel - canvas.padding.1 as f32,
+        ];
+        let at = plot.at(inside)?;
+        let bounds = (
+            (canvas.columns * CELL_WIDTH) as f32,
+            (canvas.rows.len() * CELL_HEIGHT) as f32,
+        );
+        Some((at, canvas.clone(), Readout::new(chart, plot, at, bounds)))
     }
 
     /// The line of its panel's body that the list item where the ray meets it, at `point`, drawn with `model` and
