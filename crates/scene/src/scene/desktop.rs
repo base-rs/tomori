@@ -1009,8 +1009,8 @@ mod tests {
     }
 
     #[test]
-    fn holding_b_after_travelling_leaves_with_the_environment_and_agent_where_the_window_saw_them()
-    {
+    fn holding_b_after_travelling_keeps_the_environment_where_the_window_saw_it_as_the_swarm_flies_back()
+     {
         use crate::locomotion::{Locomotion, Surface};
         let mut conversation = lobby(ConnectionRole::Owner);
         conversation.set_locomotion(vec![(
@@ -1037,40 +1037,56 @@ mod tests {
         desktop.frame(&mut conversation, &mut felt(), now, SIZE);
         desktop.key(Key::Left(Direction::Up), false, false, &mut conversation);
         desktop.frame(&mut conversation, &mut felt(), now, SIZE);
-        // What the window shows, in the participant's room: the environment's carriage and the agent.
+        // What the window shows, in the participant's room: the environment's carriage and the swarm's agents.
         let seen = |drawn: &Drawn<'_>| {
             let carriage = drawn.scene_to_space
                 * Mat4::from_rotation_translation(
                     drawn.frame.carriage.orientation,
                     drawn.frame.carriage.position,
                 );
-            let agent = drawn.frame.swarm.anchor();
-            let agent = drawn.scene_to_space
-                * Mat4::from_rotation_translation(agent.orientation, agent.position);
-            (carriage, agent)
+            let agents: Vec<Vec3> = drawn
+                .frame
+                .swarm
+                .agents
+                .iter()
+                .map(|agent| drawn.scene_to_space.transform_point3(agent.position))
+                .collect();
+            (carriage, agents)
         };
+        // None of the swarm's agents jumps: each flies at most as far as it streams in the longest step it takes.
+        let furthest = |before: &[Vec3], after: &[Vec3]| {
+            before
+                .iter()
+                .zip(after)
+                .map(|(before, after)| before.distance(*after))
+                .fold(0.0f32, f32::max)
+        };
+        let leap = crate::glide::STREAM / 30.0 + 1e-4;
         let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
         assert_ne!(drawn.scene_to_space, Mat4::IDENTITY, "travelled");
-        let (carriage, agent) = seen(&drawn);
-        // B held for a second leaves, and the environment shrinks away as the rig goes home, with nothing moving.
+        let (carriage, mut agents) = seen(&drawn);
+        // B held for a second leaves, and the environment shrinks away as the rig goes home, with nothing jumping: it
+        // stays where it was seen, and the swarm flies back to the lobby's spot from where it was seen.
         desktop.key(Key::Back, true, false, &mut conversation);
         desktop.frame(&mut conversation, &mut felt(), now, SIZE);
         let mut shrinking = 0;
         loop {
             now += Duration::from_millis(50);
             let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            let (now_carriage, now_agents) = seen(&drawn);
+            assert!(furthest(&agents, &now_agents) <= leap, "{shrinking}");
+            agents = now_agents;
             if conversation.joined_space().is_some() {
                 continue;
             }
+            assert_eq!(drawn.frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
             if drawn.frame.scenery.environment == crate::environment::Environment::MINIMAL {
-                assert_eq!(drawn.frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
                 break;
             }
             shrinking += 1;
+            assert!(drawn.frame.swarm.flying(), "{shrinking}");
             assert_eq!(drawn.scene_to_space, Mat4::IDENTITY, "home");
-            let (now_carriage, now_agent) = seen(&drawn);
             assert!(now_carriage.abs_diff_eq(carriage, 1e-4), "{shrinking}");
-            assert!(now_agent.abs_diff_eq(agent, 1e-4), "{shrinking}");
         }
         assert!(shrinking > 5, "{shrinking}");
         desktop.key(Key::Back, false, false, &mut conversation);

@@ -499,26 +499,26 @@ pub struct Step {
     row_selector: crate::client_side::Selector,
     /// The rig the platform placed this frame's poses with, as [`Self::rig`] last settled it.
     placed: Rig,
-    /// Where the space's environment and its agent stood in the participant's room on the last frame in a space, and,
-    /// once it is left, while its environment shrinks back into its object: they stay there until it has gone. See
-    /// `design/arrival.md`.
+    /// Where the space's environment stood in the participant's room on the last frame in a space, and, once it is
+    /// left, while it shrinks back into its object: it stays there until it has gone. See `design/arrival.md`.
     standing: Option<Standing>,
-    departing: bool,
+    /// The space joined and the rig as of the last frame, which tell joining and leaving, as the swarm flies between
+    /// the lobby and the space, and the rig going home from travel. See `design/arrival.md`.
+    seen_space: Option<String>,
+    seen_rig: Rig,
 }
 
-/// Where a space's environment and its agent stand in the participant's room: the environment drawn, its carriage and
-/// the agent's anchor, each in the room, and the rig they were last placed in the scene with.
+/// Where a space's environment stands in the participant's room: the environment drawn, its carriage and the ring on the
+/// floor at home, in the room.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Standing {
     environment: crate::environment::Environment,
     carriage: crate::anchors::Anchor,
-    agent: crate::anchors::Anchor,
-    /// The ring on the floor at home, its middle in the participant's room, as the agent is.
+    /// The ring on the floor at home, its middle in the participant's room.
     ring: crate::anchors::HomeRing,
-    rig: Rig,
 }
 
-/// An unturned anchor at `position`, which the rig carries as it carries the agent.
+/// An unturned anchor at `position`, which the rig carries as it carries the environment.
 fn at(position: Vec3) -> crate::anchors::Anchor {
     crate::anchors::Anchor {
         position,
@@ -581,7 +581,8 @@ impl Default for Step {
             pointed_pad: None,
             placed: Rig::default(),
             standing: None,
-            departing: false,
+            seen_space: None,
+            seen_rig: Rig::default(),
         }
     }
 }
@@ -1257,61 +1258,66 @@ impl Step {
         // and back home; the workers stand about its home. See `design/environments.md`.
         let arrangement = conversation.arrangement();
         // Leaving a space, the rig goes home and the space's state is cleared at once, while its environment still
-        // shrinks back into the space's object: the environment and the agent stay where the participant saw them, in
-        // their room, until it has gone, and only then does the agent appear back at its place, so that nothing jumps
-        // as the space is left. See `design/arrival.md`.
+        // shrinks back into the space's object: the environment stays where the participant saw it, in their room, until
+        // it has gone, so that nothing jumps as the space is left. See `design/arrival.md`.
         let placed = self.placed;
-        let in_a_space = conversation.joined_space().is_some();
+        let space = conversation
+            .joined_space()
+            .map(|(space, _)| space.id.as_str());
+        let in_a_space = space.is_some();
+        // Joining a space, from the lobby or from another, and leaving one, the agent's place is where everyone sees it
+        // at once, but this client's swarm flies there from where its participant saw it, through the environment
+        // growing in or shrinking away, as a flight that only they see. See `design/arrival.md`.
+        let joining = in_a_space && space != self.seen_space.as_deref();
+        let leaving = !in_a_space && self.seen_space.is_some();
+        // The rig moving for anything but travel within a space, as it goes home on leaving, moves the scene under the
+        // participant: the swarm is carried with them, so that it flies on from where they saw it.
+        if placed != self.seen_rig && !(in_a_space && !joining) {
+            self.coordinator.carry(
+                self.seen_rig.place(crate::anchors::Anchor::HOME),
+                placed.place(crate::anchors::Anchor::HOME),
+            );
+        }
+        self.seen_rig = placed;
+        if self.seen_space.as_deref() != space {
+            self.seen_space = space.map(str::to_owned);
+        }
         let departing = !in_a_space
             && self
                 .standing
                 .is_some_and(|standing| standing.environment == scenery.environment);
-        let departed = self.departing && !departing;
-        self.departing = departing;
         if !in_a_space && !departing {
             self.standing = None;
         }
-        let departure = self
-            .standing
-            .as_mut()
-            .filter(|_| departing)
-            .map(|standing| {
-                // The rig going home moves the scene under the participant: they are carried with it at once.
-                let moved = standing.rig != placed;
-                standing.rig = placed;
-                (
-                    placed.place(standing.carriage),
-                    placed.place(standing.agent),
-                    moved,
-                    crate::anchors::HomeRing {
-                        centre: placed.place(at(standing.ring.centre)).position,
-                        ..standing.ring
-                    },
-                )
-            });
-        let carriage = departure.map_or(arrangement.carriage, |(carriage, ..)| carriage);
-        let appear = match departure {
-            Some((_, _, moved, _)) => moved,
-            None => departed || arrangement.home != self.agent_home,
-        };
+        let departure = self.standing.filter(|_| departing).map(|standing| {
+            // The rig going home moves the scene under the participant: the environment is carried with them.
+            (
+                placed.place(standing.carriage),
+                crate::anchors::HomeRing {
+                    centre: placed.place(at(standing.ring.centre)).position,
+                    ..standing.ring
+                },
+            )
+        });
+        let carriage = departure.map_or(arrangement.carriage, |(carriage, _)| carriage);
+        let flying = joining || leaving;
+        let appear = flying || arrangement.home != self.agent_home;
         self.agent_home = arrangement.home;
-        let anchor = departure.map_or(arrangement.agent, |(_, agent, ..)| agent);
+        let anchor = arrangement.agent;
         // The ring on the floor stays at home, wherever the agent goes, and with the environment as it shrinks away.
-        let home_ring = departure.map_or(arrangement.home_ring(), |(.., ring)| ring);
-        // In a space whose environment is drawn, where it and the agent stand in the participant's room, for as long
-        // as it shrinks away should the space be left.
+        let home_ring = departure.map_or(arrangement.home_ring(), |(_, ring)| ring);
+        // In a space whose environment is drawn, where it stands in the participant's room, for as long as it shrinks
+        // away should the space be left.
         if in_a_space {
             self.standing =
                 (scenery.environment != crate::environment::Environment::MINIMAL).then(|| {
                     Standing {
                         environment: scenery.environment,
                         carriage: placed.unplace(arrangement.carriage),
-                        agent: placed.unplace(anchor),
                         ring: crate::anchors::HomeRing {
                             centre: placed.unplace(at(home_ring.centre)).position,
                             ..home_ring
                         },
-                        rig: placed,
                     }
                 });
         }
@@ -1321,6 +1327,7 @@ impl Step {
         self.coordinator.update(
             &crate::avatar::Input::new(visual, anchor, dt)
                 .appearing(appear)
+                .flying(flying)
                 .speaking(conversation.speech().playing)
                 .head(senses.head_pose.map(|pose| Vec3::from_array(pose.position)))
                 .attracted(attractor)
@@ -7924,6 +7931,86 @@ mod tests {
         assert_eq!((arrangement.via, arrangement.stream), (None, true));
     }
 
+    /// The swarm's agents where `swarm` draws them.
+    fn agents_of(swarm: &crate::swarm::Swarm) -> Vec<Vec3> {
+        swarm.agents.iter().map(|agent| agent.position).collect()
+    }
+
+    /// The middle of `agents`.
+    fn middle_of(agents: &[Vec3]) -> Vec3 {
+        agents.iter().sum::<Vec3>() / agents.len() as f32
+    }
+
+    /// How far the agent that moved furthest went between `before` and `after`.
+    fn furthest(before: &[Vec3], after: &[Vec3]) -> f32 {
+        assert_eq!(before.len(), after.len());
+        before
+            .iter()
+            .zip(after)
+            .map(|(before, after)| before.distance(*after))
+            .fold(0.0, f32::max)
+    }
+
+    /// How far, at most, one of the swarm's agents may fly in a frame of the frame step: as fast as it streams.
+    const LEAP: f32 = crate::glide::STREAM * FRAME + 1e-4;
+
+    /// Whether `conversation` asked the server to move the agent, as joining and leaving never do.
+    fn moved_the_agent(conversation: &mut Conversation) -> bool {
+        use tomori_protocol::ClientMessage;
+        conversation.take_actions().into_iter().any(|action| {
+            matches!(
+                action,
+                Action::Send(
+                    ClientMessage::PlaceAgent { .. }
+                        | ClientMessage::CallAgent
+                        | ClientMessage::PinAgent { .. }
+                        | ClientMessage::SetAgentMovement { .. }
+                )
+            )
+        })
+    }
+
+    /// The swarm's agents as of the last frame, which watches that none of them jumps, nor is jolted beyond what its
+    /// flock's forces and the easing of its speed after a flight do, and that the server is never asked to move the agent.
+    struct Watch {
+        seen: Vec<Vec3>,
+        velocities: Vec<Vec3>,
+    }
+
+    impl Watch {
+        fn new(step: &Step) -> Self {
+            let swarm = step.coordinator.swarm();
+            Self {
+                seen: agents_of(swarm),
+                velocities: swarm.agents.iter().map(|agent| agent.velocity).collect(),
+            }
+        }
+
+        /// A frame: where the agent's place is, whether the swarm flies, and its agents' middle.
+        fn frame(
+            &mut self,
+            step: &mut Step,
+            conversation: &mut Conversation,
+            now: Instant,
+        ) -> (crate::anchors::Anchor, bool, Vec3) {
+            let frame = step.update(&senses(), conversation, &mut felt(), now, FRAME);
+            let agents = agents_of(frame.swarm);
+            assert!(furthest(&self.seen, &agents) <= LEAP);
+            let velocities: Vec<Vec3> = frame
+                .swarm
+                .agents
+                .iter()
+                .map(|agent| agent.velocity)
+                .collect();
+            assert!(furthest(&self.velocities, &velocities) <= 6.0 * FRAME + 1e-4);
+            let (anchor, flying) = (frame.swarm.anchor(), frame.swarm.flying());
+            assert!(!moved_the_agent(conversation));
+            self.seen = agents;
+            self.velocities = velocities;
+            (anchor, flying, middle_of(&self.seen))
+        }
+    }
+
     #[test]
     fn while_its_speech_plays_the_agent_still_glides_where_it_follows_and_turns_to_whoever_it_turns_to()
      {
@@ -8001,39 +8088,166 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_appears_at_its_home_as_the_space_opens_and_never_moves_of_its_own_accord() {
+    fn joining_the_agent_is_at_its_place_at_once_and_this_clients_swarm_flies_there_from_the_lobby()
+    {
         let now = Instant::now();
-        let home = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
-        let anchor = crate::anchors::Anchor::from_pose(&home).unwrap();
+        // A home near the lobby's spot and one across the room, and the agent following someone, away from home.
+        let near = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
+        let across = tomori_protocol::Pose::at([-3.0, 1.5, -1.0]).facing_towards([0.0, 1.6, 0.0]);
+        let following = tomori_protocol::Pose::at([2.5, 1.5, 1.0]).facing_towards([0.0, 1.6, 0.0]);
+        for (home, summoned) in [(near, None), (across, None), (near, Some(following))] {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            let mut step = Step::default();
+            for _ in 0..200 {
+                step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+            }
+            let mut seen = agents_of(step.coordinator.swarm());
+            let lobby = middle_of(&seen);
+            assert!(lobby.distance(crate::swarm::CENTER) < 0.5, "{lobby}");
+            conversation.apply(space(|state| {
+                state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+                state.summoned = summoned;
+            }));
+            assert!(placed(&mut conversation).is_empty());
+            let place = conversation.arrangement().agent;
+            let distance = lobby.distance(place.position);
+            assert!(distance > 1.5, "{distance}");
+            let mut revealing = false;
+            let mut flown = None;
+            for index in 0..72 * 8 {
+                let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+                // The agent is where everyone sees it from the first frame, and the server is never asked to move it.
+                let at = frame.swarm.anchor();
+                assert_eq!(at.position, place.position);
+                assert!(at.orientation.dot(place.orientation).abs() > 1.0 - 1e-6);
+                assert!(!moved_the_agent(&mut conversation));
+                // Every one of the swarm's agents is drawn throughout, and none ever jumps.
+                let agents = agents_of(frame.swarm);
+                assert_eq!(agents.len(), crate::swarm::AGENT_COUNT);
+                assert!(furthest(&seen, &agents) <= LEAP, "{index}");
+                seen = agents;
+                let middle = middle_of(&seen);
+                if index == 0 {
+                    // It sets off from the lobby as the environment begins to grow in.
+                    assert!(frame.swarm.flying());
+                    assert!(middle.distance(lobby) < 0.05, "{middle}");
+                }
+                if frame.scenery.reveal.is_some() {
+                    revealing = true;
+                } else if revealing {
+                    // By the time the environment has grown in, it is well on its way, though not yet there.
+                    revealing = false;
+                    let gone = lobby.distance(middle);
+                    assert!(gone > 0.15 * distance, "{gone} of {distance}");
+                    assert!(middle.distance(place.position) > 0.2 * distance);
+                    assert!(frame.swarm.flying());
+                }
+                if !frame.swarm.flying() && flown.is_none() {
+                    flown = Some(index);
+                }
+            }
+            // It arrives within a few seconds, and stands there.
+            let flown = flown.expect("arrived") as f32 * FRAME;
+            assert!((1.0..4.0).contains(&flown), "{flown}");
+            assert!(middle_of(&seen).distance(place.position) < 0.1);
+            // And it stays, through a long idle, with no summons.
+            for _ in 0..3000 {
+                let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+                assert_eq!(frame.swarm.anchor().position, place.position);
+            }
+            assert!(placed(&mut conversation).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_swarm_flies_to_the_agent_as_it_moves_turns_back_on_leaving_and_flies_in_again_on_rejoining()
+     {
+        let now = Instant::now();
+        let home = tomori_protocol::Pose::at([-3.0, 1.5, -1.0]).facing_towards([0.0, 1.6, 0.0]);
         let mut conversation = lobby(ConnectionRole::Owner);
         let mut step = Step::default();
         for _ in 0..200 {
             step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
         }
-        let middle = |step: &Step| {
-            step.coordinator
-                .swarm()
-                .agents
-                .iter()
-                .map(|agent| agent.position)
-                .sum::<Vec3>()
-                / crate::swarm::AGENT_COUNT as f32
-        };
-        let before = middle(&step) - crate::swarm::CENTER;
+        let mut watch = Watch::new(&step);
+        let mut frame =
+            |step: &mut Step, conversation: &mut Conversation| watch.frame(step, conversation, now);
+        // Joining as the agent follows someone, who walks on: the swarm flies on to it as it glides after them.
+        let following =
+            |x: f32| Some(tomori_protocol::Pose::at([x, 1.5, 1.0]).facing_towards([0.0, 1.6, 0.0]));
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+            state.summoned = following(2.5);
+        }));
+        conversation.take_actions();
+        assert!(frame(&mut step, &mut conversation).1, "flying");
+        for index in 1..72 * 6 {
+            if index < 72 * 2 && index % 12 == 0 {
+                conversation.apply(space(|state| {
+                    state.anchors = tomori_protocol::Anchors::new().with_agent(home);
+                    state.summoned = following(2.5 - index as f32 / 72.0);
+                }));
+            }
+            frame(&mut step, &mut conversation);
+        }
+        let (place, flying, middle) = frame(&mut step, &mut conversation);
+        assert!(!flying);
+        // Where they walked to last.
+        let walked = Vec3::new(2.5 - 132.0 / 72.0, 1.5, 1.0);
+        assert!(place.position.distance(walked) < 0.05, "{place:?}");
+        assert!(middle.distance(place.position) < 0.1);
+        // Rejoined from scratch, and left a third of a second into the flight: it turns back smoothly, to the lobby.
+        conversation.hold_back(None);
+        assert!(conversation.hold_back(Some(LEAVE_HOLD)));
+        let mut lobby_spot = Vec3::ZERO;
+        for _ in 0..72 * 6 {
+            lobby_spot = frame(&mut step, &mut conversation).2;
+        }
+        assert!(conversation.joined_space().is_none());
+        conversation.join_space(SPACE);
         conversation.apply(space(|state| {
             state.anchors = tomori_protocol::Anchors::new().with_agent(home);
         }));
-        // In the first frame in the space, it is there, not gliding.
-        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
-        assert_eq!(frame.swarm.anchor(), anchor);
-        let appeared = middle(&step);
-        assert!(appeared.distance(anchor.place(before)) < 0.2, "{appeared}");
-        // And it stays, through a long idle, with no summons.
-        for _ in 0..3000 {
-            let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
-            assert_eq!(frame.swarm.anchor(), anchor);
+        conversation.take_actions();
+        let home = crate::anchors::Anchor::from_pose(&home).unwrap().position;
+        let mut turned = lobby_spot;
+        for _ in 0..24 {
+            let (_, flying, middle) = frame(&mut step, &mut conversation);
+            assert!(flying);
+            turned = middle;
         }
-        assert!(placed(&mut conversation).is_empty());
+        assert!(turned.distance(lobby_spot) > 0.1, "{turned} {lobby_spot}");
+        conversation.hold_back(None);
+        assert!(conversation.hold_back(Some(LEAVE_HOLD)));
+        let mut nearest = f32::INFINITY;
+        for _ in 0..36 {
+            // Near the lobby's spot still, it is soon back.
+            let (place, _, middle) = frame(&mut step, &mut conversation);
+            assert_eq!(place, crate::anchors::Anchor::AGENT);
+            nearest = nearest.min(middle.distance(home));
+        }
+        // It turned back, getting little nearer the space's agent than it was as it left, as its way on was spent.
+        let left = turned.distance(home);
+        assert!(nearest > left - 1.0, "{nearest} {left}");
+        // Rejoined quickly, as the environment still shrinks away, it flies in again, and arrives.
+        assert!(conversation.joined_space().is_none());
+        conversation.join_space(SPACE);
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new().with_agent(
+                tomori_protocol::Pose::at(home.to_array()).facing_towards([0.0, 1.6, 0.0]),
+            );
+        }));
+        conversation.take_actions();
+        assert!(frame(&mut step, &mut conversation).1);
+        let mut flown = false;
+        let mut middle = Vec3::ZERO;
+        for _ in 0..72 * 4 {
+            let (_, flying, now) = frame(&mut step, &mut conversation);
+            flown |= !flying;
+            middle = now;
+        }
+        assert!(flown);
+        assert!(middle.distance(home) < 0.1);
     }
 
     #[test]
@@ -8138,21 +8352,22 @@ mod tests {
     }
 
     #[test]
-    fn leaving_a_space_keeps_its_environment_and_agent_where_they_were_seen_until_it_has_gone() {
+    fn leaving_a_space_keeps_its_environment_where_it_was_seen_until_it_has_gone_as_the_swarm_flies_back()
+     {
         use crate::locomotion::{Locomotion, Surface};
         // Participants arrive 8 m along +X, facing the environment's origin, as the farmyard's arrive inside its gate;
         // the agent's home is its own; and travel teleports.
         let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
         let home = tomori_protocol::Pose::at([1.0, 1.4, -3.0]).facing_towards([0.0, 1.6, 0.0]);
-        let middle = |step: &Step| {
-            step.coordinator
-                .swarm()
-                .agents
-                .iter()
-                .map(|agent| agent.position)
-                .sum::<Vec3>()
-                / crate::swarm::AGENT_COUNT as f32
+        // The swarm's agents in the participant's room, the scene placed by `rig`.
+        let in_room = |step: &Step, rig: Rig| {
+            let back = rig.matrix().inverse();
+            agents_of(step.coordinator.swarm())
+                .into_iter()
+                .map(|agent| back.transform_point3(agent))
+                .collect::<Vec<_>>()
         };
+        let spot = crate::anchors::Anchor::AGENT.position;
         let close = |a: crate::anchors::Anchor, b: crate::anchors::Anchor| {
             a.position.distance(b.position) < 1e-4
                 && a.orientation.dot(b.orientation).abs() > 1.0 - 1e-6
@@ -8220,12 +8435,14 @@ mod tests {
             let senses = placed(&mut step, &conversation, -Vec3::Z);
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
             assert_eq!(frame.carriage, arrangement.carriage);
-            // Where the environment and the agent stand in the participant's room.
+            // Where the environment and the swarm stand in the participant's room.
             let carriage = rig.unplace(arrangement.carriage);
-            let agent = rig.unplace(arrangement.agent);
             let ring = rig.unplace(at(arrangement.home_ring().centre)).position;
             assert_eq!(frame.home_ring, arrangement.home_ring());
-            let mut swarm = rig.matrix().inverse().transform_point3(middle(&step));
+            let mut swarm = in_room(&step, rig);
+            let left = middle_of(&swarm).distance(spot);
+            assert!(left > 2.0, "travelled from the lobby's spot: {left}");
+            conversation.take_actions();
             // Leaving, the rig goes home at once, while the environment shrinks back into the space's object.
             let mut senses = if within {
                 let senses = placed(&mut step, &conversation, -Vec3::Z);
@@ -8245,23 +8462,23 @@ mod tests {
             loop {
                 let rig = step.placed;
                 let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                // The agent's place is the lobby's at once, for this client alone, and the server is never asked to
+                // move it.
+                assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
                 if frame.scenery.environment == crate::environment::Environment::MINIMAL {
-                    // Once it has gone, the agent appears back at its place, and nothing is carried.
+                    // Once it has gone, nothing is carried.
                     assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
-                    assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
                     assert_eq!(frame.home_ring, crate::anchors::HomeRing::WHOLE);
                     break;
                 }
                 shrinking += 1;
-                // While it is drawn, it and the agent stay where the participant saw them, in their room.
+                // While it is drawn, it stays where the participant saw it, in their room.
                 assert!(
                     close(rig.unplace(frame.carriage), carriage),
                     "{within} {shrinking}"
                 );
-                assert!(
-                    close(rig.unplace(frame.swarm.anchor()), agent),
-                    "{within} {shrinking}"
-                );
+                // The swarm flies back to the lobby's spot from where they saw it, as it shrinks away.
+                assert!(frame.swarm.flying(), "{within} {shrinking}");
                 // Its ring on the floor with it.
                 assert!(
                     rig.unplace(at(frame.home_ring.centre))
@@ -8270,20 +8487,41 @@ mod tests {
                         < 1e-4,
                     "{within} {shrinking}"
                 );
-                let seen = rig.matrix().inverse().transform_point3(middle(&step));
-                assert!(
-                    seen.distance(swarm) < 0.05,
-                    "{within} {shrinking}: {seen} {swarm}"
-                );
+                // None of its agents ever jumps in the room, as the rig goes home or after.
+                let seen = in_room(&step, rig);
+                let leap = furthest(&swarm, &seen);
+                assert!(leap <= LEAP, "{within} {shrinking}: {leap}");
                 swarm = seen;
+                assert!(!moved_the_agent(&mut conversation));
                 senses = placed(&mut step, &conversation, -Vec3::Z);
                 assert_eq!(step.placed, Rig::default());
             }
             assert!(shrinking > 10, "it shrinks away over frames: {shrinking}");
-            // And it stays there.
-            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
-            assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
-            assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
+            // It set off as the environment shrank away, and flies on to the lobby's spot.
+            let gone = middle_of(&swarm).distance(spot);
+            assert!(gone < left - 0.15, "{gone} of {left}");
+            let mut flying = 0;
+            loop {
+                let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+                assert_eq!(frame.swarm.anchor(), crate::anchors::Anchor::AGENT);
+                assert_eq!(frame.carriage, crate::anchors::Anchor::HOME);
+                let flown = !frame.swarm.flying();
+                let seen = in_room(&step, Rig::default());
+                assert!(furthest(&swarm, &seen) <= LEAP, "{within} {flying}");
+                swarm = seen;
+                if flown {
+                    break;
+                }
+                flying += 1;
+                assert!(flying < 72 * 4, "it arrives within seconds");
+            }
+            for _ in 0..360 {
+                step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            }
+            // About the lobby's spot, as its flock circles it there.
+            let rested = middle_of(&in_room(&step, Rig::default()));
+            assert!(rested.distance(spot) < 1.0, "{rested}");
+            assert!(!moved_the_agent(&mut conversation));
         }
     }
 
