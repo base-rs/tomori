@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Tomori's farmyard environment, its client half: the scenery Tomori's clients draw and its registration with a client's sceneries"
 repository.workspace = true
-license.workspace = true
+# The code is MIT, as is the rest of Tomori; the tūī, bellbird and kererū in `assets/sounds`, by the Department of Conservation (NZ), and the ruru, by eklemp, are under the Creative Commons Attribution 4.0 International licence (CC BY 4.0), and its other sounds are CC0 1.0; see assets/sounds/LICENSE.md. Both apply.
+license = "MIT AND CC-BY-4.0"
 readme = "readme.md"
 keywords = ["tomori", "environment", "xr", "farmyard", "wgpu"]
 categories = ["rendering", "game-development"]
@@ -29,5 +30,7 @@ sha2 = "0.10"
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
+# The voices' law of distance, by which the ambience's levels are checked where participants stand.
+tomori-client = { version = "0.2.0", path = "../client" }
 # The device for offscreen rendering tests and WGSL validation. It has no version, so that packaging leaves it out: only the tests use it.
 tomori-render = { path = "../render", features = ["test-gpu"] }

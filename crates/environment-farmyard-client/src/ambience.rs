@@ -38,7 +38,7 @@ pub const SLOTS: [&str; 14] = [
 /// The licence notice of the farmyard's sounds, which says where each came from.
 pub const LICENSE: &str = include_str!("../assets/sounds/LICENSE.md");
 /// The heading it is shown under with a build's other bundled assets'.
-pub const LICENSE_TITLE: &str = "The farmyard's sounds";
+pub const LICENSE_TITLE: &str = "The farmyard's sounds, by the Department of Conservation (NZ), eklemp and Freesound's recordists (CC BY 4.0 and CC0 1.0)";
 
 /// How far above the ground of its bush a bird calls from, in the canopy.
 const CANOPY: f32 = 6.0;
@@ -121,30 +121,39 @@ fn with(found: &[(&str, &str)]) -> Ambience {
             .around(&canopy, BUSH_SPREAD)
     };
     let waterfall = at("waterfall").next().unwrap_or_default();
+    // The beds are a quiet bed beneath everything. The water and the birds are placed, and lose to distance what the
+    // beds do not, about 17 dB for the river 15 m from the yard and 19 dB for the waterfall 26 m away, and 21 dB for
+    // a bird in the canopy 20 to 30 m away; so the water is raised to be heard a few decibels beneath the beds from
+    // the yard, and the birds to be a little above them. `tests.rs` checks the levels where participants stand.
     Ambience::new()
-        .with_bed(Bed::new(slot("wind")).gain(-6.0))
-        .with_bed(Bed::new(slot("bush")).gain(-8.0))
-        .with_loop(Loop::along(slot("river"), &river).radius(35.0).gain(-2.0))
-        .with_loop(Loop::at(slot("waterfall"), waterfall).radius(60.0))
+        .with_bed(Bed::new(slot("wind")).gain(-8.0))
+        .with_bed(Bed::new(slot("bush")).gain(-10.0))
+        .with_loop(Loop::along(slot("river"), &river).radius(35.0).gain(5.0))
+        .with_loop(
+            Loop::at(slot("waterfall"), waterfall)
+                .radius(60.0)
+                .gain(8.0),
+        )
         .with_call(
             birds(&["tui-1", "tui-2", "tui-3"], [25, 70])
                 .pitch(0.96, 1.04)
-                .gain(-4.0, 0.0),
+                .gain(14.0, 18.0),
         )
         .with_call(
             birds(&["bellbird-1", "bellbird-2", "bellbird-3"], [30, 90])
                 .pitch(0.97, 1.03)
-                .gain(-6.0, -1.0),
+                .gain(13.0, 17.0),
         )
         .with_call(
             birds(&["kereru-1", "kereru-2"], [90, 240])
                 .pitch(0.9, 1.05)
-                .gain(-6.0, 0.0),
+                .gain(12.0, 17.0),
         )
+        // The farmyard is always evening, when the ruru calls, but rarely, as one owl would.
         .with_call(
-            birds(&["ruru-1", "ruru-2"], [60, 180])
+            birds(&["ruru-1", "ruru-2"], [120, 300])
                 .pitch(0.98, 1.02)
-                .gain(-6.0, -2.0),
+                .gain(13.0, 17.0),
         )
 }
 
