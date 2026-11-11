@@ -559,6 +559,8 @@ impl Hub {
                 .map(|participant| participant.source)
                 .collect();
             self.server_sides.present(space, present);
+            // Anything of where its panels are that was not told yet, as moves held back by a participant's rate.
+            state.tell_places(space, 0);
         }
     }
 

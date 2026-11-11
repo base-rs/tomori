@@ -547,6 +547,56 @@ fn a_dismissed_panel_stays_away_until_retracted_or_the_space_comes_back() {
 }
 
 #[test]
+fn a_published_panel_s_place_names_its_environment_s_wall_by_its_order_another_wall_or_floating() {
+    use tomori_environment::PanelPlace;
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::text("rota", "Rota", "- a").on_wall(1, Some(2))),
+            0,
+        )
+        .unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    let place = |stage: &Stage| stage.published_places("yard").get("rota").copied();
+    // Where it is, with the wall it asked for.
+    assert_eq!(
+        place(&stage),
+        Some((PanelPlace::Wall { wall: 1, slot: 2 }, 1))
+    );
+    stage
+        .place(&walls, &id, Target::Slot("environment-0".into(), 1))
+        .unwrap();
+    assert_eq!(
+        place(&stage),
+        Some((PanelPlace::Wall { wall: 0, slot: 1 }, 1))
+    );
+    let added = stage.add_wall(&walls, &pose(0.0, 3.0), None).unwrap();
+    stage.place(&walls, &id, Target::Wall(added)).unwrap();
+    assert_eq!(place(&stage), Some((PanelPlace::OtherWall, 1)));
+    stage
+        .place(&walls, &id, Target::Free(pose(1.0, 1.0)))
+        .unwrap();
+    assert_eq!(place(&stage), Some((PanelPlace::Floating, 1)));
+    // An agent's panel is none of the environment's; one dismissed is gone and stays away until retracted.
+    stage.project(
+        &walls,
+        crate::stage::Content::parse("title: Notes\n---\nx").unwrap(),
+        None,
+        0,
+    );
+    assert_eq!(stage.published_places("yard").len(), 1);
+    assert!(!stage.dismissed("yard", "rota"));
+    stage.dismiss(&walls, &id).unwrap();
+    assert_eq!(place(&stage), None);
+    assert!(stage.dismissed("yard", "rota"));
+    assert!(!stage.dismissed("sky", "rota"));
+    stage.retract("yard", "rota");
+    assert!(!stage.dismissed("yard", "rota"));
+}
+
+#[test]
 fn what_a_run_that_ended_published_rests_where_it_was_holding_no_slot_until_published_again() {
     let declared = roomy();
     let walls = Walls {
