@@ -231,6 +231,10 @@ pub enum MenuKey {
     AgentStay,
     /// End the agent's pin, for everyone, so that it follows the speaker again.
     AgentFollow,
+    /// Have the agent walk with the participant, keeping with them throughout.
+    AgentWalk,
+    /// End the agent's walk with the participant.
+    AgentWalkEnd,
     /// Step how the agent moves, for everyone, as an owner.
     AgentMovement,
     /// Step how long the agent waits, quiet, before going home, for everyone, as an owner.
@@ -327,6 +331,10 @@ pub struct Model {
     /// takes pins: `Some(true)` offers **Tomori: stay here**, pinning it where it stands, and `Some(false)` **Tomori:
     /// follow again**, ending its pin. See `design/hand-menu.md`.
     pub pins: Option<bool>,
+    /// What this participant may do of the agent walking with them, where the space lets it move, on a server that
+    /// takes walks: `Some(true)` offers **Tomori: walk with me**, and `Some(false)`, while it walks with them,
+    /// **Tomori: stop walking with me**. See `design/hand-menu.md`.
+    pub walks: Option<bool>,
     /// How the agent moves, on a server that says, and whether this participant, an owner, may change it.
     pub movement: Option<(tomori_protocol::AgentMovement, bool)>,
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
@@ -423,6 +431,10 @@ pub enum Choice {
     AgentStay,
     /// Let the agent follow the speaker again, for everyone.
     AgentFollow,
+    /// Have the agent walk with this participant.
+    AgentWalk,
+    /// End the agent's walk with this participant.
+    AgentWalkEnd,
     /// Step how the agent moves to the next way, for everyone.
     AgentMovement,
     /// Step how long the agent waits before going home to the next delay, for everyone.
@@ -778,6 +790,19 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                             "Tomori: follow again".into(),
                         );
                     }
+                    None => {}
+                }
+                match model.walks {
+                    Some(true) => button(
+                        &mut items,
+                        MenuKey::AgentWalk,
+                        "Tomori: walk with me".into(),
+                    ),
+                    Some(false) => button(
+                        &mut items,
+                        MenuKey::AgentWalkEnd,
+                        "Tomori: stop walking with me".into(),
+                    ),
                     None => {}
                 }
                 if model.agent_away {
@@ -1211,6 +1236,8 @@ impl HandMenu {
             MenuKey::CallAgent => Some(Choice::CallAgent),
             MenuKey::AgentStay => Some(Choice::AgentStay),
             MenuKey::AgentFollow => Some(Choice::AgentFollow),
+            MenuKey::AgentWalk => Some(Choice::AgentWalk),
+            MenuKey::AgentWalkEnd => Some(Choice::AgentWalkEnd),
             MenuKey::AgentMovement => Some(Choice::AgentMovement),
             MenuKey::AgentReturn => Some(Choice::AgentReturn),
             MenuKey::AddWall => Some(Choice::AddWall),
@@ -2143,7 +2170,23 @@ mod tests {
             menu.choose(&MenuKey::AgentFollow),
             Some(Choice::AgentFollow)
         );
+        // Beside them, it offers to walk with them, and, while it does, to stop.
+        model.walks = Some(true);
+        let named = tomori(&model);
+        assert_eq!(
+            (named[4].0.clone(), named[4].2.as_str()),
+            (MenuKey::AgentWalk, "Tomori: walk with me")
+        );
+        assert_eq!(named[5].0, MenuKey::AgentHome);
+        model.walks = Some(false);
+        assert_eq!(tomori(&model)[4].2.as_str(), "Tomori: stop walking with me");
+        assert_eq!(menu.choose(&MenuKey::AgentWalk), Some(Choice::AgentWalk));
+        assert_eq!(
+            menu.choose(&MenuKey::AgentWalkEnd),
+            Some(Choice::AgentWalkEnd)
+        );
         model.pins = None;
+        model.walks = None;
         for (delay, said) in [
             (Some(30), "Goes home after 30 s quiet"),
             (Some(300), "Goes home after 5 min quiet"),

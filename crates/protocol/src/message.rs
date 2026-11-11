@@ -803,6 +803,15 @@ pub enum ClientMessage {
     PinAgent {
         pinned: bool,
     },
+    /// Have the current space's agent walk with this participant, as **Tomori: walk with me** does, so that it keeps
+    /// with them, 2 m from them and facing them, whether or not they speak to it, until they ask otherwise, leave or
+    /// half an hour passes with nothing between them; or, `walking` false, as **Tomori: stop walking with me** does,
+    /// end its walk with them. Participants only, and only to a server that sets [`crate::SpaceState::walks`];
+    /// refused while the space keeps the agent home, and ending a walk, unless it walks with them. See
+    /// `design/environments.md`.
+    WalkAgent {
+        walking: bool,
+    },
     /// Change how the current space's agent moves, for everyone in it. Owners only, and only to a server that sends
     /// [`crate::SpaceState::movement`]. See `design/environments.md`.
     SetAgentMovement {

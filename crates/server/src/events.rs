@@ -56,6 +56,8 @@ struct Note {
     source: Source,
     key: String,
     text: String,
+    /// The participant the note is about, by their key, where it is about one, as who came near an anchor is.
+    about: Option<String>,
     /// How many earlier notes of the same source and key this one replaced before being told.
     earlier: u32,
     /// Whether it is told without waiting for [`GAP`], as a one-off timer's firing is.
@@ -125,6 +127,24 @@ impl EventQueue {
     /// seconds later; it still waits for a quiet moment after the agent's turn. Each one-off costs the agent one turn,
     /// within the space's daily limit, so it never makes a burst.
     pub fn push_timed(&mut self, source: Source, key: &str, text: String, on_time: bool) {
+        self.queue(source, key, text, None, on_time);
+    }
+
+    /// Queue `text`, as [`push`](Self::push) does, about the participant whose key is `about`, if it is about one.
+    pub fn push_about(&mut self, source: Source, key: &str, text: String, about: Option<&str>) {
+        self.queue(source, key, text, about, false);
+    }
+
+    /// Queue `text`, from `source` under `key`, about the participant `about`, if any, told `on_time` or not, replacing
+    /// a note of the same source and key not yet told, which it counts.
+    fn queue(
+        &mut self,
+        source: Source,
+        key: &str,
+        text: String,
+        about: Option<&str>,
+        on_time: bool,
+    ) {
         let earlier = match self
             .notes
             .iter()
@@ -144,6 +164,7 @@ impl EventQueue {
             source,
             key: key.to_owned(),
             text,
+            about: about.map(str::to_owned),
             earlier,
             on_time,
         });
@@ -151,6 +172,16 @@ impl EventQueue {
 
     pub fn is_empty(&self) -> bool {
         self.notes.is_empty()
+    }
+
+    /// The participant the latest note waiting about one is about, by their key: whoever came near an anchor last, of
+    /// those told, since a note coalescing goes to the back. Notes about nobody, such as a timer's or the workers', name
+    /// nobody here.
+    pub fn about(&self) -> Option<&str> {
+        self.notes
+            .iter()
+            .rev()
+            .find_map(|note| note.about.as_deref())
     }
 
     /// Every note waiting, as one block, oldest first, separated by spaces, the latest kept within [`BLOCK_CHARS`],
@@ -192,6 +223,12 @@ impl EventQueue {
     /// `quiet_since`, at least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago.
     pub fn may_give(&self, now: Instant, quiet_since: Option<Instant>) -> bool {
         quieted(now, quiet_since) && since(now, self.last, GAP)
+    }
+
+    /// The last prompt of notes alone given [`GAP`] earlier, as a test does rather than wait.
+    #[cfg(test)]
+    pub fn lapse(&mut self) {
+        self.last = self.last.map(|last| last - GAP);
     }
 
     /// The key and text of a prompt of every note waiting, given at `now`, if any wait.
@@ -276,6 +313,31 @@ mod tests {
         let left: u32 = block[1..block.find(' ').unwrap()].parse().unwrap();
         assert!(left > 2, "{block}");
         assert!(block.ends_with(&format!("{}]", "b".repeat(300))));
+    }
+
+    #[test]
+    fn the_notes_are_about_whoever_came_near_last() {
+        let mut queue = EventQueue::default();
+        queue.push(Source::Timer, "tea", "Timer \"tea\"".to_owned());
+        assert_eq!(queue.about(), None);
+        let near = |queue: &mut EventQueue, who: &str, anchor: &str| {
+            queue.push_about(
+                Source::Proximity,
+                &format!("{who}/{anchor}"),
+                format!("{who} came near {anchor}"),
+                Some(who),
+            );
+        };
+        near(&mut queue, "ada", "station-1");
+        near(&mut queue, "bob", "station-2");
+        // A timer after them names nobody, so the latest about someone stands.
+        queue.push(Source::Timer, "status", "Timer \"status\"".to_owned());
+        assert_eq!(queue.about(), Some("bob"));
+        // Ada coming near again, coalesced, is the latest.
+        near(&mut queue, "ada", "station-1");
+        assert_eq!(queue.about(), Some("ada"));
+        queue.block();
+        assert_eq!(queue.about(), None);
     }
 
     #[test]

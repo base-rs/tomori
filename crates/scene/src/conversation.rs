@@ -1763,6 +1763,7 @@ impl Conversation {
                     .is_some_and(|(space, _)| space.summoned.is_some() || space.pinned),
             calls: self.offers_call(),
             pins: self.offers_pin(),
+            walks: self.offers_walk(),
             movement: self.agent_movement(),
             pointed: None,
             feedback: self.feedback,
@@ -2009,6 +2010,8 @@ impl Conversation {
             crate::hand_menu::Choice::CallAgent => self.call_agent(),
             crate::hand_menu::Choice::AgentStay => self.pin_agent(true),
             crate::hand_menu::Choice::AgentFollow => self.pin_agent(false),
+            crate::hand_menu::Choice::AgentWalk => self.walk_agent(true),
+            crate::hand_menu::Choice::AgentWalkEnd => self.walk_agent(false),
             crate::hand_menu::Choice::AgentMovement => {
                 if let Some((movement, _)) = self.agent_movement() {
                     self.set_agent_movement(movement.next_mode());
@@ -2639,6 +2642,31 @@ impl Conversation {
     pub fn pin_agent(&mut self, pinned: bool) {
         if self.mode == Mode::Space && self.offers_pin() == Some(pinned) {
             self.send(ClientMessage::PinAgent { pinned });
+        }
+    }
+
+    /// What the hand menu offers of the agent walking with this participant, where the space lets it move, on a server
+    /// that takes walks: `Some(true)`, **Tomori: walk with me**, while it walks with someone else or nobody, and
+    /// `Some(false)`, **Tomori: stop walking with me**, while it walks with them; none otherwise. See
+    /// `design/hand-menu.md`.
+    fn offers_walk(&self) -> Option<bool> {
+        let (space, _) = self.joined_space()?;
+        let moves = space
+            .movement
+            .is_some_and(|movement| movement.mode != tomori_protocol::Movement::Home);
+        (space.walks && moves && self.role.participates()).then(|| {
+            space
+                .walking
+                .is_none_or(|walker| Some(walker) != self.source)
+        })
+    }
+
+    /// Have the joined space's agent walk with this participant, or, `walking` false, walk with them no more, as
+    /// **Tomori: walk with me** and **Tomori: stop walking with me** do: only where the hand menu offers it. See
+    /// `design/environments.md`.
+    pub fn walk_agent(&mut self, walking: bool) {
+        if self.mode == Mode::Space && self.offers_walk() == Some(walking) {
+            self.send(ClientMessage::WalkAgent { walking });
         }
     }
 
@@ -8420,6 +8448,59 @@ mod tests {
         assert_eq!(conversation.menu_model().pins, None);
         conversation.pin_agent(true);
         assert!(sent(&mut conversation).is_empty());
+    }
+
+    #[test]
+    fn a_participant_has_the_agent_walk_with_them_or_stop_from_the_hand_menu() {
+        use tomori_protocol::{AgentMovement, Movement};
+        // This participant is number 1.
+        let walking = |mode: Movement, walks: bool, walking: Option<u32>| {
+            space(move |state| {
+                state.movement = Some(AgentMovement::new(mode, Some(90)));
+                state.walks = walks;
+                state.walking = walking;
+            })
+        };
+        let mut conversation = joined(|_| {});
+        // Walking with nobody, or with someone else, it is asked to walk with them, and only that, wherever it may move.
+        for (mode, walker) in [(Movement::Follow, None), (Movement::Asked, Some(2))] {
+            conversation.apply(walking(mode, true, walker));
+            assert_eq!(conversation.menu_model().walks, Some(true));
+            conversation.choose_menu(crate::hand_menu::Choice::AgentWalk);
+            conversation.walk_agent(false);
+            assert_eq!(
+                sent(&mut conversation),
+                [ClientMessage::WalkAgent { walking: true }]
+            );
+        }
+        // Walking with them, it is asked to stop, and only that.
+        conversation.apply(walking(Movement::Follow, true, Some(1)));
+        assert_eq!(conversation.menu_model().walks, Some(false));
+        conversation.choose_menu(crate::hand_menu::Choice::AgentWalkEnd);
+        conversation.walk_agent(true);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::WalkAgent { walking: false }]
+        );
+        // Kept home, or from a server that takes no walks, neither is offered.
+        for (mode, walks) in [(Movement::Home, true), (Movement::Follow, false)] {
+            conversation.apply(walking(mode, walks, None));
+            assert_eq!(conversation.menu_model().walks, None);
+            conversation.walk_agent(true);
+            assert!(sent(&mut conversation).is_empty());
+        }
+        // Nor to a visitor.
+        conversation.apply(walking(Movement::Follow, true, None));
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        assert_eq!(conversation.menu_model().walks, None);
+        conversation.walk_agent(true);
+        assert!(sent(&mut conversation).is_empty());
+        // Nor outside a space.
+        let mut lobby = crate::test_support::conversation("Ada");
+        lobby.walk_agent(true);
+        assert!(lobby.menu_model().walks.is_none());
     }
 
     #[test]

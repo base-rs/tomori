@@ -201,7 +201,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
             json!({"place": "wall Tomori"})
         ))
         .contains(
-            "home, stay, follow, near NAME, beside NAME, front NAME, object ID or anchor NAME"
+            "home, stay, follow, near NAME, beside NAME, front NAME, with NAME, object ID or anchor NAME"
         )
     );
     // Moving only when asked, it cannot follow the speaker.

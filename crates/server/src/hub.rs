@@ -1733,6 +1733,14 @@ impl HubState {
         }
         self.withdraw_knock(participant, &space);
         self.touch_space(&space);
+        // Its agent walks with them no more.
+        if self
+            .space(&space)
+            .and_then(|record| record.following.walks_with())
+            == Some(participant)
+        {
+            self.walk_no_more(&space, "they left the space", Instant::now());
+        }
     }
 
     /// Put `participant` in `space`, taking them out of the space they were in. Returns false, changing nothing, if the space is no longer listed, such as one forgotten while a participant who was last in it was away, or if the participant has no connection, as one joining always has.
@@ -5163,6 +5171,27 @@ impl Hub {
                     state.error(participant, error);
                 }
             }
+            ClientMessage::WalkAgent { walking } => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let now = Instant::now();
+                let done = if walking {
+                    let name = state.participants[participant].name.clone();
+                    self.walk_with(
+                        state,
+                        &space,
+                        participant,
+                        &format!(", as {name} asked from the hand menu"),
+                        now,
+                    )
+                } else {
+                    state.stop_walking(&space, participant, now)
+                };
+                if let Err(error) = done {
+                    state.error(participant, error);
+                }
+            }
             ClientMessage::SetAgentMovement { movement } => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -6612,8 +6641,12 @@ impl Hub {
     /// `design/environments.md`.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_queued(&self, space: &str, segments: usize) {
-        if let Some(record) = self.lock().space_mut(space) {
-            record.following.queued(segments, Instant::now());
+        let mut state = self.lock();
+        if let Some(record) = state.space_mut(space) {
+            let now = Instant::now();
+            record.following.queued(segments, now);
+            // Its reply to Tomori's notes about someone, queued only once they were given it, is an exchange with them.
+            self.agent_voiced(&mut state, space, now);
         }
     }
 
@@ -6724,6 +6757,12 @@ impl Hub {
                     .and_then(|space| state.space(&space))?;
                 let participants = state.participants(&space.model);
                 let cards = state.shows_cards(&space.model.id);
+                // Whom the agent walks with, by their number.
+                let walking = space
+                    .following
+                    .walks_with()
+                    .and_then(|key| state.participants.get(key))
+                    .map(|walker| walker.source);
                 let environments = self.environments();
                 let mut state = space.model.state(
                     participants,
@@ -6743,6 +6782,9 @@ impl Hub {
                 state.pinned = space.following.pinned;
                 // Participants pin it, and let it follow again, from the hand menu. See `design/hand-menu.md`.
                 state.pins = true;
+                // And have it walk with them, or walk with them no more.
+                state.walks = true;
+                state.walking = walking;
                 state.facing = space.following.faces();
                 state.partner = space.partner;
                 state.via = space.following.via;

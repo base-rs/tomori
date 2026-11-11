@@ -258,3 +258,214 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
     hub.sweep_proximity(Instant::now() + crate::proximity::COOLDOWN);
     assert!(!has_events(&hub, &space));
 }
+
+/// Ada, an owner, has the space's agent follow the speaker, going home after 90 s.
+fn follows(ada: &Client) {
+    ada.send(ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, Some(90)),
+    });
+}
+
+/// Where the agent of `space` is summoned to.
+fn summoned(hub: &Hub, space: &str) -> Option<[f32; 3]> {
+    hub.lock()
+        .space(space)
+        .unwrap()
+        .summoned
+        .map(|pose| pose.position)
+}
+
+/// The agent of `space` has arrived where it glides to.
+fn arrived(hub: &Hub, space: &str) {
+    hub.lock()
+        .space_mut(space)
+        .unwrap()
+        .following
+        .backdate(Duration::from_secs(30));
+}
+
+/// How far from `b` `a` is, across the floor.
+fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (a[0] - b[0]).hypot(a[2] - b[2])
+}
+
+/// The timer `status` fires every hour, by a clock at 09:17 UTC, with Ada present.
+fn hourly(hub: &Hub, ada: &Client) {
+    hub.set_zone("UTC");
+    hub.set_clock("2026-11-11T09:17:00Z".parse().unwrap());
+    ada.send(ClientMessage::Engagement {
+        state: tomori_protocol::Engagement::Engaged,
+    });
+    hub.agent_set_timer(
+        "session",
+        crate::timers::Request {
+            name: Some("status".to_owned()),
+            note: "Give a status update".to_owned(),
+            every_minutes: Some(60),
+            ..crate::timers::Request::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_reply_to_a_note_about_someone_comes_to_them_and_keeps_with_them_through_it() {
+    use crate::hub::following::{POLL, SETTLE};
+    let (hub, space, commands, _outlet, ada) = trail();
+    follows(&ada);
+    ada.send(standing([6.0, 1.6, -6.0]));
+    hub.sweep_proximity(Instant::now());
+    // She walks up to the station, 5 m from the agent's home: the note is given it at once, its turn being over.
+    let near = [0.5, 1.6, -7.5];
+    ada.send(standing(near));
+    hub.sweep_proximity(Instant::now());
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    // Thinking, it has said nothing yet, and moves nothing.
+    hub.flush_snapshots(Instant::now() + Duration::from_secs(2));
+    assert_eq!(summoned(&hub, &space), None);
+    // Its reply's speech queued, it comes straight to her, 2 m from her, as though she had spoken to it, and she is
+    // whom it talks with.
+    hub.speech_queued(&space, 2);
+    let at = summoned(&hub, &space).expect("gone to her");
+    assert!(
+        (level(at, near) - crate::follow::CONVERSATION).abs() < 1e-3,
+        "{at:?}"
+    );
+    let partner = hub.tool_presence("session").unwrap()["agent"]["partner"].clone();
+    assert!(partner.as_str().unwrap().starts_with("ada#"), "{partner}");
+    // More of it queued changes nothing.
+    hub.speech_queued(&space, 1);
+    assert_eq!(summoned(&hub, &space), Some(at));
+    // Its turn over, its voice still to come, it follows her on as she walks on.
+    hub.drive_event(&space, Event::Idle);
+    arrived(&hub, &space);
+    let on = [5.0, 1.6, -9.0];
+    ada.send(standing(on));
+    hub.flush_snapshots(Instant::now() + SETTLE);
+    let to_her = summoned(&hub, &space).expect("followed");
+    assert!(
+        (level(to_her, on) - crate::follow::CONVERSATION).abs() < 1e-3,
+        "{to_her:?}"
+    );
+    // Its voice heard, it keeps with her no more.
+    for _ in 0..3 {
+        hub.speech_sent(&space);
+    }
+    arrived(&hub, &space);
+    hub.flush_snapshots(Instant::now() + POLL);
+    ada.send(standing([-5.0, 1.6, -9.0]));
+    hub.flush_snapshots(Instant::now() + POLL + SETTLE);
+    assert_eq!(summoned(&hub, &space), Some(to_her));
+}
+
+#[test]
+fn a_note_s_reply_moves_nothing_without_speech_nor_for_a_timer_and_follows_whoever_came_near_last()
+{
+    let (hub, space, commands, _outlet, ada) = trail();
+    follows(&ada);
+    hourly(&hub, &ada);
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    ada.send(standing([6.0, 1.6, -6.0]));
+    bob.send(standing([-6.0, 1.6, -6.0]));
+    hub.sweep_proximity(Instant::now());
+    // Ada reaches the station, and its reply says nothing: it moves nothing.
+    ada.send(standing([0.5, 1.6, -7.5]));
+    hub.sweep_proximity(Instant::now());
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    take(&hub, &space, &prompts[0]);
+    hub.flush_snapshots(Instant::now() + Duration::from_secs(2));
+    assert_eq!(summoned(&hub, &space), None);
+    // The timer fires: its reply to that is nobody's exchange, so its speech moves nothing.
+    hub.lock().space_mut(&space).unwrap().model.lapse();
+    hub.tick_timers("2026-11-11T10:00:00Z".parse().unwrap());
+    let prompts = handed(&commands);
+    let text = &prompts[0].text;
+    assert!(text.starts_with("[Timer \"status\""), "{text}");
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    hub.speech_queued(&space, 1);
+    assert_eq!(summoned(&hub, &space), None);
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    // While the agent works, Bob reaches the station, then Ada walks off and back to it, past its cooldown, and the
+    // timer fires again: told together, its reply follows whoever came near last, Ada, the timer naming nobody.
+    hub.drive_event(&space, Event::Busy);
+    let bob_at = [-1.0, 1.6, -5.0];
+    bob.send(standing(bob_at));
+    hub.sweep_proximity(Instant::now());
+    let later = Instant::now() + crate::proximity::COOLDOWN;
+    ada.send(standing([6.0, 1.6, -6.0]));
+    hub.sweep_proximity(later);
+    let ada_at = [0.5, 1.6, -7.5];
+    ada.send(standing(ada_at));
+    hub.sweep_proximity(later);
+    hub.drive_event(&space, Event::Idle);
+    hub.lock().space_mut(&space).unwrap().model.lapse();
+    hub.tick_timers("2026-11-11T11:00:00Z".parse().unwrap());
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    let text = &prompts[0].text;
+    assert!(
+        text.starts_with("[bob came within") && text.ends_with("note: \"Give a status update\"]"),
+        "{text}"
+    );
+    assert!(
+        text.rfind("[ada came").unwrap() > text.rfind("[bob came").unwrap(),
+        "{text}"
+    );
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    hub.speech_queued(&space, 1);
+    let at = summoned(&hub, &space).expect("gone to Ada");
+    assert!(
+        (level(at, ada_at) - crate::follow::CONVERSATION).abs() < 1e-3,
+        "{at:?}"
+    );
+}
+
+#[test]
+fn a_note_s_reply_follows_nobody_who_has_left_nor_where_it_does_not_follow() {
+    let (hub, space, commands, _outlet, ada) = trail();
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    bob.send(standing([6.0, 1.6, -6.0]));
+    hub.sweep_proximity(Instant::now());
+    // Moving only when asked, a reply to a note about Bob moves nothing.
+    bob.send(standing([0.5, 1.6, -7.5]));
+    hub.sweep_proximity(Instant::now());
+    let prompts = handed(&commands);
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    hub.speech_queued(&space, 1);
+    assert_eq!(summoned(&hub, &space), None);
+    // Following, but Bob gone by the time it speaks, nor does it.
+    follows(&ada);
+    bob.send(ClientMessage::Leave);
+    hub.speech_queued(&space, 1);
+    assert_eq!(summoned(&hub, &space), None);
+    // Nor pinned.
+    ada.send(ClientMessage::PinAgent { pinned: true });
+    hub.speech_queued(&space, 1);
+    assert_eq!(summoned(&hub, &space), None);
+}

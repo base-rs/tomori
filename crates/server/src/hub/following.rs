@@ -7,8 +7,10 @@
 //! it stays [`DWELL`] before leaving one partner for another, serves a huddle from one spot, and goes home once the
 //! conversation has been quiet for the space's delay. Through its partner's exchange with it, as they speak, while it
 //! thinks and while it replies, it keeps with them: it turns to them as they move and, once they settle more than
-//! [`follow::NEAR`] away, follows them on. A pin, from **Call Tomori here** or `move_agent stay`, keeps it where it is.
-//! Everything here is for this run only. See `design/environments.md`.
+//! [`follow::NEAR`] away, follows them on; a reply to Tomori's notes about someone, as they come near an anchor, is an
+//! exchange with them. Walking with someone, as they ask, it keeps with them throughout, until they ask otherwise,
+//! leave or [`WALK_IDLE`] passes with nothing between them. A pin, from **Call Tomori here** or `move_agent stay`, keeps
+//! it where it is. Everything here is for this run only. See `design/environments.md`.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,10 @@ pub(crate) const LEFT: Duration = Duration::from_secs(15);
 
 /// How long a pin lasts with nobody in the space.
 pub(crate) const EMPTY: Duration = Duration::from_secs(30 * 60);
+
+/// How long the agent walks with someone with nothing between them, neither of them speaking nor they moving, before
+/// it walks with them no more.
+pub(crate) const WALK_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// How often, while it is away from home, whether to go home is checked.
 pub(crate) const POLL: Duration = Duration::from_secs(1);
@@ -144,6 +150,14 @@ struct Keeping {
     due: Option<Instant>,
 }
 
+/// Whom the agent walks with, as they or someone asked: their key, and when anything last passed between them, they
+/// moving or speaking to it, or it speaking. A walk ends as they leave the space.
+#[derive(Clone, Debug)]
+pub(super) struct Walking {
+    pub(super) who: String,
+    active: Instant,
+}
+
 /// What a space keeps of its agent's following, for this run and environment only.
 #[derive(Debug, Default)]
 pub(crate) struct Following {
@@ -194,6 +208,8 @@ pub(crate) struct Following {
     answering: Option<String>,
     /// Whom it keeps with, while it does.
     keeping: Option<Keeping>,
+    /// Whom it walks with, while it does: it keeps with them throughout, not only through their exchanges.
+    pub(super) walking: Option<Walking>,
 }
 
 impl Following {
@@ -235,6 +251,7 @@ impl Following {
         let until = now + duration + SPOKEN;
         self.speaking = Some(self.speaking.map_or(until, |was| was.max(until)));
         self.progressed = Some(now);
+        self.walked(now);
         // Its speech starting puts off its return, however short, between one check and the next.
         self.quiet = None;
     }
@@ -310,7 +327,7 @@ impl Following {
         gone: bool,
         now: Instant,
     ) -> Option<Duration> {
-        if self.pinned || !away || movement.mode != Movement::Follow {
+        if self.pinned || self.walking.is_some() || !away || movement.mode != Movement::Follow {
             return None;
         }
         let delay = Duration::from_secs(u64::from(movement.return_after?));
@@ -324,6 +341,23 @@ impl Following {
     /// The participant it talks with now, or last did, by their key.
     pub(super) fn partner(&self) -> Option<&str> {
         self.partner.as_deref()
+    }
+
+    /// The participant it walks with, by their key, while it does.
+    pub(super) fn walks_with(&self) -> Option<&str> {
+        self.walking.as_ref().map(|walking| walking.who.as_str())
+    }
+
+    /// Whether it walks with someone other than `participant`, so that their words only turn it.
+    fn walks_with_another(&self, participant: &str) -> bool {
+        self.walks_with().is_some_and(|who| who != participant)
+    }
+
+    /// Something passed between it and whoever it walks with at `now`, putting off the walk's end for [`WALK_IDLE`].
+    fn walked(&mut self, now: Instant) {
+        if let Some(walking) = &mut self.walking {
+            walking.active = now;
+        }
     }
 }
 
@@ -395,6 +429,10 @@ impl Hub {
             .partner()
             .and_then(|key| state.participants.get(key))
             .map(|partner| crate::presence::handle(&partner.name, partner.tag));
+        let walking = following
+            .walks_with()
+            .and_then(|key| state.participants.get(key))
+            .map(|walker| crate::presence::handle(&walker.name, walker.tag));
         let report = crate::presence::AgentState {
             summoned: record.summoned,
             at: moving.then(|| following.at(record.summoned, home, now)),
@@ -402,6 +440,7 @@ impl Hub {
             pinned: following.pinned,
             pinned_by: following.pinned_by.clone(),
             partner,
+            walking,
             returns_in: following.returns_in(
                 record.summoned.is_some(),
                 record.model.movement(),
@@ -451,6 +490,7 @@ impl Hub {
             keeping.heading = heading;
             let since = *keeping.since.get_or_insert(now);
             keeping.due = Some((now + SETTLE).min(since + RESTLESS));
+            following.walked(now);
             woken.notify(usize::MAX);
         }
         if following.moving(record.summoned, home, now) {
@@ -526,21 +566,9 @@ impl Hub {
         captured: &Captured,
         now: Instant,
     ) {
-        let eyes = captured.speaker.head.position;
+        let others = self.huddled(state, space, participant, captured, now);
         let record = state.space(space).expect("the caller found it");
         let following = &record.following;
-        let others: Vec<Speaker> = following
-            .spoken
-            .iter()
-            .filter(|(who, at)| {
-                who != participant
-                    && now.saturating_duration_since(*at) < LATELY
-                    && record.model.participants.contains(who)
-            })
-            .filter_map(|(who, _)| self.capture(state, space, who))
-            .map(|captured| captured.speaker)
-            .filter(|other| follow::together(other.head.position, eyes))
-            .collect();
         let agent = following.at(record.summoned, captured.home, now);
         if !others.is_empty() {
             let mut huddle = vec![captured.speaker];
@@ -551,10 +579,130 @@ impl Hub {
         }
         let reason = if following.answering.as_deref() == Some(participant) {
             "they moved while it answered them"
+        } else if following.walks_with() == Some(participant) {
+            "they walked on with it"
         } else {
             "they moved as they spoke to it"
         };
         state.go_to(space, participant, captured, others, now, reason);
+    }
+
+    /// Those of a huddle with `participant` in `space` at `now`, where `captured` finds them: others who spoke to its
+    /// agent within [`LATELY`], in the space and standing together with them, where they stand now.
+    fn huddled(
+        &self,
+        state: &HubState,
+        space: &str,
+        participant: &str,
+        captured: &Captured,
+        now: Instant,
+    ) -> Vec<Speaker> {
+        let eyes = captured.speaker.head.position;
+        let record = state.space(space).expect("the caller found it");
+        record
+            .following
+            .spoken
+            .iter()
+            .filter(|(who, at)| {
+                who != participant
+                    && now.saturating_duration_since(*at) < LATELY
+                    && record.model.participants.contains(who)
+            })
+            .filter_map(|(who, _)| self.capture(state, space, who))
+            .map(|captured| captured.speaker)
+            .filter(|other| follow::together(other.head.position, eyes))
+            .collect()
+    }
+
+    /// The agent of `space` queued speech at `now`, as its turn's text came: if Tomori's notes about a participant prompted
+    /// its turn, as when they came near an anchor, its reply is an exchange with them, so it goes to them and keeps with
+    /// them through it, as though they had spoken to it, where it follows the speaker, unpinned, and walks with nobody
+    /// else. A turn with no speech in it moves nothing. See `design/environments.md`.
+    pub(super) fn agent_voiced(&self, state: &mut HubState, space: &str, now: Instant) {
+        let record = state.space(space).expect("the caller found it");
+        let following = &record.following;
+        let noted = record
+            .model
+            .noted()
+            .filter(|who| {
+                following.answering.as_deref() != Some(*who)
+                    && record.model.movement().mode == Movement::Follow
+                    && !following.pinned
+                    && !following.walks_with_another(who)
+                    && record.model.participants.iter().any(|key| key == who)
+            })
+            .map(str::to_owned);
+        // Only once they have reported where they are, as they had to come near.
+        let Some((who, captured)) = noted.and_then(|who| {
+            self.capture(state, space, &who)
+                .map(|captured| (who, captured))
+        }) else {
+            return;
+        };
+        let others = self.huddled(state, space, &who, &captured, now);
+        let following = &mut state.space_mut(space).expect("found above").following;
+        following.answering = Some(who.clone());
+        state.go_to(
+            space,
+            &who,
+            &captured,
+            others,
+            now,
+            "it began answering a note about them",
+        );
+    }
+
+    /// Walk with `participant` in `space` from `now`, as `because` says who asked: unpinned, it comes to them, or only
+    /// turns where it stands near enough already, and keeps with them throughout, whether or not they speak to it, by
+    /// the rules it keeps with a partner by, its return home put off until it walks with them no more. Refused where
+    /// the space keeps it home, or before they report where they are. See `design/environments.md`.
+    pub(super) fn walk_with(
+        &self,
+        state: &mut HubState,
+        space: &str,
+        participant: &str,
+        because: &str,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let movement = state
+            .space(space)
+            .map(|record| record.model.movement())
+            .unwrap_or_default();
+        if movement.mode == Movement::Home {
+            return Err(
+                "Tomori stays home in this space: an owner can let it move in the Space section.",
+            );
+        }
+        let captured = self
+            .capture(state, space, participant)
+            .ok_or("Tomori does not know where you are yet.")?;
+        let others = self.huddled(state, space, participant, &captured, now);
+        let name = state.participants[participant].name.clone();
+        let following = &mut state.space_mut(space).expect("found above").following;
+        following.pinned = false;
+        following.pinned_by = None;
+        following.pending = None;
+        following.empty = None;
+        following.quiet = None;
+        // It goes to them at once, whoever it went to last.
+        following.moved = None;
+        following.walking = Some(Walking {
+            who: participant.to_owned(),
+            active: now,
+        });
+        following.poll = Some(now + POLL);
+        log::info!("The agent of space {space} walks with {name}{because}.");
+        state.go_to(
+            space,
+            participant,
+            &captured,
+            others,
+            now,
+            "it walks with them",
+        );
+        state.touch_space(space);
+        state.woken.notify(usize::MAX);
+        Ok(())
     }
 
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
@@ -723,6 +871,45 @@ impl HubState {
         );
     }
 
+    /// The agent of `space` walks with nobody from `now`, for `reason`, logged if it walked with someone: it stays where
+    /// it is, and its return home counts from now. Whether it walked with someone.
+    pub(super) fn walk_no_more(&mut self, space: &str, reason: &str, now: Instant) -> bool {
+        let record = self.space_mut(space).expect("the caller found it");
+        let following = &mut record.following;
+        let Some(walking) = following.walking.take() else {
+            return false;
+        };
+        following.quiet = None;
+        following.poll = Some(now + POLL);
+        let name = self
+            .participants
+            .get(&walking.who)
+            .map_or("someone", |participant| participant.name.as_str());
+        log::info!("The agent of space {space} walks with {name} no more, as {reason}.");
+        self.touch_space(space);
+        self.woken.notify(usize::MAX);
+        true
+    }
+
+    /// End the walk of the agent of `space` with `participant` at `now`, as they asked from the hand menu, with
+    /// **Tomori: stop walking with me**. Refused unless it walks with them.
+    pub(super) fn stop_walking(
+        &mut self,
+        space: &str,
+        participant: &str,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let walks = self
+            .space(space)
+            .and_then(|record| record.following.walks_with())
+            == Some(participant);
+        if !walks {
+            return Err("Tomori is not walking with you.");
+        }
+        self.walk_no_more(space, "they asked it to stop", now);
+        Ok(())
+    }
+
     /// How the agent of `space` moves changed, as `name` set it: kept home, it goes home now; otherwise it stays where it
     /// is, and follows from the next words if it now follows the speaker.
     pub(super) fn movement_changed(&mut self, space: &str, name: &str, now: Instant) {
@@ -758,6 +945,9 @@ impl HubState {
         let record = self
             .space_mut(space)
             .expect("words begin in a listed space");
+        if record.following.walks_with() == Some(participant) {
+            record.following.walked(now);
+        }
         let mode = record.model.movement().mode;
         if mode != Movement::Follow && !(mode == Movement::Asked && record.following.pinned) {
             return;
@@ -767,7 +957,8 @@ impl HubState {
                 record.model.activity(),
                 Activity::Running | Activity::Waiting
             )
-            || record.model.waiting() > 0;
+            || record.model.waiting() > 0
+            || record.following.walks_with_another(participant);
         let following = &mut record.following;
         let eyes = captured.speaker.head.position;
         following
@@ -829,10 +1020,12 @@ impl HubState {
         {
             following.pending = None;
         }
-        let gliding = following
-            .moved
-            .as_ref()
-            .is_some_and(|(_, whom)| whom == participant)
+        // A move made to keep up with whoever it walks with was never for their words.
+        let gliding = following.walks_with() != Some(participant)
+            && following
+                .moved
+                .as_ref()
+                .is_some_and(|(_, whom)| whom == participant)
             && following
                 .glide
                 .as_ref()
@@ -909,7 +1102,10 @@ impl HubState {
     /// spot clear. Nothing while it is pinned, or in a space whose agent does not follow.
     fn follow(&mut self, space: &str, participant: &str, now: Instant, reason: &str) {
         let record = self.space_mut(space).expect("the caller found it");
-        if record.model.movement().mode != Movement::Follow || record.following.pinned {
+        if record.model.movement().mode != Movement::Follow
+            || record.following.pinned
+            || record.following.walks_with_another(participant)
+        {
             return;
         }
         let members = record.model.participants.clone();
@@ -1073,6 +1269,7 @@ impl HubState {
             .following;
         let theirs = following.pinned_by.take().filter(|_| following.pinned);
         following.pinned = true;
+        following.walking = None;
         following.pinned_by = by.or(theirs);
         following.pending = None;
         following.empty = None;
@@ -1129,6 +1326,11 @@ impl HubState {
         let following = &mut record.following;
         let pinned = std::mem::take(&mut following.pinned);
         following.pinned_by = None;
+        // Following the speaker again, it walks with nobody.
+        let walked = following.walking.take().is_some();
+        if walked {
+            following.quiet = None;
+        }
         // The way home is counted from the pin's end, and not put off again by asking to follow while it follows.
         if pinned {
             following.empty = None;
@@ -1171,8 +1373,9 @@ impl HubState {
         following.glance = None;
         following.quiet = None;
         following.pending = None;
-        // Sent somewhere, it keeps with nobody until the next words that move it.
+        // Sent somewhere, it keeps with nobody until the next words that move it, and walks with nobody.
         following.keeping = None;
+        following.walking = None;
         following.poll.get_or_insert(now + POLL);
         self.woken.notify(usize::MAX);
     }
@@ -1216,6 +1419,11 @@ impl HubState {
     pub(super) fn keeps_with(&self, space: &str, now: Instant) -> Option<String> {
         let record = self.space(space).expect("the caller found it");
         let following = &record.following;
+        // Walking with someone, it keeps with them throughout: a walk ends as they leave, as it is pinned or sent
+        // anywhere, and as the space keeps it home, sending it home.
+        if let Some(who) = following.walks_with() {
+            return Some(who.to_owned());
+        }
         let who = &following.keeping.as_ref()?.who;
         let speaking = self.utterances.values().any(|utterance| {
             utterance.space == space
@@ -1304,9 +1512,17 @@ impl HubState {
             changed |= following.via.take().is_some() | std::mem::take(&mut following.stream);
         }
         let mut home = None;
+        let mut walked = None;
         if following.poll.is_some_and(|due| due <= now) {
             following.poll = None;
-            if following.pinned {
+            if let Some(walking) = &following.walking {
+                // Walking with someone, it does not go home, until it walks with them no more.
+                following.quiet = None;
+                if now.saturating_duration_since(walking.active) >= WALK_IDLE {
+                    walked = Some("nothing had passed between them for half an hour");
+                }
+                following.poll = Some(now + POLL);
+            } else if following.pinned {
                 match (empty, following.empty) {
                     (false, _) => following.empty = None,
                     (true, None) => following.empty = Some(now),
@@ -1331,6 +1547,9 @@ impl HubState {
                 }
                 following.poll = Some(now + POLL);
             }
+        }
+        if let Some(reason) = walked {
+            self.walk_no_more(space, reason, now);
         }
         if let Some(reason) = home {
             self.agent_home(space, reason, now);
