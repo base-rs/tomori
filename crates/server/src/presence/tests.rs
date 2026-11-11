@@ -1368,6 +1368,26 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     );
     assert!(followed.get("pinned_by").is_none());
     assert_eq!(followed["returns_home_in_s"], 72);
+    // Turned to someone where it stands, it faces them, as clients turn it, whichever way its spot faced; somewhere it
+    // cannot face leaves it facing as its spot does.
+    let turned = |facing| {
+        agent(
+            &anchors,
+            &AgentState {
+                summoned: Some(ahead),
+                facing: Some(facing),
+                movement: follow,
+                ..AgentState::default()
+            },
+        )["facing_yaw"]
+            .clone()
+    };
+    assert_eq!(turned([3.0, 1.6, -2.3]), 90.0);
+    assert_eq!(turned([1.0, 1.6, 0.0]), 180.0);
+    assert_eq!(turned([-1.0, 1.6, -4.3]), -45.0);
+    let spot = report(Some(ahead), false, follow, None)["facing_yaw"].clone();
+    assert_eq!(turned([1.0, 0.0, -2.3]), spot);
+    assert_eq!(turned([f32::NAN, 1.6, 0.0]), spot);
 }
 
 #[test]

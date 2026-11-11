@@ -7925,6 +7925,82 @@ mod tests {
     }
 
     #[test]
+    fn while_its_speech_plays_the_agent_still_glides_where_it_follows_and_turns_to_whoever_it_turns_to()
+     {
+        use tomori_client::connection::{Report, Session};
+        let now = Instant::now();
+        let follow = Some(tomori_protocol::AgentMovement::new(
+            tomori_protocol::Movement::Follow,
+            Some(90),
+        ));
+        let mut conversation = joined();
+        conversation.apply(space(|state| {
+            state.movement = follow;
+            state.activity = tomori_protocol::Activity::Idle;
+        }));
+        let mut step = Step::default();
+        // Its turn is over, and its voice plays on this headset, each frame, for `seconds` and then this frame.
+        let speaking = |step: &mut Step, conversation: &mut Conversation, seconds: f32| {
+            for _ in 0..=(seconds / FRAME) as usize {
+                Session::report(
+                    conversation,
+                    Report::AgentSpeech {
+                        playing: true,
+                        level: 0.3,
+                    },
+                );
+                step.update(&senses(), conversation, &mut felt(), now, FRAME);
+            }
+            Session::report(
+                conversation,
+                Report::AgentSpeech {
+                    playing: true,
+                    level: 0.3,
+                },
+            );
+        };
+        speaking(&mut step, &mut conversation, 0.5);
+        // The server follows them on, mid-reply, more than 3 m: it glides there as it speaks.
+        let to = tomori_protocol::Pose::at([3.5, 1.2, -4.0]).facing_towards([4.5, 1.1, -5.1]);
+        conversation.apply(space(|state| {
+            state.movement = follow;
+            state.activity = tomori_protocol::Activity::Idle;
+            state.summoned = Some(to);
+            state.partner = Some([4.5, 1.1, -5.1]);
+        }));
+        speaking(&mut step, &mut conversation, 12.0);
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.visual.mode, interaction::Mode::Speaking);
+        let arrived = frame.swarm.anchor();
+        assert!(
+            arrived.position.distance(Vec3::new(3.5, 1.2, -4.0)) < 0.01,
+            "{arrived:?}"
+        );
+        // Then it turns to them as they step aside, still speaking.
+        conversation.apply(space(|state| {
+            state.movement = follow;
+            state.activity = tomori_protocol::Activity::Idle;
+            state.summoned = Some(to);
+            state.partner = Some([4.5, 1.1, -5.1]);
+            state.facing = Some([5.5, 1.1, -4.6]);
+        }));
+        let turned = conversation.arrangement().agent;
+        let towards = Vec3::new(2.0, 0.0, -0.6).normalize();
+        assert!((turned.orientation * Vec3::Z).dot(towards) > 0.999);
+        speaking(&mut step, &mut conversation, 3.0);
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.visual.mode, interaction::Mode::Speaking);
+        assert!(
+            frame
+                .swarm
+                .anchor()
+                .orientation
+                .angle_between(turned.orientation)
+                < 0.02
+        );
+    }
+
+    #[test]
     fn the_agent_appears_at_its_home_as_the_space_opens_and_never_moves_of_its_own_accord() {
         let now = Instant::now();
         let home = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);

@@ -164,6 +164,21 @@ fn a_tap_only_turns_it_even_once_its_words_are_given() {
 }
 
 #[test]
+fn with_someone_in_its_way_it_glides_there_by_a_waypoint() {
+    let (hub, _jobs, space, _commands, ada) = following(Some(90));
+    // Bob stands between its home and where it stands for Ada.
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    bob.send(looking([-0.53, 1.6, -0.68], [0.0, 1.6, -3.0]));
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    press(&ada, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    let state = last_state(&ada).expect("told");
+    assert!(state.summoned.is_some());
+    assert!(state.via.is_some() && !state.stream, "{:?}", state.via);
+}
+
+#[test]
 fn far_away_it_streams_there() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     let far = [0.0, 1.6, 8.0];
