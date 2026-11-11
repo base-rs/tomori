@@ -1,6 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use tomori_environment::navmesh::{Navmesh, Obstacle};
 use tomori_environment::sightlines::{EYES, Spot, noticed, readable, seen};
 
 use super::*;
@@ -27,13 +28,17 @@ fn inside(corners: &[Vec2], point: Vec2) -> bool {
     inside
 }
 
-/// Whether `point` is on a surface participants walk or land on: the yard's open ground, the trail's band and its way
-/// out, its clearings, and the campsite's standing about its fire.
+/// Whether `point` is on a surface participants walk or land on: the ground the yard and the trail draw
+/// ([`crate::walkable::ground`]), before what stands on it is taken away, so that a fern standing on it is found there
+/// rather than taken away with it; the way out through the gate; the clearings, as the discs they are drawn within; and
+/// the places to stand about the campsite's fire.
 fn walked(point: Vec2) -> bool {
-    layout::open_ground()
-        .iter()
-        .any(|footprint| footprint.contains(point))
-        || trail::outlines()
+    static DRAWN: OnceLock<Navmesh> = OnceLock::new();
+    DRAWN
+        .get_or_init(|| Navmesh::from_triangles(crate::walkable::ground()))
+        .height_at(point)
+        .is_some()
+        || trail::way_out()
             .iter()
             .any(|(outline, _)| inside(outline, point))
         || trail::clearings()
@@ -140,6 +145,67 @@ fn every_fern_stands_on_the_ground_off_where_anyone_stands_or_walks_and_out_of_t
             assert!(from_standing(at) <= 5.0, "{fern:?}");
             assert!((0.2..1.2).contains(&height), "{fern:?}");
         }
+    }
+}
+
+#[test]
+fn the_tree_ferns_are_solid_to_the_walkable_ground_and_no_fern_cuts_any_of_it() {
+    // Each tree fern beside the trail, its trunk and its crown, is among what the walkable ground is derived less, as
+    // the plants and pines beside it are, by the yard's clearance; most of them are beside it.
+    let obstacles = crate::walkable::obstacles();
+    let beside = trail::beside();
+    let declared = |solid: &Solid| {
+        Obstacle::cuboid(solid.low.into(), solid.high.into()).with_clearance(layout::CLEARANCE)
+    };
+    let trees = super::solids();
+    let near: Vec<&Solid> = trees
+        .iter()
+        .filter(|solid| beside.contains(&(solid.low, solid.high)))
+        .collect();
+    assert!(
+        near.len() * 4 >= trees.len() * 3,
+        "{} of {}",
+        near.len(),
+        trees.len()
+    );
+    for solid in near {
+        assert!(obstacles.contains(&declared(solid)), "{solid:?}");
+    }
+    // None of them cuts any of the ground the yard and the trail draw: each trunk stands off it by more than the
+    // clearance, and each crown reaches over it only high enough overhead to leave its room clear. So the tree ferns'
+    // solids keep the agent and panels clear without taking ground from anyone.
+    let every: Vec<Obstacle> = trees.iter().map(declared).collect();
+    let area = |mesh: &Navmesh| -> f32 {
+        mesh.triangles()
+            .iter()
+            .map(|[a, b, c]| (*b - *a).cross(*c - *a).y.abs() * 0.5)
+            .sum()
+    };
+    let ground = crate::walkable::ground();
+    let (bare, with) = (
+        area(&Navmesh::derive(ground.clone(), &[])),
+        area(&Navmesh::derive(ground, &every)),
+    );
+    assert!((bare - with).abs() < 1e-3, "{bare} {with}");
+    // A ground fern is decoration, not solid: its fronds reach no nearer the walkable ground, which the tree ferns take
+    // none of, than the clearance that keeps anyone standing on it from what stands about it, so nobody standing
+    // anywhere participants may stands in one.
+    for fern in standing_ferns()
+        .iter()
+        .filter(|fern| Kind::GROUND.contains(&fern.kind))
+    {
+        let (reach, _) = fern.size();
+        for point in about(Vec2::new(fern.at.x, fern.at.z), reach + layout::CLEARANCE) {
+            assert_eq!(crate::walkable::height_at(point), None, "{fern:?} {point}");
+        }
+    }
+    // And no fern's foot is anywhere participants walk or land.
+    for fern in ferns() {
+        assert_eq!(
+            crate::walkable::height_at(Vec2::new(fern.at.x, fern.at.z)),
+            None,
+            "{fern:?}"
+        );
     }
 }
 
@@ -254,17 +320,15 @@ fn every_rule_refuses_a_fern_somewhere() {
     assert_eq!((fern.at, fern.scale), (first.at, first.scale));
 }
 
-/// Where participants' eyes may be: over the yard's open ground, along the trail and its clearings, about the campsite's
-/// fire and on the waterfall rock.
+/// Where participants' eyes may be: over the yard's walkable ground, at every corner of it, along the trail and its
+/// clearings, about the campsite's fire and on the waterfall rock.
 fn eyes() -> Vec<Vec3> {
-    let yard = layout::open_ground().into_iter().flat_map(|footprint| {
-        [
-            footprint.low,
-            footprint.high,
-            Vec2::new(footprint.low.x, footprint.high.y),
-            Vec2::new(footprint.high.x, footprint.low.y),
-        ]
-    });
+    let yard = crate::walkable::navmesh()
+        .triangles()
+        .iter()
+        .flatten()
+        .map(|corner| Vec2::new(corner.x, corner.z))
+        .filter(|corner| FENCE.contains(*corner));
     let campsite = campsite::standing()
         .into_iter()
         .flat_map(|(middle, radius)| about(middle, radius));

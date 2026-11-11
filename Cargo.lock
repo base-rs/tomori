@@ -3896,6 +3896,7 @@ dependencies = [
  "sha2 0.10.9",
  "tomori-assets",
  "tomori-client",
+ "tomori-environment",
  "tomori-environment-farmyard",
  "tomori-protocol",
  "tomori-render",

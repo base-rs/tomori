@@ -32,5 +32,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
 # The voices' law of distance, by which the ambience's levels are checked where participants stand.
 tomori-client = { version = "0.2.0", path = "../client" }
+# The room above the ground that an obstacle must reach into to take ground, by which the walkability tests tell what
+# stands on the ground from what hangs high over it, such as a tree fern's crown.
+tomori-environment = { version = "0.2.0", path = "../environment" }
 # The device for offscreen rendering tests and WGSL validation. It has no version, so that packaging leaves it out: only the tests use it.
 tomori-render = { path = "../render", features = ["test-gpu"] }

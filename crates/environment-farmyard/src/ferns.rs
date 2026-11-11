@@ -142,6 +142,18 @@ pub enum Detail {
     Far,
 }
 
+impl Detail {
+    /// How finely a fern whose heart is at `heart` is drawn for eyes at `eyes`: in full within [`NEAR`] of it, and with
+    /// less beyond.
+    pub fn seen(heart: Vec3, eyes: Vec3) -> Self {
+        if heart.distance(eyes) <= NEAR {
+            Detail::Near
+        } else {
+            Detail::Far
+        }
+    }
+}
+
 /// Every mesh the ferns are drawn from, each kind in each of its details, in the order the scenery draws them, one draw
 /// each with all its instances.
 pub fn drawn() -> Vec<(Kind, Detail)> {
@@ -809,14 +821,14 @@ impl Fern {
         }
     }
 
+    /// Where its heart is, where it stands: a tree fern's trunk's top, and a ground fern's foot.
+    pub fn heart(&self) -> Vec3 {
+        self.transform().transform_point3(self.kind.heart())
+    }
+
     /// How finely it is drawn for eyes at `eyes`: in full within [`NEAR`] of its heart, and with less beyond.
     pub fn detail(&self, eyes: Vec3) -> Detail {
-        let heart = self.transform().transform_point3(self.kind.heart());
-        if heart.distance(eyes) <= NEAR {
-            Detail::Near
-        } else {
-            Detail::Far
-        }
+        Detail::seen(self.heart(), eyes)
     }
 }
 

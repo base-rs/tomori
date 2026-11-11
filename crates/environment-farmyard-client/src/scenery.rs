@@ -512,6 +512,8 @@ struct Ferns {
     /// Each mesh, and its range of the vertices.
     meshes: FernMeshes,
     ferns: Vec<Fern>,
+    /// Where each fern's heart is, found once, so that placing them each frame only measures how far each is.
+    hearts: Vec<Vec3>,
     /// How each fern was drawn when last placed, and each mesh's range of vertices with its range of instances.
     placed: Mutex<(Vec<Detail>, FernDraws)>,
 }
@@ -557,6 +559,7 @@ impl Ferns {
             }),
             instances,
             meshes,
+            hearts: ferns.iter().map(Fern::heart).collect(),
             ferns,
             placed: Mutex::new((Vec::new(), Vec::new())),
         }
@@ -564,7 +567,11 @@ impl Ferns {
 
     /// Group the ferns by the mesh each is drawn with for eyes at `eyes`, writing their instances only when that changes.
     fn place(&self, queue: &wgpu::Queue, eyes: Vec3) {
-        let details: Vec<Detail> = self.ferns.iter().map(|fern| fern.detail(eyes)).collect();
+        let details: Vec<Detail> = self
+            .hearts
+            .iter()
+            .map(|heart| Detail::seen(*heart, eyes))
+            .collect();
         let mut placed = self
             .placed
             .lock()

@@ -20,7 +20,7 @@ Each point carries how far it sways at most, its frond tips most, 14 cm on a tre
 - out of the views the backdrop keeps open, and the trail's viewpoints' sights of the river, the waterfall and the pool (`sights`);
 - a tree fern out of the anchors' rooms, one to eighteen workers fitting at each as the server lays them out (`clusters`), 0.4 m from each anchor's point or a metre below it, and leaving the agent room to come alongside anyone on the trail from 20 of 36 ways round them, or as many as before (`taken`).
 
-A tree fern is two solids (`Fern::solids`), its trunk and its crown with its skirt, which `trail::beside` adds to the server's farmyard solids, so that the agent, walls and panels keep clear of them; a ground fern is decoration, off every walkable surface, below knee to waist high, and needs none. Walkability is the surfaces the trail and the yard declare, which no fern touches.
+A tree fern is two solids (`Fern::solids`), its trunk and its crown with its skirt, which `trail::beside` adds to the server's farmyard solids, so that the agent, walls and panels keep clear of them; a ground fern is decoration, off every walkable surface, below knee to waist high, and needs none. Where participants walk is derived from what the yard and the trail draw as ground less what stands on it (`walkable`), and no fern stands on that ground nor, solid or not, cuts any of it: a tree fern's trunk stands beyond its clearance, and its crown reaches over it only high enough overhead to leave its room clear.
 
 ## The Quest budget
 

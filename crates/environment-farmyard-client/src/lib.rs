@@ -478,7 +478,9 @@ mod tests {
         let yard = tomori_environment_farmyard::layout::obstacles().len() + 7;
         let trail = tomori_environment_farmyard::trail::solids().len();
         let beside = tomori_environment_farmyard::trail::beside().len();
-        let take = |from: usize, to: usize| -> Vec<Obstacle> { all[from..to].to_vec() };
+        let take = |from: usize, to: usize| -> Vec<Obstacle> {
+            all[from..to].iter().filter(|o| low(o)).cloned().collect()
+        };
         vec![
             ("lost: yard", take(0, yard)),
             (
@@ -490,15 +492,22 @@ mod tests {
         ]
     }
 
-    /// Whether `point`, on the ground, is within the clearance of something the farmyard declares solid, where nobody
-    /// lands.
+    /// Whether `obstacle` reaches into the room above the yard's and the trail's ground, as only what does takes ground
+    /// from it: not a tree fern's crown high overhead, which participants walk beneath.
+    fn low(obstacle: &tomori_scene::locomotion::Obstacle) -> bool {
+        use tomori_environment_farmyard::trail;
+        obstacle.bottom() < tomori_environment::navmesh::HEADROOM + trail::LIFT + trail::EDGE
+    }
+
+    /// Whether `point`, on the ground, is within the clearance of something the farmyard declares solid standing on the
+    /// ground, where nobody lands.
     fn kept(point: glam::Vec2) -> bool {
         static OBSTACLES: std::sync::OnceLock<Vec<tomori_scene::locomotion::Obstacle>> =
             std::sync::OnceLock::new();
         OBSTACLES
             .get_or_init(tomori_environment_farmyard::walkable::obstacles)
             .iter()
-            .any(|obstacle| obstacle.keeps(point))
+            .any(|obstacle| low(obstacle) && obstacle.keeps(point))
     }
 
     /// How high the top of what `models` draw low down at `point` is, on the ground: the highest of their faces that
