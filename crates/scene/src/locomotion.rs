@@ -9,6 +9,7 @@ use crate::{anchors::Anchor, environment::Environment, pointing::Ray};
 mod outline;
 
 pub use outline::{CLEARANCE, FARTHEST, MOST_POINTS, Outline, OutlineError, SMALLEST_AREA};
+pub use tomori_environment::navmesh::{Navmesh, Obstacle};
 
 /// How far a snap turn turns, in radians.
 pub const SNAP_TURN: f32 = std::f32::consts::PI / 6.0;
@@ -53,7 +54,7 @@ pub const TALLEST_TARGET: f32 = 4.0;
 /// The most steps [`Surface::sector_triangles`] cuts a sector's sweep into.
 pub const MOST_SEGMENTS: usize = 1024;
 
-/// A horizontal surface a participant may land on, in the space's scene coordinates. Made with [`Surface::rectangle`], [`Surface::disc`], [`Surface::sector`] and [`Surface::polygon`], so that it can grow, as with colliders, without breaking:
+/// A surface a participant may land on, in the space's scene coordinates: horizontal, made with [`Surface::rectangle`], [`Surface::disc`], [`Surface::sector`] and [`Surface::polygon`], or the ground an environment draws, as triangles at their own heights, made with [`Surface::mesh`]; so that it can grow, as with colliders, without breaking:
 ///
 /// ```
 /// use glam::{Vec2, Vec3};
@@ -97,6 +98,16 @@ pub enum Surface {
     #[non_exhaustive]
     Polygon {
         outline: std::sync::Arc<Outline>,
+        origin: Vec3,
+        yaw: f32,
+    },
+    /// Ground as triangles, each at the heights it is drawn, such as [`Navmesh::derive`] derives from what an
+    /// environment draws as ground less what it declares solid, in the coordinates it was declared in, standing with
+    /// their origin at `origin` and turned `yaw` about the vertical, as it is carried into a space. Made with
+    /// [`Surface::mesh`].
+    #[non_exhaustive]
+    Mesh {
+        mesh: std::sync::Arc<Navmesh>,
         origin: Vec3,
         yaw: f32,
     },
@@ -227,6 +238,39 @@ impl Surface {
         })
     }
 
+    /// The ground `mesh` holds, at the heights its triangles are, as walkable as [`Navmesh::derive`] made it: where an
+    /// environment marks what it draws as ground and declares what is solid, so that where a participant lands is what
+    /// is drawn there and the two never disagree. A point within one of its triangles, seen from above, is on it,
+    /// where the highest triangle there is; a ray lands on the first it meets from above. Shared, not copied, as the
+    /// profile is carried into each space.
+    ///
+    /// ```
+    /// use glam::{Vec2, Vec3};
+    /// use tomori_scene::locomotion::{Locomotion, Navmesh, Obstacle, Surface};
+    /// use tomori_scene::pointing::Ray;
+    ///
+    /// // A yard 10 m square, drawn as two triangles, with a shed in it.
+    /// let at = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+    /// let yard = [
+    ///     [at(-5.0, -5.0), at(5.0, -5.0), at(5.0, 5.0)],
+    ///     [at(-5.0, -5.0), at(5.0, 5.0), at(-5.0, 5.0)],
+    /// ];
+    /// let shed = Obstacle::cuboid(Vec3::new(1.0, 0.0, -4.0), Vec3::new(4.0, 2.4, -2.0));
+    /// let ground = Surface::mesh(Navmesh::derive(yard, &[shed]));
+    /// assert!(ground.contains(Vec3::new(0.0, 0.0, 0.0)));
+    /// assert!(!ground.contains(Vec3::new(2.0, 0.0, -3.0)));
+    /// let profile = Locomotion::teleport(vec![ground]);
+    /// let ray = Ray::new(Vec3::new(0.0, 1.6, 0.0), Vec3::new(-1.0, -1.0, 0.0)).unwrap();
+    /// assert!(profile.landing(&ray).unwrap().distance(Vec3::new(-1.6, 0.0, 0.0)) < 1e-5);
+    /// ```
+    pub fn mesh(mesh: Navmesh) -> Self {
+        Self::Mesh {
+            mesh: std::sync::Arc::new(mesh),
+            origin: Vec3::ZERO,
+            yaw: 0.0,
+        }
+    }
+
     /// The surface, given in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
     /// turned with it.
     pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
@@ -262,16 +306,80 @@ impl Surface {
                 origin: carriage.place(*origin),
                 yaw: yaw + carriage.yaw(),
             },
+            Self::Mesh { mesh, origin, yaw } => Self::Mesh {
+                mesh: mesh.clone(),
+                origin: carriage.place(*origin),
+                yaw: yaw + carriage.yaw(),
+            },
         }
     }
 
-    /// The surface's height.
+    /// The surface's height; for a mesh, the lowest of its triangles' corners, or its origin's where it has none.
     pub fn height(&self) -> f32 {
         match self {
             Self::Rectangle { centre, .. }
             | Self::Disc { centre, .. }
             | Self::Sector { centre, .. } => centre.y,
             Self::Polygon { origin, .. } => origin.y,
+            Self::Mesh { mesh, origin, .. } => {
+                origin.y + mesh.bounds().map_or(0.0, |(low, _)| low.y)
+            }
+        }
+    }
+
+    /// The height of the floor it gives at `point`, seen from above: the highest of a mesh's triangles there, and
+    /// another surface's own height, or `None` where `point` is not on it.
+    pub fn height_at(&self, point: Vec3) -> Option<f32> {
+        match self {
+            Self::Mesh { mesh, origin, yaw } => mesh
+                .height_at(within(point, *origin, *yaw))
+                .map(|height| origin.y + height),
+            _ => self.contains(point).then(|| self.height()),
+        }
+    }
+
+    /// Whether someone may stand at `point` on it: on it, seen from above, on a floor within [`STANDING`] of
+    /// `point`'s height, any of a mesh's where its triangles overlap.
+    fn stands(&self, point: Vec3) -> bool {
+        match self {
+            Self::Mesh { mesh, origin, yaw } => mesh
+                .heights(within(point, *origin, *yaw))
+                .any(|height| (origin.y + height - point.y).abs() <= STANDING),
+            _ => (self.height() - point.y).abs() <= STANDING && self.contains(point),
+        }
+    }
+
+    /// How far along `ray` it meets the surface, at least nothing and less than `before`: from above, or, where
+    /// `either_way`, from either side. A ray that runs level meets no horizontal surface.
+    fn meets(&self, ray: &Ray, before: f32, either_way: bool) -> Option<f32> {
+        match self {
+            Self::Mesh { mesh, origin, yaw } => {
+                let turn = Quat::from_rotation_y(-*yaw);
+                mesh.meets(
+                    turn * (ray.origin - *origin),
+                    turn * ray.direction,
+                    before,
+                    either_way,
+                )
+                .filter(|distance| *distance < before)
+            }
+            _ => {
+                if ray.direction.y.abs() < f32::EPSILON || !(either_way || ray.direction.y < 0.0) {
+                    return None;
+                }
+                let distance = (self.height() - ray.origin.y) / ray.direction.y;
+                (distance >= 0.0 && distance < before && self.contains(ray.at(distance)))
+                    .then_some(distance)
+            }
+        }
+    }
+
+    /// A mesh's ground, in the coordinates it was declared in, wherever the surface has been carried, for whoever
+    /// draws it or paths across it; `None` for the other shapes.
+    pub fn navmesh(&self) -> Option<&Navmesh> {
+        match self {
+            Self::Mesh { mesh, .. } => Some(mesh),
+            _ => None,
         }
     }
 
@@ -369,6 +477,9 @@ impl Surface {
                 origin,
                 yaw,
             } => outline.contains(within(point, *origin, *yaw)),
+            Self::Mesh { mesh, origin, yaw } => {
+                mesh.heights(within(point, *origin, *yaw)).next().is_some()
+            }
         }
     }
 }
@@ -484,10 +595,7 @@ impl Pad {
             && self.radius > 0.0
             && self.radius <= WIDEST_PAD
             && self.yaw.is_none_or(f32::is_finite)
-            && surfaces.iter().any(|surface| {
-                (surface.height() - self.centre.y).abs() <= STANDING
-                    && surface.contains(self.centre)
-            })
+            && surfaces.iter().any(|surface| surface.stands(self.centre))
     }
 }
 
@@ -623,10 +731,7 @@ impl Target {
             && self.height <= TALLEST_TARGET
             && self.yaw.is_none_or(f32::is_finite)
             && (self.arrives_on_top()
-                || surfaces.iter().any(|surface| {
-                    (surface.height() - self.arrival.y).abs() <= STANDING
-                        && surface.contains(self.arrival)
-                }))
+                || surfaces.iter().any(|surface| surface.stands(self.arrival)))
     }
 }
 
@@ -802,13 +907,9 @@ impl Locomotion {
     /// Whether a declared surface crosses `ray`, in either direction, before `distance` along it: what hides a pad
     /// beneath a deck from above, and one on top of it from below.
     pub(crate) fn surface_crossed(&self, ray: &Ray, distance: f32) -> bool {
-        if ray.direction.y.abs() < f32::EPSILON {
-            return false;
-        }
-        self.surfaces().iter().any(|surface| {
-            let crossed = (surface.height() - ray.origin.y) / ray.direction.y;
-            crossed >= 0.0 && crossed < distance && surface.contains(ray.at(crossed))
-        })
+        self.surfaces()
+            .iter()
+            .any(|surface| surface.meets(ray, distance, true).is_some())
     }
 
     /// How far along `ray` it first meets a surface from above, however near or far, and where, at the surface's
@@ -820,10 +921,19 @@ impl Locomotion {
         self.surfaces()
             .iter()
             .filter_map(|surface| {
-                let distance = (surface.height() - ray.origin.y) / ray.direction.y;
+                let distance = surface.meets(ray, f32::INFINITY, false)?;
                 let point = ray.at(distance);
-                (distance >= 0.0 && surface.contains(point))
-                    .then_some((distance, Vec3::new(point.x, surface.height(), point.z)))
+                // At the height of the floor it meets there, as declared or drawn, rather than as the ray rounds it:
+                // of a mesh's, the one nearest where the ray is.
+                let height = match surface {
+                    Surface::Mesh { mesh, origin, yaw } => mesh
+                        .heights(within(point, *origin, *yaw))
+                        .map(|height| origin.y + height)
+                        .min_by(|a, b| (a - point.y).abs().total_cmp(&(b - point.y).abs()))
+                        .unwrap_or(point.y),
+                    _ => surface.height(),
+                };
+                Some((distance, point.with_y(height)))
             })
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
     }
@@ -836,10 +946,8 @@ impl Locomotion {
             Self::Fly { .. } => BACKSTEP,
             Self::Teleport { surfaces, .. } => {
                 let walkable = |distance: f32| {
-                    let point = head + back * distance;
-                    surfaces.iter().any(|surface| {
-                        (surface.height() - floor).abs() <= STANDING && surface.contains(point)
-                    })
+                    let point = (head + back * distance).with_y(floor);
+                    surfaces.iter().any(|surface| surface.stands(point))
                 };
                 let strides = (BACKSTEP / BACKSTEP_STRIDE).round() as u32;
                 (1..=strides)
@@ -1943,6 +2051,105 @@ mod tests {
         assert_eq!(Locomotion::None.carried(&carriage), Locomotion::None);
         let discs = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 1.0)]).carried(&carriage);
         assert!(discs.surfaces()[0].contains(Vec3::new(0.0, 0.0, -8.5)));
+    }
+
+    /// Ground as an environment draws it: a yard 10 m square at its earth's height, a shed standing in it, and a ramp
+    /// rising 1 m over 4 m, about 14°, up to a deck 1 m up beyond the yard along −Z.
+    fn drawn_ground() -> Surface {
+        let at = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let ground = [
+            [at(-5.0, 0.0, 5.0), at(5.0, 0.0, 5.0), at(5.0, 0.0, -5.0)],
+            [at(-5.0, 0.0, 5.0), at(5.0, 0.0, -5.0), at(-5.0, 0.0, -5.0)],
+            [at(-1.0, 0.0, -5.0), at(1.0, 0.0, -5.0), at(1.0, 1.0, -9.0)],
+            [at(-1.0, 0.0, -5.0), at(1.0, 1.0, -9.0), at(-1.0, 1.0, -9.0)],
+            [at(-3.0, 1.0, -9.0), at(3.0, 1.0, -9.0), at(3.0, 1.0, -12.0)],
+            [
+                at(-3.0, 1.0, -9.0),
+                at(3.0, 1.0, -12.0),
+                at(-3.0, 1.0, -12.0),
+            ],
+        ];
+        let shed = Obstacle::cuboid(Vec3::new(2.0, 0.0, 1.0), Vec3::new(4.0, 2.4, 3.0));
+        Surface::mesh(Navmesh::derive(ground, &[shed]))
+    }
+
+    #[test]
+    fn ground_drawn_as_triangles_is_landed_on_at_the_height_it_is_drawn_and_stepped_back_along() {
+        let ground = drawn_ground();
+        assert_eq!(ground.height(), 0.0);
+        assert_eq!(ground.navmesh().map(Navmesh::is_empty), Some(false));
+        assert_eq!(Surface::disc(Vec3::ZERO, 1.0).navmesh(), None);
+        assert_eq!(ground.height_at(Vec3::new(0.0, 5.0, 0.0)), Some(0.0));
+        assert!((ground.height_at(Vec3::new(0.0, 0.0, -7.0)).unwrap() - 0.5).abs() < 1e-5);
+        assert_eq!(ground.height_at(Vec3::new(3.0, 0.0, 2.0)), None);
+        assert_eq!(Surface::disc(Vec3::Y, 1.0).height_at(Vec3::ZERO), Some(1.0));
+        assert_eq!(Surface::disc(Vec3::Y, 1.0).height_at(Vec3::X * 2.0), None);
+        let profile = Locomotion::teleport(vec![ground.clone()]);
+        // Onto the yard, up the ramp and onto the deck, each where it is drawn; never into the shed.
+        let eyes = Vec3::new(0.0, 1.6, 4.0);
+        for (towards, height) in [
+            (Vec3::new(-2.0, 0.0, 0.0), 0.0),
+            (Vec3::new(0.0, 0.25, -6.0), 0.25),
+            (Vec3::new(1.5, 1.0, -10.0), 1.0),
+        ] {
+            let landing = profile.landing(&ray(eyes, towards)).expect("lands");
+            assert!(close(landing, towards), "{landing}");
+            assert!((landing.y - height).abs() < 1e-5, "{landing}");
+        }
+        assert_eq!(profile.landing(&ray(eyes, Vec3::new(3.0, 0.0, 2.0))), None);
+        // A backstep goes along the floor as far as it stays within a centimetre of the floor's height: across the
+        // yard, but not off its edge, nor up the ramp.
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let back = profile.backstep(head, Vec3::NEG_Z, 0.0).unwrap();
+        assert!(close(back, Vec3::new(0.0, 0.0, BACKSTEP)));
+        let edge = profile
+            .backstep(Vec3::new(0.0, 1.6, 4.7), Vec3::NEG_Z, 0.0)
+            .unwrap();
+        assert!((edge.z - 0.3).abs() < 1e-4, "{edge}");
+        let foot = Vec3::new(0.0, 1.6, -4.9);
+        assert_eq!(profile.backstep(foot, Vec3::Z, 0.0), None);
+        // A pad on it, at its height, may be used; one floating above it may not.
+        let pads = profile.clone().with_pads([
+            [
+                Pad::at(Vec3::new(-3.0, 0.0, 3.0)),
+                Pad::at(Vec3::new(0.0, 1.0, -11.0)),
+            ],
+            [
+                Pad::at(Vec3::new(-3.0, 0.5, 3.0)),
+                Pad::at(Vec3::new(0.0, 1.0, -11.0)),
+            ],
+        ]);
+        assert_eq!(pads.pads().count(), 1);
+        // It hides a pad beneath it from above, as a deck does.
+        assert!(profile.surface_crossed(
+            &ray(Vec3::new(0.0, 3.0, -10.0), Vec3::new(0.0, -1.0, -10.0)),
+            5.0
+        ));
+        assert!(!profile.surface_crossed(
+            &ray(Vec3::new(0.0, 3.0, -10.0), Vec3::new(0.0, 2.0, -10.0)),
+            1.5
+        ));
+        assert!(profile.surface_crossed(
+            &ray(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            5.0
+        ));
+        // Carried into a space whose arrival is 8 m along +X facing the origin, it stands 8 m ahead, turned.
+        let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0, 0.0, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        let carried = profile.carried(&carriage);
+        let surface = &carried.surfaces()[0];
+        assert_eq!(surface.navmesh(), ground.navmesh());
+        let shed = carriage.place(Vec3::new(3.0, 0.0, 2.0));
+        assert!(!surface.contains(shed) && surface.contains(carriage.place(Vec3::ZERO)));
+        let deck = carriage.place(Vec3::new(1.5, 1.0, -10.0));
+        let landing = carried
+            .landing(&ray(Vec3::new(0.0, 1.6, 0.0), deck))
+            .expect("lands");
+        assert!(close(landing, deck), "{landing} {deck}");
+        // A mesh with no ground holds nothing.
+        let empty = Surface::mesh(Navmesh::from_triangles([]));
+        assert_eq!(empty.height(), 0.0);
+        assert!(!empty.contains(Vec3::ZERO));
     }
 
     /// An L-shaped deck 3 m up: 4 m square, to the right of home, its near right quarter cut away.

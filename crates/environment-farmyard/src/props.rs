@@ -128,7 +128,11 @@ fn fence_around(shapes: &mut Shapes) {
             let lean = (scatter(index as u32 * 97 + post) - 0.5) * 0.06;
             shapes.cuboid(
                 at + Vec3::Y * height * 0.5,
-                Vec3::new(0.06, height * 0.5, 0.06),
+                Vec3::new(
+                    layout::FENCE_POST * 0.5,
+                    height * 0.5,
+                    layout::FENCE_POST * 0.5,
+                ),
                 Quat::from_rotation_z(lean),
                 palette::WEATHERED * (0.9 + scatter(post) * 0.2),
             );
@@ -143,10 +147,11 @@ fn fence_around(shapes: &mut Shapes) {
         }
     }
     // The gate's posts, taller, and the lantern's arm.
+    let gate = layout::GATE_POST * 0.5;
     for x in layout::GATE {
         shapes.block(
-            Vec3::new(x - 0.08, 0.0, fence.high.y - 0.08),
-            Vec3::new(x + 0.08, height * 1.35, fence.high.y + 0.08),
+            Vec3::new(x - gate, 0.0, fence.high.y - gate),
+            Vec3::new(x + gate, layout::GATE_HEIGHT, fence.high.y + gate),
             palette::DARK_WOOD,
         );
     }
@@ -411,35 +416,7 @@ fn noticeboard(shapes: &mut Shapes) {
 
 /// The yard, as a model of one node whose mesh draws it all.
 pub fn model() -> Model {
-    let mut shapes = Shapes::new();
-    let mut glass = Shapes::new();
-    // The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
-    // open, and the packed earth inside the fence, a little above it.
-    crate::backdrop::facing(
-        &mut shapes,
-        &crate::backdrop::meadow(),
-        Vec3::Y,
-        palette::GRASS,
-    );
-    let fence = layout::FENCE;
-    shapes.polygon(
-        &[
-            Vec3::new(fence.low.x, 0.0, fence.high.y),
-            Vec3::new(fence.high.x, 0.0, fence.high.y),
-            Vec3::new(fence.high.x, 0.0, fence.low.y),
-            Vec3::new(fence.low.x, 0.0, fence.low.y),
-        ],
-        palette::EARTH,
-    );
-    path(&mut shapes);
-    fence_around(&mut shapes);
-    trough(&mut shapes);
-    feeder(&mut shapes);
-    hay(&mut shapes);
-    noticeboard(&mut shapes);
-    crate::workbench::build(&mut shapes, &mut glass);
-    trees(&mut shapes);
-    lantern(&mut shapes, &mut glass, layout::GATE_LANTERN);
+    let (shapes, glass) = yard();
     Model::built(
         vec![Node::new("yard", Transform::IDENTITY).with_mesh(0)],
         vec![0],
@@ -451,6 +428,49 @@ pub fn model() -> Model {
         &Limits::default(),
     )
     .expect("the yard is built within the limits")
+}
+
+/// What the yard draws as ground, which participants walk on: its packed earth, inside the fence, each triangle as
+/// [`model`] draws it. The path's stones on it are walked over on the earth, as they stand too little proud of it to
+/// hide the ring where a teleport lands.
+pub fn ground() -> Vec<[Vec3; 3]> {
+    yard().0.walkable().to_vec()
+}
+
+/// The yard's shapes, lit and glowing.
+fn yard() -> (Shapes, Shapes) {
+    let mut shapes = Shapes::new();
+    let mut glass = Shapes::new();
+    // The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
+    // open, and the packed earth inside the fence, a little above it.
+    crate::backdrop::facing(
+        &mut shapes,
+        &crate::backdrop::meadow(),
+        Vec3::Y,
+        palette::GRASS,
+    );
+    let fence = layout::FENCE;
+    shapes.ground(|shapes| {
+        shapes.polygon(
+            &[
+                Vec3::new(fence.low.x, 0.0, fence.high.y),
+                Vec3::new(fence.high.x, 0.0, fence.high.y),
+                Vec3::new(fence.high.x, 0.0, fence.low.y),
+                Vec3::new(fence.low.x, 0.0, fence.low.y),
+            ],
+            palette::EARTH,
+        )
+    });
+    path(&mut shapes);
+    fence_around(&mut shapes);
+    trough(&mut shapes);
+    feeder(&mut shapes);
+    hay(&mut shapes);
+    noticeboard(&mut shapes);
+    crate::workbench::build(&mut shapes, &mut glass);
+    trees(&mut shapes);
+    lantern(&mut shapes, &mut glass, layout::GATE_LANTERN);
+    (shapes, glass)
 }
 
 #[cfg(test)]

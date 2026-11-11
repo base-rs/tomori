@@ -4,28 +4,19 @@
 use super::*;
 use crate::trail;
 
-/// Where the eyes may be: above every corner of the ground participants land on, in the yard and along the trail, its
-/// band's corners and round its clearings.
+/// Where the eyes may be: above every corner of the ground participants land on, in the yard, along the trail and
+/// round its clearings, and of the way out through the gate.
 fn eyes() -> Vec<Vec3> {
-    let yard = layout::open_ground().into_iter().flat_map(|footprint| {
-        [
-            Vec2::new(footprint.low.x, footprint.low.y),
-            Vec2::new(footprint.low.x, footprint.high.y),
-            Vec2::new(footprint.high.x, footprint.low.y),
-            Vec2::new(footprint.high.x, footprint.high.y),
-        ]
-    });
-    let trail = trail::outlines()
+    let ground = crate::walkable::navmesh()
+        .triangles()
+        .iter()
+        .flatten()
+        .map(|corner| Vec2::new(corner.x, corner.z));
+    let way_out = trail::way_out()
         .into_iter()
         .flat_map(|(outline, _)| outline);
-    let clearings = trail::clearings().into_iter().flat_map(|(middle, radius)| {
-        (0..12).map(move |step| {
-            let yaw = step as f32 / 12.0 * TAU;
-            middle + Vec2::new(yaw.sin(), yaw.cos()) * radius
-        })
-    });
-    yard.chain(trail)
-        .chain(clearings)
+    ground
+        .chain(way_out)
         .map(|corner| Vec3::new(corner.x, tomori_environment::sightlines::EYES, corner.y))
         .collect()
 }
@@ -167,14 +158,18 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
         beyond_from_the_rock(plant.at + Vec3::Y * height);
         // Nor on the trail, beyond the fence, where participants walk.
         assert!(from_trail(at) > reach + trail::HALF, "{plant:?}");
-        for walkable in layout::open_ground() {
-            let solid = plant.solid();
-            let (low, high) = (solid.low, solid.high);
-            assert!(!walkable.overlaps(&layout::Footprint::new(
-                [low[0], low[2]],
-                [high[0], high[2]]
-            )));
-        }
+        let solid = plant.solid();
+        let footprint =
+            layout::Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]]);
+        assert!(
+            crate::walkable::navmesh()
+                .triangles()
+                .iter()
+                .flatten()
+                .all(|corner| !footprint.contains(Vec2::new(corner.x, corner.z))),
+            "{plant:?}"
+        );
+        assert_eq!(crate::walkable::height_at(at), None, "{plant:?}");
     }
     // And the pines with them, out of the water.
     for (base, height) in props::pines() {

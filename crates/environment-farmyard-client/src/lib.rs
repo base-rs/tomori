@@ -17,26 +17,20 @@ pub use tomori_environment_farmyard::{ID, LABEL, LICENSE, VERSION, chicken, coop
 /// The heading the chicken's licence notice, [`LICENSE`], is shown under with a build's other bundled assets'.
 pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple Williams (CC BY 4.0)";
 
-/// Where participants may travel in the farmyard: teleporting onto the yard's ground, clear of what stands in it, and
-/// along the trail round the outside of the fence, its band and its clearings, which join the yard's earth through the
-/// gate, each at the height it is drawn, so that whoever stands or lands there, and the ring where they would, is on
-/// what is drawn; turning in snaps; between the yard and the lookout at the trail's far end by a pair of teleport
-/// pads; and onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat. See Tomori's
-/// `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
+/// Where participants may travel in the farmyard: teleporting onto the ground it draws, the yard's earth and the
+/// trail's track and clearings round the outside of the fence, clear of what stands on it, as
+/// `tomori-environment-farmyard`'s `walkable` derives it, at the heights it is drawn, so that whoever stands or lands
+/// there, and the ring where they would, is on what is drawn; through the gate, on the way out declared by hand, and
+/// about the campsite's fire; turning in snaps; between the yard and the lookout at the trail's far end by a pair of
+/// teleport pads; and onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat. See
+/// Tomori's `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
 pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
     use tomori_scene::locomotion::{Locomotion, Pad, Surface, Target};
-    let mut surfaces: Vec<Surface> = layout::walkable()
-        .into_iter()
-        .map(|(centre, size)| Surface::rectangle(centre, size))
-        .collect();
-    surfaces.extend(trail::outlines().into_iter().map(|(outline, height)| {
-        Surface::polygon(outline, height).expect("the trail's outlines are simple")
-    }));
-    surfaces.extend(trail::clearings().into_iter().map(|(middle, radius)| {
-        Surface::disc(
-            glam::Vec3::new(middle.x, trail::CLEARING_HEIGHT, middle.y),
-            radius,
-        )
+    let mut surfaces = vec![Surface::mesh(
+        tomori_environment_farmyard::walkable::navmesh().clone(),
+    )];
+    surfaces.extend(trail::way_out().into_iter().map(|(outline, height)| {
+        Surface::polygon(outline, height).expect("the way out's outlines are simple")
     }));
     // About the campsite's fire, clear of its stones and seats, on its clearing as drawn.
     surfaces.extend(
@@ -165,20 +159,23 @@ mod tests {
         let Locomotion::Teleport { surfaces, .. } = &profile else {
             unreachable!("the farmyard teleports");
         };
-        // The yard's rectangles, the trail's stretches and its way out, and its clearings, all within the centimetre a
-        // backstep goes up or down of the yard's earth.
+        // The ground the farmyard draws, the trail's way out and the places to stand about the campsite's fire, all
+        // within the centimetre a backstep goes up or down of the yard's earth, but the track's edges, which rise to
+        // their crests.
         assert_eq!(
             surfaces.len(),
-            layout::open_ground().len()
-                + trail::outlines().len()
-                + trail::clearings().len()
-                + tomori_environment_farmyard::campsite::standing().len()
+            1 + trail::way_out().len() + tomori_environment_farmyard::campsite::standing().len()
         );
-        assert!(
-            surfaces
-                .iter()
-                .all(|surface| (0.0..0.009).contains(&surface.height()))
-        );
+        for surface in surfaces {
+            match surface.navmesh() {
+                Some(mesh) => {
+                    assert!(mesh.triangles().iter().flatten().all(|corner| {
+                        (-1e-6..=trail::LIFT + trail::EDGE + 1e-6).contains(&corner.y)
+                    }))
+                }
+                None => assert!((0.0..0.009).contains(&surface.height())),
+            }
+        }
         let on = |point: Vec2| {
             surfaces
                 .iter()
@@ -188,8 +185,7 @@ mod tests {
         let floor = |point: Vec2| {
             surfaces
                 .iter()
-                .filter(|surface| surface.contains(Vec3::new(point.x, 0.0, point.y)))
-                .map(|surface| surface.height())
+                .filter_map(|surface| surface.height_at(Vec3::new(point.x, 0.0, point.y)))
                 .fold(f32::NEG_INFINITY, f32::max)
         };
         // From where participants arrive, out through the gate and round the whole loop back to it, every 5 cm, across
@@ -221,14 +217,23 @@ mod tests {
             walked += length;
         }
         assert!(walked > 60.0, "{walked}");
-        // Each station's clearing too, all of it.
+        // Each station's clearing too, all of what it draws, nine-sided, to within a centimetre of its sides, but
+        // within the clearance of its post, which stands at its edge, where nobody lands.
+        let edge = trail::CLEARING * (std::f32::consts::PI / 9.0).cos() - 0.01;
         for station in &trail::STATIONS {
-            for step in 0..12 {
-                let yaw = step as f32 / 12.0 * std::f32::consts::TAU;
-                let edge =
-                    station.clearing() + Vec2::new(yaw.sin(), yaw.cos()) * (trail::CLEARING - 0.01);
-                assert!(on(edge), "{}", station.name);
+            let mut open = 0;
+            for step in 0..36 {
+                let yaw = step as f32 / 36.0 * std::f32::consts::TAU;
+                let at = station.clearing() + Vec2::new(yaw.sin(), yaw.cos()) * edge;
+                if kept(at) {
+                    assert!(!on(at), "{} {at}", station.name);
+                } else {
+                    assert!(on(at), "{} {at}", station.name);
+                    open += 1;
+                }
             }
+            assert!(open >= 24, "{} {open}", station.name);
+            assert!(on(station.clearing()), "{}", station.name);
         }
         // Stepping back along it, either way, from where one stands, steps the whole way everywhere, out through the gate
         // and back in, from one stretch to the next, so that nothing stops there.
@@ -308,6 +313,194 @@ mod tests {
         assert!((beside.x - layout::FEEDER.x).abs() < 0.5 && beside.z < layout::FEEDER.y - 1.0);
     }
 
+    /// Where participants landed before the farmyard's ground was derived from what it draws, as November 2026's
+    /// hand-laid surfaces had it (#353): the height of the highest floor at `point`, on the ground, or `None`. The
+    /// yard's earth, 0.4 m inside the fence and beyond a quarter of a metre of each of the yard's obstacles; the loop's
+    /// band, crest to crest, in four overlapping stretches; the way out; each clearing, a disc; and the places to stand
+    /// about the campsite's fire.
+    fn before() -> impl Fn(glam::Vec2) -> Option<f32> {
+        use glam::{Vec2, Vec3};
+        use tomori_scene::locomotion::Surface;
+
+        use super::{layout, trail};
+        let yard = layout::FENCE.grown(-layout::FENCE_CLEARANCE);
+        let obstacles = layout::obstacles();
+        let earth = move |point: Vec2| {
+            yard.contains(point)
+                && !obstacles.iter().any(|obstacle| {
+                    let kept = obstacle.grown(layout::CLEARANCE);
+                    point.cmpgt(kept.low).all() && point.cmplt(kept.high).all()
+                })
+        };
+        let count = trail::centreline().len();
+        let mut surfaces: Vec<Surface> = (0..4)
+            .map(|stretch| {
+                let sides: Vec<(Vec2, Vec2)> = (stretch * count / 4
+                    ..=(stretch + 1) * count / 4 + 1)
+                    .map(|index| {
+                        let (middle, _, outward) = trail::frame(index);
+                        (
+                            middle + outward * trail::HALF,
+                            middle - outward * trail::HALF,
+                        )
+                    })
+                    .collect();
+                let outline = sides
+                    .iter()
+                    .map(|(outer, _)| *outer)
+                    .chain(sides.iter().rev().map(|(_, inner)| *inner));
+                Surface::polygon(outline, trail::HEIGHT).unwrap()
+            })
+            .collect();
+        surfaces.extend(
+            trail::way_out()
+                .into_iter()
+                .map(|(outline, height)| Surface::polygon(outline, height).unwrap()),
+        );
+        let disc = |(middle, radius): (Vec2, f32)| {
+            Surface::disc(
+                Vec3::new(middle.x, trail::CLEARING_HEIGHT, middle.y),
+                radius,
+            )
+        };
+        surfaces.extend(trail::clearings().into_iter().map(disc));
+        surfaces.extend(
+            tomori_environment_farmyard::campsite::standing()
+                .into_iter()
+                .map(disc),
+        );
+        move |point| {
+            surfaces
+                .iter()
+                .filter_map(|surface| surface.height_at(Vec3::new(point.x, 0.0, point.y)))
+                .chain(earth(point).then_some(0.0))
+                .reduce(f32::max)
+        }
+    }
+
+    #[test]
+    fn the_derived_ground_is_where_the_hand_laid_surfaces_were_but_what_stands_on_it_and_what_is_not_drawn()
+     {
+        use glam::{Vec2, Vec3};
+        use tomori_scene::locomotion::Locomotion;
+
+        use super::trail;
+        let profile = super::locomotion();
+        let Locomotion::Teleport { surfaces, .. } = &profile else {
+            unreachable!("the farmyard teleports");
+        };
+        let after = |point: Vec2| {
+            surfaces
+                .iter()
+                .filter_map(|surface| surface.height_at(Vec3::new(point.x, 0.0, point.y)))
+                .reduce(f32::max)
+        };
+        let (before, groups) = (before(), obstacle_groups());
+        let mut differences: std::collections::BTreeMap<&str, (u32, Vec<Vec2>)> =
+            Default::default();
+        let (mut both, mut neither) = (0, 0);
+        for column in 0..=240 {
+            for row in 0..=240 {
+                let point =
+                    Vec2::new(-12.0, -18.0) + Vec2::new(column as f32, row as f32) * 0.1 + 0.003;
+                let middle = trail::from_middle(point);
+                let drawn_clearing = trail::clearings().iter().any(|(centre, radius)| {
+                    point.distance(*centre) <= radius * (std::f32::consts::PI / 9.0).cos()
+                });
+                let kept_by = groups
+                    .iter()
+                    .find(|(_, obstacles)| obstacles.iter().any(|obstacle| obstacle.keeps(point)))
+                    .map(|(name, _)| *name);
+                let (old, new) = (before(point), after(point));
+                let same = match (old, new) {
+                    (Some(old), Some(new)) => (old - new).abs() < 1e-3,
+                    (old, new) => old.is_none() && new.is_none(),
+                };
+                if same {
+                    neither += u32::from(old.is_none());
+                    both += u32::from(old.is_some());
+                    continue;
+                }
+                let lost = old.is_some() && new.is_none();
+                let kind = [
+                    (
+                        "higher: up the track's edge",
+                        old.is_some()
+                            && new.is_some_and(|new| new > trail::HEIGHT)
+                            && (trail::HALF - 0.08..=trail::HALF).contains(&middle),
+                    ),
+                    (kept_by.unwrap_or("lost: other"), lost && kept_by.is_some()),
+                    (
+                        "lost: undrawn clearing",
+                        lost && kept_by.is_none() && !drawn_clearing && middle > trail::HALF,
+                    ),
+                ]
+                .into_iter()
+                .find(|(_, is)| *is)
+                .map_or("other", |(kind, _)| kind);
+                let entry = differences.entry(kind).or_default();
+                entry.0 += 1;
+                if entry.1.len() < 12 {
+                    entry.1.push(point);
+                }
+            }
+        }
+        // Run with `--nocapture` for the table.
+        println!("{both} points the same, {neither} walkable neither before nor after");
+        for (kind, (count, points)) in &differences {
+            println!("{kind}: {count}, such as {points:?}");
+        }
+        // The yard is as it was, and so is the rest of the trail, but three kinds of ground, each better: up the
+        // track's edges, towards their crests, where the ring had been drawn beneath the edge, now on it; within the
+        // clearance of a station's post and plaque, which participants had landed in, or on; and beyond what a
+        // clearing draws, its nine sides within the disc it had been declared as. Nowhere is walkable that was not.
+        assert!(both > 16000, "{both}");
+        let kinds: Vec<&str> = differences.keys().copied().collect();
+        assert!(
+            kinds.iter().all(|kind| [
+                "higher: up the track's edge",
+                "lost: trail's posts, seat and rock",
+                "lost: undrawn clearing"
+            ]
+            .contains(kind)),
+            "{kinds:?}"
+        );
+        let count = |kind: &str| differences.get(kind).map_or(0, |(count, _)| *count);
+        assert!(count("higher: up the track's edge") < 1000);
+        assert!(count("lost: trail's posts, seat and rock") < 300);
+        assert!(count("lost: undrawn clearing") < 60);
+    }
+
+    /// What the farmyard declares solid, in groups, each named as the ground lost to it is in the table of differences.
+    fn obstacle_groups() -> Vec<(&'static str, Vec<tomori_scene::locomotion::Obstacle>)> {
+        use tomori_scene::locomotion::Obstacle;
+        let all = tomori_environment_farmyard::walkable::obstacles();
+        let yard = tomori_environment_farmyard::layout::obstacles().len() + 7;
+        let trail = tomori_environment_farmyard::trail::solids().len();
+        let beside = tomori_environment_farmyard::trail::beside().len();
+        let take = |from: usize, to: usize| -> Vec<Obstacle> { all[from..to].to_vec() };
+        vec![
+            ("lost: yard", take(0, yard)),
+            (
+                "lost: trail's posts, seat and rock",
+                take(yard, yard + trail),
+            ),
+            ("lost: plants", take(yard + trail, yard + trail + beside)),
+            ("lost: campsite", take(yard + trail + beside, all.len())),
+        ]
+    }
+
+    /// Whether `point`, on the ground, is within the clearance of something the farmyard declares solid, where nobody
+    /// lands.
+    fn kept(point: glam::Vec2) -> bool {
+        static OBSTACLES: std::sync::OnceLock<Vec<tomori_scene::locomotion::Obstacle>> =
+            std::sync::OnceLock::new();
+        OBSTACLES
+            .get_or_init(tomori_environment_farmyard::walkable::obstacles)
+            .iter()
+            .any(|obstacle| obstacle.keeps(point))
+    }
+
     /// How high the top of what `models` draw low down at `point` is, on the ground: the highest of their faces that
     /// face up, within 3 cm of the earth, over it, as the trail's track, its clearings and the yard's earth are, and
     /// none of what stands on them, such as a post or the seat.
@@ -379,7 +572,11 @@ mod tests {
                             at.distance(from.lerp(to, t))
                         })
                         .fold(f32::INFINITY, f32::min);
-                    if beyond > trail::HALF + 0.2 {
+                    // Within the clearance of a station's post, which stands at its clearing's edge, nobody lands.
+                    if kept(at) {
+                        let ray = Ray::new(Vec3::new(at.x, 2.0, at.y), -Vec3::Y).unwrap();
+                        assert_eq!(profile.landing(&ray), None, "{at}");
+                    } else if beyond > trail::HALF + 0.2 {
                         assert_eq!(check(at), trail::CLEARING_HEIGHT, "{at}");
                     }
                 }
