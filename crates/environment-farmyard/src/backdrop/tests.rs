@@ -2,21 +2,43 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
+use crate::trail;
 
-/// Where the eyes may be in the yard: above every corner of the ground participants land on.
+/// Where the eyes may be: above every corner of the ground participants land on, in the yard and along the trail, its
+/// band's corners and round its clearings.
 fn eyes() -> Vec<Vec3> {
-    layout::WALKABLE
-        .iter()
-        .flat_map(|footprint| {
-            [
-                Vec2::new(footprint.low.x, footprint.low.y),
-                Vec2::new(footprint.low.x, footprint.high.y),
-                Vec2::new(footprint.high.x, footprint.low.y),
-                Vec2::new(footprint.high.x, footprint.high.y),
-            ]
+    let yard = layout::WALKABLE.iter().flat_map(|footprint| {
+        [
+            Vec2::new(footprint.low.x, footprint.low.y),
+            Vec2::new(footprint.low.x, footprint.high.y),
+            Vec2::new(footprint.high.x, footprint.low.y),
+            Vec2::new(footprint.high.x, footprint.high.y),
+        ]
+    });
+    let trail = trail::outlines().into_iter().flatten();
+    let clearings = trail::clearings().into_iter().flat_map(|(middle, radius)| {
+        (0..12).map(move |step| {
+            let yaw = step as f32 / 12.0 * TAU;
+            middle + Vec2::new(yaw.sin(), yaw.cos()) * radius
         })
+    });
+    yard.chain(trail)
+        .chain(clearings)
         .map(|corner| Vec3::new(corner.x, tomori_environment::sightlines::EYES, corner.y))
         .collect()
+}
+
+/// How far `point` is from the trail's middle, on the ground.
+fn from_trail(point: Vec2) -> f32 {
+    let line = trail::centreline();
+    (0..line.len())
+        .map(|index| {
+            let (from, to) = (line[index], line[(index + 1) % line.len()]);
+            let along = to - from;
+            let t = ((point - from).dot(along) / along.length_squared()).clamp(0.0, 1.0);
+            point.distance(from + along * t)
+        })
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// How far `point` is from the fence, on the ground, outside it.
@@ -35,7 +57,7 @@ const FAR: f32 = 50.0;
 fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
     let eyes = eyes();
     // The foothills' ground: none of it within 2.5 m of the fence, its edge level with the meadow, and all of it within
-    // the far plane from anywhere participants land.
+    // the far plane from anywhere participants land, in the yard and along the trail.
     let foothills = model();
     let ground = &foothills.meshes[0].primitives[0];
     for position in &ground.positions {
@@ -55,8 +77,8 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
     // Inside the first ring is the meadow, level.
     assert_eq!(super::ground(BACKDROP_CENTRE), 0.0);
     assert_eq!(super::ground(Vec2::new(5.0, 1.6)), 0.0);
-    // Every plant at least 3 m beyond the fence, standing on the ground, none in the way in through the gate, and its top
-    // within the far plane.
+    // Every plant at least 3 m beyond the fence, standing on the ground, none in the way in through the gate nor on the
+    // trail, and its top within the far plane.
     for plant in plants() {
         let (reach, height) = plant.size();
         let at = Vec2::new(plant.at.x, plant.at.z);
@@ -70,6 +92,8 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
                 "{plant:?}"
             );
         }
+        // Nor on the trail, beyond the fence, where participants walk.
+        assert!(from_trail(at) > reach + trail::HALF, "{plant:?}");
         for walkable in layout::WALKABLE {
             let solid = plant.solid();
             let (low, high) = (solid.low, solid.high);
@@ -183,7 +207,7 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
         assert!(distance < 1e-4 && nearest.distance(*point) < 1e-4);
     }
     // It runs round the yard, never nearer the fence than 7.5 m.
-    for point in river_line(8) {
+    for point in layout::river_line(8) {
         assert!(beyond_fence(Vec2::new(point.x, point.z)) > 7.5, "{point}");
     }
     // The water: the river's surface at its levels, the waterfall from above its lip to the pool, and foam on the pool.
@@ -378,8 +402,9 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 19 thousand triangles, which the scenery draws in eight draws: the foothills, one for
-    // each kind of plant with all its instances, the water and the ranges.
+    // Under the budget, about 21 thousand triangles, which the scenery draws in ten draws: the foothills, one for each
+    // kind of plant with all its instances, the river's stones, all instances of one, the trail, the water and the
+    // ranges; and the stations' plaques, five small draws of text.
     let triangles = Triangles::counted();
     assert_eq!(
         triangles,
@@ -388,10 +413,13 @@ fn the_backdrop_is_modest_for_the_quest() {
             plants: 15_222,
             ranges: 1184,
             water: 197,
+            stones: 810,
+            trail: 1144,
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 19_483);
+    assert_eq!(triangles.total(), 21_437);
+    assert_eq!(stones().len(), 54);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances.
     for (kind, count) in [
@@ -409,4 +437,215 @@ fn the_backdrop_is_modest_for_the_quest() {
         );
     }
     assert_eq!(Kind::ALL.len(), 5);
+    // A river stone is fifteen, drawn once for all of them.
+    assert_eq!(stone().meshes[0].primitives[0].indices.len() / 3, 15);
+}
+
+/// How high the drawn ground is at `point`, from the triangle of `model`'s mesh beneath it, if any.
+fn triangle_height(model: &Model, point: Vec2) -> Option<f32> {
+    let primitive = &model.meshes[0].primitives[0];
+    primitive.indices.chunks(3).find_map(|triangle| {
+        let [a, b, c] = [0, 1, 2].map(|corner| primitive.positions[triangle[corner] as usize]);
+        let flat = |p: Vec3| Vec2::new(p.x, p.z);
+        let (a2, b2, c2) = (flat(a), flat(b), flat(c));
+        let area = (b2 - a2).perp_dot(c2 - a2);
+        let u = (b2 - point).perp_dot(c2 - point) / area;
+        let v = (c2 - point).perp_dot(a2 - point) / area;
+        let w = 1.0 - u - v;
+        (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
+    })
+}
+
+/// Points along the edges of the water's surface, at its level: the river's either side, but within the pool, and the
+/// pool's rim, but where the river leaves it.
+fn water_edges() -> Vec<Vec3> {
+    let line = layout::river_line(layout::RIVER_STEPS);
+    let half = RIVER_HALF_WIDTH + SPREAD;
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let mut sides: [Vec<Vec3>; 2] = [Vec::new(), Vec::new()];
+    for (index, middle) in line.iter().enumerate() {
+        let before = line[index.saturating_sub(1)];
+        let after = line[(index + 1).min(line.len() - 1)];
+        let tangent = Vec2::new(after.x - before.x, after.z - before.z).normalize();
+        let across = Vec3::new(-tangent.y, 0.0, tangent.x) * half;
+        sides[0].push(*middle - across);
+        sides[1].push(*middle + across);
+    }
+    let mut edges = Vec::new();
+    for side in &sides {
+        for pair in side.windows(2) {
+            for step in 0..4 {
+                let point = pair[0].lerp(pair[1], step as f32 / 4.0);
+                if Vec2::new(point.x, point.z).distance(pool) > POOL_RADIUS + 0.6 {
+                    edges.push(point);
+                }
+            }
+        }
+    }
+    let rim = POOL_RADIUS + 0.6;
+    for step in 0..96 {
+        let yaw = step as f32 / 96.0 * TAU;
+        let point = POOL + Vec3::new(yaw.sin(), 0.02, yaw.cos()) * Vec3::new(rim, 1.0, rim);
+        if layout::nearest_river(Vec2::new(point.x, point.z)).1 > half {
+            edges.push(point);
+        }
+    }
+    edges
+}
+
+#[test]
+fn the_river_and_the_pool_lie_between_banks_that_stand_above_their_water() {
+    let foothills = model();
+    // The ground as it is drawn is its triangles'.
+    for step in 0..400 {
+        let yaw = step as f32 * 0.37;
+        let radius =
+            RINGS[0] + 0.05 + (step as f32 * 0.61) % (RINGS[RINGS.len() - 1] - RINGS[0] - 0.1);
+        let point = BACKDROP_CENTRE + way(yaw) * radius;
+        let drawn = drawn_ground(point).unwrap();
+        let triangle = triangle_height(&foothills, point).unwrap();
+        assert!(
+            (drawn - triangle).abs() < 1e-4,
+            "{point} {drawn} {triangle}"
+        );
+    }
+    assert_eq!(drawn_ground(BACKDROP_CENTRE), None);
+    assert_eq!(drawn_ground(Vec2::new(0.0, 40.0)), None);
+    // Wherever the water's surface ends, beneath the river's banks and the pool's rim, the ground as it is drawn stands
+    // above it, so that the water lies between its banks, not above them; but where the river leaves the pool, whose
+    // edge stands only a little above the river's water there.
+    let edges = water_edges();
+    assert!(edges.len() > 300);
+    for edge in &edges {
+        let drawn = drawn_ground(Vec2::new(edge.x, edge.z)).unwrap();
+        assert!(drawn > edge.y + 0.04, "{edge} {drawn}");
+    }
+    let lip = layout::RIVER[1];
+    assert!(lip.y < POOL.y && POOL.y + 0.02 - lip.y < 0.05);
+    assert!(Vec2::new(lip.x, lip.z).distance(Vec2::new(POOL.x, POOL.z)) > POOL_RADIUS + 0.6);
+    // The banks rise out of the water between the bed and their lip, held a lip above the water beyond its spread.
+    const { assert!(BANKS[1] < RIVER_HALF_WIDTH + SPREAD && BANKS[2] > RIVER_HALF_WIDTH + SPREAD) };
+    const { assert!(RIM[1] < POOL_RADIUS + 0.6 && RIM[2] > POOL_RADIUS + 0.6) };
+    const { assert!(LIP >= 0.05) };
+}
+
+#[test]
+fn the_flax_stands_on_the_banks_its_leaves_clear_of_the_water() {
+    let flax: Vec<Plant> = plants()
+        .into_iter()
+        .filter(|plant| plant.kind == Kind::Flax)
+        .collect();
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let by_water = flax
+        .iter()
+        .filter(|plant| {
+            layout::nearest_river(Vec2::new(plant.at.x, plant.at.z)).1 < 6.0
+                || Vec2::new(plant.at.x, plant.at.z).distance(pool) < POOL_RADIUS + 5.0
+        })
+        .count();
+    assert!(by_water > 20, "{by_water}");
+    for plant in &flax {
+        let at = Vec2::new(plant.at.x, plant.at.z);
+        let (reach, _) = plant.size();
+        // Its foot beyond where any of the water is drawn, beneath the banks too.
+        let (nearest, river) = layout::nearest_river(at);
+        assert!(river > RIVER_HALF_WIDTH + SPREAD, "{plant:?}");
+        assert!(at.distance(pool) > POOL_RADIUS + 0.6, "{plant:?}");
+        // And nowhere within its leaves' reach is the water open, the river's, where the bank stands above it, or the
+        // pool's.
+        for step in 0..16 {
+            let yaw = step as f32 / 16.0 * TAU;
+            let leaf = at + Vec2::new(yaw.sin(), yaw.cos()) * reach;
+            let (_, distance) = layout::nearest_river(leaf);
+            if distance < RIVER_HALF_WIDTH + SPREAD {
+                let drawn = drawn_ground(leaf).unwrap_or(0.0);
+                assert!(drawn > nearest.y, "{plant:?} {leaf}");
+            }
+            assert!(leaf.distance(pool) > POOL_RADIUS + 0.6, "{plant:?} {leaf}");
+        }
+    }
+}
+
+#[test]
+fn the_river_s_stones_lie_along_its_banks_in_its_shallows_and_about_the_pool_the_same_every_time() {
+    let stones = stones();
+    assert_eq!(stones, super::stones());
+    let count = stones.len();
+    assert!(
+        (40..=(SHORE_STONES + SHALLOW_STONES + POOL_STONES) as usize).contains(&count),
+        "{count}"
+    );
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let (mut shore, mut shallow, mut pooled) = (0, 0, 0);
+    let views = views();
+    for (index, stone) in stones.iter().enumerate() {
+        let at = Vec2::new(stone.at.x, stone.at.z);
+        let (nearest, river) = layout::nearest_river(at);
+        let top = stone.at.y + STONE_TOP * stone.size.y;
+        if river < BANKS[0] {
+            // In the shallows, set into the bed and standing out of the water.
+            shallow += 1;
+            assert!(top > nearest.y + 0.05, "{stone:?}");
+            assert!(
+                stone.at.y - STONE_BOTTOM * stone.size.y < drawn_ground(at).unwrap(),
+                "{stone:?}"
+            );
+        } else {
+            // On the ground as it is drawn, by the water's edge, of the river or the pool.
+            let drawn = drawn_ground(at).unwrap();
+            assert!((stone.at.y - (drawn - 0.03)).abs() < 1e-4, "{stone:?}");
+            if river < BANKS[1] + 0.2 {
+                shore += 1;
+            } else {
+                assert!(at.distance(pool) < POOL_RADIUS + 0.2, "{stone:?}");
+                pooled += 1;
+            }
+        }
+        // Grey, rounded, of every size, each apart from the others and out of the views the backdrop keeps open.
+        assert!(
+            (0.3..0.9).contains(&stone.size.x) && stone.size.y > stone.size.x * 0.7,
+            "{stone:?}"
+        );
+        assert!((0.0..TAU).contains(&stone.turn));
+        for other in &stones[index + 1..] {
+            let apart = at.distance(Vec2::new(other.at.x, other.at.z));
+            assert!(apart > (stone.size.x + other.size.x) * 0.6);
+        }
+        assert!(
+            views
+                .iter()
+                .all(|(from, to)| !stone.solid().blocks(*from, *to))
+        );
+        assert!(
+            stone
+                .transform()
+                .transform_point3(Vec3::ZERO)
+                .distance(stone.at)
+                < 1e-4
+        );
+    }
+    assert!(
+        shore >= 30 && shallow >= 5 && pooled >= 4,
+        "{shore} {shallow} {pooled}"
+    );
+    let sizes: Vec<f32> = stones.iter().map(|stone| stone.size.x).collect();
+    let (least, most) = sizes
+        .iter()
+        .fold((f32::INFINITY, 0.0f32), |(least, most), size| {
+            (least.min(*size), most.max(*size))
+        });
+    assert!(most > least * 1.8, "{least} {most}");
+    // Its model is a rounded stone of a metre across, sitting on its foot with a little of it below.
+    let model = stone();
+    let positions = &model.meshes[0].primitives[0].positions;
+    for position in positions {
+        assert!(
+            Vec2::new(position.x, position.z).length() <= 0.53,
+            "{position}"
+        );
+        assert!(
+            (-STONE_BOTTOM - 1e-4..=STONE_TOP + 1e-4).contains(&position.y),
+            "{position}"
+        );
+    }
 }

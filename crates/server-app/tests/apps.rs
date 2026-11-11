@@ -106,7 +106,7 @@ fn tomoris_own_server_offers_tomoris_own_app_and_spectator_exactly_what_they_pre
     assert_eq!(
         everything,
         [
-            ("farmyard".to_owned(), 4),
+            ("farmyard".to_owned(), 5),
             ("github".to_owned(), 1),
             ("minimal".to_owned(), 1),
             ("sky".to_owned(), 1)

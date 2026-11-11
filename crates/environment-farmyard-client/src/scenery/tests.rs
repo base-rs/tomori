@@ -10,6 +10,7 @@ use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
 use super::*;
+use tomori_environment_farmyard::trail;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 200;
@@ -314,6 +315,8 @@ fn the_chickens_are_drawn_where_their_client_side_shows_them() {
             at + Vec3::new(0.0, 0.45, 1.1),
             at + Vec3::new(0.0, 0.18, 0.0),
         );
+        // Animated once, as every frame is, so that what else it shows, such as the stations' plaques, is shown already.
+        farmyard.animate(&device, &queue, &());
         let without = capture(&device, &queue, &farmyard, 4, close);
         // What is not the farmyard's, or shows no chickens, changes nothing.
         farmyard.animate(&device, &queue, &42u32);
@@ -602,4 +605,125 @@ fn a_running_clock_says_the_time_since_the_scenery_was_made_and_a_held_one_its_m
     let made = std::time::Instant::now();
     assert!(Clock::Running.seconds(made) < 60.0);
     assert_eq!(Clock::Held(2.5).seconds(made), 2.5);
+}
+
+/// Where the trail is seen from, as `(eye, target)`: along it on the yard's right side, by the river, towards the second
+/// station; outside the gate, looking back at it where the trail leaves the yard, the first station to the right; from
+/// behind the coop towards the lookout over the pool, its seat and the fourth station; and the second station's
+/// plaque, from its clearing.
+pub(crate) fn trail_views() -> [(Vec3, Vec3); 4] {
+    let at = |point: glam::Vec2, y: f32| Vec3::new(point.x, y, point.y);
+    let (riverbank, _, _) = trail::frame(11);
+    let (ahead, _, outward) = trail::frame(17);
+    let (behind, _, _) = trail::frame(31);
+    let (lookout, _, out) = trail::frame(37);
+    let station = trail::STATIONS[1];
+    [
+        (at(riverbank, 1.6), at(ahead + outward * 2.5, 0.6)),
+        (Vec3::new(2.4, 1.6, 7.6), Vec3::new(0.0, 0.5, 1.6)),
+        (at(behind, 1.6), at(lookout + out * 3.0, 0.5)),
+        (
+            at(station.clearing() + station.faces() * 0.4, 1.55),
+            at(station.post(), trail::PLAQUE_HEIGHT),
+        ),
+    ]
+}
+
+#[test]
+fn the_trail_is_drawn_round_the_fence_by_the_river_its_plaques_read() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // An atlas this test syncs, as a renderer syncs its own, so that the plaques' text is drawn.
+        let glyphs = Arc::new(tomori_render::glyphs::Glyphs::new(&device));
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            glyphs.clone().into(),
+        );
+        let mut farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        for _ in 0..30 {
+            farmyard.animate(&device, &queue, &());
+            glyphs.sync(&device, &queue);
+        }
+        let pictures: Vec<Vec<u8>> = trail_views()
+            .into_iter()
+            .map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()))
+            .collect();
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_TRAIL_PREVIEW") {
+            for (index, pixels) in pictures.iter().enumerate() {
+                let picture =
+                    image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone()).unwrap();
+                picture
+                    .save(path.replace(".png", &format!("-{}.png", index + 1)))
+                    .unwrap();
+            }
+        }
+        let views = trail_views();
+        // Along the trail by the river, its track is drawn ahead, earth, redder than the meadow beside it, which is
+        // greener.
+        let colour = |pixels: &[u8], at: (f32, f32)| {
+            assert!(
+                (0.0..1.0).contains(&at.0) && (0.0..1.0).contains(&at.1),
+                "{at:?}"
+            );
+            let (x, y) = (
+                (at.0 * PICTURE.0 as f32) as u32,
+                (at.1 * PICTURE.1 as f32) as u32,
+            );
+            let index = ((y * PICTURE.0 + x) * 4) as usize;
+            [pixels[index], pixels[index + 1], pixels[index + 2]]
+        };
+        // The first point of the trail ahead that is well within the picture.
+        let (point, _, outward) = (12..20)
+            .map(trail::frame)
+            .find(|(point, _, _)| {
+                let at = seen_at(views[0], Vec3::new(point.x, trail::LIFT, point.y));
+                (0.2..0.8).contains(&at.0) && (0.5..0.95).contains(&at.1)
+            })
+            .unwrap();
+        let track = colour(
+            &pictures[0],
+            seen_at(views[0], Vec3::new(point.x, trail::LIFT, point.y)),
+        );
+        assert!(track[0] > track[1], "{track:?}");
+        let beside = point + outward * 1.5;
+        let meadow = colour(
+            &pictures[0],
+            seen_at(views[0], Vec3::new(beside.x, 0.0, beside.y)),
+        );
+        assert!(meadow[1] > meadow[0], "{meadow:?}");
+        // From its clearing, a station's plaque reads: pale letters on its dark board.
+        let station = trail::STATIONS[1];
+        let post = station.post();
+        let middle = seen_at(views[3], Vec3::new(post.x, trail::PLAQUE_HEIGHT, post.y));
+        let letters = |pixels: &[u8]| {
+            let (mut pale, mut dark) = (0, 0);
+            for dy in -40..40 {
+                for dx in -120..120 {
+                    let x = (middle.0 * PICTURE.0 as f32) as i32 + dx;
+                    let y = (middle.1 * PICTURE.1 as f32) as i32 + dy;
+                    let index = ((y as u32 * PICTURE.0 + x as u32) * 4) as usize;
+                    let red = pixels[index];
+                    if red > 170 {
+                        pale += 1;
+                    } else if red < 50 {
+                        dark += 1;
+                    }
+                }
+            }
+            (pale, dark)
+        };
+        let (pale, dark) = letters(&pictures[3]);
+        assert!(pale > 300 && dark > pale * 2, "{pale} {dark}");
+        // Growing out of a point far from it, the plaque's text is not drawn before its board is.
+        farmyard.set_reveal(Some((Vec3::new(0.0, 1.0, -2.0), 0.5)));
+        let growing = capture_sized(&device, &queue, &farmyard, 4, views[3], picture());
+        assert_eq!(letters(&growing).0, 0);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
 }

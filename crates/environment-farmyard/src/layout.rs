@@ -435,14 +435,16 @@ pub const WATERFALL_LIP: Vec3 = Vec3::new(-3.263, CLIFF_TOP, -28.786);
 pub const WATERFALL_FOOT: Vec3 = Vec3::new(-3.067, POOL.y, -27.299);
 /// The middle of the waterfall's fall, where a sound of it would come from.
 pub const WATERFALL: Vec3 = Vec3::new(-3.165, (CLIFF_TOP + POOL.y) * 0.5, -28.04);
-/// The middle of the pool at the waterfall's foot, at its water's level, and how wide it is to its shore.
-pub const POOL: Vec3 = Vec3::new(-2.741, 1.0, -24.821);
+/// The middle of the pool at the waterfall's foot, at its water's level, and how wide it is to its shore: low enough that
+/// its banks rise above it all round, as the pasture between it and the yard does.
+pub const POOL: Vec3 = Vec3::new(-2.741, 0.6, -24.821);
 pub const POOL_RADIUS: f32 = 4.0;
-/// The river, from the pool downstream, its middle at its water's level: towards the yard, then round its right side,
-/// 11 m beyond the fence, and away into the foothills to the front right, behind a spur.
+/// The river, from the pool downstream, its middle at its water's level: out over the pool's lip towards the yard, then
+/// round its right side, 11 m beyond the fence, and away into the foothills to the front right, behind a spur.
 pub const RIVER: [Vec3; 13] = [
     POOL,
-    Vec3::new(-0.6, 0.55, -21.6),
+    // Where it leaves the pool, beyond the pool's water, a little below it, and down a short run to the next.
+    Vec3::new(-0.084, 0.58, -20.824),
     Vec3::new(2.6, 0.3, -19.6),
     Vec3::new(6.6, 0.26, -18.8),
     Vec3::new(10.4, 0.23, -16.6),
@@ -480,9 +482,41 @@ pub fn sounds() -> Vec<(&'static str, Vec3)> {
     sounds
 }
 
-/// The nearest point to `point` on the river's middle, at its water's level, and how far it is on the ground.
+/// How many steps the river's middle is drawn in between each two of [`RIVER`]'s points.
+pub const RIVER_STEPS: usize = 3;
+
+/// The river's middle, smoothed through [`RIVER`]'s points, `steps` to each reach, at its water's level: where its water
+/// is drawn, and what its banks are measured from.
+pub fn river_line(steps: usize) -> Vec<Vec3> {
+    let mut line = Vec::new();
+    for reach in 0..RIVER.len() - 1 {
+        let at = |index: isize| RIVER[index.clamp(0, RIVER.len() as isize - 1) as usize];
+        let [p0, p1, p2, p3] = [-1, 0, 1, 2].map(|offset| at(reach as isize + offset));
+        for step in 0..steps {
+            let t = step as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            line.push(
+                0.5 * (2.0 * p1
+                    + (p2 - p0) * t
+                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                    + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3),
+            );
+        }
+    }
+    line.push(RIVER[RIVER.len() - 1]);
+    line
+}
+
+/// The river's middle as it is drawn, [`RIVER_STEPS`] to each reach, made once.
+fn drawn_river() -> &'static [Vec3] {
+    static LINE: std::sync::OnceLock<Vec<Vec3>> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| river_line(RIVER_STEPS))
+}
+
+/// The nearest point to `point` on the river's middle as it is drawn ([`river_line`]), at its water's level, and how
+/// far it is on the ground.
 pub fn nearest_river(point: Vec2) -> (Vec3, f32) {
-    RIVER
+    drawn_river()
         .windows(2)
         .map(|pair| {
             let (from, to) = (pair[0], pair[1]);

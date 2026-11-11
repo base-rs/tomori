@@ -27,7 +27,7 @@ mod tests {
             .collect();
         assert_eq!(
             presented,
-            [("minimal", 1), ("sky", 1), ("farmyard", 4), ("github", 1)]
+            [("minimal", 1), ("sky", 1), ("farmyard", 5), ("github", 1)]
         );
         // The farmyard's teleport profile, which a spectator, following a participant, never uses itself.
         assert_eq!(sceneries().locomotion().len(), 1);
