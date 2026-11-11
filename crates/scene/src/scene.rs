@@ -564,8 +564,20 @@ pub struct Step {
 struct Standing {
     environment: crate::environment::Environment,
     carriage: crate::anchors::Anchor,
-    /// The ring on the floor at home, its middle in the participant's room.
+    /// The ring at home, its middle and its height in the participant's room.
     ring: crate::anchors::HomeRing,
+}
+
+/// The home ring `ring`, its middle and the height it is drawn at carried by `carry`, as the rig carries points.
+fn carried_ring(
+    ring: crate::anchors::HomeRing,
+    carry: impl Fn(Vec3) -> Vec3,
+) -> crate::anchors::HomeRing {
+    crate::anchors::HomeRing {
+        centre: carry(ring.centre),
+        height: carry(ring.centre.with_y(ring.height)).y,
+        ..ring
+    }
 }
 
 /// An unturned anchor at `position`, which the rig carries as it carries the environment.
@@ -1452,10 +1464,7 @@ impl Step {
             // The rig going home moves the scene under the participant: the environment is carried with them.
             (
                 placed.place(standing.carriage),
-                crate::anchors::HomeRing {
-                    centre: placed.place(at(standing.ring.centre)).position,
-                    ..standing.ring
-                },
+                carried_ring(standing.ring, |point| placed.place(at(point)).position),
             )
         });
         let carriage = departure.map_or(arrangement.carriage, |(carriage, _)| carriage);
@@ -1473,10 +1482,7 @@ impl Step {
                     Standing {
                         environment: scenery.environment,
                         carriage: placed.unplace(arrangement.carriage),
-                        ring: crate::anchors::HomeRing {
-                            centre: placed.unplace(at(home_ring.centre)).position,
-                            ..home_ring
-                        },
+                        ring: carried_ring(home_ring, |point| placed.unplace(at(point)).position),
                     }
                 });
         }
@@ -2568,6 +2574,26 @@ mod tests {
     use tomori_protocol::ConnectionRole;
 
     const FRAME: f32 = 1.0 / 72.0;
+
+    #[test]
+    fn a_home_ring_carried_with_the_room_carries_its_height_with_its_middle() {
+        // A ring under a home floating 5.3 m up, carried as a rig standing 0.5 m up and turned a quarter carries it.
+        let ring = crate::anchors::HomeRing {
+            centre: Vec3::new(1.0, 5.3, -4.0),
+            height: 3.9,
+            ..crate::anchors::HomeRing::WHOLE
+        };
+        let rig = crate::anchors::Anchor {
+            position: Vec3::new(2.0, 0.5, 0.0),
+            orientation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let carried = carried_ring(ring, |point| rig.place(point));
+        assert!(carried.centre.distance(rig.place(ring.centre)) < 1e-5);
+        assert!((carried.height - 4.4).abs() < 1e-5, "{carried:?}");
+        let back = carried_ring(carried, |point| rig.unplace(point));
+        assert!(back.centre.distance(ring.centre) < 1e-4);
+        assert!((back.height - ring.height).abs() < 1e-5);
+    }
 
     /// A head standing at home, looking ahead.
     fn senses() -> Senses {

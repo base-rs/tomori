@@ -583,6 +583,23 @@ fn a_formation_is_sent_only_where_it_is_not_the_arc_and_one_unknown_is_laid_out_
 }
 
 #[test]
+fn a_ring_under_the_home_is_sent_only_where_asked_and_one_unknown_is_on_the_floor() {
+    let floor = serde_json::to_value(ahead(HOME)).unwrap();
+    assert!(floor.get("ring").is_none());
+    let under = ahead(HOME).with_ring(RingAt::UnderHome);
+    let sent = serde_json::to_value(&under).unwrap();
+    assert_eq!(sent["ring"], "under_home");
+    assert_eq!(serde_json::from_value::<Anchor>(sent).unwrap(), under);
+    // From an older server, on the floor; from a newer, one this build does not know, on the floor too.
+    let mut newer = serde_json::to_value(ahead(HOME)).unwrap();
+    newer["ring"] = "overhead".into();
+    let newer: Anchor = serde_json::from_value(newer).unwrap();
+    assert_eq!(newer.ring, RingAt::Unknown);
+    assert!(newer.ring.is_floor() && RingAt::default().is_floor());
+    assert!(!RingAt::UnderHome.is_floor());
+}
+
+#[test]
 fn rows_stand_at_the_point_then_alternately_above_and_below() {
     assert_eq!(
         (0..5).map(row).collect::<Vec<_>>(),

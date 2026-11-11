@@ -2471,6 +2471,10 @@ impl Conversation {
             arrangement.home = home;
         }
         arrangement.workers = anchor(space.anchors.workers).unwrap_or(arrangement.home);
+        // Where the ring drawn at home lies, as the home anchor says, whatever room or formation it gives.
+        if let Some(home) = space.anchors.cluster(tomori_protocol::cluster::HOME) {
+            arrangement.ring = home.ring;
+        }
         // The room the home cluster may take, and how it stands, where the environment gives them, with the home anchor
         // where it says; room out of bounds is none.
         if let Some(home) = space
@@ -8139,6 +8143,26 @@ mod tests {
         assert_eq!((sky.formation, sky.extent), (Formation::Arc, None));
         assert_eq!(sky.home_ring(), HomeRing::WHOLE);
         assert_eq!(HomeRing::default(), HomeRing::WHOLE);
+        assert_eq!(sky.ring, tomori_protocol::cluster::RingAt::Floor);
+        // A home floating high, its anchor asking for its ring under it, on the arc and without room: the ring lies at
+        // the swarm's foot beneath it, staying there as the agent goes.
+        let high = Pose::at([0.0, 5.3, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+        let floating = tomori_protocol::cluster::Anchor::new("home", high)
+            .with_ring(tomori_protocol::cluster::RingAt::UnderHome);
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.movement = Some(AgentMovement::default());
+            state.summoned = Some(called);
+            state.anchors = Anchors::new()
+                .with_agent(high)
+                .with_workers(high)
+                .with_cluster(floating.clone());
+        }));
+        let floating = conversation.arrangement();
+        assert_eq!(floating.formation, Formation::Arc);
+        let drawn = floating.home_ring();
+        assert_eq!(drawn.centre, Anchor::from_pose(&high).unwrap().position);
+        assert!((drawn.height - 3.9).abs() < 1e-5, "{drawn:?}");
     }
 
     #[test]

@@ -72,7 +72,8 @@ pub use backends::{AnyBackend, AnySession, Backends};
 pub use builder::Builder;
 pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
 pub use environments::{
-    Environment, EnvironmentWall, STATUS_SLOTS, StatusWall, WALL_NAME_BYTES, valid_wall_name,
+    Environment, EnvironmentWall, FOLLOW_HEIGHTS, STATUS_SLOTS, StatusWall, WALL_NAME_BYTES,
+    valid_wall_name,
 };
 pub use hub::CLOSED_SPACES;
 pub use hub::agent_actions::ACT_TIMEOUT;

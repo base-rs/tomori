@@ -384,6 +384,34 @@ fn with_nowhere_clear_beside_them_it_only_turns_and_a_call_stands_it_in_front_of
 }
 
 #[test]
+fn in_an_environment_with_a_follow_height_it_hovers_there_above_whoever_it_comes_to() {
+    // A home floating 5.3 m up, its agent hovering 5.1 m above the floor as it comes to someone: Ada on the floor, or on
+    // a platform 4.5 m up, each 6 m from the home; or by default, a little above her eyes, never above 2.4 m.
+    let high = tomori_protocol::Pose::at([0.0, 5.3, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+    for (eyes, declared, height) in [
+        (1.6, Some(5.1), 5.1),
+        (6.1, Some(5.1), 6.2),
+        (1.6, None, 1.7),
+        (6.1, None, 2.4),
+    ] {
+        let (hub, _jobs, space, _commands, ada) = following(Some(90));
+        let sky = crate::Environment::new("sky", "Sky").with_agent(high);
+        let sky = match declared {
+            Some(metres) => sky.with_follow_height(metres),
+            None => sky,
+        };
+        hub.set_environments(Environments::new([sky]));
+        let at = [0.0, eyes, 2.0];
+        ada.send(looking(at, [0.0, eyes, -3.0]));
+        press(&ada, "u1");
+        hub.flush_snapshots(Instant::now() + COMMIT);
+        let spot = agent(&hub, &space).0.expect("gone to her");
+        assert!((spot.position[1] - height).abs() < 1e-4, "{eyes}: {spot:?}");
+        assert!((level(spot.position, at) - CONVERSATION).abs() < 1e-3);
+    }
+}
+
+#[test]
 fn turned_at_home_it_turns_back_once_the_conversation_is_quiet() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));

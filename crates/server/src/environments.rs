@@ -46,7 +46,14 @@ pub struct Environment {
     /// The boxes of its scenery that nothing of Tomori's stands inside nor is seen through, in its own coordinates, each
     /// from its least to its greatest corner. See `design/environments.md`.
     solids: Vec<([f32; 3], [f32; 3])>,
+    /// How high above the space's floor the agent hovers as it comes to someone, if it says. See
+    /// `design/environments.md`.
+    follow_height: Option<f32>,
 }
+
+/// The lowest and highest an environment may have the agent hover as it comes to someone, in metres above the space's
+/// floor: [`Environment::with_follow_height`].
+pub const FOLLOW_HEIGHTS: (f32, f32) = (1.0, 10.0);
 
 /// One of an environment's own projection walls: where it stands, in the environment's own coordinates, upright and
 /// facing along its pose's +Z, and how it is laid out, its grid of slots, their size and shape, whether it curves and
@@ -366,6 +373,7 @@ impl fmt::Debug for Environment {
             .field("avatar", &self.avatar)
             .field("walls", &self.walls)
             .field("solids", &self.solids)
+            .field("follow_height", &self.follow_height)
             .finish()
     }
 }
@@ -384,6 +392,7 @@ impl PartialEq for Environment {
             && self.avatar == other.avatar
             && self.walls == other.walls
             && self.solids == other.solids
+            && self.follow_height == other.follow_height
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
                 (None, None) => true,
@@ -411,6 +420,7 @@ impl Environment {
             walls: Vec::new(),
             carried: Vec::new(),
             solids: Vec::new(),
+            follow_height: None,
         }
     }
 
@@ -892,6 +902,38 @@ impl Environment {
         &self.solids
     }
 
+    /// The environment, whose agent hovers `metres` above the space's floor, the floor where participants arrive, as
+    /// it comes to someone, following the speaker, called or asked to go to them or beside something, rather than a
+    /// little above their eyes, such as one whose home floats high over the scene; but never lower than it would stand
+    /// before someone's eyes higher than that, as on a raised platform, so that it stands above them or level with
+    /// them, as far from them across the floor as ever, and never in front of their face below their eyes. One not from
+    /// [`FOLLOW_HEIGHTS`]`.0` to `.1`, 1 to 10 m, is left out with a warning, keeping the default. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_server::Environment;
+    ///
+    /// assert_eq!(Environment::new("observe", "Observe").with_follow_height(5.1).follow_height(), Some(5.1));
+    /// assert_eq!(Environment::new("observe", "Observe").with_follow_height(12.0).follow_height(), None);
+    /// assert_eq!(Environment::new("observe", "Observe").follow_height(), None);
+    /// ```
+    pub fn with_follow_height(mut self, metres: f32) -> Self {
+        if (FOLLOW_HEIGHTS.0..=FOLLOW_HEIGHTS.1).contains(&metres) {
+            self.follow_height = Some(metres);
+        } else {
+            log::warn!(
+                "Environment {}'s follow height of {metres} m is left out, as it is not from 1 to 10 m, and the agent stands a little above the eyes of whoever it comes to.",
+                self.id
+            );
+        }
+        self
+    }
+
+    /// How high above the space's floor its agent hovers as it comes to someone, if it says.
+    pub fn follow_height(&self) -> Option<f32> {
+        self.follow_height
+    }
+
     /// Its solids, carried into a space's coordinates, each the box about its corners carried there, those not finite
     /// or beyond [`crate::stage::ARRIVAL_REACH`] left out.
     fn carried_solids(&self) -> Vec<tomori_environment::sightlines::Solid> {
@@ -1015,6 +1057,11 @@ impl Environments {
             .map(str::to_owned)
     }
 
+    /// How high above the space's floor the agent of the environment `id` hovers as it comes to someone, if it says.
+    pub(crate) fn follow_height(&self, id: &str) -> Option<f32> {
+        self.get(id).and_then(Environment::follow_height)
+    }
+
     /// The solids of the environment `id`, carried into a space's coordinates, none when it is not offered.
     pub(crate) fn solids(&self, id: &str) -> Vec<tomori_environment::sightlines::Solid> {
         self.get(id)
@@ -1056,9 +1103,10 @@ impl Environments {
         if let Some(environment) = self.get(id) {
             anchors.agent = environment.carried(environment.agent.as_ref());
             anchors.workers = environment.carried(environment.workers().as_ref());
-            // The home anchor's room or formation, where it gives one, beside the workers anchor an older client keeps.
+            // The home anchor's room, formation or ring, where it gives one, beside the workers anchor an older client
+            // keeps.
             if let Some(home) = environment.home()
-                && (home.extent.is_some() || !home.formation.is_arc())
+                && (home.extent.is_some() || !home.formation.is_arc() || !home.ring.is_floor())
                 && let Some(pose) = anchors.workers
             {
                 let mut carried = home.clone();
@@ -1546,6 +1594,11 @@ mod tests {
         let ringed = tomoris().with(Environment::new("ringed", "Ringed").with_anchor(ring.clone()));
         assert_eq!(ringed.anchors("ringed").clusters, [ring]);
         assert_eq!(ringed.anchors("ringed").workers, Some(yard));
+        // So is one on the arc, without room, whose ring lies under the home.
+        let under = Anchor::new(HOME, yard).with_ring(tomori_protocol::cluster::RingAt::UnderHome);
+        let floating =
+            tomoris().with(Environment::new("floating", "Floating").with_anchor(under.clone()));
+        assert_eq!(floating.anchors("floating").clusters, [under]);
         let street = offered.anchors("street");
         let home = street.cluster(HOME).unwrap();
         assert_eq!(Some(home.pose), street.workers);
@@ -1750,6 +1803,25 @@ mod tests {
         let offered = tomoris().with(turned);
         assert_eq!(offered.solids("field").len(), 1);
         assert!(offered.solids("nowhere").is_empty());
+    }
+
+    #[test]
+    fn a_follow_height_is_taken_from_1_to_10_m_and_otherwise_left_out() {
+        for metres in [FOLLOW_HEIGHTS.0, 5.1, FOLLOW_HEIGHTS.1] {
+            let observe = Environment::new("observe", "Observe").with_follow_height(metres);
+            assert_eq!(observe.follow_height(), Some(metres));
+        }
+        for metres in [0.99, 10.01, -2.0, f32::NAN, f32::INFINITY] {
+            let refused = Environment::new("observe", "Observe").with_follow_height(metres);
+            assert_eq!(refused.follow_height(), None, "{metres}");
+            assert_eq!(refused, Environment::new("observe", "Observe"));
+        }
+        let floating = Environment::new("observe", "Observe").with_follow_height(5.1);
+        assert_ne!(floating, Environment::new("observe", "Observe"));
+        assert!(format!("{floating:?}").contains("follow_height: Some(5.1)"));
+        let offered = tomoris().with(floating);
+        assert_eq!(offered.follow_height("observe"), Some(5.1));
+        assert_eq!(offered.follow_height("nowhere"), None);
     }
 
     #[test]

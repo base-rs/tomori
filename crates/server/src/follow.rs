@@ -43,6 +43,14 @@ pub(crate) const RISE: f32 = 0.1;
 /// The lowest and highest its middle stands above the floor, in metres.
 pub(crate) const HEIGHTS: (f32, f32) = (1.1, 2.4);
 
+/// How far above someone's eyes its middle stands at most where the environment declares a follow height, in metres:
+/// as far as a follow height of 5.1 m leaves above eyes 1.6 m up on the space's floor, so that it never hovers out of
+/// talking distance above anyone on a lower level.
+pub(crate) const HIGHEST_ABOVE: f32 = 3.5;
+
+/// How far above an object its middle stands beside it where the environment declares a follow height, in metres.
+pub(crate) const ABOVE_OBJECT: f32 = 0.5;
+
 /// How far about its middle the swarm reaches, across, up and down, and towards and away from whoever it faces, in
 /// metres: half of `entourage::SWARM` each way, as the swarm's shapes reach while it talks.
 pub(crate) const REACH: [f32; 3] = [
@@ -103,6 +111,8 @@ pub(crate) struct Scene {
     pub panels: Vec<Pose>,
     /// Every participant's head.
     pub heads: Vec<[f32; 3]>,
+    /// How high above the floor the environment has its middle hover, if it says, in place of [`RISE`] above the eyes.
+    pub hover: Option<f32>,
 }
 
 impl Scene {
@@ -127,6 +137,45 @@ impl Scene {
             solids: blocking,
             panels,
             heads,
+            hover: None,
+        }
+    }
+
+    /// What the agent keeps clear of, standing its middle `hover` above the floor, if the environment says, as it
+    /// comes to someone.
+    pub(crate) fn hovering(self, hover: Option<f32>) -> Self {
+        Self { hover, ..self }
+    }
+
+    /// The heights the agent's middle is tried at for eyes at `eyes`, in order: by [`RISE`] and [`HEIGHTS`]; or, where
+    /// the environment says, at its hover above the space's floor, but no more than [`HIGHEST_ABOVE`] above the eyes nor
+    /// less than [`RISE`], so that it stands above whoever it comes to, never before their face below their eyes nor
+    /// out of talking distance above them; then, where nothing there is clear, as beneath a ceiling, [`RISE`] above the
+    /// eyes.
+    fn heights(&self, eyes: f32) -> Vec<f32> {
+        match self.hover {
+            Some(hover) => {
+                let face = eyes + RISE;
+                let hovering = (entourage::FLOOR + hover)
+                    .min(eyes + HIGHEST_ABOVE)
+                    .max(face);
+                if hovering > face {
+                    vec![hovering, face]
+                } else {
+                    vec![face]
+                }
+            }
+            None => vec![height(eyes)],
+        }
+    }
+
+    /// The height the agent's middle stands at beside an object at `object` for eyes at `eyes`: by [`RISE`] and
+    /// [`HEIGHTS`]; or, where the environment declares a follow height, [`ABOVE_OBJECT`] above the object, but never
+    /// less than [`RISE`] above the eyes, so that it stands by what it is beside rather than high over it.
+    fn beside_height(&self, eyes: f32, object: f32) -> f32 {
+        match self.hover {
+            Some(_) => (object + ABOVE_OBJECT).max(eyes + RISE),
+            None => height(eyes),
         }
     }
 
@@ -190,7 +239,7 @@ fn wrapped(angle: f32) -> f32 {
     (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
-/// The height the agent's middle stands at for eyes at `eyes`, by [`RISE`] and [`HEIGHTS`].
+/// The height the agent's middle stands at for eyes at `eyes`, by [`RISE`] and [`HEIGHTS`], by default.
 fn height(eyes: f32) -> f32 {
     (eyes + RISE).clamp(entourage::FLOOR + HEIGHTS.0, entourage::FLOOR + HEIGHTS.1)
 }
@@ -301,7 +350,7 @@ fn swings() -> impl Iterator<Item = f32> {
 }
 
 /// Where the agent, at `from`, stands for `speaker`, clear of `scene`: on the straight line from their eyes towards
-/// it, [`CONVERSATION`] from them, at [`height`], facing them, whichever way they face or what they attend to, even
+/// it, [`CONVERSATION`] from them, at the first of [`Scene::heights`] at which it is clear, facing them, whichever way they face or what they attend to, even
 /// behind them; where that is not clear, at the same distance, swung round them by the least of [`swings`] at which
 /// it is; else none, for it to stay where it is and only turn. Coming to someone, it only ever comes straight towards
 /// them. See `design/environments.md`.
@@ -315,24 +364,25 @@ pub(crate) fn spot(from: [f32; 3], speaker: &Speaker, scene: &Scene) -> Option<P
         heading(&speaker.head)
     };
     let panels = scene.panels_near(eyes);
-    let y = height(eyes[1]);
-    swings()
-        .map(|turn| {
-            let towards = line + turn;
-            let middle = [
-                eyes[0] + CONVERSATION * towards.sin(),
-                y,
-                eyes[2] - CONVERSATION * towards.cos(),
-            ];
-            Pose::upright_facing(middle, [eyes[0], y, eyes[2]])
-        })
-        .filter_map(|pose| crate::stage::valid(&pose))
-        .find(|pose| clear(pose, eyes, scene, &panels))
+    scene.heights(eyes[1]).into_iter().find_map(|y| {
+        swings()
+            .map(|turn| {
+                let towards = line + turn;
+                let middle = [
+                    eyes[0] + CONVERSATION * towards.sin(),
+                    y,
+                    eyes[2] - CONVERSATION * towards.cos(),
+                ];
+                Pose::upright_facing(middle, [eyes[0], y, eyes[2]])
+            })
+            .filter_map(|pose| crate::stage::valid(&pose))
+            .find(|pose| clear(pose, eyes, scene, &panels))
+    })
 }
 
 /// Where the agent stands beside an object at `object`, for the asker, whose head is at `head`, looking at it from
 /// where they stand, clear of `scene`: at the first of [`DISTANCES`] and [`BEARINGS`] about the line from their eyes to
-/// it at which it stands clear and out of their way, at [`height`], facing them; else the same bearings at
+/// it at which it stands clear and out of their way, at [`Scene::beside_height`], facing them; else the same bearings at
 /// [`FALLBACK`]; else none. See `design/environments.md`.
 pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pose> {
     let eyes = head.position;
@@ -345,7 +395,7 @@ pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pos
         }
     };
     let panels = scene.panels_near(eyes);
-    let y = height(eyes[1]);
+    let y = scene.beside_height(eyes[1], object[1]);
     DISTANCES
         .iter()
         .chain(std::iter::once(&FALLBACK))
@@ -365,7 +415,7 @@ pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pos
 
 /// Where the agent, at `from`, stands for a huddle, `speakers`, who spoke to it lately and stand together, the one it
 /// answers first: on the straight line from the middle of their heads towards it, about [`CONVERSATION`] from the
-/// nearest of them, facing that middle, at [`height`] for their eyes on average, clear of `scene` and seen by each,
+/// nearest of them, facing that middle, at the first of [`Scene::heights`] at which it is clear for their eyes on average, clear of `scene` and seen by each,
 /// whichever way they face; where that is not clear, swung round them by the least of [`swings`] at which it is; else
 /// where it stands for the first alone, by [`spot`]; else none. See `design/environments.md`.
 pub(crate) fn huddle(from: [f32; 3], speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
@@ -383,7 +433,6 @@ pub(crate) fn huddle(from: [f32; 3], speakers: &[Speaker], scene: &Scene) -> Opt
     } else {
         heading(&speakers[0].head)
     };
-    let y = height(middle[1]);
     let panels: Vec<Solid> = speakers
         .iter()
         .flat_map(|speaker| scene.panels_near(speaker.head.position))
@@ -394,32 +443,43 @@ pub(crate) fn huddle(from: [f32; 3], speakers: &[Speaker], scene: &Scene) -> Opt
             .map(|speaker| level(sub(at, speaker.head.position)))
             .fold(f32::INFINITY, f32::min)
     };
-    swings()
-        .filter_map(|turn| {
-            let towards = line + turn;
-            let (dx, dz) = (towards.sin(), -towards.cos());
-            // Out from the middle of the group until it stands far enough from the nearest of them.
-            (0..=60)
-                .map(|step| step as f32 * 0.1)
-                .map(|out| [middle[0] + dx * out, y, middle[2] + dz * out])
-                .find(|at| nearest(*at) >= CONVERSATION)
-        })
-        .map(|at| Pose::upright_facing(at, [middle[0], y, middle[2]]))
-        .filter_map(|pose| crate::stage::valid(&pose))
-        .find(|pose| {
-            speakers
-                .iter()
-                .all(|speaker| clear(pose, speaker.head.position, scene, &panels))
+    scene
+        .heights(middle[1])
+        .into_iter()
+        .find_map(|y| {
+            swings()
+                .filter_map(|turn| {
+                    let towards = line + turn;
+                    let (dx, dz) = (towards.sin(), -towards.cos());
+                    // Out from the middle of the group until it stands far enough from the nearest of them.
+                    (0..=60)
+                        .map(|step| step as f32 * 0.1)
+                        .map(|out| [middle[0] + dx * out, y, middle[2] + dz * out])
+                        .find(|at| nearest(*at) >= CONVERSATION)
+                })
+                .map(|at| Pose::upright_facing(at, [middle[0], y, middle[2]]))
+                .filter_map(|pose| crate::stage::valid(&pose))
+                .find(|pose| {
+                    speakers
+                        .iter()
+                        .all(|speaker| clear(pose, speaker.head.position, scene, &panels))
+                })
         })
         .or_else(|| spot(from, &speakers[0], scene))
 }
 
 /// Whether the agent standing at `agent` already serves `speaker`, so that it never moves on its own, only turning to
-/// them: within [`NEAR`] of their eyes. Distance is the only rule that moves it: where it stands off the way they face,
-/// or in their way to what they attend to, it stays, and moves only when asked; once it moves, it comes straight
-/// towards them, by [`spot`], to [`CONVERSATION`], within this.
-pub(crate) fn near_enough(agent: &Pose, speaker: &Speaker) -> bool {
-    distance(agent.position, speaker.head.position) <= NEAR
+/// them: within [`NEAR`] of their eyes; or, where `scene` hovers it at the environment's follow height, well above
+/// their eyes, within [`NEAR`] of them across the floor. Distance is the only rule that moves it: where it stands off
+/// the way they face, or in their way to what they attend to, it stays, and moves only when asked; once it moves, it
+/// comes straight towards them, by [`spot`], to [`CONVERSATION`], within this.
+pub(crate) fn near_enough(agent: &Pose, speaker: &Speaker, scene: &Scene) -> bool {
+    let apart = sub(agent.position, speaker.head.position);
+    if scene.hover.is_some() {
+        level(apart) <= NEAR
+    } else {
+        distance(agent.position, speaker.head.position) <= NEAR
+    }
 }
 
 /// Whether the agent standing at `agent` already serves `huddle`, those who spoke to it lately standing together, the

@@ -11,7 +11,9 @@
 //! beneath it, from the arrival; `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
 //! someone standing, 1.6 m and 1.8 m, down the sheet; and `workbench.png`, the agent at its workbench in the yard's
 //! corner, its workers in the ring about it, from the arrival turned towards it, from the yard before it, from within
-//! the ring and from straight above, down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
+//! the ring and from straight above, down the sheet; and `ring-under.png`, the agent's home floating 5.3 m above the
+//! yard, seen from the arrival looking up at it, its ring on the floor, out of sight, and under it, at the swarm's foot,
+//! down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
 //! `design/interaction.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1119,6 +1121,109 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
             std::fs::create_dir_all(&directory).unwrap();
             sheet
                 .save(directory.join("workbench.png"))
+                .expect("the preview is saved");
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_home_floating_high_with_its_ring_under_it_has_its_ring_at_the_swarm_s_foot_not_on_the_floor() {
+    use tomori_protocol::cluster::{HOME, RING_BELOW, RingAt};
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut sceneries = Sceneries::empty();
+        tomori_environment_farmyard_client::register(&mut sceneries);
+        let mut feedback = Feedback::new(Settings::default());
+        // The agent's home floating 5.3 m above the yard, over its workbench, as Observe floats its home over a globe:
+        // its ring on the floor by default, and under it, at the swarm's foot, where its home anchor asks.
+        let high = {
+            let home = carried(layout::AGENT_HOME);
+            Pose {
+                position: [home.position[0], 5.3, home.position[2]],
+                ..home
+            }
+        };
+        let eyes = Vec3::from_array(SUMMONER);
+        let agent = Vec3::from_array(high.position);
+        let towards = (agent - eyes).normalize();
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+        for (row, ring) in [RingAt::Floor, RingAt::UnderHome].into_iter().enumerate() {
+            let mut conversation = joined(3, None);
+            let mut floating = state(3, None);
+            floating.anchors = Anchors::new()
+                .with_agent(high)
+                .with_workers(high)
+                .with_arrival(
+                    Pose::at(layout::ARRIVAL.to_array())
+                        .facing_towards(layout::ARRIVAL_FACING.to_array()),
+                )
+                .with_cluster(tomori_protocol::cluster::Anchor::new(HOME, high).with_ring(ring));
+            conversation.apply(Event::Message(ServerMessage::Space {
+                state: Box::new(floating),
+            }));
+            conversation.apply(Event::Message(ServerMessage::Projection {
+                projection: Box::new(Projection::new(SPACE, farmyard().id())),
+            }));
+            conversation.take_actions();
+            let mut step = Step::default();
+            let mut now = Instant::now();
+            let frame = run(
+                &mut step,
+                &mut conversation,
+                &mut feedback,
+                &senses(eyes, towards),
+                8.0,
+                &mut now,
+            );
+            assert!(Vec3::from_array(frame.agent).distance(agent) < 0.05);
+            let drawn_ring = frame.home_ring;
+            let height = if ring == RingAt::Floor {
+                entourage::FLOOR
+            } else {
+                5.3 - RING_BELOW
+            };
+            assert!(
+                (drawn_ring.height - height).abs() < 1e-4,
+                "{ring:?}: {drawn_ring:?}"
+            );
+            assert!(Vec3::from_array(drawn_ring.centre.to_array()).distance(agent) < 1e-4);
+            let fov = 1.2;
+            let drawn = render(&device, &queue, &sceneries, &frame, eyes, towards, fov);
+            // Where the ring's cubes would lie under the swarm, 1.25 m about it at 3.9 m up, against the sky: the ring's
+            // blue only where it is asked to lie there.
+            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
+                * Mat4::look_to_rh(eyes, towards, Vec3::Y);
+            let ringed = (0..40)
+                .map(|n| n as f32 * std::f32::consts::TAU / 40.0)
+                .map(|angle| {
+                    agent.with_y(5.3 - RING_BELOW + 0.015)
+                        + Vec3::new(angle.cos(), 0.0, angle.sin())
+                            * tomori_scene::anchors::FLOOR_RING
+                })
+                .filter(|at| {
+                    let clip = matrix * at.extend(1.0);
+                    let (x, y) = (
+                        ((clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32) as u32,
+                        ((1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32) as u32,
+                    );
+                    assert!(x < WIDTH && y < HEIGHT, "in view: {x} {y}");
+                    let [red, green, blue, _] = drawn.get_pixel(x, y).0;
+                    i32::from(green) - i32::from(red) > 60 && i32::from(blue) - i32::from(red) > 60
+                })
+                .count();
+            if ring == RingAt::Floor {
+                assert!(ringed < 10, "{ringed} of 40 at 3.9 m drawn on the floor");
+            } else {
+                assert!(ringed >= 20, "only {ringed} of 40 drawn under the home");
+            }
+            image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
+        }
+        if let Some(directory) = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            sheet
+                .save(directory.join("ring-under.png"))
                 .expect("the preview is saved");
         }
         assert!(pollster::block_on(scope.pop()).is_none());
