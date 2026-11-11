@@ -14,13 +14,13 @@ The farmyard's ambience plays the sounds in this folder, each named for its slot
 
 | Slot | Kind | What it should sound like | Length |
 | --- | --- | --- | --- |
-| `wind` | bed, stereo, −6 dB | A gentle evening breeze through grass and pines, steady, with no gusts that stand out | 45 to 90 s |
-| `bush` | bed, stereo, −8 dB | Distant native bush at dusk: insects, leaves and a far stream, with no birdsong that stands out | 45 to 90 s |
-| `river` | loop, mono, −2 dB, heard within 35 m along the river | A shallow river over shingle and stones, close up, steady | 30 to 60 s |
-| `waterfall` | loop, mono, heard within 60 m, from the middle of its fall | A small waterfall falling a few metres into a pool | 30 to 60 s |
-| `tui-1` to `tui-3` | call, mono, every 25 to 70 s | A tūī's song, its bell notes, clicks and wheezes, one phrase each | 2 to 6 s |
-| `bellbird-1` to `bellbird-3` | call, mono, every 30 to 90 s | A bellbird's (korimako's) liquid, bell-like song, one phrase each | 1 to 4 s |
-| `kereru-1`, `kereru-2` | call, mono, every 90 to 240 s | A kererū's heavy, whooshing wingbeats as it flies over | 1 to 3 s |
-| `ruru-1`, `ruru-2` | call, mono, every 60 to 180 s | A ruru's (morepork's) two-note "more-pork" call, once or twice | 1 to 3 s |
+| `wind` | bed, stereo, −8 dB | A gentle evening breeze through grass and pines, steady, with no gusts that stand out | 45 to 90 s |
+| `bush` | bed, stereo, −10 dB | Distant native bush at dusk: insects, leaves and a far stream, with no birdsong that stands out | 45 to 90 s |
+| `river` | loop, mono, +5 dB, heard within 35 m along the river | A shallow river over shingle and stones, close up, steady | 30 to 60 s |
+| `waterfall` | loop, mono, +8 dB, heard within 60 m, from the middle of its fall | A small waterfall falling a few metres into a pool | 30 to 60 s |
+| `tui-1` to `tui-3` | call, mono, +14 to +18 dB, every 25 to 70 s | A tūī's song, its bell notes, clicks and wheezes, one phrase each | 2 to 6 s |
+| `bellbird-1` to `bellbird-3` | call, mono, +13 to +17 dB, every 30 to 90 s | A bellbird's (korimako's) liquid, bell-like song, one phrase each | 1 to 4 s |
+| `kereru-1`, `kereru-2` | call, mono, +12 to +17 dB, every 90 to 240 s | A kererū's heavy, whooshing wingbeats as it flies over | 1 to 3 s |
+| `ruru-1`, `ruru-2` | call, mono, +13 to +17 dB, every 120 to 300 s | A ruru's (morepork's) two-note "more-pork" call, once or twice | 1 to 3 s |
 
-The calls come from the backdrop's bush, about 6 m up in its canopy, at a slightly different pitch and gain each time, a different variant from the last, so that none sounds like a loop. `design/farmyard.md` describes where each is heard.
+The calls come from the backdrop's bush, about 6 m up in its canopy, at a slightly different pitch and gain each time, a different variant from the last, so that none sounds like a loop. The water and the birds are raised above the beds because distance takes 17 to 21 dB from them where participants stand; `design/farmyard.md` describes where each is heard, and how loud.

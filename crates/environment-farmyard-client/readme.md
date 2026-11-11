@@ -10,7 +10,7 @@ Tomori's own app and spectator register it; a build of another project's registe
 let headset = tomori::Builder::default().register(tomori_environment_farmyard_client::register);
 ```
 
-A headset build carries the chicken in its APK as `farmyard/`, from `tomori-environment-farmyard`'s `assets/models`, and the sounds as `farmyard/sounds/`, from this crate's `assets/sounds`, as [`context/usage.md`](context/usage.md) says. The chicken is by Hinoki Maple Williams, under the [Creative Commons Attribution 4.0 International licence](https://creativecommons.org/licenses/by/4.0/) (CC BY 4.0); `register` adds its notice to the build's licences, which `tomori --licenses` shows.
+A headset build carries the chicken in its APK as `farmyard/`, from `tomori-environment-farmyard`'s `assets/models`, and the sounds as `farmyard/sounds/`, from this crate's `assets/sounds`, as [`context/usage.md`](context/usage.md) says. The chicken is by Hinoki Maple Williams, under the [Creative Commons Attribution 4.0 International licence](https://creativecommons.org/licenses/by/4.0/) (CC BY 4.0). The tūī, bellbird and kererū are the Department of Conservation (NZ)'s recordings, and the ruru eklemp's, from iNaturalist, each under CC BY 4.0, and the wind, bush, river and waterfall are Freesound recordings under CC0 1.0, as [`assets/sounds/LICENSE.md`](assets/sounds/LICENSE.md) says; the code is MIT, so the crate is `MIT AND CC-BY-4.0`. `register` adds both notices to the build's licences, which `tomori --licenses` shows.
 
 The interface is 0.x. Its requirements are in Tomori's [`design/farmyard.md`](https://github.com/ioquatix/tomori/blob/main/design/farmyard.md).
 
