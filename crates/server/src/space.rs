@@ -5070,7 +5070,7 @@ mod tests {
         assert_eq!(taken[1].1, nobody);
         // So does a turn of Tomori's notes alone, such as someone coming near an anchor.
         space.apply(Event::Idle);
-        space.tell_proximity("near", "[Ada came within 2 m of station-1]".into());
+        space.tell_proximity("near", None, "[Ada came within 2 m of station-1]".into());
         space.quieten();
         let prompt = space
             .next_prompt_at(std::time::Instant::now(), false)
