@@ -253,3 +253,109 @@ fn a_cairn_of_the_beach_s_own_stones_stands_on_the_shingle_and_never_moves_aslee
     let after: Vec<Placement> = (0..6).map(|body| world.placement(body).unwrap()).collect();
     assert_eq!(after, rested);
 }
+
+#[test]
+fn each_taking_and_letting_go_is_logged_taken_or_refused_and_why() {
+    log::set_max_level(log::LevelFilter::Trace);
+    let now = Instant::now();
+    let mut shingle = Shingle::new(now);
+    let ada = beside(&shingle, 0, 3, now);
+    let bea = Presence::new(4, ada.head, None, ada.right, now);
+    let near_one = beside(&shingle, 1, 3, now);
+    let asked = |payload: &str| serde_json::from_str::<Intent>(payload).unwrap();
+    let said = |shingle: &mut Shingle, by: u32, payload: &str, presence: &[Presence]| {
+        shingle.answer(by, asked(payload), presence)
+    };
+    let refused = |line: String, why: &str| {
+        assert!(line.contains(&format!("was refused: {why}.")), "{line}");
+    };
+    refused(
+        said(&mut shingle, 3, &take(0, 0), &[]),
+        "it is out of their reach, or the server has not seen where they are",
+    );
+    refused(
+        said(&mut shingle, 3, &take(0, 5), &[ada]),
+        "it has moved on to epoch 0",
+    );
+    refused(
+        said(&mut shingle, 3, &take(99, 0), &[ada]),
+        "no body numbered 99",
+    );
+    assert_eq!(
+        said(&mut shingle, 3, &take(0, 0), &[ada]),
+        "Participant 3 took stone 0 with their right hand, at epoch 1."
+    );
+    refused(
+        said(&mut shingle, 4, &take(0, 1), &[bea]),
+        "participant 3 holds it",
+    );
+    refused(
+        said(&mut shingle, 3, &take(0, 7), &[ada]),
+        "they hold it in their right hand",
+    );
+    refused(
+        said(&mut shingle, 3, &take(1, 0), &[near_one]),
+        "they hold something in that hand, or two already",
+    );
+    // Their letting go lost, they take it again.
+    assert_eq!(
+        said(&mut shingle, 3, &take(0, 2), &[ada]),
+        "Participant 3 took stone 0 again, with their right hand, at epoch 3, as their letting go of it never arrived."
+    );
+    let at = Placement::at(glam::Vec3::from(ada.right.unwrap().position));
+    refused(
+        said(&mut shingle, 3, &let_go(0, 1, at, [0.0; 3]), &[ada]),
+        "it has moved on to epoch 3",
+    );
+    refused(
+        said(&mut shingle, 4, &let_go(0, 3, at, [0.0; 3]), &[bea]),
+        "participant 3 holds it",
+    );
+    refused(
+        said(&mut shingle, 3, &let_go(1, 0, at, [0.0; 3]), &[ada]),
+        "nobody holds it",
+    );
+    let line = said(&mut shingle, 3, &let_go(0, 3, at, [0.0, 2.0, 0.0]), &[ada]);
+    assert!(
+        line.starts_with("Participant 3 let go of stone 0 at (")
+            && line.ends_with("), moving at 2.0 m/s, at epoch 4."),
+        "{line}"
+    );
+    // The left hand is named as such; and what is asked is logged.
+    let left = serde_json::to_string(&Intent::Take(Take {
+        body: 1,
+        epoch: 0,
+        hand: Side::Left,
+        offset: Encoded::default(),
+    }))
+    .unwrap();
+    let left_hand = Presence::new(3, near_one.head, near_one.right, None, now);
+    assert_eq!(
+        said(&mut shingle, 3, &left, &[left_hand]),
+        "Participant 3 took stone 1 with their left hand, at epoch 1."
+    );
+    assert!(shingle.ask(3, &take(5, 0), &[ada]));
+    // Beyond the burst, what is asked is still done, but not logged.
+    for _ in 0..LOG_BURST as usize {
+        assert!(shingle.ask(3, &take(99, 0), &[ada]));
+    }
+    assert!(shingle.logged.skipped > 0);
+}
+
+#[test]
+fn the_stones_log_at_most_a_burst_and_then_a_few_a_second_saying_how_many_were_not() {
+    let now = Instant::now();
+    let mut logged = Logged::new(now);
+    for line in 0..LOG_BURST as usize {
+        assert_eq!(logged.line(line.to_string(), now), Some(line.to_string()));
+    }
+    assert_eq!(logged.line("skipped".to_owned(), now), None);
+    assert_eq!(logged.line("skipped".to_owned(), now), None);
+    let later = now + Duration::from_secs(1);
+    assert_eq!(
+        logged.line("next".to_owned(), later).unwrap(),
+        "next (2 more of the stones' takings and lettings go were not logged.)"
+    );
+    assert_eq!(logged.line("then".to_owned(), later).unwrap(), "then");
+    assert_eq!(logged.line("beyond".to_owned(), later), None);
+}

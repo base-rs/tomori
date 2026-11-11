@@ -505,26 +505,56 @@ impl World {
     /// it at the epoch they saw, if it is within their reach, nobody holds it, and they hold nothing in that hand and
     /// fewer than [`HELD_LIMIT`] bodies: out of the simulation, touching nothing, until they let go, and anything resting
     /// on it woken. Returns its epoch now.
+    ///
+    /// One they hold already, by the world's account, they take again, in the hand that takes it now, at the epoch they
+    /// hold it at or the one their letting go of it would have made: their client let go of it, but its letting go never
+    /// arrived or was refused, as one intent too many, so that they would otherwise never take it again until their client
+    /// noticed. Its epoch is then the one after the epoch they asked at, as their client expects.
     pub fn take(&mut self, by: u32, take: &Take, seen: Option<&Seen>) -> Result<u32, Refused> {
         let index = self.index(take.body)?;
         let entry = &self.entries[index];
-        if entry.held.is_some() {
+        let again = entry.held.is_some_and(|held| held.by == by)
+            && (take.epoch == entry.epoch || take.epoch == entry.epoch.wrapping_add(1));
+        if entry.held.is_some() && !again {
             return Err(Refused::Held(take.body));
         }
-        if entry.epoch != take.epoch {
+        if entry.epoch != take.epoch && !again {
             return Err(Refused::Epoch(take.body));
         }
         let holding: Vec<&Held> = self
             .entries
             .iter()
-            .filter_map(|entry| entry.held.as_ref())
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, entry)| entry.held.as_ref())
             .filter(|held| held.by == by)
             .collect();
         if holding.len() >= HELD_LIMIT || holding.iter().any(|held| held.hand == take.hand) {
             return Err(Refused::Hands);
         }
-        let at = self.placement_of(entry);
+        // Where it is: held, where the side last saw it held, or where it was taken.
+        let at = match entry.held {
+            Some(held) => seen
+                .and_then(|seen| seen.holding(&held))
+                .unwrap_or_else(|| self.placement_of(entry)),
+            None => self.placement_of(entry),
+        };
         take.reachable(at.position, entry.body.radius(), seen)?;
+        if again {
+            let entry = &mut self.entries[index];
+            entry.epoch = take.epoch.wrapping_add(1);
+            entry.held = Some(Held {
+                by,
+                hand: take.hand,
+                offset: take.offset,
+            });
+            self.pending.holding.push(Holding {
+                body: take.body,
+                epoch: entry.epoch,
+                held: entry.held,
+            });
+            return Ok(entry.epoch);
+        }
         // Whatever rests on it or beside it wakes, so that a cairn whose stone is taken falls as it would.
         let reach = entry.body.radius();
         for other in 0..self.entries.len() {
@@ -671,6 +701,11 @@ impl World {
         holders.sort_unstable();
         holders.dedup();
         holders
+    }
+
+    /// Body `body`'s epoch, if the world has it.
+    pub fn epoch(&self, body: u32) -> Option<u32> {
+        Some(self.entries[self.index(body).ok()?].epoch)
     }
 
     /// Who holds body `body`, if anyone does.

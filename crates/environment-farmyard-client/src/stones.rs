@@ -156,7 +156,8 @@ impl Stones {
     }
 
     /// What the server side now says of the stones this participant holds: their taking agreed, or given up as another
-    /// holds it or it has moved on without them.
+    /// holds it or it has moved on without them. Until then, what it says of an epoch before the one their taking makes,
+    /// their own letting go of it before or their own holding of it whose letting go was lost, changes nothing.
     fn agree(&mut self) {
         for holding in &mut self.holding {
             let Some(held) = holding.as_mut() else {
@@ -166,17 +167,24 @@ impl Stones {
                 self.mirror.epoch(held.stone),
                 self.mirror.held(held.stone).map(|held| held.by),
             );
-            if epoch == Some(held.epoch) && by.is_some() && by == self.me {
+            let mine = by.is_some() && by == self.me;
+            if epoch == Some(held.epoch) && mine {
                 held.agreed = true;
-            } else if held.agreed || by.is_some() || epoch.is_none_or(|epoch| epoch >= held.epoch) {
+            } else if held.agreed
+                || (by.is_some() && !mine)
+                || epoch.is_none_or(|epoch| epoch >= held.epoch)
+            {
                 *holding = None;
             }
         }
     }
 
-    /// Whether stone `stone` may be taken: nobody holds it, as far as this client knows.
+    /// Whether stone `stone` may be taken: nobody holds it, as far as this client knows, or the server side says this
+    /// participant does though no hand of theirs does, as when their letting go of it was lost, which it takes again.
     fn free(&self, stone: u32) -> bool {
-        self.mirror.held(stone).is_none()
+        self.mirror
+            .held(stone)
+            .is_none_or(|held| Some(held.by) == self.me)
             && self
                 .holding
                 .iter()
@@ -249,7 +257,14 @@ impl Stones {
                         continue;
                     }
                     let at = self.drawn[&stone];
-                    let epoch = self.mirror.epoch(stone).expect("known above");
+                    // At the epoch the server side last said; or, for one this participant let go of whose letting go
+                    // it has not yet answered, the epoch that letting go makes, which the side takes even if the letting
+                    // go was lost: so that a stone taken again just after it was dropped is taken, not refused.
+                    let said = self.mirror.epoch(stone).expect("known above");
+                    let epoch = match self.astray.remove(&stone) {
+                        Some((_, epoch)) if said <= epoch => epoch.wrapping_add(1),
+                        _ => said,
+                    };
                     // Within reach, held where the hand closed on it; otherwise pulled to the palm, turned as it was.
                     let (offset, pulled) = if reach(stone, &at, hand.position) <= REACH {
                         (hand.inverse().then(&at), None)
@@ -334,8 +349,9 @@ impl Stones {
             }
         }
         let mirror = &self.mirror;
+        // Kept until the side's epoch moves on beyond it, as one it has not yet said this participant's taking made.
         self.astray.retain(|stone, (_, epoch)| {
-            mirror.epoch(*stone) == Some(*epoch)
+            mirror.epoch(*stone).is_some_and(|said| said <= *epoch)
                 && mirror.held(*stone).is_none_or(|held| Some(held.by) == me)
         });
         let mut intents = Vec::new();

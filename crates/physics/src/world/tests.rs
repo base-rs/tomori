@@ -398,6 +398,68 @@ fn a_body_is_taken_once_at_the_epoch_seen_within_reach_with_a_free_hand() {
 }
 
 #[test]
+fn a_body_whose_letting_go_never_arrived_is_taken_again_by_its_holder_alone() {
+    let (mut world, seen, take) = one();
+    assert_eq!(world.take(3, &take, Some(&seen)), Ok(1));
+    world.step(0.0);
+    // Their letting go at epoch 1 lost, their client takes it again at the epoch its letting go would have made, with
+    // the other hand: it is theirs again, in that hand, at the epoch after it, as their client expects.
+    let again = Take {
+        epoch: 2,
+        hand: Side::Left,
+        ..take
+    };
+    assert_eq!(world.take(3, &again, Some(&seen)), Ok(3));
+    assert_eq!(
+        world.held(1).map(|held| (held.by, held.hand)),
+        Some((3, Side::Left))
+    );
+    assert_eq!(
+        world.step(0.0).holding,
+        [Holding {
+            body: 1,
+            epoch: 3,
+            held: world.held(1)
+        }]
+    );
+    assert!(!world.moving());
+    // Or at the epoch it holds it at, as a client that heard of its taking but whose letting go was lost.
+    assert_eq!(
+        world.take(3, &Take { epoch: 3, ..take }, Some(&seen)),
+        Ok(4)
+    );
+    // Nobody else takes it, at any epoch, nor its holder at one long gone or far ahead, nor unseen.
+    for epoch in [0, 4, 5] {
+        assert_eq!(
+            world.take(5, &Take { epoch, ..take }, Some(&seen)),
+            Err(Refused::Held(1))
+        );
+    }
+    for epoch in [0, 3, 6] {
+        assert_eq!(
+            world.take(3, &Take { epoch, ..take }, Some(&seen)),
+            Err(Refused::Held(1))
+        );
+    }
+    assert_eq!(
+        world.take(3, &Take { epoch: 4, ..take }, None),
+        Err(Refused::Reach(1))
+    );
+    // Let go at the epoch its taking again made, it is let go.
+    let let_go = LetGo {
+        body: 1,
+        epoch: 4,
+        at: Placement::at(Vec3::new(0.0, 0.3, 0.0)).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    assert_eq!(world.let_go(3, &let_go, Some(&seen)), Ok(5));
+    assert_eq!(world.held(1), None);
+    assert_eq!((world.epoch(1), world.epoch(9)), (Some(5), None));
+}
+
+#[test]
 fn each_participant_holds_one_body_in_each_hand() {
     let bodies: Vec<Body> = (0..3)
         .map(|id| {

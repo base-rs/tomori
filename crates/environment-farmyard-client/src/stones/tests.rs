@@ -545,3 +545,253 @@ fn a_stone_the_server_side_says_is_held_by_no_hand_of_this_participant_is_let_go
             .is_empty()
     );
 }
+
+#[test]
+fn a_stone_taken_again_before_its_letting_go_is_answered_is_taken_at_the_epoch_its_letting_go_makes()
+ {
+    let start = Instant::now();
+    let at = lying(0).position;
+    let hand = hand_at(at + Vec3::Y * 0.03);
+    let said = |epoch: u32, by: Option<u32>| Update {
+        holding: vec![Changed {
+            body: 0,
+            epoch,
+            held: by.map(|by| Held {
+                by,
+                hand: tomori_physics::Side::Right,
+                offset: Encoded::default(),
+            }),
+        }],
+        ..Default::default()
+    };
+    let taken = |intents: &[Intent]| match intents {
+        [Intent::Take(take)] => take.epoch,
+        _ => panic!("{intents:?}"),
+    };
+    let mut stones = shared();
+    let grip = |stones: &mut Stones, phase: Phase, now: Instant| {
+        stones.update(
+            [&grab(0, hand, phase, Side::Right)].into_iter(),
+            Some(5),
+            now,
+            0,
+        )
+    };
+    assert_eq!(taken(&grip(&mut stones, Phase::Began, start)), 3);
+    stones.changed(10, &said(4, Some(5)), 20);
+    assert!(matches!(
+        grip(&mut stones, Phase::Ended, start)[..],
+        [Intent::LetGo(LetGo { epoch: 4, .. })]
+    ));
+    // Squeezed on again before the side has said it was let go: taken at the epoch the letting go makes.
+    assert_eq!(stones.within_reach(at), Some("stone-0".to_owned()));
+    let soon = start + Duration::from_millis(100);
+    assert_eq!(taken(&grip(&mut stones, Phase::Began, soon)), 5);
+    // Its letting go said, the taking again waits; then agreed, it is kept, and never let go of again unasked.
+    stones.changed(30, &said(5, None), 40);
+    assert!(stones.holding[1].is_some());
+    stones.changed(40, &said(6, Some(5)), 50);
+    assert!(stones.holding[1].as_ref().is_some_and(|held| held.agreed));
+    let later = start + ASTRAY * 3;
+    assert!(
+        stones
+            .update(std::iter::empty(), Some(5), later, 0)
+            .is_empty()
+    );
+    assert!(stones.holding[1].is_some());
+}
+
+#[test]
+fn a_stone_the_server_side_says_this_participant_holds_with_no_hand_of_theirs_is_theirs_to_take_again()
+ {
+    let start = Instant::now();
+    let at = lying(0).position;
+    let hand = hand_at(at + Vec3::Y * 0.03);
+    // As when their letting go was lost, the side says they hold it; another's is not theirs to take.
+    let mut held = state();
+    held.bodies[0].epoch = 4;
+    held.bodies[0].held = Some(Held {
+        by: 5,
+        hand: tomori_physics::Side::Right,
+        offset: Encoded::default(),
+    });
+    held.bodies[1].held = Some(Held {
+        by: 7,
+        hand: tomori_physics::Side::Right,
+        offset: Encoded::default(),
+    });
+    let mut stones = Stones::new();
+    stones.share(&held);
+    stones.update(std::iter::empty(), Some(5), start, 0);
+    stones.shown(&[], &[], start, 0);
+    assert_eq!(stones.within_reach(at), Some("stone-0".to_owned()));
+    assert_eq!(stones.within_reach(lying(1).position), None);
+    let down = Ray::new(at + Vec3::Y, Vec3::NEG_Y).unwrap();
+    assert_eq!(stones.pick(&down).unwrap().object, "stone-0");
+    // Taken with the left hand, at the epoch its letting go would make, and agreed in that hand.
+    let intents = stones.update(
+        [&grab(0, hand, Phase::Began, Side::Left)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    let [Intent::Take(take)] = intents[..] else {
+        panic!("{intents:?}")
+    };
+    assert_eq!((take.epoch, take.hand), (5, tomori_physics::Side::Left));
+    stones.changed(
+        10,
+        &Update {
+            holding: vec![Changed {
+                body: 0,
+                epoch: 6,
+                held: Some(Held {
+                    by: 5,
+                    hand: tomori_physics::Side::Left,
+                    offset: take.offset,
+                }),
+            }],
+            ..Default::default()
+        },
+        20,
+    );
+    assert!(stones.holding[0].as_ref().is_some_and(|held| held.agreed));
+}
+
+/// The client side and the farmyard's own server side's stones, as one participant, 3, plays with them: what the client
+/// asks reaches the side `latency` later, unless it is dropped, as the server drops an intent beyond its rate, and what
+/// the side says reaches the client as long again.
+mod played {
+    use super::*;
+    use std::collections::VecDeque;
+    use tomori_environment::Presence;
+    use tomori_environment_farmyard::side::Shingle;
+    use tomori_protocol::Pose;
+
+    struct Played {
+        side: Shingle,
+        client: Stones,
+        start: Instant,
+        now: Instant,
+        latency: Duration,
+        asked: VecDeque<(Instant, String)>,
+        said: VecDeque<(Instant, u64, Update)>,
+        /// Whether the client's next letting go is dropped on the way.
+        drop_letting_go: bool,
+    }
+
+    impl Played {
+        fn new(latency: u64) -> Self {
+            let start = Instant::now();
+            let side = Shingle::new(start);
+            let mut client = Stones::new();
+            client.share(&side.shared());
+            Self {
+                side,
+                client,
+                start,
+                now: start,
+                latency: Duration::from_millis(latency),
+                asked: VecDeque::new(),
+                said: VecDeque::new(),
+                drop_letting_go: false,
+            }
+        }
+
+        /// A frame of 14 ms, the grip `phase` on stone `stone`, if any, with the hand at `hand` and the head beside it.
+        fn frame(&mut self, grip: Option<(u32, Phase)>, hand: Vec3) {
+            self.now += Duration::from_millis(14);
+            let clock = self.now.duration_since(self.start).as_millis() as u64;
+            while self.said.front().is_some_and(|(at, ..)| *at <= self.now) {
+                let (_, sent, update) = self.said.pop_front().unwrap();
+                self.client.changed(sent, &update, clock);
+            }
+            let grabs: Vec<Grab> = grip
+                .map(|(stone, phase)| grab(stone, hand_at(hand), phase, Side::Right))
+                .into_iter()
+                .collect();
+            for intent in self.client.update(grabs.iter(), Some(3), self.now, clock) {
+                if matches!(intent, Intent::LetGo(_)) && std::mem::take(&mut self.drop_letting_go) {
+                    continue;
+                }
+                let asked = serde_json::to_string(&intent).unwrap();
+                self.asked.push_back((self.now + self.latency, asked));
+            }
+            let presence = [Presence::new(
+                3,
+                Pose::at((hand + Vec3::new(-0.3, 0.6, 0.0)).to_array()),
+                None,
+                Some(Pose::at(hand.to_array())),
+                self.now,
+            )];
+            while self.asked.front().is_some_and(|(at, _)| *at <= self.now) {
+                let (_, asked) = self.asked.pop_front().unwrap();
+                assert!(self.side.ask(3, &asked, &presence));
+            }
+            self.side.sweep(Some(&[3]), &presence, self.now);
+            if let Some(update) = self.side.update(self.now) {
+                self.said
+                    .push_back((self.now + self.latency, clock, update));
+            }
+            self.client.shown(&[], &[], self.now, clock);
+        }
+
+        /// Stone `stone` taken within reach, lifted `lift` and let go, then, `wait` frames on, taken again where it is
+        /// drawn and held for two seconds: whether the side then says participant 3 holds it, and the client agrees.
+        fn taken_again(&mut self, stone: u32, lift: f32, wait: usize) -> bool {
+            let at = self.side.world().placement(stone).unwrap().position;
+            let mut hand = at + Vec3::Y * 0.03;
+            self.frame(Some((stone, Phase::Began)), hand);
+            for _ in 0..30 {
+                hand += Vec3::Y * lift / 30.0;
+                self.frame(Some((stone, Phase::Changed)), hand);
+            }
+            self.frame(Some((stone, Phase::Ended)), hand);
+            for _ in 0..wait {
+                self.frame(None, hand);
+            }
+            let hand = self.client.drawn[&stone].position + Vec3::Y * 0.03;
+            assert_eq!(
+                self.client.within_reach(hand),
+                Some(format!("stone-{stone}"))
+            );
+            self.frame(Some((stone, Phase::Began)), hand);
+            for _ in 0..140 {
+                self.frame(Some((stone, Phase::Changed)), hand);
+            }
+            self.side.world().held(stone).map(|held| held.by) == Some(3)
+                && self.client.holding[1]
+                    .as_ref()
+                    .is_some_and(|held| held.agreed)
+        }
+    }
+
+    #[test]
+    fn a_stone_dropped_is_taken_again_however_soon_and_however_far_the_server_is() {
+        for latency in [0, 60, 150] {
+            for wait in [0, 5, 20, 100] {
+                for lift in [0.0, 0.8] {
+                    let mut played = Played::new(latency);
+                    assert!(
+                        played.taken_again(5, lift, wait),
+                        "taken again {wait} frames after it was dropped from {lift} m, {latency} ms away"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stone_whose_letting_go_was_dropped_on_the_way_is_taken_again() {
+        for latency in [0, 60] {
+            for wait in [0, 20, 100] {
+                let mut played = Played::new(latency);
+                played.drop_letting_go = true;
+                assert!(
+                    played.taken_again(12, 0.3, wait),
+                    "taken again {wait} frames after its letting go was lost, {latency} ms away"
+                );
+            }
+        }
+    }
+}
