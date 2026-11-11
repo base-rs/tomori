@@ -225,8 +225,8 @@ impl Static {
     }
 
     /// Whether it is one the world takes: finite, a mesh's triangles naming its corners, a hull of 4 to
-    /// [`HULL_POINTS`] points.
-    pub(crate) fn valid(&self) -> bool {
+    /// [`HULL_POINTS`] points, a box with an extent every way.
+    pub fn valid(&self) -> bool {
         match self {
             Self::Mesh {
                 vertices,
