@@ -10,7 +10,9 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tomori_environment::{Action, Error, Object, Outcome, Parameter, Result, ServerSide, Space};
+use tomori_environment::{
+    Action, Around, Error, Object, Outcome, Parameter, Result, ServerSide, Space, Zone,
+};
 
 use crate::campsite::{self, Campsite};
 use crate::chicken::Chicken;
@@ -41,6 +43,38 @@ pub fn actions() -> Vec<Action> {
 }
 
 pub mod shingle;
+
+/// The zone before the coop, whose occupancy the side is told: a cylinder 2 m about the ramp's foot, from the ground to
+/// 2.5 m up, which a participant standing there enters and the arrival, 5 m off, is outside; someone coming to it for
+/// a second has the hens glance up. See `design/farmyard.md`.
+pub const COOP_ZONE: &str = "coop";
+
+/// The zones the side declares.
+pub fn zones() -> Vec<Zone> {
+    let foot = crate::layout::RAMP_FOOT;
+    vec![
+        Zone::cylinder(
+            COOP_ZONE,
+            Around::point([foot.x, 0.0, foot.z]),
+            2.0,
+            0.0,
+            2.5,
+        )
+        .dwelling(Duration::from_secs(1)),
+    ]
+}
+
+/// Whether the hens notice someone, told `occupancy`, where someone was at the coop as `visited` says, or nothing is
+/// known yet, which it updates: only someone coming to the coop where nobody was, not someone already there as the side
+/// starts, which the first occupancy tells, nor another joining them, nor anyone at any other zone.
+pub fn noticed(visited: &mut Option<bool>, occupancy: &tomori_environment::Occupancy) -> bool {
+    if occupancy.zone() != COOP_ZONE {
+        return false;
+    }
+    let came = occupancy.occupied() && *visited == Some(false);
+    *visited = Some(occupancy.occupied());
+    came
+}
 
 fn json(value: impl serde::Serialize) -> String {
     serde_json::to_string(&value).expect("the flock's messages are JSON")
@@ -162,7 +196,10 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     drop(flock);
     let mut pace = Pace::new(Instant::now());
     space.declare_actions(actions())?;
+    space.declare_zones(zones())?;
     let mut described: Option<Instant> = None;
+    // Whether someone is at the coop, as the side was last told, or nothing until it is.
+    let mut visited = None;
     while !space.cancellation().is_cancelled() {
         let mut changes = Vec::new();
         let intent = space.next_intent(TICK);
@@ -183,6 +220,10 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                 Err(reason) => Outcome::refused(reason),
             };
             space.answer(acted.ticket(), outcome);
+        } else if let Some(occupancy) = intent.as_ref().and_then(|intent| intent.occupancy()) {
+            if noticed(&mut visited, occupancy) {
+                changes.extend(flock.glance(clock()));
+            }
         } else if let Some(intent) = intent {
             if shingle.ask(intent.participant(), intent.payload(), &space.presence()) {
                 // The stones' changes are said below, with the rest of what moved.

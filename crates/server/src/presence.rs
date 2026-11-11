@@ -20,7 +20,7 @@ use crate::stage::{Destination, Placement};
 
 /// How long a report stays current: a client in a space reports with every frame, so one not heard from for this long
 /// has stopped, such as while its headset sleeps.
-pub(crate) const STALE: Duration = Duration::from_secs(5);
+pub(crate) const STALE: Duration = tomori_environment::PRESENCE_STALE;
 
 /// How far along a ray what it meets is resolved, in metres: a little beyond what the space reaches.
 const RANGE: f32 = 30.0;

@@ -20,6 +20,11 @@
 //! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`]. A participant's choice of a row it marks [choosable](Row::choosable) reaches it as an [`Intent`] whose [`Intent::chosen`] names the row.
 //!
 //! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`], and the cluster anchors it places by [`ANCHOR_LIMIT`], [`ANCHOR_NAME_BYTES`], [`ANCHOR_LABEL_LIMIT`], [`ANCHOR_INTERVAL`], [`ANCHOR_CHANGES_PER_SECOND`] and [`ANCHOR_BURST`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
+//!
+//! A side learns where participants are in two ways: it may declare proximity [zones](Zone), whose occupancy the server
+//! tells it as an [`Intent`] whose [`Intent::occupancy`] names the zone and how many are within it, see
+//! [`Space::declare_zones`]; and it may read where each participant's head and hands are, and how engaged they are,
+//! with [`Space::presence`]. Participants are named by their numbers alone, as everywhere else a side meets them.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -31,12 +36,19 @@ mod action;
 pub mod navmesh;
 mod panel;
 pub mod sightlines;
+mod zone;
 
 pub use action::{
     ACTION_DESCRIPTION_LIMIT, ACTION_LIMIT, ACTION_NAME_BYTES, ACTIONS_LIMIT, Acted, Action,
     CHOICE_LABEL_LIMIT, CHOICE_LIMIT, Choice, Kind, OFFER_LIMIT, OUTCOME_LIMIT, Outcome,
     PARAMETER_DESCRIPTION_LIMIT, PARAMETER_LIMIT, Parameter, TEXT_LIMIT, check_actions,
     valid_action_name,
+};
+
+pub use zone::{
+    Around, Engagement, LEAST_ZONE_RADIUS, MOST_ZONE_DWELL, MOST_ZONE_HEIGHT, MOST_ZONE_MARGIN,
+    MOST_ZONE_RADIUS, Occupancy, PRESENCE_LIMIT, PRESENCE_STALE, Shape, ZONE_INTERVAL, ZONE_LIMIT,
+    ZONE_MARGIN, ZONE_NAME_BYTES, Zone, ZoneError, check_zones,
 };
 
 pub use panel::{
@@ -147,6 +159,7 @@ pub struct Intent {
     chosen: Option<Chosen>,
     acted: Option<Acted>,
     moved: Option<Moved>,
+    occupancy: Option<Occupancy>,
 }
 
 /// Where a panel the side published is now, as the server tells the side in a [`Moved`].
@@ -263,6 +276,7 @@ impl Intent {
             chosen: None,
             acted: None,
             moved: None,
+            occupancy: None,
         }
     }
 
@@ -285,6 +299,7 @@ impl Intent {
             chosen: Some(chosen),
             acted: None,
             moved: None,
+            occupancy: None,
         }
     }
 
@@ -308,6 +323,7 @@ impl Intent {
             chosen: None,
             acted: Some(acted),
             moved: None,
+            occupancy: None,
         }
     }
 
@@ -331,6 +347,30 @@ impl Intent {
             chosen: None,
             acted: None,
             moved: Some(moved),
+            occupancy: None,
+        }
+    }
+
+    /// The occupancy of one of the side's zones, `occupancy`, which nobody asked, so its participant is `0`, the number
+    /// the server gives nobody, and its payload is empty. The server makes it, as a zone is declared and as how many
+    /// are within it changes, never from a client's intent; a side's own tests make it to try their handling of a zone.
+    ///
+    /// ```
+    /// use tomori_environment::{Intent, Occupancy};
+    ///
+    /// let intent = Intent::zone(Occupancy::new("coop", 1));
+    /// assert_eq!(intent.occupancy().map(Occupancy::count), Some(1));
+    /// assert_eq!((intent.participant(), intent.payload(), intent.acted()), (0, "", None));
+    /// assert_eq!(Intent::new(3, r#"{"zone":"coop"}"#).occupancy(), None);
+    /// ```
+    pub fn zone(occupancy: Occupancy) -> Self {
+        Self {
+            participant: 0,
+            payload: String::new(),
+            chosen: None,
+            acted: None,
+            moved: None,
+            occupancy: Some(occupancy),
         }
     }
 
@@ -371,6 +411,13 @@ impl Intent {
     /// retract it, or publish another in its place. See `design/panel-actions.md`.
     pub fn moved(&self) -> Option<&Moved> {
         self.moved.as_ref()
+    }
+
+    /// How many are within one of the side's zones, if this is the server telling it so rather than the client side's
+    /// own intent. Only the server makes one, as it looks at where participants are in a zone this side declared: a
+    /// client's intent is never one, whatever its payload says. See [`Space::declare_zones`].
+    pub fn occupancy(&self) -> Option<&Occupancy> {
+        self.occupancy.as_ref()
     }
 }
 
@@ -591,6 +638,8 @@ pub struct Presence {
     pub left: Option<tomori_protocol::Pose>,
     pub right: Option<tomori_protocol::Pose>,
     pub at: Instant,
+    /// How engaged they are, as their client last reported, if it says.
+    pub engagement: Option<Engagement>,
 }
 
 impl Presence {
@@ -609,7 +658,23 @@ impl Presence {
             left,
             right,
             at,
+            engagement: None,
         }
+    }
+
+    /// This presence, with the engagement their client last reported, if it says.
+    ///
+    /// ```
+    /// use std::time::Instant;
+    /// use tomori_environment::{Engagement, Presence};
+    /// use tomori_protocol::Pose;
+    ///
+    /// let ada = Presence::new(3, Pose::HOME, None, None, Instant::now()).with_engagement(Some(Engagement::Away));
+    /// assert_eq!(ada.engagement, Some(Engagement::Away));
+    /// ```
+    pub fn with_engagement(mut self, engagement: Option<Engagement>) -> Self {
+        self.engagement = engagement;
+        self
     }
 }
 
@@ -650,6 +715,12 @@ pub trait Outlet: Send + Sync {
     /// outlet that takes no actions, as one made before actions were, keeps nothing.
     fn declare_actions(&self, actions: Vec<Action>) -> Result<()> {
         let _ = actions;
+        Ok(())
+    }
+    /// Declare the zones whose occupancy the side is told, replacing those declared before. An outlet that takes no
+    /// zones, as one made before zones were, keeps nothing.
+    fn declare_zones(&self, zones: Vec<Zone>) -> Result<()> {
+        let _ = zones;
         Ok(())
     }
 }
@@ -792,6 +863,12 @@ impl Inbox {
             .unwrap_or_else(PoisonError::into_inner) = Some(participants);
     }
 
+    /// Tell the side how many are within one of its zones, `occupancy`, unless [`WAITING_INTENT_LIMIT`] intents are
+    /// already waiting, when it is not told. Says whether it was, so that the server tells it again later.
+    pub fn occupy(&self, occupancy: Occupancy) -> bool {
+        self.push(Intent::zone(occupancy))
+    }
+
     /// Say where a participant is now, `presence`, as their client reported it, which [`Space::presence`] reads: only
     /// once [`PRESENCE_INTERVAL`] has passed since the last it took for them, by its [`Presence::at`], so that a side is
     /// told at most 20 times a second however often a headset reports. Says whether it took it. The server says it of
@@ -823,6 +900,34 @@ impl Inbox {
         }
         known.insert(presence.participant, presence);
         true
+    }
+
+    /// Say that participant `participant` is now `engagement`, as their client reported it, in where [`Space::presence`]
+    /// says they are, at once, whatever [`PRESENCE_INTERVAL`] holds back, since a headset lifted off says it is away and
+    /// then reports nothing more. Changes nothing for a participant the side has not been told is present.
+    ///
+    /// ```
+    /// use std::time::Instant;
+    /// use tomori_environment::{Engagement, Presence, Space};
+    /// use tomori_protocol::Pose;
+    ///
+    /// let space = Space::new("space-1-1", "Yard", "/");
+    /// space.inbox().set_presence(Presence::new(3, Pose::HOME, None, None, Instant::now()));
+    /// space.inbox().set_engagement(3, Engagement::Away);
+    /// space.inbox().set_engagement(4, Engagement::Away);
+    /// assert_eq!(space.presence()[0].engagement, Some(Engagement::Away));
+    /// assert_eq!(space.presence().len(), 1);
+    /// ```
+    pub fn set_engagement(&self, participant: u32, engagement: Engagement) {
+        if let Some(known) = self
+            .0
+            .presence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&participant)
+        {
+            known.engagement = Some(engagement);
+        }
     }
 
     /// The inspector the side last gave with [`Space::inspect_with`], if it gave one.
@@ -1064,6 +1169,31 @@ impl Space {
         self.outlet.declare_actions(actions)
     }
 
+    /// Declare the zones whose occupancy this side is told, replacing those declared before, such as when a console's
+    /// terminal changes: each a sphere or a vertical cylinder about a point in the environment's own coordinates, or
+    /// about an anchor or an object it gives, which the server follows wherever it stands. As the hub sweeps, about once
+    /// a second, the server counts the participants whose heads are within each, entering at its radius and leaving
+    /// beyond its margin, as their clients last reported them, none whose report is [`PRESENCE_STALE`] or older, none
+    /// whose client says they are away, and no visitor; and tells the side, as an [`Intent`] whose [`Intent::occupancy`] names the zone and how many are within
+    /// it, each zone's occupancy at the next sweep after it is declared, whatever it is, and then each change of how
+    /// many: a change between nobody and somebody only once it has lasted the zone's dwell, any other at once. Who they
+    /// are it is not told; [`Space::presence`] says where each is, by number. An occupancy waits in the inbox in order with
+    /// intents, and one the inbox has no room for is told at a later sweep. A zone declared again under its name keeps
+    /// who was within it; a declaration sooner than [`ZONE_INTERVAL`] after the last taken waits, the latest replacing the
+    /// one before. The server refuses, saying why, a
+    /// declaration [`check_zones`] refuses, or one around a point beyond 20 m of home once carried into the space, and
+    /// keeps none of it. What it keeps belongs to the side's binding. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Around, Space, Zone};
+    ///
+    /// let space = Space::new("space-1-1", "Deck", "/");
+    /// space.declare_zones(vec![Zone::cylinder("console/2", Around::anchor("console/2"), 1.5, 0.5, 2.5)]).unwrap();
+    /// ```
+    pub fn declare_zones(&self, zones: Vec<Zone>) -> Result<()> {
+        self.outlet.declare_zones(zones)
+    }
+
     /// Answer the action handed to this side as `ticket`, [`Acted::ticket`], with `outcome`: done, with a summary of
     /// what changed, or refused, with the reason. The server waits for an answer for at most a few seconds, telling the
     /// agent then that the environment did not answer; an answer to an action no longer waited for, as one answered
@@ -1269,6 +1399,8 @@ mod tests {
         assert_eq!(space.place_anchor(rack), Ok(()));
         assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
         assert_eq!(space.declare_actions(vec![Action::new("a", "b")]), Ok(()));
+        let well = Zone::sphere("well", Around::point([0.0; 3]), 1.0);
+        assert_eq!(space.declare_zones(vec![well]), Ok(()));
     }
 
     #[test]
@@ -1297,6 +1429,31 @@ mod tests {
         assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
         // Nor actions, made before them.
         assert_eq!(space.declare_actions(Vec::new()), Ok(()));
+        // Nor zones, made before them.
+        assert_eq!(space.declare_zones(Vec::new()), Ok(()));
+    }
+
+    #[test]
+    fn an_occupancy_is_an_intent_only_the_server_makes_waiting_in_order() {
+        let space = Space::new("space-1-7", "Deck", "/");
+        let inbox = space.inbox();
+        // A client's intent is never an occupancy, whatever it says.
+        let forged = Intent::new(4, r#"{"occupancy":{"zone":"console","count":3}}"#);
+        assert_eq!(forged.occupancy(), None);
+        assert!(inbox.push(forged.clone()));
+        assert!(inbox.occupy(Occupancy::new("console", 1)));
+        assert_eq!(space.next_intent(Duration::ZERO), Some(forged));
+        let told = space.next_intent(Duration::ZERO).unwrap();
+        assert_eq!(told.occupancy(), Some(&Occupancy::new("console", 1)));
+        assert_eq!(
+            (told.participant(), told.chosen(), told.acted()),
+            (0, None, None)
+        );
+        // Not told while the inbox is full, so that the server tells it again.
+        for participant in 0..WAITING_INTENT_LIMIT as u32 {
+            assert!(inbox.push(Intent::new(participant, "{}")));
+        }
+        assert!(!inbox.occupy(Occupancy::new("console", 0)));
     }
 
     #[test]

@@ -54,6 +54,9 @@ pub const NAMES: [&str; 8] = [
 /// The most times the space's agent may have a chicken peck at once, with [`Flock::peck`].
 pub const PECKS: u64 = 8;
 
+/// How long a hen glances up as someone comes to the coop, in milliseconds.
+pub const GLANCE: u64 = 1_500;
+
 /// The chance a chicken goes to roost in the coop, each time it chooses what to do, if nobody else is.
 pub const VISITS: f32 = 0.08;
 
@@ -553,6 +556,31 @@ impl Flock {
                 pecks.clamp(1, PECKS)
             ),
         ))
+    }
+
+    /// Someone has come to the coop, at `now`: each hen standing, pecking or looking about on the ground glances up to
+    /// one side, alternately left and right, beginning [`LEAD`] from now, so that the flock notices them. Returns the
+    /// changes it makes. See `design/farmyard.md`.
+    pub fn glance(&mut self, now: u64) -> Vec<(usize, Behaviour)> {
+        let mut changes = Vec::new();
+        for index in 0..self.hens.len() {
+            let idle = matches!(
+                self.hens[index].behaviour.doing,
+                Doing::Stand | Doing::Peck { .. } | Doing::Look { .. }
+            );
+            if !idle || self.position(index, now).y >= layout::ON_GROUND {
+                continue;
+            }
+            let side = if index % 2 == 0 {
+                crate::behaviour::LOOK
+            } else {
+                -crate::behaviour::LOOK
+            };
+            let since = now + LEAD;
+            let until = since + GLANCE;
+            changes.push((index, self.begin(index, Doing::Look { side, until }, since)));
+        }
+        changes
     }
 
     /// What chicken `index` is doing at `now`, in words.

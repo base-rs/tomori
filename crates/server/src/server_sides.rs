@@ -195,6 +195,35 @@ impl ServerSides {
         }
     }
 
+    /// Tell the side running for `space`, if one does, that participant `participant` is now `engagement`, at once,
+    /// in what it knows of where they are. See `tomori_environment::Space::presence`.
+    pub(crate) fn engagement(
+        &self,
+        space: &str,
+        participant: u32,
+        engagement: tomori_environment::Engagement,
+    ) {
+        if let Some(running) = self.running.lock().expect("never left poisoned").get(space) {
+            running.inbox.set_engagement(participant, engagement);
+        }
+    }
+
+    /// Tell the side running for `binding` of `space` how many are within one of its zones, `occupancy`; says whether it
+    /// was told, which it is not where another binding's side runs, or none, or its inbox is full.
+    pub(crate) fn occupy(
+        &self,
+        space: &str,
+        binding: u64,
+        occupancy: tomori_environment::Occupancy,
+    ) -> bool {
+        self.running
+            .lock()
+            .expect("never left poisoned")
+            .get(space)
+            .filter(|running| running.binding == binding)
+            .is_some_and(|running| running.inbox.occupy(occupancy))
+    }
+
     /// The inspector the side running for `space` gave, with the inspection counted until it is dropped, or why there is
     /// none to ask.
     pub(crate) fn inspector(
@@ -743,6 +772,22 @@ mod tests {
                 .err(),
             Some(Unactable::Full)
         );
+        sides.reconcile(&environments, &[]);
+        eventually("the sides never ended", || sides.alive() == 0);
+    }
+
+    #[test]
+    fn an_occupancy_is_told_only_to_its_binding_s_side() {
+        let sides = ServerSides::default();
+        let (environments, started) = offered(until_cancelled);
+        let occupancy = || tomori_environment::Occupancy::new("console", 1);
+        assert!(!sides.occupy("space-1", 0, occupancy()));
+        sides.reconcile(&environments, &[wanted("space-1", "observe")]);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let binding = sides.binding("space-1").unwrap();
+        assert!(!sides.occupy("space-1", binding + 1, occupancy()));
+        assert!(!sides.occupy("space-2", binding, occupancy()));
+        assert!(sides.occupy("space-1", binding, occupancy()));
         sides.reconcile(&environments, &[]);
         eventually("the sides never ended", || sides.alive() == 0);
     }

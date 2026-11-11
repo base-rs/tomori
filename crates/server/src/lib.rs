@@ -58,6 +58,7 @@ mod versions;
 mod voice;
 mod watch;
 mod workspace;
+mod zones;
 
 pub mod mixer;
 

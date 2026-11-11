@@ -92,6 +92,28 @@ fn terminals(space: &Space) -> Result<()> {
 }
 ```
 
+A side may learn where participants are. It declares proximity zones, each a sphere or vertical cylinder about a point, an anchor or an object, and is told each zone's occupancy, how many are within it, as an `Intent` whose `occupancy()` names it: as it is declared, and as the count changes, with a margin before anyone leaves and an optional dwell before a zone becomes occupied or empty. It may also read, when it likes, where each participant's head is, by their number, with `Space::presence`:
+
+```rust
+use std::time::Duration;
+use tomori_environment::{Around, Result, Space, Zone};
+
+fn consoles(space: &Space) -> Result<()> {
+    space.declare_zones(vec![
+        Zone::cylinder("console/2", Around::anchor("console/2"), 1.5, 0.5, 2.5).dwelling(Duration::from_secs(2)),
+    ])?;
+    let mut poll = Duration::from_secs(60);
+    while let Some(intent) = space.next_intent(Duration::from_secs(1)) {
+        if let Some(occupancy) = intent.occupancy() {
+            // Poll the console's source quickly while someone stands at it, and slowly while nobody does.
+            poll = if occupancy.occupied() { Duration::from_secs(5) } else { Duration::from_secs(60) };
+        }
+    }
+    let _ = (poll, space.presence());
+    Ok(())
+}
+```
+
 A side can also publish panels onto its environment's own walls, text, lists of rows it highlights by id, or live charts, by ids it chooses, with `Space::publish(Panel::chart("pressure", "Scaling pressure", chart))`, updating one in place by publishing it again and taking it away with `Space::retract`; the chart is `tomori_environment::chart::Chart`, a small bounded spec of evenly spaced points, a gap where nothing was measured.
 
 [Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
