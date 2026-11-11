@@ -11,6 +11,7 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::chicken::Chicken;
+use crate::layout;
 
 /// How fast a chicken turns on the spot before it walks, in radians a second.
 pub const TURN: f32 = 2.6;
@@ -84,6 +85,44 @@ pub fn turn_between(from: f32, to: f32) -> f32 {
 fn turned(from: f32, to: f32, rate: f32, seconds: f32) -> f32 {
     let turn = turn_between(from, to);
     from + turn.signum() * turn.abs().min(rate * seconds.max(0.0))
+}
+
+/// How far a chicken's toes reach ahead of the middle between its feet that it stands on, and its heels behind it.
+pub const TOES: f32 = 0.05;
+pub const HEELS: f32 = 0.03;
+
+/// A chicken going `heading` over `point`, its feet on what is there ([`layout::underfoot`]): where it stands, and how
+/// far it leans forward, in radians. On the ramp, its feet lie along the board from heel to toe, leaning back as it
+/// climbs and forward as it comes down, and over the ramp's foot and its sill they rest on the board and the ground, or
+/// the floor, rather than sink into either. Stepping onto a nest box's lip or into it, it stands on whichever its feet
+/// reach first, as a hen hops up.
+pub fn afoot(point: Vec3, heading: f32) -> (Vec3, f32) {
+    let flat = Vec2::new(point.x, point.z);
+    let way = facing(heading);
+    let (toes, heels) = (flat + way * TOES, flat - way * HEELS);
+    let mut height = [toes, heels]
+        .into_iter()
+        .filter_map(layout::nest_height)
+        .fold(layout::underfoot(flat), f32::max);
+    let mut lean = 0.0;
+    if layout::ramp().grown(TOES).contains(flat) {
+        // Along the line from heel to toe, and resting on the edge of the sill, or the foot, if that is beneath it.
+        let (ahead, behind) = (layout::ramp_height(toes.y), layout::ramp_height(heels.y));
+        let rise = (ahead - behind) / (TOES + HEELS);
+        let edges = [layout::RAMP_FOOT.z, layout::DOOR.z]
+            .into_iter()
+            .filter(|_| way.y.abs() > 1e-3)
+            .map(|z| (z - flat.y) / way.y)
+            .filter(|along| (-HEELS..=TOES).contains(along))
+            .map(|along| (along, layout::ramp_height(flat.y + way.y * along)));
+        height = [(TOES, ahead), (-HEELS, behind)]
+            .into_iter()
+            .chain(edges)
+            .map(|(along, beneath)| beneath - rise * along)
+            .fold(height, f32::max);
+        lean = -rise.atan();
+    }
+    (Vec3::new(point.x, height, point.z), lean)
 }
 
 /// A walk, as it is planned: when it turns and begins to walk, when it stops with both feet down, and how far it goes.
@@ -191,22 +230,25 @@ impl Behaviour {
                 let loops = (played / length).floor();
                 let moved = (loops * chicken.stride() + chicken.walk.at(played - loops * length))
                     .min(walk.distance);
+                let (position, lean) = afoot(at + walk.direction * moved, walk.heading);
                 Placed {
-                    position: at + walk.direction * moved,
+                    position,
                     heading: if now < walk.walks {
                         turned(self.heading, walk.heading, TURN, elapsed)
                     } else {
                         walk.heading
                     },
-                    lean: 0.0,
+                    lean,
                 }
             }
             Doing::Sprint { away } => {
                 let to = heading(Vec2::from(away));
                 let direction = Vec2::from(away).normalize_or_zero();
                 let moved = chicken.sprint.at(elapsed);
+                let (position, _) =
+                    afoot(at + Vec3::new(direction.x, 0.0, direction.y) * moved, to);
                 Placed {
-                    position: at + Vec3::new(direction.x, 0.0, direction.y) * moved,
+                    position,
                     heading: turned(self.heading, to, SPIN, elapsed),
                     lean: 0.0,
                 }

@@ -5,7 +5,7 @@
 //! the water trough, the feeder and its scattered grain, the hay bales, the pines beyond, and the lantern on the gate
 //! post, whose glass glows. The coop is a model of its own (see [`crate::coop`]), and so is the land beyond the pines
 //! (see [`crate::backdrop`]).
-use glam::{Quat, Vec3, Vec4};
+use glam::{Quat, Vec2, Vec3, Vec4};
 use tomori_assets::{Limits, Material, Mesh, Model, Node, Transform};
 
 use crate::layout;
@@ -67,6 +67,9 @@ pub fn scatter(seed: u32) -> f32 {
     (hash & 0xffff) as f32 / 65536.0
 }
 
+/// The path's stones, a little paler than the earth they are set in.
+const STONE: Vec3 = Vec3::new(0.32, 0.28, 0.23);
+
 /// A lantern hung at `at`: its cap and base, and its glass, which glows, into `glass`.
 pub fn lantern(shapes: &mut Shapes, glass: &mut Shapes, at: Vec3) {
     shapes.block(
@@ -84,6 +87,21 @@ pub fn lantern(shapes: &mut Shapes, glass: &mut Shapes, at: Vec3) {
         at + Vec3::new(0.065, 0.11, 0.065),
         palette::GLOW,
     );
+}
+
+/// The path of flat stones from the gate towards the coop and the feeder ([`layout::stones`]), each standing a little
+/// proud of the earth, its edge bevelled.
+fn path(shapes: &mut Shapes) {
+    for stone in layout::stones() {
+        let ground = |corner: &glam::Vec2| Vec3::new(corner.x, 0.0, corner.y);
+        let outline: Vec<Vec3> = stone.outline.iter().map(ground).collect();
+        let top: Vec<Vec3> = stone
+            .top()
+            .iter()
+            .map(|corner| ground(corner) + Vec3::Y * stone.height)
+            .collect();
+        shapes.slab(&outline, &top, STONE);
+    }
 }
 
 fn fence_around(shapes: &mut Shapes) {
@@ -191,25 +209,54 @@ fn trough(shapes: &mut Shapes) {
 
 fn feeder(shapes: &mut Shapes) {
     let at = Vec3::new(layout::FEEDER.x, 0.0, layout::FEEDER.y);
+    // Its grain heaped a little on it, rather than a disc a millimetre above its top, which flickered against it.
     shapes.cylinder(at, layout::FEEDER_RADIUS, 0.06, 10, palette::METAL);
-    shapes.disc(
-        at + Vec3::Y * 0.061,
+    shapes.cone(
+        at + Vec3::Y * 0.06,
         layout::FEEDER_RADIUS * 0.85,
+        0.035,
         10,
         palette::GRAIN,
     );
-    // Grain scattered about it, thinning outwards.
+    // Grain scattered about it, thinning outwards, each a little above any it overlaps.
+    let mut layers = Layers::default();
     for grain in 0..90 {
         let angle = scatter(grain * 3) * std::f32::consts::TAU;
         let distance =
             layout::FEEDER_RADIUS + scatter(grain * 3 + 1).powi(2) * layout::GRAIN_RADIUS;
-        let centre = at + Vec3::new(angle.cos() * distance, 0.012, angle.sin() * distance);
         let size = 0.012 + scatter(grain * 3 + 2) * 0.01;
+        let middle = at + Vec3::new(angle.cos() * distance, 0.0, angle.sin() * distance);
+        let top = layers.over(middle, Vec2::splat(size));
+        let centre = middle + Vec3::Y * top;
         shapes.block(
             centre - Vec3::splat(size),
             centre + Vec3::new(size, 0.0, size),
             palette::GRAIN,
         );
+    }
+}
+
+/// Small flat things scattered on the earth, each laid 1.2 mm above any earlier one it overlaps, from 6 mm up, so
+/// that none flickers against the earth or another.
+#[derive(Default)]
+struct Layers {
+    laid: Vec<(Vec2, Vec2, u32)>,
+}
+
+impl Layers {
+    /// The height of the top of the next, reaching `reach` either way across the ground about `middle`.
+    fn over(&mut self, middle: Vec3, reach: Vec2) -> f32 {
+        let middle = Vec2::new(middle.x, middle.z);
+        let (low, high) = (middle - reach, middle + reach);
+        let layer = (0..)
+            .find(|layer| {
+                !self.laid.iter().any(|(other_low, other_high, other)| {
+                    other == layer && low.cmplt(*other_high).all() && other_low.cmplt(high).all()
+                })
+            })
+            .expect("a layer");
+        self.laid.push((low, high, layer));
+        0.006 + layer as f32 * 0.0012
     }
 }
 
@@ -248,15 +295,24 @@ fn hay(shapes: &mut Shapes) {
         Vec3::new(low.x + 0.1, 0.0, high.y - 0.55),
         Vec3::new(mid + 0.2, 0.42, high.y),
     );
-    // Loose straw strewn in front.
+    // Loose straw strewn in front, each strand a little above any it crosses, as the grain is.
+    let mut layers = Layers::default();
     for straw in 0..40 {
         let at = Vec3::new(
             low.x + scatter(straw * 5 + 400) * (high.x - low.x),
-            0.006,
+            0.0,
             high.y + 0.1 + scatter(straw * 5 + 401) * 0.6,
         );
-        let turn = Quat::from_rotation_y(scatter(straw * 5 + 402) * std::f32::consts::TAU);
-        shapes.cuboid(at, Vec3::new(0.09, 0.004, 0.006), turn, palette::STRAW);
+        let angle = scatter(straw * 5 + 402) * std::f32::consts::TAU;
+        let (sin, cos) = (angle.sin().abs(), angle.cos().abs());
+        let reach = Vec2::new(0.09 * cos + 0.006 * sin, 0.09 * sin + 0.006 * cos);
+        let top = layers.over(at, reach);
+        shapes.cuboid(
+            at + Vec3::Y * (top - 0.004),
+            Vec3::new(0.09, 0.004, 0.006),
+            Quat::from_rotation_y(angle),
+            palette::STRAW,
+        );
     }
 }
 
@@ -369,11 +425,7 @@ pub fn model() -> Model {
         ],
         palette::EARTH,
     );
-    // A worn path from the gate towards the coop and the feeder.
-    for step in 0..9 {
-        let at = Vec3::new(-0.2 - step as f32 * 0.25, 0.003, 0.8 - step as f32 * 0.8);
-        shapes.disc(at, 0.5, 7, palette::EARTH * 1.12);
-    }
+    path(&mut shapes);
     fence_around(&mut shapes);
     trough(&mut shapes);
     feeder(&mut shapes);
@@ -424,5 +476,82 @@ mod tests {
                 .map(scatter)
                 .all(|value| (0.0..1.0).contains(&value))
         );
+    }
+
+    #[test]
+    fn the_path_is_a_few_stones_of_a_few_faces_each() {
+        let mut shapes = Shapes::new();
+        path(&mut shapes);
+        let path = shapes.primitive(PLAIN);
+        // Each stone's sides and top: 159 triangles, where the flat discs it was were 45.
+        assert_eq!(path.indices.len() / 3, 159);
+        // Its tops face up, above the earth, and its sides slope out and up from it.
+        for (position, normal) in path.positions.iter().zip(&path.normals) {
+            assert!(position.y >= 0.0 && position.y <= 0.02);
+            assert!(normal.y > 0.3, "{normal}");
+        }
+    }
+
+    #[test]
+    fn nothing_lies_flat_just_above_the_earth_to_flicker_against_it() {
+        // Every face of the yard and the coop that faces up, but the meadow and the earth themselves, stands at least
+        // 5 mm above whatever flat face it is over, so that none fights the earth, the coop's floor or another for depth.
+        // Within a few centimetres of the earth, and of the coop's floor, where what lies on them is seen; and no two
+        // faces there that overlap lie within a millimetre of each other, but a face's own triangles.
+        let coop = crate::coop::model();
+        let placed = |point: Vec3| crate::coop::placement().transform_point3(point);
+        let unmoved = |point: Vec3| point;
+        // Each face that faces up, low down: its height, its bounds on the ground, and which face it is of which model.
+        let mut flats: Vec<(f32, glam::Vec2, glam::Vec2, (usize, u32))> = Vec::new();
+        for (which, (model, place)) in [
+            (model(), &unmoved as &dyn Fn(Vec3) -> Vec3),
+            (coop, &placed),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (primitive_index, primitive) in model.meshes[0].primitives.iter().enumerate() {
+                for triangle in primitive.indices.chunks(3) {
+                    let corners = [0, 1, 2]
+                        .map(|corner| place(primitive.positions[triangle[corner] as usize]));
+                    let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+                    let height = corners[0].y;
+                    let low_down = (-0.02..0.05).contains(&height)
+                        || (layout::COOP_FLOOR - 0.01..layout::COOP_FLOOR + 0.06).contains(&height);
+                    if normal.normalize_or_zero().y > 0.999 && low_down {
+                        let flat = |corner: Vec3| glam::Vec2::new(corner.x, corner.z);
+                        let low = flat(corners[0].min(corners[1]).min(corners[2]));
+                        let high = flat(corners[0].max(corners[1]).max(corners[2]));
+                        // A face's triangles share its first corner.
+                        flats.push((
+                            height,
+                            low,
+                            high,
+                            (which * 2 + primitive_index, triangle[0]),
+                        ));
+                    }
+                }
+            }
+        }
+        let fence = layout::FENCE;
+        let mut decals = 0;
+        for (index, (height, low, high, face)) in flats.iter().enumerate() {
+            let inside = fence.contains(*low) && fence.contains(*high);
+            if (-0.02..0.05).contains(height) && inside && *height != 0.0 {
+                assert!(*height >= 0.005, "{height} {low} {high}");
+                decals += 1;
+            }
+            for (other, other_low, other_high, other_face) in &flats[index + 1..] {
+                let overlaps = low.cmplt(*other_high).all() && other_low.cmplt(*high).all();
+                if overlaps && face != other_face {
+                    assert!(
+                        (height - other).abs() >= 0.001,
+                        "{height} {other} {low} {high}"
+                    );
+                }
+            }
+        }
+        // The path's stones, the grain about the feeder and the straw by the hay among them.
+        assert!(decals > 100, "{decals}");
     }
 }

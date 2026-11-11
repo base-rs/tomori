@@ -57,11 +57,19 @@ pub const VISITS: f32 = 0.08;
 /// The part of the yard the chickens keep to: inside the fence, and short of where participants arrive.
 pub const AREA: Footprint = Footprint::new([-4.4, -10.4], [4.4, -1.8]);
 
-/// Where each chicken roosts inside the coop: two nests and the perch.
+/// Where each chicken roosts inside the coop: on the bottom of either nest box ([`layout::NESTS`]), far enough in that
+/// she stands and turns round inside it, and on the floor by the perch.
 pub const ROOSTS: [[f32; 3]; 3] = [
-    [-3.1, layout::COOP_FLOOR, -9.0],
-    [-2.5, layout::COOP_FLOOR, -9.0],
+    [-3.22, layout::NEST_FLOOR, -9.03],
+    [-2.38, layout::NEST_FLOOR, -9.03],
     [-2.3, layout::COOP_FLOOR, -8.4],
+];
+/// Where a chicken goes in the coop before her roost: square in front of her nest box, clear of it as she turns, so that
+/// she walks straight in over its lip, and out again; for the perch, nowhere first.
+pub const ENTRIES: [Option<[f32; 3]>; 3] = [
+    Some([-3.22, layout::COOP_FLOOR, -8.51]),
+    Some([-2.38, layout::COOP_FLOOR, -8.51]),
+    None,
 ];
 
 /// The SplitMix64 finalizer, for numbers that are the same everywhere.
@@ -171,7 +179,7 @@ impl Flock {
                 pace,
                 behaviour: Behaviour {
                     since: now,
-                    at: [home.x, 0.0, home.y],
+                    at: [home.x, layout::underfoot(home), home.y],
                     heading,
                     doing: Doing::Stand,
                 },
@@ -296,16 +304,17 @@ impl Flock {
         {
             let door = (layout::DOOR - Vec3::Z * 0.15).to_array();
             let stays = 20_000 + (self.unit() * 40_000.0) as u64;
-            self.kept[index].plan.extend([
-                (Doing::Walk { to: foot }, 0),
-                (Doing::Walk { to: door }, 0),
-                (
-                    Doing::Walk {
-                        to: ROOSTS[index % ROOSTS.len()],
-                    },
-                    0,
-                ),
+            let roost = index % ROOSTS.len();
+            let entry = ENTRIES[roost].map(|to| (Doing::Walk { to }, 0));
+            let plan = &mut self.kept[index].plan;
+            plan.extend([(Doing::Walk { to: foot }, 0), (Doing::Walk { to: door }, 0)]);
+            plan.extend(entry);
+            plan.extend([
+                (Doing::Walk { to: ROOSTS[roost] }, 0),
                 (Doing::Roost, stays),
+            ]);
+            plan.extend(entry);
+            plan.extend([
                 (Doing::Walk { to: door }, 0),
                 (Doing::Walk { to: foot }, 0),
                 (Doing::Walk { to: approach }, 0),
@@ -470,7 +479,7 @@ impl Flock {
                 let hen = self.hens.get(notice)?;
                 let toward = Vec2::from(toward);
                 let here = self.position(notice, now);
-                let grounded = here.y < 0.01 && hen.behaviour.doing != Doing::Roost;
+                let grounded = here.y < layout::ON_GROUND && hen.behaviour.doing != Doing::Roost;
                 let running = matches!(hen.behaviour.doing, Doing::Sprint { .. });
                 if !toward.is_finite() || !grounded || running {
                     return None;
@@ -515,7 +524,7 @@ impl Flock {
             Doing::Stand | Doing::Recover => "standing",
             Doing::Peck { .. } => "pecking at the ground",
             Doing::Look { .. } => "looking about",
-            Doing::Walk { .. } if here.y > 0.01 => "on the coop's ramp",
+            Doing::Walk { .. } if here.y >= layout::ON_GROUND => "on the coop's ramp",
             Doing::Walk { .. } => "wandering",
             Doing::Confused { .. } => "looking up, puzzled, at whoever is pointing at her",
             Doing::Sprint { .. } => "running off, startled",

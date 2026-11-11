@@ -24,6 +24,16 @@ fn skinned(model: &Model, name: &str, animation: usize, time: f32) -> Vec<Vec3> 
         .collect()
 }
 
+/// Every vertex of the chicken, cone and all, `time` seconds into its walk, standing on the origin and facing +Z.
+pub(crate) fn walking(chicken: &Chicken, time: f32) -> Vec<Vec3> {
+    let walk = chicken.model.animation("walk").unwrap();
+    ["chicken", CONE]
+        .into_iter()
+        .flat_map(|name| skinned(&chicken.model, name, walk, time))
+        .map(|point| chicken.placement.transform_point3(point))
+        .collect()
+}
+
 #[test]
 fn the_chicken_moves_as_blender_moves_it() {
     // A few of each mesh's vertices, as Blender deforms them, at a few frames of each animation, in glTF's axes, written

@@ -61,14 +61,100 @@ fn a_walk_turns_then_goes_as_far_as_its_feet_carry_it_and_stops_with_them_down()
         (nowhere.walks, nowhere.stops, nowhere.distance),
         (1_000, 1_000, 0.0)
     );
-    // Up a ramp, it rises as it goes.
-    let up = at(Doing::Walk {
-        to: [0.0, 0.6, -5.6],
-    });
+    // Up the coop's ramp, it rises as it goes, to the coop's floor.
+    let up = Behaviour {
+        at: layout::RAMP_FOOT.to_array(),
+        ..at(Doing::Walk {
+            to: (layout::DOOR - Vec3::Z * 0.15).to_array(),
+        })
+    };
     let climbing = up.place(&chicken, 1.0, up.ends(&chicken, 1.0).unwrap());
-    assert!(climbing.position.y > 0.55);
+    assert!((climbing.position.y - layout::COOP_FLOOR).abs() < 1e-5);
     // Something else is no walk.
     assert_eq!(at(Doing::Stand).walk(&chicken, 1.0), None);
+}
+
+/// The soles of its feet as it stands, the lowest of its points, standing on the origin and facing +Z.
+fn soles(chicken: &Chicken) -> Vec<Vec3> {
+    let (start, _) = crate::chicken::seconds(crate::chicken::WALK);
+    let standing = crate::chicken::tests::walking(chicken, start);
+    let soles: Vec<Vec3> = standing
+        .into_iter()
+        .filter(|point| point.y < 0.001)
+        .collect();
+    assert!(soles.len() > 4, "{}", soles.len());
+    soles
+}
+
+/// Where `point` of a chicken placed as `placed` is, as its controller draws it, but for its animation.
+fn drawn(placed: &Placed, point: Vec3) -> Vec3 {
+    glam::Mat4::from_rotation_translation(
+        glam::Quat::from_rotation_y(placed.heading),
+        placed.position,
+    )
+    .transform_point3(glam::Quat::from_rotation_x(placed.lean) * point)
+}
+
+#[test]
+fn up_and_down_the_ramp_its_feet_stay_on_its_board_and_it_leans_with_it() {
+    let chicken = chicken();
+    let soles = soles(&chicken);
+    let door = (layout::DOOR - Vec3::Z * 0.15).to_array();
+    // Up from in front of its foot, to in at the door, and down again, from just off its line, as a chicken overshoots.
+    for (from, to) in [
+        ([layout::RAMP_FOOT.x, 0.0, layout::RAMP_FOOT.z + 0.4], door),
+        (
+            [layout::RAMP_FOOT.x + 0.03, 0.0, layout::RAMP_FOOT.z + 0.03],
+            door,
+        ),
+        (door, [layout::RAMP_FOOT.x, 0.0, layout::RAMP_FOOT.z + 0.4]),
+    ] {
+        let walk = Behaviour {
+            since: 0,
+            at: from,
+            heading: heading(Vec2::new(to[0] - from[0], to[2] - from[2])),
+            doing: Doing::Walk { to },
+        };
+        let planned = walk.walk(&chicken, 1.0).unwrap();
+        let (mut sunk, mut along, mut raised, mut steepest) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for now in (planned.walks..=planned.stops).step_by(20) {
+            let placed = walk.place(&chicken, 1.0, now);
+            steepest = steepest.max(placed.lean.abs());
+            // Each sole is on whatever is beneath it: the board, the coop's floor or the ground.
+            for sole in &soles {
+                let at = drawn(&placed, *sole);
+                let beneath = layout::underfoot(Vec2::new(at.x, at.z));
+                sunk = sunk.max(beneath - at.y);
+                // Along the board, a foot's length from its turns, on it; over them, resting on both sides.
+                let turns = [layout::RAMP_FOOT.z, layout::DOOR.z];
+                if turns
+                    .iter()
+                    .all(|turn| (placed.position.z - turn).abs() > 0.1)
+                {
+                    along = along.max((at.y - beneath).abs());
+                } else {
+                    raised = raised.max(at.y - beneath);
+                }
+            }
+            // Leaning back up the ramp and forward down it, as steep as it is, and only on it.
+            let climbing = to[1] > from[1];
+            assert!(placed.lean <= 1e-6 || !climbing, "{now} {placed:?}");
+            assert!(placed.lean >= -1e-6 || climbing, "{now} {placed:?}");
+        }
+        // Never into it by more than a couple of millimetres; along it, within them; and over its foot and its sill,
+        // where a foot that does not bend rests on both sides of the turn, less than a centimetre above it.
+        assert!(sunk < 0.002 && along < 0.002, "{from:?} {sunk} {along}");
+        assert!(raised < 0.01, "{from:?} {raised}");
+        let incline = (layout::COOP_FLOOR / (layout::RAMP_FOOT.z - layout::DOOR.z)).atan();
+        assert!((steepest - incline).abs() < 1e-3, "{steepest} {incline}");
+    }
+    // Turned across the ramp, it stands level on it, as the board is level across.
+    let middle = (layout::RAMP_FOOT + layout::DOOR) * 0.5;
+    let (across, lean) = afoot(middle, std::f32::consts::FRAC_PI_2);
+    assert!((across.y - layout::COOP_FLOOR * 0.5).abs() < 1e-5 && lean.abs() < 1e-6);
+    // Off the ramp, it stands on the ground, upright.
+    let (ground, lean) = afoot(Vec3::new(0.0, 0.3, -4.0), 0.0);
+    assert_eq!((ground, lean), (Vec3::new(0.0, 0.0, -4.0), 0.0));
 }
 
 #[test]
