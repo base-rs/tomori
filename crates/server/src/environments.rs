@@ -1100,17 +1100,13 @@ impl Environments {
     }
 
     /// `pose`, in a space's coordinates, in the environment `id`'s own: carried back by its carriage, turned and all, as
-    /// a participant's head and hands are for its server side; or none, as for one it does not offer.
-    pub(crate) fn uncarry(
-        &self,
-        id: &str,
-        pose: &tomori_protocol::Pose,
-    ) -> Option<tomori_protocol::Pose> {
-        let environment = self.get(id)?;
-        Some(match environment.carriage() {
+    /// a participant's head and hands are for its server side; or as it is, for one that gives no arrival or that it
+    /// does not offer, which runs no side to be told.
+    pub(crate) fn uncarry(&self, id: &str, pose: &tomori_protocol::Pose) -> tomori_protocol::Pose {
+        match self.get(id).and_then(Environment::carriage) {
             None => *pose,
             Some(carriage) => uncarried(&carriage, pose),
-        })
+        }
     }
 
     /// The names of the cluster anchors the environment `id` declares, `home` always among them, since the place is
@@ -2049,10 +2045,10 @@ mod tests {
             orientation: [0.0, 0.0, 0.0, 1.0],
         };
         // An environment that gives no arrival leaves it where it is; one not offered has none.
-        assert_eq!(environments.uncarry("grid", &pose), Some(pose));
-        assert_eq!(environments.uncarry("moon", &pose), None);
+        assert_eq!(environments.uncarry("grid", &pose), pose);
+        assert_eq!(environments.uncarry("moon", &pose), pose);
         // Carried back, it is carried forth to where it was.
-        let back = environments.uncarry("yard", &pose).unwrap();
+        let back = environments.uncarry("yard", &pose);
         let forth = environments.carry("yard", &back).unwrap();
         assert!((0..3).all(|axis| (forth.position[axis] - pose.position[axis]).abs() < 1e-4));
         assert!((forth.yaw() - pose.yaw()).abs() < 1e-4);

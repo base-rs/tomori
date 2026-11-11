@@ -1089,6 +1089,27 @@ fn the_bonfire_s_light_flickers_and_the_campsite_draws_within_its_budget() {
     }
 }
 
+#[test]
+fn each_stone_is_an_instance_of_the_stones_model_showing_only_its_own() {
+    let shown = [
+        crate::stones::Shown {
+            stone: 3,
+            transform: Mat4::from_translation(Vec3::new(1.0, 0.0, 2.0)),
+        },
+        crate::stones::Shown {
+            stone: 7,
+            transform: Mat4::IDENTITY,
+        },
+    ];
+    let instances = stone_instances(&shown);
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].transform, shown[0].transform);
+    for (instance, stone) in instances.iter().zip(&shown) {
+        let meshes: Vec<usize> = instance.draws().iter().map(|draw| draw.mesh).collect();
+        assert_eq!(meshes, [stone.stone]);
+    }
+}
+
 /// Where the ferns are seen from, as `(eye, target)`: on the trail by the river, looking along it past the ferns on its
 /// banks; and from the trail beside the campsite, looking past its fire to the tree ferns beyond it.
 fn fern_views() -> [(Vec3, Vec3); 2] {

@@ -64,6 +64,16 @@ fn a_stone_is_pointed_at_where_its_faces_are_and_taken_within_reach_of_a_hand() 
     );
     assert_eq!(stones.within_reach(at), Some("stone-0".to_owned()));
     assert_eq!(stones.within_reach(at + Vec3::Y * 0.3), None);
+    // Of two, the nearer: along the ray, and to the hand.
+    let other = lying(1).position;
+    let along = Ray::new(at - (other - at).normalize() * 0.5, (other - at).normalize()).unwrap();
+    assert_eq!(stones.pick(&along).unwrap().object, "stone-0");
+    let mut close = Stones::new();
+    let mut near = state();
+    near.bodies[1].at = Placement::new(at + Vec3::new(0.12, 0.0, 0.0), Quat::IDENTITY).encoded(Precision::Rest);
+    close.share(&near);
+    assert_eq!(close.within_reach(at + Vec3::new(0.02, 0.0, 0.0)), Some("stone-0".to_owned()));
+    assert_eq!(close.within_reach(at + Vec3::new(0.1, 0.0, 0.0)), Some("stone-1".to_owned()));
 }
 
 #[test]

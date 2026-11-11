@@ -4394,16 +4394,14 @@ impl Hub {
                     let environments = self.environments();
                     let uncarry =
                         |pose: &tomori_protocol::Pose| environments.uncarry(environment, pose);
-                    if let Some(at) = uncarry(&head) {
-                        let presence = tomori_environment::Presence::new(
-                            source,
-                            at,
-                            left.as_ref().and_then(uncarry),
-                            right.as_ref().and_then(uncarry),
-                            Instant::now(),
-                        );
-                        self.server_sides.presence(id, presence);
-                    }
+                    let presence = tomori_environment::Presence::new(
+                        source,
+                        uncarry(&head),
+                        left.as_ref().map(uncarry),
+                        right.as_ref().map(uncarry),
+                        Instant::now(),
+                    );
+                    self.server_sides.presence(id, presence);
                 }
                 // A following agent keeps with whoever it talks with as they move. See `design/environments.md`.
                 self.agent_seen(state, id, participant, Instant::now());

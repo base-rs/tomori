@@ -46,7 +46,8 @@ fn the_beach_s_stones_settle_on_the_shingle_within_seconds_and_then_cost_nothing
     let mut shingle = Shingle::new(now);
     let world = shingle.world();
     assert!(!world.moving());
-    assert!(world.clock() < 6_000, "settled in {} ms", world.clock());
+    let settled = world.clock();
+    assert!(settled < 6_000, "settled in {settled} ms");
     assert_eq!(shingle.shared().bodies.len(), beach::STONES);
     for body in world.bodies() {
         let at = world.placement(body).unwrap().position;
@@ -227,7 +228,8 @@ fn a_cairn_of_the_beach_s_own_stones_stands_on_the_shingle_and_never_moves_aslee
     )
     .unwrap();
     assert!(world.settle(10.0));
-    assert!(world.clock() < 5_000, "{}", world.clock());
+    let settled = world.clock();
+    assert!(settled < 5_000, "settled in {settled} ms");
     let rested: Vec<Placement> = (0..6).map(|body| world.placement(body).unwrap()).collect();
     // Standing: each stone on the one below it, leaning only as their tilted tops lean it, and none fallen, sunk no
     // more than the gaps it was placed with.

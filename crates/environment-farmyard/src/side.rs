@@ -121,11 +121,12 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     let Some(chicken) = chicken else {
         return Err(Error::new("The farmyard's chickens could not be loaded."));
     };
+    // The beach's stones settled first, so that the flock's clock begins once they have.
+    let mut shingle = Shingle::new(Instant::now());
     let clock = move || start.elapsed().as_millis() as u64;
     // Shared with the inspector, which the server asks on a thread of its own; held only briefly on either side.
     let shared = Arc::new(Mutex::new(Flock::new(seed(space.id()), chicken, clock())));
     let camp = Arc::new(Mutex::new(Campsite::new()));
-    let mut shingle = Shingle::new(Instant::now());
     let stones = Arc::new(Mutex::new(shingle.shared()));
     let (inspected, inspected_camp, inspected_stones) =
         (shared.clone(), camp.clone(), stones.clone());
