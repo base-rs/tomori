@@ -1902,9 +1902,14 @@ impl Step {
                 pad.map(|(_, distance, point)| crate::pointing::End::new(distance, point));
             crate::pointing::end([card_end, projected.hit, object_end, worker_end, pad_end])
         });
-        // The label on the ray names the panel pointed at, not one carried, and says how to tick the item it meets.
+        // The label on the ray names the panel pointed at, not one carried, and says how to tick the item it meets; on a
+        // chart's plot, its readout says what the chart reads there instead, over its face.
         let mut projection = projected.sheets;
-        if let (Some(panel), Some((_, _, point)), None) =
+        let pointed_here = panel.is_some()
+            && panel.as_deref() == projected.pointed.as_ref().map(|(id, ..)| id.as_str());
+        if let Some(readout) = projected.readout.clone().filter(|_| pointed_here) {
+            projection.push(readout);
+        } else if let (Some(panel), Some((_, _, point)), None) =
             (&panel, &projected.pointed, self.projector.held())
             && let Some(shown) = conversation
                 .projection()
@@ -1987,8 +1992,11 @@ impl Step {
                     .zip(item)
                     .and_then(|(panel, line)| conversation.row_at(panel, line))
                     .map(|row| row.id.clone());
-                conversation.point(panel.clone().map(|panel| match (item, row) {
-                    (Some(line), Some(row)) => {
+                // On a chart's plot, where across its time axis, so that the agent is told the time and values there.
+                let across = projected.across.filter(|_| pointed_here);
+                conversation.point(panel.clone().map(|panel| match (item, row, across) {
+                    (_, _, Some(across)) => tomori_protocol::Resource::chart_at(panel, across),
+                    (Some(line), Some(row), _) => {
                         tomori_protocol::Resource::panel_row(panel, line, row)
                     }
                     _ => tomori_protocol::Resource::panel_at(panel, item),
@@ -6651,6 +6659,121 @@ mod tests {
                 Resource::panel_at("panel-1", Some(3)),
                 Resource::panel("panel-1"),
             ]
+        );
+    }
+
+    #[test]
+    fn scanning_a_chart_s_plot_reads_it_over_the_chart_and_the_words_say_when_it_was_pointed_at() {
+        use tomori_protocol::{Panel, Place, Pose, Resource, ServerMessage};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.projection = true));
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let chart = crate::chart::fixtures::admissions();
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![
+                        Panel::new(
+                            "panel-1",
+                            "Root admissions",
+                            chart.summary(),
+                            Place::Free {
+                                pose: Pose::upright_facing(
+                                    ahead.to_array(),
+                                    arrival::HOME.to_array(),
+                                ),
+                            },
+                        )
+                        .with_chart(chart),
+                    ]),
+            ),
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let now = Instant::now();
+        // From the left of the floating chart to its right, a little below its middle, through its plot.
+        let (width, _) = crate::projection::fitted_size(
+            conversation
+                .projection()
+                .and_then(|projection| projection.panel("panel-1"))
+                .unwrap(),
+            crate::projection::Fit::Text,
+        );
+        let mut named = Vec::new();
+        let mut read = Vec::new();
+        for across in 0..=40 {
+            let x = width * (across as f32 / 40.0 - 0.5) * 0.98;
+            let at = ahead + Vec3::new(x, -20.0 * crate::projection::PIXEL, 0.0);
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, at - arrival::HOME),
+                ..senses()
+            };
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+            // Its readout over the chart, its time and value, in place of the label on the ray.
+            let readout = frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_deref())
+                .find(|canvas| canvas.background[3] == 0.0 && !canvas.labels.is_empty())
+                .map(|canvas| {
+                    canvas
+                        .labels
+                        .iter()
+                        .map(|label| crate::ui_text::plain(&label.cells))
+                        .collect::<Vec<_>>()
+                });
+            let labelled = frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_deref())
+                .any(|canvas| {
+                    canvas.plain().starts_with("Root admissions") && canvas.rows.len() <= 4
+                });
+            assert_ne!(readout.is_some(), labelled);
+            read.extend(readout);
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            named.extend(utterance.attention.first().cloned());
+        }
+        // Left of the plot, where its values are labelled, the panel alone; across it, each time later than the last.
+        assert_eq!(named[0], Resource::panel("panel-1"));
+        let acrosses: Vec<u16> = named
+            .iter()
+            .filter_map(|resource| {
+                let Resource::Panel { across, .. } = resource else {
+                    unreachable!("only the panel is pointed at")
+                };
+                *across
+            })
+            .collect();
+        assert!(acrosses.len() > 30, "{named:?}");
+        assert!(
+            acrosses.windows(2).all(|pair| pair[0] < pair[1]),
+            "{acrosses:?}"
+        );
+        assert_eq!(
+            named.iter().find(|resource| matches!(
+                resource,
+                Resource::Panel {
+                    across: Some(_),
+                    ..
+                }
+            )),
+            Some(&Resource::chart_at("panel-1", acrosses[0]))
+        );
+        assert_eq!(read.len(), acrosses.len());
+        // From about a quarter of a minute after its oldest point to about a quarter of a minute before now.
+        assert_eq!(read[0][0], "-14 min 55 s");
+        assert_eq!(read[read.len() - 1][0], "-16 s");
+        assert!(
+            read.iter()
+                .all(|lines| lines[1].starts_with("admitted ") && lines[1].ends_with(" a minute"))
         );
     }
 

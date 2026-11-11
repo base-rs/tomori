@@ -2555,18 +2555,21 @@ impl Stage {
         line: Option<u32>,
         now: u64,
     ) -> Option<String> {
-        self.describe_at(walls, panel, line, None, now)
+        self.describe_at(walls, panel, (line, None, None), now)
     }
 
     /// As [`Self::describe`] says, of the panel pointed at on its row `row`, by the row's id, where the client named one:
     /// that row wherever it now is on the list, or, where it has gone, saying so, rather than the row on `line` now,
     /// so that the agent is told of the row the participant saw. See `design/panel-actions.md`.
+    ///
+    /// On a chart panel pointed at `across` its time axis, it says the time there and each series' value, read from the
+    /// stage's own copy of the chart, as `; at the time pointed at: "-6 min: admitted 203,800 a minute"`, in quotes, as it
+    /// is the environment's text. See `design/projection.md`.
     pub(crate) fn describe_at(
         &self,
         walls: &Walls<'_>,
         panel: &str,
-        line: Option<u32>,
-        row: Option<&str>,
+        (line, row, across): (Option<u32>, Option<&str>, Option<u16>),
         now: u64,
     ) -> Option<String> {
         let shown = self.view("", walls, now);
@@ -2633,6 +2636,15 @@ impl Stage {
             details.push_str(&format!(
                 "; shows: \"{}\"",
                 crate::space::one_line(&panel.body.replace('\n', ", "), blocks::BODY_CHARS)
+            ));
+        }
+        if let (Some(chart), Some(across)) = (&panel.chart, across) {
+            details.push_str(&format!(
+                "; at the time pointed at: \"{}\"",
+                crate::space::one_line(
+                    &chart.read_at(chart.at_across(across)),
+                    tomori_protocol::chart::READING_CHARS
+                )
             ));
         }
         // An image panel's size, and its caption in quotes, as it is the agent's text.

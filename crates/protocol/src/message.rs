@@ -190,8 +190,10 @@ pub enum Resource {
     /// panel's body, the `line` of the body, counted from 0, that the item begins on, and, on a row of a list panel
     /// ([`crate::Panel::rows`]), the `row`'s id, so that the server describes the row the participant saw, even where
     /// the list changed meanwhile. The server describes it from its own store of the space's panels, and the item from
-    /// its own copy of the body; an older server ignores `line` and `row`. See `design/projection.md` and
-    /// `design/panel-actions.md`.
+    /// its own copy of the body; an older server ignores `line` and `row`. On a chart panel's plot, `across` says where
+    /// along its time axis the ray meets it, in [`crate::chart::ACROSS`] parts from its oldest point to its newest, so
+    /// that the server reads the time there and each series' value from its own copy of the chart; an older server
+    /// ignores it. See `design/projection.md` and `design/panel-actions.md`.
     #[non_exhaustive]
     Panel {
         panel: String,
@@ -199,6 +201,8 @@ pub enum Resource {
         line: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         row: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        across: Option<u16>,
     },
     /// The "+N more" sign of a cluster anchor's cluster, by the anchor's name, which stands for the workers gathered
     /// into it: the server names them, their titles and sessions, from its own layout of the cluster. An older server
@@ -271,6 +275,28 @@ impl Resource {
             panel: panel.into(),
             line: None,
             row: None,
+            across: None,
+        }
+    }
+
+    /// The chart panel whose [`crate::Panel::id`] is `panel`, pointed at on its plot `across` its time axis, in
+    /// [`crate::chart::ACROSS`] parts from its oldest point to its newest.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// let pointed = Resource::chart_at("panel-3", 6_000);
+    /// assert_eq!(
+    ///     serde_json::to_value(&pointed).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-3", "across": 6000})
+    /// );
+    /// ```
+    pub fn chart_at(panel: impl Into<String>, across: u16) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line: None,
+            row: None,
+            across: Some(across),
         }
     }
 
@@ -281,6 +307,7 @@ impl Resource {
             panel: panel.into(),
             line,
             row: None,
+            across: None,
         }
     }
 
@@ -301,6 +328,7 @@ impl Resource {
             panel: panel.into(),
             line: Some(line),
             row: Some(row.into()),
+            across: None,
         }
     }
 }

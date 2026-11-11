@@ -267,9 +267,11 @@ const CONTEXT_TITLE_CHARS: usize = 160;
 /// Resources that would not fit, after the first, are left out.
 pub const CONTEXT_CHARS: usize = 1_000;
 
-/// How a panel attended to is described: by its identity, the line of its body pointed at and the row's id, as the
-/// client named them, from the stage's own store, or `None` where the space does not show it.
-pub type DescribePanel<'a> = dyn Fn(&str, Option<u32>, Option<&str>) -> Option<String> + 'a;
+/// How a panel attended to is described: by its identity, the line of its body pointed at, the row's id and where across
+/// a chart's time axis, as the client named them, from the stage's own store, or `None` where the space does not show
+/// it.
+pub type DescribePanel<'a> =
+    dyn Fn(&str, Option<u32>, Option<&str>, Option<u16>) -> Option<String> + 'a;
 
 /// Which workers a cluster anchor's "+N more" sign gathers, by the anchor's name, each by session, in the order of their
 /// slots, as the space lays its clusters out, or `None` where it has no such anchor or the sign gathers none.
@@ -1772,7 +1774,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
-        self.attended_with(resource, cards, objects, &|_, _, _| None, &|_| None)
+        self.attended_with(resource, cards, objects, &|_, _, _, _| None, &|_| None)
     }
 
     /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
@@ -1829,14 +1831,18 @@ impl SpaceModel {
             // A panel's identity is only looked up: the stage describes the panel it has.
             // A list's row is named by its id, which is dropped where it is longer than any, and the line taken alone.
             tomori_protocol::Resource::Panel {
-                panel, line, row, ..
+                panel,
+                line,
+                row,
+                across,
+                ..
             } if panel.len() <= limits::IDENTIFIER_BYTES => {
                 let row = row
                     .as_deref()
                     .filter(|row| row.len() <= tomori_environment::ROW_ID_BYTES);
                 Some(Attended(Resolved::Panel {
                     id: panel.clone(),
-                    description: panels(panel, *line, row)?,
+                    description: panels(panel, *line, row, *across)?,
                 }))
             }
             // Its workers are those the space's own layout gathers into it, each as the space knows it now.
@@ -1882,7 +1888,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
-        self.resolve_with(attention, cards, objects, &|_, _, _| None, &|_| None)
+        self.resolve_with(attention, cards, objects, &|_, _, _, _| None, &|_| None)
     }
 
     /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, and "+N more" signs
@@ -3938,7 +3944,7 @@ mod tests {
             ],
             None,
             None,
-            &|_, _, _| None,
+            &|_, _, _, _| None,
             &gathered,
         );
         assert_eq!(attention.len(), 1);
@@ -3961,7 +3967,7 @@ mod tests {
             &[tomori_protocol::Resource::gathered("home")],
             None,
             None,
-            &|_, _, _| None,
+            &|_, _, _, _| None,
             &|_| Some(vec!["ses_00".to_owned()]),
         );
         space.apply(Event::WorkersChanged {
@@ -5137,8 +5143,11 @@ mod tests {
     #[test]
     fn a_panel_attended_to_is_described_as_the_stage_describes_it_once() {
         let space = model();
-        let describe = |panel: &str, _: Option<u32>, row: Option<&str>| {
-            (panel == "panel-1").then(|| format!("panel \"Status\"{}", row.unwrap_or_default()))
+        let describe = |panel: &str, _: Option<u32>, row: Option<&str>, across: Option<u16>| {
+            (panel == "panel-1").then(|| {
+                let across = across.map_or(String::new(), |across| format!(" at {across}"));
+                format!("panel \"Status\"{}{across}", row.unwrap_or_default())
+            })
         };
         let panel = tomori_protocol::Resource::panel("panel-1");
         let attention = space.resolve_with(
@@ -5177,6 +5186,20 @@ mod tests {
         assert_eq!(
             row(&"a".repeat(tomori_environment::ROW_ID_BYTES + 1)).as_deref(),
             Some("[Pointing at panel \"Status\"]")
+        );
+        // Where across a chart it was pointed at is passed on, for the stage to read it there.
+        let chart = space
+            .attended_with(
+                &tomori_protocol::Resource::chart_at("panel-1", 6_000),
+                None,
+                None,
+                &describe,
+                &|_| None,
+            )
+            .map(|attended| context("fake", &[attended], &[]).unwrap());
+        assert_eq!(
+            chart.as_deref(),
+            Some("[Pointing at panel \"Status\" at 6000]")
         );
         // Without the stage, a panel is not resolved.
         assert!(

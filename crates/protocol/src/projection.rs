@@ -1507,6 +1507,11 @@ mod tests {
         assert_eq!(serde_json::to_value(&item).unwrap(), json);
         assert_eq!(serde_json::from_value::<Resource>(json).unwrap(), item);
         assert_eq!(Resource::panel_at("panel-1", None), panel);
+        // Pointed at on a chart's plot, it says where across its time axis, which an older server skips.
+        let chart = Resource::chart_at("panel-1", 6_000);
+        let json = serde_json::json!({"kind": "panel", "panel": "panel-1", "across": 6000});
+        assert_eq!(serde_json::to_value(&chart).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Resource>(json).unwrap(), chart);
         // A panel with the agent's id carries it only when it has one, and a client that knows no id, as an older one,
         // reads the rest as before, so that a panel updated in place shows its new text there too.
         let plain = Panel::new("panel-1", "Agenda", "- [ ] One", Place::Unknown);

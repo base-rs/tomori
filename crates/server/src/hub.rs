@@ -3946,8 +3946,10 @@ impl Hub {
                             &attention,
                             state.cards_of(&space),
                             record.channel.as_ref(),
-                            &|panel, line, row| {
-                                record.stage.describe_at(&walls, panel, line, row, now)
+                            &|panel, line, row, across| {
+                                record
+                                    .stage
+                                    .describe_at(&walls, panel, (line, row, across), now)
                             },
                             &|anchor| record.gathered(&environments, anchor),
                         )
@@ -4057,8 +4059,13 @@ impl Hub {
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
-                                    &|panel, line, row| {
-                                        space.stage.describe_at(&walls, panel, line, row, now)
+                                    &|panel, line, row, across| {
+                                        space.stage.describe_at(
+                                            &walls,
+                                            panel,
+                                            (line, row, across),
+                                            now,
+                                        )
                                     },
                                     &|anchor| space.gathered(&environments, anchor),
                                 )
