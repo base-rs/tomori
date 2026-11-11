@@ -67,3 +67,23 @@ fn it_faces_whomever_it_glances_at_before_whoever_it_turned_to_and_speaks_until_
         Some(now + Duration::from_secs(2) + SPOKEN)
     );
 }
+
+#[test]
+fn speech_still_to_come_counts_until_it_is_sent_or_nothing_of_it_moves_for_a_minute() {
+    let now = Instant::now();
+    let mut following = Following::default();
+    assert!(!following.unspoken(now));
+    following.queued(2, now);
+    assert!(following.unspoken(now));
+    // Synthesis that hangs ends the reply all the same, once nothing of its speech has moved for `STALLED`.
+    assert!(following.unspoken(now + STALLED - Duration::from_millis(1)));
+    assert!(!following.unspoken(now + STALLED));
+    // A frame sent, or a segment sent whole, is progress, from which it counts again.
+    let later = now + Duration::from_secs(50);
+    following.spoke(later, Duration::from_millis(20));
+    assert!(following.unspoken(later + Duration::from_secs(50)));
+    following.sent(later + Duration::from_secs(55));
+    assert!(following.unspoken(later + Duration::from_secs(100)));
+    following.sent(later + Duration::from_secs(56));
+    assert!(!following.unspoken(later + Duration::from_secs(56)));
+}

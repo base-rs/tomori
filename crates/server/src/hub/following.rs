@@ -52,6 +52,10 @@ pub(crate) const STREAMING: f32 = 6.0;
 /// pause before held speech plays.
 const SPOKEN: Duration = Duration::from_millis(700);
 
+/// How long speech still to come counts towards the agent's reply with nothing of it queued, sent or finished meanwhile,
+/// as when synthesis hangs: its reply then ends, so that it never keeps with someone, nor stays away from home, for ever.
+pub(crate) const STALLED: Duration = Duration::from_secs(60);
+
 /// How long whoever the agent keeps with, through their exchange with it, stands still before it follows them on, if
 /// they have gone beyond where it serves them: it waits for them to settle rather than chasing each step, and never
 /// moves while they travel, as by a teleport, only once they arrive.
@@ -180,6 +184,11 @@ pub(crate) struct Following {
     poll: Option<Instant>,
     /// Until when the agent speaks, from the last frame of its speech sent.
     speaking: Option<Instant>,
+    /// How many segments of its speech are queued for synthesis, or synthesized and not yet all sent: speech still to
+    /// come, after its turn may have ended, which its reply lasts through as much as speech playing.
+    unspoken: usize,
+    /// When its speech last made progress: a segment queued, a frame sent, or a segment sent whole.
+    progressed: Option<Instant>,
     /// The participant whose words it was last given, until its reply to them is over: its turn ended and its speech
     /// heard.
     answering: Option<String>,
@@ -225,8 +234,37 @@ impl Following {
     pub(super) fn spoke(&mut self, now: Instant, duration: Duration) {
         let until = now + duration + SPOKEN;
         self.speaking = Some(self.speaking.map_or(until, |was| was.max(until)));
+        self.progressed = Some(now);
         // Its speech starting puts off its return, however short, between one check and the next.
         self.quiet = None;
+    }
+
+    /// `segments` more segments of the agent's speech, at least one, were queued for synthesis: its reply goes on until
+    /// they are sent, however long synthesis takes after its turn has ended, and its return is put off.
+    pub(super) fn queued(&mut self, segments: usize, now: Instant) {
+        self.unspoken += segments;
+        self.progressed = Some(now);
+        self.quiet = None;
+    }
+
+    /// One segment queued for its speech has been sent whole, or could not be synthesized.
+    pub(super) fn sent(&mut self, now: Instant) {
+        self.unspoken = self.unspoken.saturating_sub(1);
+        self.progressed = Some(now);
+    }
+
+    /// Synthesis stopped: nothing more queued for its speech will be sent.
+    pub(super) fn unqueued(&mut self) {
+        self.unspoken = 0;
+    }
+
+    /// Whether any of its speech is still to come at `now`: queued for synthesis, or synthesized and not yet all sent,
+    /// unless it has made no progress for [`STALLED`].
+    pub(super) fn unspoken(&self, now: Instant) -> bool {
+        self.unspoken > 0
+            && self
+                .progressed
+                .is_some_and(|at| now.saturating_duration_since(at) < STALLED)
     }
 
     /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides,
@@ -366,6 +404,7 @@ impl Hub {
         let report = crate::presence::AgentState {
             summoned: record.summoned,
             at: moving.then(|| following.at(record.summoned, home, now)),
+            facing: following.faces(),
             pinned: following.pinned,
             pinned_by: following.pinned_by.clone(),
             partner,
@@ -398,12 +437,12 @@ impl Hub {
             .get(participant)
             .and_then(|record| record.seen.as_ref())
             .map(|seen| seen.head);
-        let woken = state.woken.clone();
-        let record = state.space_mut(space).expect("the caller found it");
         if keeps.is_none() {
-            record.following.keeping = None;
+            state.keep_with_nobody(space);
             return;
         }
+        let woken = state.woken.clone();
+        let record = state.space_mut(space).expect("the caller found it");
         let Some(head) = head.filter(|_| keeps.as_deref() == Some(participant)) else {
             return;
         };
@@ -468,7 +507,7 @@ impl Hub {
             keeping.due = None;
             keeping.since = None;
             let Some(participant) = keeps else {
-                record.following.keeping = None;
+                state.keep_with_nobody(&space);
                 continue;
             };
             self.keep_up_with(state, &space, &participant, now);
@@ -710,6 +749,22 @@ impl Hub {
 }
 
 impl HubState {
+    /// The agent of `space` keeps with nobody from now, their exchange with it over: logged, once, if it kept with
+    /// someone.
+    fn keep_with_nobody(&mut self, space: &str) {
+        let record = self.space_mut(space).expect("the caller found it");
+        let Some(keeping) = record.following.keeping.take() else {
+            return;
+        };
+        let name = self
+            .participants
+            .get(&keeping.who)
+            .map_or("someone", |participant| participant.name.as_str());
+        log::info!(
+            "The agent of space {space} keeps with {name} no more, as their exchange with it is over."
+        );
+    }
+
     /// How the agent of `space` moves changed, as `name` set it: kept home, it goes home now; otherwise it stays where it
     /// is, and follows from the next words if it now follows the speaker.
     pub(super) fn movement_changed(&mut self, space: &str, name: &str, now: Instant) {
@@ -965,6 +1020,10 @@ impl HubState {
         };
         let Some(spot) = spot else {
             turn(following);
+            log::info!(
+                "The agent of space {space} only turned to {name}, as {reason}, {:.1} m from them, as nowhere beside them was clear.",
+                follow::distance(agent.position, eyes)
+            );
             self.touch_space(space);
             return;
         };
@@ -984,9 +1043,16 @@ impl HubState {
         } else {
             name
         };
+        let [x, y, z] = spot.position;
+        let how = match route {
+            Route::Straight => "gliding",
+            Route::Via(_) => "gliding by a waypoint",
+            Route::Stream => "streaming",
+        };
         log::info!(
-            "The agent of space {space} followed {with}, as {reason}, {:.1} m from them.",
-            follow::distance(agent.position, eyes)
+            "The agent of space {space} followed {with}, as {reason}, {:.1} m from them, {how} to ({x:.2}, {y:.2}, {z:.2}), {:.1} m from them, facing them.",
+            follow::distance(agent.position, eyes),
+            follow::distance(spot.position, eyes)
         );
         self.touch_space(space);
         self.woken.notify(usize::MAX);
@@ -1009,6 +1075,8 @@ impl HubState {
             holding: std::mem::take(&mut record.following.holding),
             tapped: std::mem::take(&mut record.following.tapped),
             speaking: record.following.speaking,
+            unspoken: record.following.unspoken,
+            progressed: record.following.progressed,
             ..Following::default()
         };
         let moved = self.summon(space, None, None);
@@ -1135,7 +1203,8 @@ impl HubState {
     }
 
     /// Whether the conversation in `space` is quiet at `now`: nobody records or is transcribed for it, nothing is queued,
-    /// no approval or question waits, its agent's session is idle, and no agent speech plays or is held for anyone.
+    /// no approval or question waits, its agent's session is idle, and no agent speech plays, is held for anyone or is
+    /// still to come from synthesis.
     fn conversation_quiet(&self, space: &str, now: Instant) -> bool {
         let record = self.space(space).expect("the caller found it");
         !self
@@ -1145,12 +1214,14 @@ impl HubState {
             && record.model.waiting() == 0
             && matches!(record.model.activity(), Activity::Idle | Activity::Unknown)
             && record.speech.quiet()
+            && !record.following.unspoken(now)
             && record.following.speaking.is_none_or(|until| until <= now)
     }
 
     /// Whether the agent of `space` is still replying at `now`, to whoever's words it was given last: their words or
     /// another's being given or queued, its turn running or a question or approval of its waiting, or its speech
-    /// playing or held for anyone.
+    /// playing, held for anyone or still to come, queued for synthesis after its turn has ended, until the last of it
+    /// has played. Its voice, not its text turn, ends its reply. See `design/environments.md`.
     fn replying(&self, space: &str, now: Instant) -> bool {
         let record = self.space(space).expect("the caller found it");
         record.model.waiting() > 0
@@ -1159,6 +1230,7 @@ impl HubState {
                 Activity::Running | Activity::Waiting
             )
             || !record.speech.quiet()
+            || record.following.unspoken(now)
             || record.following.speaking.is_some_and(|until| until > now)
     }
 

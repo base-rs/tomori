@@ -44,6 +44,8 @@ mod layouts;
 mod pairing_window;
 mod provenance;
 pub(crate) mod tools;
+#[cfg(all(test, feature = "speech"))]
+pub(crate) use following::STALLED as SPEECH_STALLED;
 pub(crate) use following::home as agent_home;
 
 pub(crate) use agent_pairing::Decision;
@@ -6471,6 +6473,42 @@ impl Hub {
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_gap(&self, space: &str, reply: u64) {
         self.live_speech(space, reply, Item::Gap, |_| {});
+    }
+
+    /// `segments` more segments of agent speech, at least one, were queued for synthesis in `space`, before synthesis starts on them:
+    /// the agent's reply lasts until they have been sent, however long after its turn ends, so that a following agent
+    /// keeps with whoever it answers, and does not go home, while its voice is still to come. See
+    /// `design/environments.md`.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn speech_queued(&self, space: &str, segments: usize) {
+        if let Some(record) = self.lock().space_mut(space) {
+            record.following.queued(segments, Instant::now());
+        }
+    }
+
+    /// One segment of agent speech queued in `space` has been sent whole, in order with its frames, or could not be
+    /// synthesized.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn speech_sent(&self, space: &str) {
+        if let Some(record) = self.lock().space_mut(space) {
+            record.following.sent(Instant::now());
+        }
+    }
+
+    /// Whether any of the agent speech of `space` is still to come at `now`, queued for synthesis or not yet all sent.
+    #[cfg(all(test, feature = "speech"))]
+    pub(crate) fn speech_to_come(&self, space: &str, now: Instant) -> bool {
+        self.lock()
+            .space(space)
+            .is_some_and(|record| record.following.unspoken(now))
+    }
+
+    /// Synthesis stopped for `space`: whatever of its speech was still queued will not be sent.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn speech_unqueued(&self, space: &str) {
+        if let Some(record) = self.lock().space_mut(space) {
+            record.following.unqueued();
+        }
     }
 
     /// Send each catching-up or replaying participant of `space` what is due by `now`. Returns `None` once the space is gone, and otherwise when the next is due, if anyone is still catching up or replaying.

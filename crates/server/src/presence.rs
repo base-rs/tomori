@@ -1286,6 +1286,8 @@ pub(crate) struct AgentState {
     pub summoned: Option<Pose>,
     /// Where it has reached, while it is on its way somewhere, or home.
     pub at: Option<Pose>,
+    /// Where it turned to face, where it stands, if it did: whoever it glances at, or turned to, as clients turn it.
+    pub facing: Option<[f32; 3]>,
     pub pinned: bool,
     /// Who pinned it, by their handle, where a participant did.
     pub pinned_by: Option<String>,
@@ -1306,8 +1308,14 @@ pub(crate) struct AgentState {
 pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> Value {
     let home = crate::hub::agent_home(anchors);
     let at = state.summoned.unwrap_or(home);
-    // The way it faces, its +Z, clockwise from −Z.
-    let facing = rotate(at.orientation, [0.0, 0.0, 1.0]);
+    // The way it faces, its +Z, clockwise from −Z: or, where it turned to someone, towards them about the vertical, as
+    // clients turn it where it stands.
+    let facing = state
+        .facing
+        .map(|eyes| [eyes[0] - at.position[0], 0.0, eyes[2] - at.position[2]])
+        .filter(|towards| towards.iter().all(|axis| axis.is_finite()))
+        .filter(|towards| towards[0].hypot(towards[2]) > 1e-3)
+        .unwrap_or_else(|| rotate(at.orientation, [0.0, 0.0, 1.0]));
     let mode = match (state.pinned, state.summoned, state.movement.mode) {
         (true, _, _) => "pinned",
         (false, None, _) if state.at.is_some() => "going home",

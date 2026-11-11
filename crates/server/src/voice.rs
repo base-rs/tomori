@@ -349,6 +349,17 @@ mod enabled {
                 self.more = Some(self.reply);
                 segments.push(MORE_ON_THE_PANEL.to_owned());
             }
+            // Counted before synthesis can start them, so that the pacer's report of each one sent never comes first: the
+            // reply lasts until they have been sent. A segment with nothing to say is neither queued nor counted.
+            let queued = segments
+                .iter()
+                .filter(|segment| !segment.trim().is_empty())
+                .count();
+            if queued > 0
+                && let Some(hub) = self.hub.upgrade()
+            {
+                hub.speech_queued(&self.space, queued);
+            }
             // Holding the labels across `speak` means the pacer finds each segment's label once synthesis starts it.
             let mut labels = self.labels.lock().unwrap_or_else(PoisonError::into_inner);
             // A segment with nothing to say is not spoken.
@@ -395,6 +406,10 @@ mod enabled {
         /// A breath of [`SEGMENT_GAP`] of silence between two spoken segments.
         Gap,
         Failed(String),
+        /// A queued segment's audio, if any, has all been sent before this, or it could not be synthesized.
+        Sent,
+        /// Synthesis stopped: nothing more that was queued will be sent.
+        Unqueued,
     }
 
     /// Turns synthesized audio into a real-time frame stream for one space, and paces its participants' catch-ups and replays.
@@ -537,6 +552,8 @@ mod enabled {
             match item {
                 Item::Announce(message) => hub.agent_speech(&self.space, reply, message),
                 Item::Failed(error) => hub.speech_failed(&self.space, error),
+                Item::Sent => hub.speech_sent(&self.space),
+                Item::Unqueued => hub.speech_unqueued(&self.space),
                 Item::Gap => {
                     // A breath between segments: advance the clock so the next frame, and the
                     // silence the client plays while it waits for it, is later by [`SEGMENT_GAP`].
@@ -588,6 +605,8 @@ mod enabled {
                         // A breath between this segment and the next, so back-to-back blocks do not run together.
                         self.pending.push_back((self.reply, Item::Gap));
                     }
+                    // Sent once its last frame has been, at the rate it plays.
+                    self.pending.push_back((self.reply, Item::Sent));
                 }
                 SpeechEvent::Failed { error, .. } => {
                     self.flush();
@@ -610,6 +629,8 @@ mod enabled {
                             )),
                         ));
                     }
+                    // Whatever of it was synthesized is sent before this.
+                    self.pending.push_back((self.reply, Item::Sent));
                 }
             }
         }
@@ -678,6 +699,8 @@ mod enabled {
                     ),
                 ));
             }
+            // What it produced is sent first; nothing queued after it will be.
+            self.pending.push_back((self.reply, Item::Unqueued));
         }
     }
 
@@ -697,6 +720,20 @@ mod enabled {
                 _: &str,
                 _: &mut dyn FnMut(AudioChunk),
             ) -> Result<(), tomori_speech::Error> {
+                Ok(())
+            }
+        }
+
+        /// A synthesizer that says nothing once it is let go of.
+        struct Held(Receiver<()>);
+
+        impl Synthesizer for Held {
+            fn synthesize(
+                &mut self,
+                _: &str,
+                _: &mut dyn FnMut(AudioChunk),
+            ) -> Result<(), tomori_speech::Error> {
+                let _ = self.0.recv();
                 Ok(())
             }
         }
@@ -797,6 +834,8 @@ mod enabled {
             ] {
                 pacer.handle(SpeechEvent::Failed { segment: 3, error });
             }
+            // Then synthesis stops: nothing more is to come.
+            pacer.disconnect();
             let kinds: Vec<&str> = pacer
                 .pending
                 .iter()
@@ -805,18 +844,69 @@ mod enabled {
                     Item::Frame { .. } => "frame",
                     Item::Gap => "gap",
                     Item::Failed(_) => "failed",
+                    Item::Sent => "sent",
+                    Item::Unqueued => "unqueued",
                 })
                 .collect();
+            // Each segment, spoken, silent or failed, is sent whole after its last frame.
             assert_eq!(
                 kinds,
                 [
-                    "announce", "frame", "frame", "frame", "gap", "failed", "failed"
+                    "announce", "frame", "frame", "frame", "gap", "sent", "sent", "failed", "sent",
+                    "failed", "sent", "sent", "failed", "unqueued"
                 ]
             );
+            // Until the last of them is sent, or synthesis stops, its speech is still to come; one more was queued than
+            // was sent.
+            hub.speech_queued(&space, 6);
             let now = Instant::now();
             while let Some((reply, item)) = pacer.pending.pop_front() {
+                assert!(hub.speech_to_come(&space, Instant::now()));
                 assert!(pacer.send(reply, item, now));
             }
+            assert!(!hub.speech_to_come(&space, Instant::now()));
+            // Never fewer than nothing.
+            hub.speech_sent(&space);
+            hub.speech_queued(&space, 1);
+            assert!(hub.speech_to_come(&space, Instant::now()));
+            // Speech for a space that is gone counts for nothing.
+            hub.speech_queued("gone", 1);
+            hub.speech_sent("gone");
+            hub.speech_unqueued("gone");
+            assert!(!hub.speech_to_come("gone", Instant::now()));
+        }
+
+        #[test]
+        fn a_reply_s_speech_is_to_come_from_its_segments_being_queued_until_the_last_is_sent_or_synthesis_stops()
+         {
+            let (hub, space) = space();
+            // Synthesis waits, as for a long paragraph after its turn has ended.
+            let (release, held) = mpsc::channel::<()>();
+            let mut voice = Voices::new(Held(held)).start(&hub, &space).unwrap();
+            assert!(!hub.speech_to_come(&space, Instant::now()));
+            voice.observe(&Event::MessageStarted {
+                message: "m".into(),
+                role: Role::Assistant,
+            });
+            voice.observe(&Event::TextDelta {
+                message: "m".into(),
+                text: "Over there.\n\nBy the coop.\n\n```\nnothing said\n```\n".into(),
+            });
+            voice.observe(&Event::MessageCompleted {
+                message: "m".into(),
+            });
+            assert!(hub.speech_to_come(&space, Instant::now()));
+            // Synthesis that hangs ends the reply all the same, once nothing of its speech has moved for a minute.
+            assert!(!hub.speech_to_come(&space, Instant::now() + crate::hub::SPEECH_STALLED));
+            // Synthesis stopping leaves nothing to come.
+            let (mut stopped, _sender) = pacer(&hub, &space);
+            stopped.disconnect();
+            let Some((reply, Item::Unqueued)) = stopped.pending.pop_back() else {
+                unreachable!("nothing more is to come after what it produced");
+            };
+            assert!(stopped.send(reply, Item::Unqueued, Instant::now()));
+            assert!(!hub.speech_to_come(&space, Instant::now()));
+            drop(release);
         }
 
         #[test]
@@ -826,13 +916,23 @@ mod enabled {
             pacer.audio(chunk(16_000, 10));
             pacer.disconnect();
             pacer.disconnect();
-            let Some((_, Item::Failed(_))) = pacer.pending.back() else {
-                unreachable!("stopping is said after the frame");
-            };
+            let kinds: Vec<bool> = pacer
+                .pending
+                .iter()
+                .map(|(_, item)| matches!(item, Item::Failed(_)))
+                .collect();
+            assert_eq!(
+                kinds,
+                [false, true, false],
+                "stopping is said after the frame"
+            );
             let (mut closing, _sender) = self::pacer(&hub, &space);
             closing.closing.store(true, Ordering::SeqCst);
             closing.disconnect();
-            assert!(closing.pending.is_empty());
+            assert!(matches!(
+                closing.pending.make_contiguous(),
+                [(_, Item::Unqueued)]
+            ));
         }
 
         #[test]
