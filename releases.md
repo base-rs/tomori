@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Locked walls stay out of the way.** A locked wall, such as the farmyard's notice board or a console's wall, no longer shows a grab bar or any handle, and squeezing it takes nothing. Only an owner, who can unlock it, sees its padlock, and only within about 3 m of it, so that walls far away show nothing; squeeze it to unlock the wall and take hold of it, and squeeze the padlock again to lock it and let go. Pointing at a locked wall says faintly that it is locked, and, to an owner too far away, to come closer to unlock it. A group with a locked wall at its bottom left keeps its grab bar, on its lowest left wall that is unlocked.
+
+- For clients: `tomori-scene`'s `projection::editing` gains `PADLOCK_NEAR`; `group_bar` gives no bar for a locked wall, `hint_for` no longer describes a locked wall, and `bar_label_for` says `unlock this wall` for one; `locked_label` is new.
+
 - **Tomori comes to you when it speaks to you unasked.** Replying aloud to a sub-agent's report, a timer or anything else that isn't someone's words, a following agent now comes to whoever it was last talking with, where they stand now, and keeps with them while it speaks, as when you speak to it, provided you are still here and talked with it in the last 10 minutes; otherwise it speaks from where it is. Pinned, moving only when asked, walking with someone or saying nothing aloud, it stays as before. Its panels in such a reply go beside the same person. See `design/environments.md`.
 
 - **Replies are heard after launching with the headset off.** The headset opens its speaker again each time Tomori gains focus, as when you put the headset on, since Horizon OS silenced a speaker opened while Tomori was in the background, so that replies arrived but could not be heard until Tomori was started again. For clients: `tomori-client`'s `speaker::Playback` gains `reopens_on_focus`, false unless a platform asks for it. See `design/spatial-audio.md`.

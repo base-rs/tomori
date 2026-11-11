@@ -113,16 +113,17 @@ pub(super) fn labelled(wall: &Wall, walls: &[&Wall]) -> bool {
     chosen(wall, walls, true)
 }
 
-/// Whether `wall` shows its group's one grab bar: its group's bottom left wall, whose slots reach lowest, so that the
-/// bar, below its bottom edge, stands below every wall of its group and over none of their slots, whatever their
-/// shapes. See `design/projection.md`.
+/// Whether `wall` shows its group's one grab bar: its group's bottom left wall unlocked, whose slots reach lowest of
+/// those, so that the bar, below its bottom edge, or below the group's lowest slots where a locked wall's reach lower,
+/// stands below every wall of its group and over none of their slots, whatever their shapes. A group of none but locked
+/// walls shows none, as a locked wall is not taken hold of. See `design/projection.md`.
 pub(super) fn bears_bar(wall: &Wall, walls: &[&Wall]) -> bool {
     chosen(wall, walls, false)
 }
 
-/// Whether `wall` is its group's bottom left wall among `walls`, which bears its bar, or, for its `label`, its top left,
-/// or, where the group is curved, its bottom left, as they stand on the surface of its group's first wall: a wall alone
-/// is.
+/// Whether `wall` is its group's bottom left wall unlocked among `walls`, which bears its bar, or, for its `label`, its
+/// top left, or, where the group is curved, its bottom left, locked or not, as they stand on the surface of its group's
+/// first wall: a wall alone is.
 fn chosen(wall: &Wall, walls: &[&Wall], label: bool) -> bool {
     let mut group: Vec<&Wall> = members(wall, walls);
     if group.is_empty() {
@@ -144,6 +145,7 @@ fn chosen(wall: &Wall, walls: &[&Wall], label: bool) -> bool {
     };
     group
         .iter()
+        .filter(|other| label || !other.is_locked())
         .min_by(|a, b| {
             let (a, b) = (place(a), place(b));
             a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
