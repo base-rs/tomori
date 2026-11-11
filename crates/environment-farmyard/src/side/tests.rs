@@ -65,9 +65,10 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     });
     let first: State = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
     let objects = kept.objects.lock().unwrap()[0].clone();
-    // Each hen, then the campsite's bonfire and its sticks.
-    assert_eq!(objects.len(), first.chickens.len() + 1 + campsite::STICKS);
-    assert_eq!(objects[first.chickens.len()].id(), "bonfire");
+    // Each hen, then the beach, and the campsite's bonfire and its sticks.
+    assert_eq!(objects.len(), first.chickens.len() + 2 + campsite::STICKS);
+    assert_eq!(objects[first.chickens.len()].id(), "beach");
+    assert_eq!(objects[first.chickens.len() + 1].id(), "bonfire");
     assert_eq!(objects[0].id(), "chicken-0");
     assert!(
         objects[0]
@@ -316,4 +317,99 @@ fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_
     assert!(back.now.fresh());
     cancellation.cancel();
     assert_eq!(running.join().unwrap(), Ok(()));
+}
+
+#[test]
+fn the_side_keeps_the_beach_s_stones_taking_one_within_reach_and_saying_so_with_the_stones_in_its_state()
+ {
+    let cancellation = Cancellation::new();
+    let kept = Arc::new(Kept::default());
+    let space = Space::with_cancellation("space-1", "Fleet", "/", cancellation.child())
+        .with_outlet(kept.clone());
+    let inbox = space.inbox();
+    let running = std::thread::spawn(move || FarmyardSide.run(&space));
+    eventually(|| !kept.states.lock().unwrap().is_empty());
+    // Its state has every stone, at rest, beside the flock.
+    let first: serde_json::Value = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
+    let stones: tomori_physics::message::State =
+        serde_json::from_value(first["stones"].clone()).unwrap();
+    assert_eq!(stones.bodies.len(), crate::beach::STONES);
+    assert!(
+        stones
+            .bodies
+            .iter()
+            .all(|stone| !stone.moving && stone.held.is_none())
+    );
+    // Someone beside stone 5, their hand on it, takes it: everyone is told, as a change of the stones.
+    let at = tomori_physics::Encoded(stones.bodies[5].at.0)
+        .placement(tomori_physics::Precision::Rest)
+        .position;
+    inbox.set_present(vec![3]);
+    inbox.set_presence(tomori_environment::Presence::new(
+        3,
+        tomori_protocol::Pose::at([at.x - 0.3, at.y + 1.4, at.z]),
+        None,
+        Some(tomori_protocol::Pose::at(at.to_array())),
+        Instant::now(),
+    ));
+    let take = r#"{"take":{"body":5,"epoch":0,"hand":"right","offset":[0,0,0,0,0,0,10000]}}"#;
+    assert!(inbox.push(Asked::new(3, take)));
+    let changes = |kept: &Kept| -> Vec<Stones> {
+        kept.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| serde_json::from_str::<Stones>(event).ok())
+            .collect()
+    };
+    eventually(|| !changes(&kept).is_empty());
+    let change = &changes(&kept)[0];
+    assert_eq!(change.stones.holding[0].held.map(|held| held.by), Some(3));
+    let last: serde_json::Value =
+        serde_json::from_str(kept.states.lock().unwrap().last().unwrap()).unwrap();
+    assert_eq!(last["stones"]["bodies"][5]["held"]["by"], 3);
+    // The agent may inspect the beach, told how many are held.
+    let inspector = inbox.inspector().unwrap();
+    eventually(|| {
+        let details: serde_json::Value =
+            serde_json::from_str(&inspector.inspect("beach/shingle").unwrap().unwrap()).unwrap();
+        details["held"] == 1
+    });
+    // Gone, they let go of it, where their hand was.
+    inbox.set_present(Vec::new());
+    eventually(|| {
+        changes(&kept).iter().any(|change| {
+            change
+                .stones
+                .holding
+                .iter()
+                .any(|holding| holding.held.is_none())
+        })
+    });
+    cancellation.cancel();
+    assert_eq!(running.join().unwrap(), Ok(()));
+}
+
+#[test]
+fn the_side_announces_in_turn_at_the_pace_the_server_takes_and_drops_the_oldest_beyond_what_may_wait()
+ {
+    let now = Instant::now();
+    let mut pace = Pace::new(now);
+    for event in 0..100 {
+        pace.push(event.to_string());
+    }
+    // The burst less the state it shared, then thirty a second, in order.
+    let due = pace.due(now);
+    assert_eq!(due.len(), tomori_environment::UPDATE_BURST as usize - 1);
+    assert_eq!(due[0], "0");
+    assert!(pace.due(now).is_empty());
+    let later = pace.due(now + Duration::from_secs(1));
+    assert_eq!(later.len(), tomori_environment::UPDATES_PER_SECOND as usize);
+    assert_eq!(later[0], (tomori_environment::UPDATE_BURST - 1).to_string());
+    // Beyond what may wait, the oldest goes.
+    let mut pace = Pace::new(now);
+    for event in 0..WAITING + 5 {
+        pace.push(event.to_string());
+    }
+    assert_eq!(pace.due(now)[0], "5");
 }

@@ -11,16 +11,18 @@
 //! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, the yard with its
 //! workbench, the coop, the backdrop beyond the fence, the ferns about the trail and the campsite by the pool, built in code as `tomori-assets`
 //! models; the chicken, its asset, its animator's graph and its
-//! controller; what each chicken does, and where that puts it; the flock its server side owns; and the server side
-//! itself, which has nothing that must stay in the server, so that it needs no server crate of its own. Its client half,
+//! controller; what each chicken does, and where that puts it; the flock its server side owns; the beach's stones; and
+//! the server side itself, which has nothing that must stay in the server, so that it needs no server crate of its own,
+//! behind the `side` feature, since it builds the physics engine that only a server needs. Its client half,
 //! the scenery, teleport profile and client side a client registers, is `tomori-environment-farmyard-client`. See
 //! `design/farmyard.md`.
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 7, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 8, "Farmyard"));
 //! ```
 pub mod backdrop;
+pub mod beach;
 pub mod behaviour;
 pub mod campsite;
 pub mod chicken;
@@ -32,6 +34,7 @@ pub mod flock;
 pub mod layout;
 pub mod props;
 mod shapes;
+#[cfg(feature = "side")]
 pub mod side;
 pub mod trail;
 pub mod walkable;
@@ -48,8 +51,10 @@ pub const ID: &str = "farmyard";
 /// which an earlier client neither draws nor lets anyone walk, and 6 when the river and the pool sank into a channel and
 /// the waterfall came 1.5 m nearer, with a rock in its pool and an anchor beside it, which an earlier client would show
 /// over its pool where it no longer is, and 7 when it gained the campsite beside
-/// the lookout's seat, whose bonfire and sticks an earlier client does not draw, nor its anchor, nor lets anyone hold.
-pub const VERSION: u32 = 7;
+/// the lookout's seat, whose bonfire and sticks an earlier client does not draw, nor its anchor, nor lets anyone hold,
+/// and 8 when it gained the shingle beach by the riverbank, whose stones an earlier client neither draws nor lets anyone
+/// take.
+pub const VERSION: u32 = 8;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

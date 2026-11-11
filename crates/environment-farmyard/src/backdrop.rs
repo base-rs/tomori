@@ -847,10 +847,9 @@ impl Stone {
     }
 }
 
-/// The model every river stone is drawn from, a metre across, rounded and low, its foot at its origin, a little of it
-/// below: two rings of five corners, the upper turned half a corner from the lower, and a crown.
-pub fn stone() -> Model {
-    let mut shapes = Shapes::new();
+/// The corners of the model every river stone is drawn from, a metre across: its lower ring of five, its upper ring,
+/// turned half a corner from it, and its crown.
+fn stone_rings() -> (Vec<Vec3>, Vec<Vec3>, Vec3) {
     let ring = |level: f32, reach: f32, turn: f32, seed: u32| -> Vec<Vec3> {
         (0..5)
             .map(|side| {
@@ -860,11 +859,25 @@ pub fn stone() -> Model {
             })
             .collect()
     };
-    let (lower, upper) = (
+    (
         ring(-STONE_BOTTOM, 0.46, 0.0, 800),
         ring(0.24, 0.34, 0.5, 810),
-    );
-    let top = Vec3::new(0.04, STONE_TOP, -0.03);
+        Vec3::new(0.04, STONE_TOP, -0.03),
+    )
+}
+
+/// Every corner of the river stone's model, a metre across, its foot at its origin, of which it is the convex hull: what
+/// a body knocked against it meets.
+pub fn stone_corners() -> Vec<Vec3> {
+    let (lower, upper, top) = stone_rings();
+    lower.into_iter().chain(upper).chain([top]).collect()
+}
+
+/// The model every river stone is drawn from, a metre across, rounded and low, its foot at its origin, a little of it
+/// below: two rings of five corners, the upper turned half a corner from the lower, and a crown.
+pub fn stone() -> Model {
+    let mut shapes = Shapes::new();
+    let (lower, upper, top) = stone_rings();
     let middle = Vec3::Y * 0.05;
     for side in 0..5 {
         let next = (side + 1) % 5;

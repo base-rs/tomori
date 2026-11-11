@@ -4175,6 +4175,7 @@ dependencies = [
  "serde_json",
  "tomori-assets",
  "tomori-environment",
+ "tomori-physics",
  "tomori-protocol",
 ]
 
@@ -4193,6 +4194,7 @@ dependencies = [
  "tomori-client",
  "tomori-environment",
  "tomori-environment-farmyard",
+ "tomori-physics",
  "tomori-protocol",
  "tomori-render",
  "tomori-scene",

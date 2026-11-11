@@ -435,6 +435,7 @@ fn each_participant_holds_one_body_in_each_hand() {
     );
     // Someone else's hands are their own.
     assert_eq!(world.take(5, &take(2, Side::Right), Some(&seen)), Ok(1));
+    assert_eq!(world.holders(), [2, 5]);
     // Let go of as they leave, where their hands were seen, unmoving, each said.
     let mut let_go = world.let_go_of(2, Some(&seen));
     let_go.sort();
@@ -467,6 +468,7 @@ fn each_participant_holds_one_body_in_each_hand() {
             < 0.05
     );
     assert!(world.let_go_of(9, None).is_empty());
+    assert!(world.holders().is_empty());
     let (updates, _) = until_rest(&mut world, 10.0);
     assert!(updates.iter().flat_map(|update| &update.rested).count() >= 3);
 }

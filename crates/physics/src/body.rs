@@ -37,7 +37,9 @@ pub struct Body {
 
 impl Body {
     /// Body `id`, the convex hull of `points`, of granite by default: 2,650 kg/m³, a friction of 0.9, bouncing little,
-    /// damped a little, dynamic, beginning at the origin.
+    /// damped a little, dynamic, beginning at the origin. A face that another body is to rest on, or that rests on
+    /// another, has at most four corners: Rapier rests a face of more than four on another unsteadily, so that a stack
+    /// of them shakes itself apart. See `design/physics.md`.
     pub fn convex(id: u32, points: Vec<Vec3>) -> Self {
         Self {
             id,

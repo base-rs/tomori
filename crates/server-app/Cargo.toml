@@ -25,7 +25,7 @@ speech-shared = ["tomori-server/speech-shared"]
 
 [dependencies]
 tomori-environment = { version = "0.2.0", path = "../environment" }
-tomori-environment-farmyard = { version = "0.2.0", path = "../environment-farmyard" }
+tomori-environment-farmyard = { version = "0.2.0", path = "../environment-farmyard", features = ["side"] }
 tomori-environment-github-server = { version = "0.2.0", path = "../environment-github-server" }
 tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
 tomori-protocol = { version = "0.2.0", path = "../protocol" }

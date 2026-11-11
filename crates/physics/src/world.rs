@@ -26,6 +26,16 @@ const GLIDE_RISE: f32 = 0.3;
 /// soon after one it may strike again, in milliseconds, so that a stone settling clacks once rather than rattling.
 const STRUCK: f32 = 0.6;
 const RESTRIKE: u64 = 150;
+/// How far ahead of a body its contacts are foreseen, in metres: what a body let go at [`crate::RELEASE_SPEED`] travels in
+/// a step at 60 Hz, and a little more.
+const SOFT_CCD: f32 = 0.15;
+/// How long everything that moves may move no more than [`STILL_MOVE`] metres, nor turn more than [`STILL_TURN`]
+/// radians, before it is all put to sleep, in milliseconds: so that a body Rapier's own rule keeps awake, as a stone lying
+/// where the ground bends, rocking at the solver's noise, rests all the same, and is said to, rather than being sent
+/// forever.
+const STILL_FOR: u64 = 2_000;
+const STILL_MOVE: f32 = 0.003;
+const STILL_TURN: f32 = 0.02;
 /// How far a body let go inside another is lifted to clear it, at most, a centimetre at a time.
 const CLEAR: f32 = 0.5;
 
@@ -60,6 +70,8 @@ struct Entry {
     soaking: Option<u64>,
     /// Where it rests, as it was said, while it does.
     rested: crate::Encoded,
+    /// Where it was when it last moved more than a little, and when, while it moves.
+    still: Option<(u64, Placement)>,
 }
 
 /// An environment's bodies and what they rest on, simulated.
@@ -177,7 +189,9 @@ impl World {
             .pose(pose(&home))
             .linear_damping(body.linear_damping)
             .angular_damping(body.angular_damping)
-            .ccd_enabled(true)
+            // Soft, predictive, rather than Rapier's hard CCD, which is more than a stone needs: far enough ahead to
+            // catch one thrown at the fastest a hand lets go, 8 m/s, within a step.
+            .soft_ccd_prediction(SOFT_CCD)
             .sleeping(true)
             .build();
         let (handle, collider) = self.physics.insert(built, collider);
@@ -199,6 +213,7 @@ impl World {
             wet: false,
             soaking: None,
             rested: home.encoded(Precision::Rest),
+            still: None,
         });
         Ok(())
     }
@@ -333,6 +348,29 @@ impl World {
         for index in 0..self.entries.len() {
             self.after(index, clock);
         }
+        // Everything that moves barely moving for a while, all of it is put to sleep together, and rests on the next
+        // step, so that a cairn settling is never stopped part way.
+        let mut moving = self
+            .entries
+            .iter()
+            .filter(|entry| entry.motion != Motion::Resting && entry.motion != Motion::Held)
+            .peekable();
+        let quiet = moving.peek().is_some()
+            && moving.all(|entry| {
+                entry.motion == Motion::Moving
+                    && entry
+                        .still
+                        .is_some_and(|(since, _)| clock >= since + STILL_FOR)
+            });
+        if quiet {
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| entry.motion == Motion::Moving)
+            {
+                self.physics.bodies[entry.handle].sleep();
+            }
+        }
     }
 
     /// What became of body `index` in the step that ended at `clock`.
@@ -391,6 +429,14 @@ impl World {
                 let lost = at.position.y < self.lowest - self.settings.lost_below
                     || (at.position - self.settings.home).with_y(0.0).length()
                         > self.settings.lost_beyond;
+                // Where it was since it last moved more than a little.
+                let still = entry.still.is_some_and(|(_, was)| {
+                    was.position.distance(at.position) <= STILL_MOVE
+                        && was.rotation.angle_between(at.rotation) <= STILL_TURN
+                });
+                if !still {
+                    entry.still = Some((clock, at));
+                }
                 if lost {
                     let rigid = &mut self.physics.bodies[entry.handle];
                     rigid.set_position(pose(&entry.home), true);
@@ -417,6 +463,7 @@ impl World {
         let entry = &mut self.entries[index];
         entry.motion = Motion::Resting;
         entry.velocity = Vec3::ZERO;
+        entry.still = None;
         entry.rested = encoded;
         entry.soaking = returns.then_some(clock);
         self.pending
@@ -612,6 +659,18 @@ impl World {
             Motion::Resting => Some(entry.rested.placement(Precision::Rest)),
             _ => Some(self.placement_of(entry)),
         }
+    }
+
+    /// Who holds any body, by their numbers, in order.
+    pub fn holders(&self) -> Vec<u32> {
+        let mut holders: Vec<u32> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.held.map(|held| held.by))
+            .collect();
+        holders.sort_unstable();
+        holders.dedup();
+        holders
     }
 
     /// Who holds body `body`, if anyone does.
