@@ -591,7 +591,7 @@ impl Voice {
             true => {}
             false => {
                 return Err(if live {
-                    "Allow the microphone, then squeeze the left grip again."
+                    "Allow the microphone, then click the left stick again."
                 } else {
                     "Allow the microphone, then hold X again."
                 }

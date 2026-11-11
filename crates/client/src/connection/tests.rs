@@ -267,7 +267,7 @@ fn live_microphone_stops_and_permission_is_required() {
         denied
             .start_live(&client, 0)
             .unwrap_err()
-            .contains("left grip")
+            .contains("click the left stick")
     );
     assert!(denied.recording.is_none());
     let mut voice = voice(&rate, true, None);

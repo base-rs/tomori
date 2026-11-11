@@ -51,7 +51,8 @@ pub struct Buttons {
     pub y: bool,
     /// X is held: push-to-talk.
     pub talk: bool,
-    /// The left stick was clicked: mute spoken replies.
+    /// The desktop's V was pressed: mute spoken replies, as the hand menu's row does. The headset's left stick click
+    /// toggles the live microphone instead, and sets nothing here.
     pub mute: bool,
     /// The right stick was clicked: replay the latest reply.
     pub replay: bool,
@@ -788,6 +789,12 @@ impl Step {
         self.panel.reset();
     }
 
+    /// Whether the left stick rested at its middle as of the last frame's buttons, no push of it under way, so that
+    /// a click of it is not part of travel. See `design/live-audio.md`.
+    pub fn left_stick_free(&self) -> bool {
+        self.left_stick == LeftStick::Free
+    }
+
     /// Whether the hand menu is pinned open with Y.
     pub fn pinned(&self) -> bool {
         self.hand_menu.pinned()
@@ -1150,7 +1157,7 @@ impl Step {
             conversation.talk(talking);
         }
         self.was_talking = talking;
-        // Left stick click mutes spoken replies locally; right stick click plays the latest reply again, or stops it.
+        // The desktop's V mutes spoken replies locally; right stick click plays the latest reply again, or stops it.
         if buttons.mute {
             conversation.toggle_mute();
         }

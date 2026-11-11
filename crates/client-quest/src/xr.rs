@@ -683,9 +683,9 @@ struct Input {
     refresh: xr::Action<bool>,
     navigation: xr::Action<xr::Vector2f>,
     presentation_navigation: xr::Action<xr::Vector2f>,
-    sound_toggle: xr::Action<bool>,
+    /// The left stick's click, which toggles the live microphone.
+    live_toggle: xr::Action<bool>,
     replay: xr::Action<bool>,
-    audience_grip: xr::Action<f32>,
     /// The right grip, which detaches the right wrist's transcript into the world and reattaches it.
     transcript_grip: xr::Action<f32>,
     /// The haptic output action, for both hands.
@@ -716,11 +716,9 @@ impl Input {
         )?;
         let presentation_navigation =
             set.create_action::<xr::Vector2f>("result_pages", "Browse result cards", &[])?;
-        let sound_toggle =
-            set.create_action::<bool>("sound_toggle", "Toggle spoken replies", &[])?;
+        let live_toggle =
+            set.create_action::<bool>("live_toggle", "Toggle the live microphone", &[])?;
         let replay = set.create_action::<bool>("replay", "Replay spoken reply", &[])?;
-        let audience_grip =
-            set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
         let transcript_grip =
             set.create_action::<f32>("transcript_grip", "Detach or reattach the transcript", &[])?;
         let hand_paths = [
@@ -772,16 +770,12 @@ impl Input {
                     instance.string_to_path("/user/hand/right/input/thumbstick")?,
                 ),
                 xr::Binding::new(
-                    &sound_toggle,
+                    &live_toggle,
                     instance.string_to_path("/user/hand/left/input/thumbstick/click")?,
                 ),
                 xr::Binding::new(
                     &replay,
                     instance.string_to_path("/user/hand/right/input/thumbstick/click")?,
-                ),
-                xr::Binding::new(
-                    &audience_grip,
-                    instance.string_to_path("/user/hand/left/input/squeeze/value")?,
                 ),
                 xr::Binding::new(
                     &transcript_grip,
@@ -816,9 +810,8 @@ impl Input {
             refresh,
             navigation,
             presentation_navigation,
-            sound_toggle,
+            live_toggle,
             replay,
-            audience_grip,
             transcript_grip,
             haptic,
             haptics: Haptics::default(),
@@ -865,9 +858,8 @@ impl Input {
                     self.presentation_navigation
                         .state(session, xr::Path::NULL)?,
                 ),
-                sound_toggle: xr_types::action(self.sound_toggle.state(session, xr::Path::NULL)?),
+                live_toggle: xr_types::action(self.live_toggle.state(session, xr::Path::NULL)?),
                 replay: xr_types::action(self.replay.state(session, xr::Path::NULL)?),
-                audience_grip: xr_types::action(self.audience_grip.state(session, xr::Path::NULL)?),
                 transcript_grip: xr_types::action(
                     self.transcript_grip.state(session, xr::Path::NULL)?,
                 ),

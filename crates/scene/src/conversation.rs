@@ -1412,7 +1412,7 @@ impl Conversation {
         self.report();
     }
 
-    /// Left stick click: mute or unmute spoken replies, for this participant only. Other participants still play.
+    /// The hand menu's Spoken replies row, or the desktop's V: mute or unmute spoken replies, for this participant only. Other participants still play.
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
         log::info!(
