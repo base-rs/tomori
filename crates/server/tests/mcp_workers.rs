@@ -702,7 +702,8 @@ fn at_most_a_bounded_number_are_removed_in_one_call() {
         "Tomori removes at most 64 workers in one call; ask again for the rest."
     );
     let said = notices(&spaces.ada, |found| !found.is_empty());
-    assert!(said[0].ends_with("- Task 4\n- and 59 more"), "{said:?}");
+    // Each is named as long as the notice's body has lines for them, the rest counted.
+    assert!(said[0].ends_with("- Task 26\n- and 37 more"), "{said:?}");
 }
 
 #[test]
