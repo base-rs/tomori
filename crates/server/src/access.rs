@@ -234,6 +234,8 @@ mod tests {
                 right: None,
                 hands: None,
                 carrying: None,
+                carried: Vec::new(),
+                rays: None,
             },
             ClientMessage::SetAttribution { enabled: true },
             ClientMessage::SetMode {

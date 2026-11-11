@@ -173,6 +173,7 @@ fn input(projection: &Projection, viewer: Vec3, ray: Option<Ray>, grip: f32) -> 
         controls: Controls::Controllers,
         scroll: None,
         rights: editing::Rights::default(),
+        left: crate::projection::Hold::default(),
         now: Instant::now(),
         dt: 1.0 / 72.0,
     }

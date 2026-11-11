@@ -414,8 +414,12 @@ pub struct Conversation {
     #[cfg(any(not(target_os = "android"), test))]
     paged: Option<Paged>,
     talk: Option<Talk>,
-    /// What the participant points at now, a worker or a card, as the frame loop or console last reported.
+    /// What the participant points at now, a worker or a card, as the frame loop or console last reported: with the
+    /// right hand's ray, and with the left's, and whether the left's moved onto what it is on more recently, so that
+    /// words begun name it first. See `design/interaction.md`.
     pointing_at: Option<tomori_protocol::Resource>,
+    pointing_left: Option<tomori_protocol::Resource>,
+    left_first: bool,
     /// The checklist item the participant points at now, by its panel and the line of the body it begins on, which A
     /// ticks or unticks, as the frame step last reported. See `design/projection.md`.
     pointed_item: Option<(String, u32)>,
@@ -588,6 +592,8 @@ impl Conversation {
             paged: None,
             talk: None,
             pointing_at: None,
+            pointing_left: None,
+            left_first: false,
             pointed_item: None,
             pointed_pad: false,
             pad_chosen: false,
@@ -3691,7 +3697,8 @@ impl Conversation {
                 }
                 // B on its own never dismisses a panel, which takes carrying it with the grip; pointed at one, a
                 // participant is told how. See `design/projection.md`.
-                if let Some(tomori_protocol::Resource::Panel { panel, .. }) = &self.pointing_at
+                if let Some(tomori_protocol::Resource::Panel { panel, .. }) =
+                    self.pointing_at.as_ref().or(self.pointing_left.as_ref())
                     && self.role.participates()
                     && self
                         .projection()
@@ -3813,11 +3820,21 @@ impl Conversation {
         // What is pointed at as X is pressed is what the words are about, captured now, as the server captures it;
         // pointing elsewhere while talking does not change it. An answer goes to the question presented, and a name to
         // the participant, so either is about nothing pointed at.
-        let pointed = self
-            .pointing_at
-            .clone()
-            .filter(|target| naming.is_none() && self.knows(target));
-        let attention = pointed.iter().filter(|_| !answering).cloned().collect();
+        // Both rays' targets, the one moved onto most recently first, and one alone where both are on it.
+        let (first, second) = if self.left_first {
+            (&self.pointing_left, &self.pointing_at)
+        } else {
+            (&self.pointing_at, &self.pointing_left)
+        };
+        let mut attended: Vec<tomori_protocol::Resource> = Vec::new();
+        for target in [first, second].into_iter().flatten() {
+            if naming.is_none() && self.knows(target) && !attended.contains(target) {
+                attended.push(target.clone());
+            }
+        }
+        attended.truncate(tomori_protocol::ATTENTION_LIMIT);
+        let pointed = attended.first().cloned();
+        let attention = if answering { Vec::new() } else { attended };
         // The words follow the newest of the agent's messages shown, which is what they answer unless it says more
         // before they arrive; the server is told which, so that it can say so then. See `design/interaction.md`.
         let seen = self.newest_said().filter(|_| !answering);
@@ -3861,6 +3878,25 @@ impl Conversation {
     pub fn point(&mut self, target: Option<tomori_protocol::Resource>) {
         if self.pointing_at != target {
             self.pointing_at = target;
+        }
+    }
+
+    /// What the participant's left ray points at now, from the headset each frame, as [`Self::point`] says of the
+    /// right's, and whether it moved onto it more recently than the right moved onto its own, `first`: words begun
+    /// name both, that one first. See `design/interaction.md`.
+    pub fn point_left(&mut self, target: Option<tomori_protocol::Resource>, first: bool) {
+        if self.pointing_left != target {
+            self.pointing_left = target;
+        }
+        self.left_first = first;
+    }
+
+    /// Know `object`, something an environment shows, as `label`, as either ray points at it: attended to as
+    /// `Resource::object` while they talk, as a worker or card is, and named `label` while they do.
+    pub fn label_object(&mut self, object: &str, label: &str) {
+        if self.object_labels.get(object).map(String::as_str) != Some(label) {
+            self.object_labels
+                .insert(object.to_owned(), label.to_owned());
         }
     }
 
@@ -3918,10 +3954,15 @@ impl Conversation {
     /// it: `None` where they point at no such row, or the server takes no choices. A visitor points at it too, and is
     /// told they only watch.
     pub fn pointed_row(&self) -> Option<(String, String)> {
+        self.choosable_row(self.pointed_item.as_ref()?)
+    }
+
+    /// The choosable row that begins on `item`'s line of its panel, as [`Self::pointed_row`] says of the item pointed
+    /// at, by its panel and the row's id: as either ray points at it, which that hand's trigger chooses.
+    pub fn choosable_row(&self, (panel, line): &(String, u32)) -> Option<(String, String)> {
         if !self.joined_space().is_some_and(|(space, _)| space.choices) {
             return None;
         }
-        let (panel, line) = self.pointed_item.as_ref()?;
         self.row_at(panel, *line)
             .filter(|row| row.choosable)
             .map(|row| (panel.clone(), row.id.clone()))
@@ -3932,9 +3973,15 @@ impl Conversation {
     /// names the row the participant saw. Says whether it chose, as only a participant does; a visitor is told they
     /// only watch. See `design/panel-actions.md`.
     pub fn choose_row(&mut self) -> bool {
-        let Some((panel, row)) = self.pointed_row() else {
+        let Some(row) = self.pointed_row() else {
             return false;
         };
+        self.choose_row_at(row)
+    }
+
+    /// Choose `row`, the row of a list by its panel and its id, as [`Self::choose_row`] does the row pointed at: as the
+    /// trigger of the hand whose ray is on it does. Says whether it chose.
+    pub fn choose_row_at(&mut self, (panel, row): (String, String)) -> bool {
         let revision = self
             .projection()
             .and_then(|projection| projection.panel(&panel))
@@ -4000,14 +4047,6 @@ impl Conversation {
             checked,
         );
         true
-    }
-
-    /// The participant points at `object`, something an environment shows, called `label`: attended to as
-    /// `Resource::object` while they talk, as a worker or card is, and named `label` while they do.
-    pub fn point_at_object(&mut self, object: &str, label: &str) {
-        self.object_labels
-            .insert(object.to_owned(), label.to_owned());
-        self.point(Some(tomori_protocol::Resource::object(object)));
     }
 
     /// The notice shown, for the frame step's tests.

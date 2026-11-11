@@ -566,6 +566,8 @@ mod tests {
             right,
             hands: Some(Box::new([None, None])),
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         }
     }
 
@@ -679,6 +681,8 @@ mod tests {
             right: None,
             hands: None,
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         });
         // Cy travelled to stand 1 m in front of her, as she now faces.
         let ahead = head + Quat::from_array(orientation) * -Vec3::Z;
@@ -691,6 +695,8 @@ mod tests {
             right: None,
             hands: None,
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         });
         let frame = until(&mut feed, |feed, _| {
             feed.following.is_some() && feed.connection.placed().position(cy_source).is_some()

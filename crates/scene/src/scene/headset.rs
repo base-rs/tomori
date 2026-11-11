@@ -51,6 +51,9 @@ pub struct Actions {
     pub live_toggle: Action<bool>,
     pub replay: Action<bool>,
     pub transcript_grip: Action<f32>,
+    /// The left trigger and the left grip, which act on Tomori's own things as the right's do.
+    pub left_trigger: Action<f32>,
+    pub left_grip: Action<f32>,
 }
 
 /// Where a space is, as the runtime located it, with which parts of it are valid.
@@ -96,6 +99,11 @@ pub struct Controls {
     pub replay: bool,
     /// The right grip's value, while its action is active.
     pub transcript_grip: Option<f32>,
+    /// The left controller's aim pose, while tracked, and its trigger's and grip's values, while their actions are
+    /// active.
+    pub left_aim: Option<Pose>,
+    pub left_trigger: Option<f32>,
+    pub left_grip: Option<f32>,
 }
 
 impl Controls {
@@ -131,6 +139,11 @@ impl Controls {
                 .transcript_grip
                 .active
                 .then_some(actions.transcript_grip.value),
+            left_trigger: actions
+                .left_trigger
+                .active
+                .then_some(actions.left_trigger.value),
+            left_grip: actions.left_grip.active.then_some(actions.left_grip.value),
             ..Self::default()
         }
     }
@@ -607,16 +620,18 @@ impl Headset {
             .map(|pose| pose.and_then(|pose| anchor.to_scene_pose(pose)));
         let scene_from_space = anchor.transform().inverse();
         let tracked = hands.map(|joints| joints.and_then(|joints| hand(&joints, scene_from_space)));
-        // Outside a space, arrival's objects are pointed at with the right controller's aim ray. A trigger pull that begins on one of them chooses it; any other pull attracts the swarm, as it does inside a space, where there is nothing to point at.
-        let ray = controls
-            .aim
-            .and_then(|pose| anchor.to_scene_pose(pose))
-            .and_then(|pose| {
-                Ray::from_pose(
-                    Vec3::from_array(pose.position),
-                    Quat::from_array(pose.orientation),
-                )
-            });
+        // Each controller's aim ray points, the right's and the left's alike, at arrival's objects outside a space and at what a space shows inside one. A trigger pull that begins on one of them chooses it; outside a space, any other pull attracts the swarm. A tracked hand has a ray where the runtime gives it an aim pose, as a controller does.
+        let aimed = |aim: Option<Pose>| {
+            aim.and_then(|pose| anchor.to_scene_pose(pose))
+                .and_then(|pose| {
+                    Ray::from_pose(
+                        Vec3::from_array(pose.position),
+                        Quat::from_array(pose.orientation),
+                    )
+                })
+        };
+        let ray = aimed(controls.aim);
+        let left_ray = aimed(controls.left_aim);
         let space_head = head_pose(views);
         let head_pose = anchor.to_scene_transform(space_head);
         let scene_head = head_pose.map(|pose| pose.transform());
@@ -666,6 +681,13 @@ impl Headset {
             space_head,
             ray,
             trigger: controls.trigger,
+            left_ray,
+            left_trigger: controls.left_trigger,
+            left_grip: controls.left_grip,
+            left_attractor: controllers[controller::LEFT]
+                .map(|pose| Vec3::from_array(pose.position)),
+            // The left stick aims a teleport along the left ray, the hand that holds it.
+            teleport: crate::sides::Side::Left,
             pointing: self.step.pointing(controls.trigger),
             left_palm,
             right_palm: right_controller.or(right_hand),
@@ -734,6 +756,8 @@ mod tests {
             live_toggle: action(held, active, changed),
             replay: action(held, active, changed),
             transcript_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
+            left_trigger: action(if held { 1.0 } else { 0.0 }, active, changed),
+            left_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
         }
     }
 
@@ -2151,14 +2175,14 @@ mod tests {
         for _ in 0..400 {
             rig.frame(&Controls::default(), [None, None], Duration::ZERO);
         }
-        // The right controller points down and ahead, at the floor 1.5 m in front.
+        // The left controller, whose stick aims, points down and ahead, at the floor 1.5 m in front.
         let aim = Pose {
             position: [0.2, 1.2, -0.3],
             orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
         };
         let right = grip(Quat::IDENTITY);
         let pointing = |stick: glam::Vec2| Controls {
-            aim: Some(aim),
+            left_aim: Some(aim),
             controller_poses: [None, Some(right)],
             navigation: stick,
             navigation_active: true,
@@ -2168,12 +2192,16 @@ mod tests {
         let drawn = rig.frame(&pointing(glam::Vec2::Y), [None, None], Duration::ZERO);
         let landing = drawn.frame.landing.expect("somewhere to land");
         assert!(landing.distance(Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
-        let beam = drawn.frame.arrival.and_then(|arrival| arrival.ray).unwrap();
+        let beam = drawn
+            .frame
+            .arrival
+            .and_then(|arrival| arrival.left_ray)
+            .unwrap();
         assert!(beam.hit && beam.end.distance(landing) < 1e-4);
-        // Finding a landing ticks, on the right.
+        // Finding a landing ticks, on the left, whose ray found it.
         let now = rig.start;
         let ticks = rig.headset.haptics(&mut rig.feedback, now);
-        assert!(matches!(ticks.as_slice(), [(Side::Right, _)]), "{ticks:?}");
+        assert!(matches!(ticks.as_slice(), [(Side::Left, _)]), "{ticks:?}");
         // Releasing the stick lands there, with a click, and this frame is still drawn from where the participant was.
         let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD);
         assert_eq!(drawn.frame.landing, None);
@@ -2297,13 +2325,13 @@ mod tests {
         for _ in 0..400 {
             frame(&mut rig, &Controls::default());
         }
-        // The stick lands on the pad ahead, and standing on it takes the participant to the floor below.
+        // The left stick, aimed with the left ray, lands on the pad ahead, and standing on it takes the participant to the floor below.
         let aim = Pose {
             position: [0.2, 1.2, -0.3],
             orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
         };
         let pointing = |stick: glam::Vec2| Controls {
-            aim: Some(aim),
+            left_aim: Some(aim),
             navigation: stick,
             navigation_active: true,
             trigger: Some(0.0),

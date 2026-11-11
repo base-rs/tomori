@@ -173,7 +173,10 @@ fn a_squeeze_begun_on_a_stick_that_takes_the_grip_is_its_until_let_go_held_where
             None
         ]
     );
-    assert_eq!(rig.step.last_grab, Some(precedence::Grab::Environment));
+    assert_eq!(
+        rig.step.last_grab,
+        Some((crate::sides::Side::Right, precedence::Grab::Environment))
+    );
     // Without a controller, as on the desktop, the hand is along the ray, as far as it took the stick, facing along it,
     // and moves with the ray, wherever it goes, still the stick's.
     let grab = rig.grip(1.0).unwrap();
@@ -236,13 +239,19 @@ fn the_grip_reaches_the_environment_only_where_nothing_of_tomori_s_takes_it() {
     rig.senses.ray = behind();
     rig.frame();
     rig.grip(1.0);
-    assert_eq!(rig.step.last_grab, Some(precedence::Grab::Nothing));
+    assert_eq!(
+        rig.step.last_grab,
+        Some((crate::sides::Side::Right, precedence::Grab::Nothing))
+    );
     rig.senses.ray = ahead();
     assert!(rig.phases(&[1.0, 1.0, 0.0]).iter().all(Option::is_none));
     // A stick that does not take the grip is not taken.
     let mut rig = Rig::new(ConnectionRole::Owner, false);
     assert!(rig.phases(&[1.0, 0.0]).iter().all(Option::is_none));
-    assert_eq!(rig.step.last_grab, Some(precedence::Grab::Nothing));
+    assert_eq!(
+        rig.step.last_grab,
+        Some((crate::sides::Side::Right, precedence::Grab::Nothing))
+    );
     // A visitor takes nothing.
     let mut rig = Rig::new(ConnectionRole::Visitor, true);
     assert!(rig.phases(&[1.0, 0.0]).iter().all(Option::is_none));
@@ -254,7 +263,10 @@ fn the_grip_reaches_the_environment_only_where_nothing_of_tomori_s_takes_it() {
     }
     assert!(rig.step.wrist.state().active());
     assert!(rig.phases(&[1.0, 0.0]).iter().all(Option::is_none));
-    assert_eq!(rig.step.last_grab, Some(precedence::Grab::Transcript));
+    assert_eq!(
+        rig.step.last_grab,
+        Some((crate::sides::Side::Right, precedence::Grab::Transcript))
+    );
     // A panel nearer than the stick is Tomori's, which the grip pulls off, the stick told nothing; and carried, it
     // keeps the next squeeze too.
     let mut rig = Rig::new(ConnectionRole::Owner, true);
@@ -278,7 +290,10 @@ fn the_grip_reaches_the_environment_only_where_nothing_of_tomori_s_takes_it() {
         rig.frame();
     }
     assert!(rig.phases(&[1.0, 1.0]).iter().all(Option::is_none));
-    assert_eq!(rig.step.last_grab, Some(precedence::Grab::Tomori));
+    assert_eq!(
+        rig.step.last_grab,
+        Some((crate::sides::Side::Right, precedence::Grab::Tomori))
+    );
     assert_eq!(rig.step.projector.held(), Some("panel-1"));
     rig.grip(0.0);
     assert!(rig.phases(&[1.0, 0.0]).iter().all(Option::is_none));

@@ -1576,10 +1576,8 @@ impl HubState {
                 .participants
                 .iter()
                 .filter_map(|key| self.participants.get(key))
-                .filter_map(|participant| {
-                    participant.seen.as_ref().and_then(|seen| seen.carried(now))
-                })
-                .map(str::to_owned)
+                .filter_map(|participant| participant.seen.as_ref())
+                .flat_map(|seen| seen.carried(now).iter().cloned())
                 .collect()
         })
     }
@@ -4191,6 +4189,8 @@ impl Hub {
                 right,
                 hands,
                 carrying,
+                carried,
+                rays,
             } => {
                 let Some(id) = space.filter(|space| state.space(space).is_some()) else {
                     return;
@@ -4205,7 +4205,7 @@ impl Hub {
                     hands.as_deref(),
                     Instant::now(),
                 )
-                .map(|seen| seen.carrying(carrying));
+                .map(|seen| seen.carrying_all(carrying, carried).showing(rays));
                 for other in space.model.members() {
                     if other != participant {
                         state.send(

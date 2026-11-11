@@ -1,6 +1,6 @@
 # Proposal: Two-Handed Pointing and Grabbing
 
-Status: **proposed**, November 2026, for the maintainer's review. Nothing here is a requirement until each stage brings it into the design documents it changes (listed at the end), which take precedence until then.
+Status: **approved**, November 2026; **stage 1 built**: the left ray, trigger and grip mirror the right's for Tomori's own things, as `design/interaction.md` (**Each hand points**), `responders.md`, `locomotion.md`, `mcp.md`, `clients.md` and `feedback.md` now require. Stages 2 to 4 are proposals still, and nothing of them is a requirement until each brings it into the design documents it changes (listed at the end), which take precedence.
 
 It builds on the ray and its unified end (`design/interaction.md`, #233), the per-control orders and the responder chain's increments (`design/responders.md`), carrying panels and walls with the grip and editing walls by their handles (`design/projection.md`), the grip's declared order and the campsite's marshmallow sticks (`design/environments.md`, #346), travel and its teleport aim (`design/locomotion.md`), the hand menu and the right wrist's transcript (`design/hand-menu.md`, `design/wrist-transcript.md`), feedback by hand (`design/feedback.md`), presence and the agent's `presence` tool (`design/mcp.md`), and the physics proposal (#339), whose held stones are a hand each.
 

@@ -394,6 +394,16 @@ impl Feedback {
 
     /// Something happened at `now`.
     pub fn emit(&mut self, event: Event, now: Instant) {
+        self.emit_by(event, event.hand(), now);
+    }
+
+    /// Something `hand` did happened at `now`, such as its ray hovering onto something or its trigger choosing it: felt
+    /// on that hand and heard from its side, rather than where [`Event::hand`] puts it. See `design/feedback.md`.
+    pub fn emit_on(&mut self, event: Event, hand: Hand, now: Instant) {
+        self.emit_by(event, hand, now);
+    }
+
+    fn emit_by(&mut self, event: Event, hand: Hand, now: Instant) {
         if event == Event::Hover {
             if self
                 .last_hover
@@ -408,14 +418,18 @@ impl Feedback {
             && self.settings.sounds.allows(event)
             && let Some(earcon) = event.earcon()
         {
-            self.earcons.push((earcon, event.direction()));
+            let direction = match event.direction() {
+                Direction::Left | Direction::Right if hand == Hand::Left => Direction::Left,
+                Direction::Left | Direction::Right => Direction::Right,
+                direction => direction,
+            };
+            self.earcons.push((earcon, direction));
         }
         if event == Event::Left {
             self.left = true;
             self.ramp = None;
         }
         if self.haptics && self.settings.vibration.allows(event) {
-            let hand = event.hand();
             let essential = event.essential();
             self.pulses.extend(
                 event
@@ -1014,6 +1028,35 @@ mod tests {
         feedback.mute_sounds();
         feedback.emit(Event::Choose, now);
         assert_eq!(feedback.take_earcons().count(), 0);
+    }
+
+    #[test]
+    fn pointing_and_choosing_with_the_left_hand_are_felt_and_heard_on_the_left() {
+        let (mut feedback, now) = feedback();
+        feedback.emit_on(Event::Choose, Hand::Left, now);
+        assert_eq!(
+            feedback.take_earcons().collect::<Vec<_>>(),
+            [(Earcon::Choose, Direction::Left)]
+        );
+        assert!(
+            feedback
+                .haptics(now)
+                .iter()
+                .all(|(hand, _)| *hand == Hand::Left)
+        );
+        // The right, as ever, by default; and what sounds from the agent still does.
+        feedback.emit_on(Event::Choose, Hand::Right, now);
+        feedback.emit_on(Event::RequestWaiting, Hand::Left, now);
+        assert_eq!(
+            feedback.take_earcons().collect::<Vec<_>>(),
+            [
+                (Earcon::Choose, Direction::Right),
+                (Earcon::Request, Direction::Agent)
+            ]
+        );
+        feedback.emit_on(Event::Hover, Hand::Left, now + ms(200));
+        let due = feedback.haptics(now + ms(200));
+        assert!(due.iter().any(|(hand, _)| *hand == Hand::Left));
     }
 
     #[test]

@@ -201,7 +201,7 @@ pub fn run(
     // Drawing new glyphs, such as a first paragraph of Japanese, costs this thread at most about 1.5 ms a frame; the rest are drawn over the frames after, and the log reports what each frame spent. See `design/text.md`.
     tomori_render::glyphs::budget(tomori_render::glyphs::Budget::FRAME);
     log::info!(
-        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose.",
+        "Ready: {width}x{height} per eye, {} swapchain images. Either trigger: choose what its ray points at, or attract; A: choose.",
         images.len()
     );
     'main: loop {
@@ -677,6 +677,11 @@ struct Input {
     aim_space: xr::Space,
     aim: xr::Action<xr::Posef>,
     trigger: xr::Action<f32>,
+    /// The left controller's pointing pose, trigger and grip, which act on Tomori's own things as the right's do.
+    left_aim_space: xr::Space,
+    left_aim: xr::Action<xr::Posef>,
+    left_trigger: xr::Action<f32>,
+    left_squeeze: xr::Action<f32>,
     reset: xr::Action<bool>,
     talk: xr::Action<bool>,
     back: xr::Action<bool>,
@@ -705,6 +710,12 @@ impl Input {
         let left_grip = set.create_action::<xr::Posef>("left_grip_pose", "Left controller", &[])?;
         let aim = set.create_action::<xr::Posef>("right_aim", "Point", &[])?;
         let trigger = set.create_action::<f32>("attract", "Attract agents or choose", &[])?;
+        let left_aim =
+            set.create_action::<xr::Posef>("left_aim", "Point with the left hand", &[])?;
+        let left_trigger =
+            set.create_action::<f32>("left_choose", "Choose with the left hand", &[])?;
+        let left_squeeze =
+            set.create_action::<f32>("left_take", "Take hold with the left hand", &[])?;
         let reset = set.create_action::<bool>("reset", "Reset swarm", &[])?;
         let talk = set.create_action::<bool>("talk", "Hold to speak", &[])?;
         let back = set.create_action::<bool>("chat_back", "Back or deny", &[])?;
@@ -744,6 +755,18 @@ impl Input {
                 xr::Binding::new(
                     &trigger,
                     instance.string_to_path("/user/hand/right/input/trigger/value")?,
+                ),
+                xr::Binding::new(
+                    &left_aim,
+                    instance.string_to_path("/user/hand/left/input/aim/pose")?,
+                ),
+                xr::Binding::new(
+                    &left_trigger,
+                    instance.string_to_path("/user/hand/left/input/trigger/value")?,
+                ),
+                xr::Binding::new(
+                    &left_squeeze,
+                    instance.string_to_path("/user/hand/left/input/squeeze/value")?,
                 ),
                 xr::Binding::new(
                     &reset,
@@ -796,6 +819,7 @@ impl Input {
         let left_grip_space =
             left_grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         let aim_space = aim.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
+        let left_aim_space = left_aim.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         Ok(Self {
             grip_space,
             grip,
@@ -804,6 +828,10 @@ impl Input {
             aim_space,
             aim,
             trigger,
+            left_aim_space,
+            left_aim,
+            left_trigger,
+            left_squeeze,
             reset,
             talk,
             back,
@@ -863,6 +891,8 @@ impl Input {
                 transcript_grip: xr_types::action(
                     self.transcript_grip.state(session, xr::Path::NULL)?,
                 ),
+                left_trigger: xr_types::action(self.left_trigger.state(session, xr::Path::NULL)?),
+                left_grip: xr_types::action(self.left_squeeze.state(session, xr::Path::NULL)?),
             },
             focused,
         ))
@@ -904,6 +934,11 @@ impl Input {
         );
         // Pointing is optional: an aim pose that cannot be located only hides the ray.
         controls.aim = locate(&self.aim, &self.aim_space)
+            .ok()
+            .flatten()
+            .map(xr_types::location)
+            .and_then(Location::tracked);
+        controls.left_aim = locate(&self.left_aim, &self.left_aim_space)
             .ok()
             .flatten()
             .map(xr_types::location)

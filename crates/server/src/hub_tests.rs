@@ -539,6 +539,8 @@ fn what_needs_a_space_is_refused_in_the_lobby() {
         right: None,
         hands: None,
         carrying: None,
+        carried: Vec::new(),
+        rays: None,
     });
     client.send(ClientMessage::StopReplay);
     assert!(client.read().is_empty());
@@ -4783,6 +4785,8 @@ fn standing(at: [f32; 3]) -> ClientMessage {
         right: None,
         hands: None,
         carrying: None,
+        carried: Vec::new(),
+        rays: None,
     }
 }
 
@@ -4802,6 +4806,8 @@ fn looking(at: [f32; 3], target: [f32; 3]) -> ClientMessage {
         right: None,
         hands: None,
         carrying: None,
+        carried: Vec::new(),
+        rays: None,
     }
 }
 

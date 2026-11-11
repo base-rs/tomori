@@ -16,6 +16,7 @@ use tomori_protocol::{Timer, TimerState};
 use crate::anchors::Anchor;
 use crate::delegation::Cube;
 use crate::pointing::{Ray, Shape};
+use crate::sides::{Hands, Side};
 
 /// The most timers a space keeps, and so the most dials drawn: the rest, from a server that sends more, are not.
 pub const MOST: usize = 8;
@@ -453,8 +454,9 @@ pub struct Dials {
     shown: Vec<Shown>,
     /// Drawn alongside [`Self::shown`], their words made again only as they change.
     dials: Vec<Dial>,
-    pointed: Option<String>,
-    hit: Option<Vec3>,
+    /// The timer each hand's ray points at, by name, and where it meets its dial.
+    pointed: Hands<Option<String>>,
+    hit: Hands<Option<Vec3>>,
     /// Whether the space's state was current as of the last update.
     current: bool,
     /// The places last stood for how many dials, in what room.
@@ -466,8 +468,8 @@ impl Dials {
     pub fn clear(&mut self) {
         self.shown.clear();
         self.dials.clear();
-        self.pointed = None;
-        self.hit = None;
+        self.pointed = Hands::default();
+        self.hit = Hands::default();
         self.placed = None;
         self.current = false;
     }
@@ -479,13 +481,24 @@ impl Dials {
 
     /// The timer whose dial the last [`Self::point`] met, by name.
     pub fn pointed(&self) -> Option<&str> {
-        self.pointed.as_deref()
+        self.pointed_by(Side::Right)
+    }
+
+    /// The timer whose dial `side`'s ray last met, by name.
+    pub fn pointed_by(&self, side: Side) -> Option<&str> {
+        self.pointed[side].as_deref()
     }
 
     /// Point at the dials with `ray`, or with nothing: the nearest live dial it meets, a sphere about its middle of
     /// [`POINTING_RADIUS`] growing with its distance beyond [`crate::delegation::POINTING_REACH`], as a worker's does,
     /// and how far along the ray it is met, where the ray passes nearest its middle. A leaving dial is not pointed at.
     pub fn point(&mut self, ray: Option<Ray>) -> Option<(f32, Vec3)> {
+        self.point_with(Side::Right, ray)
+    }
+
+    /// Point at the dials with `side`'s ray, `ray`, as [`Self::point`] does with the right's; a dial either ray meets is
+    /// drawn pointed at.
+    pub fn point_with(&mut self, side: Side, ray: Option<Ray>) -> Option<(f32, Vec3)> {
         let mut hit: Option<(f32, usize, Vec3)> = None;
         if let Some(ray) = ray {
             for (index, shown) in self.shown.iter().enumerate() {
@@ -505,13 +518,13 @@ impl Dials {
             }
         }
         let name = hit.map(|(_, index, _)| self.shown[index].timer.name.as_str());
-        if self.pointed.as_deref() != name {
-            self.pointed = name.map(str::to_owned);
+        if self.pointed[side].as_deref() != name {
+            self.pointed[side] = name.map(str::to_owned);
         }
-        self.hit = ray.zip(hit).map(|(ray, (distance, _, centre))| {
+        self.hit[side] = ray.zip(hit).map(|(ray, (distance, _, centre))| {
             ray.at((centre - ray.origin).dot(ray.direction).max(distance))
         });
-        hit.zip(self.hit)
+        hit.zip(self.hit[side])
             .map(|((distance, ..), point)| (distance, point))
     }
 
@@ -645,8 +658,10 @@ impl Dials {
         for (index, shown) in self.shown.iter_mut().enumerate() {
             let opacity = smooth((shown.age / ARRIVING_SECONDS).min(1.0))
                 * (1.0 - smooth((shown.leaving.unwrap_or(0.0) / LEAVING_SECONDS).min(1.0)));
-            let pointed =
-                shown.leaving.is_none() && self.pointed.as_deref() == Some(&shown.timer.name);
+            let pointed = shown.leaving.is_none()
+                && self
+                    .pointed
+                    .any(|_, pointed| pointed.as_deref() == Some(&shown.timer.name));
             draw(shown, audience, room.home, now, opacity, pointed, cubes);
             let counted = shown.timer.next.map(|next| left(next, now));
             let made = index < self.dials.len() && shown.counted == counted;
@@ -684,7 +699,7 @@ impl Dials {
 
     /// Where the last [`Self::point`] met the dial it points at.
     pub fn hit_point(&self) -> Option<Vec3> {
-        self.hit
+        self.hit.right
     }
 }
 

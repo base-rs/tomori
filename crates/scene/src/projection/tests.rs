@@ -154,6 +154,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         controls: Controls::Controllers,
         scroll: None,
         rights: editing::Rights::default(),
+        left: crate::projection::Hold::default(),
         now,
         dt: 1.0 / 72.0,
     }
@@ -1316,7 +1317,7 @@ fn a_panel_is_pointed_at_pulled_off_carried_and_left_floating() {
         panel("b", Place::Free { pose: left }),
     ]);
     let output = projector.update(input(&floating, None, 0.0, now));
-    assert!(projector.pending.is_none());
+    assert!(projector.pending.right.is_none());
     assert!(drawn_at(&output, "Panel b").unwrap().distance(held_at) < 1e-4);
 }
 
@@ -1344,7 +1345,7 @@ fn a_panel_let_go_near_a_wall_snaps_into_its_layout() {
     // Shown where it was let go until the server puts it in the wall's layout.
     let moved = projection(vec![panel("a", on("wall-1", 5))]);
     projector.update(input(&moved, None, 0.0, now));
-    assert!(projector.pending.is_none());
+    assert!(projector.pending.right.is_none());
 }
 
 /// A panel floating at `at`, facing home.
@@ -2278,7 +2279,7 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
         panel("b", on(TOMORI_WALL, 0)),
     ]);
     projector.update(input(&swapped, None, 0.0, now));
-    assert!(projector.pending.is_none());
+    assert!(projector.pending.right.is_none());
 }
 
 #[test]
@@ -2440,7 +2441,7 @@ fn the_hint_shows_only_while_a_panel_is_carried_beside_it_and_legible_at_any_dis
     let output = projector.update(input(&shown, ray, 1.0, now));
     assert!(output.picked);
     assert_eq!(output.hint, None);
-    let held = |projector: &Projector| projector.held.as_ref().unwrap().model;
+    let held = |projector: &Projector| projector.held.right.as_ref().unwrap().model;
     let text = |output: &Output| {
         output
             .hint
@@ -2528,13 +2529,27 @@ fn the_hint_stands_above_a_panel_carried_low_where_below_would_be_hidden() {
     // Carried low and near, far below the eyes, the hint goes above it.
     let low = at(HOME + Vec3::new(0.0, -1.3, -0.6));
     let output = projector.update(input(&shown, low, 1.0, now));
-    let centre = projector.held.as_ref().unwrap().model.w_axis.truncate();
+    let centre = projector
+        .held
+        .right
+        .as_ref()
+        .unwrap()
+        .model
+        .w_axis
+        .truncate();
     let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
     assert!(hint.y > centre.y, "{hint} {centre}");
     // Ahead at the eyes' height, it is below.
     let ahead = at(HOME + Vec3::new(0.0, 0.0, -2.0));
     let output = projector.update(input(&shown, ahead, 1.0, now));
-    let centre = projector.held.as_ref().unwrap().model.w_axis.truncate();
+    let centre = projector
+        .held
+        .right
+        .as_ref()
+        .unwrap()
+        .model
+        .w_axis
+        .truncate();
     let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
     assert!(hint.y < centre.y, "{hint} {centre}");
 }

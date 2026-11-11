@@ -4,6 +4,7 @@
 use super::*;
 use crate::arrival::HOME;
 use crate::projection::{Input as Frame, Projector};
+use crate::sides::Side;
 use tomori_protocol::{Panel, Place, TOMORI_WALL};
 
 const ADJUST: Rights = Rights {
@@ -69,6 +70,7 @@ fn frame<'a>(
         controls: Controls::Controllers,
         scroll: None,
         rights,
+        left: crate::projection::Hold::default(),
         now,
         dt: 1.0 / 72.0,
     }
@@ -3204,4 +3206,101 @@ fn an_owner_s_padlock_is_laid_out_once_and_again_only_as_its_wall_changes() {
     let projection = shown(vec![moved.with_locked(false)], Vec::new());
     projector.update(frame(&projection, None, 0.0, LOCKER, now));
     assert!(projector.editor.padlock_layouts.is_empty());
+}
+
+/// `frame`, with the right hand idle and the left hand's ray and grip.
+fn left_handed<'a>(
+    projection: &'a Projection,
+    ray: Option<Ray>,
+    grip: f32,
+    rights: Rights,
+    now: Instant,
+) -> Frame<'a> {
+    Frame {
+        ray: None,
+        grip: Some(0.0),
+        left: crate::projection::Hold {
+            ray,
+            grip: Some(grip),
+            active: true,
+            pointing: true,
+            nearer: f32::INFINITY,
+            free: false,
+        },
+        ..frame(projection, None, 0.0, rights, now)
+    }
+}
+
+#[test]
+fn the_left_grip_takes_hold_of_and_carries_a_wall_as_the_right_does_and_the_right_meanwhile_takes_nothing_of_it()
+ {
+    let wall = added();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(on(&wall, 0.0, 0.42));
+    // The left ray meets the wall's board, where it ends, as the right's would.
+    let output = projector.update(left_handed(&projection, ray, 0.0, ADJUST, now));
+    assert!(output.left.hit.is_some_and(|hit| !hit.held));
+    assert_eq!(output.hit, None);
+    // Squeezed, the left grip takes hold of it and carries it along the left ray, and the editor follows the left.
+    let output = projector.update(left_handed(&projection, ray, 1.0, ADJUST, now));
+    assert_eq!(output.wall_hand, Side::Left);
+    assert_eq!(projector.carried_wall_in(Side::Left), Some("wall-1"));
+    assert_eq!(projector.carried_wall_in(Side::Right), None);
+    assert!(projector.carrying_in(Side::Left) && !projector.carrying_in(Side::Right));
+    let aside = at(on(&wall, -1.0, 0.42));
+    let output = projector.update(left_handed(&projection, aside, 1.0, ADJUST, now));
+    assert!(output.left.hit.is_some_and(|hit| hit.held));
+    // The right ray meets the wall carried, and its squeeze takes nothing: the wall stays the left's.
+    let right = at(on(&wall, -1.0, 0.42));
+    let both = |grip: f32| Frame {
+        ray: right,
+        grip: Some(grip),
+        ..left_handed(&projection, aside, 1.0, ADJUST, now)
+    };
+    let output = projector.update(both(0.0));
+    assert!(
+        output.hit.is_some(),
+        "the right ray ends on the wall carried"
+    );
+    projector.update(both(1.0));
+    assert_eq!(projector.carried_wall_in(Side::Left), Some("wall-1"));
+    // Let go by the left, it is put down where the left hand left it.
+    let output = projector.update(left_handed(&projection, aside, 0.0, ADJUST, now));
+    let change = output.wall.expect("a pose to send");
+    assert!(change.pose.expect("moved").position[0] < -0.5);
+    assert!(!projector.carrying());
+    // Still taken hold of, its handles show; the right ray, which the editor does not follow, meets one, ending on it.
+    let moved = projector.editor.walls(&projection)[0].clone();
+    let frame_of = model(&moved.frame()).unwrap();
+    let (models, _) = handle_models(
+        &moved,
+        frame_of,
+        &[&moved],
+        None,
+        LockControls::of(&moved, ADJUST),
+    );
+    let handle = models[0].1.w_axis.truncate();
+    let output = projector.update(Frame {
+        ray: at(handle),
+        ..left_handed(&projection, None, 0.0, ADJUST, now)
+    });
+    assert!(
+        output
+            .hit
+            .is_some_and(|hit| hit.point.distance(handle) < 0.05),
+        "{:?}",
+        output.hit
+    );
+    // A hand that is not followed meets nothing where the participant may not adjust walls.
+    let none = Rights {
+        adjust: false,
+        ..ADJUST
+    };
+    let output = projector.update(Frame {
+        ray: at(on(&wall, 0.0, 0.42)),
+        ..left_handed(&projection, None, 0.0, none, now)
+    });
+    assert_eq!(output.hit, None);
 }

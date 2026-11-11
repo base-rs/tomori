@@ -455,6 +455,13 @@ impl Desktop {
             space_head: room_head,
             ray,
             trigger: focused.then_some(if self.input.trigger { 1.0 } else { 0.0 }),
+            // The mouse is the right hand; the window has no left ray.
+            left_ray: None,
+            left_trigger: None,
+            left_grip: None,
+            left_attractor: None,
+            // The arrow keys aim a teleport where the mouse points.
+            teleport: crate::sides::Side::Right,
             pointing: self.input.trigger,
             left_palm: (self.menu_open || self.step.pinned()).then(|| travelled(self.head.palm())),
             right_palm: self.wrist_open.then(|| travelled(self.head.right_palm())),

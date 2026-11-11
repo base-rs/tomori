@@ -192,6 +192,7 @@ fn main() {
             controls: Controls::Controllers,
             scroll: None,
             rights: Rights::default(),
+            left: tomori_scene::projection::Hold::default(),
             now: start + Duration::from_secs_f32(time),
             dt: 1.0 / 72.0,
         };

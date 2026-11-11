@@ -245,6 +245,8 @@ mod tests {
             right: Some(pose),
             hands: Some(Box::new([Some(hand), Some(hand)])),
             carrying: Some("panel-1".repeat(20)),
+            carried: Vec::new(),
+            rays: None,
         };
         let presence = Frame::client(&presence).payload.len();
         let audio = Frame::audio(&AudioFrame {

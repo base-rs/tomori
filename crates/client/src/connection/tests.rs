@@ -1749,7 +1749,7 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     let mut connection = connection(&mut session, Scripted::default(), Nowhere);
     connection.feedback().set_haptics(true);
     // Presence goes nowhere, and no voice is placed.
-    connection.send_presence(pose(0.0), None, None, [None, None], None);
+    connection.send_presence(pose(0.0), None, None, [None, None], &[], [false, true]);
     let mut placed = false;
     connection.listen([2], |_, _| placed = true);
     assert!(!placed);
@@ -3191,7 +3191,8 @@ mod served {
             Some(pose(-0.2)),
             Some(pose(0.2)),
             [None, None],
-            Some("panel-1"),
+            &["panel-1".to_owned()],
+            [true, true],
         );
         let (left, right) = bea.wait_for(
             || connection.poll(true, &mut session),

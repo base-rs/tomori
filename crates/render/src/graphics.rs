@@ -2383,6 +2383,7 @@ mod tests {
                         &crate::arrival_graphics::Frame {
                             scene: &scene,
                             hovered: Some(&hovered),
+                            left_ray: None,
                             ray: Some(crate::arrival_graphics::Beam {
                                 origin,
                                 end: target,
@@ -2492,6 +2493,7 @@ mod tests {
                         &crate::arrival_graphics::Frame {
                             scene: &scene,
                             hovered: Some(&Key::Create),
+                            left_ray: None,
                             ray: Some(crate::arrival_graphics::Beam {
                                 origin: glam::Vec3::new(0.2, 1.1, -0.3),
                                 end: crate::arrival::CREATE,
@@ -2737,6 +2739,7 @@ mod tests {
                             &crate::arrival_graphics::Frame {
                                 scene: &arrival,
                                 hovered: Some(&Key::Create),
+                                left_ray: None,
                                 ray: Some(crate::arrival_graphics::Beam {
                                     origin: glam::Vec3::new(0.2, 1.1, -0.3),
                                     end: crate::arrival::CREATE,

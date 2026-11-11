@@ -49,8 +49,11 @@ pub(crate) struct Seen {
     pub hands: [Option<[f32; 3]>; 2],
     /// When it was reported.
     pub at: Instant,
-    /// The panel they are carrying, by its identity, as their client said.
-    pub carrying: Option<String>,
+    /// The panels they are carrying, by identity, one in each hand at most, as their client said.
+    pub carrying: Vec<String>,
+    /// Which of their rays are shown, left then right, as their client said: an older client says nothing, which is
+    /// taken as the right ray alone.
+    pub rays: [bool; 2],
 }
 
 impl Seen {
@@ -76,22 +79,47 @@ impl Seen {
             controllers: [left.and_then(sound), right.and_then(sound)],
             hands: hands.map_or([None, None], |hands| [palm(&hands[0]), palm(&hands[1])]),
             at,
-            carrying: None,
+            carrying: Vec::new(),
+            rays: [false, true],
         })
     }
 
     /// It, carrying `panel`, if its identity is within bounds; one beyond them names no panel there is.
-    pub(crate) fn carrying(mut self, panel: Option<String>) -> Self {
-        self.carrying = panel.filter(|panel| panel.len() <= crate::limits::IDENTIFIER_BYTES);
+    #[cfg(test)]
+    pub(crate) fn carrying(self, panel: Option<String>) -> Self {
+        self.carrying_all(panel, Vec::new())
+    }
+
+    /// It, carrying `carried`, a panel in each hand at most, or, from an older client that names only one, `panel`;
+    /// each within bounds, as [`Self::carrying`] says.
+    pub(crate) fn carrying_all(mut self, panel: Option<String>, carried: Vec<String>) -> Self {
+        let carried = if carried.is_empty() {
+            panel.into_iter().collect()
+        } else {
+            carried
+        };
+        self.carrying = carried
+            .into_iter()
+            .filter(|panel| panel.len() <= crate::limits::IDENTIFIER_BYTES)
+            .take(2)
+            .collect();
         self
     }
 
-    /// The panel it says is being carried at `now`, if any: a report gone [`STALE`] says nothing, since its client has
-    /// stopped, as when its headset sleeps.
-    pub(crate) fn carried(&self, now: Instant) -> Option<&str> {
-        self.carrying
-            .as_deref()
-            .filter(|_| now.saturating_duration_since(self.at) < STALE)
+    /// It, with `rays` shown, as its client said, or, from an older client that says nothing, the right ray alone.
+    pub(crate) fn showing(mut self, rays: Option<[bool; 2]>) -> Self {
+        self.rays = rays.unwrap_or([false, true]);
+        self
+    }
+
+    /// The panels it says are being carried at `now`: a report gone [`STALE`] says none, since its client has stopped,
+    /// as when its headset sleeps.
+    pub(crate) fn carried(&self, now: Instant) -> &[String] {
+        if now.saturating_duration_since(self.at) < STALE {
+            &self.carrying
+        } else {
+            &[]
+        }
     }
 
     /// Whether it says anything only a headset reports: a controller or a hand.
@@ -733,11 +761,17 @@ pub(crate) fn report(
                 (None, None) => Value::Null,
             };
         }
-        report["pointing_at"] = seen.controllers[1]
-            .and_then(|ray| meet(ray.position, forward(&ray), projection, &others))
-            .map_or(Value::Null, |(met, along)| {
-                described(&met, along, projection)
-            });
+        // What each shown ray points at, and, for agents' instructions written for one ray, the right's as before.
+        let pointing = |index: usize| {
+            seen.controllers[index]
+                .filter(|_| seen.rays[index])
+                .and_then(|ray| meet(ray.position, forward(&ray), projection, &others))
+                .map_or(Value::Null, |(met, along)| {
+                    described(&met, along, projection)
+                })
+        };
+        report["pointing"] = json!({ "left": pointing(0), "right": pointing(1) });
+        report["pointing_at"] = pointing(1);
     }
     report["nearest_wall"] = nearest_wall(&projection.walls, seen.head.position).map_or(
         Value::Null,
