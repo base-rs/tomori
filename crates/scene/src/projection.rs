@@ -44,10 +44,6 @@ pub const FIT_ROWS: (usize, usize) = (3, 30);
 /// The widest a floating panel's face grows to show a table, in cells: about a metre, 38° from 1.5 m, so that a row of
 /// the table is still read by moving the eyes, not the head.
 pub const TABLE_COLUMNS: usize = 60;
-/// The furthest along the ray a slot is aimed at to put a panel carried in it, in metres.
-const AIM_REACH: f32 = 8.0;
-/// How far beyond a slot's edges the ray still aims at it, so that the gaps between slots aim at one, in metres.
-const AIM_MARGIN: f32 = 0.03;
 /// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m. Walls
 /// are laid out in it, as `tomori_protocol::wall` lays them out for the server and every client alike.
 pub const PIXEL: f32 = layout::PIXEL;
@@ -81,9 +77,28 @@ const LABEL_INDENT: usize = 24;
 /// How far in front of its wall a panel stands, so that it is drawn over it.
 const LIFT: f32 = layout::LIFT;
 
-/// How far from a wall's plane, and beyond its edges, a panel let go snaps back into its layout, in metres.
-const SNAP_DEPTH: f32 = 0.4;
+/// How near a slot's plane a panel carried must come to dock there, as a share of how far the participant is from the
+/// slot, and the least and most it is, in metres: see [`capture`].
+pub const CAPTURE_SHARE: f32 = 0.15;
+pub const CAPTURE_LEAST: f32 = 0.3;
+pub const CAPTURE_MOST: f32 = 1.0;
+/// How far beyond a slot's edges a panel carried may be and still dock there, so that the gaps between slots dock in
+/// one, in metres.
 const SNAP_MARGIN: f32 = 0.25;
+/// How much further, as a share, a panel docking in a slot may go before it no longer does, so that a hand's tremor at
+/// the edge of reach does not flicker it.
+pub const CAPTURE_HOLD: f32 = 1.25;
+/// How much nearer across the slots' planes another slot must be than the one a panel carried docks in to take its
+/// place, in metres.
+const SWITCH: f32 = 0.05;
+/// How far behind a slot's plane a panel carried still docks in it, as one pushed a little into a wall, in metres;
+/// further behind, at the wall's back, it docks in none.
+pub const BEHIND: f32 = 0.05;
+/// How quickly a panel carried glides to the slot it docks in, and back to the ray, as the time to go most of the way,
+/// in seconds.
+const PULL_TIME: f32 = 0.06;
+/// How far in front of the slot it docks in a panel carried is drawn, over its outline, in metres.
+const DOCK_LIFT: f32 = 2.0 * LIFT;
 
 /// How long a panel let go is shown where it was let go, while the server's projection does not yet say so.
 pub const PENDING: Duration = Duration::from_secs(3);
@@ -1320,6 +1335,8 @@ fn hint_sheet(mut canvas: Canvas, model: Mat4, (_, height): (f32, f32), viewer: 
     let distance = centre.distance(viewer).max(0.1);
     canvas.pixel = HINT_ANGLE * distance;
     let (_, tall) = canvas.size();
+    // The panel's height as drawn, at a slot's scale while it docks in one.
+    let height = height * model.y_axis.truncate().length();
     let offset = height / 2.0 + HINT_GAP * distance + tall / 2.0;
     let below = centre - Vec3::Y * offset;
     let bottom = below.y - tall / 2.0;
@@ -1370,50 +1387,40 @@ pub(crate) fn wall_hit(wall: &Wall, frame: Mat4, ray: &Ray) -> Option<f32> {
         .min_by(f32::total_cmp)
 }
 
-/// A slot a panel carried would be put in if let go: the wall, the slot, where it stands, and where the ray meets it,
-/// when the ray chose it.
+/// A slot a panel carried would be put in if let go: the wall, the slot, where it stands, and how a panel in it is laid
+/// out.
 #[derive(Clone, Debug, PartialEq)]
 struct Aim {
     wall: String,
     slot: u32,
     model: Mat4,
-    point: Option<Vec3>,
+    fit: Fit,
 }
 
-/// The slot `ray` meets first, within [`AIM_REACH`] and [`AIM_MARGIN`] of its edges, in each slot's own plane, so that
-/// a curved wall's slots are aimed at as they stand.
-fn aim(walls: &[(&Wall, Mat4)], ray: &Ray) -> Option<Aim> {
-    let margin = AIM_MARGIN;
-    walls
-        .iter()
-        .flat_map(|(wall, frame)| {
-            slot_frames(wall, *frame)
-                .into_iter()
-                .enumerate()
-                .filter_map(move |(slot, model)| {
-                    let scale = model.x_axis.truncate().length();
-                    hit_within(model, slot_unit(wall), margin / scale, ray)
-                        .filter(|distance| *distance <= AIM_REACH)
-                        .map(|distance| {
-                            (
-                                distance,
-                                Aim {
-                                    wall: wall.id.clone(),
-                                    slot: slot as u32,
-                                    model,
-                                    point: Some(ray.at(distance)),
-                                },
-                            )
-                        })
-                })
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, aim)| aim)
+/// How near a slot's plane a panel carried must come to dock there, in metres, for a participant `distance` from the
+/// slot: [`CAPTURE_SHARE`] of it, within [`CAPTURE_LEAST`] and [`CAPTURE_MOST`]. A share, since how well someone judges
+/// how far away something is, and how far the right stick pushes a panel in a moment, both grow with its distance; so
+/// that a wall at arm's length takes a panel brought within 30 cm of it, one 3.3 m away within half a metre, and one
+/// 6.7 m away or more within a metre. See `design/projection.md`.
+///
+/// ```
+/// use tomori_scene::projection::capture;
+///
+/// assert_eq!(capture(1.0), 0.3);
+/// assert!((capture(4.0) - 0.6).abs() < 1e-6);
+/// assert_eq!(capture(20.0), 1.0);
+/// ```
+pub fn capture(distance: f32) -> f32 {
+    (CAPTURE_SHARE * distance).clamp(CAPTURE_LEAST, CAPTURE_MOST)
 }
 
-/// The slot a panel carried at `centre` snaps into, if it is near enough to one: within [`SNAP_DEPTH`] of its plane and
-/// [`SNAP_MARGIN`] of its edges, the nearest such slot.
-fn snap(walls: &[(&Wall, Mat4)], centre: Vec3) -> Option<Aim> {
+/// The slot a panel carried at `centre` docks in, for a participant at `viewer`, if it is near enough to one: its middle
+/// in front of the slot's plane by at most [`capture`], or behind it by at most [`BEHIND`], and within [`SNAP_MARGIN`]
+/// of its edges, measured from the panel's middle, never from where the ray points. Of those, the nearest across the
+/// slots' planes, how far beyond each slot's edges it is, and of slots as near across, the nearest in depth. The slot
+/// it docked in last frame, `shown`, holds it within [`CAPTURE_HOLD`] of those, and ranks [`SWITCH`] nearer across
+/// than it is, however deep the panel is held, so that it neither flickers at the edge of reach nor between two slots.
+fn dock(walls: &[(&Wall, Mat4)], centre: Vec3, viewer: Vec3, shown: Option<&Aim>) -> Option<Aim> {
     walls
         .iter()
         .flat_map(|(wall, frame)| {
@@ -1422,26 +1429,60 @@ fn snap(walls: &[(&Wall, Mat4)], centre: Vec3) -> Option<Aim> {
                 .into_iter()
                 .enumerate()
                 .filter_map(move |(slot, model)| {
+                    let held =
+                        shown.is_some_and(|aim| aim.wall == wall.id && aim.slot == slot as u32);
+                    let (hold, nearer) = if held {
+                        (CAPTURE_HOLD, SWITCH)
+                    } else {
+                        (1.0, 0.0)
+                    };
                     let scale = model.x_axis.truncate().length();
                     let local = model.inverse().transform_point3(centre) * scale;
-                    (local.z.abs() <= SNAP_DEPTH
-                        && local.x.abs() <= width * scale / 2.0 + SNAP_MARGIN
-                        && local.y.abs() <= height * scale / 2.0 + SNAP_MARGIN)
-                        .then(|| {
-                            (
-                                local.length(),
-                                Aim {
-                                    wall: wall.id.clone(),
-                                    slot: slot as u32,
-                                    model,
-                                    point: None,
-                                },
-                            )
-                        })
+                    let beyond = Vec2::new(
+                        (local.x.abs() - width * scale / 2.0).max(0.0),
+                        (local.y.abs() - height * scale / 2.0).max(0.0),
+                    );
+                    let reach = capture(viewer.distance(model.w_axis.truncate())) * hold;
+                    let within = local.z <= reach
+                        && local.z >= -BEHIND
+                        && beyond.max_element() <= SNAP_MARGIN * hold;
+                    within.then(|| {
+                        (
+                            (beyond.length() - nearer, local.z.abs()),
+                            Aim {
+                                wall: wall.id.clone(),
+                                slot: slot as u32,
+                                model,
+                                fit: Fit::Slot(Cells::of(wall)),
+                            },
+                        )
+                    })
                 })
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .min_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
         .map(|(_, aim)| aim)
+}
+
+/// Where a panel carried is drawn docking in a slot standing at `slot`: as the slot stands, at its size, just in front
+/// of it.
+fn docked(slot: Mat4) -> Mat4 {
+    let (scale, rotation, position) = slot.to_scale_rotation_translation();
+    Mat4::from_scale_rotation_translation(
+        scale,
+        rotation,
+        position + rotation * Vec3::Z * DOCK_LIFT,
+    )
+}
+
+/// Between `from` and `to`, `share` of the way.
+fn blend(from: Mat4, to: Mat4, share: f32) -> Mat4 {
+    let (scale, rotation, position) = from.to_scale_rotation_translation();
+    let (to_scale, to_rotation, to_position) = to.to_scale_rotation_translation();
+    Mat4::from_scale_rotation_translation(
+        scale.lerp(to_scale, share),
+        rotation.slerp(to_rotation, share),
+        position.lerp(to_position, share),
+    )
 }
 
 /// Whether `place`, where the server says a panel is, is where it was put, `target`.
@@ -1495,8 +1536,50 @@ struct Held {
     panel: String,
     /// How far along the ray it is carried, and how far it is turned from facing the participant.
     manipulation: Manipulation,
-    /// Where it was last drawn, which it stays at while the ray is not tracked.
+    /// Where it is carried, on the ray, which it stays at while the ray is not tracked.
     model: Mat4,
+    /// How far it is drawn pulled from where it is carried towards the slot it docks in, from 0 to 1, and where it is
+    /// pulled towards, which glides from slot to slot.
+    pull: f32,
+    toward: Mat4,
+    /// Where it is drawn: where it is carried, pulled towards the slot it docks in; and how its face is laid out: as that
+    /// slot lays it out while it docks, so that it is drawn at the slot's size, and fitting its text otherwise.
+    drawn: Mat4,
+    fit: Fit,
+}
+
+impl Held {
+    /// Carried from `model`, docking nowhere yet.
+    fn new(panel: String, distance: f32, model: Mat4) -> Self {
+        Self {
+            panel,
+            manipulation: Manipulation::new(distance),
+            model,
+            pull: 0.0,
+            toward: model,
+            drawn: model,
+            fit: Fit::Text,
+        }
+    }
+
+    /// Glide towards where it docks, `dock`, laid out as that slot lays it out, or back to where it is carried, fitting
+    /// its text, over `dt` seconds.
+    fn glide(&mut self, dock: Option<(Mat4, Fit)>, dt: f32) {
+        self.fit = dock.map_or(Fit::Text, |(_, fit)| fit);
+        let dock = dock.map(|(model, _)| model);
+        let step = 1.0 - (-dt.max(0.0) / PULL_TIME).exp();
+        if let Some(dock) = dock {
+            // From where it is carried, it is pulled straight to the slot; between slots, it glides from one to the other.
+            self.toward = if self.pull < 0.01 {
+                dock
+            } else {
+                blend(self.toward, dock, step)
+            };
+        }
+        let pull = if dock.is_some() { 1.0 } else { 0.0 };
+        self.pull += (pull - self.pull) * step;
+        self.drawn = blend(self.model, self.toward, self.pull);
+    }
 }
 
 /// A panel let go, shown where it was let go until the server's projection agrees or [`PENDING`] passes.
@@ -1736,15 +1819,22 @@ impl Projector {
                     * Mat4::from_rotation_y(held.manipulation.yaw());
             }
         }
-        // The slot it would be put in: the one the ray meets, or else one it is carried near. While a teleport is aimed,
-        // the ray chooses none.
+        // The slot it would be put in: the one it is carried near, wherever the ray points, and it is drawn pulled
+        // towards it. See `design/projection.md`.
         self.aim = self.held.as_ref().and_then(|held| {
-            input
-                .ray
-                .filter(|_| input.active && input.pointing)
-                .and_then(|ray| aim(&pickable, &ray))
-                .or_else(|| snap(&pickable, held.model.w_axis.truncate()))
+            dock(
+                &pickable,
+                held.model.w_axis.truncate(),
+                viewer,
+                self.aim.as_ref(),
+            )
         });
+        if let Some(held) = &mut self.held {
+            held.glide(
+                self.aim.as_ref().map(|aim| (docked(aim.model), aim.fit)),
+                input.dt,
+            );
+        }
         // Let go, or taken by something else, it goes into that slot, or floats where it is, as it is turned.
         if (released || !input.active)
             && let Some(held) = self.held.take()
@@ -1877,24 +1967,14 @@ impl Projector {
                 .find(|(shown, ..)| shown.id == panel)
                 .map(|(_, model, _)| *model)
                 .expect("pointed at a panel shown");
-            self.held = Some(Held {
-                panel,
-                manipulation: Manipulation::new(distance),
-                model,
-            });
+            self.held = Some(Held::new(panel, distance, model));
             self.pending = None;
             output.picked = true;
         }
         output.preview = self.aim.as_ref().map(|aim| (aim.wall.clone(), aim.slot));
-        // The ray ends where it aims at a slot, or else at the middle of the panel carried, or where it meets the panel
-        // pointed at.
+        // The ray ends at the middle of the panel carried, where it is drawn, or where it meets the panel pointed at.
         output.end = match &self.held {
-            Some(held) => Some(
-                self.aim
-                    .as_ref()
-                    .and_then(|aim| aim.point)
-                    .unwrap_or(held.model.w_axis.truncate()),
-            ),
+            Some(held) => Some(held.drawn.w_axis.truncate()),
             None => edited
                 .end
                 .or(output.pointed.as_ref().map(|(_, _, point)| *point)),
@@ -1930,10 +2010,10 @@ impl Projector {
             .and_then(|held| {
                 projection
                     .panel(&held.panel)
-                    .map(|panel| (panel, held.model))
+                    .map(|panel| (panel, held.drawn, held.fit))
             });
         output.hint = carried
-            .map(|(panel, model)| (panel, model, self.faces_for(panel).at(Fit::Text).size))
+            .map(|(panel, model, fit)| (panel, model, self.faces_for(panel).at(fit).size))
             .map(|(panel, model, size)| {
                 let release = match &self.aim {
                     None => Release::Float,
@@ -2116,7 +2196,7 @@ impl Projector {
             return None;
         }
         match (&self.held, &self.pending) {
-            (Some(held), _) if held.panel == panel.id => return Some((held.model, Fit::Text)),
+            (Some(held), _) if held.panel == panel.id => return Some((held.drawn, held.fit)),
             (_, Some(pending)) if pending.panel == panel.id => {
                 let fit = match &pending.target {
                     Target::Wall(on, _) => walls

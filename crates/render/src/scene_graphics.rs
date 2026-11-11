@@ -2881,12 +2881,34 @@ mod tests {
                 warm(&hinted) > 20 + warm(&unhinted),
                 "the throw row is warm"
             );
-            // Carried over the wall's slot holding the code panel, the hint says the two would change places.
+            // Pushed with the right stick up to the wall's slot holding the code panel, the hint says the two would
+            // change places.
             let over = Senses {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, slot(2) - arrival::HOME),
                 ..carried
             };
-            let frame = step.update(&over, &mut conversation, &mut felt(), now, 0.01);
+            let stick = |right_stick: glam::Vec2| tomori_scene::scene::Buttons {
+                right_stick,
+                ..Default::default()
+            };
+            let push = (slot(2).distance(arrival::HOME) / ahead.distance(arrival::HOME)).ln()
+                / tomori_scene::manipulation::RATE;
+            step.buttons(
+                &stick(glam::Vec2::Y),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            step.update(&over, &mut conversation, &mut felt(), now, push);
+            step.buttons(
+                &stick(glam::Vec2::ZERO),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            let frame = step.update(&over, &mut conversation, &mut felt(), now, 1.0);
             let hint = frame.projection.last().unwrap().canvas.as_deref().unwrap();
             let said = text(hint);
             assert!(said.ends_with("swap with that one"), "{said}");

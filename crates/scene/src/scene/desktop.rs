@@ -1165,6 +1165,79 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_carried_with_g_docks_on_a_wall_only_once_page_up_pushes_it_there() {
+        use tomori_protocol::{Grid, Panel, Place, Pose as Placed, Wall, WallKind};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        // A panel 1.5 m ahead, where the middle of the window points, and a wall of three slots 8.3 m ahead, behind it.
+        let forward = Head::default().transform().transform_vector3(-Vec3::Z);
+        let ahead = arrival::HOME + forward * 1.5;
+        let behind = arrival::HOME + forward * 8.3;
+        let wall = Wall::new(
+            "deck",
+            WallKind::Added,
+            Placed::upright_facing(behind.to_array(), arrival::HOME.to_array()),
+        )
+        .with_grid(Grid::new(3, 1).unwrap());
+        let panel = Panel::new(
+            "panel-1",
+            "Notes",
+            "A note.",
+            Place::Free {
+                pose: Placed::upright_facing(ahead.to_array(), arrival::HOME.to_array()),
+            },
+        );
+        show_projection(&mut conversation, vec![wall], vec![panel]);
+        let mut desktop = desktop(&mut conversation);
+        let mut now = Instant::now();
+        let mut frame = |desktop: &mut Desktop, conversation: &mut Conversation| {
+            now += Duration::from_millis(100);
+            desktop.frame(conversation, &mut felt(), now, SIZE);
+        };
+        desktop.cursor_moved(SIZE * 0.5);
+        frame(&mut desktop, &mut conversation);
+        // Held with G and let go, with the mouse on the wall behind it, it floats where it is.
+        desktop.key(Key::Grip, true, false, &mut conversation);
+        frame(&mut desktop, &mut conversation);
+        assert_eq!(desktop.step.projector.held(), Some("panel-1"));
+        desktop.key(Key::Grip, false, false, &mut conversation);
+        frame(&mut desktop, &mut conversation);
+        let floated = conversation.take_actions();
+        assert!(
+            matches!(
+                floated.as_slice(),
+                [Action::Send(ClientMessage::PlacePanel {
+                    wall: None,
+                    slot: None,
+                    pose: Some(_),
+                    ..
+                })]
+            ),
+            "{floated:?}"
+        );
+        // Held again and pushed with Page Up as far as it goes, within reach of the wall, it goes into the slot under it.
+        desktop.key(Key::Grip, true, false, &mut conversation);
+        frame(&mut desktop, &mut conversation);
+        assert_eq!(desktop.step.projector.held(), Some("panel-1"));
+        desktop.key(Key::Right(Direction::Up), true, false, &mut conversation);
+        for _ in 0..30 {
+            frame(&mut desktop, &mut conversation);
+        }
+        desktop.key(Key::Right(Direction::Up), false, false, &mut conversation);
+        frame(&mut desktop, &mut conversation);
+        desktop.key(Key::Grip, false, false, &mut conversation);
+        frame(&mut desktop, &mut conversation);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::PlacePanel {
+                panel: "panel-1".into(),
+                wall: Some("deck".into()),
+                slot: Some(1),
+                pose: None,
+            })]
+        );
+    }
+
+    #[test]
     fn page_up_and_down_and_the_brackets_reach_an_environment_with_nothing_carried() {
         let (mut conversation, done) = crate::scene::tests::lamp(Default::default(), false);
         let mut desktop = desktop(&mut conversation);
