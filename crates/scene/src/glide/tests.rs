@@ -335,7 +335,7 @@ fn it_turns_to_where_it_goes_as_it_sets_off_and_to_face_them_as_it_arrives() {
     let path = frames(&mut glide, aside, None, false, 4.0);
     assert!(path.iter().all(|frame| frame.orientation == Quat::IDENTITY));
     assert_eq!(path.last().unwrap().position, aside.position);
-    // Straight up, by a waypoint above it, it keeps facing as it faces.
+    // Straight up, it keeps facing as it faces.
     let mut glide = standing(home);
     let above = at(Vec3::new(0.0, 3.4, -2.3));
     let path = frames(&mut glide, above, None, false, 6.0);
@@ -353,25 +353,82 @@ fn it_moves_alike_at_any_frame_rate() {
         let mut glide = standing(home);
         let mut path = frames_at(&mut glide, there, Some(over), false, 2.5, dt);
         path.extend(frames_at(&mut glide, back, None, false, 8.0, dt));
-        // Sampled every 1/24 s, which both rates land on.
-        let every = (hz / 24.0).round() as usize;
+        // Sampled every 1/6 s, which every rate lands on.
+        let every = (hz / 6.0).round() as usize;
         path.into_iter()
             .skip(every - 1)
             .step_by(every)
             .collect::<Vec<_>>()
     };
     let (slow, fast) = (run(72.0), run(120.0));
-    assert_eq!(slow.len(), fast.len());
-    for (slow, fast) in slow.iter().zip(&fast) {
-        assert!(
-            slow.position.distance(fast.position) < 2e-3,
-            "{slow:?} {fast:?}"
-        );
-        assert!(slow.orientation.angle_between(fast.orientation) < 0.01);
+    for other in [&fast, &run(90.0)] {
+        assert_eq!(slow.len(), other.len());
+        for (slow, other) in slow.iter().zip(other) {
+            assert!(
+                slow.position.distance(other.position) < 2e-3,
+                "{slow:?} {other:?}"
+            );
+            assert!(slow.orientation.angle_between(other.orientation) < 0.01);
+        }
     }
     // Both arrive where the server stands it, facing as it faces.
     for path in [&slow, &fast] {
         assert_eq!(path.last().unwrap().position, back.position);
         assert_eq!(path.last().unwrap().orientation, back.orientation);
     }
+}
+
+#[test]
+fn a_dropped_frame_or_a_stall_never_throws_it() {
+    let home = at(Vec3::new(0.0, 1.4, -2.3));
+    let there = turned(at(Vec3::new(3.0, 1.4, 0.5)), -2.0);
+    let over = Vec3::new(1.5, 2.6, -1.0);
+    // A frame dropped now and then, its time given in the next, keeps to the same path: compared frame by frame where
+    // both stepped.
+    let run = |dropped: bool| {
+        let mut glide = standing(home);
+        let mut path = Vec::new();
+        let mut frame = 0;
+        while path.len() < (8.0 / FRAME) as usize {
+            let frames = if dropped && frame % 7 == 3 { 3 } else { 1 };
+            let at = glide.step(there, Some(over), false, false, frames as f32 * FRAME);
+            path.extend(std::iter::repeat_n(None, frames - 1));
+            path.push(Some(at));
+            frame += 1;
+        }
+        path
+    };
+    let (steady, dropped) = (run(false), run(true));
+    let mut compared = 0;
+    for (steady, dropped) in steady.iter().zip(&dropped) {
+        let (Some(steady), Some(dropped)) = (steady, dropped) else {
+            continue;
+        };
+        assert!(steady.position.distance(dropped.position) < 2e-3);
+        assert!(steady.orientation.angle_between(dropped.orientation) < 0.01);
+        compared += 1;
+    }
+    assert!(compared > 400);
+    // A stall, as the app resumes, or a frame time that is nonsense, moves it no more than a tenth of a second would,
+    // and never leaves it anywhere but somewhere finite, still arriving.
+    let mut glide = standing(home);
+    let mut was = home;
+    for dt in [FRAME, 30.0, f32::NAN, -1.0, f32::INFINITY, 1e-9] {
+        let at = glide.step(there, None, false, false, dt);
+        assert!(at.position.is_finite() && at.orientation.is_finite());
+        assert!(at.position.distance(was.position) <= SPEED * 0.1 + 1e-4);
+        was = at;
+    }
+    let path = frames(&mut glide, there, None, false, 10.0);
+    assert_eq!(path.last().unwrap().position, there.position);
+    assert_eq!(path.last().unwrap().orientation, there.orientation);
+    // Turned exactly round, it turns one way, finitely and gently, and faces exactly that way.
+    let mut glide = standing(home);
+    let behind = turned(home, std::f32::consts::PI);
+    let path = frames(&mut glide, behind, None, false, 4.0);
+    assert!(path.iter().all(|frame| frame.orientation.is_finite()));
+    let turns = spins(&path, FRAME);
+    assert!(turns.iter().all(|spin| spin.abs() <= TURN_SPEED + 1e-3));
+    assert!(turns.iter().all(|spin| *spin >= -1e-4) || turns.iter().all(|spin| *spin <= 1e-4));
+    assert_eq!(path.last().unwrap().orientation, behind.orientation);
 }

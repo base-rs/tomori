@@ -34,8 +34,10 @@ pub const STREAM_FOLLOW: f32 = 10.0;
 /// rather than cutting the corner.
 pub const CORNER: f32 = 0.6;
 
-/// The share of its speed the lead keeps at a waypoint.
-pub const CORNER_SPEED: f32 = 0.3;
+/// The share of its speed the lead keeps at a waypoint: so that the place slows round it no harder than it sets off,
+/// passing within about 0.1 m of it, without lingering there, over whoever it goes over, much longer than the server's
+/// straight glide through it expects.
+pub const CORNER_SPEED: f32 = 0.6;
 
 /// How fast the agent's lead turns, at most, in radians a second: 90° a second, so that a turn is gentle, never a
 /// spin, before whoever it faces.
@@ -130,6 +132,7 @@ impl Glide {
         {
             self.target = Some(target.position);
             self.via = via.filter(|via| via.is_finite());
+            self.passed = None;
         }
         let steps = (dt / STEP).ceil();
         let h = if steps > 0.0 { dt / steps } else { 0.0 };
