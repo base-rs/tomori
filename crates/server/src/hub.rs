@@ -34,6 +34,7 @@ use crate::workspace::SpaceSlots;
 
 pub(crate) mod agent_actions;
 pub(crate) mod agent_inspect;
+mod agent_names;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 mod agent_places;
@@ -568,6 +569,8 @@ struct HubState {
     next_knock: u64,
     /// When a visitor, by hub key, may next knock on a space, after a knock there was declined or expired.
     knock_cooldowns: HashMap<(String, String), Instant>,
+    /// When each identity was last renamed through its space's agent, for [`agent_names::RENAME_LIMIT`].
+    renames: agent_names::Renames,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
     /// The cards the server shows in their environment's spaces, if it shows any. See `design/github.md`.
@@ -1092,6 +1095,14 @@ struct Rename {
     name: String,
     /// The participant who asked, by hub key, and the utterance that said the name, if they spoke it, to answer once it is kept. A name kept on their behalf, as when their token had none, answers nobody.
     asked: Option<(String, Option<String>)>,
+}
+
+/// Why a token holder's new name was not kept with their token.
+enum Unkept {
+    /// Their token is no longer issued.
+    Revoked,
+    /// The token store could not be written.
+    Unwritten,
 }
 
 /// A name said aloud, as recognition writes it, without the full stop or other mark it may end with: "Ada." is Ada.
@@ -3057,6 +3068,34 @@ impl Hub {
         }
     }
 
+    /// Keep `name` with the token of `principal`, writing the token store, and then call everyone holding it by it, on every device. Called outside the lock, since it writes the token store; returns the lock, taken again, and whether the name was kept.
+    fn write_name(
+        &self,
+        tokens: &tomori_security::TokenStore,
+        principal: &str,
+        name: &str,
+    ) -> (MutexGuard<'_, HubState>, Result<(), Unkept>) {
+        let id = principal.strip_prefix("token:").unwrap_or_default();
+        // Another token's name is no bar: tags tell their holders apart.
+        let kept = match tokens.rename(id, name, |_| false) {
+            Ok(tomori_security::Renamed::Renamed) => Ok(()),
+            Ok(_) => Err(Unkept::Revoked),
+            Err(error) => {
+                log::warn!("Could not keep the name of token {id}: {error}.");
+                Err(Unkept::Unwritten)
+            }
+        };
+        let mut state = self.lock();
+        if kept.is_ok() {
+            log::info!("Token {id} is now called {name:?}.");
+            state.rename(
+                |_, record| record.principal.as_deref() == Some(principal),
+                name,
+            );
+        }
+        (state, kept)
+    }
+
     /// Keep a token holder's new name with their token, then call everyone holding it by it, on every device, and answer whoever asked. Called outside the lock, since renaming writes the token store.
     fn keep_name(&self, rename: Rename) {
         let Rename {
@@ -3065,24 +3104,11 @@ impl Hub {
             name,
             asked,
         } = rename;
-        let id = principal.strip_prefix("token:").unwrap_or_default();
-        // Another token's name is no bar: tags tell their holders apart.
-        let kept = match tokens.rename(id, &name, |_| false) {
-            Ok(tomori_security::Renamed::Renamed) => Ok(()),
-            Ok(_) => Err("Your token is no longer issued."),
-            Err(error) => {
-                log::warn!("Could not keep the name of token {id}: {error}.");
-                Err("Your name could not be kept. Try again.")
-            }
-        };
-        let mut state = self.lock();
-        if kept.is_ok() {
-            log::info!("Token {id} is now called {name:?}.");
-            state.rename(
-                |_, record| record.principal.as_deref() == Some(principal.as_str()),
-                &name,
-            );
-        }
+        let (state, kept) = self.write_name(&tokens, &principal, &name);
+        let kept = kept.map_err(|unkept| match unkept {
+            Unkept::Revoked => "Your token is no longer issued.",
+            Unkept::Unwritten => "Your name could not be kept. Try again.",
+        });
         let Some((participant, utterance)) = asked else {
             return;
         };
