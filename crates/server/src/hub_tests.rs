@@ -7787,6 +7787,8 @@ fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_
         right: Some(upright([0.0, 1.0, -1.0])),
         hands: None,
         carrying: None,
+        carried: Vec::new(),
+        rays: None,
     });
     vic.send(standing([1.0, 1.6, 0.0]));
     eventually_in("Ada, where she is", || seen.lock().unwrap().len() == 1);
@@ -7809,6 +7811,39 @@ fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_
         -(1.0 - 2.0 * (x * x + y * y)),
     ];
     assert!(near(ahead, [1.0, 0.0, 0.0]), "{ahead:?}");
+    // A hand that is no pose, as one without a rotation or beyond any space, is not given to the side, whose checks of
+    // reach would otherwise meet what is not a number; nor is anything of a report whose head is no pose.
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL);
+    ada.send(ClientMessage::Presence {
+        head: upright([0.0, 1.6, 0.0]),
+        left: Some(tomori_protocol::Pose {
+            position: [0.0, 1.0, -1.0],
+            orientation: [0.0; 4],
+        }),
+        right: Some(upright([f32::MAX, 1.0, -1.0])),
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    eventually_in("Ada, without her hands", || {
+        seen.lock().unwrap()[0].right.is_none()
+    });
+    assert_eq!(seen.lock().unwrap()[0].left, None);
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL);
+    ada.send(ClientMessage::Presence {
+        head: upright([f32::MAX, 1.6, 0.0]),
+        left: None,
+        right: Some(upright([0.0, 1.0, -1.0])),
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL * 4);
+    let presence = seen.lock().unwrap()[0];
+    assert!(presence.head.position.iter().all(|value| value.is_finite()));
+    assert_eq!(presence.right, None);
     // Gone from the space, she is nowhere.
     hub.disconnect(ada.connection);
     hub.sweep_present();

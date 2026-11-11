@@ -4387,21 +4387,27 @@ impl Hub {
                 record.headset |= seen
                     .as_ref()
                     .is_some_and(crate::presence::Seen::tracks_hands);
+                // Where a participant is, for the environment's server side, in its own coordinates, from the poses as
+                // the server sounded them, so that nothing a client sends makes a side's checks fail open; a report whose
+                // head is no pose tells it nothing. A visitor's presence is refused before it reaches here (`access.rs`).
+                let sounded = seen
+                    .as_ref()
+                    .map(|seen| (seen.head, seen.controllers[0], seen.controllers[1]));
                 record.seen = seen;
-                // Where a participant is, for the environment's server side, in its own coordinates: a visitor's
-                // presence is refused before it reaches here (`access.rs`).
-                let environment = &state.space(id).expect("found above").model.environment;
-                let environments = self.environments();
-                let uncarry =
-                    |pose: &tomori_protocol::Pose| environments.uncarry(environment, pose);
-                let presence = tomori_environment::Presence::new(
-                    source,
-                    uncarry(&head),
-                    left.as_ref().map(uncarry),
-                    right.as_ref().map(uncarry),
-                    Instant::now(),
-                );
-                self.server_sides.presence(id, presence);
+                if let Some((head, left, right)) = sounded {
+                    let environment = &state.space(id).expect("found above").model.environment;
+                    let environments = self.environments();
+                    let uncarry =
+                        |pose: &tomori_protocol::Pose| environments.uncarry(environment, pose);
+                    let presence = tomori_environment::Presence::new(
+                        source,
+                        uncarry(&head),
+                        left.as_ref().map(uncarry),
+                        right.as_ref().map(uncarry),
+                        Instant::now(),
+                    );
+                    self.server_sides.presence(id, presence);
+                }
                 // A following agent keeps with whoever it talks with as they move. See `design/environments.md`.
                 self.agent_seen(state, id, participant, Instant::now());
             }

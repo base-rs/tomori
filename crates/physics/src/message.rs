@@ -57,9 +57,17 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// Where body `held` is, as the side last saw its holder's hand, if it saw the hand.
+    /// Where body `held` is, as the side last saw its holder's hand, if it saw the hand and it is a placement.
     pub fn holding(&self, held: &Held) -> Option<Placement> {
-        self.hands[held.hand.index()].map(|hand| held.placement(&hand))
+        self.hands[held.hand.index()]
+            .filter(Placement::valid)
+            .map(|hand| held.placement(&hand))
+    }
+
+    /// Whether its head and hands are all finite placements, as the server sounds presence before a side sees it: one
+    /// that is not is taken as nobody seen.
+    pub fn sound(&self) -> bool {
+        self.head.is_finite() && self.hands.iter().flatten().all(Placement::valid)
     }
 }
 
@@ -200,6 +208,11 @@ pub struct Thrown {
     pub spin: Vec3,
 }
 
+/// Whether `value` is no more than `most`: never, if it is not a number.
+fn within(value: f32, most: f32) -> bool {
+    value <= most
+}
+
 /// `vector`, if finite, no longer than `most`; otherwise none at all.
 fn cut(vector: Vec3, most: f32) -> Vec3 {
     if vector.is_finite() {
@@ -216,15 +229,18 @@ impl Take {
     /// since; and held no farther than [`HOLD`] from the hand.
     pub fn reachable(&self, at: Vec3, radius: f32, seen: Option<&Seen>) -> Result<(), Refused> {
         let refused = Refused::Reach(self.body);
-        let seen = seen.ok_or(refused)?;
-        if self.offset.placement(Precision::Rest).position.length() > HOLD {
+        let seen = seen.filter(|seen| seen.sound()).ok_or(refused)?;
+        if !within(
+            self.offset.placement(Precision::Rest).position.length(),
+            HOLD,
+        ) {
             return Err(refused);
         }
         let from = match seen.hands[self.hand.index()] {
             Some(hand) => hand.position.distance(at),
-            None => (seen.head.distance(at) - 0.8).max(0.0),
+            None => seen.head.distance(at) - 0.8,
         };
-        if from - radius > PULL + 0.5 {
+        if !within(from - radius, PULL + 0.5) {
             return Err(refused);
         }
         Ok(())
@@ -238,8 +254,10 @@ impl LetGo {
     /// than [`RELEASE_SPIN`], cut to them, a speed that is not finite being none.
     pub fn checked(&self, seen: Option<&Seen>, holding: Placement) -> Thrown {
         let at = self.at.placement(Precision::Rest);
-        let from = seen.map_or(holding.position, |seen| seen.head);
-        if from.distance(at.position) > REACH {
+        let from = seen
+            .filter(|seen| seen.sound())
+            .map_or(holding.position, |seen| seen.head);
+        if !within(from.distance(at.position), REACH) {
             return Thrown {
                 at: holding,
                 velocity: Vec3::ZERO,
@@ -449,6 +467,19 @@ mod tests {
         );
         // Never by someone the side has not seen, nor held far from the hand, nor at no placement.
         assert_eq!(near.reachable(hand, 0.1, None), Err(Refused::Reach(5)));
+        // Nor by someone seen where no number is: what is not finite is never within reach.
+        for unsound in [
+            seen(Some(Vec3::NAN)),
+            Seen {
+                head: Vec3::NAN,
+                hands: [None, None],
+            },
+        ] {
+            assert_eq!(
+                near.reachable(hand, 0.1, Some(&unsound)),
+                Err(Refused::Reach(5))
+            );
+        }
         let wide = take(Placement::at(Vec3::new(0.0, 0.0, -0.6)));
         assert_eq!(
             wide.reachable(hand, 0.1, Some(&seen_hand)),
@@ -490,6 +521,14 @@ mod tests {
         // Unseen, it is let go where they say only within reach of where it was held.
         let thrown = let_go(at, [3.0, 0.0, 0.0], [0.0; 3]).checked(None, holding);
         assert_eq!(thrown.at, at.snapped(Precision::Rest));
+        // Seen where no number is, as unseen: only within reach of where it was held.
+        let unsound = Seen {
+            head: Vec3::NAN,
+            hands: [None, None],
+        };
+        let farther = Placement::at(Vec3::new(0.0, 1.6, -2.5));
+        let thrown = let_go(farther, [3.0, 0.0, 0.0], [0.0; 3]).checked(Some(&unsound), holding);
+        assert_eq!((thrown.at, thrown.velocity), (holding, Vec3::ZERO));
         let mut nowhere = let_go(at, [0.0; 3], [0.0; 3]);
         nowhere.at.0[0] = i32::MAX;
         let thrown = nowhere.checked(None, holding);
