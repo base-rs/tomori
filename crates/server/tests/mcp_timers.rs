@@ -266,7 +266,13 @@ fn a_timer_set_seconds_ahead_fires_at_its_second_through_the_server() {
         .as_str()
         .unwrap();
     assert!(schedule.starts_with("once at "), "{schedule}");
-    assert_eq!(schedule.len(), "once at 09:17:30".len(), "{schedule}");
+    // To the second, unless it falls on a minute, as one time in sixty.
+    assert!(
+        ["once at 09:17:30", "once at 09:17"]
+            .iter()
+            .any(|said| said.len() == schedule.len()),
+        "{schedule}"
+    );
     assert_eq!(
         set["structuredContent"]["timer"]["next_in"]
             .as_str()

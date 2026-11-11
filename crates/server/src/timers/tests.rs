@@ -1580,8 +1580,11 @@ fn a_timer_set_in_seconds_fires_at_its_second() {
         space.describe("plank").unwrap(),
         "timer \"plank\" (once at 09:17:30, when present; next in 1 s)"
     );
+    let fired = space.tick(later(set, 29_600), &names(SAMUEL));
+    // A one-off is told on time, without the gap since the last prompt of notes alone.
+    assert!(fired.iter().all(|firing| firing.on_time));
     assert_eq!(
-        texts(space.tick(later(set, 29_600), &names(SAMUEL))),
+        texts(fired),
         [
             "Timer \"plank\" (once at 09:17:30, when present): fired 09:17:30; present: Samuel; its last firing; note: \"Thirty seconds of plank are up\""
         ]
@@ -1654,8 +1657,11 @@ fn every_so_many_seconds_counts_from_when_it_was_set() {
     assert_eq!(space.list()[0].next, Some(start + 90));
     assert_eq!(space.list()[0].describe(), "every 90 s, when present");
     let present = names(SAMUEL);
+    let fired = space.tick(instant(start + 90), &present);
+    // A repeating timer waits for the gap, as other notes do.
+    assert!(fired.iter().all(|firing| !firing.on_time));
     assert_eq!(
-        texts(space.tick(instant(start + 90), &present)),
+        texts(fired),
         [
             "Timer \"intervals\" (every 90 s, when present): fired 09:18:30; present: Samuel; note: \"Next exercise\""
         ]

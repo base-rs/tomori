@@ -2222,8 +2222,12 @@ impl SpaceModel {
     pub fn tick_timers(&mut self, now: jiff::Timestamp, present: &[String]) -> bool {
         let before = self.timers.views();
         for firing in self.timers.tick(now, present) {
-            self.events
-                .push(crate::events::Source::Timer, &firing.name, firing.text);
+            self.events.push_timed(
+                crate::events::Source::Timer,
+                &firing.name,
+                firing.text,
+                firing.on_time,
+            );
         }
         self.timers.views() != before
     }

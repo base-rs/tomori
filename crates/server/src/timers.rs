@@ -141,12 +141,14 @@ pub struct Timer {
     pub limited: u32,
 }
 
-/// One firing of a timer, for the space's event queue: the timer's name, which coalesces its firings, and the note's
-/// text, without its brackets.
+/// One firing of a timer, for the space's event queue: the timer's name, which coalesces its firings, the note's text,
+/// without its brackets, and whether it is told on time, without the gap since the last prompt of notes alone, as a
+/// one-off's is, such as a 30-second timer someone asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Firing {
     pub name: String,
     pub text: String,
+    pub on_time: bool,
 }
 
 /// What the agent asked `set_timer` for, its arguments read but not yet checked.
@@ -499,6 +501,7 @@ impl Timer {
                 self.describe(),
                 said.join("; ")
             ),
+            on_time: matches!(self.schedule, Schedule::Once { .. }),
         }
     }
 }

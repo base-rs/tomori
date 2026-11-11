@@ -8,6 +8,16 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+/// Whether `at` was at least `least` before `now`, or never was.
+fn since(now: Instant, at: Option<Instant>, least: Duration) -> bool {
+    at.is_none_or(|at| now.saturating_duration_since(at) >= least)
+}
+
+/// Whether the agent's turn ended, at `quiet_since`, at least [`QUIET`] before `now`.
+fn quieted(now: Instant, quiet_since: Option<Instant>) -> bool {
+    since(now, quiet_since, QUIET)
+}
+
 /// The start of the key of a prompt of notes alone, which no participant's entry has.
 pub const PROMPT_KEY: &str = "tomori-event-";
 
@@ -48,6 +58,8 @@ struct Note {
     text: String,
     /// How many earlier notes of the same source and key this one replaced before being told.
     earlier: u32,
+    /// Whether it is told without waiting for [`GAP`], as a one-off timer's firing is.
+    on_time: bool,
 }
 
 impl Note {
@@ -105,6 +117,14 @@ impl EventQueue {
     /// Queue `text`, from `source` under `key`, replacing a note of the same source and key not yet told, which it
     /// counts.
     pub fn push(&mut self, source: Source, key: &str, text: String) {
+        self.push_timed(source, key, text, false);
+    }
+
+    /// Queue `text` as [`Self::push`] does, told `on_time`, without waiting for [`GAP`] since the last prompt of notes
+    /// alone, as a one-off timer's firing is, so that a 30-second timer is told at its second rather than up to 30
+    /// seconds later; it still waits for a quiet moment after the agent's turn. Each one-off costs the agent one turn,
+    /// within the space's daily limit, so it never makes a burst.
+    pub fn push_timed(&mut self, source: Source, key: &str, text: String, on_time: bool) {
         let earlier = match self
             .notes
             .iter()
@@ -125,6 +145,7 @@ impl EventQueue {
             key: key.to_owned(),
             text,
             earlier,
+            on_time,
         });
     }
 
@@ -160,18 +181,17 @@ impl EventQueue {
     }
 
     /// Whether a prompt of notes alone may be given at `now`: some wait, the agent's turn ended, at `quiet_since`, at
-    /// least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago.
+    /// least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago, or one of them is told on time.
     pub fn ready(&self, now: Instant, quiet_since: Option<Instant>) -> bool {
-        !self.notes.is_empty() && self.may_give(now, quiet_since)
+        !self.notes.is_empty()
+            && (self.may_give(now, quiet_since)
+                || (self.notes.iter().any(|note| note.on_time) && quieted(now, quiet_since)))
     }
 
     /// Whether a prompt of notes alone may be given at `now`, were any waiting: the agent's turn ended, at
     /// `quiet_since`, at least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago.
     pub fn may_give(&self, now: Instant, quiet_since: Option<Instant>) -> bool {
-        let since = |at: Option<Instant>, least: Duration| {
-            at.is_none_or(|at| now.saturating_duration_since(at) >= least)
-        };
-        since(quiet_since, QUIET) && since(self.last, GAP)
+        quieted(now, quiet_since) && since(now, self.last, GAP)
     }
 
     /// The key and text of a prompt of every note waiting, given at `now`, if any wait.
@@ -279,5 +299,31 @@ mod tests {
         assert!(!queue.ready(start + QUIET + Duration::from_secs(29), None));
         assert!(queue.ready(start + QUIET + GAP, None));
         assert!(queue.prompt(start + QUIET + GAP).unwrap().0.ends_with("-2"));
+    }
+
+    #[test]
+    fn a_note_told_on_time_waits_for_a_quiet_moment_but_not_the_gap() {
+        let mut queue = EventQueue::default();
+        let start = Instant::now();
+        queue.push(Source::Proximity, "ada", "near".to_owned());
+        queue.prompt(start).unwrap();
+        // A one-off timer fires 12 s after the last prompt of notes alone, the agent's turn having ended 11 s ago.
+        let fired = start + Duration::from_secs(12);
+        let ended = Some(start + Duration::from_secs(1));
+        queue.push_timed(Source::Timer, "plank", "up".to_owned(), true);
+        assert!(!queue.ready(fired, Some(fired - Duration::from_secs(9))));
+        assert!(queue.ready(fired, ended));
+        // A note waiting with it that would wait for the gap goes with it.
+        queue.push(Source::Proximity, "bob", "near".to_owned());
+        assert_eq!(queue.prompt(fired).unwrap().1, "[up] [near]");
+        // One not on time, as a repeating timer's, waits for the gap.
+        queue.push_timed(Source::Timer, "every", "again".to_owned(), false);
+        assert!(!queue.ready(fired + QUIET, ended));
+        assert!(queue.ready(fired + GAP, ended));
+        // So does an on-time note replaced by one that is not.
+        queue.prompt(fired + GAP).unwrap();
+        queue.push_timed(Source::Timer, "plank", "up".to_owned(), true);
+        queue.push(Source::Timer, "plank", "again".to_owned());
+        assert!(!queue.ready(fired + GAP + QUIET, ended));
     }
 }
