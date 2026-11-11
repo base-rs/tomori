@@ -303,6 +303,8 @@ pub struct Conversation {
     /// The others' right hands in the space, by their numbers, as their presence last said, for what an environment's
     /// client side draws in their hands. See `design/environments.md`.
     right_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
+    /// The others' left hands, likewise.
+    left_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
@@ -528,6 +530,7 @@ impl Conversation {
         Self {
             source: None,
             right_hands: std::collections::BTreeMap::new(),
+            left_hands: std::collections::BTreeMap::new(),
             role: ConnectionRole::Unknown,
             certificate: None,
             pairing: None,
@@ -891,6 +894,7 @@ impl Conversation {
             self.server_name = name.clone();
             self.source = Some(*source);
             self.right_hands.clear();
+            self.left_hands.clear();
             self.utterance_limit = *utterance_limit;
             self.role = *role;
             self.certificate = *certificate;
@@ -1259,16 +1263,26 @@ impl Conversation {
             }
             // A reply held for this participant while they record, and in the pause after they let go of X.
             ServerMessage::SpeechHeld { held } => self.turn.held(held),
-            // The others' right hands, for what an environment's client side draws in them; the rest of presence is the
+            // The others' hands, for what an environment's client side draws in them; the rest of presence is the
             // scene's and the player's.
-            ServerMessage::Presence { source, right, .. } => match right {
-                Some(right) if self.space.is_some() => {
-                    self.right_hands.insert(source, right);
+            ServerMessage::Presence {
+                source,
+                left,
+                right,
+                ..
+            } => {
+                for (hands, pose) in [(&mut self.right_hands, right), (&mut self.left_hands, left)]
+                {
+                    match pose {
+                        Some(pose) if self.space.is_some() => {
+                            hands.insert(source, pose);
+                        }
+                        _ => {
+                            hands.remove(&source);
+                        }
+                    }
                 }
-                _ => {
-                    self.right_hands.remove(&source);
-                }
-            },
+            }
             ServerMessage::Welcome { .. }
             | ServerMessage::Ping { .. }
             | ServerMessage::Pong { .. } => {}
@@ -1619,6 +1633,7 @@ impl Conversation {
         self.forget_turn();
         self.space = None;
         self.right_hands.clear();
+        self.left_hands.clear();
         self.cards = None;
         self.projection.clear();
         self.channel.clear();
@@ -4732,10 +4747,22 @@ impl Conversation {
     /// The right hands of the others in the joined space, by their numbers, as their presence last said, in the space's
     /// coordinates: only those the space's state still lists, and never this participant's own.
     pub fn right_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
+        self.others(&self.right_hands)
+    }
+
+    /// The others' left hands, likewise.
+    pub fn left_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
+        self.others(&self.left_hands)
+    }
+
+    fn others(
+        &self,
+        hands: &std::collections::BTreeMap<u32, tomori_protocol::Pose>,
+    ) -> Vec<(u32, tomori_protocol::Pose)> {
         let Some((space, _)) = self.joined_space() else {
             return Vec::new();
         };
-        self.right_hands
+        hands
             .iter()
             .filter(|(source, _)| {
                 Some(**source) != self.source

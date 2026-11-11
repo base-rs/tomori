@@ -442,11 +442,11 @@ fn the_left_trigger_chooses_a_row_and_a_pad_as_the_right_does() {
 }
 
 #[test]
-fn the_left_hand_takes_nothing_the_environment_shows_until_either_hand_does() {
+fn the_left_trigger_chooses_nothing_the_environment_shows_and_its_grip_takes_what_its_ray_is_on() {
     use std::sync::{Arc, Mutex};
     /// A client side whose stick, a metre along any ray, is selectable and takes the grip.
     struct Stick {
-        told: Arc<Mutex<Vec<(bool, bool)>>>,
+        told: Arc<Mutex<Vec<(bool, bool, bool)>>>,
     }
     impl crate::client_side::ClientSide for Stick {
         fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
@@ -457,10 +457,11 @@ fn the_left_hand_takes_nothing_the_environment_shows_until_either_hand_does() {
             })
         }
         fn update(&mut self, input: crate::client_side::Input<'_>) -> crate::client_side::Output {
-            self.told
-                .lock()
-                .unwrap()
-                .push((input.select.is_some(), input.grab.is_some()));
+            self.told.lock().unwrap().push((
+                input.select.is_some(),
+                input.grab.is_some(),
+                input.left_grab.is_some(),
+            ));
             crate::client_side::Output::new()
         }
     }
@@ -496,7 +497,7 @@ fn the_left_hand_takes_nothing_the_environment_shows_until_either_hand_does() {
     assert_eq!(step.hands[Hand::Left].aim, precedence::Aim::Environment);
     assert_eq!(attending(&mut conversation), [Resource::object("stick")]);
     told.lock().unwrap().clear();
-    // Neither its trigger nor its grip takes it.
+    // Its trigger chooses nothing of it; its grip takes it, and the client side is told of the left grip on it.
     step.update(
         &senses(1.0, 1.0),
         &mut conversation,
@@ -513,14 +514,11 @@ fn the_left_hand_takes_nothing_the_environment_shows_until_either_hand_does() {
     );
     assert_eq!(
         step.last_grab,
-        Some((Hand::Left, precedence::Grab::Nothing))
+        Some((Hand::Left, precedence::Grab::Environment))
     );
-    assert!(
-        told.lock()
-            .unwrap()
-            .iter()
-            .all(|(select, grab)| !select && !grab)
-    );
+    let told = told.lock().unwrap();
+    assert!(told.iter().all(|(select, grab, _)| !select && !grab));
+    assert!(told.iter().any(|(_, _, left)| *left));
 }
 
 #[test]

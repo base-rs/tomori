@@ -344,10 +344,57 @@ struct Client {
     scrollable: Option<String>,
     /// The pushes of the right stick, and turns of the wheel, it has been told of.
     scroller: crate::client_side::Scroller,
-    /// The object of its within reach of the right hand last frame, and the one the ray pointed at last frame that takes
-    /// the grip, with how far along the ray, which a squeeze of the grip takes, the one within reach first.
-    reachable: Option<String>,
-    grabbable: Option<(String, f32)>,
+    /// The object of its within reach of each hand last frame, and the one each ray pointed at last frame that takes the
+    /// grip, with how far along the ray, which a squeeze of that hand's grip takes, the one within reach first.
+    reachable: Hands<Option<String>>,
+    grabbable: Hands<Option<(String, f32)>>,
+}
+
+/// The index of `side`'s controller among the platform's.
+fn controller_of(side: Side) -> usize {
+    match side {
+        Side::Left => crate::controller::LEFT,
+        Side::Right => crate::controller::RIGHT,
+    }
+}
+
+/// What a client side is told this frame of a squeeze of the grip of `side` that took an object of its, as `gripping`
+/// says, with the hand at `hand`, if it is tracked, or else `along` the ray as far as it took the object, and the grip
+/// `closed` or not: `Began` once there is a hand to tell of, `Changed` while it is held and `Ended` once as it is let go,
+/// with the hand last told while tracking is lost; and nothing of its end if its beginning never was.
+fn told(
+    gripping: &mut Gripping,
+    hand: Option<crate::client_side::Hand>,
+    along: impl FnOnce(f32) -> Option<crate::client_side::Hand>,
+    closed: bool,
+    side: Side,
+) -> Option<crate::client_side::Grab> {
+    let Gripping::Environment {
+        object,
+        distance,
+        told,
+        hand: last,
+    } = std::mem::take(gripping)
+    else {
+        return None;
+    };
+    let held = hand.or_else(|| distance.and_then(along)).or(last);
+    let phase = match (closed, told) {
+        (true, false) => crate::client_side::Phase::Began,
+        (true, true) => crate::client_side::Phase::Changed,
+        (false, _) => crate::client_side::Phase::Ended,
+    };
+    // Told nothing until there is a hand to tell of, nor its end if its beginning never was.
+    let told_now = held.filter(|_| closed || told);
+    if closed {
+        *gripping = Gripping::Environment {
+            object: object.clone(),
+            distance,
+            told: told || told_now.is_some(),
+            hand: held,
+        };
+    }
+    told_now.map(|hand| crate::client_side::Grab::new(object, hand, phase).of(side.into()))
 }
 
 /// How near the middle the right stick returns to end a push.
@@ -776,7 +823,7 @@ impl Step {
     /// Whose `side`'s grip's squeeze is this frame, from `grip`, its value while it acts, with `wrist_active` whether
     /// the transcript showed: as it closes, the first rung of [`precedence::Grab`] that claims it for that hand, as
     /// things stood last frame, Tomori's own first, the environment's object within reach of the hand, or else pointed
-    /// at, only for a participant, and for now only for the right hand; held until it is let go. Returns whether it is
+    /// at with its ray, only for a participant; held until it is let go. Returns whether it is
     /// the environment's, or was as it was let go this frame, so that nothing of Tomori's is given it.
     fn grip(
         &mut self,
@@ -795,19 +842,16 @@ impl Step {
         let began = closed && !hand.grip_closed;
         self.hands[side].grip_closed = closed;
         if began && self.hands[side].gripping == Gripping::Free {
-            // The environment's objects take the right hand's grip alone, until either hand takes them.
             let target = self
                 .client
                 .as_ref()
-                .filter(|_| participates && side == Side::Right)
+                .filter(|_| participates)
                 .and_then(|client| {
-                    client
-                        .reachable
+                    client.reachable[side]
                         .clone()
                         .map(|object| (object, None))
                         .or_else(|| {
-                            client
-                                .grabbable
+                            client.grabbable[side]
                                 .clone()
                                 .map(|(object, distance)| (object, Some(distance)))
                         })
@@ -1923,8 +1967,8 @@ impl Step {
                         back: false,
                         scrollable: None,
                         scroller: Default::default(),
-                        reachable: None,
-                        grabbable: None,
+                        reachable: Hands::default(),
+                        grabbable: Hands::default(),
                     });
                     self.selector.abandon();
                     self.abandon_scroll();
@@ -1978,13 +2022,17 @@ impl Step {
                 .and_then(|_| card_pointed.as_ref().map(|(_, distance, _)| *distance))
                 .or_else(|| worker.as_ref().or(timer.as_ref()).and(hit_point).map(reach))
                 .unwrap_or(f32::INFINITY);
+            // A ray whose hand points down, which points at nothing else, still meets what the environment has that the
+            // grip takes, as a stone at one's feet, and shows while it does, as it does a pad.
+            let lowered = rays[side].filter(|_| ray.is_none() && self.hands[side].lowered);
             let picked = self
                 .client
                 .as_ref()
-                .zip(ray.filter(|_| in_space && held_card.is_none()))
+                .zip(ray.or(lowered).filter(|_| in_space && held_card.is_none()))
                 // The client side picks in the environment's own coordinates.
-                .and_then(|(client, ray)| {
-                    client.side.pick(&arrangement.carriage.unplace_ray(&ray))
+                .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)))
+                .filter(|picked| {
+                    ray.is_some() || picked.actions.contains(crate::client_side::Actions::GRAB)
                 });
             let object = picked.clone().filter(|picked| picked.distance < nearest);
             let (card, worker, timer) = if object.is_some() {
@@ -2178,20 +2226,27 @@ impl Step {
                 .as_ref()
                 .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
                 .map(|picked| picked.object.clone());
-            // And what a squeeze of the grip takes: what is within reach of the right hand, or else what the ray is on
-            // that takes the grip.
-            client.grabbable = right_object
-                .as_ref()
-                .filter(|picked| picked.actions.contains(crate::client_side::Actions::GRAB))
-                .map(|picked| (picked.object.clone(), picked.distance));
-            client.reachable = senses.controllers[crate::controller::RIGHT]
-                .filter(|pose| world.right && pose.valid())
-                .and_then(|pose| {
-                    let hand = arrangement
-                        .carriage
-                        .unplace(Vec3::from_array(pose.position));
-                    client.side.within_reach(hand)
-                });
+            // And what a squeeze of each grip takes: what is within reach of that hand, or else what its ray is on that
+            // takes the grip.
+            client.grabbable = Hands::from_fn(|side| {
+                resolved[side]
+                    .object
+                    .as_ref()
+                    .filter(|picked| picked.actions.contains(crate::client_side::Actions::GRAB))
+                    .map(|picked| (picked.object.clone(), picked.distance))
+            });
+            let side = &client.side;
+            client.reachable = Hands::from_fn(|hand| {
+                senses.controllers[controller_of(hand)]
+                    .filter(|pose| world[hand] && pose.valid())
+                    .and_then(|pose| {
+                        side.within_reach(
+                            arrangement
+                                .carriage
+                                .unplace(Vec3::from_array(pose.position)),
+                        )
+                    })
+            });
         }
         // Each ray shown: in full while it meets something, its hand is busy or aims a teleport, and for a second after;
         // otherwise a short stub from the controller; hidden while its hand points down, holds the menu or the
@@ -2202,7 +2257,11 @@ impl Step {
                 Side::Left => menu_on_palm,
                 Side::Right => wrist_shown,
             };
-            rays[side].is_some() && !palm && (casts[side].is_some() || resolved[side].pad.is_some())
+            rays[side].is_some()
+                && !palm
+                && (casts[side].is_some()
+                    || resolved[side].pad.is_some()
+                    || resolved[side].object.is_some())
         });
         for side in Side::BOTH {
             // Entering a new target, an arrival object, a hand menu row, a card, a worker, a panel or a list's choosable
@@ -2393,66 +2452,57 @@ impl Step {
                 // own coordinates.
                 let carriage = arrangement.carriage;
                 let unturn = carriage.orientation.inverse();
-                let controller = senses.controllers[crate::controller::RIGHT]
-                    .filter(|pose| pose.valid())
-                    .map(|pose| {
-                        crate::client_side::Hand::new(
-                            carriage.unplace(Vec3::from_array(pose.position)),
-                            unturn * glam::Quat::from_array(pose.orientation).normalize(),
-                        )
-                    });
-                let gripping = &mut self.hands.right.gripping;
-                let grab = match std::mem::take(gripping) {
-                    Gripping::Environment {
-                        object,
-                        distance,
-                        told,
-                        hand,
-                    } => {
-                        let along = senses.ray.zip(distance).map(|(ray, distance)| {
+                let controller = |side: Side| {
+                    senses.controllers[controller_of(side)]
+                        .filter(|pose| pose.valid())
+                        .map(|pose| {
+                            crate::client_side::Hand::new(
+                                carriage.unplace(Vec3::from_array(pose.position)),
+                                unturn * glam::Quat::from_array(pose.orientation).normalize(),
+                            )
+                        })
+                };
+                let along = |ray: Option<Ray>| {
+                    move |distance: f32| {
+                        ray.map(|ray| {
                             let ray = carriage.unplace_ray(&ray);
                             crate::client_side::Hand::new(
                                 ray.at(distance.clamp(0.3, 1.2)),
                                 glam::Quat::from_rotation_arc(Vec3::NEG_Z, ray.direction),
                             )
-                        });
-                        let held = controller.or(along).or(hand);
-                        let closed = self.hands.right.grip_closed;
-                        let phase = match (closed, told) {
-                            (true, false) => crate::client_side::Phase::Began,
-                            (true, true) => crate::client_side::Phase::Changed,
-                            (false, _) => crate::client_side::Phase::Ended,
-                        };
-                        // Told nothing until there is a hand to tell of, nor its end if its beginning never was.
-                        let told_now = held.filter(|_| closed || told);
-                        if closed {
-                            self.hands.right.gripping = Gripping::Environment {
-                                object: object.clone(),
-                                distance,
-                                told: told || told_now.is_some(),
-                                hand: held,
-                            };
-                        }
-                        told_now.map(|hand| crate::client_side::Grab::new(object, hand, phase))
-                    }
-                    other => {
-                        self.hands.right.gripping = other;
-                        None
+                        })
                     }
                 };
-                let hands = conversation
-                    .right_hands()
-                    .into_iter()
-                    .map(|(source, pose)| {
-                        (
-                            source,
-                            crate::client_side::Hand::new(
-                                carriage.unplace(Vec3::from_array(pose.position)),
-                                unturn * glam::Quat::from_array(pose.orientation).normalize(),
-                            ),
-                        )
-                    })
-                    .collect();
+                let grab = told(
+                    &mut self.hands.right.gripping,
+                    controller(Side::Right),
+                    along(senses.ray),
+                    self.hands.right.grip_closed,
+                    Side::Right,
+                );
+                let left_grab = told(
+                    &mut self.hands.left.gripping,
+                    controller(Side::Left),
+                    along(senses.left_ray),
+                    self.hands.left.grip_closed,
+                    Side::Left,
+                );
+                let hands_of = |hands: Vec<(u32, tomori_protocol::Pose)>| {
+                    hands
+                        .into_iter()
+                        .map(|(source, pose)| {
+                            (
+                                source,
+                                crate::client_side::Hand::new(
+                                    carriage.unplace(Vec3::from_array(pose.position)),
+                                    unturn * glam::Quat::from_array(pose.orientation).normalize(),
+                                ),
+                            )
+                        })
+                        .collect()
+                };
+                let hands = hands_of(conversation.right_hands());
+                let left_hands = hands_of(conversation.left_hands());
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(
@@ -2464,7 +2514,9 @@ impl Step {
                         .with_sticks(left, right)
                         .with_scroll(scroll)
                         .with_grab(grab)
+                        .with_left_grab(left_grab)
                         .with_hands(hands)
+                        .with_left_hands(left_hands)
                         .as_participant(
                             conversation
                                 .source()
