@@ -19,16 +19,35 @@ pub(crate) fn capture(
     queue: &wgpu::Queue,
     scenery: &dyn Scenery,
     samples: u32,
-    (eye, target): (Vec3, Vec3),
+    view: (Vec3, Vec3),
 ) -> Vec<u8> {
-    let view_projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 200.0)
-        * Mat4::look_at_rh(eye, target, Vec3::Y);
+    let projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 200.0);
+    capture_sized(
+        device,
+        queue,
+        scenery,
+        samples,
+        view,
+        (WIDTH, HEIGHT, projection),
+    )
+}
+
+/// As [`capture`], `width` by `height` through `projection`.
+fn capture_sized(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scenery: &dyn Scenery,
+    samples: u32,
+    (eye, target): (Vec3, Vec3),
+    (width, height, projection): (u32, u32, Mat4),
+) -> Vec<u8> {
+    let view_projection = projection * Mat4::look_at_rh(eye, target, Vec3::Y);
     let texture = |format, samples, usage| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Farmyard test target"),
             size: wgpu::Extent3d {
-                width: WIDTH,
-                height: HEIGHT,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -93,10 +112,10 @@ pub(crate) fn capture(
         scenery.draw(&mut pass, 0);
         scenery.draw_translucent(&mut pass, 0);
     }
-    let stride = (WIDTH * 4).div_ceil(256) * 256;
+    let stride = (width * 4).div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Farmyard test readback"),
-        size: u64::from(stride * HEIGHT),
+        size: u64::from(stride * height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -107,12 +126,12 @@ pub(crate) fn capture(
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(stride),
-                rows_per_image: Some(HEIGHT),
+                rows_per_image: Some(height),
             },
         },
         wgpu::Extent3d {
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
     );
@@ -128,7 +147,7 @@ pub(crate) fn capture(
     let data = buffer.slice(..).get_mapped_range().unwrap();
     let pixels = data
         .chunks(stride as usize)
-        .flat_map(|row| &row[..(WIDTH * 4) as usize])
+        .flat_map(|row| &row[..(width * 4) as usize])
         .copied()
         .collect();
     drop(data);
@@ -153,7 +172,7 @@ fn average(pixels: &[u8], low: (f32, f32), high: (f32, f32)) -> [f32; 3] {
 }
 
 fn target(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> Farmyard {
-    Farmyard::new(
+    Farmyard::with_clock(
         &Target::new(
             device,
             queue,
@@ -165,6 +184,7 @@ fn target(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> Farmyard 
         ),
         &Coop::Built,
         Library::shared(),
+        Clock::Held(0.0),
     )
 }
 
@@ -188,7 +208,7 @@ fn workbench() -> (Vec3, Vec3) {
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["sky.wgsl"]);
+    assert_eq!(names, ["sky.wgsl", "water.wgsl"]);
     for (name, source) in files {
         test_gpu::validate_wgsl(&name, &source);
     }
@@ -251,7 +271,7 @@ fn the_farmyard_is_an_evening_yard_with_a_warmly_lit_red_coop() {
         farmyard.prepare(&queue, 1, Mat4::ZERO);
         // Registered, the build's sceneries make it for their targets.
         let mut sceneries = tomori_render::scenery::Sceneries::empty();
-        crate::register(&mut sceneries);
+        crate::registered(&mut sceneries, Coop::Built, Clock::Held(0.0));
         let made = sceneries.create(&Target::new(
             &device,
             &queue,
@@ -338,4 +358,129 @@ fn the_chickens_are_drawn_where_their_client_side_shows_them() {
         );
         assert!(pollster::block_on(scope.pop()).is_none());
     });
+}
+
+/// The backdrop's pictures: wide, through the headset's 50 m far plane.
+const PICTURE: (u32, u32) = (1280, 800);
+
+fn picture() -> (u32, u32, Mat4) {
+    let (width, height) = PICTURE;
+    (
+        width,
+        height,
+        Mat4::perspective_rh(1.3, width as f32 / height as f32, 0.05, 50.0),
+    )
+}
+
+/// Where `point` is drawn in a picture from `view`, as fractions across and down.
+fn seen_at((eye, target): (Vec3, Vec3), point: Vec3) -> (f32, f32) {
+    let clip = picture().2 * Mat4::look_at_rh(eye, target, Vec3::Y) * point.extend(1.0);
+    (clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5)
+}
+
+/// The average colour of a picture's pixels about `at`, fractions across and down.
+fn about(pixels: &[u8], at: (f32, f32)) -> f32 {
+    let (width, height) = PICTURE;
+    let (x, y) = ((at.0 * width as f32) as i32, (at.1 * height as f32) as i32);
+    let mut sum = 0.0;
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let index = (((y + dy) as u32 * width + (x + dx) as u32) * 4) as usize;
+            sum += pixels[index..index + 3]
+                .iter()
+                .map(|value| f32::from(*value))
+                .sum::<f32>();
+        }
+    }
+    sum / 25.0
+}
+
+/// From where participants arrive, looking at the coop, the waterfall over the back fence to its right; and from the
+/// workbench's curve, looking out over the yard to the river beyond its right side.
+fn backdrop_views() -> [(Vec3, Vec3); 2] {
+    let eyes = layout::ARRIVAL + Vec3::Y * 1.6;
+    let bench = Vec3::new(layout::WORKBENCH.x, 1.6, layout::WORKBENCH.y);
+    let out = Vec3::new(
+        layout::ARRIVAL.x - bench.x,
+        0.0,
+        layout::ARRIVAL.z - bench.z,
+    )
+    .normalize();
+    [
+        (
+            eyes,
+            Vec3::new(layout::ARRIVAL_FACING.x, 2.2, layout::ARRIVAL_FACING.z),
+        ),
+        (bench, bench + out * 10.0 + Vec3::Y * 0.4),
+    ]
+}
+
+#[test]
+fn the_backdrop_is_seen_from_the_arrival_and_the_workbench_its_water_moving() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let made = |clock| Farmyard::with_clock(&target, &Coop::Built, Library::shared(), clock);
+        let farmyard = made(Clock::Held(0.0));
+        let [arrival, workbench] = backdrop_views();
+        let from_arrival = capture_sized(&device, &queue, &farmyard, 4, arrival, picture());
+        let from_workbench = capture_sized(&device, &queue, &farmyard, 4, workbench, picture());
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_BACKDROP_PREVIEW") {
+            for (index, pixels) in [&from_arrival, &from_workbench].into_iter().enumerate() {
+                let picture =
+                    image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone()).unwrap();
+                picture
+                    .save(path.replace(".png", &format!("-{}.png", index + 1)))
+                    .unwrap();
+            }
+        }
+        // From the arrival, the waterfall falls brighter than the cliff and the bush either side of it.
+        let fall = seen_at(arrival, layout::WATERFALL);
+        assert!(
+            (0.5..0.95).contains(&fall.0) && (0.2..0.6).contains(&fall.1),
+            "{fall:?}"
+        );
+        let across = Vec3::new(4.0, 0.0, 0.0);
+        let beside = [
+            seen_at(arrival, layout::WATERFALL - across),
+            seen_at(arrival, layout::WATERFALL + across),
+        ];
+        let falling = about(&from_arrival, fall);
+        for side in beside {
+            assert!(
+                falling > about(&from_arrival, side) * 1.5,
+                "{falling} {side:?}"
+            );
+        }
+        // From the workbench, the river beyond the fence is drawn, darker water between paler shingle and grass.
+        let river = seen_at(workbench, layout::RIVER[7]);
+        assert!(
+            (0.0..1.0).contains(&river.0) && (0.5..1.0).contains(&river.1),
+            "{river:?}"
+        );
+        // The water moves: a moment later, the waterfall's streaks have fallen on.
+        let later = made(Clock::Held(0.6));
+        let moved = capture_sized(&device, &queue, &later, 4, arrival, picture());
+        assert_ne!(about(&moved, fall), falling);
+        // Moving with the time, as the farmyard is made for a client, it is drawn too.
+        let running = Farmyard::new(&target, &Coop::Built, Library::shared());
+        assert_eq!(running.clock, Clock::Running);
+        capture_sized(&device, &queue, &running, 4, arrival, picture());
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_running_clock_says_the_time_since_the_scenery_was_made_and_a_held_one_its_moment() {
+    let made = std::time::Instant::now();
+    assert!(Clock::Running.seconds(made) < 60.0);
+    assert_eq!(Clock::Held(2.5).seconds(made), 2.5);
 }
