@@ -130,11 +130,13 @@ fn cards_no_longer_drawn_are_freed_beyond_a_few_spare() {
             "those kept keep their meshes"
         );
         // Every face a card knows is the one it shows.
-        for (address, card) in &panels.faces {
-            assert_eq!(
-                *address,
-                crate::scene_graphics::address(panels.cards[*card].panel.shown().unwrap())
-            );
+        for (address, cards) in &panels.faces {
+            for card in cards {
+                assert_eq!(
+                    *address,
+                    crate::scene_graphics::address(panels.cards[*card].panel.shown().unwrap())
+                );
+            }
         }
         // A face to come takes a spare card, rather than a new one.
         let more = vec![many[5].clone(), many[17].clone(), face("new")];
@@ -163,5 +165,67 @@ fn cards_no_longer_drawn_are_freed_beyond_a_few_spare() {
         panels.set_cards(&device, &queue, &renderer, &unplaced);
         assert!(panels.list(Mat4::IDENTITY).is_empty());
         assert_eq!(panels.cards.len(), SPARE_CARDS);
+    });
+}
+
+#[test]
+fn a_face_drawn_by_several_sheets_keeps_each_mesh_however_they_are_reordered() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4, 4);
+        let mut panels = Panels::new(&device, &renderer);
+        // A curved wall's one slot board, drawn by each of its slots, among other faces.
+        let board = face("slot");
+        let (one, two) = (face("one"), face("two"));
+        let mut faces = vec![
+            board.clone(),
+            one.clone(),
+            board.clone(),
+            two,
+            board.clone(),
+        ];
+        let uploads = panels.set_cards(&device, &queue, &renderer, &sheets(&faces));
+        assert_eq!(
+            uploads,
+            Uploads {
+                built: 5,
+                recoloured: 0
+            }
+        );
+        assert_eq!(
+            panels.faces[&crate::scene_graphics::address(&board)].len(),
+            3
+        );
+        // However they are ordered, each is drawn by a card that showed it.
+        for turn in 1..faces.len() {
+            faces.rotate_left(turn);
+            let uploads = panels.set_cards(&device, &queue, &renderer, &sheets(&faces));
+            assert_eq!(uploads, Uploads::default(), "turned {turn}");
+            assert!(
+                drawn(&panels)
+                    .iter()
+                    .zip(&faces)
+                    .all(|(a, b)| Arc::ptr_eq(a, b))
+            );
+        }
+        assert_eq!(panels.cards.len(), 5);
+        // Drawn by fewer, one card is left spare, still showing it; a face another sheet then takes it for is built.
+        faces.retain(|face| !Arc::ptr_eq(face, &one));
+        faces.pop();
+        panels.set_cards(&device, &queue, &renderer, &sheets(&faces));
+        faces.push(face("three"));
+        let uploads = panels.set_cards(&device, &queue, &renderer, &sheets(&faces));
+        assert_eq!(
+            uploads,
+            Uploads {
+                built: 1,
+                recoloured: 0
+            }
+        );
+        assert_eq!(uploads.meshes(), 1);
+        for (address, cards) in &panels.faces {
+            for card in cards {
+                assert_eq!(panels.cards[*card].face, *address);
+            }
+        }
     });
 }

@@ -5,7 +5,9 @@
 use crate::{
     connection::Connection,
     conversation::Conversation,
+    frame_timing::{self, FrameTimes, Segment, Timer},
     graphics::Renderer,
+    log_cadence::{self, Cadence},
     scene::desktop::{Button, Desktop, Direction, Key, KeyResult, TITLE},
     scene_graphics::{self, Panels},
     spatial_audio,
@@ -68,6 +70,9 @@ pub struct Participant {
     /// The desktop's logic, whose first frame steps from when the window was ready.
     desktop: Desktop,
     first_frame: bool,
+    /// What each frame drawn costs the CPU, summarized once a minute with the frame rate; see `design/rendering.md`.
+    frame_times: FrameTimes,
+    frame_log: Cadence,
 }
 
 impl Participant {
@@ -131,6 +136,8 @@ impl Participant {
             occluded: false,
             desktop,
             first_frame: true,
+            frame_times: FrameTimes::default(),
+            frame_log: Cadence::new(log_cadence::FRAME_SUMMARY),
         }
     }
 
@@ -150,42 +157,64 @@ impl Participant {
         surface.request_redraw();
     }
 
-    /// One frame of the desktop's logic, returning the head's view and projection, and the transform from the scene to the participant's room, to draw it with.
-    fn step(&mut self, surface: &mut dyn Surface) -> (Mat4, Mat4) {
+    /// One frame of the desktop's logic, returning the head's view and projection, and the transform from the scene to the participant's room, to draw it with, each part timed by `timer`.
+    fn step(&mut self, surface: &mut dyn Surface, timer: &mut Timer) -> (Mat4, Mat4) {
         let now = Instant::now();
         let (conversation, connection) = (&mut self.conversation, &mut self.connection);
-        connection.poll(self.desktop.focused(), conversation);
+        timer.time(Segment::Poll, || {
+            connection.poll(self.desktop.focused(), conversation)
+        });
         let size = Vec2::new(self.width.max(1) as f32, self.height.max(1) as f32);
+        let stepping = Instant::now();
         let drawn = self
             .desktop
             .frame(conversation, connection.feedback(), now, size);
         if let Some(title) = &drawn.title {
             surface.set_title(title);
         }
-        scene_graphics::draw(
-            &mut self.renderer,
-            &self.device,
-            &self.queue,
-            &mut self.panels,
-            &drawn.frame,
-        );
+        timer.add(Segment::Step, stepping.elapsed());
+        let uploads = timer.time(Segment::Draw, || {
+            scene_graphics::draw(
+                &mut self.renderer,
+                &self.device,
+                &self.queue,
+                &mut self.panels,
+                &drawn.frame,
+            )
+        });
+        timer.meshes(uploads.meshes());
         // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
-        spatial_audio::listen(
-            connection,
-            drawn.frame.listener,
-            drawn.frame.agent,
-            conversation,
-        );
+        timer.time(Segment::Audio, || {
+            spatial_audio::listen(
+                connection,
+                drawn.frame.listener,
+                drawn.frame.agent,
+                conversation,
+            )
+        });
         if let Some(presence) = &drawn.frame.presence {
-            presence.send(connection);
+            timer.time(Segment::Presence, || presence.send(connection));
         }
         (drawn.view_projection, drawn.scene_to_space)
     }
 
-    /// One frame of the desktop's logic, drawn.
+    /// One frame of the desktop's logic, drawn, and what it cost this thread kept, summarized with the frame rate at the first frame and then at most once a minute.
     fn frame(&mut self, surface: &mut dyn Surface) -> Result<()> {
-        let (view_projection, scene_to_space) = self.step(surface);
-        self.draw(surface, view_projection, scene_to_space)
+        let mut timer = Timer::start();
+        let started = Instant::now();
+        let (view_projection, scene_to_space) = self.step(surface, &mut timer);
+        self.draw(surface, view_projection, scene_to_space, &mut timer)?;
+        timer.add(Segment::Frame, started.elapsed());
+        self.frame_times.record(timer.finish());
+        if let Some(due) = self.frame_log.record(Instant::now())
+            && let Some(summary) = self.frame_times.summary()
+        {
+            log::info!(
+                "Desktop frames, {}; {summary}",
+                frame_timing::rate(due.rate())
+            );
+        }
+        Ok(())
     }
 
     /// Draw what the last step decided into the window, from the participant's room: `view_projection` is the head's in it, and `scene_to_space` takes the space's scene, and the panels in it, from where the participant travelled to it. See `design/locomotion.md`.
@@ -194,18 +223,21 @@ impl Participant {
         surface: &mut dyn Surface,
         view_projection: Mat4,
         scene_to_space: Mat4,
+        timer: &mut Timer,
     ) -> Result<()> {
-        let Some(target) = surface.acquire()? else {
+        let Some(target) = timer.time(Segment::ImageWait, || surface.acquire())? else {
             return Ok(());
         };
-        self.renderer.render(
-            &self.device,
-            &self.queue,
-            &[target],
-            &[view_projection],
-            scene_to_space,
-            &self.panels.list(scene_to_space),
-        );
+        timer.time(Segment::Render, || {
+            self.renderer.render(
+                &self.device,
+                &self.queue,
+                &[target],
+                &[view_projection],
+                scene_to_space,
+                &self.panels.list(scene_to_space),
+            )
+        });
         surface.present();
         if self.first_frame {
             log::info!("Presented first desktop frame");
@@ -279,7 +311,7 @@ impl Contents for Participant {
         if !self.hidden() {
             return Ok(Wake::Wait);
         }
-        self.step(surface);
+        self.step(surface, &mut Timer::start());
         Ok(Wake::At(Instant::now() + Duration::from_millis(20)))
     }
 }
@@ -552,7 +584,7 @@ mod tests {
                 ] {
                     input(&mut window, &mut surface, press(code, pressed));
                 }
-                let (_, scene_to_space) = window.step(&mut surface);
+                let (_, scene_to_space) = window.step(&mut surface, &mut Timer::start());
                 let (_, turned, moved) = scene_to_space.to_scale_rotation_translation();
                 if turned.angle_between(Quat::IDENTITY) > 0.1 && moved.length() > 0.1 {
                     break;
@@ -560,7 +592,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
             // The presence the window sends has its travel applied, so Bea receives the head where the participant now is in the shared scene, which their room takes back to where they stand at home, and hears them there.
-            let (_, scene_to_space) = window.step(&mut surface);
+            let (_, scene_to_space) = window.step(&mut surface, &mut Timer::start());
             let home = tomori_scene::arrival::HOME;
             let head = bea.wait_for(
                 || window.redraw(&mut surface).unwrap(),
@@ -591,14 +623,20 @@ mod tests {
                     Instant::now() < deadline,
                     "timed out showing the transcript"
                 );
-                let (view_projection, scene_to_space) = window.step(&mut surface);
+                let (view_projection, scene_to_space) =
+                    window.step(&mut surface, &mut Timer::start());
                 if last(&window, scene_to_space) != last(&window, Mat4::IDENTITY) {
                     break (view_projection, scene_to_space);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             };
             window
-                .draw(&mut surface, view_projection, scene_to_space)
+                .draw(
+                    &mut surface,
+                    view_projection,
+                    scene_to_space,
+                    &mut Timer::start(),
+                )
                 .unwrap();
             let drawn = surface.pixels(&device, &queue);
             // What the window draws is the space, and the panels in it, both taken to the participant's room; drawing either from home instead would differ.

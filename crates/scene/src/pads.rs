@@ -231,7 +231,7 @@ pub(crate) fn label(
             viewer,
             1.0,
         )),
-        canvas: Some(std::sync::Arc::new(canvas)),
+        canvas: Some(crate::frame_timing::drawn(canvas)),
     })
 }
 

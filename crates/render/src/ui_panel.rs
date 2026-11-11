@@ -161,8 +161,7 @@ pub struct Panel {
     image: Option<String>,
     /// The image's quad, in the panel's plane, with where in the image each corner is.
     image_quad: wgpu::Buffer,
-    /// How many times its mesh was built, and its frame alone recoloured, for the tests.
-    #[cfg(test)]
+    /// How many times its mesh was built, and its frame alone recoloured.
     pub(crate) builds: (usize, usize),
 }
 
@@ -208,7 +207,6 @@ impl Panel {
             occludes: false,
             image: None,
             image_quad,
-            #[cfg(test)]
             builds: (0, 0),
         }
     }
@@ -261,19 +259,13 @@ impl Panel {
             (start * size_of::<Vertex>()) as u64,
             bytemuck::cast_slice(&frame),
         );
-        #[cfg(test)]
-        {
-            self.builds.1 += 1;
-        }
+        self.builds.1 += 1;
         true
     }
 
     /// Build `canvas`'s mesh and write it, with its image's quad.
     fn build(&mut self, queue: &wgpu::Queue, canvas: &Canvas) {
-        #[cfg(test)]
-        {
-            self.builds.0 += 1;
-        }
+        self.builds.0 += 1;
         let waited = tomori_text::atlas::waited();
         let mut mesh = canvas.mesh();
         self.complete = tomori_text::atlas::waited() == waited;

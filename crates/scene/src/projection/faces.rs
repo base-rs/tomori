@@ -266,9 +266,14 @@ thread_local! {
     pub(super) static COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-/// Count one more layout, or face, for the tests.
-#[cfg(test)]
+/// Count one more layout, or face, for the tests, and the faces for the frame's timing.
 fn count(layouts: usize, faces: usize) {
+    crate::frame_timing::faces(faces);
+    counted(layouts, faces);
+}
+
+#[cfg(test)]
+fn counted(layouts: usize, faces: usize) {
     COUNTS.with(|counts| {
         let (laid, drawn) = counts.get();
         counts.set((laid + layouts, drawn + faces));
@@ -276,7 +281,7 @@ fn count(layouts: usize, faces: usize) {
 }
 
 #[cfg(not(test))]
-fn count(_: usize, _: usize) {}
+fn counted(_: usize, _: usize) {}
 
 impl Layout {
     fn new(panel: &Panel, fit: Fit) -> Self {
@@ -335,6 +340,7 @@ impl Layout {
         let face = match self.face.take() {
             Some(face) if face.view == view && face.border == border => face,
             Some(face) if face.view == view => {
+                crate::frame_timing::faces(1);
                 let mut canvas = Canvas::clone(&face.canvas);
                 canvas.border = Some(border);
                 Face {

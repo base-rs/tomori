@@ -22,7 +22,7 @@ use super::{LABEL_INDENT, PIXEL, SLOT, WALL_PADDING, wall_border, wall_label};
 type Board = group::Extent;
 
 /// The other walls of `wall`'s group among `walls`.
-fn members<'a>(wall: &Wall, walls: &[&'a Wall]) -> Vec<&'a Wall> {
+pub(super) fn members<'a>(wall: &Wall, walls: &[&'a Wall]) -> Vec<&'a Wall> {
     walls
         .iter()
         .filter(|other| other.id != wall.id && other.group.is_some() && other.group == wall.group)

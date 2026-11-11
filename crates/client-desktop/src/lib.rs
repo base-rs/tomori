@@ -21,8 +21,8 @@ use tomori_render::{graphics, scene_graphics};
 #[cfg(test)]
 use tomori_scene::test_support;
 use tomori_scene::{
-    caption, capture, conversation, environment, hand_menu, pointing, scene, spatial_audio, swarm,
-    transcript, ui_text,
+    caption, capture, conversation, environment, frame_timing, hand_menu, log_cadence, pointing,
+    scene, spatial_audio, swarm, transcript, ui_text,
 };
 
 use connection::Connection;

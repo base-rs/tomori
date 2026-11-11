@@ -440,6 +440,8 @@ pub struct Step {
     board: crate::board::Board,
     /// The space's projected panels: the one carried and the one let go; see `design/projection.md`.
     projector: crate::projection::Projector,
+    /// The label on the ray last drawn, handed over again while it says the same, so that it is not drawn again.
+    ray_label: crate::projection::KeptLabel,
     /// How far along the ray the card it met last frame was, which the grip picks up instead of a panel behind it.
     card_reach: f32,
     /// Where the participant has travelled, in an environment that allows it, and the teleport being aimed; see `design/locomotion.md`.
@@ -566,6 +568,7 @@ impl Default for Step {
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
             projector: crate::projection::Projector::paced(),
+            ray_label: crate::projection::KeptLabel::default(),
             card_reach: f32::INFINITY,
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
@@ -1425,6 +1428,7 @@ impl Step {
                 .chosen_row()
                 .map(|(panel, row)| (panel.to_owned(), row.to_owned())),
         });
+        let projecting = Instant::now();
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
@@ -1451,6 +1455,7 @@ impl Step {
             now,
             dt,
         });
+        crate::frame_timing::projection(projecting.elapsed());
         if let Some(change) = projected.wall.clone() {
             feedback.emit(feedback::Event::Hover, now);
             conversation.set_wall(change);
@@ -1781,10 +1786,9 @@ impl Step {
                         })
                 })
                 .map(|action| (self.controls, action));
-            projection.push(crate::projection::label(
+            projection.push(self.ray_label.sheet(
                 shown,
-                *point,
-                senses.viewer.unwrap_or(arrival::HOME),
+                (*point, senses.viewer.unwrap_or(arrival::HOME)),
                 self.projector.scrollable(panel).then_some(self.controls),
                 tick,
             ));

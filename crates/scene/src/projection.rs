@@ -1078,6 +1078,19 @@ pub fn label(
     scrolls: Option<Controls>,
     item: Option<(Controls, ItemAction)>,
 ) -> Sheet {
+    label_sheet(
+        crate::frame_timing::drawn(label_face(panel, scrolls, item)),
+        at,
+        viewer,
+    )
+}
+
+/// The face of the label on the ray naming `panel`, as [`label`] draws it.
+fn label_face(
+    panel: &Panel,
+    scrolls: Option<Controls>,
+    item: Option<(Controls, ItemAction)>,
+) -> Canvas {
     let mut canvas = Canvas::new(LABEL_COLUMNS, LABEL_PIXEL);
     canvas.background = [0.0, 0.0, 0.0, 0.88];
     canvas.border = Some(HIGHLIGHT);
@@ -1110,11 +1123,7 @@ pub fn label(
             LABEL_COLUMNS,
         ));
     }
-    let place = match &panel.place {
-        Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL => "on the Tomori wall",
-        Place::Wall { .. } => "on a wall",
-        _ => "floating",
-    };
+    let place = place_named(&panel.place);
     canvas.rows.push(Row::text(
         &format!("{} ago, {place}", crate::board::age(panel.age)),
         Style::plain(DIM),
@@ -1153,6 +1162,20 @@ pub fn label(
             LABEL_COLUMNS,
         )));
     }
+    canvas
+}
+
+/// Where the label on the ray says a panel at `place` is.
+fn place_named(place: &Place) -> &'static str {
+    match place {
+        Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL => "on the Tomori wall",
+        Place::Wall { .. } => "on a wall",
+        _ => "floating",
+    }
+}
+
+/// The label on the ray showing `canvas`, pointed at where the ray meets its panel, `at`, facing `viewer`.
+fn label_sheet(canvas: Arc<Canvas>, at: Vec3, viewer: Vec3) -> Sheet {
     let towards = (viewer - at).try_normalize().unwrap_or(Vec3::Z);
     let (_, height) = canvas.size();
     Sheet {
@@ -1161,8 +1184,54 @@ pub fn label(
             viewer,
             1.0,
         )),
-        canvas: Some(std::sync::Arc::new(canvas)),
+        canvas: Some(canvas),
     }
+}
+
+/// What the label on the ray is drawn from: the panel it names, how it scrolls and the item it names.
+type LabelKey = (Panel, Option<Controls>, Option<(Controls, ItemAction)>);
+
+/// The label on the ray last drawn, with what it was drawn from, handed over again while it says the same, so that it
+/// is not drawn again and its mesh is kept as it turns to face the viewer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KeptLabel(Option<(LabelKey, Arc<Canvas>)>);
+
+impl KeptLabel {
+    /// The label on the ray naming `panel`, as [`label`] draws it, its face the one kept while it says the same.
+    pub(crate) fn sheet(
+        &mut self,
+        panel: &Panel,
+        (at, viewer): (Vec3, Vec3),
+        scrolls: Option<Controls>,
+        item: Option<(Controls, ItemAction)>,
+    ) -> Sheet {
+        let canvas = match &self.0 {
+            Some(((kept, was_scrolling, was_item), canvas))
+                if *was_scrolling == scrolls && *was_item == item && says_same(kept, panel) =>
+            {
+                canvas.clone()
+            }
+            _ => {
+                let canvas = crate::frame_timing::drawn(label_face(panel, scrolls, item));
+                self.0 = Some(((panel.clone(), scrolls, item), canvas.clone()));
+                canvas
+            }
+        };
+        label_sheet(canvas, at, viewer)
+    }
+}
+
+/// Whether the label on the ray naming `kept` says what one naming `panel` would, compared in place: its title, its
+/// metadata, its code, whether it is pinned, where it is, and its age as it shows, and its body where its name or the
+/// lines it holds come from it.
+fn says_same(kept: &Panel, panel: &Panel) -> bool {
+    kept.title == panel.title
+        && kept.meta == panel.meta
+        && kept.code == panel.code
+        && kept.pinned == panel.pinned
+        && place_named(&kept.place) == place_named(&panel.place)
+        && (kept.age == panel.age || crate::board::age(kept.age) == crate::board::age(panel.age))
+        && ((!panel.title.is_empty() && panel.code.is_none()) || kept.body == panel.body)
 }
 
 /// Which controls the participant has, which the hint beside a panel carried names.
@@ -1263,7 +1332,7 @@ fn hint_sheet(mut canvas: Canvas, model: Mat4, (_, height): (f32, f32), viewer: 
     };
     Sheet {
         model: Some(facing(at, viewer, 1.0)),
-        canvas: Some(std::sync::Arc::new(canvas)),
+        canvas: Some(crate::frame_timing::drawn(canvas)),
     }
 }
 
@@ -1528,6 +1597,8 @@ pub struct Projector {
     /// Each panel's faces laid out, and how far it scrolls as it stands this frame, laid out again only when what it
     /// shows changes, as the server's patch upserts it, or its size does. See `design/rendering.md`.
     faces: HashMap<String, faces::Faces>,
+    /// Each wall's own faces, kept while what they are drawn from is the same, and forgotten once it is not shown.
+    walls: walls::WallFaces,
     /// Whether it lays out at most [`faces::LAYOUTS`] panels a frame for what the server changed, as the frame step's
     /// does, or every one in the frame it changes, as by default. See [`Projector::paced`].
     paced: bool,
@@ -1610,6 +1681,7 @@ impl Projector {
             self.thrown = None;
             self.scrolls.clear();
             self.faces.clear();
+            self.walls = walls::WallFaces::default();
             self.editor.stop();
             return Output::default();
         };
@@ -1926,7 +1998,7 @@ impl Projector {
     /// before them and write depth only once drawn, so that a nearer one covers one behind it, and a wall's panels cover
     /// the wall. Each of `standing` shows its face of `faces`.
     fn sheets(
-        &self,
+        &mut self,
         walls: &[(&Wall, Mat4)],
         standing: &[Standing],
         faces: &[Arc<Canvas>],
@@ -1939,7 +2011,9 @@ impl Projector {
         // A panel drawn in a wall's slot belongs to that wall's group.
         let moved = self
             .held()
-            .or(self.pending.as_ref().map(|pending| pending.panel.as_str()));
+            .or(self.pending.as_ref().map(|pending| pending.panel.as_str()))
+            .map(str::to_owned);
+        let moved = moved.as_deref();
         fn in_layout<'a>(panel: &'a Panel, moved: Option<&str>) -> Option<&'a str> {
             match &panel.place {
                 Place::Wall { wall, .. } if moved != Some(panel.id.as_str()) => Some(wall),
@@ -1947,45 +2021,42 @@ impl Projector {
             }
         }
         let drawn: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
+        self.walls.retain(&drawn);
         let mut groups: Vec<(f32, Vec<Sheet>)> = walls
             .iter()
             .map(|(wall, frame)| {
                 // A flat wall is one board, drawn edge by edge in a group; a curved one, a board for each slot, and its
-                // label below their middle, once for a group.
+                // label below their middle, once for a group. Each is the face drawn before while what it is drawn
+                // from is the same.
                 let mut sheets = match arc(wall) {
-                    None if wall.group.is_some() => boards::sheets(wall, *frame, &drawn),
-                    None => vec![Sheet {
-                        canvas: Some(std::sync::Arc::new(wall_face(wall))),
-                        model: Some(
-                            *frame
-                                * Mat4::from_scale(Vec3::splat(wall.scale() * self.folded(wall))),
-                        ),
-                    }],
+                    None if wall.group.is_some() => self
+                        .walls
+                        .group(wall, &drawn)
+                        .iter()
+                        .map(|(face, model)| sheet(face, *frame * *model))
+                        .collect(),
+                    None => vec![sheet(
+                        &self.walls.board(wall),
+                        *frame * Mat4::from_scale(Vec3::splat(wall.scale() * self.folded(wall))),
+                    )],
                     Some(_) => {
                         let (_, height) = wall.size();
+                        let board = self.walls.slot(wall);
                         let mut boards: Vec<Sheet> = self
                             .frames(wall, *frame)
                             .into_iter()
-                            .map(|model| Sheet {
-                                canvas: Some(std::sync::Arc::new(slot_board(
-                                    wall_border(wall),
-                                    Cells::of(wall),
-                                ))),
-                                model: Some(model),
-                            })
+                            .map(|model| sheet(&board, model))
                             .collect();
                         // Below its rows, since the status pill stands just above the Tomori wall from home; not
                         // while it is folded.
                         if boards::labelled(wall, &drawn) && self.folded(wall) == 1.0 {
-                            boards.push(Sheet {
-                                canvas: Some(std::sync::Arc::new(arc_label(wall))),
-                                model: Some(
-                                    *frame
-                                        * Mat4::from_translation(
-                                            -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
-                                        ),
-                                ),
-                            });
+                            boards.push(sheet(
+                                &self.walls.label(wall),
+                                *frame
+                                    * Mat4::from_translation(
+                                        -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
+                                    ),
+                            ));
                         }
                         boards
                     }
@@ -2000,11 +2071,16 @@ impl Projector {
                         .map(|((_, model, _), face)| sheet(face, *model)),
                 );
                 // The outline of the slot a panel carried would take, over any panel in it.
-                if let Some(aim) = self.aim.as_ref().filter(|aim| aim.wall == wall.id) {
-                    sheets.push(Sheet {
-                        canvas: Some(std::sync::Arc::new(ghost(Cells::of(wall)))),
-                        model: Some(aim.model * Mat4::from_translation(Vec3::Z * LIFT)),
-                    });
+                if let Some(model) = self
+                    .aim
+                    .as_ref()
+                    .filter(|aim| aim.wall == wall.id)
+                    .map(|aim| aim.model)
+                {
+                    sheets.push(sheet(
+                        &self.walls.ghost(wall),
+                        model * Mat4::from_translation(Vec3::Z * LIFT),
+                    ));
                 }
                 (frame.w_axis.truncate().distance(viewer), sheets)
             })
@@ -2266,6 +2342,7 @@ mod image;
 mod list;
 pub(crate) use list::RowMarks;
 pub mod travel;
+mod walls;
 
 #[cfg(test)]
 mod tests;
