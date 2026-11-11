@@ -555,3 +555,37 @@ fn in_the_farmyard_it_follows_and_faces_them_for_as_long_as_its_voice_plays_afte
     let (_, facing) = presence(&hub, &space, over);
     assert!(apart(facing, turned).abs() < 3.0, "{facing} for {turned}");
 }
+
+#[test]
+fn at_an_environment_s_follow_height_arrived_it_only_turns_to_presses_and_settles_within_3_m_across_the_floor()
+ {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    // Its home floating 5.3 m up, it hovers 5.1 m above the floor as it comes to someone: about 4 m from Ada's eyes.
+    let high = tomori_protocol::Pose::at([0.0, 5.3, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+    hub.set_environments(Environments::new([crate::Environment::new("sky", "Sky")
+        .with_agent(high)
+        .with_follow_height(5.1)]));
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    asked(&hub, &ada, &commands, &space);
+    let for_ada = agent(&hub, &space).0.expect("gone to Ada");
+    assert!((for_ada.position[1] - 5.1).abs() < 1e-4, "{for_ada:?}");
+    assert!(crate::follow::distance(for_ada.position, ADA) > 4.0);
+    // Settling a step aside, within 3 m of it across the floor, only turns it, again and again.
+    for (n, step) in [[0.5, 1.6, 2.2], [-0.5, 1.6, 2.4], [0.3, 1.6, 2.6]]
+        .into_iter()
+        .enumerate()
+    {
+        stands(&ada, step, [0.0, 1.6, -3.0]);
+        hub.flush_snapshots(Instant::now() + SETTLE * (n as u32 + 2));
+        assert_eq!(agent(&hub, &space).0, Some(for_ada), "{step:?}");
+    }
+    // A fresh press and its words, from where she stands, only turn it.
+    hub.drive_event(&space, Event::Idle);
+    for utterance in ["u2", "u3"] {
+        press(&ada, utterance);
+        hub.flush_snapshots(Instant::now() + COMMIT * 2);
+        release(&ada, utterance);
+        cancel(&ada, utterance);
+        assert_eq!(agent(&hub, &space).0, Some(for_ada), "{utterance}");
+    }
+}

@@ -641,10 +641,10 @@ impl Renderer {
         }
     }
 
-    /// Draw the ring on the floor at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes:
-    /// on the space's floor, however high its home stands, a little dimmer while the agent is away, brightening as it
-    /// comes back. With none, or one that is nonsense, it is drawn beneath the
-    /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
+    /// Draw the ring at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes: at its height,
+    /// on the space's floor however high its home stands or under the home where its environment says so, a little
+    /// dimmer while the agent is away, brightening as it comes back. With none, or one that is nonsense, it is drawn
+    /// beneath the swarm wherever it stands, as before there were homes. See `design/environments.md`.
     pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
         self.home_ring = ring.filter(|ring| {
             ring.centre.is_finite()
@@ -652,6 +652,7 @@ impl Renderer {
                 && ring.radius > 0.0
                 && ring.radius <= MOST_HOME_RING
                 && ring.sweep.is_finite()
+                && ring.height.is_finite()
         });
     }
 
@@ -698,13 +699,13 @@ impl Renderer {
         if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
-        // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, on the space's
-        // floor however high its home stands; or else beneath the swarm, as before there were homes: on the room's
+        // The ring at home, the agent's place, which stays there wherever the agent goes, on the space's floor however
+        // high its home stands, or under it where its environment says so; or else beneath the swarm, as before there were homes: on the room's
         // floor, or, for a swarm raised above its usual height, on the floor it would stand that high over. A little
         // dimmer while the agent is away, it brightens as it comes back within the ring.
         let swarm_at = swarm.anchor().position;
         let (ring, floor) = match self.home_ring {
-            Some(ring) => (ring, tomori_protocol::entourage::FLOOR + FLOOR_LIFT),
+            Some(ring) => (ring, ring.height + FLOOR_LIFT),
             None => (
                 tomori_scene::anchors::HomeRing {
                     centre: swarm_at,
@@ -3213,6 +3214,7 @@ mod tests {
                 radius: tomori_protocol::cluster::RING,
                 towards: glam::Vec3::Z,
                 sweep: std::f32::consts::TAU,
+                height: tomori_protocol::entourage::FLOOR,
             };
             renderer.set_home_ring(Some(ring));
             // The ring's cubes, on the space's floor beneath home, though home stands 0.1 m above the swarm's usual
@@ -3325,6 +3327,23 @@ mod tests {
                     "{height} {middle}"
                 );
             }
+            // Under a home floating high, where its environment asks, the ring lies at its height, whole, about home.
+            let high = home.with_y(5.3);
+            renderer.set_home_ring(Some(HomeRing {
+                centre: high,
+                height: 3.9,
+                ..ring
+            }));
+            swarm.set_anchor(at(high));
+            renderer.update(&queue, &swarm, None, false);
+            assert!(floor(&renderer).is_empty());
+            let under = on(&renderer, 3.9);
+            assert_eq!(under.len(), HOME_RING_CUBES);
+            assert!(under.iter().all(|instance| {
+                let across =
+                    glam::Vec2::new(instance.position[0] - home.x, instance.position[2] - home.z);
+                (across.length() - ring.radius).abs() < 1e-4
+            }));
             swarm.set_anchor(at(home + glam::Vec3::new(0.9, 0.0, 0.0)));
             // Nonsense, or none, draws it beneath the swarm, as before there were homes.
             for nonsense in [
@@ -3334,6 +3353,10 @@ mod tests {
                 },
                 HomeRing {
                     centre: glam::Vec3::NAN,
+                    ..ring
+                },
+                HomeRing {
+                    height: f32::INFINITY,
                     ..ring
                 },
             ] {

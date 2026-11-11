@@ -821,7 +821,7 @@ impl Hub {
     }
 
     /// What the agent of `space` keeps clear of now, the environment's solids, the walls shown, the panels floating and
-    /// everyone's heads; what the space projects; and where the agent's home is.
+    /// everyone's heads, and how high it hovers there; what the space projects; and where the agent's home is.
     fn scene(&self, state: &HubState, space: &str) -> (Scene, tomori_protocol::Projection, Pose) {
         let record = state.space(space).expect("the caller found it");
         let environments = self.environments();
@@ -849,7 +849,8 @@ impl Hub {
             &projection.walls,
             panels,
             heads,
-        );
+        )
+        .hovering(environments.follow_height(environment));
         (scene, projection, home(&environments.anchors(environment)))
     }
 }
@@ -1165,7 +1166,7 @@ impl HubState {
             following.facing = Some(eyes);
             following.poll.get_or_insert(now + POLL);
         };
-        if follow::near_enough(&agent, &speaker) {
+        if follow::near_enough(&agent, &speaker, scene) {
             turn(following);
             self.touch_space(space);
             return;

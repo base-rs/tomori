@@ -109,6 +109,86 @@ fn the_spot_stands_at_a_face_s_height_for_anyone_seated_or_standing_within_its_b
 }
 
 #[test]
+fn an_environment_s_follow_height_hovers_it_above_the_floor_within_reach_of_anyone_on_any_level() {
+    // From a home 5.3 m up, for someone standing on the main floor, a bridge 0.5 m up, a deck 2.7 m up and a basement
+    // 4.5 m down: by default, a little above their eyes within the floor's heights; at a follow height of 5.1 m, that
+    // high over the main floor and the bridge, above the side walls, but no more than 3.5 m above their eyes, and never
+    // below them.
+    let from = [0.0, 5.3, -4.0];
+    for (floor, default, declared) in [
+        (0.0, 1.7, 5.1),
+        (0.5, 2.2, 5.1),
+        (2.7, 2.4, 5.1),
+        (-4.5, 1.1, -4.5 + 1.6 + HIGHEST_ABOVE),
+    ] {
+        let eyes = floor + 1.6;
+        let at = [0.0, eyes, 0.0];
+        let ada = speaker(at, [0.0, eyes, -3.0]);
+        let by_default = spot(from, &ada, &open(&[at])).expect("clear");
+        assert!((by_default.position[1] - default).abs() < 1e-5, "{floor}");
+        let hovering = spot(from, &ada, &open(&[at]).hovering(Some(5.1))).expect("clear");
+        assert!(
+            (hovering.position[1] - declared).abs() < 1e-5,
+            "{floor}: {hovering:?}"
+        );
+        // As far from them across the floor, on the same line, facing them: above them, within 3.5 m of their eyes.
+        assert!((level(sub(hovering.position, at)) - CONVERSATION).abs() < 1e-4);
+        assert!((hovering.position[0] - by_default.position[0]).abs() < 1e-4);
+        assert!((hovering.position[2] - by_default.position[2]).abs() < 1e-4);
+        let above = hovering.position[1] - eyes;
+        assert!(
+            (RISE - 1e-5..=HIGHEST_ABOVE + 1e-5).contains(&above),
+            "{floor}: {above}"
+        );
+        // Arrived, it is near enough, measured across the floor, though its eyes are 4 m from it.
+        let scene = open(&[at]).hovering(Some(5.1));
+        assert!(near_enough(&hovering, &ada, &scene), "{floor}");
+        let stepped = speaker([0.0, eyes, 0.9], [0.0, eyes, -3.0]);
+        assert!(near_enough(&hovering, &stepped, &scene), "{floor}");
+        let far = speaker([0.0, eyes, 1.2], [0.0, eyes, -3.0]);
+        assert!(!near_enough(&hovering, &far, &scene), "{floor}");
+    }
+    // At its follow height, its eyes 4.03 m from it, it would not be near enough by distance in space.
+    let ada = speaker(EYES, [0.0, 1.6, -3.0]);
+    let hovering = spot(from, &ada, &open(&[EYES]).hovering(Some(5.1))).expect("clear");
+    assert!(!near_enough(&hovering, &ada, &Scene::default()));
+    // Beneath the basement's ceiling, the main floor's slab, a declared solid, nothing at 0.6 m is seen from their eyes:
+    // it stands a little above their eyes instead.
+    let basement = [0.0, -2.9, 0.0];
+    let slab = Solid::new([-20.0, -0.3, -20.0], [20.0, 0.0, 20.0]);
+    let below = Scene::new(&[slab], &[], Vec::new(), vec![basement]).hovering(Some(5.1));
+    let under = spot(
+        [0.0, -2.9, -4.0],
+        &speaker(basement, [0.0, -2.9, -3.0]),
+        &below,
+    )
+    .expect("clear beneath the ceiling");
+    assert!(
+        (under.position[1] - (-2.9 + RISE)).abs() < 1e-5,
+        "{under:?}"
+    );
+    // On a low level, its hover and its face height are one: tried once.
+    assert_eq!(open(&[]).hovering(Some(1.0)).heights(1.6), [1.7]);
+    // Beside an object, a little above the object, not at the follow height, nor below the asker's eyes; for a huddle,
+    // at the follow height.
+    let scene = open(&[EYES]).hovering(Some(5.1));
+    let beside_low = beside(&ada.head, [0.0, 1.0, -4.0], &scene).expect("clear");
+    assert!(
+        (beside_low.position[1] - 1.7).abs() < 1e-5,
+        "{beside_low:?}"
+    );
+    let beside_high = beside(&ada.head, [0.0, 3.0, -4.0], &scene).expect("clear");
+    assert!(
+        (beside_high.position[1] - (3.0 + ABOVE_OBJECT)).abs() < 1e-5,
+        "{beside_high:?}"
+    );
+    let bob = speaker([1.0, 1.6, 0.0], [0.0, 1.6, -3.0]);
+    let scene = open(&[EYES, bob.head.position]).hovering(Some(5.1));
+    let served = huddle(from, &[ada, bob], &scene).expect("clear");
+    assert!((served.position[1] - 5.1).abs() < 1e-5, "{served:?}");
+}
+
+#[test]
 fn where_the_line_is_blocked_it_swings_round_them_by_the_least_it_must_at_the_same_distance() {
     let ada = speaker(EYES, [0.0, 1.6, 3.0]);
     // Coming from straight ahead of her, along −Z, the spot on the line is at bearing 0.
@@ -195,13 +275,13 @@ fn arrived_it_stands_well_within_reach_so_that_it_never_moves_again_at_the_edge(
     let ada = speaker(EYES, [0.0, 1.6, -3.0]);
     const { assert!(CONVERSATION <= NEAR - 1.0) };
     let spot = spot([5.0, 1.4, 0.0], &ada, &open(&[EYES])).expect("clear");
-    assert!(near_enough(&spot, &ada));
+    assert!(near_enough(&spot, &ada, &Scene::default()));
     // She may step a metre away, any way, and it only turns to her.
     for way in 0..8 {
         let way = (way as f32 * 45.0).to_radians();
         let stepped = [way.sin() * 0.99, 1.6, -way.cos() * 0.99];
         let moved = speaker(stepped, [stepped[0], 1.6, -3.0]);
-        assert!(near_enough(&spot, &moved), "{stepped:?}");
+        assert!(near_enough(&spot, &moved, &Scene::default()), "{stepped:?}");
     }
 }
 
@@ -295,15 +375,15 @@ fn it_stands_near_enough_to_need_no_move_within_3_m_whichever_way_they_face_and_
             EYES,
         )
     };
-    assert!(near_enough(&at(-45.0, 1.5), &ada));
-    assert!(near_enough(&at(40.0, 2.9), &ada));
+    assert!(near_enough(&at(-45.0, 1.5), &ada, &Scene::default()));
+    assert!(near_enough(&at(40.0, 2.9), &ada, &Scene::default()));
     // Close up, far round, behind her or in her way to what she attends to, it only turns.
-    assert!(near_enough(&at(-60.0, 1.5), &ada));
-    assert!(near_enough(&at(180.0, 2.0), &ada));
-    assert!(near_enough(&at(-10.0, 1.5), &ada));
+    assert!(near_enough(&at(-60.0, 1.5), &ada, &Scene::default()));
+    assert!(near_enough(&at(180.0, 2.0), &ada, &Scene::default()));
+    assert!(near_enough(&at(-10.0, 1.5), &ada, &Scene::default()));
     assert!(in_the_way(&at(-10.0, 1.5), EYES, [0.0, 1.6, -3.0]));
     // Distance alone moves it.
-    assert!(!near_enough(&at(-45.0, 3.2), &ada));
+    assert!(!near_enough(&at(-45.0, 3.2), &ada, &Scene::default()));
     let screen = Solid::new([-2.0, 0.0, -1.0], [2.0, 3.0, -0.9]);
     let hidden = Scene::new(&[screen], &[], Vec::new(), vec![EYES]);
     assert!(!sees(&at(-45.0, 1.5), EYES, &hidden));

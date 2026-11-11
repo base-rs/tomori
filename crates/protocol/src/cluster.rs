@@ -197,6 +197,46 @@ impl Formation {
     }
 }
 
+/// Where the ring drawn at the agent's home lies, the environment's choice on its `home` anchor: on the space's floor,
+/// the default, however high the home stands; or under the home, [`RING_BELOW`] beneath its point, at the swarm's foot,
+/// as it lay beneath a swarm before there were homes, for a home high above the floor, such as one floating over a
+/// globe, whose ring on the floor would circle whatever stands beneath it rather than lie under the agent.
+///
+/// A newer place this build does not know is read as [`RingAt::Unknown`], drawn on the floor.
+///
+/// ```
+/// use tomori_protocol::Pose;
+/// use tomori_protocol::cluster::{Anchor, RingAt};
+///
+/// let high = Pose::at([0.0, 5.3, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+/// let home = Anchor::new("home", high).with_ring(RingAt::UnderHome);
+/// assert_eq!(home.ring, RingAt::UnderHome);
+/// assert!(Anchor::new("home", high).ring.is_floor());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RingAt {
+    /// On the space's floor, beneath the home however high it stands.
+    #[default]
+    Floor,
+    /// Under the home, [`RING_BELOW`] beneath its point, no lower than the floor.
+    UnderHome,
+    /// One a newer build sends that this build does not know: on the floor.
+    #[serde(other)]
+    Unknown,
+}
+
+impl RingAt {
+    /// Whether it is drawn on the floor, as by default, which is not sent.
+    pub fn is_floor(&self) -> bool {
+        *self != Self::UnderHome
+    }
+}
+
+/// How far beneath the home's point the ring drawn under it lies, in metres: the swarm's usual height above the floor,
+/// so that it lies where the floor would be beneath a swarm standing at its usual height.
+pub const RING_BELOW: f32 = 1.4;
+
 /// A named place in an environment that workers, panels and the agent gather at: its name, its pose, whose point a
 /// single member stands at, facing along its +Z towards whoever watches it, and the room its cluster may take, if it
 /// says. In an environment's registration, its pose is in the environment's own coordinates; in the space's state,
@@ -248,6 +288,10 @@ pub struct Anchor {
     /// See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_within: Option<f32>,
+    /// Where the ring drawn at the agent's home lies, for the `home` anchor: on the floor, by default, or under the
+    /// home. Only the `home` anchor's is read; an older client ignores it, and draws the ring on the floor.
+    #[serde(default, skip_serializing_if = "RingAt::is_floor")]
+    pub ring: RingAt,
 }
 
 /// The least and the most radius an anchor may notify the agent within, in metres.
@@ -278,6 +322,7 @@ impl Anchor {
             formation: Formation::Arc,
             sweep: None,
             notify_within: None,
+            ring: RingAt::Floor,
         }
     }
 
@@ -301,6 +346,12 @@ impl Anchor {
     /// This anchor, whose cluster stands in `formation` about its point, such as a ring about the agent's home.
     pub fn with_formation(mut self, formation: Formation) -> Self {
         self.formation = formation;
+        self
+    }
+
+    /// This anchor, whose drawn home ring lies at `ring`, such as under a home floating high above the floor.
+    pub fn with_ring(mut self, ring: RingAt) -> Self {
+        self.ring = ring;
         self
     }
 

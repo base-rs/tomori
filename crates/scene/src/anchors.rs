@@ -348,6 +348,9 @@ pub struct Arrangement {
     /// whole of it.
     pub formation: tomori_protocol::cluster::Formation,
     pub sweep: Option<f32>,
+    /// Where the ring drawn at home lies, as the environment's `home` anchor says: on the floor, by default, or under
+    /// the home.
+    pub ring: tomori_protocol::cluster::RingAt,
     pub audience: Vec3,
     pub placement: Option<Placement>,
     pub carriage: Anchor,
@@ -381,10 +384,24 @@ impl Arrangement {
         self.agent.position.distance(self.home.position) > AWAY
     }
 
-    /// The ring drawn on the floor at home, which stays there wherever the agent goes: the workers' ring, where they
-    /// stand in one, on its radius and as much of it as they take, about the way their anchor faces; or else about the
-    /// agent's home, [`FLOOR_RING`] from it, whole. See `design/environments.md`.
+    /// The ring drawn at home, which stays there wherever the agent goes: the workers' ring, where they stand in one,
+    /// on its radius and as much of it as they take, about the way their anchor faces; or else about the agent's home,
+    /// [`FLOOR_RING`] from it, whole; on the space's floor, or, where the home anchor says so, under the home, at the
+    /// swarm's foot, [`tomori_protocol::cluster::RING_BELOW`] beneath the point it stands about and no lower than the
+    /// floor. See `design/environments.md`.
     pub fn home_ring(&self) -> HomeRing {
+        let ring = self.ring_about();
+        let height = if self.ring.is_floor() {
+            tomori_protocol::entourage::FLOOR
+        } else {
+            (ring.centre.y - tomori_protocol::cluster::RING_BELOW)
+                .max(tomori_protocol::entourage::FLOOR)
+        };
+        HomeRing { height, ..ring }
+    }
+
+    /// The ring drawn at home, on the floor.
+    fn ring_about(&self) -> HomeRing {
         match self.formation {
             tomori_protocol::cluster::Formation::Ring => {
                 let cluster = cluster(self.workers, self.audience, self.extent)
@@ -396,6 +413,7 @@ impl Arrangement {
                     radius: tomori_protocol::cluster::RING,
                     towards: Vec3::new(x, 0.0, z),
                     sweep: cluster.sweep(),
+                    ..HomeRing::WHOLE
                 }
             }
             _ => HomeRing {
@@ -410,17 +428,18 @@ impl Arrangement {
 /// The radius of the ring drawn on the floor about the agent's home where its workers stand on the arc, in metres.
 pub const FLOOR_RING: f32 = 1.25;
 
-/// The ring drawn on the floor at home, the agent's place, which never travels with it: the middle it stands about, in
-/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the space's floor beneath,
-/// however high that is; its radius, in metres; and how much of the circle it takes, in radians, centred on `towards`,
-/// the way its workers' anchor faces, about the vertical. Workers standing in a ring about the agent's home stand on it. See
-/// `design/environments.md`.
+/// The ring drawn at home, the agent's place, which never travels with it: the middle it stands about, in the space's
+/// coordinates, at the height of whatever stands there; the height it is drawn at, the space's floor by default, however
+/// high the home stands, or under the home where its environment says so; its radius, in metres; and how much of the
+/// circle it takes, in radians, centred on `towards`, the way its workers' anchor faces, about the vertical. Workers
+/// standing in a ring about the agent's home stand on it. See `design/environments.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeRing {
     pub centre: Vec3,
     pub radius: f32,
     pub towards: Vec3,
     pub sweep: f32,
+    pub height: f32,
 }
 
 impl HomeRing {
@@ -430,6 +449,7 @@ impl HomeRing {
         radius: FLOOR_RING,
         towards: Vec3::Z,
         sweep: std::f32::consts::TAU,
+        height: tomori_protocol::entourage::FLOOR,
     };
 }
 
@@ -450,6 +470,7 @@ impl Default for Arrangement {
             extent: None,
             formation: tomori_protocol::cluster::Formation::Arc,
             sweep: None,
+            ring: tomori_protocol::cluster::RingAt::Floor,
             audience: EYES,
             placement: None,
             carriage: Anchor::HOME,
@@ -472,6 +493,7 @@ impl std::fmt::Debug for Arrangement {
             .field("extent", &self.extent)
             .field("formation", &self.formation)
             .field("sweep", &self.sweep)
+            .field("ring", &self.ring)
             .field("audience", &self.audience)
             .field("placement", &self.placement.is_some())
             .field("carriage", &self.carriage)
@@ -522,6 +544,57 @@ mod tests {
         assert!(ring.towards.x > 0.999 && ring.towards.y == 0.0, "{ring:?}");
         assert!((ring.sweep - 170f32.to_radians()).abs() < 1e-5);
         assert_eq!(ring.centre, Vec3::new(0.0, 1.5, -4.0));
+    }
+
+    #[test]
+    fn the_home_ring_lies_on_the_floor_by_default_and_under_the_home_where_asked() {
+        use tomori_protocol::cluster::{Formation, RING_BELOW, RingAt};
+        // A home floating 5.3 m up, over a globe: on the floor by default, however high it stands.
+        let high = tomori_protocol::Pose::at([1.0, 5.3, -4.0]).facing_towards([0.0, 1.6, 0.0]);
+        let home = Anchor::from_pose(&high).unwrap();
+        let floating = Arrangement {
+            home,
+            workers: home,
+            ..Arrangement::default()
+        };
+        let floor = floating.home_ring();
+        assert_eq!(floor.height, tomori_protocol::entourage::FLOOR);
+        assert_eq!(floor.centre, Vec3::new(1.0, 5.3, -4.0));
+        assert_eq!(floor.radius, FLOOR_RING);
+        // Under the home, at the swarm's foot, about the same point.
+        let under = Arrangement {
+            ring: RingAt::UnderHome,
+            ..floating.clone()
+        };
+        let ring = under.home_ring();
+        assert!((ring.height - (5.3 - RING_BELOW)).abs() < 1e-5, "{ring:?}");
+        assert!((ring.height - 3.9).abs() < 1e-5);
+        assert_eq!(
+            HomeRing {
+                height: 0.0,
+                ..ring
+            },
+            floor
+        );
+        // A ring of workers about it too, on their ring.
+        let ringed = Arrangement {
+            formation: Formation::Ring,
+            ..under.clone()
+        }
+        .home_ring();
+        assert_eq!(ringed.radius, tomori_protocol::cluster::RING);
+        assert_eq!(ringed.height, ring.height);
+        // A home low by the floor keeps its ring on the floor, never beneath it.
+        let low = Anchor {
+            position: Vec3::new(0.0, 0.6, -3.0),
+            ..home
+        };
+        let low = Arrangement {
+            home: low,
+            ..under.clone()
+        };
+        assert_eq!(low.home_ring().height, tomori_protocol::entourage::FLOOR);
+        assert!(format!("{under:?}").contains("UnderHome"));
     }
 
     #[test]
