@@ -1065,3 +1065,90 @@ fn a_reply_that_waited_for_a_replay_follows_it_whole_after_the_live_speech_befor
         assert_eq!(mixer.statistics().discarded_frames, 0);
     }
 }
+
+#[test]
+fn the_ambience_bus_plays_ambient_sounds_at_the_participant_s_level_gliding_to_it() {
+    let mut mixer = mixer();
+    assert_eq!(mixer.ambience_gain(), 1.0);
+    assert_eq!(mixer.playing_ambience(), (0, 0));
+    mixer.set_ambience_gain(-1.0);
+    assert_eq!(mixer.ambience_gain(), 0.0);
+    mixer.set_ambience_gain(0.5);
+    // The first mix glides from where it was, and the next is at the level.
+    mixer.ambient(Sound::new(vec![100.0; 100], RATE), [0.0; 3]);
+    let glide = mix(&mut mixer, 4);
+    assert!(glide[0] < 100 && glide[3] == 50, "{glide:?}");
+    assert_eq!(mix(&mut mixer, 2), [50, 50]);
+    // Off, it is silent.
+    mixer.set_ambience_gain(0.0);
+    mix(&mut mixer, 1);
+    assert_eq!(mix(&mut mixer, 2), [0, 0]);
+}
+
+#[test]
+fn the_ambience_ducks_under_anyone_speaking_but_agent_speech_not_heard_here() {
+    /// `source` speaking for 300 ms, as it arrives.
+    fn speak(mixer: &mut Mixer, source: u32) {
+        for sequence in 0..75 {
+            mixer.push(frame(source, sequence, 10_000));
+            mix(mixer, 4);
+        }
+    }
+    // A person speaking, over an ambient sound that began before them.
+    let mut mixer = mixer();
+    mixer.ambient(Sound::new(vec![1_000.0; 2_000], RATE), [0.0; 3]);
+    speak(&mut mixer, 1);
+    assert_eq!(mixer.ambience_duck_depth(), 12.0);
+    // Agent speech, live or played again.
+    for source in [AGENT_SOURCE, REPLAY_SOURCE] {
+        let mut mixer = self::mixer();
+        speak(&mut mixer, source);
+        assert_eq!(mixer.ambience_duck_depth(), 12.0);
+    }
+    // Agent speech muted here, or skipped, does not duck it.
+    for muted in [true, false] {
+        let mut mixer = self::mixer();
+        if muted {
+            mixer.set_agent_muted(true);
+        } else {
+            mixer.set_agent_skipped(true);
+        }
+        speak(&mut mixer, AGENT_SOURCE);
+        assert_eq!(mixer.ambience_duck_depth(), 0.0);
+    }
+    // Ducked, the ambient sound is 12 dB down, beneath the person still speaking.
+    mixer.push(frame(1, 75, 10_000));
+    let ducked = mix(&mut mixer, 4);
+    assert!(
+        ducked
+            .iter()
+            .all(|sample| (*sample - 10_000 - 251).abs() <= 2),
+        "{ducked:?}"
+    );
+}
+
+#[test]
+fn the_ambience_its_thread_feeds_plays_in_the_mix_beneath_cues() {
+    use crate::playback::ambience::engine::{self, Command};
+    use crate::playback::ambience::{Ambience, Loop, Slot};
+    let (mut feeder, bus) = engine::pair(1);
+    feeder.apply(Command::Gain(1.0), Duration::ZERO);
+    let tone = Slot::embedded("tone", crate::playback::ambience::engine::tests::MONO);
+    feeder.apply(
+        Command::Ambience(Some(std::sync::Arc::new(
+            Ambience::new().with_loop(Loop::at(tone, [0.0; 3])),
+        ))),
+        Duration::ZERO,
+    );
+    let mut mixer = Mixer::new(MixerOptions::default());
+    mixer.set_ambience_bus(Some(Box::new(bus)));
+    feeder.pump(Duration::ZERO);
+    let mut output = vec![0; 960];
+    mixer.mix_stereo(&mut output);
+    feeder.pump(Duration::ZERO);
+    mixer.mix_stereo(&mut output);
+    assert!(output.iter().any(|sample| sample.unsigned_abs() > 1_000));
+    assert_eq!(mixer.playing_ambience(), (1, 0));
+    assert!(mixer.take_ambience_bus().is_some());
+    assert_eq!(mixer.playing_ambience(), (0, 0));
+}

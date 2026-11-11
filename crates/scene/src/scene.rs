@@ -475,6 +475,13 @@ pub struct Step {
     controls: crate::projection::Controls,
     /// The client side of the joined space's environment, for that space and environment. See `design/environments.md`.
     client: Option<Client>,
+    /// The space, environment and carriage the ambience last handed to the feedback model was for, while one plays.
+    /// See `design/spatial-audio.md`.
+    ambience: Option<(
+        String,
+        crate::environment::Environment,
+        crate::anchors::Anchor,
+    )>,
     /// The left and right sticks, where they are the client side's, from the last buttons.
     environment_sticks: (Vec2, Vec2),
     /// Whose the left stick's push is, from when it left the middle until it returns.
@@ -569,6 +576,7 @@ impl Default for Step {
             removing: None,
             controls: crate::projection::Controls::default(),
             client: None,
+            ambience: None,
             environment_sticks: (Vec2::ZERO, Vec2::ZERO),
             left_stick: LeftStick::Free,
             selector: crate::client_side::Selector::default(),
@@ -1495,6 +1503,27 @@ impl Step {
         let space = conversation
             .joined_space()
             .map(|(space, _)| space.id.clone());
+        // The environment's ambience, too, once its scenery has grown in, carried into the space as it is drawn; and
+        // none outside a space, on the grid or in an environment without one.
+        let ambience = conversation
+            .ambience()
+            .filter(|(environment, _)| {
+                scenery.reveal.is_none() && scenery.environment == *environment
+            })
+            .zip(space.clone());
+        let playing = ambience
+            .as_ref()
+            .map(|((environment, _), space)| (space.clone(), *environment, arrangement.carriage));
+        if playing != self.ambience {
+            self.ambience = playing;
+            let carriage = arrangement.carriage;
+            feedback.set_ambience(ambience.map(|((_, ambience), _)| {
+                std::sync::Arc::new(
+                    ambience
+                        .carried(|position| carriage.place(Vec3::from_array(position)).to_array()),
+                )
+            }));
+        }
         match (shown, space) {
             (Some((environment, factory)), Some(space)) => {
                 let current = self.client.as_ref().is_some_and(|client| {
@@ -8256,6 +8285,47 @@ mod tests {
         }
         assert!(flown);
         assert!(middle.distance(home) < 0.1);
+    }
+
+    #[test]
+    fn an_environment_s_ambience_plays_once_its_scenery_grows_in_carried_into_the_space_until_it_is_left()
+     {
+        use crate::ambience::{Ambience, Loop, Slot};
+        use std::sync::Arc;
+        let waterfall =
+            Ambience::new().with_loop(Loop::at(Slot::missing("waterfall"), [0.0, 2.0, 0.0]));
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_ambiences(vec![(crate::test_support::SKY, Arc::new(waterfall))]);
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        // None in the lobby.
+        step.update(&senses(), &mut conversation, &mut feedback, now, FRAME);
+        assert!(feedback.take_ambience().is_none());
+        // Participants arrive 8 m along +X in the environment, facing its origin, where its waterfall is.
+        let street = tomori_protocol::Pose::at([8.0, 0.0, 0.0]).facing_towards([0.0; 3]);
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new().with_arrival(street);
+        }));
+        conversation.take_actions();
+        // Not while its scenery grows in, and then once, carried: 8 m ahead of home.
+        step.update(&senses(), &mut conversation, &mut feedback, now, FRAME);
+        assert!(feedback.take_ambience().is_none());
+        for _ in 0..400 {
+            step.update(&senses(), &mut conversation, &mut feedback, now, FRAME);
+        }
+        let playing = feedback.take_ambience().unwrap().unwrap();
+        let heard = Vec3::from_array(playing.loops[0].path.points()[0]);
+        assert!(heard.distance(Vec3::new(0.0, 2.0, -8.0)) < 1e-4, "{heard}");
+        step.update(&senses(), &mut conversation, &mut feedback, now, FRAME);
+        assert!(feedback.take_ambience().is_none());
+        // Leaving, none.
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::LEFT,
+        ));
+        step.update(&senses(), &mut conversation, &mut feedback, now, FRAME);
+        assert!(feedback.take_ambience().unwrap().is_none());
+        assert!(conversation.ambience().is_none());
     }
 
     #[test]

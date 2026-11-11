@@ -852,6 +852,9 @@ struct Speaker {
     route: Route,
     /// Whether the players made for later connections load the echo probe, for the echo test.
     probe: bool,
+    /// The environment's ambience and the participant's level for it, kept across connections.
+    ambience: Option<Arc<crate::playback::ambience::Ambience>>,
+    ambience_gain: f32,
 }
 
 impl Speaker {
@@ -866,6 +869,8 @@ impl Speaker {
             muted: false,
             route: Route::default(),
             probe: false,
+            ambience: None,
+            ambience_gain: feedback::Ambience::default().gain(),
         }
     }
 
@@ -902,7 +907,25 @@ impl Speaker {
             player.load_probe();
         }
         control.set_agent_muted(self.muted);
+        control.set_ambience_gain(self.ambience_gain);
+        control.set_ambience(self.ambience.clone());
         self.player = Some((Arc::new(Mutex::new(player)), control));
+    }
+
+    /// Play `ambience`, or none, on this player and those of later connections. See `design/spatial-audio.md`.
+    fn set_ambience(&mut self, ambience: Option<Arc<crate::playback::ambience::Ambience>>) {
+        self.ambience = ambience;
+        if let Some(control) = self.control() {
+            control.set_ambience(self.ambience.clone());
+        }
+    }
+
+    /// Play the ambience at the participant's level, as a gain, here and on later connections.
+    fn set_ambience_gain(&mut self, gain: f32) {
+        self.ambience_gain = gain;
+        if let Some(control) = self.control() {
+            control.set_ambience_gain(gain);
+        }
     }
 
     /// Mute or unmute agent speech locally, on this player and those of later connections.
@@ -1058,7 +1081,10 @@ impl Connection {
                 live: false,
                 generation: None,
             },
-            speaker: Speaker::new(playback),
+            speaker: Speaker {
+                ambience_gain: feedback.ambience.gain(),
+                ..Speaker::new(playback)
+            },
             presence: None,
             link: None,
             feedback: feedback::Feedback::new(feedback),
@@ -1412,8 +1438,11 @@ impl Connection {
         self.play_cues();
     }
 
-    /// Play the cues due. Nothing plays without a connection and an open speaker, and a cue played late would mislead, so they are dropped then.
+    /// Play the cues due. Nothing plays without a connection and an open speaker, and a cue played late would mislead, so they are dropped then. The environment's ambience is kept, to play once there is a speaker.
     fn play_cues(&mut self) {
+        if let Some(ambience) = self.feedback.take_ambience() {
+            self.speaker.set_ambience(ambience);
+        }
         match self
             .speaker
             .control()
@@ -1610,6 +1639,7 @@ impl Connection {
                 }
                 Action::SetFeedback(settings) => {
                     self.feedback.set_settings(settings);
+                    self.speaker.set_ambience_gain(settings.ambience.gain());
                     self.store.remember_feedback(settings);
                 }
             }

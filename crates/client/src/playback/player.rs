@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tomori_protocol::{AGENT_SOURCE, AudioFrame, REPLAY_SOURCE};
 
+use super::ambience::{bus::Bus, engine};
 use super::spatial::{Position, Scene};
 use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics, Sound};
 
@@ -23,6 +24,9 @@ enum Command {
     Play(Earcon, Direction),
     Ambient(Sound, Position),
     Probe,
+    /// The ambience's bus, from its thread, which starts with the first ambience.
+    AmbienceBus(Box<Bus>),
+    AmbienceGain(f32),
 }
 
 /// The scene the application last set, until the callback takes it.
@@ -43,6 +47,8 @@ struct Shared {
     level: AtomicU32,
     statistics: Mutex<PlaybackStatistics>,
     scene: Mutex<SceneSlot>,
+    /// The participant's ambience level, as the bits of an `f32` gain, for the ambience's thread as it starts.
+    ambience_gain: AtomicU32,
 }
 
 /// Plays what a [`crate::Client`] receives: drains its audio into a [`Mixer`] and renders the mix for an output device.
@@ -64,6 +70,15 @@ pub struct Player {
     agent_skipped: bool,
     /// Whether mixers load the echo probe.
     probe: bool,
+    /// The ambience level, for mixers made later.
+    ambience_gain: f32,
+}
+
+/// The ambience's thread: what tells it, and the thread, which ends once that goes.
+struct Ambience {
+    commands: mpsc::Sender<engine::Command>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// The application's handle on a [`Player`]. Cloneable, and never blocks the player.
@@ -71,13 +86,18 @@ pub struct Player {
 pub struct PlayerControl {
     commands: mpsc::Sender<Command>,
     shared: Arc<Shared>,
+    /// The ambience's thread, once an ambience has been set, which ends as the last control goes.
+    ambience: Arc<Mutex<Option<Ambience>>>,
 }
 
 impl Player {
     /// Play `audio`, typically from [`crate::Client::take_audio`]. `options.sample_rate` is replaced by the rate given to [`Self::render`].
     pub fn new(audio: Receiver<AudioFrame>, options: MixerOptions) -> (Self, PlayerControl) {
         let (commands, receiver) = mpsc::channel();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            ambience_gain: AtomicU32::new(1.0_f32.to_bits()),
+            ..Shared::default()
+        });
         let player = Self {
             audio,
             commands: receiver,
@@ -88,8 +108,14 @@ impl Player {
             agent_muted: false,
             agent_skipped: false,
             probe: false,
+            ambience_gain: 1.0,
         };
-        (player, PlayerControl { commands, shared })
+        let control = PlayerControl {
+            commands,
+            shared,
+            ambience: Arc::default(),
+        };
+        (player, control)
     }
 
     /// Synthesize the echo probe now and for later mixers, outside the audio callback, so that [`PlayerControl::play_probe`] can play it. Only the echo test needs it.
@@ -109,6 +135,9 @@ impl Player {
             sample_rate,
             ..self.options
         });
+        // The ambience plays on in the new mixer, as its thread feeds it.
+        mixer.set_ambience_bus(self.mixer.as_mut().and_then(Mixer::take_ambience_bus));
+        mixer.set_ambience_gain(self.ambience_gain);
         mixer.set_local_source(self.local_source);
         mixer.set_agent_muted(self.agent_muted);
         // A mixer made while agent speech is skipped starts with it silent, rather than fading out what is not heard.
@@ -149,6 +178,11 @@ impl Player {
                 Command::Play(earcon, direction) => mixer.play(earcon, direction),
                 Command::Ambient(sound, position) => mixer.ambient(sound, position),
                 Command::Probe => mixer.play_probe(),
+                Command::AmbienceBus(bus) => mixer.set_ambience_bus(Some(bus)),
+                Command::AmbienceGain(gain) => {
+                    self.ambience_gain = gain;
+                    mixer.set_ambience_gain(gain);
+                }
                 Command::Clear => {
                     mixer.clear();
                     // Including what arrived before the clear but was not yet rendered, such as a backlog from while no output played.
@@ -253,6 +287,74 @@ impl PlayerControl {
     /// Play the echo probe, once [`Player::load_probe`] has rendered it, for the echo test to measure what the microphone hears of it.
     pub fn play_probe(&self) {
         let _ = self.commands.send(Command::Probe);
+    }
+
+    /// Play `ambience` beneath everything else, or none: its slots load and its sounds decode on a thread of its own,
+    /// which starts with the first ambience and ends as the last control goes, and the callback mixes them on its
+    /// ambience bus. A thread that cannot start leaves it silent, saying so. See [`super::ambience`].
+    pub fn set_ambience(&self, ambience: Option<Arc<super::ambience::Ambience>>) {
+        let mut thread = self.ambience.lock().unwrap_or_else(PoisonError::into_inner);
+        if thread.is_none() {
+            if ambience.is_none() {
+                return;
+            }
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let (feeder, bus) = engine::pair(seed);
+            let (sender, commands) = mpsc::channel();
+            let gain = f32::from_bits(self.shared.ambience_gain.load(Ordering::Relaxed));
+            let _ = sender.send(engine::Command::Gain(gain));
+            match crate::system::spawn("tomori-ambience", move || engine::run(feeder, commands)) {
+                Ok(started) => {
+                    let _ = self.commands.send(Command::AmbienceBus(Box::new(bus)));
+                    *thread = Some(Ambience {
+                        commands: sender,
+                        thread: started,
+                    });
+                }
+                Err(error) => {
+                    log::warn!("Ambience: cannot start its thread, so it is silent: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(running) = thread.as_ref() else {
+            unreachable!("its thread started above, or before");
+        };
+        let _ = running.commands.send(engine::Command::Ambience(ambience));
+    }
+
+    /// Play the ambience at `gain`, the participant's level: at 0 its thread decodes nothing.
+    pub fn set_ambience_gain(&self, gain: f32) {
+        let gain = gain.max(0.0);
+        self.shared
+            .ambience_gain
+            .store(gain.to_bits(), Ordering::Relaxed);
+        let _ = self.commands.send(Command::AmbienceGain(gain));
+        if let Some(running) = self
+            .ambience
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            let _ = running.commands.send(engine::Command::Gain(gain));
+        }
+    }
+
+    /// End the ambience's thread and wait for it, for tests that check how it ends.
+    #[cfg(test)]
+    fn end_ambience(&self) -> bool {
+        let running = self
+            .ambience
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        running.is_some_and(|running| {
+            drop(running.commands);
+            running.thread.join().is_ok()
+        })
     }
 
     /// Set where the listener and the sources are, typically once a frame. `change` must write the whole scene: it is given an older one to reuse its storage, which may be one the callback has finished with. The callback takes only the latest, at its next render, and never waits for this.

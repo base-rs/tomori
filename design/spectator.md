@@ -2,7 +2,7 @@
 
 ## Requirement
 
-Spectator output shows the scene without a head-locked HUD, including status captions and recording indicators, and plays no sound cues (see `feedback.md`). This applies to windowed and PipeWire output; the headset retains its own HUD. Connection and follow status may still be logged.
+Spectator output shows the scene without a head-locked HUD, including status captions and recording indicators, and plays no sound cues (see `feedback.md`), nor an environment's ambience or ambient sounds, so that its audience hears the conversation (see `spatial-audio.md`). This applies to windowed and PipeWire output; the headset retains its own HUD. Connection and follow status may still be logged.
 
 For the virtual camera, the PipeWire spectator renders at 1920×1080 at up to 30 fps, matching the virtual camera's 1920×1080 output rather than rendering at 4K and scaling down.
 

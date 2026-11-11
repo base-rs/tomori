@@ -78,6 +78,57 @@ impl Level {
     }
 }
 
+/// How loud an environment's ambience plays: its beds, loops and calls and its ambient sounds. Low by default, so that it
+/// stays beneath the conversation; off, nothing of it is decoded. See `design/spatial-audio.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ambience {
+    Off,
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+impl Ambience {
+    /// The next level, as choosing the setting steps through them: up from low to high, then off.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// The level named `word`, as the console takes it.
+    pub fn parse(word: &str) -> Option<Self> {
+        [Self::Off, Self::Low, Self::Medium, Self::High]
+            .into_iter()
+            .find(|level| level.label() == word)
+    }
+
+    /// Its gain over the ambience as its sounds are mastered: −10 dB low, −5 dB medium, as mastered high, and nothing
+    /// off.
+    pub fn gain(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::Low => crate::playback::ambience::gain(-10.0),
+            Self::Medium => crate::playback::ambience::gain(-5.0),
+            Self::High => 1.0,
+        }
+    }
+}
+
 /// The participant's Feedback setting, kept on the device rather than in the space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -88,6 +139,9 @@ pub struct Settings {
     /// Play every source in both ears alike, for people who hear with one ear; distance still changes loudness. See `design/spatial-audio.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mono: bool,
+    /// How loud an environment's ambience plays here.
+    #[serde(default)]
+    pub ambience: Ambience,
 }
 
 /// Something that changed, which the participant hears and feels. See `design/feedback.md` for exactly when each happens.
@@ -284,6 +338,9 @@ pub struct Feedback {
     knocks: Vec<String>,
     ambient: Vec<(crate::playback::Sound, crate::playback::spatial::Position)>,
     last_ambient: Option<Instant>,
+    /// The ambience of the environment the participant is in, and whether it changed since it was last taken.
+    ambience: Option<std::sync::Arc<crate::playback::ambience::Ambience>>,
+    ambience_changed: bool,
     /// When it last became the participant's turn, as [`Self::observe_turn`] last saw it, so that each turn is cued once.
     turn: Option<Instant>,
 }
@@ -391,6 +448,30 @@ impl Feedback {
         }
         self.last_ambient = Some(now);
         self.ambient.push((sound, position));
+    }
+
+    /// The participant is in an environment that sounds `ambience`, already in the space's coordinates, or none. Never
+    /// on a client that plays no cues. See `design/spatial-audio.md`.
+    pub fn set_ambience(
+        &mut self,
+        ambience: Option<std::sync::Arc<crate::playback::ambience::Ambience>>,
+    ) {
+        let ambience = ambience.filter(|_| !self.muted);
+        let same = match (&self.ambience, &ambience) {
+            (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
+            (was, now) => was.is_none() && now.is_none(),
+        };
+        if !same {
+            self.ambience = ambience;
+            self.ambience_changed = true;
+        }
+    }
+
+    /// The ambience to play now, if it changed since it was last taken.
+    pub fn take_ambience(
+        &mut self,
+    ) -> Option<Option<std::sync::Arc<crate::playback::ambience::Ambience>>> {
+        std::mem::take(&mut self.ambience_changed).then(|| self.ambience.clone())
     }
 
     /// The ambient sounds to play, oldest first, and where each is.
@@ -779,6 +860,7 @@ mod tests {
                 sounds,
                 vibration,
                 mono: false,
+                ambience: Ambience::Low,
             });
             feedback.emit(event, now);
             assert_eq!(
@@ -796,7 +878,8 @@ mod tests {
                 Settings {
                     sounds,
                     vibration,
-                    mono: false
+                    mono: false,
+                    ambience: Ambience::Low
                 }
             );
         }
@@ -830,6 +913,61 @@ mod tests {
     }
 
     #[test]
+    fn the_ambience_level_steps_up_from_low_parses_labels_and_is_kept_with_the_setting() {
+        assert_eq!(Settings::default().ambience, Ambience::Low);
+        let mut level = Ambience::Low;
+        let mut labels = Vec::new();
+        for _ in 0..4 {
+            labels.push(level.label());
+            assert_eq!(Ambience::parse(level.label()), Some(level));
+            level = level.next();
+        }
+        assert_eq!(labels, ["low", "medium", "high", "off"]);
+        assert_eq!(Ambience::parse("loud"), None);
+        // Low and medium well beneath the sounds as mastered, and off nothing at all.
+        assert_eq!(Ambience::Off.gain(), 0.0);
+        assert!((Ambience::Low.gain() - 0.316).abs() < 1e-3);
+        assert!((Ambience::Medium.gain() - 0.562).abs() < 1e-3);
+        assert_eq!(Ambience::High.gain(), 1.0);
+        // Kept as a word, and a setting kept before it had one is low.
+        let kept = serde_json::to_string(&Settings {
+            ambience: Ambience::Medium,
+            ..Settings::default()
+        })
+        .unwrap();
+        assert!(kept.contains(r#""ambience":"medium""#), "{kept}");
+        let older: Settings =
+            serde_json::from_str(r#"{"sounds":"full","vibration":"off"}"#).unwrap();
+        assert_eq!(older.ambience, Ambience::Low);
+    }
+
+    #[test]
+    fn the_ambience_is_handed_on_once_each_time_it_changes_and_never_to_a_client_that_plays_no_cues()
+     {
+        use crate::playback::ambience::{Ambience as Sounds, Bed, Slot};
+        use std::sync::Arc;
+        let (mut feedback, _) = feedback();
+        assert_eq!(feedback.take_ambience().map(|_| ()), None);
+        let farm = Arc::new(Sounds::new().with_bed(Bed::new(Slot::missing("wind"))));
+        feedback.set_ambience(Some(farm.clone()));
+        feedback.set_ambience(Some(farm.clone()));
+        let taken = feedback.take_ambience().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&taken, &farm));
+        assert!(feedback.take_ambience().is_none());
+        // Another, even alike, is a change, and so is none, once.
+        feedback.set_ambience(Some(Arc::new(Sounds::new())));
+        assert!(feedback.take_ambience().unwrap().is_some());
+        feedback.set_ambience(None);
+        feedback.set_ambience(None);
+        assert!(feedback.take_ambience().unwrap().is_none());
+        assert!(feedback.take_ambience().is_none());
+        let (mut muted, _) = self::feedback();
+        muted.mute_sounds();
+        muted.set_ambience(Some(farm));
+        assert!(muted.take_ambience().is_none());
+    }
+
+    #[test]
     fn levels_step_parse_and_label() {
         assert_eq!(Level::Full.next(), Level::Reduced);
         assert_eq!(Level::Reduced.next(), Level::Off);
@@ -847,11 +985,12 @@ mod tests {
                 sounds: Level::Reduced,
                 vibration: Level::Full,
                 mono: false,
+                ambience: Ambience::Low,
             }
         );
         assert_eq!(
             serde_json::to_string(&kept).unwrap(),
-            r#"{"sounds":"reduced","vibration":"full"}"#
+            r#"{"sounds":"reduced","vibration":"full","ambience":"low"}"#
         );
     }
 
@@ -898,6 +1037,7 @@ mod tests {
             sounds: Level::Full,
             vibration: Level::Reduced,
             mono: false,
+            ambience: Ambience::Low,
         });
         // The knock's second tap, which is essential, remains; the live microphone's does not.
         let due = feedback.haptics(now + ms(500));
@@ -940,6 +1080,7 @@ mod tests {
             sounds: Level::Full,
             vibration: Level::Off,
             mono: false,
+            ambience: Ambience::Low,
         });
         assert!(feedback.haptics(now + ms(500)).is_empty());
     }
@@ -1023,6 +1164,7 @@ mod tests {
             sounds: Level::Full,
             vibration: Level::Reduced,
             mono: false,
+            ambience: Ambience::Low,
         });
         feedback.hold_to_leave(Some(0.3));
         assert!(feedback.haptics(now).is_empty());

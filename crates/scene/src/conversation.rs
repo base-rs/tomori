@@ -377,6 +377,8 @@ pub struct Conversation {
     locomotion: Vec<(Environment, Locomotion)>,
     /// The client sides this build registers, by environment. See `design/environments.md`.
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
+    /// The ambiences this build registers, by environment. See `design/environments.md`.
+    ambiences: Vec<(Environment, std::sync::Arc<crate::ambience::Ambience>)>,
     /// The worker placements this build registers, by environment. See `design/environments.md`.
     worker_placements: Vec<(Environment, crate::anchors::Placement)>,
     /// The avatars this build registers, by identifier. See `design/avatars.md`.
@@ -555,6 +557,7 @@ impl Conversation {
             over_grid: Vec::new(),
             locomotion: Vec::new(),
             client_sides: Vec::new(),
+            ambiences: Vec::new(),
             worker_placements: Vec::new(),
             avatars: Vec::new(),
             avatar_failures: crate::avatar::Failures::default(),
@@ -1448,12 +1451,21 @@ impl Conversation {
         });
     }
 
+    /// Play an environment's ambience at `level` on this device, and keep it. See `design/spatial-audio.md`.
+    pub fn set_ambience(&mut self, level: feedback::Ambience) {
+        self.keep_feedback(feedback::Settings {
+            ambience: level,
+            ..self.feedback
+        });
+    }
+
     fn keep_feedback(&mut self, settings: feedback::Settings) {
         log::info!(
-            "Feedback: sounds {}, vibration {}, {}",
+            "Feedback: sounds {}, vibration {}, {}, ambience {}",
             settings.sounds.label(),
             settings.vibration.label(),
-            if settings.mono { "mono" } else { "stereo" }
+            if settings.mono { "mono" } else { "stereo" },
+            settings.ambience.label()
         );
         self.feedback = settings;
         self.actions.push(Action::SetFeedback(settings));
@@ -1996,6 +2008,7 @@ impl Conversation {
                 self.change_feedback(None, Some(self.feedback.vibration.next()))
             }
             crate::hand_menu::Choice::Mono => self.set_mono(!self.feedback.mono),
+            crate::hand_menu::Choice::Ambience => self.set_ambience(self.feedback.ambience.next()),
             // The next press of X says the new name; choosing again changes nothing after all.
             crate::hand_menu::Choice::Rename => {
                 self.naming = !self.naming && self.renames();
@@ -2320,6 +2333,26 @@ impl Conversation {
             .iter()
             .find(|(registered, _)| registered.id() == environment.id())
             .map(|(_, factory)| (environment, factory.clone()))
+    }
+
+    /// Sound each environment `ambiences` names with its ambience, in a space bound to it whose scenery this build
+    /// draws. See `design/environments.md`.
+    pub fn set_ambiences(
+        &mut self,
+        ambiences: Vec<(Environment, std::sync::Arc<crate::ambience::Ambience>)>,
+    ) {
+        self.ambiences = ambiences;
+    }
+
+    /// The ambience of the joined space's environment, as this build draws it, if the build registers one, in the
+    /// environment's own coordinates.
+    pub fn ambience(&self) -> Option<(Environment, std::sync::Arc<crate::ambience::Ambience>)> {
+        let environment = self.environment();
+        self.joined_space()?;
+        self.ambiences
+            .iter()
+            .find(|(registered, _)| registered.id() == environment.id())
+            .map(|(_, ambience)| (environment, ambience.clone()))
     }
 
     /// Place the workers of each environment `placements` names by its placement, in a space bound to it whose scenery
@@ -10462,6 +10495,7 @@ mod tests {
             sounds: Level::Off,
             vibration: Level::Reduced,
             mono: false,
+            ambience: feedback::Ambience::Low,
         };
         conversation.set_feedback(kept);
         assert_eq!(conversation.menu_model().feedback, kept);
@@ -10470,13 +10504,11 @@ mod tests {
         conversation.choose_menu(crate::hand_menu::Choice::Vibration);
         let full = Settings {
             sounds: Level::Full,
-            vibration: Level::Reduced,
-            mono: false,
+            ..kept
         };
         let stepped = Settings {
-            sounds: Level::Full,
             vibration: Level::Off,
-            mono: false,
+            ..full
         };
         assert_eq!(
             conversation.take_actions(),
@@ -10493,6 +10525,17 @@ mod tests {
         assert_eq!(
             conversation.take_actions(),
             [Action::SetFeedback(mono), Action::SetFeedback(stepped)]
+        );
+        // The ambience steps up from low, and is kept each time.
+        conversation.choose_menu(crate::hand_menu::Choice::Ambience);
+        let medium = Settings {
+            ambience: feedback::Ambience::Medium,
+            ..stepped
+        };
+        assert_eq!(conversation.take_actions(), [Action::SetFeedback(medium)]);
+        assert_eq!(
+            conversation.menu_model().feedback.ambience,
+            feedback::Ambience::Medium
         );
     }
 

@@ -256,6 +256,8 @@ pub enum MenuKey {
     Vibration,
     /// Turn mono audio on or off.
     Mono,
+    /// Step the ambience's level to the next.
+    Ambience,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
@@ -439,6 +441,8 @@ pub enum Choice {
     Sounds,
     Vibration,
     Mono,
+    /// Step the ambience's level to the next.
+    Ambience,
 }
 
 /// One row of the menu.
@@ -576,6 +580,11 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     "Mono audio: {}",
                     if model.feedback.mono { "on" } else { "off" }
                 ),
+            );
+            button(
+                &mut items,
+                MenuKey::Ambience,
+                format!("Ambience: {}", model.feedback.ambience.label()),
             );
         }
         Some(Section::Space) => {
@@ -1214,6 +1223,7 @@ impl HandMenu {
             MenuKey::Sounds => Some(Choice::Sounds),
             MenuKey::Vibration => Some(Choice::Vibration),
             MenuKey::Mono => Some(Choice::Mono),
+            MenuKey::Ambience => Some(Choice::Ambience),
             MenuKey::Knock => Some(Choice::Knock),
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
@@ -1608,12 +1618,13 @@ mod tests {
 
     #[test]
     fn the_sound_section_steps_the_feedback_setting_in_and_out_of_a_space() {
-        use tomori_client::feedback::{Level, Settings};
+        use tomori_client::feedback::{Ambience, Level, Settings};
         let mut model = Model {
             feedback: Settings {
                 sounds: Level::Reduced,
                 vibration: Level::Full,
                 mono: false,
+                ambience: Ambience::Medium,
             },
             ..Default::default()
         };
@@ -1628,6 +1639,7 @@ mod tests {
                     "Vibration: full",
                     "Reduced: requests, failures, knocks",
                     "Mono audio: off",
+                    "Ambience: medium",
                 ]
             );
         }
@@ -1637,6 +1649,7 @@ mod tests {
         assert_eq!(menu.choose(&MenuKey::Sounds), Some(Choice::Sounds));
         assert_eq!(menu.choose(&MenuKey::Vibration), Some(Choice::Vibration));
         assert_eq!(menu.choose(&MenuKey::Mono), Some(Choice::Mono));
+        assert_eq!(menu.choose(&MenuKey::Ambience), Some(Choice::Ambience));
         assert_eq!(menu.choose(&MenuKey::Back), None);
         assert_eq!(menu.section, None);
     }

@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn keeps_the_feedback_setting_on_the_device() {
-        use crate::feedback::{Level, Settings};
+        use crate::feedback::{Ambience, Level, Settings};
         let directory = directory("feedback");
         let store = Store::new(Some(directory.clone()));
         assert_eq!(store.feedback(), Settings::default());
@@ -571,6 +571,7 @@ mod tests {
             sounds: Level::Reduced,
             vibration: Level::Off,
             mono: false,
+            ambience: Ambience::High,
         };
         store.remember_feedback(settings);
         assert_eq!(Store::new(Some(directory.clone())).feedback(), settings);

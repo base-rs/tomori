@@ -99,6 +99,7 @@ pub struct Sceneries {
     locomotion: Vec<(Environment, Locomotion)>,
     over_grid: Vec<Environment>,
     client_sides: Vec<(Environment, tomori_scene::client_side::Factory)>,
+    ambiences: Vec<(Environment, Arc<tomori_scene::ambience::Ambience>)>,
     worker_placements: Vec<(Environment, tomori_scene::anchors::Placement)>,
     avatars: Vec<(&'static str, tomori_scene::avatar::Factory, Create)>,
     avatar_failures: tomori_scene::avatar::Failures,
@@ -173,6 +174,21 @@ impl Sceneries {
     /// The client sides registered for each environment, for the conversation.
     pub fn client_sides(&self) -> Vec<(Environment, tomori_scene::client_side::Factory)> {
         self.client_sides.clone()
+    }
+
+    /// Sound `ambience` beneath the conversation in a space bound to the environment `id`, where this build draws its
+    /// scenery, once it has grown in, in place of any registered before for it: its beds, loops and calls, in the
+    /// environment's own coordinates, which the client carries into the space's. See `design/environments.md`.
+    pub fn set_ambience(&mut self, id: &'static str, ambience: tomori_scene::ambience::Ambience) {
+        let environment = Environment::new(id);
+        self.ambiences
+            .retain(|(declared, _)| *declared != environment);
+        self.ambiences.push((environment, Arc::new(ambience)));
+    }
+
+    /// The ambiences registered for each environment, for the conversation.
+    pub fn ambiences(&self) -> Vec<(Environment, Arc<tomori_scene::ambience::Ambience>)> {
+        self.ambiences.clone()
     }
 
     /// Place the delegated workers of a space bound to the environment `id`, where this build draws it, by `placement`,
@@ -357,6 +373,23 @@ mod tests {
         ) -> tomori_scene::client_side::Output {
             tomori_scene::client_side::Output::new()
         }
+    }
+
+    #[test]
+    fn ambiences_are_registered_by_identifier_and_none_by_default() {
+        use tomori_scene::ambience::{Ambience, Bed, Slot};
+        assert!(Sceneries::default().ambiences().is_empty());
+        let mut sceneries = Sceneries::empty();
+        let wind = || Ambience::new().with_bed(Bed::new(Slot::missing("wind")));
+        sceneries.set_ambience("floor", wind());
+        sceneries.set_ambience("deck", Ambience::new());
+        sceneries.set_ambience("floor", Ambience::new());
+        sceneries.set_ambience("floor", wind());
+        let registered = sceneries.ambiences();
+        assert_eq!(registered.len(), 2);
+        assert_eq!(registered[0].0.id(), "deck");
+        assert_eq!(registered[1].0.id(), "floor");
+        assert_eq!(registered[1].1.slots().count(), 1);
     }
 
     #[test]
