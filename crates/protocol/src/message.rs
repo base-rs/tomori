@@ -621,6 +621,16 @@ pub enum ClientMessage {
         /// `design/projection.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         carrying: Option<String>,
+        /// Every panel this participant is carrying, one in each hand at most, by identity, of which `carrying` is the
+        /// first, for older servers, which protect only that one. Not relayed. Absent while they carry none, and from
+        /// older clients. See `design/clients.md`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        carried: Vec<String>,
+        /// Which of this participant's rays are shown, left then right: a ray hidden, as while its hand hangs down or
+        /// its palm is up, points at nothing. Absent from older clients, which the server takes as the right ray alone.
+        /// Not relayed. See `design/interaction.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rays: Option<[bool; 2]>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -1736,6 +1746,8 @@ mod tests {
             right: None,
             hands: Some(Box::new(hands)),
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         };
         let client_json =
             serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
@@ -1766,6 +1778,8 @@ mod tests {
             right: None,
             hands: None,
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).unwrap(),
@@ -1778,6 +1792,8 @@ mod tests {
             right: None,
             hands: None,
             carrying: Some("panel-3".into()),
+            carried: Vec::new(),
+            rays: None,
         };
         let carrying_json =
             serde_json::json!({"type": "presence", "head": head_json, "carrying": "panel-3"});
@@ -1785,6 +1801,29 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ClientMessage>(carrying_json).unwrap(),
             carrying
+        );
+        // A panel in each hand, and which rays are shown, which older servers ignore; an older client's presence,
+        // without them, reads as none carried beyond `carrying` and no rays said.
+        let both = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            carrying: Some("panel-3".into()),
+            carried: vec!["panel-3".into(), "panel-4".into()],
+            rays: Some([false, true]),
+        };
+        let both_json = serde_json::json!({
+            "type": "presence",
+            "head": head_json,
+            "carrying": "panel-3",
+            "carried": ["panel-3", "panel-4"],
+            "rays": [false, true],
+        });
+        assert_eq!(serde_json::to_value(&both).unwrap(), both_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(both_json).unwrap(),
+            both
         );
     }
 

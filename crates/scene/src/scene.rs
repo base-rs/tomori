@@ -26,6 +26,7 @@ use crate::{
     panel_anchor::PanelAnchor,
     pointing::{Pointer, Ray},
     recording::Trackers,
+    sides::{Hands, Side},
     swarm::Swarm,
 };
 use tomori_client::feedback::{self, Feedback};
@@ -94,6 +95,16 @@ pub struct Senses {
     pub ray: Option<Ray>,
     /// The trigger, while it can act; see [`Pointer::update`].
     pub trigger: Option<f32>,
+    /// The left controller's aim ray, its trigger and its grip, which act on Tomori's own things as the right's do; the
+    /// desktop has none. See `design/interaction.md`.
+    pub left_ray: Option<Ray>,
+    pub left_trigger: Option<f32>,
+    pub left_grip: Option<f32>,
+    /// Where the swarm is attracted to while the left trigger attracts it, outside a space.
+    pub left_attractor: Option<Vec3>,
+    /// The hand whose ray aims a teleport: the left on the headset, the hand whose stick aims it, and the right, the
+    /// mouse, on the desktop. See `design/locomotion.md`.
+    pub teleport: Side,
     /// The right hand points, which keeps the transcript from showing.
     pub pointing: bool,
     /// The left palm, which shows the hand menu while it faces up.
@@ -124,20 +135,25 @@ pub struct Senses {
 pub struct Arrival {
     pub scene: arrival::Scene,
     pub hovered: Option<arrival::Key>,
+    /// The right ray and the left, as drawn. See `design/interaction.md`.
     pub ray: Option<crate::pointing::Beam>,
+    pub left_ray: Option<crate::pointing::Beam>,
     pub time: f32,
 }
 
-/// This participant's head, controllers and hands, for the others in the space, and the panel they carry, if any, for
-/// the server alone.
+/// This participant's head, controllers and hands, for the others in the space, and the panels they carry and which of
+/// their rays are shown, for the server alone.
 #[derive(Clone, Debug)]
 pub struct Presence {
     pub head: Pose,
     pub left: Option<Pose>,
     pub right: Option<Pose>,
     pub hands: [Option<Hand>; 2],
-    /// The panel carried, by its identity, so that the space's agent does not move it out of the hand.
-    pub carrying: Option<String>,
+    /// The panels carried, by their identities, the right hand's first, so that the space's agent does not move them
+    /// out of the hands.
+    pub carried: Vec<String>,
+    /// Which rays are shown, left then right, so that the space's agent is told what each shown one points at.
+    pub rays: [bool; 2],
 }
 
 impl Presence {
@@ -148,7 +164,8 @@ impl Presence {
             self.left.map(Into::into),
             self.right.map(Into::into),
             self.hands,
-            self.carrying.as_deref(),
+            &self.carried,
+            self.rays,
         );
     }
 }
@@ -440,18 +457,15 @@ pub struct Step {
     was_talking: bool,
     /// After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     talk_blocked: bool,
-    /// The arrival object the ray met on the last frame, which A chooses.
-    highlighted: Option<arrival::Key>,
     /// Whether the hand menu showed last frame, when A is read, so that A then chooses only in it.
     menu_was_shown: bool,
     hand_menu: HandMenu,
     wrist: Wrist,
     indicator: Indicator,
-    pointer: Pointer<arrival::Key>,
-    hover: feedback::Hover,
-    /// The choosable row of a list the ray is on, which ticks as it is entered, apart from its panel, so that leaving it
-    /// for the rest of the panel ticks nothing.
-    row_hover: feedback::Hover,
+    /// What each hand's ray points at, chooses and takes hold of. See `design/interaction.md`.
+    hands: Hands<HandState>,
+    /// The hand whose trigger began drawing the swarm first, outside a space, while either does.
+    attracting: Option<Side>,
     /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
     /// `design/avatars.md`.
     coordinator: crate::avatar::Coordinator,
@@ -469,10 +483,6 @@ pub struct Step {
     board: crate::board::Board,
     /// The space's projected panels: the one carried and the one let go; see `design/projection.md`.
     projector: crate::projection::Projector,
-    /// The label on the ray last drawn, handed over again while it says the same, so that it is not drawn again.
-    ray_label: crate::projection::KeptLabel,
-    /// How far along the ray the card it met last frame was, which the grip picks up instead of a panel behind it.
-    card_reach: f32,
     /// Where the participant has travelled, in an environment that allows it, and the teleport being aimed; see `design/locomotion.md`.
     travel: Travel,
     /// The left stick, which travels in such a space, from the last buttons.
@@ -493,14 +503,9 @@ pub struct Step {
     /// mouse's wheel scrolled since the last frame, and by how many rows.
     scroll_stick: Option<(String, f32)>,
     wheel: Option<(String, f32)>,
-    /// The panel the ray pointed at last frame, not one carried, which a push of the right stick or the wheel scrolls.
-    pointed_panel: Option<String>,
     /// The wall carried as B was pressed, and when: removed for everyone, or asked to confirm, if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     removing: Option<(String, Instant)>,
-    /// What the ray pointed at last frame, Tomori's own interface first, which decides whose the trigger and the sticks
-    /// are as they begin. See `design/interaction.md`.
-    aim: precedence::Aim,
     /// The panel carried as B was pressed, and when: thrown away for everyone if B is let go within
     /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
     throwing: Option<(String, Instant)>,
@@ -519,9 +524,6 @@ pub struct Step {
     environment_sticks: (Vec2, Vec2),
     /// Whose the left stick's push is, from when it left the middle until it returns.
     left_stick: LeftStick,
-    /// Whose the right grip's squeeze is, from when it closed until it is let go, and whether it is closed.
-    gripping: Gripping,
-    grip_closed: bool,
     /// The pulls of the trigger and the presses of A on the client side's selectable objects, which outlive a client
     /// side, so that a pull begun for one is nobody's once it has gone. See `design/environments.md`.
     selector: crate::client_side::Selector,
@@ -530,9 +532,9 @@ pub struct Step {
     /// Whose the last press of B was, for tests that check the order.
     #[cfg(test)]
     last_back: Option<crate::conversation::Back>,
-    /// Whose the last squeeze of the grip was, for tests that check the order.
+    /// Whose the last squeeze of a grip was, and which hand's, for tests that check the order.
     #[cfg(test)]
-    last_grab: Option<precedence::Grab>,
+    last_grab: Option<(Side, precedence::Grab)>,
     /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
     /// swarm appears at the new one rather than gliding. See `design/environments.md`.
     agent_home: crate::anchors::Anchor,
@@ -541,13 +543,6 @@ pub struct Step {
     /// `design/timers.md`.
     clock: crate::dials::Clock,
     system: Option<Box<dyn Fn() -> f64 + Send + Sync>>,
-    /// The pulls of the trigger on teleport pads, with the thresholds that choose an arrival object, and the pad the ray
-    /// pointed at last frame, which a pull begun on it, or A, chooses. See `design/locomotion.md`.
-    pad_selector: crate::client_side::Selector,
-    pointed_pad: Option<crate::pads::Way>,
-    /// The pulls of the trigger on choosable rows of an environment's lists, with the same thresholds, a pull begun on
-    /// one choosing it once pressed there. See `design/panel-actions.md`.
-    row_selector: crate::client_side::Selector,
     /// The rig the platform placed this frame's poses with, as [`Self::rig`] last settled it.
     placed: Rig,
     /// Where the space's environment stood in the participant's room on the last frame in a space, and, once it is
@@ -589,6 +584,82 @@ fn at(position: Vec3) -> crate::anchors::Anchor {
     }
 }
 
+/// What one hand's ray points at, chooses and takes hold of, across frames: the same for either hand, the right's
+/// alone acting on the environment's objects for now. See `design/interaction.md`.
+struct HandState {
+    /// Arrival's objects and the hand menu's rows, which the ray points at and the trigger chooses.
+    pointer: Pointer<arrival::Key>,
+    /// The arrival object or menu row the ray met on the last frame, which A chooses.
+    highlighted: Option<arrival::Key>,
+    hover: feedback::Hover,
+    /// The choosable row of a list the ray is on, which ticks as it is entered, apart from its panel, so that leaving it
+    /// for the rest of the panel ticks nothing.
+    row_hover: feedback::Hover,
+    /// What the ray pointed at last frame, Tomori's own interface first, which decides whose the hand's trigger and grip
+    /// are as they begin, and the buttons and sticks', the right's first. See `design/interaction.md`.
+    aim: precedence::Aim,
+    /// The panel the ray pointed at last frame, not one carried, which a push of the right stick or the wheel scrolls.
+    panel: Option<String>,
+    /// The checklist item or row of a list the ray met last frame, by its panel and line.
+    item: Option<(String, u32)>,
+    /// How far along the ray the card it met last frame was, which the grip picks up instead of a panel behind it.
+    card_reach: f32,
+    /// The pad the ray pointed at last frame, which a pull begun on it, or A, chooses, and the pulls of the trigger on
+    /// pads, with the thresholds that choose an arrival object. See `design/locomotion.md`.
+    pad: Option<crate::pads::Way>,
+    pad_selector: crate::client_side::Selector,
+    /// The pulls of the trigger on choosable rows of an environment's lists, with the same thresholds, a pull begun on
+    /// one choosing it once pressed there. See `design/panel-actions.md`.
+    row_selector: crate::client_side::Selector,
+    /// The label on the ray last drawn, handed over again while it says the same, so that it is not drawn again.
+    ray_label: crate::projection::KeptLabel,
+    /// Whose the grip's squeeze is, from when it closed until it is let go, and whether it is closed.
+    gripping: Gripping,
+    grip_closed: bool,
+    /// What the ray is on, as words begun would name it, and when it moved onto it, so that words name what was pointed
+    /// at most recently first.
+    target: Option<tomori_protocol::Resource>,
+    since: Option<Instant>,
+    /// The ray as drawn: when it last had something to say, which keeps it drawn in full a second longer, and whether
+    /// its hand points down, as an arm resting at the side does. See `design/interaction.md`.
+    lit: Option<Instant>,
+    lowered: bool,
+}
+
+impl Default for HandState {
+    fn default() -> Self {
+        Self {
+            pointer: Pointer::default(),
+            highlighted: None,
+            hover: feedback::Hover::default(),
+            row_hover: feedback::Hover::default(),
+            aim: precedence::Aim::Nothing,
+            panel: None,
+            item: None,
+            card_reach: f32::INFINITY,
+            pad: None,
+            pad_selector: crate::client_side::Selector::default(),
+            row_selector: crate::client_side::Selector::default(),
+            ray_label: crate::projection::KeptLabel::default(),
+            gripping: Gripping::Free,
+            grip_closed: false,
+            target: None,
+            since: None,
+            lit: None,
+            lowered: false,
+        }
+    }
+}
+
+/// How long a ray stays drawn in full after it last had something to say. See `design/interaction.md`.
+const LIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a ray that has nothing to say is drawn, from its controller, in metres.
+pub const STUB: f32 = 0.15;
+/// How far below the horizontal a hand points, as the sine of the angle, for its ray to be hidden, 50°, and to show
+/// again, 45°, so that a hand held near the edge does not flicker.
+const LOWERED: f32 = 0.766;
+const RAISED: f32 = 0.707;
+
 impl Default for Step {
     fn default() -> Self {
         Self {
@@ -596,14 +667,12 @@ impl Default for Step {
             back_since: None,
             was_talking: false,
             talk_blocked: false,
-            highlighted: None,
             menu_was_shown: false,
             hand_menu: HandMenu::default(),
             wrist: Wrist::default(),
             indicator: Indicator::default(),
-            pointer: Pointer::default(),
-            hover: feedback::Hover::default(),
-            row_hover: feedback::Hover::default(),
+            hands: Hands::default(),
+            attracting: None,
             coordinator: crate::avatar::Coordinator::default(),
             signals: interaction::Signals::default(),
             motion: arrival_motion::Motion::default(),
@@ -615,8 +684,6 @@ impl Default for Step {
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
             projector: crate::projection::Projector::paced(),
-            ray_label: crate::projection::KeptLabel::default(),
-            card_reach: f32::INFINITY,
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
             right_stick: RightStick::Free,
@@ -627,8 +694,6 @@ impl Default for Step {
             straighten: false,
             scroll_stick: None,
             wheel: None,
-            pointed_panel: None,
-            aim: precedence::Aim::Nothing,
             throwing: None,
             removing: None,
             controls: crate::projection::Controls::default(),
@@ -636,8 +701,6 @@ impl Default for Step {
             ambience: None,
             environment_sticks: (Vec2::ZERO, Vec2::ZERO),
             left_stick: LeftStick::Free,
-            gripping: Gripping::Free,
-            grip_closed: false,
             selector: crate::client_side::Selector::default(),
             a_press: crate::client_side::Press::default(),
             #[cfg(test)]
@@ -647,9 +710,6 @@ impl Default for Step {
             agent_home: crate::anchors::Anchor::AGENT,
             clock: crate::dials::Clock::default(),
             system: None,
-            pad_selector: crate::client_side::Selector::default(),
-            row_selector: crate::client_side::Selector::default(),
-            pointed_pad: None,
             placed: Rig::default(),
             standing: None,
             seen_space: None,
@@ -668,8 +728,13 @@ impl Step {
         self.talk_blocked = true;
         conversation.stop_live();
         conversation.stop_talking();
-        self.pointer.release();
-        self.highlighted = None;
+        for side in Side::BOTH {
+            let hand = &mut self.hands[side];
+            hand.pointer.release();
+            hand.highlighted = None;
+            hand.pad = None;
+        }
+        self.attracting = None;
         self.presentation_navigation.release();
         self.cancel_travel();
         // A push that was an object's is nobody's until it returns to the middle, so that it does not begin again.
@@ -686,7 +751,6 @@ impl Step {
         self.environment_sticks = (Vec2::ZERO, Vec2::ZERO);
         self.left_stick = LeftStick::Free;
         self.a_press = crate::client_side::Press::default();
-        self.pointed_pad = None;
         if let Some(client) = self.client.as_mut() {
             client.back = false;
         }
@@ -701,31 +765,41 @@ impl Step {
         }
         self.wheel_push = None;
         self.scroll_axis = Vec2::ZERO;
-        // And a squeeze of the grip that was an object's, which the next client side is told nothing of.
-        if matches!(self.gripping, Gripping::Environment { .. }) {
-            self.gripping = Gripping::Abandoned;
+        // And a squeeze of a grip that was an object's, which the next client side is told nothing of.
+        for side in Side::BOTH {
+            if matches!(self.hands[side].gripping, Gripping::Environment { .. }) {
+                self.hands[side].gripping = Gripping::Abandoned;
+            }
         }
     }
 
-    /// Whose the right grip's squeeze is this frame, from `grip`, its value while it acts, with `wrist_active` whether
-    /// the transcript showed: as it closes, the first rung of [`precedence::Grab`] that claims it, as things stood last
-    /// frame, Tomori's own first, the environment's object within reach of the hand, or else pointed at, only for a
-    /// participant; held until it is let go. Returns whether it is the environment's, or was as it was let go this frame,
-    /// so that nothing of Tomori's is given it.
-    fn grip(&mut self, grip: Option<f32>, wrist_active: bool, participates: bool) -> bool {
+    /// Whose `side`'s grip's squeeze is this frame, from `grip`, its value while it acts, with `wrist_active` whether
+    /// the transcript showed: as it closes, the first rung of [`precedence::Grab`] that claims it for that hand, as
+    /// things stood last frame, Tomori's own first, the environment's object within reach of the hand, or else pointed
+    /// at, only for a participant, and for now only for the right hand; held until it is let go. Returns whether it is
+    /// the environment's, or was as it was let go this frame, so that nothing of Tomori's is given it.
+    fn grip(
+        &mut self,
+        side: Side,
+        grip: Option<f32>,
+        wrist_active: bool,
+        participates: bool,
+    ) -> bool {
         let value = grip.filter(|value| value.is_finite()).unwrap_or(0.0);
-        let closed = if self.grip_closed {
+        let hand = &self.hands[side];
+        let closed = if hand.grip_closed {
             value > controller_ui::RELEASE
         } else {
             value > controller_ui::SQUEEZE
         };
-        let began = closed && !self.grip_closed;
-        self.grip_closed = closed;
-        if began && self.gripping == Gripping::Free {
+        let began = closed && !hand.grip_closed;
+        self.hands[side].grip_closed = closed;
+        if began && self.hands[side].gripping == Gripping::Free {
+            // The environment's objects take the right hand's grip alone, until either hand takes them.
             let target = self
                 .client
                 .as_ref()
-                .filter(|_| participates)
+                .filter(|_| participates && side == Side::Right)
                 .and_then(|client| {
                     client
                         .reachable
@@ -739,19 +813,19 @@ impl Step {
                         })
                 });
             let rung = precedence::Grab::first(|rung| match rung {
-                precedence::Grab::Transcript => wrist_active,
+                precedence::Grab::Transcript => side == Side::Right && wrist_active,
                 precedence::Grab::Carried => {
-                    self.projector.carrying() || self.board.held().is_some()
+                    self.projector.carrying_in(side) || self.board.held_in(side).is_some()
                 }
-                precedence::Grab::Tomori => self.aim == precedence::Aim::Tomori,
+                precedence::Grab::Tomori => self.hands[side].aim == precedence::Aim::Tomori,
                 precedence::Grab::Environment => target.is_some(),
                 precedence::Grab::Nothing => true,
             });
             #[cfg(test)]
             {
-                self.last_grab = Some(rung);
+                self.last_grab = Some((side, rung));
             }
-            self.gripping = match (rung, target) {
+            self.hands[side].gripping = match (rung, target) {
                 (precedence::Grab::Environment, Some((object, distance))) => {
                     Gripping::Environment {
                         object,
@@ -763,9 +837,9 @@ impl Step {
                 _ => Gripping::Other,
             };
         }
-        let environment = matches!(self.gripping, Gripping::Environment { .. });
+        let environment = matches!(self.hands[side].gripping, Gripping::Environment { .. });
         if !closed && !environment {
-            self.gripping = Gripping::Free;
+            self.hands[side].gripping = Gripping::Free;
         }
         environment
     }
@@ -809,7 +883,19 @@ impl Step {
     /// Whether the right hand points this frame, from `trigger` and what the ray met: the palm turns while pointing across the body.
     pub fn pointing(&self, trigger: Option<f32>) -> bool {
         trigger.is_some_and(|trigger| trigger > POINTING)
-            || matches!(self.highlighted, Some(arrival::Key::Menu(_)))
+            || matches!(self.hands.right.highlighted, Some(arrival::Key::Menu(_)))
+    }
+
+    /// The hand whose ray a button or stick of `own`'s controller acts on: its own, while its ray is on something, or
+    /// else the other's, while that one's is; otherwise its own. So A ticks the item the right ray is on, or else the
+    /// one the left ray is on. See `design/interaction.md`.
+    fn serving(&self, own: Side) -> Side {
+        let on = |side: Side| self.hands[side].aim != precedence::Aim::Nothing;
+        if !on(own) && on(own.other()) {
+            own.other()
+        } else {
+            own
+        }
     }
 
     /// Act on this frame's `buttons` at `now`, `focused` if the participant has input. Buttons act on every frame, even one that is not drawn.
@@ -826,13 +912,17 @@ impl Step {
         // `precedence` that claims it, Tomori's own interface first, so that the environment's client side has it only
         // with the ray on something of its own or on nothing of Tomori's. See `design/interaction.md`.
         let environment = self.client.is_some();
-        let aim = self.aim;
+        // The left stick acts on what the left ray is on, or else the right's; the right stick, A and B on what the
+        // right ray is on, or else the left's.
+        let left_aim = self.hands[self.serving(Side::Left)].aim;
+        let serving = self.serving(Side::Right);
+        let aim = self.hands[serving].aim;
         let travels = !matches!(conversation.locomotion(), locomotion::Locomotion::None);
         self.left_stick = self.left_stick.update(stick, || {
             match precedence::Left::first(|rung| match rung {
                 precedence::Left::Travel => travels,
                 precedence::Left::Tomori => {
-                    matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
+                    matches!(left_aim, precedence::Aim::Tomori | precedence::Aim::Pad)
                 }
                 precedence::Left::Environment => environment,
                 precedence::Left::Nothing => true,
@@ -862,8 +952,8 @@ impl Step {
         let wrist_active = self.wrist.state().active();
         // A push of the right stick is the panel or wall carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. Otherwise, while the transcript does not show, a push that leaves the middle pointing at a panel with more than it shows scrolls it, for this participant alone, and nothing else. See `design/projection.md`.
         let carrying = self.projector.carrying();
-        let scrolls = self
-            .pointed_panel
+        let scrolls = self.hands[serving]
+            .panel
             .as_deref()
             .filter(|panel| !wrist_active && self.projector.scrollable(panel));
         // An object of the environment's that takes the right stick, pointed at, has a push that nothing of Tomori's
@@ -927,7 +1017,7 @@ impl Step {
             (Vec2::ZERO, Vec2::ZERO)
         };
         // The mouse's wheel scrolls the panel pointed at, unless one is carried or the transcript shows.
-        if let Some(panel) = &self.pointed_panel
+        if let Some(panel) = &self.hands[serving].panel
             && focused
             && !carrying
             && !wrist_active
@@ -1106,13 +1196,18 @@ impl Step {
         // that the ray pointed at last frame, which it selects. See `design/interaction.md`.
         let focus = self.client.as_ref().and_then(|client| client.focus.clone());
         let mut chose = false;
+        // The menu row or arrival object the right ray is on, or else the left's.
+        let highlighted = self.hands[Side::Right]
+            .highlighted
+            .clone()
+            .or_else(|| self.hands[Side::Left].highlighted.clone());
         let rung = buttons.a.then(|| {
             precedence::A::first(|rung| match rung {
-                precedence::A::MenuRow => matches!(self.highlighted, Some(arrival::Key::Menu(_))),
+                precedence::A::MenuRow => matches!(highlighted, Some(arrival::Key::Menu(_))),
                 precedence::A::Menu => self.menu_was_shown,
                 precedence::A::Transcript => wrist_active,
                 precedence::A::Conversation => {
-                    let nothing = conversation.press_a(self.highlighted.as_ref());
+                    let nothing = conversation.press_a(highlighted.as_ref());
                     chose = !nothing && !conversation.a_refused();
                     !nothing
                 }
@@ -1121,7 +1216,7 @@ impl Step {
                 precedence::A::Nothing => true,
             })
         });
-        match (rung, &self.highlighted) {
+        match (rung, &highlighted) {
             // The ray only meets rows that can be chosen.
             (Some(precedence::A::MenuRow), Some(arrival::Key::Menu(key))) => {
                 feedback.emit(feedback::Event::Choose, now);
@@ -1224,6 +1319,19 @@ impl Step {
                 visual.working
             );
         }
+        // Each hand's ray, trigger and grip, which act alike on Tomori's own things. See `design/interaction.md`.
+        let rays = Hands {
+            right: senses.ray,
+            left: senses.left_ray,
+        };
+        let triggers = Hands {
+            right: senses.trigger,
+            left: senses.left_trigger,
+        };
+        let grips = Hands {
+            right: senses.grip,
+            left: senses.left_grip,
+        };
         // Arrival's objects move between its steps rather than cutting, and are pointed at where they are now. See `design/arrival.md`.
         self.arrival_time += dt;
         self.motion
@@ -1245,20 +1353,24 @@ impl Step {
                 now,
             );
         self.menu_was_shown = menu_shown;
+        // Shown on the left palm, rather than pinned with Y, the menu is the right ray's alone, and the left hand,
+        // holding it, points at nothing and chooses nothing.
+        let menu_on_palm = menu_shown && !self.hand_menu.pinned();
         let in_space = conversation.joined_space().is_some();
-        // Whose the right grip's squeeze is, decided as it closes, until it is let go: Tomori's own first, and the
+        // Whose each grip's squeeze is, decided as it closes, until it is let go: Tomori's own first, and the
         // environment's object only where none of them takes it, which nothing of Tomori's is then given. See
         // `design/interaction.md` and `design/environments.md`.
-        let environment_grip = self.grip(
-            senses.grip.filter(|_| focused && in_space),
-            self.wrist.state().active(),
-            conversation.role().participates(),
-        );
-        let tomori_grip = if environment_grip {
-            Some(0.0)
-        } else {
-            senses.grip
-        };
+        let wrist_was_active = self.wrist.state().active();
+        let participates = conversation.role().participates();
+        let tomori_grips = Hands::from_fn(|side| {
+            let environment = self.grip(
+                side,
+                grips[side].filter(|_| focused && in_space),
+                wrist_was_active,
+                participates,
+            );
+            if environment { Some(0.0) } else { grips[side] }
+        });
         let (wrist_opened, wrist) = self.wrist.update(
             conversation,
             WristFrame {
@@ -1269,9 +1381,10 @@ impl Step {
                 in_space,
                 menu_shown,
                 menu_pinned: self.hand_menu.pinned(),
-                // A panel carried keeps the transcript away, as pointing does, so that turning the wrist does not let it go.
-                pointing: senses.pointing || self.projector.carrying(),
-                grip: tomori_grip,
+                // A panel carried in the right hand keeps the transcript away, as pointing does, so that turning the
+                // wrist does not let it go.
+                pointing: senses.pointing || self.projector.carrying_in(Side::Right),
+                grip: tomori_grips.right,
             },
             moment,
         );
@@ -1283,11 +1396,13 @@ impl Step {
         let wrist_shown = self.wrist.state().on_hand();
         let wrist_active = self.wrist.state().active();
         let wrist_waiting = conversation.wrist_waiting();
-        // What the ray pointed at last frame, so that the description of the mode pointed at shows beneath the modes, in rows that are there whatever is pointed at, so that the rows do not move under the ray.
-        let pointed = match &self.highlighted {
-            Some(arrival::Key::Menu(key)) => Some(key.clone()),
-            _ => None,
-        };
+        // What the rays pointed at last frame, so that the description of the mode pointed at shows beneath the modes, in rows that are there whatever is pointed at, so that the rows do not move under the ray.
+        let pointed = Side::BOTH
+            .into_iter()
+            .find_map(|side| match &self.hands[side].highlighted {
+                Some(arrival::Key::Menu(key)) => Some(key.clone()),
+                _ => None,
+            });
         let menu = |hand_menu: &HandMenu, conversation: &Conversation| {
             let mut objects = match senses.left_palm {
                 Some(palm) if menu_shown => {
@@ -1317,18 +1432,35 @@ impl Step {
             .into_iter()
             .filter(|target| !menu_shown || matches!(target.key, arrival::Key::Menu(_)))
             .collect();
-        let pointing = self.pointer.update(senses.ray, senses.trigger, &targets);
-        self.highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
-        if let Some(key) = &pointing.chosen {
-            feedback.emit(feedback::Event::Choose, now);
-            match key {
-                arrival::Key::Menu(key) => {
-                    if let Some(choice) = self.hand_menu.choose(key) {
-                        conversation.choose_menu(choice);
+        // Each ray points at arrival's objects and the menu's rows, and its trigger chooses them; the left, holding the
+        // menu on its palm, at none.
+        let mut pointings = Hands::from_fn(|side| {
+            let targets = if side == Side::Left && menu_on_palm {
+                &[][..]
+            } else {
+                &targets[..]
+            };
+            self.hands[side]
+                .pointer
+                .update(rays[side], triggers[side], targets)
+        });
+        let mut chose = false;
+        for side in Side::BOTH {
+            self.hands[side].highlighted = pointings[side].hit.as_ref().map(|hit| hit.key.clone());
+            if let Some(key) = pointings[side].chosen.take() {
+                chose = true;
+                feedback.emit_on(feedback::Event::Choose, side.into(), now);
+                match key {
+                    arrival::Key::Menu(key) => {
+                        if let Some(choice) = self.hand_menu.choose(&key) {
+                            conversation.choose_menu(choice);
+                        }
                     }
+                    key => conversation.choose_object(&key),
                 }
-                key => conversation.choose_object(key),
             }
+        }
+        if chose {
             self.motion
                 .update(&arrival_target(conversation), self.arrival_time);
             scene = self.motion.scene(self.arrival_time);
@@ -1339,35 +1471,48 @@ impl Step {
         let in_space_shown = !in_arrival && conversation.joined_space().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         let scenery = self.motion.scenery(self.arrival_time);
-        // Whose a pull of the trigger is, decided as it begins, until it is let go: the first rung of
-        // `precedence::Trigger` that claims it, as the ray found things last frame, Tomori's own interface first. A pull
-        // that begins on a selectable object of the environment's client side, with nothing of Tomori's taking it, is the
-        // client side's, and does not attract the swarm. See `design/interaction.md` and `design/environments.md`.
+        // Whose each pull of a trigger is, decided as it begins, until it is let go: the first rung of
+        // `precedence::Trigger` that claims it for that hand, as its ray found things last frame, Tomori's own interface
+        // first. A pull that begins on a selectable object of the environment's client side, with nothing of Tomori's
+        // taking it, is the client side's, and does not attract the swarm: for now, the right trigger's alone. See
+        // `design/interaction.md` and `design/environments.md`.
         let focus = self
             .client
             .as_ref()
             .and_then(|client| client.focus.as_deref());
-        let aim = self.aim;
-        let carrying_wall = self.projector.carried_wall().is_some();
-        // A choosable row of an environment's list the ray met last frame, for a participant: a pull begun on it chooses
-        // it, as A does, rather than attracting the swarm. See `design/panel-actions.md`.
-        let row = conversation
-            .pointed_row()
-            .filter(|_| conversation.ticks())
-            .map(|(panel, row)| format!("{panel}\n{row}"));
-        let rung = precedence::Trigger::first(|rung| match rung {
-            precedence::Trigger::Menu => menu_shown || in_arrival,
-            precedence::Trigger::Transcript => wrist_active,
-            precedence::Trigger::CarriedWall => carrying_wall,
-            precedence::Trigger::Row => aim == precedence::Aim::Tomori && row.is_some(),
-            precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
-            precedence::Trigger::Pad => aim == precedence::Aim::Pad,
-            precedence::Trigger::Environment => focus.is_some(),
-            precedence::Trigger::Swarm => true,
+        // A choosable row of an environment's list each ray met last frame, for a participant: a pull begun on it
+        // chooses it, as A does, rather than attracting the swarm. See `design/panel-actions.md`.
+        let rows = Hands::from_fn(|side| {
+            self.hands[side]
+                .item
+                .as_ref()
+                .and_then(|item| conversation.choosable_row(item))
+                .filter(|_| conversation.ticks())
         });
-        let others = self.pad_selector.holds() || self.row_selector.holds();
+        let rungs = Hands::from_fn(|side| {
+            let aim = self.hands[side].aim;
+            precedence::Trigger::first(|rung| match rung {
+                precedence::Trigger::Menu => menu_shown || in_arrival,
+                precedence::Trigger::Transcript => side == Side::Right && wrist_active,
+                precedence::Trigger::CarriedWall => self.projector.carried_wall_in(side).is_some(),
+                precedence::Trigger::Row => aim == precedence::Aim::Tomori && rows[side].is_some(),
+                precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
+                precedence::Trigger::Pad => aim == precedence::Aim::Pad,
+                precedence::Trigger::Environment => side == Side::Right && focus.is_some(),
+                precedence::Trigger::Swarm => true,
+            })
+        });
+        // One select at a time, across both hands: a pull that begins while another is held is nobody's.
+        let holding = |step: &Self, but: (Side, u8)| {
+            (step.selector.holds() && but != (Side::Right, 0))
+                || Side::BOTH.into_iter().any(|side| {
+                    (step.hands[side].pad_selector.holds() && but != (side, 1))
+                        || (step.hands[side].row_selector.holds() && but != (side, 2))
+                })
+        };
+        let others = holding(self, (Side::Right, 0));
         let select = self.selector.update_beside(
-            focus.filter(|_| rung == precedence::Trigger::Environment),
+            focus.filter(|_| rungs.right == precedence::Trigger::Environment),
             senses.trigger,
             // A press is told once; A held is as the last buttons found it, until the next. A press in the frame the hand
             // menu or the transcript appears is theirs, as a pull of the trigger is, though A's own rungs, which are
@@ -1388,50 +1533,76 @@ impl Step {
         // A pull begun on a teleport pad chooses it once pressed as far as choosing an arrival object takes, as A does,
         // which the conversation's `accept` took for it; either takes the participant to the pad paired with it, from
         // this frame's travel. See `design/locomotion.md`.
-        let pad_name = self
-            .pointed_pad
-            .filter(|_| rung == precedence::Trigger::Pad)
-            .map(|way| match way {
-                crate::pads::Way::Pad(key) => format!("{}/{}", key.pair, key.end),
-                crate::pads::Way::Target(index) => format!("target/{index}"),
-            });
-        let others = self.selector.holds() || self.row_selector.holds();
-        let pulled = matches!(
-            self.pad_selector.update_beside(
-                pad_name.as_deref(),
-                senses.trigger,
-                crate::client_side::Press::default(),
-                others,
-            ),
-            Some(crate::client_side::Select::Pressed(_))
-        );
-        let pressed = conversation.take_pad_choice();
-        let chosen_pad = self.pointed_pad.filter(|_| pulled || pressed);
-        // Pressed as far as choosing takes, on the row it began on, it chooses that row, with the choosing click.
-        // One select at a time: a pull that begins while the environment's select or a pad's is held is nobody's.
-        let others = self.selector.holds() || self.pad_selector.holds();
-        if let Some(crate::client_side::Select::Pressed(_)) = self.row_selector.update_beside(
-            row.as_deref().filter(|_| rung == precedence::Trigger::Row),
-            senses.trigger,
-            crate::client_side::Press::default(),
-            others,
-        ) && conversation.choose_row()
-        {
-            feedback.emit(feedback::Event::Choose, now);
+        let mut pulled = None;
+        for side in Side::BOTH {
+            let pad_name = self.hands[side]
+                .pad
+                .filter(|_| rungs[side] == precedence::Trigger::Pad)
+                .map(|way| match way {
+                    crate::pads::Way::Pad(key) => format!("{}/{}", key.pair, key.end),
+                    crate::pads::Way::Target(index) => format!("target/{index}"),
+                });
+            let others = holding(self, (side, 1));
+            if matches!(
+                self.hands[side].pad_selector.update_beside(
+                    pad_name.as_deref(),
+                    triggers[side],
+                    crate::client_side::Press::default(),
+                    others,
+                ),
+                Some(crate::client_side::Select::Pressed(_))
+            ) {
+                pulled = pulled.or(self.hands[side].pad);
+            }
         }
-        let selecting =
-            self.selector.owns() || self.pad_selector.owns() || self.row_selector.owns();
+        let pressed = conversation.take_pad_choice();
+        let serving = self.serving(Side::Right);
+        let chosen_pad = pulled.or(self.hands[serving].pad.filter(|_| pressed));
+        // Pressed as far as choosing takes, on the row it began on, it chooses that row, with the choosing click.
+        for side in Side::BOTH {
+            let others = holding(self, (side, 2));
+            if let Some(crate::client_side::Select::Pressed(_)) =
+                self.hands[side].row_selector.update_beside(
+                    rows[side]
+                        .as_ref()
+                        .map(|(panel, row)| format!("{panel}\n{row}"))
+                        .as_deref()
+                        .filter(|_| rungs[side] == precedence::Trigger::Row),
+                    triggers[side],
+                    crate::client_side::Press::default(),
+                    others,
+                )
+                && let Some(row) = rows[side].clone()
+                && conversation.choose_row_at(row)
+            {
+                feedback.emit_on(feedback::Event::Choose, side.into(), now);
+            }
+        }
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
-        // While a wall is carried, the trigger keeps it from snapping rather than attracting the swarm. See
+        // While a wall is carried, its hand's trigger keeps it from snapping rather than attracting the swarm. See
         // `design/projection.md`. In a space it draws the swarm nowhere: the agent comes to whoever speaks to it, and the
-        // trigger is for pointing and selecting. See `design/interaction.md`.
-        let attracting = pointing.attracting
-            && !in_space_shown
-            && !menu_shown
-            && !wrist_active
-            && !selecting
-            && rung != precedence::Trigger::CarriedWall;
-        let attractor = senses.attractor.filter(|_| attracting);
+        // trigger is for pointing and selecting. Outside one, either trigger draws it towards its own hand, and a pull
+        // of both towards the first. See `design/interaction.md`.
+        let attracts = Hands::from_fn(|side| {
+            let selecting = (side == Side::Right && self.selector.owns())
+                || self.hands[side].pad_selector.owns()
+                || self.hands[side].row_selector.owns();
+            pointings[side].attracting
+                && !in_space_shown
+                && !menu_shown
+                && !(side == Side::Right && wrist_active)
+                && !selecting
+                && rungs[side] != precedence::Trigger::CarriedWall
+        });
+        self.attracting = self
+            .attracting
+            .filter(|side| attracts[*side])
+            .or(Side::BOTH.into_iter().find(|side| attracts[*side]));
+        let attracting = self.attracting.is_some();
+        let attractor = self.attracting.and_then(|side| match side {
+            Side::Right => senses.attractor,
+            Side::Left => senses.left_attractor,
+        });
         // The agent appears at its home as a space opens, or changes environment, and otherwise glides to where it goes
         // and back home; the workers stand about its home. See `design/environments.md`.
         let arrangement = conversation.arrangement();
@@ -1511,22 +1682,50 @@ impl Step {
             Marker::WhileAttracting => attractor,
             Marker::Hidden => None,
         };
-        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`. While the transcript shows, the ray is hidden and points at nothing.
-        let in_space = focused
-            && !in_arrival
-            && !menu_shown
-            && !wrist_active
-            && conversation.joined_space().is_some();
-        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        // In a space each ray points at what the space shows, which only highlights it, its trigger and grip acting on it as the ladders say, and holding X sends what the rays point at with the words. See `design/interaction.md`. While the hand menu shows, the rays are its; while the transcript shows, the right ray is hidden and points at nothing, and the left goes on.
+        let world = Hands::from_fn(|side| {
+            focused
+                && !in_arrival
+                && !menu_shown
+                && !(side == Side::Right && wrist_active)
+                && conversation.joined_space().is_some()
+        });
+        // A ray whose hand points down, as an arm resting at the side does, is hidden, and points at nothing, unless its
+        // hand is busy: holding something, squeezing or pulling. Only where the platform draws its rays: the desktop's
+        // mouse points wherever it does.
+        let busy = Hands::from_fn(|side| {
+            triggers[side].is_some_and(|trigger| trigger > crate::pointing::PULL)
+                || self.hands[side].grip_closed
+                || self.projector.carrying_in(side)
+                || self.board.held_in(side).is_some()
+        });
+        for side in Side::BOTH {
+            let down = rays[side].map(|ray| -ray.direction.y);
+            let hand = &mut self.hands[side];
+            hand.lowered = senses.beam
+                && down.is_some_and(|down| {
+                    if hand.lowered {
+                        down > RAISED
+                    } else {
+                        down > LOWERED
+                    }
+                });
+        }
+        let casts =
+            Hands::from_fn(|side| rays[side].filter(|_| !self.hands[side].lowered || busy[side]));
+        // In an environment that allows it, the left stick travels: aiming a teleport with the left ray, the hand whose stick aims it, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
         let locomotion = conversation.locomotion();
-        // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put it down. A panel carried travels along, in the hand, as the rig carries the ray it follows.
+        // The hand whose ray aims: the left on the headset, whose stick aims, and the mouse on the desktop.
+        let aimer = senses.teleport;
+        // Only once the environment's scenery has grown in, so that its surfaces are seen; not while the transcript shows; and not while the left hand carries a card, since aiming would put it down. A panel carried in either hand travels along, in the hand, as the rig carries the ray it follows.
         let grown = scenery.reveal.is_none() && scenery.environment == conversation.environment();
-        let travel_active = in_space && grown && self.board.held().is_none();
+        let travel_active =
+            world[aimer] && !wrist_active && grown && self.board.held_in(aimer).is_none();
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
             locomotion: &locomotion,
             stick: self.travel_stick,
-            ray: senses.ray,
+            ray: rays[aimer],
             head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
             facing: senses
                 .head_pose
@@ -1535,25 +1734,33 @@ impl Step {
             chosen: chosen_pad,
             dt,
         });
-        // Landing clicks as choosing does; a pad chosen with A clicked as A chose it.
+        // Landing clicks as choosing does, on the hand that aimed; a pad chosen with A clicked as A chose it.
         if travel.teleported || (travel.transported && !pressed) {
-            feedback.emit(feedback::Event::Choose, now);
+            feedback.emit_on(feedback::Event::Choose, aimer.into(), now);
         }
-        // While a teleport is aimed, the ray serves only it, though a panel carried stays in the hand.
-        let carrying_through = in_space;
-        let in_space = in_space && !travel.aiming;
-        // What is projected stands wherever the space shows it; the ray and the right grip act on it only while nothing else takes them, and not while a card is carried. A card the ray met nearer last frame takes the grip. See `design/projection.md`.
+        // While a teleport is aimed, the left ray serves only it, though a panel carried in either hand stays there; the
+        // right ray goes on pointing, choosing and carrying.
+        let carrying_through = world;
+        let points = Hands::from_fn(|side| world[side] && !(side == aimer && travel.aiming));
+        // What is projected stands wherever the space shows it; the rays and grips act on it only while nothing else takes them, and not while that hand carries a card. A card a ray met nearer last frame takes that hand's grip. See `design/projection.md`.
         conversation.observe_head(senses.head_pose.map(Into::into));
         // A change to a wall the server refused is drawn as the server has it at once, not as sent.
         if let Some(wall) = conversation.take_refused_wall() {
             self.projector.refused_wall(&wall);
         }
-        // The teleport pad the ray meets, if any, which nothing nearer takes, below; a panel behind it is not pulled
-        // off, as one behind a card is not.
-        let pad_met = senses
-            .ray
-            .filter(|_| travel_active && !travel.aiming && !self.projector.carrying())
-            .and_then(|ray| crate::pads::point(&locomotion, &ray));
+        // The teleport pad each ray meets, if any, which nothing nearer takes, below; a panel behind it is not pulled
+        // off, as one behind a card is not. A ray pointing down still meets the pads and targets on the floor, as the
+        // pad stood on, and shows while it does.
+        let pads_met = Hands::from_fn(|side| {
+            rays[side]
+                .filter(|_| {
+                    points[side]
+                        && grown
+                        && self.board.held_in(side).is_none()
+                        && !self.projector.carrying_in(side)
+                })
+                .and_then(|ray| crate::pads::point(&locomotion, &ray))
+        });
         // A list's choosable row pointed at last frame is marked where A or the trigger would choose it for this
         // participant, and the row just chosen for as long as the label says so.
         self.projector.mark_rows(crate::projection::RowMarks {
@@ -1562,109 +1769,111 @@ impl Step {
                 .chosen_row()
                 .map(|(panel, row)| (panel.to_owned(), row.to_owned())),
         });
+        let hold = |step: &Self, side: Side| crate::projection::Hold {
+            ray: casts[side],
+            // Only a participant pulls panels off; a visitor only looks at them and points.
+            grip: tomori_grips[side].filter(|_| step.board.held_in(side).is_none() && participates),
+            active: carrying_through[side] && step.board.held_in(side).is_none(),
+            pointing: points[side],
+            nearer: pads_met[side].map_or(step.hands[side].card_reach, |(_, distance, _)| {
+                step.hands[side].card_reach.min(distance)
+            }),
+            free: triggers[side].is_some_and(|trigger| trigger > crate::pointing::PULL),
+        };
+        let right = hold(self, Side::Right);
+        let left = hold(self, Side::Left);
+        // Which hands held a panel or a card before this frame, so that what each takes or puts down is felt on it.
+        let held_before = Hands::from_fn(|side| self.projector.held_in(side).is_some());
         let projecting = Instant::now();
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
-            ray: senses.ray,
-            // Only a participant pulls panels off; a visitor only looks at them and points.
-            grip: tomori_grip
-                .filter(|_| self.board.held().is_none() && conversation.role().participates()),
+            ray: right.ray,
+            grip: right.grip,
             viewer: senses.viewer,
-            active: carrying_through && self.board.held().is_none(),
-            pointing: !travel.aiming,
-            nearer: pad_met.map_or(self.card_reach, |(_, distance, _)| {
-                self.card_reach.min(distance)
-            }),
+            active: right.active,
+            pointing: right.pointing,
+            nearer: right.nearer,
             stick: self.carry_stick,
             straighten: std::mem::take(&mut self.straighten),
-            free: senses
-                .trigger
-                .is_some_and(|trigger| trigger > crate::pointing::PULL),
+            free: right.free,
             controls: self.controls,
             scroll: scrolled(self.scroll_stick.as_ref(), self.wheel.take(), dt)
                 .as_ref()
                 .map(|(panel, rows)| (panel.as_str(), *rows)),
             rights: conversation.wall_rights(),
+            left,
             now,
             dt,
         });
         crate::frame_timing::projection(projecting.elapsed());
         if let Some(change) = projected.wall.clone() {
-            feedback.emit(feedback::Event::Hover, now);
+            feedback.emit_on(feedback::Event::Hover, projected.wall_hand.into(), now);
             conversation.set_wall(change);
         }
         if let Some(change) = projected.lock.clone() {
-            feedback.emit(feedback::Event::Choose, now);
+            feedback.emit_on(feedback::Event::Choose, projected.wall_hand.into(), now);
             conversation.lock_wall(change);
         }
         if projected.wall_ticked {
-            feedback.emit(feedback::Event::Hover, now);
+            feedback.emit_on(feedback::Event::Hover, projected.wall_hand.into(), now);
         }
         if projected.turned {
             feedback.emit(feedback::Event::Hover, now);
         }
-        if projected.picked {
-            feedback.emit(feedback::Event::Choose, now);
+        for side in Side::BOTH {
+            if self.projector.held_in(side).is_some() && !held_before[side] {
+                feedback.emit_on(feedback::Event::Choose, side.into(), now);
+            }
         }
-        if let Some((panel, target)) = projected.placed.clone() {
-            feedback.emit(feedback::Event::Hover, now);
-            conversation.place_panel(panel, target);
+        for (side, placed) in [
+            (Side::Right, projected.placed.clone()),
+            (Side::Left, projected.left.placed.clone()),
+        ] {
+            if let Some((panel, target)) = placed {
+                feedback.emit_on(feedback::Event::Hover, side.into(), now);
+                conversation.place_panel(panel, target);
+            }
         }
-        let carrying = self.projector.carrying();
-        // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them, such as a panel carried. See `design/github.md`.
+        // Each hand's view of what is projected: what its ray points at, the item it meets, and where it ends.
+        // Whether the right ray points at `panel` on what is projected, rather than carrying it, where a chart's readout
+        // is drawn.
+        let pointed_here = |panel: &Option<String>| {
+            panel.is_some()
+                && panel.as_deref() == projected.pointed.as_ref().map(|(id, ..)| id.as_str())
+        };
+        let views = Hands {
+            right: (projected.pointed.clone(), projected.item, projected.hit),
+            left: (
+                projected.left.pointed.clone(),
+                projected.left.item,
+                projected.left.hit,
+            ),
+        };
+        // The space's cards stand wherever it shows them; each ray and grip acts on them only while nothing else takes them, such as a panel that hand carries. See `design/github.md`.
+        let carded = Hands::from_fn(|side| self.board.held_in(side).is_some());
         let board = self.board.update(crate::board::Input {
             cards: conversation.cards().filter(|_| !in_arrival),
-            ray: senses.ray,
-            grip: tomori_grip.filter(|_| !carrying),
+            hands: Hands::from_fn(|side| {
+                let carrying = self.projector.carrying_in(side);
+                crate::board::Reach {
+                    ray: casts[side],
+                    grip: tomori_grips[side].filter(|_| !carrying),
+                    active: points[side] && !carrying,
+                }
+            }),
             viewer: senses.viewer,
-            active: in_space && !carrying,
             now,
         });
-        self.card_reach = board
-            .pointed
-            .as_ref()
-            .map_or(f32::INFINITY, |(_, distance, _)| *distance);
-        if board.picked {
-            feedback.emit(feedback::Event::Choose, now);
+        for side in Side::BOTH {
+            match (carded[side], self.board.held_in(side).is_some()) {
+                (false, true) => feedback.emit_on(feedback::Event::Choose, side.into(), now),
+                (true, false) => feedback.emit_on(feedback::Event::Hover, side.into(), now),
+                _ => {}
+            }
         }
-        if let Some((card, placement)) = board.placed {
-            feedback.emit(feedback::Event::Hover, now);
+        for (card, placement) in board.placed.iter().cloned() {
             conversation.place_card(card, placement);
         }
-        let worker = self
-            .delegation_scene
-            .point(senses.ray.filter(|_| in_space))
-            .map(str::to_owned);
-        // The nearer of the card and the worker the ray meets is pointed at; a card carried is pointed at all along.
-        let reach = |point: Vec3| {
-            senses
-                .ray
-                .map_or(f32::INFINITY, |ray| point.distance(ray.origin))
-        };
-        let card = self.board.held().map(str::to_owned).or_else(|| {
-            board
-                .pointed
-                .as_ref()
-                .filter(|(_, distance, _)| {
-                    self.delegation_scene
-                        .hit_point()
-                        .is_none_or(|point| *distance < reach(point))
-                })
-                .map(|(card, _, _)| card.clone())
-        });
-        let worker = worker.filter(|_| card.is_none());
-        // Or a timer's dial, nearer than any worker. See `design/timers.md`.
-        let timer = self
-            .delegation_scene
-            .pointed_timer()
-            .filter(|_| card.is_none())
-            .map(str::to_owned);
-        // Or the "+N more" sign of a cluster, which stands for the workers gathered into it.
-        let gathered = self
-            .delegation_scene
-            .pointed_gathered()
-            .filter(|_| card.is_none())
-            .map(str::to_owned);
         // The environment's client side, in a space whose scenery has grown in, made for the space and environment it
         // is in. It points at what the environment shows only where nothing else is nearer, and not while a card is
         // carried.
@@ -1725,116 +1934,255 @@ impl Step {
                 }
             }
         }
-        let nearest = card
-            .as_ref()
-            .and_then(|_| board.pointed.as_ref().map(|(_, distance, _)| *distance))
-            .or_else(|| {
-                worker
+        // What each ray is on: the nearest of what it meets, Tomori's own interface first. See `design/interaction.md`.
+        let mut resolved: Hands<Resolved> = Hands::default();
+        for side in Side::BOTH {
+            let ray = casts[side];
+            let in_space = points[side];
+            let (panel_pointed, panel_item, projected_hit) = views[side].clone();
+            let worker = self
+                .delegation_scene
+                .point_with(side, ray.filter(|_| in_space))
+                .map(str::to_owned);
+            let hit_point = self.delegation_scene.hit_point_by(side);
+            // The nearer of the card and the worker the ray meets is pointed at; a card carried is pointed at all along.
+            let reach = |point: Vec3| ray.map_or(f32::INFINITY, |ray| point.distance(ray.origin));
+            let card_pointed = board.pointed[side].clone();
+            let held_card = self.board.held_in(side).map(str::to_owned);
+            let card = held_card.clone().or_else(|| {
+                card_pointed
                     .as_ref()
-                    .or(timer.as_ref())
-                    .and(self.delegation_scene.hit_point())
-                    .map(reach)
-            })
-            .unwrap_or(f32::INFINITY);
-        let picked = self
-            .client
-            .as_ref()
-            .zip(
-                senses
-                    .ray
-                    .filter(|_| in_space && self.board.held().is_none()),
-            )
-            // The client side picks in the environment's own coordinates.
-            .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)));
-        let object = picked.clone().filter(|picked| picked.distance < nearest);
-        let (card, worker, timer) = if object.is_some() {
-            (None, None, None)
-        } else {
-            (card, worker, timer)
-        };
-        // A panel is pointed at where nothing else the ray meets is nearer; a panel carried is pointed at all along.
-        let nearest = object.as_ref().map_or(nearest, |picked| picked.distance);
-        let panel = self.projector.held().map(str::to_owned).or_else(|| {
-            projected
-                .pointed
-                .as_ref()
-                .filter(|(_, distance, _)| *distance < nearest && self.board.held().is_none())
-                .map(|(panel, _, _)| panel.clone())
-        });
-        let (card, worker, timer, object) = if panel.is_some() {
-            (None, None, None, None)
-        } else {
-            (card, worker, timer, object)
-        };
-        // A teleport pad is pointed at, while travel may be used and nothing is carried, where the ray meets nothing else
-        // nearer that it may point at or take hold of: a card, a worker, an environment's object, or what the projector
-        // meets: a panel pointed at or a wall's board and handles.
-        let met = [
-            board.pointed.as_ref().map(|(_, distance, _)| *distance),
-            self.delegation_scene.hit_point().map(reach),
-            picked.as_ref().map(|picked| picked.distance),
-            projected.hit.map(|hit| hit.distance),
-        ]
-        .into_iter()
-        .flatten()
-        .fold(f32::INFINITY, f32::min);
-        let pad = pad_met
-            .filter(|_| !self.projector.carrying())
-            .filter(|(_, distance, _)| *distance < met);
-        let (card, worker, timer, object, panel) = if pad.is_some() {
-            (None, None, None, None, None)
-        } else {
-            (card, worker, timer, object, panel)
-        };
-        // What the ray is on, Tomori's own interface first, which the trigger and the sticks act on next frame: a wall's
-        // board, bar or handles, where the participant may take hold of walls, or a wall carried, count as Tomori's too.
-        let on_wall = pad.is_none()
-            && projected.hit.is_some_and(|hit| {
-                hit.held
-                    || picked
-                        .as_ref()
-                        .is_none_or(|picked| hit.distance < picked.distance)
+                    .filter(|(_, distance, _)| {
+                        hit_point.is_none_or(|point| *distance < reach(point))
+                    })
+                    .map(|(card, _, _)| card.clone())
             });
-        self.aim = if menu_shown
-            || on_wall
-            || wrist_active
-            || travel.aiming
-            || self.highlighted.is_some()
-            || panel.is_some()
-            || card.is_some()
-            || worker.is_some()
-            || timer.is_some()
-        {
-            precedence::Aim::Tomori
-        } else if pad.is_some() {
-            precedence::Aim::Pad
-        } else if object.is_some() {
-            precedence::Aim::Environment
-        } else {
-            precedence::Aim::Nothing
-        };
-        // What the trigger and A choose next frame.
-        self.pointed_pad = pad.map(|(key, _, _)| key);
-        conversation.point_pad(pad.is_some());
-        // What the trigger and B act on next frame.
+            let worker = worker.filter(|_| card.is_none());
+            // Or a timer's dial, nearer than any worker. See `design/timers.md`.
+            let timer = self
+                .delegation_scene
+                .pointed_timer_by(side)
+                .filter(|_| card.is_none())
+                .map(str::to_owned);
+            // Or the "+N more" sign of a cluster, which stands for the workers gathered into it.
+            let gathered = self
+                .delegation_scene
+                .pointed_gathered_by(side)
+                .filter(|_| card.is_none())
+                .map(str::to_owned);
+            let nearest = card
+                .as_ref()
+                .and_then(|_| card_pointed.as_ref().map(|(_, distance, _)| *distance))
+                .or_else(|| worker.as_ref().or(timer.as_ref()).and(hit_point).map(reach))
+                .unwrap_or(f32::INFINITY);
+            let picked = self
+                .client
+                .as_ref()
+                .zip(ray.filter(|_| in_space && held_card.is_none()))
+                // The client side picks in the environment's own coordinates.
+                .and_then(|(client, ray)| {
+                    client.side.pick(&arrangement.carriage.unplace_ray(&ray))
+                });
+            let object = picked.clone().filter(|picked| picked.distance < nearest);
+            let (card, worker, timer) = if object.is_some() {
+                (None, None, None)
+            } else {
+                (card, worker, timer)
+            };
+            // A panel is pointed at where nothing else the ray meets is nearer; a panel carried is pointed at all along.
+            let nearest = object.as_ref().map_or(nearest, |picked| picked.distance);
+            let panel = self.projector.held_in(side).map(str::to_owned).or_else(|| {
+                panel_pointed
+                    .as_ref()
+                    .filter(|(_, distance, _)| *distance < nearest && held_card.is_none())
+                    .map(|(panel, _, _)| panel.clone())
+            });
+            let (card, worker, timer, object) = if panel.is_some() {
+                (None, None, None, None)
+            } else {
+                (card, worker, timer, object)
+            };
+            // A teleport pad is pointed at, while travel may be used and nothing is carried, where the ray meets nothing
+            // else nearer that it may point at or take hold of: a card, a worker, an environment's object, or what the
+            // projector meets: a panel pointed at or a wall's board and handles.
+            let met = [
+                card_pointed.as_ref().map(|(_, distance, _)| *distance),
+                hit_point.map(reach),
+                picked.as_ref().map(|picked| picked.distance),
+                projected_hit.map(|hit| hit.distance),
+            ]
+            .into_iter()
+            .flatten()
+            .fold(f32::INFINITY, f32::min);
+            let pad = pads_met[side].filter(|(_, distance, _)| *distance < met);
+            let (card, worker, timer, object, panel) = if pad.is_some() {
+                (None, None, None, None, None)
+            } else {
+                (card, worker, timer, object, panel)
+            };
+            // What the ray is on, Tomori's own interface first, which the trigger and the sticks act on next frame: a
+            // wall's board, bar or handles, where the participant may take hold of walls, or a wall carried, count as
+            // Tomori's too.
+            let on_wall = pad.is_none()
+                && projected_hit.is_some_and(|hit| {
+                    hit.held
+                        || picked
+                            .as_ref()
+                            .is_none_or(|picked| hit.distance < picked.distance)
+                });
+            let menus = menu_shown && !(side == Side::Left && menu_on_palm);
+            let aiming = side == aimer && travel.aiming;
+            let aim = if menus
+                || on_wall
+                || (side == Side::Right && wrist_active)
+                || aiming
+                || self.hands[side].highlighted.is_some()
+                || panel.is_some()
+                || card.is_some()
+                || worker.is_some()
+                || timer.is_some()
+            {
+                precedence::Aim::Tomori
+            } else if pad.is_some() {
+                precedence::Aim::Pad
+            } else if object.is_some() {
+                precedence::Aim::Environment
+            } else {
+                precedence::Aim::Nothing
+            };
+            // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next,
+            // or, a list's choosable row, chooses: a target of its own.
+            let item = match (&panel, &panel_pointed, self.projector.held_in(side)) {
+                (Some(panel), Some((pointed, ..)), None) if pointed == panel => {
+                    panel_item.map(|line| (panel.clone(), line))
+                }
+                _ => None,
+            };
+            // The ray ends on what it meets, of every kind it may point at, the nearest, or on what is held: a card or
+            // a panel carried, a wall carried or a handle dragged. See `design/interaction.md`.
+            let end = rays[side].and_then(|ray| {
+                let card_end = match &held_card {
+                    Some(_) => {
+                        board.end[side].map(|end| crate::pointing::End::held(ray.origin, end))
+                    }
+                    None => card_pointed
+                        .as_ref()
+                        .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
+                };
+                let object_end = picked.as_ref().map(|picked| {
+                    crate::pointing::End::new(picked.distance, ray.at(picked.distance))
+                });
+                let worker_end = hit_point
+                    .map(|point| crate::pointing::End::new(point.distance(ray.origin), point));
+                let pad_end =
+                    pad.map(|(_, distance, point)| crate::pointing::End::new(distance, point));
+                crate::pointing::end([card_end, projected_hit, object_end, worker_end, pad_end])
+            });
+            // What words begun now would name of it.
+            let target = if panel.is_some() {
+                let item = panel_pointed
+                    .as_ref()
+                    .filter(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
+                    .and(panel_item);
+                // A row of an environment's list is named by its id too, so that the agent is told of the row the
+                // participant saw, even as the list changes.
+                let row = panel
+                    .as_deref()
+                    .zip(item)
+                    .and_then(|(panel, line)| conversation.row_at(panel, line))
+                    .map(|row| row.id.clone());
+                // On a chart's plot, pointed at with the right ray, whose readout the projector draws, where across
+                // its time axis, so that the agent is told the time and values there.
+                let across = projected
+                    .across
+                    .filter(|_| side == Side::Right && pointed_here(&panel));
+                panel.clone().map(|panel| match (item, row, across) {
+                    (_, _, Some(across)) => tomori_protocol::Resource::chart_at(panel, across),
+                    (Some(line), Some(row), _) => {
+                        tomori_protocol::Resource::panel_row(panel, line, row)
+                    }
+                    _ => tomori_protocol::Resource::panel_at(panel, item),
+                })
+            } else if let Some(card) = &card {
+                Some(tomori_protocol::Resource::card(card))
+            } else if let Some(worker) = &worker {
+                Some(tomori_protocol::Resource::worker(worker))
+            } else if let Some(timer) = &timer {
+                Some(tomori_protocol::Resource::timer(timer))
+            } else if let Some(gathered) = &gathered {
+                Some(tomori_protocol::Resource::gathered(gathered))
+            } else {
+                object
+                    .as_ref()
+                    .map(|picked| tomori_protocol::Resource::object(&picked.object))
+            };
+            resolved[side] = Resolved {
+                card,
+                worker,
+                timer,
+                object,
+                panel,
+                pad,
+                aim,
+                item,
+                end,
+                target,
+                card_reach: card_pointed
+                    .as_ref()
+                    .map_or(f32::INFINITY, |(_, distance, _)| *distance),
+            };
+        }
+        for side in Side::BOTH {
+            let resolved = &resolved[side];
+            let hand = &mut self.hands[side];
+            hand.aim = resolved.aim;
+            hand.card_reach = resolved.card_reach;
+            // What the trigger and A choose next frame.
+            hand.pad = resolved.pad.map(|(key, _, _)| key);
+            hand.item = resolved.item.clone();
+            // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
+            hand.panel = resolved
+                .panel
+                .clone()
+                .filter(|_| self.projector.held_in(side).is_none());
+            // Words name what was pointed at most recently first.
+            if hand.target != resolved.target {
+                hand.since = resolved.target.as_ref().map(|_| now);
+                hand.target = resolved.target.clone();
+            }
+        }
+        // The choosable row each ray is on now, which ticks as it is entered and its label offers.
+        let rows_now = Hands::from_fn(|side| {
+            resolved[side]
+                .item
+                .as_ref()
+                .and_then(|item| conversation.choosable_row(item))
+                .filter(|_| conversation.ticks())
+        });
+        // The buttons on the right controller act on what the right ray is on, or else the left's.
+        let serving = self.serving(Side::Right);
+        conversation.point_pad(resolved[serving].pad.is_some());
+        conversation.point_item(resolved[serving].item.clone());
+        // What the trigger and B act on next frame, the right ray's alone in the environment for now.
+        let right_object = resolved.right.object.clone();
         if let Some(client) = self.client.as_mut() {
-            client.focus = object
+            client.focus = right_object
                 .as_ref()
                 .filter(|picked| picked.selectable)
                 .map(|picked| picked.object.clone());
             // What a push of the right stick takes next frame.
-            client.scrollable = object
+            client.scrollable = right_object
                 .as_ref()
                 .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
                 .map(|picked| picked.object.clone());
             // And what a squeeze of the grip takes: what is within reach of the right hand, or else what the ray is on
             // that takes the grip.
-            client.grabbable = object
+            client.grabbable = right_object
                 .as_ref()
                 .filter(|picked| picked.actions.contains(crate::client_side::Actions::GRAB))
                 .map(|picked| (picked.object.clone(), picked.distance));
             client.reachable = senses.controllers[crate::controller::RIGHT]
-                .filter(|pose| in_space && pose.valid())
+                .filter(|pose| world.right && pose.valid())
                 .and_then(|pose| {
                     let hand = arrangement
                         .carriage
@@ -1842,125 +2190,133 @@ impl Step {
                     client.side.within_reach(hand)
                 });
         }
-        // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next, or, a
-        // list's choosable row, chooses: a target of its own.
-        let item = match (&panel, &projected.pointed, self.projector.held()) {
-            (Some(panel), Some((pointed, ..)), None) if pointed == panel => {
-                projected.item.map(|line| (panel.clone(), line))
-            }
-            _ => None,
-        };
-        conversation.point_item(item.clone());
-        // Entering a new target, an arrival object, a hand menu row, a card, a worker, a panel or a list's choosable row on
-        // it, ticks very lightly, but not while the trigger pulls the swarm; leaving a row for the rest of its panel does
-        // not. While a teleport is aimed, only finding a landing ticks, even with a panel carried.
-        let target = if travel.aiming {
-            travel.landing.map(|_| feedback::key("landing"))
-        } else {
-            self.highlighted
-                .as_ref()
-                .map(feedback::key)
-                .or_else(|| card.as_ref().map(feedback::key))
-                .or_else(|| worker.as_ref().map(feedback::key))
-                .or_else(|| timer.as_ref().map(|timer| feedback::key(&("timer", timer))))
-                .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
-                .or_else(|| panel.as_ref().map(feedback::key))
-                .or_else(|| pad.map(|(key, _, _)| feedback::key(&("pad", key))))
-        };
-        let row = conversation
-            .pointed_row()
-            .filter(|_| {
-                conversation.ticks()
-                    && target.is_some()
-                    && target == panel.as_ref().map(feedback::key)
-            })
-            .map(|row| feedback::key(&row));
-        let entered_row = self.row_hover.update(row, attracting);
-        if self.hover.update(target, attracting) | entered_row {
-            feedback.emit(feedback::Event::Hover, now);
-        }
-        // The ray ends on what it meets, of every kind it may point at, the nearest, or on what is held: a card or a
-        // panel carried, a wall carried or a handle dragged. See `design/interaction.md`.
-        let ends = senses.ray.map(|ray| {
-            let card_end = match self.board.held() {
-                Some(_) => board
-                    .end
-                    .map(|end| crate::pointing::End::held(ray.origin, end)),
-                None => board
-                    .pointed
-                    .as_ref()
-                    .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
+        // Each ray shown: in full while it meets something, its hand is busy or aims a teleport, and for a second after;
+        // otherwise a short stub from the controller; hidden while its hand points down, holds the menu or the
+        // transcript on its palm, or is not tracked. The hand menu's ray is drawn in full, as ever. See
+        // `design/interaction.md`.
+        let ray_shown = Hands::from_fn(|side| {
+            let palm = match side {
+                Side::Left => menu_on_palm,
+                Side::Right => wrist_shown,
             };
-            let object_end = picked
-                .as_ref()
-                .map(|picked| crate::pointing::End::new(picked.distance, ray.at(picked.distance)));
-            let worker_end = self
-                .delegation_scene
-                .hit_point()
-                .map(|point| crate::pointing::End::new(point.distance(ray.origin), point));
-            let pad_end =
-                pad.map(|(_, distance, point)| crate::pointing::End::new(distance, point));
-            crate::pointing::end([card_end, projected.hit, object_end, worker_end, pad_end])
+            rays[side].is_some() && !palm && (casts[side].is_some() || resolved[side].pad.is_some())
         });
-        // The label on the ray names the panel pointed at, not one carried, and says how to tick the item it meets; on a
-        // chart's plot, its readout says what the chart reads there instead, over its face.
+        for side in Side::BOTH {
+            // Entering a new target, an arrival object, a hand menu row, a card, a worker, a panel or a list's choosable
+            // row on it, ticks very lightly on the hand whose ray entered it, but not while the trigger pulls the swarm;
+            // leaving a row for the rest of its panel does not. While a teleport is aimed, only finding a landing ticks
+            // the left, even with a panel carried.
+            let resolved = &resolved[side];
+            let highlighted = self.hands[side].highlighted.clone();
+            let target = if side == aimer && travel.aiming {
+                travel.landing.map(|_| feedback::key("landing"))
+            } else {
+                highlighted
+                    .as_ref()
+                    .map(feedback::key)
+                    .or_else(|| resolved.card.as_ref().map(feedback::key))
+                    .or_else(|| resolved.worker.as_ref().map(feedback::key))
+                    .or_else(|| {
+                        resolved
+                            .timer
+                            .as_ref()
+                            .map(|timer| feedback::key(&("timer", timer)))
+                    })
+                    .or_else(|| {
+                        resolved
+                            .object
+                            .as_ref()
+                            .map(|picked| feedback::key(&picked.object))
+                    })
+                    .or_else(|| resolved.panel.as_ref().map(feedback::key))
+                    .or_else(|| resolved.pad.map(|(key, _, _)| feedback::key(&("pad", key))))
+            };
+            let row = rows_now[side]
+                .as_ref()
+                .filter(|_| {
+                    target.is_some() && target == resolved.panel.as_ref().map(feedback::key)
+                })
+                .map(feedback::key);
+            let pulling = attracts[side];
+            let hand = &mut self.hands[side];
+            let entered_row = hand.row_hover.update(row, pulling);
+            if hand.hover.update(target, pulling) | entered_row {
+                feedback.emit_on(feedback::Event::Hover, side.into(), now);
+            }
+            // The ray has something to say while it meets something, its hand is busy, or it aims a teleport.
+            let says = resolved.end.is_some()
+                || pointings[side].hit.is_some()
+                || busy[side]
+                || (side == aimer && travel.aiming);
+            if says && ray_shown[side] {
+                hand.lit = Some(now);
+            }
+        }
+        // The labels on the rays name the panel each points at, not one carried, and say how to tick the item it meets; on
+        // a chart's plot, the right ray's readout says what the chart reads there instead, over its face.
+        let readout = projected
+            .readout
+            .clone()
+            .filter(|_| pointed_here(&resolved.right.panel));
         let mut projection = projected.sheets;
-        let pointed_here = panel.is_some()
-            && panel.as_deref() == projected.pointed.as_ref().map(|(id, ..)| id.as_str());
-        if let Some(readout) = projected.readout.clone().filter(|_| pointed_here) {
-            projection.push(readout);
-        } else if let (Some(panel), Some((_, _, point)), None) =
-            (&panel, &projected.pointed, self.projector.held())
-            && let Some(shown) = conversation
-                .projection()
-                .and_then(|projection| projection.panel(panel))
-        {
-            // A choosable row says how to choose it, or, just chosen, that it was; a checklist item how to tick it.
-            let chosen = conversation
-                .pointed_row()
-                .filter(|_| conversation.ticks())
-                .map(|(panel, row)| {
-                    if conversation.just_chose(&panel, &row) {
+        for side in Side::BOTH {
+            let (panel_pointed, _, _) = &views[side];
+            let resolved = &resolved[side];
+            if side == Side::Right
+                && let Some(readout) = readout.clone()
+            {
+                projection.push(readout);
+            } else if let (Some(panel), Some((_, _, point)), None) =
+                (&resolved.panel, panel_pointed, self.projector.held_in(side))
+                && let Some(shown) = conversation
+                    .projection()
+                    .and_then(|projection| projection.panel(panel))
+            {
+                // A choosable row says how to choose it, or, just chosen, that it was; a checklist item how to tick it.
+                let chosen = rows_now[side].as_ref().map(|(panel, row)| {
+                    if conversation.just_chose(panel, row) {
                         crate::projection::ItemAction::Chosen
                     } else {
                         crate::projection::ItemAction::Choose
                     }
                 });
-            let tick = chosen
-                .or_else(|| {
-                    item.as_ref()
-                        .filter(|_| conversation.ticks())
-                        .and_then(|(panel, line)| conversation.item_checked(panel, *line))
-                        .map(|checked| {
-                            if checked {
-                                crate::projection::ItemAction::Untick
-                            } else {
-                                crate::projection::ItemAction::Tick
-                            }
-                        })
-                })
-                .map(|action| (self.controls, action));
-            projection.push(self.ray_label.sheet(
-                shown,
-                (*point, senses.viewer.unwrap_or(arrival::HOME)),
-                self.projector.scrollable(panel).then_some(self.controls),
-                tick,
-            ));
+                let tick = chosen
+                    .or_else(|| {
+                        resolved
+                            .item
+                            .as_ref()
+                            .filter(|_| conversation.ticks())
+                            .and_then(|(panel, line)| conversation.item_checked(panel, *line))
+                            .map(|checked| {
+                                if checked {
+                                    crate::projection::ItemAction::Untick
+                                } else {
+                                    crate::projection::ItemAction::Tick
+                                }
+                            })
+                    })
+                    .map(|action| (self.controls, action));
+                projection.push(self.hands[side].ray_label.sheet(
+                    shown,
+                    (*point, senses.viewer.unwrap_or(arrival::HOME)),
+                    self.projector.scrollable(panel).then_some(self.controls),
+                    tick,
+                ));
+            }
+            // The label beside a teleport pad or target pointed at says where it goes.
+            projection.extend(resolved.pad.and_then(|(way, _, point)| {
+                crate::pads::label_for(
+                    &locomotion,
+                    way,
+                    point,
+                    senses.viewer.unwrap_or(arrival::HOME),
+                    self.controls,
+                )
+            }));
         }
-        // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
-        self.pointed_panel = panel.clone().filter(|_| self.projector.held().is_none());
-        // The label beside a teleport pad or target pointed at says where it goes.
-        projection.extend(pad.and_then(|(way, _, point)| {
-            crate::pads::label_for(
-                &locomotion,
-                way,
-                point,
-                senses.viewer.unwrap_or(arrival::HOME),
-                self.controls,
-            )
-        }));
-        // The hint beside a panel carried, over everything else.
-        projection.extend(projected.hint);
+        // The hints beside panels carried, over everything else.
+        projection.extend(projected.hint.clone());
+        projection.extend(projected.left.hint.clone());
         // The images the panels drawn show, of those held, for the renderer to decode and draw over them.
         let images = projection
             .iter()
@@ -1977,46 +2333,24 @@ impl Step {
                     .map(|png| (image.hash.clone(), png.clone()))
             })
             .collect();
-        match (card, worker, &object) {
-            // Pointed at, rather than carried, it names the list item the ray meets, if any.
-            _ if panel.is_some() => {
-                let item = projected
-                    .pointed
-                    .as_ref()
-                    .filter(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
-                    .and(projected.item);
-                // A row of an environment's list is named by its id too, so that the agent is told of the row the
-                // participant saw, even as the list changes.
-                let row = panel
-                    .as_deref()
-                    .zip(item)
-                    .and_then(|(panel, line)| conversation.row_at(panel, line))
-                    .map(|row| row.id.clone());
-                // On a chart's plot, where across its time axis, so that the agent is told the time and values there.
-                let across = projected.across.filter(|_| pointed_here);
-                conversation.point(panel.clone().map(|panel| match (item, row, across) {
-                    (_, _, Some(across)) => tomori_protocol::Resource::chart_at(panel, across),
-                    (Some(line), Some(row), _) => {
-                        tomori_protocol::Resource::panel_row(panel, line, row)
-                    }
-                    _ => tomori_protocol::Resource::panel_at(panel, item),
-                }))
+        // What each shown ray points at, which words begun now name, the one moved onto most recently first.
+        for side in Side::BOTH {
+            if let Some(picked) = &resolved[side].object {
+                conversation.label_object(&picked.object, &picked.label);
             }
-            (Some(card), _, _) => conversation.point(Some(tomori_protocol::Resource::card(card))),
-            (None, Some(worker), _) => {
-                conversation.point(Some(tomori_protocol::Resource::worker(worker)))
-            }
-            (None, None, _) if timer.is_some() => {
-                conversation.point(timer.map(tomori_protocol::Resource::timer))
-            }
-            (None, None, _) if gathered.is_some() => {
-                conversation.point(gathered.map(tomori_protocol::Resource::gathered))
-            }
-            (None, None, Some(picked)) => {
-                conversation.point_at_object(&picked.object, &picked.label)
-            }
-            (None, None, None) => conversation.point(None),
         }
+        let attended = |side: Side| {
+            self.hands[side]
+                .target
+                .clone()
+                .filter(|_| side == Side::Right || ray_shown[side])
+        };
+        let left_first = match (self.hands.left.since, self.hands.right.since) {
+            (Some(left), Some(right)) => left > right,
+            _ => false,
+        } && ray_shown.left;
+        conversation.point(attended(Side::Right));
+        conversation.point_left(attended(Side::Left), left_first);
         // What the environment's server side sent reaches its client side, which says what to ask, what it sounds and
         // what its scenery draws.
         let drawn = match self.client.as_mut() {
@@ -2064,7 +2398,8 @@ impl Step {
                             unturn * glam::Quat::from_array(pose.orientation).normalize(),
                         )
                     });
-                let grab = match std::mem::take(&mut self.gripping) {
+                let gripping = &mut self.hands.right.gripping;
+                let grab = match std::mem::take(gripping) {
                     Gripping::Environment {
                         object,
                         distance,
@@ -2079,7 +2414,7 @@ impl Step {
                             )
                         });
                         let held = controller.or(along).or(hand);
-                        let closed = self.grip_closed;
+                        let closed = self.hands.right.grip_closed;
                         let phase = match (closed, told) {
                             (true, false) => crate::client_side::Phase::Began,
                             (true, true) => crate::client_side::Phase::Changed,
@@ -2088,7 +2423,7 @@ impl Step {
                         // Told nothing until there is a hand to tell of, nor its end if its beginning never was.
                         let told_now = held.filter(|_| closed || told);
                         if closed {
-                            self.gripping = Gripping::Environment {
+                            self.hands.right.gripping = Gripping::Environment {
                                 object: object.clone(),
                                 distance,
                                 told: told || told_now.is_some(),
@@ -2098,7 +2433,7 @@ impl Step {
                         told_now.map(|hand| crate::client_side::Grab::new(object, hand, phase))
                     }
                     other => {
-                        self.gripping = other;
+                        self.hands.right.gripping = other;
                         None
                     }
                 };
@@ -2117,7 +2452,10 @@ impl Step {
                     .collect();
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
-                        .pointing(object.as_ref().map(|picked| picked.object.as_str()), head)
+                        .pointing(
+                            right_object.as_ref().map(|picked| picked.object.as_str()),
+                            head,
+                        )
                         .with_select(client.select.take())
                         .with_back(std::mem::take(&mut client.back))
                         .with_sticks(left, right)
@@ -2183,47 +2521,85 @@ impl Step {
             unix,
         );
         self.delegation_scene.update(root, workspace, dt);
-        // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
-        let ray = senses.ray.filter(|_| senses.beam);
-        let beam = if in_arrival || menu_shown {
-            ray.zip(pointing.endpoint(crate::pointing::RAY_LENGTH))
-                .map(|(ray, end)| crate::pointing::Beam {
+        // Each ray is drawn where its platform draws rays: at arrival's objects or the hand menu, and in a space at what it meets, where it ends on what it meets, or else as a stub. See `design/interaction.md`.
+        let beams = Hands::from_fn(|side| {
+            let ray = rays[side].filter(|_| senses.beam && ray_shown[side]);
+            let lit = self.hands[side]
+                .lit
+                .is_some_and(|lit| now.saturating_duration_since(lit) < LIT);
+            let stub = |ray: Ray| crate::pointing::Beam {
+                origin: ray.origin,
+                end: ray.at(STUB),
+                hit: false,
+            };
+            let menus = menu_shown && !(side == Side::Left && menu_on_palm);
+            if menus {
+                // The hand menu's ray, in full, as ever.
+                ray.zip(pointings[side].endpoint(crate::pointing::RAY_LENGTH))
+                    .map(|(ray, end)| crate::pointing::Beam {
+                        origin: ray.origin,
+                        end,
+                        hit: pointings[side].hit.is_some(),
+                    })
+            } else if in_arrival {
+                ray.map(
+                    |ray| match pointings[side].endpoint(crate::pointing::RAY_LENGTH) {
+                        Some(end) if lit => crate::pointing::Beam {
+                            origin: ray.origin,
+                            end,
+                            hit: pointings[side].hit.is_some(),
+                        },
+                        _ => stub(ray),
+                    },
+                )
+            } else if side == aimer && travel.aiming {
+                // Aiming a teleport, it ends at the landing, highlighted, or is plain and short where there is nowhere to land.
+                ray.map(|ray| crate::pointing::Beam {
                     origin: ray.origin,
-                    end,
-                    hit: pointing.hit.is_some(),
+                    end: travel
+                        .landing
+                        .unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
+                    hit: travel.landing.is_some(),
                 })
-        } else if travel.aiming {
-            // Aiming a teleport, it ends at the landing, highlighted, or is plain and short where there is nowhere to land.
-            ray.map(|ray| crate::pointing::Beam {
-                origin: ray.origin,
-                end: travel
-                    .landing
-                    .unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
-                hit: travel.landing.is_some(),
-            })
-        } else {
-            let hit = ends.flatten().map(|end| end.point);
-            ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
-                origin: ray.origin,
-                end: hit.unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
-                hit: hit.is_some(),
-            })
-        };
+            } else {
+                let hit = resolved[side].end.map(|end| end.point);
+                ray.filter(|_| world[side]).map(|ray| match hit {
+                    Some(end) => crate::pointing::Beam {
+                        origin: ray.origin,
+                        end,
+                        hit: true,
+                    },
+                    None if lit => crate::pointing::Beam {
+                        origin: ray.origin,
+                        end: ray.at(crate::pointing::SPACE_RAY_LENGTH),
+                        hit: false,
+                    },
+                    None => stub(ray),
+                })
+            }
+        });
         // Arrival's objects are still drawn as they leave on entering a space.
         let arrival = (in_arrival
             || menu_shown
-            || beam.is_some()
+            || beams.right.is_some()
+            || beams.left.is_some()
             || !scene.objects.is_empty()
             || scene.heading.is_some())
         .then(|| Arrival {
-            hovered: pointing.hit.as_ref().map(|hit| hit.key.clone()),
-            ray: beam,
+            hovered: pointings
+                .right
+                .hit
+                .as_ref()
+                .or(pointings.left.hit.as_ref())
+                .map(|hit| hit.key.clone()),
+            ray: beams.right,
+            left_ray: beams.left,
             time: self.arrival_time,
             scene,
         });
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
         let agent = self.coordinator.voice();
-        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates. Visitors send no presence; see `design/security.md`.
+        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates, and the server alone the panels they carry and which rays they show. Visitors send no presence; see `design/security.md`.
         let presence = senses
             .head_pose
             .filter(|_| conversation.role().participates())
@@ -2232,7 +2608,11 @@ impl Step {
                 left: senses.controllers[crate::controller::LEFT],
                 right: senses.controllers[crate::controller::RIGHT],
                 hands: senses.hands,
-                carrying: self.projector.held().map(str::to_owned),
+                carried: Side::BOTH
+                    .into_iter()
+                    .filter_map(|side| self.projector.held_in(side).map(str::to_owned))
+                    .collect(),
+                rays: [ray_shown.left, ray_shown.right],
             });
         // Arrival hides the panel; entering a space places it in front of the participant again.
         if in_arrival {
@@ -2246,6 +2626,7 @@ impl Step {
             in_arrival || menu_shown || wrist_shown,
             panel_pose,
         );
+        let pointed_pad = self.hands.right.pad.or(self.hands.left.pad);
         Frame {
             scenery,
             swarm: self.coordinator.swarm(),
@@ -2271,11 +2652,11 @@ impl Step {
             projection,
             images,
             landing: travel.landing.or_else(|| {
-                crate::pads::ring(&locomotion, self.pointed_pad).filter(|_| in_space_shown && grown)
+                crate::pads::ring(&locomotion, pointed_pad).filter(|_| in_space_shown && grown)
             }),
             blink: travel.blink,
             pads: if in_space_shown && grown {
-                crate::pads::shown(&locomotion, self.pointed_pad)
+                crate::pads::shown(&locomotion, pointed_pad)
             } else {
                 Vec::new()
             },
@@ -2285,6 +2666,22 @@ impl Step {
             home_ring,
         }
     }
+}
+
+/// What one hand's ray is on this frame, of everything it meets, Tomori's own interface first.
+#[derive(Clone, Debug, Default)]
+struct Resolved {
+    card: Option<String>,
+    worker: Option<String>,
+    timer: Option<String>,
+    object: Option<crate::client_side::Picked>,
+    panel: Option<String>,
+    pad: Option<(crate::pads::Way, f32, Vec3)>,
+    aim: precedence::Aim,
+    item: Option<(String, u32)>,
+    end: Option<crate::pointing::End>,
+    target: Option<tomori_protocol::Resource>,
+    card_reach: f32,
 }
 
 /// Conversations and feedback in the states the frame step's tests need.
@@ -3402,7 +3799,7 @@ mod tests {
                 senses.ray = aim_at(target(&scene, &mute).shape);
                 senses.beam = true;
                 step.update(senses, conversation, &mut felt(), now, FRAME);
-                assert_eq!(step.highlighted, Some(mute));
+                assert_eq!(step.hands.right.highlighted, Some(mute));
             }
         }
         /// The participant pointing at the queue's choosable row `pod112`, as the frame before found it.
@@ -3446,7 +3843,7 @@ mod tests {
                     request(conversation);
                     conversation.settle_request();
                     menu(conversation, step, senses, now, false);
-                    assert!(step.highlighted.is_none());
+                    assert!(step.hands.right.highlighted.is_none());
                     Box::new(|conversation, _| {
                         conversation.take_actions().is_empty() && !conversation.a_refused()
                     })
@@ -3779,7 +4176,9 @@ mod tests {
             // there; forcing it in shows that A goes first to them, as it would on the frame the menu or the
             // transcript appears, before the frame step has found what is pointed at. Everywhere else the lamp is
             // pointed at, as the frame before found it.
-            if matches!(rung, A::MenuRow | A::Menu | A::Transcript) || step.pointed_pad.is_some() {
+            if matches!(rung, A::MenuRow | A::Menu | A::Transcript)
+                || step.hands.right.pad.is_some()
+            {
                 step.client.as_mut().unwrap().focus = Some("lamp".into());
             }
             assert_eq!(
@@ -3788,7 +4187,7 @@ mod tests {
                 "{label}"
             );
             assert_eq!(
-                step.aim == precedence::Aim::Tomori,
+                step.hands.right.aim == precedence::Aim::Tomori,
                 matches!(rung, A::MenuRow | A::Menu | A::Transcript | A::Tomori),
                 "{label}"
             );
@@ -3844,7 +4243,7 @@ mod tests {
             ..senses()
         };
         grow(&mut step, &mut conversation, &senses, now);
-        assert_eq!(step.aim, precedence::Aim::Environment);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Environment);
         step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(selects(&done).is_empty());
@@ -4223,7 +4622,7 @@ mod tests {
             grow(&mut step, &mut conversation, &senses, now);
             setup(&mut conversation, &mut step, &mut senses, now);
             grow(&mut step, &mut conversation, &senses, now);
-            assert_eq!(step.aim, precedence::Aim::Tomori, "{label}");
+            assert_eq!(step.hands.right.aim, precedence::Aim::Tomori, "{label}");
             conversation.take_actions();
             done.lock().unwrap().clear();
             step.buttons(&a_down(), true, &mut conversation, &mut felt(), now);
@@ -4415,7 +4814,7 @@ mod tests {
             let (mut conversation, mut step, senses, done) = lit(Locomotion::None);
             code_ahead(&mut conversation, lines);
             grow(&mut step, &mut conversation, &senses, now);
-            assert_eq!(step.aim, precedence::Aim::Tomori);
+            assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
             assert_eq!(step.projector.scrollable("panel-1"), scrolls);
             let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
             assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
@@ -4437,7 +4836,7 @@ mod tests {
             // Back to the middle with the ray on nothing of Tomori's, nor of the environment's, the next push is the
             // environment's.
             sticks(&mut step, &mut conversation, &away, &done, rest, true);
-            assert_eq!(step.aim, precedence::Aim::Nothing);
+            assert_eq!(step.hands.right.aim, precedence::Aim::Nothing);
             let told = sticks(&mut step, &mut conversation, &away, &done, push, true);
             assert_eq!(told, (Vec2::X, Vec2::NEG_Y), "{lines}");
             // Carried, the panel takes the right stick before anything else, and the left stick is not the
@@ -4462,7 +4861,7 @@ mod tests {
         let now = Instant::now();
         code_ahead(&mut conversation, 1);
         grow(&mut step, &mut conversation, &senses, now);
-        assert_eq!(step.aim, precedence::Aim::Tomori);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
         done.lock().unwrap().clear();
         // The pull attracts the swarm, as on any panel, and selects nothing behind it.
         let mut attracting = Vec::new();
@@ -4482,7 +4881,7 @@ mod tests {
         for _ in 0..4 {
             step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         }
-        assert_eq!(step.aim, precedence::Aim::Environment);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Environment);
         assert!(selects(&done).is_empty());
         // Let go, the next pull on the lamp is the environment's.
         senses.trigger = Some(0.0);
@@ -5024,7 +5423,7 @@ mod tests {
         // Behind the panel, the pad is not pointed at, and the trigger is the panel's, attracting the swarm as ever.
         let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
         assert!(frame.pads.iter().all(|pad| !pad.highlighted));
-        assert_eq!(step.aim, precedence::Aim::Tomori);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
         let senses = Senses {
             attractor: Some(pad),
             ..on_pads(&mut step, &conversation, pad, 1.0)
@@ -5040,7 +5439,7 @@ mod tests {
             ..on_pads(&mut step, &conversation, pad, 0.0)
         };
         step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
-        assert_eq!(step.aim, precedence::Aim::Pad);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Pad);
         step.buttons(
             &press(|buttons| buttons.left_stick = Vec2::Y),
             true,
@@ -5056,7 +5455,7 @@ mod tests {
         conversation.toggle_travel();
         let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
         assert!(frame.pads.is_empty());
-        assert_ne!(step.aim, precedence::Aim::Pad);
+        assert_ne!(step.hands.right.aim, precedence::Aim::Pad);
     }
 
     /// A profile with a pad on a disc 1 m beyond where `ray` meets something `nearer`, with its column 0.3 m up the ray
@@ -5094,7 +5493,7 @@ mod tests {
             frame.pads.iter().all(|pad| !pad.highlighted),
             "{aim:?} {nearer}"
         );
-        assert_eq!(step.aim, aim);
+        assert_eq!(step.hands.right.aim, aim);
     }
 
     #[test]
@@ -6003,7 +6402,7 @@ mod tests {
         assert_eq!(
             step.update(&senses, &mut conversation, &mut felt(), start, FRAME)
                 .presence
-                .and_then(|presence| presence.carrying),
+                .and_then(|presence| presence.carried.first().cloned()),
             None
         );
         b(&mut step, &mut conversation, true, true, start);
@@ -6025,7 +6424,7 @@ mod tests {
         let carrying = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
             step.update(senses, conversation, &mut felt(), start, FRAME)
                 .presence
-                .and_then(|presence| presence.carrying)
+                .and_then(|presence| presence.carried.first().cloned())
         };
         assert_eq!(
             carrying(&mut step, &mut conversation, &senses).as_deref(),
@@ -8419,7 +8818,7 @@ mod tests {
             ..senses()
         };
         grow(&mut step, &mut conversation, &on_lamp, now);
-        assert_eq!(step.aim, precedence::Aim::Environment);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Environment);
         assert!(!pull(&mut step, &mut conversation, &on_lamp));
         assert!(!selects(&done).is_empty());
         // On a panel in front of it, Tomori's, the pull draws nothing and summons nothing.
@@ -8427,7 +8826,7 @@ mod tests {
         conversation.apply(space(|state| state.projection = true));
         conversation.take_actions();
         grow(&mut step, &mut conversation, &on_lamp, now);
-        assert_eq!(step.aim, precedence::Aim::Tomori);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
         assert!(!pull(&mut step, &mut conversation, &on_lamp));
         assert!(placed(&mut conversation).is_empty());
     }
@@ -10054,7 +10453,7 @@ mod tests {
             bar.middle
         );
         // The bar is Tomori's, so the environment takes neither the trigger nor a stick there.
-        assert_eq!(step.aim, precedence::Aim::Tomori);
+        assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
         // Taken hold of, at a handle, at the handle, however near the board behind it.
         senses.ray = Ray::new(arrival::HOME, board - arrival::HOME);
         senses.grip = Some(1.0);
@@ -10109,28 +10508,181 @@ mod tests {
     }
 
     #[test]
-    fn in_a_space_the_beam_reaches_out_and_ends_short_of_nothing() {
+    fn each_ray_is_drawn_in_full_while_it_has_something_to_say_a_stub_otherwise_and_hidden_hanging_down_or_palm_up()
+     {
         let mut conversation = joined();
         let mut step = Step::default();
-        let ray = Ray::new(arrival::HOME, -Vec3::Z);
-        let pointing = Senses {
-            ray,
+        let mut feedback = felt();
+        let now = Instant::now();
+        let ahead = Ray::new(arrival::HOME, -Vec3::Z);
+        let left_ahead = Ray::new(arrival::HOME + Vec3::new(-0.2, 0.0, 0.0), -Vec3::Z);
+        let pointing = |trigger: f32, left: Option<Ray>, left_trigger: f32| Senses {
+            ray: ahead,
+            trigger: Some(trigger),
+            left_ray: left,
+            left_trigger: Some(left_trigger),
             beam: true,
             ..senses()
         };
+        let rays = |frame: &Frame<'_>| {
+            frame
+                .arrival
+                .as_ref()
+                .map_or((None, None), |arrival| (arrival.ray, arrival.left_ray))
+        };
+        // Meeting nothing, each ray is a short stub from its controller, plain.
         let frame = step.update(
-            &pointing,
+            &pointing(0.0, left_ahead, 0.0),
             &mut conversation,
-            &mut felt(),
-            Instant::now(),
+            &mut feedback,
+            now,
             FRAME,
         );
-        let beam = frame
-            .arrival
-            .and_then(|arrival| arrival.ray)
-            .expect("the beam");
-        assert!(!beam.hit);
-        assert_eq!(beam.end, ray.unwrap().at(crate::pointing::SPACE_RAY_LENGTH));
+        let (right, left) = rays(&frame);
+        let (right, left) = (right.expect("the right ray"), left.expect("the left ray"));
+        assert!(!right.hit && !left.hit);
+        assert_eq!(right.end, ahead.unwrap().at(STUB));
+        assert_eq!(left.end, left_ahead.unwrap().at(STUB));
+        assert_eq!(
+            frame.presence.map(|presence| presence.rays),
+            Some([true, true])
+        );
+        // A pull of either trigger draws its ray in full, as before, and a second longer once let go.
+        let frame = step.update(
+            &pointing(1.0, left_ahead, 0.0),
+            &mut conversation,
+            &mut feedback,
+            now,
+            FRAME,
+        );
+        let (right, left) = rays(&frame);
+        assert_eq!(
+            right.unwrap().end,
+            ahead.unwrap().at(crate::pointing::SPACE_RAY_LENGTH)
+        );
+        assert_eq!(left.unwrap().end, left_ahead.unwrap().at(STUB));
+        let soon = now + LIT / 2;
+        let frame = step.update(
+            &pointing(0.0, left_ahead, 1.0),
+            &mut conversation,
+            &mut feedback,
+            soon,
+            FRAME,
+        );
+        let (right, left) = rays(&frame);
+        assert_eq!(
+            right.unwrap().end,
+            ahead.unwrap().at(crate::pointing::SPACE_RAY_LENGTH)
+        );
+        assert_eq!(
+            left.unwrap().end,
+            left_ahead.unwrap().at(crate::pointing::SPACE_RAY_LENGTH)
+        );
+        let later = now + LIT * 2;
+        let frame = step.update(
+            &pointing(0.0, left_ahead, 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        let (right, left) = rays(&frame);
+        assert_eq!(right.unwrap().end, ahead.unwrap().at(STUB));
+        assert_eq!(left.unwrap().end, left_ahead.unwrap().at(STUB));
+        // Hanging down, past 50° below the horizontal, the left ray is hidden, and shown as not shown; it shows again
+        // only once raised within 45°, so that a hand at the edge does not flicker.
+        let down = |degrees: f32| {
+            Ray::new(
+                arrival::HOME + Vec3::new(-0.2, -0.5, 0.0),
+                glam::Quat::from_rotation_x(-degrees.to_radians()) * -Vec3::Z,
+            )
+        };
+        let frame = step.update(
+            &pointing(0.0, down(60.0), 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert_eq!(rays(&frame).1, None);
+        assert_eq!(
+            frame.presence.map(|presence| presence.rays),
+            Some([false, true])
+        );
+        let frame = step.update(
+            &pointing(0.0, down(48.0), 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert_eq!(rays(&frame).1, None, "within the leeway");
+        let frame = step.update(
+            &pointing(0.0, down(40.0), 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert!(rays(&frame).1.is_some());
+        // Held down while its trigger pulls, it shows: the hand is busy.
+        step.update(
+            &pointing(0.0, down(60.0), 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        let frame = step.update(
+            &pointing(0.0, down(60.0), 1.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert!(rays(&frame).1.is_some());
+        // Untracked, it is not drawn, nor shown.
+        let frame = step.update(
+            &pointing(0.0, None, 0.0),
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert_eq!(rays(&frame).1, None);
+        assert_eq!(
+            frame.presence.map(|presence| presence.rays),
+            Some([false, true])
+        );
+        // With the left palm up showing the hand menu, the left ray is hidden, and the right is the menu's.
+        let palm = Senses {
+            left_palm: Some(left_palm_up(0.0)),
+            ..pointing(0.0, left_ahead, 0.0)
+        };
+        step.update(&palm, &mut conversation, &mut feedback, later, FRAME);
+        let shown = later + crate::hand_menu::HOLD;
+        let frame = step.update(&palm, &mut conversation, &mut feedback, shown, FRAME);
+        let (right, left) = rays(&frame);
+        assert!(right.is_some());
+        assert_eq!(left, None);
+        assert_eq!(
+            frame.presence.map(|presence| presence.rays),
+            Some([false, true])
+        );
+        assert!(step.menu_was_shown);
+        // The desktop's window, which draws no ray, draws neither.
+        let mut step = Step::default();
+        let frame = step.update(
+            &Senses {
+                beam: false,
+                ..pointing(0.0, left_ahead, 0.0)
+            },
+            &mut conversation,
+            &mut feedback,
+            later,
+            FRAME,
+        );
+        assert_eq!(rays(&frame), (None, None));
     }
 
     #[test]
@@ -10192,4 +10744,7 @@ mod tests {
 
     /// The space's timers, drawn as dials and pointed at.
     mod timers;
+
+    /// The left hand's ray, trigger and grip, which mirror the right's for Tomori's own things.
+    mod hands;
 }

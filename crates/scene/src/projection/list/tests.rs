@@ -402,6 +402,7 @@ fn input<'a>(projection: &'a Projection, scroll: Option<(&'a str, f32)>) -> Inpu
         controls: Controls::Controllers,
         scroll,
         rights: editing::Rights::default(),
+        left: crate::projection::Hold::default(),
         now: std::time::Instant::now(),
         dt: 1.0 / 72.0,
     }

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Quat, Vec3};
 use tomori_protocol::{Card, CardKind, Cards, Checks, Pose};
 
+use crate::sides::{Hands, Side};
 use crate::{
     arrival::HOME,
     canvas::Canvas,
@@ -286,20 +287,27 @@ struct Pending {
     since: Instant,
 }
 
+/// One hand's ray and grip, as the cards take them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Reach {
+    /// The hand's ray, while it can point at cards.
+    pub ray: Option<Ray>,
+    /// The hand's grip's value, while its action is active.
+    pub grip: Option<f32>,
+    /// Whether the hand's ray and grip act on the cards: in a space, with nothing else taking them, such as the hand
+    /// menu or the right wrist's transcript. Otherwise a card it carries is put down where it is.
+    pub active: bool,
+}
+
 /// What the board needs this frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Input<'a> {
     /// The space's cards, while they are shown.
     pub cards: Option<&'a Cards>,
-    /// The pointing ray, while it can point at cards.
-    pub ray: Option<Ray>,
-    /// The right grip's value, while its action is active.
-    pub grip: Option<f32>,
+    /// Each hand's ray and grip: either picks up a card, and each carries its own.
+    pub hands: Hands<Reach>,
     /// The point a carried card faces.
     pub viewer: Option<Vec3>,
-    /// Whether the ray and grip act on the cards: in a space, with nothing else taking them, such as the hand menu or
-    /// the right wrist's transcript. Otherwise a card carried is put down where it is.
-    pub active: bool,
     pub now: Instant,
 }
 
@@ -308,22 +316,24 @@ pub struct Input<'a> {
 pub struct Output {
     /// The inbox, then each card, to draw.
     pub sheets: Vec<Sheet>,
-    /// The card the ray points at, by identity, and how far along the ray and where it meets it.
-    pub pointed: Option<(String, f32, Vec3)>,
+    /// The card each hand's ray points at, by identity, and how far along the ray and where it meets it: one the other
+    /// hand carries too, which this hand's grip does not take.
+    pub pointed: Hands<Option<(String, f32, Vec3)>>,
     /// A card was picked up.
     pub picked: bool,
-    /// A card was put down, where, or back in the inbox: to send to the server.
-    pub placed: Option<(String, Option<Pose>)>,
-    /// Where the ray ends on a card: where it meets the card pointed at, or the middle of the card carried.
-    pub end: Option<Vec3>,
+    /// The cards put down, where, or back in the inbox: to send to the server.
+    pub placed: Vec<(String, Option<Pose>)>,
+    /// Where each hand's ray ends on a card: where it meets the card pointed at, or the middle of the card carried.
+    pub end: Hands<Option<Vec3>>,
 }
 
-/// The cards across frames: the card carried, and the card put down that the server has not yet confirmed.
+/// The cards across frames: the card each hand carries, and the card each put down that the server has not yet
+/// confirmed.
 #[derive(Clone, Debug, Default)]
 pub struct Board {
-    grip: Grip,
-    held: Option<Held>,
-    pending: Option<Pending>,
+    grip: Hands<Grip>,
+    held: Hands<Option<Held>>,
+    pending: Hands<Option<Pending>>,
     /// The inbox's face last drawn, by what it says, and each card's, by its identity and what it is drawn from: its
     /// card wherever it stands, whether it is covered and whether it is highlighted. Each is handed over again while it
     /// is drawn from the same, so that the renderer keeps its mesh as the cards change their order by distance, and a
@@ -341,61 +351,68 @@ type TrayKey = (String, usize, Option<String>);
 impl Board {
     /// Follow `input`, and say what to draw and send.
     pub fn update(&mut self, input: Input<'_>) -> Output {
-        // The grip is followed even while the cards do not take it, so that a squeeze held as they start to is not a new one.
-        let (pressed, released) = self.grip.update(input.grip);
+        // The grips are followed even while the cards do not take them, so that a squeeze held as they start to is not a
+        // new one.
+        let edges = Hands::from_fn(|side| self.grip[side].update(input.hands[side].grip));
         let Some(cards) = input.cards else {
-            self.held = None;
-            self.pending = None;
+            self.held = Hands::default();
+            self.pending = Hands::default();
             self.tray = None;
             self.faces.clear();
             return Output::default();
         };
         self.faces
             .retain(|id, _| cards.cards.iter().any(|card| card.id == *id));
-        // A card put down shows where it was put until the server agrees, or for a while if it does not.
-        if let Some(pending) = &self.pending {
-            let confirmed = cards
-                .cards
-                .iter()
-                .find(|card| card.id == pending.card)
-                .is_none_or(|card| card.placement == pending.placement);
-            if confirmed || input.now.saturating_duration_since(pending.since) >= PENDING {
-                self.pending = None;
+        for side in Side::BOTH {
+            // A card put down shows where it was put until the server agrees, or for a while if it does not.
+            if let Some(pending) = &self.pending[side] {
+                let confirmed = cards
+                    .cards
+                    .iter()
+                    .find(|card| card.id == pending.card)
+                    .is_none_or(|card| card.placement == pending.placement);
+                if confirmed || input.now.saturating_duration_since(pending.since) >= PENDING {
+                    self.pending[side] = None;
+                }
             }
-        }
-        // A card that left the board, as when it closed on GitHub, is no longer carried.
-        if let Some(held) = &self.held
-            && !cards.cards.iter().any(|card| card.id == held.card)
-        {
-            self.held = None;
+            // A card that left the board, as when it closed on GitHub, is no longer carried.
+            if let Some(held) = &self.held[side]
+                && !cards.cards.iter().any(|card| card.id == held.card)
+            {
+                self.held[side] = None;
+            }
         }
         let frame = inbox_frame();
         let viewer = input.viewer.unwrap_or(HOME);
         let mut output = Output::default();
-        // The card carried follows the ray, facing the viewer.
-        if let Some(held) = &mut self.held
-            && let Some(ray) = input.ray.filter(|_| input.active)
-        {
-            held.model = facing(ray.at(held.distance), viewer, 1.0);
-        }
-        // Let go, or taken by something else, it is put down where it is, or back in the inbox over it.
-        if (released || !input.active)
-            && let Some(held) = self.held.take()
-        {
-            let inside = frame
-                .inverse()
-                .transform_point3(held.model.w_axis.truncate());
-            let (width, height) = inbox_size(self.inboxed(cards));
-            let into_inbox = inside.x.abs() <= width / 2.0 + INBOX_MARGIN
-                && inside.y.abs() <= height / 2.0 + INBOX_MARGIN
-                && inside.z.abs() <= INBOX_DEPTH;
-            let placement = (!into_inbox).then(|| pose(held.model));
-            self.pending = Some(Pending {
-                card: held.card.clone(),
-                placement,
-                since: input.now,
-            });
-            output.placed = Some((held.card, placement));
+        for side in Side::BOTH {
+            let hand = input.hands[side];
+            let (_, released) = edges[side];
+            // The card carried follows its hand's ray, facing the viewer.
+            if let Some(held) = &mut self.held[side]
+                && let Some(ray) = hand.ray.filter(|_| hand.active)
+            {
+                held.model = facing(ray.at(held.distance), viewer, 1.0);
+            }
+            // Let go, or taken by something else, it is put down where it is, or back in the inbox over it.
+            if (released || !hand.active)
+                && let Some(held) = self.held[side].take()
+            {
+                let inside = frame
+                    .inverse()
+                    .transform_point3(held.model.w_axis.truncate());
+                let (width, height) = inbox_size(self.inboxed(cards));
+                let into_inbox = inside.x.abs() <= width / 2.0 + INBOX_MARGIN
+                    && inside.y.abs() <= height / 2.0 + INBOX_MARGIN
+                    && inside.z.abs() <= INBOX_DEPTH;
+                let placement = (!into_inbox).then(|| pose(held.model));
+                self.pending[side] = Some(Pending {
+                    card: held.card.clone(),
+                    placement,
+                    since: input.now,
+                });
+                output.placed.push((held.card, placement));
+            }
         }
         let inboxed = self.inboxed(cards);
         let mut slot = 0;
@@ -412,45 +429,59 @@ impl Board {
                 }
             })
             .collect();
-        // The nearest card the ray meets, other than one carried, is pointed at.
-        let carried = self.held();
-        output.pointed = input.ray.filter(|_| input.active).and_then(|ray| {
-            cards
-                .cards
-                .iter()
-                .zip(&models)
-                .filter(|(card, _)| Some(card.id.as_str()) != carried)
-                .filter_map(|(card, (model, _))| {
-                    hit(*model, &ray).map(|distance| (card.id.clone(), distance, ray.at(distance)))
-                })
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-        });
-        // A squeeze picks up the card pointed at.
-        if pressed
-            && carried.is_none()
-            && let Some((card, distance, _)) = output.pointed.take()
-        {
-            let index = cards
-                .cards
-                .iter()
-                .position(|known| known.id == card)
-                .expect("pointed at a card on the board");
-            self.held = Some(Held {
-                card,
-                distance: distance.clamp(NEAREST, FARTHEST),
-                model: models[index].0,
+        for side in Side::BOTH {
+            let hand = input.hands[side];
+            let (pressed, _) = edges[side];
+            // The nearest card the ray meets, other than one its own hand carries, is pointed at.
+            let carried = self.held_in(side);
+            output.pointed[side] = hand.ray.filter(|_| hand.active).and_then(|ray| {
+                cards
+                    .cards
+                    .iter()
+                    .zip(&models)
+                    .filter(|(card, _)| Some(card.id.as_str()) != carried)
+                    .filter_map(|(card, (model, _))| {
+                        hit(*model, &ray)
+                            .map(|distance| (card.id.clone(), distance, ray.at(distance)))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
             });
-            self.pending = None;
-            output.picked = true;
+            // A squeeze picks up the card pointed at, unless the other hand carries it.
+            let other = self.held_in(side.other()).map(str::to_owned);
+            if pressed
+                && carried.is_none()
+                && let Some((card, distance, _)) = output.pointed[side]
+                    .take_if(|(card, ..)| Some(card.as_str()) != other.as_deref())
+            {
+                let index = cards
+                    .cards
+                    .iter()
+                    .position(|known| known.id == card)
+                    .expect("pointed at a card on the board");
+                self.held[side] = Some(Held {
+                    card,
+                    distance: distance.clamp(NEAREST, FARTHEST),
+                    model: models[index].0,
+                });
+                self.pending[side] = None;
+                output.picked = true;
+            }
+            output.end[side] = match &self.held[side] {
+                Some(held) => Some(held.model.w_axis.truncate()),
+                None => output.pointed[side].as_ref().map(|(_, _, point)| *point),
+            };
         }
-        output.end = match &self.held {
-            Some(held) => Some(held.model.w_axis.truncate()),
-            None => output.pointed.as_ref().map(|(_, _, point)| *point),
-        };
-        let highlighted = self
-            .held()
-            .or(output.pointed.as_ref().map(|(card, _, _)| card.as_str()))
-            .map(str::to_owned);
+        // Each hand's card is highlighted, carried or pointed at.
+        let highlighted: Vec<String> = Side::BOTH
+            .into_iter()
+            .filter_map(|side| {
+                self.held_in(side)
+                    .or(output.pointed[side]
+                        .as_ref()
+                        .map(|(card, _, _)| card.as_str()))
+                    .map(str::to_owned)
+            })
+            .collect();
         let tray = match &self.tray {
             Some(((source, count, status), face))
                 if *source == cards.source && *count == inboxed && *status == cards.status =>
@@ -481,7 +512,7 @@ impl Board {
         order.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
         output.sheets.extend(order.into_iter().map(|index| {
             let (card, (model, covered)) = (&cards.cards[index], &models[index]);
-            let highlighted = highlighted.as_deref() == Some(card.id.as_str());
+            let highlighted = highlighted.contains(&card.id);
             let covered = *covered && !highlighted;
             // Compared in place, wherever it stands: the card kept takes this one's placement.
             let kept = self.faces.get_mut(&card.id).and_then(|(key, face)| {
@@ -507,11 +538,17 @@ impl Board {
     /// Where `card` stands, when it is not in the inbox: carried, put down but not yet confirmed, or where the server
     /// says it was put.
     fn stands(&self, card: &Card) -> Option<Mat4> {
-        match (&self.held, &self.pending) {
-            (Some(held), _) if held.card == card.id => Some(held.model),
-            (_, Some(pending)) if pending.card == card.id => {
-                pending.placement.as_ref().and_then(model)
-            }
+        let held = Side::BOTH
+            .into_iter()
+            .find_map(|side| self.held[side].as_ref().filter(|held| held.card == card.id));
+        let pending = Side::BOTH.into_iter().find_map(|side| {
+            self.pending[side]
+                .as_ref()
+                .filter(|pending| pending.card == card.id)
+        });
+        match (held, pending) {
+            (Some(held), _) => Some(held.model),
+            (_, Some(pending)) => pending.placement.as_ref().and_then(model),
             _ => card.placement.as_ref().and_then(model),
         }
     }
@@ -525,9 +562,14 @@ impl Board {
             .count()
     }
 
-    /// The card being carried, by identity.
+    /// A card being carried, by identity: the right hand's, or else the left's.
     pub fn held(&self) -> Option<&str> {
-        self.held.as_ref().map(|held| held.card.as_str())
+        self.held_in(Side::Right).or(self.held_in(Side::Left))
+    }
+
+    /// The card `side`'s hand carries, by identity.
+    pub fn held_in(&self, side: Side) -> Option<&str> {
+        self.held[side].as_ref().map(|held| held.card.as_str())
     }
 }
 
@@ -559,15 +601,31 @@ mod tests {
         }
     }
 
+    /// The right hand's ray and grip on `cards`, the left hand idle.
     fn input(cards: &Cards, ray: Option<Ray>, grip: f32, now: Instant) -> Input<'_> {
         Input {
             cards: Some(cards),
-            ray,
-            grip: Some(grip),
+            hands: Hands {
+                right: Reach {
+                    ray,
+                    grip: Some(grip),
+                    active: true,
+                },
+                left: Reach {
+                    active: true,
+                    ..Reach::default()
+                },
+            },
             viewer: Some(HOME),
-            active: true,
             now,
         }
+    }
+
+    /// The same, with the right hand's reach inactive, as when the hand menu takes it.
+    fn inactive(input: Input<'_>) -> Input<'_> {
+        let mut input = input;
+        input.hands.right.active = false;
+        input
     }
 
     /// A ray from home towards the centre of the sheet drawn with `model`.
@@ -743,20 +801,21 @@ mod tests {
         let models = models(&board.update(input(&cards, None, 0.0, now)), 3);
         // Aimed at the second card's header, the second is met; at its middle, the third, which covers it there.
         let output = board.update(input(&cards, Some(header(models[1])), 0.0, now));
-        let (pointed, distance, point) = output.pointed.clone().unwrap();
+        let (pointed, distance, point) = output.pointed.right.clone().unwrap();
         assert_eq!(pointed, cards.cards[1].id);
         assert!(point.distance(HOME + header(models[1]).direction * distance) < 1e-4);
         // The pointed card is highlighted.
         let highlighted = sheet(&output, 2).canvas.as_deref().unwrap();
         assert_eq!(highlighted.border, Some(HIGHLIGHT));
         let output = board.update(input(&cards, Some(at(models[1])), 0.0, now));
-        assert_eq!(output.pointed.unwrap().0, cards.cards[2].id);
+        assert_eq!(output.pointed.right.unwrap().0, cards.cards[2].id);
         // Away from the cards, parallel to one, from behind one, or inactive, nothing is.
         let away = Ray::new(HOME, Vec3::Z).unwrap();
         assert!(
             board
                 .update(input(&cards, Some(away), 0.0, now))
                 .pointed
+                .right
                 .is_none()
         );
         let frame = inbox_frame();
@@ -769,6 +828,7 @@ mod tests {
             board
                 .update(input(&cards, Some(along), 0.0, now))
                 .pointed
+                .right
                 .is_none()
         );
         let behind = Ray::new(
@@ -780,13 +840,11 @@ mod tests {
             board
                 .update(input(&cards, Some(behind), 0.0, now))
                 .pointed
+                .right
                 .is_none()
         );
-        let inactive = Input {
-            active: false,
-            ..input(&cards, Some(header(models[1])), 0.0, now)
-        };
-        assert!(board.update(inactive).pointed.is_none());
+        let inactive = inactive(input(&cards, Some(header(models[1])), 0.0, now));
+        assert!(board.update(inactive).pointed.right.is_none());
     }
 
     #[test]
@@ -809,7 +867,7 @@ mod tests {
         );
         let picked = board.update(input(&cards, Some(header(models[1])), 0.9, now));
         assert!(picked.picked);
-        assert_eq!(picked.pointed, None);
+        assert_eq!(picked.pointed.right, None);
         assert_eq!(board.held(), Some(id.as_str()));
         // It follows the ray at the same distance, facing the viewer, and the inbox closes up behind it.
         let distance = (models[1] * Mat4::from_translation(Vec3::new(0.0, 0.02, 0.0)))
@@ -835,13 +893,13 @@ mod tests {
             sheet(&carried, 2).canvas.as_deref().unwrap().border,
             Some(HIGHLIGHT)
         );
-        assert_eq!(carried.placed, None);
+        assert!(carried.placed.is_empty());
         // Untracked, it stays where it was.
         let untracked = board.update(input(&cards, None, 0.7, now));
         assert_eq!(sheet(&untracked, 2).model, Some(model));
         // Letting go puts it down there, to send, and shows it there until the server says so.
         let put = board.update(input(&cards, Some(right), 0.2, now));
-        let (card, placement) = put.placed.clone().unwrap();
+        let (card, placement) = put.placed[0].clone();
         assert_eq!(card, id);
         let placement = placement.unwrap();
         assert!(Vec3::from_array(placement.position).distance(right.at(distance)) < 1e-4);
@@ -868,7 +926,7 @@ mod tests {
                 .distance(right.at(distance))
                 < 1e-4
         );
-        assert!(board.pending.is_none());
+        assert!(board.pending.right.is_none());
         // Picked up again from where it stands, and let go over the inbox, it goes back in.
         let placed = sheet(&agreed, 2).model.unwrap();
         assert!(
@@ -878,7 +936,7 @@ mod tests {
         );
         let inbox = Ray::new(HOME, INBOX - HOME).unwrap();
         let back = board.update(input(&cards, Some(inbox), 0.0, now));
-        assert_eq!(back.placed, Some((id.clone(), None)));
+        assert_eq!(back.placed, [(id.clone(), None)]);
         let shown = board.update(input(&cards, None, 0.0, now));
         assert_eq!(
             text(shown.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
@@ -887,7 +945,100 @@ mod tests {
         // The server never agreeing, it shows as the server has it once the pending time passes.
         let expired = board.update(input(&cards, None, 0.0, now + PENDING));
         assert_eq!(sheet(&expired, 2).model, Some(placed));
-        assert!(board.pending.is_none());
+        assert!(board.pending.right.is_none());
+    }
+
+    /// `input`, with the left hand's ray and grip.
+    fn with_left(input: Input<'_>, ray: Option<Ray>, grip: f32) -> Input<'_> {
+        let mut input = input;
+        input.hands.left = Reach {
+            ray,
+            grip: Some(grip),
+            active: true,
+        };
+        input
+    }
+
+    #[test]
+    fn the_left_grip_picks_up_and_carries_a_card_as_the_right_does_each_hand_its_own() {
+        let now = Instant::now();
+        let mut board = Board::default();
+        let cards = cards(3);
+        let shown = board.update(input(&cards, None, 0.0, now));
+        let (first, second) = (
+            sheet(&shown, 1).model.unwrap(),
+            sheet(&shown, 2).model.unwrap(),
+        );
+        // The left ray points at a card, highlighted, as the right's does.
+        let pointed = board.update(with_left(
+            input(&cards, None, 0.0, now),
+            Some(header(second)),
+            0.0,
+        ));
+        assert_eq!(pointed.pointed.left.as_ref().unwrap().0, cards.cards[1].id);
+        assert_eq!(pointed.pointed.right, None);
+        assert!(pointed.end.left.is_some());
+        assert_eq!(
+            sheet(&pointed, 2).canvas.as_deref().unwrap().border,
+            Some(HIGHLIGHT)
+        );
+        // The right grip picks up another; then the left picks up its own, each carrying its own.
+        let took = board.update(with_left(
+            input(&cards, Some(header(first)), 1.0, now),
+            None,
+            0.0,
+        ));
+        assert!(took.picked);
+        assert_eq!(board.held_in(Side::Right), Some(cards.cards[0].id.as_str()));
+        // Laid out again without it, the inbox moves the rest.
+        let shown = board.update(input(&cards, Some(header(first)), 1.0, now));
+        let second = sheet(&shown, 2).model.unwrap();
+        assert!(
+            board
+                .update(with_left(
+                    input(&cards, Some(header(first)), 1.0, now),
+                    Some(header(second)),
+                    1.0
+                ))
+                .picked
+        );
+        assert_eq!(board.held_in(Side::Left), Some(cards.cards[1].id.as_str()));
+        assert_eq!(board.held(), Some(cards.cards[0].id.as_str()));
+        // The left card follows the left ray.
+        let aside = Ray::new(HOME, Vec3::new(-1.0, 0.0, -1.0)).unwrap();
+        let moved = board.update(with_left(
+            input(&cards, Some(header(first)), 1.0, now),
+            Some(aside),
+            1.0,
+        ));
+        let left_end = moved.end.left.unwrap();
+        assert!((left_end - aside.origin).normalize().dot(aside.direction) > 0.999);
+        // Letting go of the left puts its card down where it is, the right still carrying its own.
+        let put = board.update(with_left(
+            input(&cards, Some(header(first)), 1.0, now),
+            Some(aside),
+            0.0,
+        ));
+        assert_eq!(put.placed.len(), 1);
+        assert_eq!(put.placed[0].0, cards.cards[1].id);
+        assert_eq!(board.held_in(Side::Left), None);
+        assert_eq!(board.held_in(Side::Right), Some(cards.cards[0].id.as_str()));
+        // A squeeze of the left on the card the right carries is nobody's: it stays in the right hand.
+        let carried = sheet(
+            &board.update(input(&cards, Some(header(first)), 1.0, now)),
+            1,
+        )
+        .model
+        .unwrap();
+        let taken = board.update(with_left(
+            input(&cards, Some(header(first)), 1.0, now),
+            Some(at(carried)),
+            1.0,
+        ));
+        assert!(!taken.picked);
+        assert_eq!(taken.pointed.left.as_ref().unwrap().0, cards.cards[0].id);
+        assert_eq!(board.held_in(Side::Left), None);
+        assert_eq!(board.held_in(Side::Right), Some(cards.cards[0].id.as_str()));
     }
 
     #[test]
@@ -904,13 +1055,10 @@ mod tests {
                 .picked
         );
         // The hand menu opens: it is put down where it is.
-        let taken = Input {
-            active: false,
-            ..input(&cards, Some(at(model)), 1.0, now)
-        };
+        let taken = inactive(input(&cards, Some(at(model)), 1.0, now));
         let put = board.update(taken);
         assert_eq!(
-            put.placed.as_ref().map(|(card, _)| card.as_str()),
+            put.placed.first().map(|(card, _)| card.as_str()),
             Some(cards.cards[0].id.as_str())
         );
         // Still held when it opens, the grip picks up nothing more until it is let go and squeezed again.
@@ -925,27 +1073,27 @@ mod tests {
             .unwrap();
         assert!(
             board
-                .update(input(&cards, Some(at(second)), 1.0, now))
+                .update(input(&cards, Some(header(second)), 1.0, now))
                 .picked
         );
         // The card closes on GitHub while carried: it is dropped, and nothing is sent.
         let mut fewer = cards.clone();
         fewer.cards.remove(1);
         let gone = board.update(input(&fewer, None, 1.0, now));
-        assert_eq!((gone.placed, board.held()), (None, None));
+        assert!(gone.placed.is_empty() && board.held().is_none());
         // A card put down that leaves the board is no longer pending, and leaving the space forgets everything.
         assert!(
             board
                 .update(input(&cards, Some(header(model)), 0.0, now))
                 .placed
-                .is_none()
+                .is_empty()
         );
         let none = Input {
             cards: None,
             ..input(&cards, None, 0.0, now)
         };
         board.update(none);
-        assert_eq!((board.held(), board.pending.as_ref()), (None, None));
+        assert_eq!((board.held(), board.pending.right.as_ref()), (None, None));
         // A placement that is not a pose stays in the inbox; a grip that is not a number is let go.
         let mut odd = cards.clone();
         odd.cards[0].placement = Some(Pose {

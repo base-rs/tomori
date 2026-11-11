@@ -37,8 +37,9 @@ pub struct Frame<'a> {
     pub scene: &'a Scene,
     /// The object the ray meets.
     pub hovered: Option<&'a Key>,
-    /// The ray, drawn in arrival and, from the headset, in a space.
+    /// The right ray and the left, drawn in arrival and, from the headset, in a space.
     pub ray: Option<Beam>,
+    pub left_ray: Option<Beam>,
     /// Seconds, for slow motion such as turning.
     pub time: f32,
 }
@@ -353,7 +354,7 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
             ));
         }
     }
-    if let Some(beam) = frame.ray {
+    for beam in [frame.ray, frame.left_ray].into_iter().flatten() {
         let color = if beam.hit { HOVER } else { [0.55, 0.6, 0.75] };
         out.extend(bar(beam.origin, beam.end, 0.003, color));
         out.push(cube(
@@ -719,6 +720,7 @@ mod tests {
         cubes(&Frame {
             scene,
             hovered,
+            left_ray: None,
             ray: None,
             time: 0.0,
         })
@@ -792,6 +794,7 @@ mod tests {
         let cubes = cubes(&Frame {
             scene: &scene,
             hovered: None,
+            left_ray: None,
             ray: Some(Beam {
                 origin,
                 end,
@@ -814,6 +817,7 @@ mod tests {
         let cubes = cubes(&Frame {
             scene: &scene,
             hovered: None,
+            left_ray: None,
             ray: Some(Beam {
                 origin: Vec3::new(0.2, 1.2, -0.3),
                 end: Vec3::new(0.0, 1.3, -2.6),
@@ -1095,6 +1099,7 @@ mod tests {
         let frame = Frame {
             scene: &scene,
             hovered: None,
+            left_ray: None,
             ray: None,
             time: 0.0,
         };
@@ -1303,6 +1308,7 @@ mod tests {
                 &Frame {
                     scene,
                     hovered,
+                    left_ray: None,
                     ray: None,
                     time: 0.0,
                 },
@@ -1538,6 +1544,7 @@ mod tests {
                     &Frame {
                         scene,
                         hovered: None,
+                        left_ray: None,
                         ray: None,
                         time: 0.0,
                     },
@@ -1705,6 +1712,7 @@ mod tests {
                 &Frame {
                     scene: &scene,
                     hovered: None,
+                    left_ray: None,
                     ray: None,
                     time: 0.0,
                 },

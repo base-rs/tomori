@@ -29,6 +29,7 @@ use crate::{
     pointing::Ray,
     recording::facing,
     shapes::{Mark, Shape},
+    sides::{Hands, Side},
     transcript::{BRIGHT, DIM, Line, TEXT},
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style, cut},
 };
@@ -1277,12 +1278,23 @@ pub enum Release {
 /// few short rows of the control and what it does, as `controls` name them, the last saying what letting go would do
 /// now, `release`.
 pub fn hint(controls: Controls, release: Release) -> Canvas {
+    hint_of(controls, release, true)
+}
+
+/// The hint beside a panel carried in the other hand while the stick, its click and B act on what the first carries:
+/// only what letting go of it would do now, `release`, as [`hint`] says it.
+pub fn let_go_hint(controls: Controls, release: Release) -> Canvas {
+    hint_of(controls, release, false)
+}
+
+/// The hint [`hint`] draws, with the rows for the stick, its click and B only where `steered`.
+fn hint_of(controls: Controls, release: Release, steered: bool) -> Canvas {
     let let_go = match release {
         Release::Slot => "put it in the slot",
         Release::Swap => "swap with that one",
         Release::Float => "leave it floating",
     };
-    let rows: [(&str, &str); 5] = match controls {
+    let all: [(&str, &str); 5] = match controls {
         Controls::Controllers => [
             ("Stick ↕", "further / closer"),
             ("Stick ↔", "turn"),
@@ -1298,6 +1310,7 @@ pub fn hint(controls: Controls, release: Release) -> Canvas {
             ("Let go G", let_go),
         ],
     };
+    let rows = if steered { &all[..] } else { &all[4..] };
     let keys = rows
         .iter()
         .map(|(control, _)| crate::ui_text::width(control))
@@ -1314,7 +1327,7 @@ pub fn hint(controls: Controls, release: Release) -> Canvas {
         .enumerate()
         .map(|(index, (control, action))| {
             let (key, text) = match index {
-                3 => (Style::bold(THROW), Style::plain(THROW)),
+                3 if steered => (Style::bold(THROW), Style::plain(THROW)),
                 _ => (Style::bold(BRIGHT), Style::plain(TEXT)),
             };
             let control = crate::ui_text::pad(control, keys);
@@ -1628,9 +1641,67 @@ pub struct Input<'a> {
     pub scroll: Option<(&'a str, f32)>,
     /// What the participant may do with walls.
     pub rights: editing::Rights,
+    /// The left hand's ray, grip and trigger, which act on the panels and walls as the right's above do: it points,
+    /// pulls off and carries a panel of its own, and takes hold of a wall and its handles. The stick and its click act
+    /// on what the right hand carries, or else on what the left does. See `design/interaction.md`.
+    pub left: Hold,
     pub now: Instant,
     /// Seconds since the last frame.
     pub dt: f32,
+}
+
+/// One hand's ray, grip and trigger, as [`Input`] gives the right's, for the left hand.
+#[derive(Clone, Copy, Debug)]
+pub struct Hold {
+    /// The hand's ray, while it can point at panels.
+    pub ray: Option<Ray>,
+    /// The hand's grip's value, while its action is active.
+    pub grip: Option<f32>,
+    /// Whether the hand's ray and grip act on the panels, as [`Input::active`] says of the right's.
+    pub active: bool,
+    /// Whether the hand's ray points at panels: not while it aims a teleport, as [`Input::pointing`] says.
+    pub pointing: bool,
+    /// How far along the hand's ray something else it meets is, which its grip takes instead of a panel behind it.
+    pub nearer: f32,
+    /// The hand's trigger is held: a wall it carries snaps to no other.
+    pub free: bool,
+}
+
+impl Default for Hold {
+    /// A hand that points at nothing and holds nothing.
+    fn default() -> Self {
+        Self {
+            ray: None,
+            grip: None,
+            active: false,
+            pointing: false,
+            nearer: f32::INFINITY,
+            free: false,
+        }
+    }
+}
+
+/// What the projector did for the left hand this frame, as [`Output`]'s fields of the same names say for the right's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Left {
+    pub pointed: Option<(String, f32, Vec3)>,
+    pub item: Option<u32>,
+    pub placed: Option<(String, Target)>,
+    pub preview: Option<(String, u32)>,
+    pub end: Option<Vec3>,
+    pub hit: Option<crate::pointing::End>,
+    pub hint: Option<Sheet>,
+}
+
+/// What the projector does for one hand in a frame, before it is told as the right's or the left's.
+#[derive(Clone, Debug, Default)]
+struct Told {
+    pointed: Option<(String, f32, Vec3)>,
+    item: Option<u32>,
+    placed: Option<(String, Target)>,
+    end: Option<Vec3>,
+    hit: Option<crate::pointing::End>,
+    hint: Option<Sheet>,
 }
 
 /// What the projector did this frame.
@@ -1669,16 +1740,24 @@ pub struct Output {
     /// which pointing says as the words begin. See `design/projection.md`.
     pub readout: Option<Sheet>,
     pub across: Option<u16>,
+    /// Which hand's ray the wall editor followed this frame, which [`Self::wall_ticked`] is felt on.
+    pub wall_hand: Side,
+    /// What it did for the left hand: every field above but these is the right hand's.
+    pub left: Left,
 }
 
 /// The panels across frames: the one carried, the slot it would be put in, and the one let go that the server has not
 /// yet confirmed.
 #[derive(Clone, Debug, Default)]
 pub struct Projector {
-    grip: Grip,
-    held: Option<Held>,
-    aim: Option<Aim>,
-    pending: Option<Pending>,
+    grip: Hands<Grip>,
+    /// The panel each hand carries, the slot it would be put in, and the one each let go that the server has not yet
+    /// confirmed.
+    held: Hands<Option<Held>>,
+    aim: Hands<Option<Aim>>,
+    pending: Hands<Option<Pending>>,
+    /// The hand whose ray and grip the wall editor follows: the one that took hold of the wall, or last squeezed.
+    editor_hand: Side,
     /// A panel thrown away, hidden from when it was until the server's projection no longer shows it, or [`PENDING`]
     /// passes.
     thrown: Option<(String, Instant)>,
@@ -1744,6 +1823,7 @@ impl Projector {
     ///     controls: Controls::Controllers,
     ///     scroll: None,
     ///     rights: Rights::default(),
+    ///     left: tomori_scene::projection::Hold::default(),
     ///     now: std::time::Instant::now(),
     ///     dt: 1.0 / 72.0,
     /// };
@@ -1765,13 +1845,24 @@ impl Projector {
 
     /// Follow `input`, and say what to draw and send.
     pub fn update(&mut self, input: Input<'_>) -> Output {
-        // The grip is followed even while the panels do not take it, so that a squeeze held as they start to is not a new
-        // one.
-        let (pressed, released) = self.grip.update(input.grip);
+        let hands = Hands {
+            right: Hold {
+                ray: input.ray,
+                grip: input.grip,
+                active: input.active,
+                pointing: input.pointing,
+                nearer: input.nearer,
+                free: input.free,
+            },
+            left: input.left,
+        };
+        // The grips are followed even while the panels do not take them, so that a squeeze held as they start to is not
+        // a new one.
+        let edges = Hands::from_fn(|side| self.grip[side].update(hands[side].grip));
         let Some(projection) = input.projection else {
-            self.held = None;
-            self.aim = None;
-            self.pending = None;
+            self.held = Hands::default();
+            self.aim = Hands::default();
+            self.pending = Hands::default();
             self.thrown = None;
             self.scrolls.clear();
             self.faces.clear();
@@ -1791,19 +1882,21 @@ impl Projector {
         {
             self.thrown = None;
         }
-        if let Some(pending) = &self.pending {
-            let confirmed = projection
-                .panel(&pending.panel)
-                .is_none_or(|panel| agrees(&panel.place, &pending.target));
-            if confirmed || input.now.saturating_duration_since(pending.since) >= PENDING {
-                self.pending = None;
+        for side in Side::BOTH {
+            if let Some(pending) = &self.pending[side] {
+                let confirmed = projection
+                    .panel(&pending.panel)
+                    .is_none_or(|panel| agrees(&panel.place, &pending.target));
+                if confirmed || input.now.saturating_duration_since(pending.since) >= PENDING {
+                    self.pending[side] = None;
+                }
             }
-        }
-        // A panel dismissed by someone else is no longer carried.
-        if let Some(held) = &self.held
-            && projection.panel(&held.panel).is_none()
-        {
-            self.held = None;
+            // A panel dismissed by someone else is no longer carried.
+            if let Some(held) = &self.held[side]
+                && projection.panel(&held.panel).is_none()
+            {
+                self.held[side] = None;
+            }
         }
         let viewer = input.viewer.unwrap_or(HOME);
         // The walls as drawn: one being changed as it is being changed, and the Tomori wall where it travels.
@@ -1814,53 +1907,72 @@ impl Projector {
             .collect();
         let pickable = pickable(&walls, travelling.is_some());
         let mut output = Output::default();
-        // The panel carried follows the ray, facing the viewer, as far along it and as turned as the right stick puts it.
-        if let Some(held) = &mut self.held
-            && input.active
-        {
-            output.turned = held.manipulation.update(input.stick, input.dt);
-            if input.straighten && !held.manipulation.square() {
-                held.manipulation.straighten();
-                output.turned = true;
+        let mut told: Hands<Told> = Hands::default();
+        // The right stick and its click act on what the right hand carries, or else on what the left does: a panel, or
+        // the wall the editor carries for that hand.
+        let carries = |side: Side| {
+            self.held[side].is_some()
+                || (self.editor_hand == side && self.editor.carrying().is_some())
+        };
+        let steered = Side::BOTH.into_iter().find(|side| carries(*side));
+        for side in Side::BOTH {
+            let hand = hands[side];
+            let (_, released) = edges[side];
+            let steers = steered == Some(side);
+            // The panel carried follows its hand's ray, facing the viewer, as far along it and as turned as the right
+            // stick puts it.
+            if let Some(held) = &mut self.held[side]
+                && hand.active
+            {
+                if steers {
+                    output.turned |= held.manipulation.update(input.stick, input.dt);
+                    if input.straighten && !held.manipulation.square() {
+                        held.manipulation.straighten();
+                        output.turned = true;
+                    }
+                }
+                if let Some(ray) = hand.ray {
+                    // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
+                    let at = ray.at(held.manipulation.distance());
+                    held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
+                        * Mat4::from_rotation_y(held.manipulation.yaw());
+                }
             }
-            if let Some(ray) = input.ray {
-                // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
-                let at = ray.at(held.manipulation.distance());
-                held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
-                    * Mat4::from_rotation_y(held.manipulation.yaw());
-            }
-        }
-        // The slot it would be put in: the one it is carried near, wherever the ray points, and it is drawn pulled
-        // towards it. See `design/projection.md`.
-        self.aim = self.held.as_ref().and_then(|held| {
-            dock(
-                &pickable,
-                held.model.w_axis.truncate(),
-                viewer,
-                self.aim.as_ref(),
-            )
-        });
-        if let Some(held) = &mut self.held {
-            held.glide(
-                self.aim.as_ref().map(|aim| (docked(aim.model), aim.fit)),
-                input.dt,
-            );
-        }
-        // Let go, or taken by something else, it goes into that slot, or floats where it is, as it is turned.
-        if (released || !input.active)
-            && let Some(held) = self.held.take()
-        {
-            let (target, model) = match self.aim.take() {
-                Some(aim) => (Target::Wall(aim.wall, aim.slot), aim.model),
-                None => (Target::Free(pose(held.model)), held.model),
-            };
-            self.pending = Some(Pending {
-                panel: held.panel.clone(),
-                target: target.clone(),
-                model,
-                since: input.now,
+            // The slot it would be put in: the one it is carried near, wherever the ray points, and it is drawn pulled
+            // towards it. See `design/projection.md`.
+            let shown = self.aim[side].take();
+            self.aim[side] = self.held[side].as_ref().and_then(|held| {
+                dock(
+                    &pickable,
+                    held.model.w_axis.truncate(),
+                    viewer,
+                    shown.as_ref(),
+                )
             });
-            output.placed = Some((held.panel, target));
+            if let Some(held) = &mut self.held[side] {
+                held.glide(
+                    self.aim[side]
+                        .as_ref()
+                        .map(|aim| (docked(aim.model), aim.fit)),
+                    input.dt,
+                );
+            }
+            // Let go, or taken by something else, it goes into that slot, or floats where it is, as it is turned.
+            if (released || !hand.active)
+                && let Some(held) = self.held[side].take()
+            {
+                let (target, model) = match self.aim[side].take() {
+                    Some(aim) => (Target::Wall(aim.wall, aim.slot), aim.model),
+                    None => (Target::Free(pose(held.model)), held.model),
+                };
+                self.pending[side] = Some(Pending {
+                    panel: held.panel.clone(),
+                    target: target.clone(),
+                    model,
+                    since: input.now,
+                });
+                told[side].placed = Some((held.panel, target));
+            }
         }
         let standing: Vec<Standing> = projection
             .panels
@@ -1880,55 +1992,76 @@ impl Projector {
             let scroll = self.scrolls.entry(panel.to_owned()).or_default();
             *scroll = (scroll.min(limit) + rows).clamp(0.0, limit);
         }
-        // The nearest panel the ray meets, other than one carried, is pointed at.
-        let carried = self.held().map(str::to_owned);
-        let pointed = input
-            .ray
-            .filter(|_| input.active && input.pointing)
-            .and_then(|ray| {
-                standing
-                    .iter()
-                    .zip(&sizes)
-                    .filter(|((panel, ..), _)| Some(panel.id.as_str()) != carried.as_deref())
-                    // Nothing on the Tomori wall is pointed at while it travels.
-                    .filter(|((panel, ..), _)| {
-                        travelling.is_none()
-                            || !matches!(&panel.place, Place::Wall { wall, .. } if wall == TOMORI_WALL)
-                    })
-                    .filter_map(|((panel, model, fit), size)| {
-                        hit(*model, *size, &ray)
-                            .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
-                    })
-                    .min_by(|a, b| a.3.total_cmp(&b.3))
+        // The nearest panel each hand's ray meets, other than one that hand carries, is pointed at; one the other hand
+        // carries is met, so that the ray ends on it, but its grip takes nothing there.
+        let mut right_pointed = None;
+        for side in Side::BOTH {
+            let hand = hands[side];
+            let carried = self.held_in(side).map(str::to_owned);
+            let pointed = hand
+                .ray
+                .filter(|_| hand.active && hand.pointing)
+                .and_then(|ray| {
+                    standing
+                        .iter()
+                        .zip(&sizes)
+                        .filter(|((panel, ..), _)| Some(panel.id.as_str()) != carried.as_deref())
+                        // Nothing on the Tomori wall is pointed at while it travels.
+                        .filter(|((panel, ..), _)| {
+                            travelling.is_none()
+                                || !matches!(&panel.place, Place::Wall { wall, .. } if wall == TOMORI_WALL)
+                        })
+                        .filter_map(|((panel, model, fit), size)| {
+                            hit(*model, *size, &ray)
+                                .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
+                        })
+                        .min_by(|a, b| a.3.total_cmp(&b.3))
+                });
+            told[side].item = pointed.and_then(|(panel, model, fit, _, point)| {
+                let scroll = self.scroll(&panel.id);
+                self.faces_for(panel).item(fit, model, scroll, point)
             });
-        output.item = pointed.and_then(|(panel, model, fit, _, point)| {
-            let scroll = self.scroll(&panel.id);
-            self.faces_for(panel).item(fit, model, scroll, point)
-        });
-        output.pointed =
-            pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
+            told[side].pointed =
+                pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
+            if side == Side::Right {
+                right_pointed = pointed;
+            }
+        }
+        // The wall editor follows one hand at a time: the one that carries the wall or drags its handle, until it lets
+        // go, or else the one that squeezes now, the right first, of those carrying no panel.
+        if !self.editor.busy()
+            && let Some(side) = Side::BOTH
+                .into_iter()
+                .find(|side| edges[*side].0 && self.held[*side].is_none())
+        {
+            self.editor_hand = side;
+        }
+        let editing = self.editor_hand;
+        let (pressed, released) = edges[editing];
+        let hand = hands[editing];
+        let picking = self.held[editing].is_none();
         // The wall taken hold of, and its handles, take the squeeze first, a handle before a panel and a panel before the
         // wall it is on; a wall carried or a handle dragged is let go as the grip is.
         let edited = self.editor.update(
             editing::Input {
                 projection,
-                ray: input.ray,
-                pressed: pressed && carried.is_none(),
+                ray: hand.ray,
+                pressed: pressed && picking,
                 released,
-                active: input.active,
-                pointing: input.pointing,
-                nearer: input.nearer,
-                panel: output
+                active: hand.active,
+                pointing: hand.pointing,
+                nearer: hand.nearer,
+                panel: told[editing]
                     .pointed
                     .as_ref()
                     .map_or(f32::INFINITY, |(_, distance, _)| *distance),
-                stick: if self.held.is_none() {
+                stick: if steered == Some(editing) && picking {
                     input.stick
                 } else {
                     Vec2::ZERO
                 },
-                straighten: input.straighten && self.held.is_none(),
-                free: input.free,
+                straighten: input.straighten && steered == Some(editing) && picking,
+                free: hand.free,
                 viewer,
                 rights: input.rights,
                 controls: input.controls,
@@ -1940,6 +2073,7 @@ impl Projector {
         output.wall = edited.change;
         output.lock = edited.lock;
         output.wall_ticked = edited.ticked;
+        output.wall_hand = editing;
         // What the editor changed this frame is drawn this frame, the panels on a wall with it.
         let redrawn = travelled(self.editor.walls(projection), travelling);
         let walls: Vec<(&Wall, Mat4)> = redrawn
@@ -1955,65 +2089,86 @@ impl Projector {
             })
             .collect();
         self.lay_out_standing(&standing, false);
-        // A handle the ray meets is pointed at rather than a panel behind it.
-        if edited.reach.is_some_and(|reach| {
-            output
-                .pointed
-                .as_ref()
-                .is_none_or(|(_, distance, _)| reach < *distance)
-        }) {
-            output.pointed = None;
-            output.item = None;
-        }
-        // A squeeze pulls off the panel pointed at, unless something nearer takes it.
-        if pressed
-            && !edited.took
-            && carried.is_none()
-            && let Some((panel, distance, _)) = output
-                .pointed
-                .take_if(|(_, distance, _)| *distance < input.nearer)
-        {
-            let model = standing
-                .iter()
-                .find(|(shown, ..)| shown.id == panel)
-                .map(|(_, model, _)| *model)
-                .expect("pointed at a panel shown");
-            self.held = Some(Held::new(panel, distance, model));
-            self.pending = None;
-            output.picked = true;
-        }
-        output.preview = self.aim.as_ref().map(|aim| (aim.wall.clone(), aim.slot));
-        // The ray ends at the middle of the panel carried, where it is drawn, or where it meets the panel pointed at.
-        output.end = match &self.held {
-            Some(held) => Some(held.drawn.w_axis.truncate()),
-            None => edited
-                .end
-                .or(output.pointed.as_ref().map(|(_, _, point)| *point)),
-        };
-        output.hit = match (&self.held, input.ray.filter(|_| input.active)) {
-            (Some(_), Some(ray)) => output
-                .end
-                .map(|end| crate::pointing::End::held(ray.origin, end)),
-            (Some(_), None) => None,
-            (None, _) => crate::pointing::end([
-                edited.hit,
-                output
+        for side in Side::BOTH {
+            let hand = hands[side];
+            let (pressed, _) = edges[side];
+            // What the other hand's ray meets of the walls, which the editor does not follow: a handle, a bar or a wall,
+            // where the participant may take hold of one.
+            let (reach, wall_hit) = if side == editing {
+                (edited.reach, edited.hit)
+            } else {
+                hand.ray
+                    .filter(|_| hand.active && hand.pointing)
+                    .map_or((None, None), |ray| {
+                        self.editor.probe(&ray, &pickable, input.rights)
+                    })
+            };
+            // A handle the ray meets is pointed at rather than a panel behind it.
+            if reach.is_some_and(|reach| {
+                told[side]
                     .pointed
                     .as_ref()
-                    .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
-            ]),
-        };
-        let faces = self.faces_of(
-            projection,
-            &standing,
-            output.pointed.as_ref().map(|(id, ..)| id.as_str()),
-        );
+                    .is_none_or(|(_, distance, _)| reach < *distance)
+            }) {
+                told[side].pointed = None;
+                told[side].item = None;
+            }
+            // A squeeze pulls off the panel pointed at, unless something nearer takes it, or the other hand carries it.
+            let other = self.held_in(side.other()).map(str::to_owned);
+            let took = side == editing && edited.took;
+            if pressed
+                && !took
+                && self.held[side].is_none()
+                && told[side]
+                    .pointed
+                    .as_ref()
+                    .is_some_and(|(panel, ..)| Some(panel) != other.as_ref())
+                && let Some((panel, distance, _)) = told[side]
+                    .pointed
+                    .take_if(|(_, distance, _)| *distance < hand.nearer)
+            {
+                let model = standing
+                    .iter()
+                    .find(|(shown, ..)| shown.id == panel)
+                    .map(|(_, model, _)| *model)
+                    .expect("pointed at a panel shown");
+                self.held[side] = Some(Held::new(panel, distance, model));
+                self.pending[side] = None;
+                output.picked = true;
+            }
+            // The ray ends at the middle of the panel carried, where it is drawn, or where it meets the panel pointed at.
+            let editor_end = if side == editing { edited.end } else { None };
+            told[side].end = match &self.held[side] {
+                Some(held) => Some(held.drawn.w_axis.truncate()),
+                None => editor_end.or(told[side].pointed.as_ref().map(|(_, _, point)| *point)),
+            };
+            told[side].hit = match (&self.held[side], hand.ray.filter(|_| hand.active)) {
+                (Some(_), Some(ray)) => told[side]
+                    .end
+                    .map(|end| crate::pointing::End::held(ray.origin, end)),
+                (Some(_), None) => None,
+                (None, _) => crate::pointing::end([
+                    wall_hit,
+                    told[side]
+                        .pointed
+                        .as_ref()
+                        .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
+                ]),
+            };
+        }
+        let pointed: Vec<String> = Side::BOTH
+            .into_iter()
+            .filter_map(|side| told[side].pointed.as_ref().map(|(id, ..)| id.clone()))
+            .collect();
+        let faces = self.faces_of(projection, &standing, &pointed);
         output.sheets = self.sheets(&walls, &standing, &faces, viewer);
-        // Pointing at a chart's plot, not carrying a panel, its readout follows the ray, drawn over its face.
-        let read = pointed
+        // Pointing at a chart's plot with the right ray, not carrying a panel in that hand, its readout follows the ray,
+        // drawn over its face.
+        let read = right_pointed
             .filter(|(panel, ..)| {
-                self.held.is_none()
-                    && output
+                self.held.right.is_none()
+                    && told
+                        .right
                         .pointed
                         .as_ref()
                         .is_some_and(|(id, ..)| *id == panel.id)
@@ -2052,45 +2207,70 @@ impl Projector {
         // The handles of the wall taken hold of, and the hint below it, over the walls.
         output.sheets.extend(edited.sheets);
         // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,
-        // from the frame after it is pulled off, once where it would go is known.
+        // from the frame after it is pulled off, once where it would go is known: the controls only beside the one they
+        // act on, and only what letting go does beside the other.
         // The panel carried is always shown, as one no longer shown is no longer carried.
-        let carried = self
-            .held
-            .as_ref()
-            .filter(|_| input.active && !output.picked)
-            .and_then(|held| {
-                projection
-                    .panel(&held.panel)
-                    .map(|panel| (panel, held.drawn, held.fit))
-            });
-        output.hint = carried
-            .map(|(panel, model, fit)| (panel, model, self.faces_for(panel).at(fit).size))
-            .map(|(panel, model, size)| {
-                let release = match &self.aim {
-                    None => Release::Float,
-                    Some(aim) => {
-                        let taken = projection.panels.iter().any(|other| {
-                            other.id != panel.id
-                                && matches!(&other.place, Place::Wall { wall, slot } if *wall == aim.wall && *slot == aim.slot)
-                        });
-                        if taken { Release::Swap } else { Release::Slot }
-                    }
-                };
-                hint_sheet(
-                    hint(input.controls, release),
-                    model,
-                    size,
-                    viewer,
-                )
-            });
+        for side in Side::BOTH {
+            let carried = self.held[side]
+                .as_ref()
+                .filter(|_| hands[side].active && !output.picked)
+                .and_then(|held| {
+                    projection
+                        .panel(&held.panel)
+                        .map(|panel| (panel, held.drawn, held.fit))
+                });
+            let controls = steered == Some(side);
+            told[side].hint = carried
+                .map(|(panel, model, fit)| (panel, model, self.faces_for(panel).at(fit).size))
+                .map(|(panel, model, size)| {
+                    let release = match &self.aim[side] {
+                        None => Release::Float,
+                        Some(aim) => {
+                            let taken = projection.panels.iter().any(|other| {
+                                other.id != panel.id
+                                    && matches!(&other.place, Place::Wall { wall, slot } if *wall == aim.wall && *slot == aim.slot)
+                            });
+                            if taken { Release::Swap } else { Release::Slot }
+                        }
+                    };
+                    let canvas = if controls {
+                        hint(input.controls, release)
+                    } else {
+                        let_go_hint(input.controls, release)
+                    };
+                    hint_sheet(canvas, model, size, viewer)
+                });
+        }
+        let preview = |aim: &Option<Aim>| aim.as_ref().map(|aim| (aim.wall.clone(), aim.slot));
+        let left = std::mem::take(&mut told.left);
+        let right = std::mem::take(&mut told.right);
+        output.left = Left {
+            pointed: left.pointed,
+            item: left.item,
+            placed: left.placed,
+            preview: preview(&self.aim.left),
+            end: left.end,
+            hit: left.hit,
+            hint: left.hint,
+        };
+        output.pointed = right.pointed;
+        output.item = right.item;
+        output.placed = right.placed;
+        output.preview = preview(&self.aim.right);
+        output.end = right.end;
+        output.hit = right.hit;
+        output.hint = right.hint;
         output
     }
 
-    /// Throw away the panel carried, at `now`: it is no longer carried, nor let go anywhere, and is hidden until the
-    /// server's projection no longer shows it, or for [`PENDING`]. Returns its identity, if one was carried.
+    /// Throw away the panel the right hand carries, or else the left's, at `now`: it is no longer carried, nor let go
+    /// anywhere, and is hidden until the server's projection no longer shows it, or for [`PENDING`]. Returns its
+    /// identity, if one was carried.
     pub fn throw(&mut self, now: Instant) -> Option<String> {
-        let held = self.held.take()?;
-        self.aim = None;
+        let (side, held) = Side::BOTH
+            .into_iter()
+            .find_map(|side| self.held[side].take().map(|held| (side, held)))?;
+        self.aim[side] = None;
         self.thrown = Some((held.panel.clone(), now));
         Some(held.panel)
     }
@@ -2103,9 +2283,13 @@ impl Projector {
         &mut self,
         projection: &Projection,
         standing: &[Standing],
-        pointed: Option<&str>,
+        pointed: &[String],
     ) -> Vec<Arc<Canvas>> {
-        let highlighted = self.held().or(pointed).map(str::to_owned);
+        let highlighted: Vec<String> = Side::BOTH
+            .into_iter()
+            .filter_map(|side| self.held_in(side).map(str::to_owned))
+            .chain(pointed.iter().cloned())
+            .collect();
         let newest = newest(projection);
         let marks = self.marks.clone();
         standing
@@ -2117,7 +2301,7 @@ impl Projector {
                     }
                     _ => false,
                 };
-                let border = frame(highlighted.as_deref() == Some(panel.id.as_str()), newest);
+                let border = frame(highlighted.contains(&panel.id), newest);
                 let scroll = self.scroll(&panel.id);
                 self.faces_for(panel).face(*fit, (scroll, &marks), border)
             })
@@ -2139,15 +2323,23 @@ impl Projector {
             canvas: Some(face.clone()),
             model: Some(model),
         };
-        // A panel drawn in a wall's slot belongs to that wall's group.
-        let moved = self
-            .held()
-            .or(self.pending.as_ref().map(|pending| pending.panel.as_str()))
-            .map(str::to_owned);
-        let moved = moved.as_deref();
-        fn in_layout<'a>(panel: &'a Panel, moved: Option<&str>) -> Option<&'a str> {
+        // A panel drawn in a wall's slot belongs to that wall's group, unless it is carried or was let go.
+        let moved: Vec<String> = Side::BOTH
+            .into_iter()
+            .flat_map(|side| {
+                [
+                    self.held_in(side).map(str::to_owned),
+                    self.pending[side]
+                        .as_ref()
+                        .map(|pending| pending.panel.clone()),
+                ]
+            })
+            .flatten()
+            .collect();
+        let moved = moved.as_slice();
+        fn in_layout<'a>(panel: &'a Panel, moved: &[String]) -> Option<&'a str> {
             match &panel.place {
-                Place::Wall { wall, .. } if moved != Some(panel.id.as_str()) => Some(wall),
+                Place::Wall { wall, .. } if !moved.contains(&panel.id) => Some(wall),
                 _ => None,
             }
         }
@@ -2202,12 +2394,12 @@ impl Projector {
                         .map(|((_, model, _), face)| sheet(face, *model)),
                 );
                 // The outline of the slot a panel carried would take, over any panel in it.
-                if let Some(model) = self
-                    .aim
-                    .as_ref()
-                    .filter(|aim| aim.wall == wall.id)
-                    .map(|aim| aim.model)
-                {
+                for model in Side::BOTH.into_iter().filter_map(|side| {
+                    self.aim[side]
+                        .as_ref()
+                        .filter(|aim| aim.wall == wall.id)
+                        .map(|aim| aim.model)
+                }) {
                     sheets.push(sheet(
                         &self.walls.ghost(wall),
                         model * Mat4::from_translation(Vec3::Z * LIFT),
@@ -2246,9 +2438,19 @@ impl Projector {
         {
             return None;
         }
-        match (&self.held, &self.pending) {
-            (Some(held), _) if held.panel == panel.id => return Some((held.drawn, held.fit)),
-            (_, Some(pending)) if pending.panel == panel.id => {
+        let held = Side::BOTH.into_iter().find_map(|side| {
+            self.held[side]
+                .as_ref()
+                .filter(|held| held.panel == panel.id)
+        });
+        let pending = Side::BOTH.into_iter().find_map(|side| {
+            self.pending[side]
+                .as_ref()
+                .filter(|pending| pending.panel == panel.id)
+        });
+        match (held, pending) {
+            (Some(held), _) => return Some((held.drawn, held.fit)),
+            (_, Some(pending)) => {
                 let fit = match &pending.target {
                     Target::Wall(on, _) => walls
                         .iter()
@@ -2305,9 +2507,24 @@ impl Projector {
         self.marks = marks;
     }
 
-    /// The panel being carried, by identity.
+    /// A panel being carried, by identity: the right hand's, or else the left's.
     pub fn held(&self) -> Option<&str> {
-        self.held.as_ref().map(|held| held.panel.as_str())
+        self.held_in(Side::Right).or(self.held_in(Side::Left))
+    }
+
+    /// The panel `side`'s hand carries, by identity.
+    pub fn held_in(&self, side: Side) -> Option<&str> {
+        self.held[side].as_ref().map(|held| held.panel.as_str())
+    }
+
+    /// The wall `side`'s hand carries, by identity.
+    pub fn carried_wall_in(&self, side: Side) -> Option<&str> {
+        self.editor.carrying().filter(|_| self.editor_hand == side)
+    }
+
+    /// Whether `side`'s hand carries a panel or a wall.
+    pub fn carrying_in(&self, side: Side) -> bool {
+        self.held[side].is_some() || self.carried_wall_in(side).is_some()
     }
 
     /// Whether `panel`, shown last frame, has more than its face shows at once, so that it scrolls.
@@ -2418,7 +2635,7 @@ impl Projector {
 
     /// Whether a panel or a wall is carried, so that the right stick, its click and B are its.
     pub fn carrying(&self) -> bool {
-        self.held.is_some() || self.editor.carrying().is_some()
+        self.held.any(|_, held| held.is_some()) || self.editor.carrying().is_some()
     }
 
     /// The server refused the change sent to the wall `wall`, as made against a version since changed: it is drawn as

@@ -323,6 +323,7 @@ pub fn draw(
                 scene: &arrival.scene,
                 hovered: arrival.hovered.as_ref(),
                 ray: arrival.ray,
+                left_ray: arrival.left_ray,
                 time: arrival.time,
             },
         );
@@ -1474,6 +1475,8 @@ mod tests {
             right: None,
             hands: None,
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         });
         client.say("u1", "show me the build status");
         let session = tomori_server::test_support::eventually(|| {

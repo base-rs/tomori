@@ -410,6 +410,32 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     assert_eq!(report["pointing_at"]["panel"], "panel-1");
     assert_eq!(report["pointing_at"]["title"], "Build status");
     assert_eq!(report["pointing_at"]["slot"], 2);
+    // Each hand's ray, the right's as `pointing_at` says; an older client, which says nothing of its rays, is taken
+    // to show the right one alone, so the left points at nothing.
+    assert_eq!(report["pointing"]["right"], report["pointing_at"]);
+    assert_eq!(report["pointing"]["left"], Value::Null);
+    // Shown, the left ray points where it is aimed; hidden, as hanging down, a ray points at nothing.
+    let mut both = ada.clone().showing(Some([true, true]));
+    both.controllers[0] = Some(looking([-0.2, 1.1, -0.3], slots[4].middle));
+    let pointed = |seen: &Seen| {
+        super::report(
+            &Person {
+                seen: Some(seen),
+                ..headset
+            },
+            &projection,
+            &heads,
+            now,
+        )
+    };
+    let report_both = pointed(&both);
+    assert_eq!(report_both["pointing"]["left"]["slot"], 4);
+    assert_eq!(report_both["pointing"]["right"]["slot"], 2);
+    let left_only = both.clone().showing(Some([true, false]));
+    let report_left = pointed(&left_only);
+    assert_eq!(report_left["pointing"]["left"]["slot"], 4);
+    assert_eq!(report_left["pointing"]["right"], Value::Null);
+    assert_eq!(report_left["pointing_at"], Value::Null);
     assert_eq!(report["left_hand"]["tracked"], "controller");
     assert_eq!(report["left_hand"]["yaw"], 0.0);
     assert_eq!(report["right_hand"]["position"], json!([0.2, 1.1, -0.3]));
@@ -1218,15 +1244,24 @@ fn a_panel_carried_is_known_while_the_report_is_current_and_its_identity_bounded
             .unwrap()
             .carrying(Some(panel.to_owned()))
     };
-    assert_eq!(carrying("panel-3").carried(now), Some("panel-3"));
+    assert_eq!(carrying("panel-3").carried(now), ["panel-3"]);
     assert_eq!(
         carrying("panel-3").carried(now + STALE - Duration::from_millis(1)),
-        Some("panel-3")
+        ["panel-3"]
     );
-    assert_eq!(carrying("panel-3").carried(now + STALE), None);
-    assert_eq!(seen(head).carried(now), None);
+    assert!(carrying("panel-3").carried(now + STALE).is_empty());
+    assert!(seen(head).carried(now).is_empty());
     let long = "x".repeat(crate::limits::IDENTIFIER_BYTES + 1);
-    assert_eq!(carrying(&long).carried(now), None);
+    assert!(carrying(&long).carried(now).is_empty());
+    // A panel in each hand, named in full by a newer client; at most two are kept, and the one an older client names
+    // alone when it names no more.
+    let both = Seen::reported(head, None, None, None, now)
+        .unwrap()
+        .carrying_all(
+            Some("panel-3".into()),
+            vec!["panel-3".into(), "panel-4".into(), "panel-5".into(), long],
+        );
+    assert_eq!(both.carried(now), ["panel-3", "panel-4"]);
 }
 
 #[test]

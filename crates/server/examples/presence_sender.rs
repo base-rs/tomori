@@ -276,6 +276,8 @@ fn main() {
             right: None,
             hands: Some(Box::new([Some(hand), None])),
             carrying: None,
+            carried: Vec::new(),
+            rays: None,
         });
 
         // A periodic ping keeps the client side of the connection alive too.

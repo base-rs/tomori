@@ -15,6 +15,7 @@ use crate::anchors::{Anchor, Placed, Placement, Placing};
 #[cfg(test)]
 use crate::pointing::Target;
 use crate::pointing::{Ray, Shape};
+use crate::sides::{Hands, Side};
 use crate::swarm::CENTER;
 
 pub const MAX_CUBES: usize = 4096;
@@ -464,9 +465,9 @@ pub struct Scene {
     coordinator_samples: [Vec3; MAX_COORDINATOR_SAMPLES],
     coordinator_sample_count: usize,
     /// The worker pointed at, drawn highlighted.
-    highlighted: Option<String>,
+    highlighted: Hands<Option<String>>,
     /// Where the headset's ray ends on the worker pointed at.
-    hit_point: Option<Vec3>,
+    hit_point: Hands<Option<Vec3>>,
     /// The origin of the workers' arrangement, home unless the joined space's environment says otherwise, or the agent
     /// while it is summoned.
     origin: Anchor,
@@ -484,7 +485,7 @@ pub struct Scene {
     /// crosses what one of its steps holds, when every live worker is placed again.
     layout: tomori_protocol::cluster::Arrangement,
     /// The cluster whose "+N more" sign the ray points at, by its anchor's name, `None` within it for home.
-    pointed_more: Option<Option<String>>,
+    pointed_more: Hands<Option<Option<String>>>,
     /// The joined space's cluster anchors other than home, by name, each with its cluster and how the server lays it
     /// out. See `design/environments.md`.
     named: BTreeMap<
@@ -523,7 +524,7 @@ pub struct Scene {
     /// The dials drawn for them, among [`Self::cubes`].
     dials: crate::dials::Dials,
     /// Whether the last [`Self::point`] met a dial nearer than any worker.
-    pointed_timer: bool,
+    pointed_timer: Hands<bool>,
 }
 
 impl Default for Scene {
@@ -544,8 +545,8 @@ impl Scene {
             previous_trusted: false,
             coordinator_samples: [CENTER; MAX_COORDINATOR_SAMPLES],
             coordinator_sample_count: 0,
-            highlighted: None,
-            hit_point: None,
+            highlighted: Hands::default(),
+            hit_point: Hands::default(),
             origin: Anchor::AGENT,
             audience: crate::anchors::EYES,
             extent: None,
@@ -553,7 +554,7 @@ impl Scene {
             sweep: None,
             cluster: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None),
             layout: crate::anchors::cluster(Anchor::AGENT, crate::anchors::EYES, None).arrange(1),
-            pointed_more: None,
+            pointed_more: Hands::default(),
             named: BTreeMap::new(),
             seats: BTreeMap::new(),
             home_laid: None,
@@ -568,7 +569,7 @@ impl Scene {
             now: 0.0,
             room: crate::dials::Room::open(Anchor::AGENT, crate::anchors::EYES),
             dials: crate::dials::Dials::default(),
-            pointed_timer: false,
+            pointed_timer: Hands::default(),
         };
         scene.furnish();
         scene
@@ -643,7 +644,14 @@ impl Scene {
     /// The timer whose dial the last [`Self::point`] met, by name, where it was nearer than any worker. See
     /// `design/timers.md`.
     pub fn pointed_timer(&self) -> Option<&str> {
-        self.dials.pointed().filter(|_| self.pointed_timer)
+        self.pointed_timer_by(Side::Right)
+    }
+
+    /// The timer whose dial `side`'s ray last met, nearer than any worker, by name.
+    pub fn pointed_timer_by(&self, side: Side) -> Option<&str> {
+        self.dials
+            .pointed_by(side)
+            .filter(|_| self.pointed_timer[side])
     }
 
     /// Arrange the workers about `origin`, gathered about whoever's eyes are at `audience`, by `placement`, or without
@@ -853,7 +861,12 @@ impl Scene {
     /// The anchor whose cluster's "+N more" sign the last [`Self::point`] met, by name, `home` for home's, which stands
     /// for the workers gathered into it; or `None` where it met none. See `design/interaction.md`.
     pub fn pointed_gathered(&self) -> Option<&str> {
-        self.pointed_more
+        self.pointed_gathered_by(Side::Right)
+    }
+
+    /// The cluster whose "+N more" sign `side`'s ray last met, as [`Self::pointed_gathered`] says of the right's.
+    pub fn pointed_gathered_by(&self, side: Side) -> Option<&str> {
+        self.pointed_more[side]
             .as_ref()
             .map(|at| at.as_deref().unwrap_or(tomori_protocol::cluster::HOME))
     }
@@ -1036,6 +1049,12 @@ impl Scene {
     /// Pointing only highlights; it never takes the trigger. The satellites are never pointed at. See
     /// `design/interaction.md`.
     pub fn point(&mut self, ray: Option<Ray>) -> Option<&str> {
+        self.point_with(Side::Right, ray)
+    }
+
+    /// Point at the workers with `side`'s ray, `ray`, as [`Self::point`] does with the right's: what either ray meets
+    /// is highlighted.
+    pub fn point_with(&mut self, side: Side, ray: Option<Ray>) -> Option<&str> {
         // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
         let mut hit: Option<(f32, &str, Vec3)> = None;
         if let Some(ray) = ray {
@@ -1053,33 +1072,39 @@ impl Scene {
             }
         }
         // A timer's dial nearer than any worker is pointed at instead.
-        let dial = self.dials.point(ray);
-        self.pointed_timer =
+        let dial = self.dials.point_with(side, ray);
+        let timer =
             dial.is_some_and(|(distance, _)| hit.is_none_or(|(nearest, ..)| distance < nearest));
-        let hit = hit.filter(|_| !self.pointed_timer);
+        self.pointed_timer[side] = timer;
+        let hit = hit.filter(|_| !timer);
         // The ray ends among the worker's flock, where it passes nearest its anchor, rather than where it enters the pointing sphere.
-        self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
+        self.hit_point[side] = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
             ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
         });
-        if self.pointed_timer {
-            self.hit_point = dial.map(|(_, point)| point);
+        if timer {
+            self.hit_point[side] = dial.map(|(_, point)| point);
         }
         // One gathered into a "+N more" sign is pointed at as the sign, which stands for all of them.
-        self.pointed_more = hit
+        self.pointed_more[side] = hit
             .and_then(|(_, id, _)| self.workers.get(id))
             .filter(|worker| worker.more)
             .map(|worker| worker.at.clone());
-        let more = self.pointed_more.is_some();
+        let more = self.pointed_more[side].is_some();
         let hit = hit.map(|(_, id, _)| id).filter(|_| !more);
-        if self.highlighted.as_deref() != hit {
-            self.highlighted = hit.map(str::to_owned);
+        if self.highlighted[side].as_deref() != hit {
+            self.highlighted[side] = hit.map(str::to_owned);
         }
-        self.highlighted.as_deref()
+        self.highlighted[side].as_deref()
     }
 
     /// Where the last [`Self::point`] met the worker it highlights, or the dial, or `None` when it met neither.
     pub fn hit_point(&self) -> Option<Vec3> {
-        self.hit_point
+        self.hit_point.right
+    }
+
+    /// Where `side`'s ray last met the worker it highlights, or the dial, as [`Self::hit_point`] says of the right's.
+    pub fn hit_point_by(&self, side: Side) -> Option<Vec3> {
+        self.hit_point[side]
     }
 
     pub fn cubes(&self) -> &[Cube] {
@@ -1466,8 +1491,13 @@ impl Scene {
             let color = worker.color * (0.70 + 0.30 * worker.visual_opacity);
             // The worker pointed at glows paler and a little larger, so the participant sees what they would ask about.
             let pointed = worker.retired.is_none()
-                && (self.highlighted.as_deref() == Some(id.as_str())
-                    || (worker.more && self.pointed_more.as_ref() == Some(&worker.at)));
+                && (self
+                    .highlighted
+                    .any(|_, highlighted| highlighted.as_deref() == Some(id.as_str()))
+                    || (worker.more
+                        && self
+                            .pointed_more
+                            .any(|_, more| more.as_ref() == Some(&worker.at))));
             let (color, emphasis) = if pointed {
                 (color.lerp(Vec3::ONE, HIGHLIGHT_WHITENING), HIGHLIGHT_SCALE)
             } else {
@@ -1531,7 +1561,7 @@ impl Scene {
             gathered.sort_by_key(|(slot, _)| *slot);
             let mut sign = gathered[0].1.clone();
             sign.more = gathered.len();
-            sign.title = if self.pointed_more.as_ref() == Some(&at) {
+            sign.title = if self.pointed_more.any(|_, more| more.as_ref() == Some(&at)) {
                 let titles: Vec<&str> = gathered
                     .iter()
                     .map(|(_, station)| station.title.as_str())

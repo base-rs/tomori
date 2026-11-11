@@ -1484,6 +1484,52 @@ impl Editor {
         self.carry.as_ref().and(self.wall.as_deref())
     }
 
+    /// Whether a wall is carried or a handle dragged, so that the hand doing it keeps the editor until it lets go.
+    pub fn busy(&self) -> bool {
+        self.drag.is_some() || self.carry.is_some()
+    }
+
+    /// What `ray`, the ray of a hand the editor does not follow, meets of `walls`, with `rights`: how
+    /// far along it a handle of the wall taken hold of, or a bar, is, which it meets before a panel behind it, and where
+    /// it ends on the nearest of those and the walls it may take hold of, as [`Self::update`] says of the hand it
+    /// follows. It changes nothing, and takes no squeeze.
+    pub fn probe(
+        &self,
+        ray: &Ray,
+        walls: &[(&Wall, Mat4)],
+        rights: Rights,
+    ) -> (Option<f32>, Option<crate::pointing::End>) {
+        if !rights.adjust {
+            return (None, None);
+        }
+        let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
+        let handle = self
+            .wall
+            .as_ref()
+            .filter(|_| !self.busy())
+            .and_then(|id| walls.iter().find(|(wall, _)| wall.id == *id))
+            .and_then(|(wall, frame)| {
+                let controls = LockControls::of(wall, rights);
+                let (models, size) = handle_models(wall, *frame, &all, None, controls);
+                nearest_handle(&models, size, ray)
+            })
+            .map(|(_, along)| along);
+        let bar = walls
+            .iter()
+            .filter_map(|(wall, frame)| group_bar(wall, *frame, &all).and_then(|bar| bar.hit(ray)))
+            .min_by(f32::total_cmp);
+        let reach = handle.or(bar);
+        let along = walls
+            .iter()
+            .filter_map(|(wall, frame)| super::wall_hit(wall, *frame, ray))
+            .chain(reach)
+            .min_by(f32::total_cmp);
+        (
+            reach,
+            along.map(|along| crate::pointing::End::new(along, ray.at(along))),
+        )
+    }
+
     /// Let go of the wall taken hold of, as B does when nothing is carried. Returns whether one was.
     pub fn stop(&mut self) -> bool {
         self.drag = None;

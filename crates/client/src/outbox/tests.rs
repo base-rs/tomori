@@ -73,6 +73,8 @@ fn presence(x: f32) -> ClientMessage {
         right: None,
         hands: None,
         carrying: None,
+        carried: Vec::new(),
+        rays: None,
     }
 }
 
