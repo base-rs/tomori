@@ -399,3 +399,149 @@ fn a_stone_let_go_unmoving_is_let_go_still() {
     };
     assert_eq!((let_go.velocity, let_go.spin), ([0.0; 3], [0.0; 3]));
 }
+
+#[test]
+fn a_stone_the_server_side_says_is_held_by_no_hand_of_this_participant_is_let_go_of_again() {
+    let start = Instant::now();
+    let at = lying(0).position;
+    let hand = hand_at(at);
+    let mut stones = shared();
+    stones.update(
+        [&grab(0, hand, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    stones.changed(
+        10,
+        &Update {
+            holding: vec![Changed {
+                body: 0,
+                epoch: 4,
+                held: Some(Held {
+                    by: 5,
+                    hand: tomori_physics::Side::Right,
+                    offset: Encoded::default(),
+                }),
+            }],
+            ..Default::default()
+        },
+        20,
+    );
+    // Let go, but the letting go never arrives, as when it was one intent too many: the server side still says they
+    // hold it.
+    let intents = stones.update(
+        [&grab(0, hand, Phase::Ended, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        100,
+    );
+    assert!(matches!(intents[..], [Intent::LetGo(_)]));
+    let lets_go = |intents: &[Intent]| {
+        intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::LetGo(let_go) => Some((let_go.body, let_go.epoch, let_go.velocity)),
+                Intent::Take(_) => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Not at once, while its own letting go may yet be answered; then, unmoving, at the epoch the server side says; and
+    // again only a while after.
+    let soon = start + ASTRAY / 2;
+    assert!(
+        stones
+            .update(std::iter::empty(), Some(5), soon, 200)
+            .is_empty()
+    );
+    let astray = start + ASTRAY;
+    assert_eq!(
+        lets_go(&stones.update(std::iter::empty(), Some(5), astray, 300)),
+        [(0, 4, [0.0; 3])]
+    );
+    assert!(
+        stones
+            .update(std::iter::empty(), Some(5), astray + ASTRAY / 2, 400)
+            .is_empty()
+    );
+    assert_eq!(
+        lets_go(&stones.update(std::iter::empty(), Some(5), astray + ASTRAY, 500)).len(),
+        1
+    );
+    // Once the server side says it is let go, nothing more.
+    stones.changed(
+        600,
+        &Update {
+            holding: vec![Changed {
+                body: 0,
+                epoch: 5,
+                held: None,
+            }],
+            ..Default::default()
+        },
+        610,
+    );
+    assert!(
+        stones
+            .update(std::iter::empty(), Some(5), astray + ASTRAY * 3, 700)
+            .is_empty()
+    );
+    // Taken, but agreed only after this client gave the taking up: let go of again, at the epoch it was agreed at.
+    let mut late = shared();
+    late.update(
+        [&grab(0, hand, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    let given_up = start + UNAGREED;
+    late.update(std::iter::empty(), Some(5), given_up, 0);
+    late.changed(
+        10,
+        &Update {
+            holding: vec![Changed {
+                body: 0,
+                epoch: 4,
+                held: Some(Held {
+                    by: 5,
+                    hand: tomori_physics::Side::Right,
+                    offset: Encoded::default(),
+                }),
+            }],
+            ..Default::default()
+        },
+        20,
+    );
+    assert!(
+        late.update(std::iter::empty(), Some(5), given_up, 0)
+            .is_empty()
+    );
+    assert_eq!(
+        lets_go(&late.update(std::iter::empty(), Some(5), given_up + ASTRAY, 0)),
+        [(0, 4, [0.0; 3])]
+    );
+    // Someone else's stone is never theirs to let go of.
+    let mut others = shared();
+    others.changed(
+        10,
+        &Update {
+            holding: vec![Changed {
+                body: 1,
+                epoch: 4,
+                held: Some(Held {
+                    by: 7,
+                    hand: tomori_physics::Side::Left,
+                    offset: Encoded::default(),
+                }),
+            }],
+            ..Default::default()
+        },
+        20,
+    );
+    others.update(std::iter::empty(), Some(5), start, 0);
+    assert!(
+        others
+            .update(std::iter::empty(), Some(5), start + ASTRAY * 2, 0)
+            .is_empty()
+    );
+}

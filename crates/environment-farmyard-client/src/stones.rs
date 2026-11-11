@@ -24,6 +24,10 @@ pub const REACH: f32 = 0.05;
 const UNAGREED: Duration = Duration::from_millis(1500);
 /// How long a hand's motion is followed back to say how fast it moved as it let go.
 const FOLLOWED: Duration = Duration::from_millis(80);
+/// How long the server side may say this participant holds a stone that no hand of theirs does before it is let go of
+/// again, and how often after: as when their letting go was refused, being one intent too many, or their taking was
+/// agreed only after this client gave it up.
+pub const ASTRAY: Duration = Duration::from_secs(1);
 
 /// A stone as it is drawn this frame: which, and where.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +118,10 @@ pub struct Stones {
     /// Where each stone was last drawn: what the ray and the hands meet, and where one another holds stays should their
     /// hand go unreported.
     drawn: BTreeMap<u32, Placement>,
+    /// The stones this participant let go of, or that the server side says they hold though no hand of theirs does,
+    /// until the server side's epoch for each moves on: since when, or since each was last let go of again, and at
+    /// which epoch.
+    astray: BTreeMap<u32, (Instant, u32)>,
 }
 
 impl Stones {
@@ -300,8 +308,52 @@ impl Stones {
                         clock,
                     }));
                     self.mirror.let_go(stone, at, velocity, spin, clock);
+                    self.astray.insert(stone, (now, holding.epoch));
                 }
             }
+        }
+        intents.extend(self.again(now, clock));
+        intents
+    }
+
+    /// The stones this participant let go of whose letting go the server side has not answered, and those it says they
+    /// hold that no hand of theirs does, let go of again, unmoving, where they are drawn, once each has been astray for
+    /// [`ASTRAY`], and each [`ASTRAY`] after, until the server side's epoch moves on: so that a stone whose letting go
+    /// never arrived is not left in their hand, for everyone else, for as long as they stay.
+    fn again(&mut self, now: Instant, clock: u64) -> Vec<Intent> {
+        let me = self.me;
+        for stone in self.mirror.bodies() {
+            let held = self
+                .holding
+                .iter()
+                .flatten()
+                .any(|holding| holding.stone == stone);
+            if me.is_some() && !held && self.mirror.held(stone).map(|held| held.by) == me {
+                let epoch = self.mirror.epoch(stone).expect("known");
+                self.astray.entry(stone).or_insert((now, epoch));
+            }
+        }
+        let mirror = &self.mirror;
+        self.astray.retain(|stone, (_, epoch)| {
+            mirror.epoch(*stone) == Some(*epoch)
+                && mirror.held(*stone).is_none_or(|held| Some(held.by) == me)
+        });
+        let mut intents = Vec::new();
+        for (stone, (since, epoch)) in &mut self.astray {
+            // Every stone the mirror knows was drawn as it was shared.
+            let at = self.drawn[stone];
+            if now.saturating_duration_since(*since) < ASTRAY {
+                continue;
+            }
+            *since = now;
+            intents.push(Intent::LetGo(LetGo {
+                body: *stone,
+                epoch: *epoch,
+                at: at.snapped(Precision::Rest).encoded(Precision::Rest),
+                velocity: [0.0; 3],
+                spin: [0.0; 3],
+                clock,
+            }));
         }
         intents
     }
