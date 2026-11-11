@@ -100,14 +100,11 @@ impl Pose {
     /// marshmallow over the seat towards the fire.
     pub fn racked(index: usize) -> Self {
         let (middle, along, _, radius) = seat();
-        let across = Vec3::new(along.y, 0.0, -along.x);
-        let towards = if across.dot(FIRE - middle) > 0.0 {
-            across
-        } else {
-            -across
-        };
-        let spread = (index as f32 - (STICKS as f32 - 1.0) * 0.5) * 0.27;
         let along = Vec3::new(along.x, 0.0, along.y);
+        // Across the log, level, towards the fire.
+        let to_fire = FIRE - middle;
+        let towards = (to_fire - along * to_fire.dot(along)).normalize();
+        let spread = (index as f32 - (STICKS as f32 - 1.0) * 0.5) * 0.27;
         // Its butt back from the seat's middle, on the ground, its shaft leaning at the angle that lays it on the log,
         // touching it, rather than through it: the log's axis as far from the shaft as their radii together.
         let back = 0.6;

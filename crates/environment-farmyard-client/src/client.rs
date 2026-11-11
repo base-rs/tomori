@@ -105,10 +105,11 @@ impl FarmyardClient {
             _ => None,
         };
         if let Some(state) = state {
-            // The campsite's sticks beside the flock, none in a state from before them.
-            if let Ok(shared) = serde_json::from_value::<campsite::Shared>(state.value().clone()) {
-                self.sticks.share(shared);
-            }
+            // The campsite's sticks beside the flock, none in a state from before them or one that cannot be read.
+            self.sticks.share(
+                serde_json::from_value::<campsite::Shared>(state.value().clone())
+                    .unwrap_or_default(),
+            );
             let Ok(state) = serde_json::from_value::<State>(state.value().clone()) else {
                 log::debug!("A farmyard state could not be read.");
                 return;

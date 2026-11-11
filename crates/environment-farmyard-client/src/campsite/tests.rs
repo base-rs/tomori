@@ -54,6 +54,38 @@ fn a_ray_passing_near_a_free_stick_takes_it_with_the_grip_and_the_bonfire_is_poi
         Some("stick-1".to_owned())
     );
     assert_eq!(sticks.within_reach(hand_on(1).position), None);
+    // A ray along the log, over it, meets every stick leaning on it, and takes the nearest.
+    let (middle, along, length, _) = campsite::seat();
+    let along = Vec3::new(along.x, 0.0, along.y);
+    // As high as a stick passes over the log's axis, its butt 0.6 m back from it.
+    let racked = Pose::racked(1);
+    let level = (racked.along.x.powi(2) + racked.along.z.powi(2)).sqrt();
+    let over = middle + Vec3::Y * (racked.butt + racked.along * (0.6 / level)).y;
+    let lengthwise = Ray::new(over + along * length, -along).unwrap();
+    sticks.share(shared(|_| {}));
+    let met: Vec<f32> = (0..STICKS)
+        .filter_map(|index| {
+            Pose::racked(index).met(lengthwise.origin, lengthwise.direction, POINTED)
+        })
+        .collect();
+    assert!(met.len() >= 2, "{met:?}");
+    assert!(
+        sticks
+            .pick(&lengthwise)
+            .unwrap()
+            .object
+            .starts_with("stick-")
+    );
+    // A hand at two sticks' handles, one lying across another's, reaches the nearer.
+    let hand = hand_on(1).position;
+    sticks.share(shared(|sticks| {
+        sticks[0].lying = Some(Lying {
+            at: (hand + Vec3::new(0.05, 0.0, -0.2)).to_array(),
+            yaw: 0.0,
+        });
+    }));
+    assert_eq!(sticks.within_reach(hand).as_deref(), Some("stick-1"));
+    sticks.share(shared(|sticks| sticks[1].held = Some(9)));
     // A hand at a free stick's handle reaches it, the nearest; nowhere near, none.
     assert_eq!(
         sticks.within_reach(hand_on(2).position).as_deref(),

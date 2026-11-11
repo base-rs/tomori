@@ -6069,6 +6069,26 @@ mod tests {
     }
 
     /// A conversation connected to a server and joined to [`SPACE`], with any request it shows there long enough to be chosen.
+    #[test]
+    fn a_ping_or_pong_changes_nothing_and_presence_keeps_only_the_others_right_hands_in_a_space() {
+        let mut conversation = joined(|_| {});
+        let before = conversation.right_hands();
+        conversation.apply(Event::Message(ServerMessage::Ping { nonce: 1 }));
+        conversation.apply(Event::Message(ServerMessage::Pong { nonce: 1 }));
+        assert_eq!(conversation.right_hands(), before);
+        assert!(conversation.take_actions().is_empty());
+        // Outside a space, a right hand is not kept.
+        let mut lobby = Conversation::new("Ada");
+        lobby.apply(Event::Message(ServerMessage::Presence {
+            source: 2,
+            head: tomori_protocol::Pose::HOME,
+            left: None,
+            right: Some(tomori_protocol::Pose::HOME),
+            hands: None,
+        }));
+        assert!(lobby.right_hands.is_empty());
+    }
+
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
         let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));

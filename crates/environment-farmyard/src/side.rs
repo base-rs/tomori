@@ -118,27 +118,26 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         // A stick whose holder has left goes back on its log, and an empty space tidies itself after a while.
         sticks.extend(campsite.sweep(space.present().as_deref(), clock()));
         changes.extend(flock.update(clock()));
-        for (chicken, behaviour) in changes {
-            let now = clock();
-            space.announce(
+        // Each change, the flock's and then the sticks', announced with the state it leaves.
+        let mut events: Vec<String> = changes
+            .into_iter()
+            .map(|(chicken, behaviour)| {
                 json(Event {
-                    clock: now,
+                    clock: clock(),
                     chicken,
                     behaviour,
-                }),
-                state(&flock, &campsite, now),
-            )?;
-        }
-        for stick in sticks {
-            let now = clock();
-            space.announce(
-                json(campsite::Event {
-                    clock: now,
-                    stick,
-                    now: campsite.sticks()[stick].clone(),
-                }),
-                state(&flock, &campsite, now),
-            )?;
+                })
+            })
+            .collect();
+        events.extend(sticks.into_iter().map(|stick| {
+            json(campsite::Event {
+                clock: clock(),
+                stick,
+                now: campsite.sticks()[stick].clone(),
+            })
+        }));
+        for event in events {
+            space.announce(event, state(&flock, &campsite, clock()))?;
         }
         if described.is_none_or(|described| described.elapsed() >= DESCRIBE) {
             described = Some(Instant::now());
