@@ -272,9 +272,8 @@ impl Hub {
                             crate::space::one_line(&id, 80)
                         )
                     })?;
-                let asker = record
-                    .model
-                    .origin()
+                let asker = state
+                    .asking(space)
                     .map_or(tomori_protocol::cluster::EYES, |head| head.position);
                 let pose = crate::places::before_object(position, asker);
                 placed(
@@ -290,7 +289,7 @@ impl Hub {
                 let walls = environments.walls(&record.model.environment);
                 let projection = record.stage.view(space, &walls, crate::cards::unix_now());
                 let people = state.heads(space);
-                let origin = record.model.origin();
+                let origin = state.asking(space);
                 let id =
                     crate::presence::which_wall(&named, origin.as_ref(), &people, &projection)?;
                 let (index, wall) = projection
@@ -311,7 +310,7 @@ impl Hub {
                 let people = state.heads(space);
                 let head = crate::presence::head_of(
                     name.as_deref(),
-                    record.model.origin().as_ref(),
+                    state.asking(space).as_ref(),
                     &people,
                 )?;
                 let (at, pose) = crate::places::near_cluster(

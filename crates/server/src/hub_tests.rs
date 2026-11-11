@@ -5015,8 +5015,8 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
     let wall = ada.projection().walls[1].id.clone();
     ada.send(looking([0.2, 1.6, 2.5], [0.2, 1.5, 3.0]));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
-    // Where they move after they began speaking changes nothing.
-    ada.send(standing([1.9, 1.6, -2.0]));
+    // Where they move after they began speaking, within a few steps, changes nothing.
+    ada.send(standing([1.9, 1.6, 1.0]));
     hub.drive_event(&space, Event::Delivered { key: prompt.key });
     reply(&hub, &space, "m1", PANEL_REPLY);
     ada.read();
@@ -7186,6 +7186,8 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
 mod actions;
 #[path = "hub_tests/anchors.rs"]
 mod anchors;
+#[path = "hub_tests/asking.rs"]
+mod asking;
 #[path = "hub_tests/following.rs"]
 mod following;
 #[path = "hub_tests/keeping.rs"]

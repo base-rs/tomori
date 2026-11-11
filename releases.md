@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **A panel Tomori puts beside you goes where you are now.** When the agent shows something after a sub-agent's report, a timer or a place's note, rather than in answer to your words, it now goes beside whoever it is talking with, or whoever spoke last, where they stand now, rather than where they stood when they last spoke, minutes before. In answer to your words it still goes where you were looking as you began, unless you have walked more than 3 m since or began speaking a minute ago, when it goes where you are. A name, as in `beside Ada`, always means where she is now. The same holds for the agent's tools, such as moving a panel, showing an image or adding a wall. See `design/projection.md`.
+
 - **The ring where you'll teleport shows on the farmyard's trail.** Aiming along the trail, the ring was hidden under the path, which was drawn above where you landed; you now land, and stand, on the path itself, its clearings and the lookout's pad, which was buried too, and the trail sits a little lower on the meadow. The ring is also a little taller everywhere, sunk into the ground beneath it, so that a stone or a slightly raised floor never hides it. See `design/locomotion.md`.
 
 - For environments: **walkable surfaces are declared at what is drawn.** `tomori-environment-farmyard`'s `trail::outlines()` now gives each outline with its height, **breaking** for a build that used it, `trail::HEIGHT` is the track's top, `LIFT`, now 8 mm, and `trail` gains `CLEARING_HEIGHT` and `EARTH`; the lookout's pad stands at its clearing's height. `tomori-render`'s `graphics` gains `LANDING_TOP` and `LANDING_SUNK`, how far the ring's bars stand above the landing and reach into the surface.

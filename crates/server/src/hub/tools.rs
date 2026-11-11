@@ -302,12 +302,12 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let environments = self.environments();
         let record = state.space_mut(&space).expect("found above");
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
-        let origin = record.model.origin();
         let solids = environments.solids(&record.model.environment);
         let to = match place {
             Some(place) => record.panel_destination(
@@ -509,6 +509,7 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
@@ -524,7 +525,7 @@ impl Hub {
             &environments,
             &placement,
             0,
-            record.model.origin().as_ref(),
+            origin.as_ref(),
             &people,
             &projection,
             &environments.solids(&record.model.environment),
@@ -591,12 +592,12 @@ impl Hub {
             false => None,
         };
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.versioned(&environments, now);
-        let origin = record.model.origin();
         let id = crate::presence::which_wall(wall, origin.as_ref(), &people, &projection)?;
         let before = projection.wall(&id).expect("a wall named is shown").clone();
         let the = crate::presence::the_wall(&projection, &before);
@@ -807,10 +808,10 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
-        let origin = record.model.origin();
         let laid = layout.apply(tomori_protocol::Wall::new(
             "",
             tomori_protocol::WallKind::Added,
@@ -847,12 +848,12 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
-        let origin = record.model.origin();
         let id = crate::presence::which_wall(wall, origin.as_ref(), &people, &projection)?;
         let shown = projection.wall(&id).expect("a wall named is shown");
         let the = crate::presence::the_wall(&projection, shown);
@@ -1060,7 +1061,7 @@ impl Hub {
                         true
                     }
                     (None, Some(position)) => {
-                        let asker = record.model.origin().unwrap_or_else(|| {
+                        let asker = state.asking(&space).unwrap_or_else(|| {
                             tomori_protocol::Pose::at(tomori_protocol::cluster::EYES)
                         });
                         let at = self.beside_object(&state, &space, position, asker).ok_or(
@@ -1093,10 +1094,9 @@ impl Hub {
             }
             Going::Person(name, beside) => {
                 let people = state.heads(&space);
-                let record = state.space(&space).expect("found above");
                 let head = crate::presence::head_of(
                     name.as_deref(),
-                    record.model.origin().as_ref(),
+                    state.asking(&space).as_ref(),
                     &people,
                 )?;
                 // Whom it goes to, where they have reported: whoever is named, or whoever's words it answers.
@@ -1133,8 +1133,8 @@ impl Hub {
     }
 
     /// The key of the participant in `space` that `name` names among `people`, those in it, as
-    /// [`crate::presence::whom`] finds them, who has reported where they are; or, naming nobody, the participant whose
-    /// words the agent was given last.
+    /// [`crate::presence::whom`] finds them, who has reported where they are; or, naming nobody, whoever the agent acts
+    /// for, as [`HubState::asked_by`] finds them.
     fn participant_named(
         &self,
         state: &HubState,
@@ -1143,22 +1143,23 @@ impl Hub {
         people: &[crate::presence::Someone],
     ) -> Option<String> {
         let record = state.space(space).expect("the caller found it");
-        let found = |key: &&String| match name {
-            Some(name) => crate::presence::whom(name, people).is_ok_and(|someone| {
-                state.participants.get(*key).is_some_and(|participant| {
-                    participant.name == someone.name
-                        && participant.tag == someone.tag
-                        && participant.seen.is_some()
-                })
-            }),
-            None => record.model.given().is_some_and(|given| {
-                state
-                    .participants
-                    .get(*key)
-                    .is_some_and(|participant| participant.source == given.source)
-            }),
+        let Some(name) = name else {
+            return state.asked_by(space, &record.model.asked());
         };
-        record.model.participants.iter().find(found).cloned()
+        record
+            .model
+            .participants
+            .iter()
+            .find(|key| {
+                crate::presence::whom(name, people).is_ok_and(|someone| {
+                    state.participants.get(*key).is_some_and(|participant| {
+                        participant.name == someone.name
+                            && participant.tag == someone.tag
+                            && participant.seen.is_some()
+                    })
+                })
+            })
+            .cloned()
     }
 
     /// Change how much of each reply the space bound to `session` speaks, as its agent asked for its participants, telling everyone in it and logging the change. See `design/mcp.md`.

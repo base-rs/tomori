@@ -242,17 +242,18 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     .clone();
     assert_eq!(looking["moved"], false);
     assert_eq!(looking["agent"]["position"], json!([1.0, 1.9, -2.3]));
-    // Nobody asked as they spoke, so a form that names nobody is refused; and a place too long, or none.
-    assert!(
-        failure(&call(
-            &server,
-            &token,
-            &session,
-            "move_agent",
-            json!({"place": "front"})
-        ))
-        .contains("Nobody asked")
-    );
+    // Nobody asked as they spoke, so a form that names nobody means whom it talks with, Ada, who called it, where she
+    // stands now: in front of her, where it is already. A place too long, or none, is refused.
+    let front = content(&call(
+        &server,
+        &token,
+        &session,
+        "move_agent",
+        json!({"place": "front"}),
+    ))
+    .clone();
+    assert_eq!(front["moved"], false);
+    assert_eq!(front["agent"]["position"], json!([1.0, 1.9, -2.3]));
     let long = "x".repeat(2000);
     assert_eq!(
         call(
