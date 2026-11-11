@@ -1183,7 +1183,7 @@ impl Hub {
                         .space_mut(&space)
                         .expect("found above")
                         .following
-                        .partner = Some(participant);
+                        .talk_with(&participant, now);
                 }
                 moved
             }
@@ -1207,7 +1207,7 @@ impl Hub {
     ) -> Option<String> {
         let record = state.space(space).expect("the caller found it");
         let Some(name) = name else {
-            return state.asked_by(space, &record.model.asked());
+            return state.asked_by(space, &record.model.asked(), std::time::Instant::now());
         };
         record
             .model
