@@ -21,6 +21,7 @@ use tomori_render::scenery::{Scenery, Target};
 use wgpu::util::DeviceExt;
 
 use tomori_environment_farmyard::backdrop::{self, Kind};
+use tomori_environment_farmyard::beach;
 use tomori_environment_farmyard::campsite;
 use tomori_environment_farmyard::coop::{self, Coop};
 use tomori_environment_farmyard::ferns::{self, Detail, Fern};
@@ -881,6 +882,9 @@ pub struct Farmyard {
     sticks: Drawn,
     fire: Fire,
     ferns: Ferns,
+    /// The beach's shingle, and its stones where its client side last showed them.
+    beach: Drawn,
+    stones: Drawn,
     reveal: Option<(Vec3, f32)>,
 }
 
@@ -967,6 +971,14 @@ impl Farmyard {
             Mat4::IDENTITY,
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
+        let shingle = Drawn::new(
+            device,
+            target.queue,
+            &models,
+            &Arc::new(beach::model()),
+            Mat4::IDENTITY,
+        );
+        let stones = Drawn::placed(device, target.queue, &models, &stones(), &[]);
         let fire = Fire::new(target, &pipeline_layout);
         let ferns = Ferns::new(target, &pipeline_layout);
         Self {
@@ -986,9 +998,35 @@ impl Farmyard {
             sticks,
             fire,
             ferns,
+            beach: shingle,
+            stones,
             reveal: None,
         }
     }
+}
+
+/// The beach's stones' model, built once.
+fn stones() -> Arc<Model> {
+    static STONES: std::sync::OnceLock<Arc<Model>> = std::sync::OnceLock::new();
+    STONES
+        .get_or_init(|| Arc::new(beach::stones_model()))
+        .clone()
+}
+
+/// The stones as `shown`, each an instance of the stones' model showing its own.
+pub(crate) fn stone_instances(shown: &[crate::stones::Shown]) -> Vec<Instance> {
+    let model = stones();
+    shown
+        .iter()
+        .map(|stone| {
+            let mut instance = Instance::new(model.clone());
+            instance.transform = stone.transform;
+            for index in 0..beach::STONES {
+                instance.set_shown(&beach::stone_node(index), index == stone.stone);
+            }
+            instance
+        })
+        .collect()
 }
 
 /// The stick's model, built once.
@@ -1031,6 +1069,14 @@ impl Scenery for Farmyard {
             &self.sticks.model,
             &mut self.sticks.batch,
             &stick_instances(&drawn.sticks),
+        );
+        // The stones, where the client side shows them.
+        self.models.place(
+            device,
+            queue,
+            &self.stones.model,
+            &mut self.stones.batch,
+            &stone_instances(&drawn.stones),
         );
         let burning: Vec<Vec3> = drawn
             .sticks
@@ -1112,7 +1158,13 @@ impl Scenery for Farmyard {
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
             .flatten()
-            .chain([&self.sticks, &self.campsite, &backdrop.trail])
+            .chain([
+                &self.sticks,
+                &self.stones,
+                &self.campsite,
+                &self.beach,
+                &backdrop.trail,
+            ])
         {
             self.models.draw(pass, eye, &drawn.model, &drawn.batch);
         }

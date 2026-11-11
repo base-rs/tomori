@@ -3,8 +3,9 @@
 
 //! The farmyard's client side, for one space: the flock as its server side shares it, each chicken with its controller,
 //! moved on by the farmyard's clock, which it reads from the server's messages; the campsite's marshmallow sticks, which
-//! a participant takes with the grip and toasts over the fire; what the ray points at; the notices it asks for as a
-//! participant points at a chicken and looks away; the clucks it hears; and what its scenery draws.
+//! a participant takes with the grip and toasts over the fire; the beach's stones, which a participant takes with either
+//! grip, carries, throws and stacks; what the ray points at; the notices it asks for as a participant points at a
+//! chicken and looks away; the clucks, clacks and splashes it hears; and what its scenery draws.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,16 +15,18 @@ use tomori_scene::channel::Update;
 use tomori_scene::client_side::{ClientSide, Input, Output, Picked, Sound};
 use tomori_scene::pointing::Ray;
 
-use tomori_environment_farmyard::campsite;
 use tomori_environment_farmyard::chicken::{CLUCK, Chicken, SQUAWK};
 use tomori_environment_farmyard::cluck::{Cluck, RATE, rendered};
 use tomori_environment_farmyard::controller::ChickenController;
 use tomori_environment_farmyard::flock::{self, Event, Intent, MOST, PER_CHICKEN, State};
+use tomori_environment_farmyard::{beach, campsite};
 
-/// What the farmyard's scenery draws this frame: each chicken, posed and placed, and each of the campsite's sticks.
+/// What the farmyard's scenery draws this frame: each chicken, posed and placed, each of the campsite's sticks, and each
+/// of the beach's stones.
 pub struct Drawn {
     pub chickens: Vec<Instance>,
     pub sticks: Vec<crate::campsite::Shown>,
+    pub stones: Vec<crate::stones::Shown>,
 }
 
 /// How often, on average, a chicken clucks of its own accord, in slots of this many milliseconds, and the chance it
@@ -59,6 +62,9 @@ pub struct FarmyardClient {
     asked: [Option<Instant>; MOST],
     /// The campsite's sticks.
     sticks: crate::campsite::Sticks,
+    /// The beach's stones, and the sounds of those that landed since the last frame.
+    stones: crate::stones::Stones,
+    landed: Vec<(Sound, [f32; 3])>,
 }
 
 impl FarmyardClient {
@@ -75,6 +81,8 @@ impl FarmyardClient {
             held: None,
             asked: [None; MOST],
             sticks: crate::campsite::Sticks::new(),
+            stones: crate::stones::Stones::new(),
+            landed: Vec::new(),
         }
     }
 
@@ -110,6 +118,8 @@ impl FarmyardClient {
                 serde_json::from_value::<campsite::Shared>(state.value().clone())
                     .unwrap_or_default(),
             );
+            // And the beach's stones, none in a state from before them.
+            self.stones.share(&beach::shared(state.value()));
             let Ok(state) = serde_json::from_value::<State>(state.value().clone()) else {
                 log::debug!("A farmyard state could not be read.");
                 return;
@@ -128,6 +138,12 @@ impl FarmyardClient {
             self.held = self.held.filter(|held| *held < self.controllers.len());
         }
         if let Some(event) = event {
+            if let Ok(event) = serde_json::from_value::<beach::Event>(event.value().clone()) {
+                let now = self.clock(now).unwrap_or(event.clock);
+                let landed = self.stones.changed(event.clock, &event.stones, now);
+                self.landed.extend(landed);
+                return;
+            }
             if let Ok(event) = serde_json::from_value::<campsite::Event>(event.value().clone()) {
                 self.sticks.changed(event);
                 return;
@@ -224,11 +240,14 @@ impl ClientSide for FarmyardClient {
                 .map(|distance| Picked::new(format!("chicken-{index}"), name.clone(), distance))
             })
             .chain(self.sticks.pick(ray))
+            .chain(self.stones.pick(ray))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
 
     fn within_reach(&self, hand: Vec3) -> Option<String> {
-        self.sticks.within_reach(hand)
+        self.sticks
+            .within_reach(hand)
+            .or_else(|| self.stones.within_reach(hand))
     }
 
     fn update(&mut self, input: Input<'_>) -> Output {
@@ -285,6 +304,23 @@ impl ClientSide for FarmyardClient {
                 serde_json::to_value(intent).expect("an intent is JSON"),
             ));
         }
+        // The beach's stones: those this participant takes with either hand, carries and throws, and what landed.
+        for intent in self.stones.update(
+            input.grab.iter().chain(&input.left_grab),
+            input.participant,
+            input.now,
+            clock,
+        ) {
+            output = output.with_intent(tomori_protocol::Payload::new(
+                serde_json::to_value(intent).expect("an intent is JSON"),
+            ));
+        }
+        for (sound, at) in self.landed.drain(..) {
+            output = output.with_sound(sound, at);
+        }
+        let stones = self
+            .stones
+            .shown(&input.hands, &input.left_hands, input.now, clock);
         output.drawing(Arc::new(Drawn {
             chickens: self
                 .controllers
@@ -292,6 +328,7 @@ impl ClientSide for FarmyardClient {
                 .map(|controller| controller.instance().clone())
                 .collect(),
             sticks: self.sticks.shown(&input.hands),
+            stones,
         }))
     }
 }

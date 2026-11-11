@@ -160,15 +160,24 @@ pub fn water_level() -> f32 {
 }
 
 /// Where participants may stand on the beach, as flat cells over its slope, each at the height of its middle, so that
-/// none stands more than a few centimetres from the shingle: down to just above the water's edge. See `locomotion.md`;
-/// walkable ground derived from what is drawn would replace them.
+/// none stands more than a few centimetres from the shingle: down the gentle slope to where its steep bank falls to the
+/// water, short of where the river's water may spread, as everywhere in the farmyard, so that nobody lands in it; its
+/// stones below are reached by pulling them along the ray. See `locomotion.md`; walkable ground derived from what is
+/// drawn would replace them.
 pub fn walkable() -> Vec<(Vec<Vec2>, f32)> {
-    const OUT: usize = 12;
+    const OUT: usize = 8;
     const ALONG: usize = 5;
-    let edge = (0..=40)
-        .map(|step| NEAR + (FAR - NEAR) * step as f32 / 40.0)
-        .find(|out| height(at(*out, HALF_WIDTH)).is_none_or(|height| height < water_level() + 0.05))
-        .unwrap_or(FAR);
+    let width = HALF_WIDTH - 0.05;
+    let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD + 0.1;
+    let edge = (0..=80)
+        .map(|step| NEAR + (FAR - NEAR) * step as f32 / 80.0)
+        .take_while(|out| {
+            [-width, 0.0, width]
+                .iter()
+                .all(|along| layout::nearest_river(at(*out, *along)).1 > spread)
+        })
+        .last()
+        .unwrap_or(NEAR);
     let width = HALF_WIDTH - 0.05;
     let mut cells = Vec::with_capacity(OUT * ALONG);
     for band in 0..OUT {
@@ -418,6 +427,19 @@ pub fn waters() -> Vec<Water> {
             Water::below(level, outline).returning(RETURNS)
         })
         .collect()
+}
+
+/// What changed of the beach's stones, as the farmyard's server side sends it to everyone in the space: the farmyard's
+/// clock, and what changed. A client from before the beach reads it as neither a chicken's nor a stick's, and ignores it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Event {
+    pub clock: u64,
+    pub stones: tomori_physics::message::Update,
+}
+
+/// The beach's stones as the farmyard shares them, in its state beside the flock's, or none in a state from before them.
+pub fn shared(state: &serde_json::Value) -> tomori_physics::message::State {
+    serde_json::from_value(state["stones"].clone()).unwrap_or_default()
 }
 
 /// How long a stone rests in the river before it comes back to the beach, in milliseconds.

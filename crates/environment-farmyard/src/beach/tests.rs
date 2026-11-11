@@ -50,15 +50,22 @@ fn the_shingle_is_drawn_above_the_ground_everywhere_and_slopes_gently() {
 }
 
 #[test]
-fn participants_stand_on_the_beach_in_cells_down_to_the_water_s_edge() {
+fn participants_stand_on_the_beach_in_cells_down_its_slope_short_of_the_river_s_spread() {
     let bands = walkable();
-    assert_eq!(bands.len(), 60);
+    assert_eq!(bands.len(), 40);
+    let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD;
+    let lowest = bands
+        .iter()
+        .map(|(_, height)| *height)
+        .fold(f32::INFINITY, f32::min);
+    assert!(lowest < 0.0, "{lowest}");
     for (outline, at_height) in &bands {
         let middle = outline.iter().copied().sum::<Vec2>() / 4.0;
         let shingle = height(middle).unwrap();
         assert!((shingle - at_height).abs() < 0.03, "{shingle} {at_height}");
         assert!(*at_height > water_level());
         for corner in outline {
+            assert!(layout::nearest_river(*corner).1 > spread, "{corner}");
             let below = height(*corner).unwrap();
             // Where the bank steepens towards the channel, a cell's corner may be a hand's breadth off.
             assert!(

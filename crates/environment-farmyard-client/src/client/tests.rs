@@ -337,7 +337,12 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_the_g
     let mut client = FarmyardClient::new("space-1", Some(chicken()), epoch);
     // The farmyard's state, the flock and the sticks together, as its server side shares it.
     let flock = Flock::new(flock::seed("space-1"), chicken(), 5_000);
-    let state = tomori_environment_farmyard::side::state(&flock, &Campsite::new(), 5_000);
+    let state = tomori_environment_farmyard::side::state(
+        &flock,
+        &Campsite::new(),
+        &Default::default(),
+        5_000,
+    );
     let state = Update::State(Payload::new(serde_json::from_str(&state).unwrap()));
     let output = client.update(Input::new(vec![state], epoch));
     assert_eq!(drawn(&output).sticks.len(), campsite::STICKS);
@@ -385,4 +390,66 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_the_g
         drawn(&output).sticks[3].transform,
         Pose::held(theirs.position, theirs.orientation).transform()
     );
+}
+
+#[test]
+fn the_beach_s_stones_come_with_the_farmyard_s_state_and_are_taken_with_either_grip_and_heard_landing()
+ {
+    use tomori_environment_farmyard::beach;
+    use tomori_environment_farmyard::campsite::Campsite;
+    use tomori_physics::message::{Landed, Update as Changed};
+    use tomori_scene::client_side::{Grab, Hand, Phase, Side};
+    let epoch = Instant::now();
+    let mut client = FarmyardClient::new("space-1", Some(chicken()), epoch);
+    // The farmyard's state, with the beach's stones as its server side settles them.
+    let flock = Flock::new(flock::seed("space-1"), chicken(), 5_000);
+    let stones = tomori_environment_farmyard::side::Shingle::new(epoch).shared();
+    let at = stones.bodies[2]
+        .at
+        .placement(tomori_physics::Precision::Rest)
+        .position;
+    let state = tomori_environment_farmyard::side::state(&flock, &Campsite::new(), &stones, 5_000);
+    let state = Update::State(Payload::new(serde_json::from_str(&state).unwrap()));
+    let output = client.update(Input::new(vec![state], epoch));
+    assert_eq!(drawn(&output).stones.len(), beach::STONES);
+    // A hand at it reaches it, and the ray down onto it points at it.
+    assert_eq!(client.within_reach(at).as_deref(), Some("stone-2"));
+    let ray = Ray::new(at + Vec3::Y, Vec3::NEG_Y).unwrap();
+    assert_eq!(client.pick(&ray).unwrap().object, "stone-2");
+    // Taken with the left grip, by a participant, the server side is asked for it.
+    let hand = Hand::new(at, glam::Quat::IDENTITY);
+    let output = client.update(
+        Input::new(Vec::new(), epoch)
+            .with_left_grab(Some(
+                Grab::new("stone-2", hand, Phase::Began).of(Side::Left),
+            ))
+            .as_participant(Some(4)),
+    );
+    assert_eq!(output.intents[0].value()["take"]["body"], 2);
+    assert_eq!(output.intents[0].value()["take"]["hand"], "left");
+    // A stone landing, as the server side announces it, is heard where it is.
+    let event = beach::Event {
+        clock: 5_100,
+        stones: Changed {
+            landed: vec![Landed {
+                body: 5,
+                speed: 3.0,
+                water: false,
+            }],
+            ..Default::default()
+        },
+    };
+    let output = client.update(Input::new(
+        vec![Update::Event(Payload::new(
+            serde_json::to_value(event).unwrap(),
+        ))],
+        epoch,
+    ));
+    assert_eq!(output.sounds.len(), 1);
+    let heard = Vec3::from(output.sounds[0].1);
+    let five = stones.bodies[5]
+        .at
+        .placement(tomori_physics::Precision::Rest)
+        .position;
+    assert!(heard.distance(five) < 1e-3);
 }

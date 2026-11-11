@@ -11,14 +11,16 @@ pub mod ambience;
 pub mod campsite;
 pub mod client;
 pub mod scenery;
+pub mod stones;
 
 pub use tomori_environment_farmyard::{ID, LABEL, LICENSE, VERSION, chicken, coop, layout, trail};
 
 /// The heading the chicken's licence notice, [`LICENSE`], is shown under with a build's other bundled assets'.
 pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple Williams (CC BY 4.0)";
 
-/// Where participants may travel in the farmyard: teleporting onto the ground it draws, the yard's earth and the
-/// trail's track and clearings round the outside of the fence, clear of what stands on it, as
+/// Where participants may travel in the farmyard: teleporting onto the ground it draws, the yard's earth, the trail's
+/// track and clearings round the outside of the fence and the beach's shingle down towards the river, clear of what
+/// stands on it, as
 /// `tomori-environment-farmyard`'s `walkable` derives it, at the heights it is drawn, so that whoever stands or lands
 /// there, and the ring where they would, is on what is drawn; through the gate, on the way out declared by hand, and
 /// about the campsite's fire; turning in snaps; between the yard and the lookout at the trail's far end by a pair of

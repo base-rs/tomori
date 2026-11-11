@@ -60,13 +60,7 @@ pub fn state(
     json(state)
 }
 
-/// What changed of the beach's stones, as the side sends it to everyone in the space: the farmyard's clock, and what
-/// changed.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Stones {
-    pub clock: u64,
-    pub stones: tomori_physics::message::Update,
-}
+pub use crate::beach::Event as Stones;
 
 /// The most events the side keeps waiting to be announced: beyond it, the oldest is dropped, which the log says.
 pub const WAITING: usize = 1024;

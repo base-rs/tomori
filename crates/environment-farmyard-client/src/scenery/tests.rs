@@ -331,6 +331,7 @@ fn the_chickens_are_drawn_where_their_client_side_shows_them() {
             &device,
             &queue,
             &crate::client::Drawn {
+                stones: Vec::new(),
                 chickens: Vec::new(),
                 sticks: Vec::new(),
             },
@@ -577,6 +578,7 @@ fn the_coop_s_ramp_nests_and_perch_and_the_path_s_stones_are_drawn() {
             &device,
             &queue,
             &crate::client::Drawn {
+                stones: Vec::new(),
                 chickens,
                 sticks: Vec::new(),
             },
@@ -833,9 +835,19 @@ fn the_river_lies_in_its_channel_below_the_trail_and_the_waterfall_rock_stands_i
         let river = tint(&pictures[0], within(seen_at(views[0], water)));
         let banks = [water - away * 2.6, water + away * 2.6]
             .map(|bank| tint(&pictures[0], within(seen_at(views[0], on(bank)))));
+        // The meadow beside the trail is green, but where the beach's shingle lies towards the river, which is grey.
+        let along = glam::Vec3::new(-away.z, 0.0, away.x);
         let meadow = tint(
             &pictures[0],
+            within(seen_at(views[0], on(water - away * 4.6 + along * 1.9))),
+        );
+        let shingle = tint(
+            &pictures[0],
             within(seen_at(views[0], on(water - away * 4.6))),
+        );
+        assert!(
+            shingle.y < shingle.x + 8.0 && shingle.z < shingle.x + 18.0,
+            "{shingle}"
         );
         assert!(river.z > river.x + 18.0, "{river}");
         for bank in banks {
@@ -906,6 +918,7 @@ fn the_campsite_s_bonfire_glows_lighting_its_seats_and_its_sticks_are_drawn_wher
             Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(1.3));
         let view = campsite_view();
         let none = crate::client::Drawn {
+            stones: Vec::new(),
             chickens: Vec::new(),
             sticks: Vec::new(),
         };
@@ -913,6 +926,7 @@ fn the_campsite_s_bonfire_glows_lighting_its_seats_and_its_sticks_are_drawn_wher
         let without = capture_sized(&device, &queue, &farmyard, 4, view, picture());
         let shown = campsite_sticks();
         let sticks = crate::client::Drawn {
+            stones: Vec::new(),
             chickens: Vec::new(),
             sticks: shown.clone(),
         };
@@ -1008,6 +1022,7 @@ fn the_campsite_s_bonfire_glows_lighting_its_seats_and_its_sticks_are_drawn_wher
             &device,
             &queue,
             &crate::client::Drawn {
+                stones: Vec::new(),
                 chickens: Vec::new(),
                 sticks: burning,
             },
