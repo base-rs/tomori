@@ -68,6 +68,30 @@ fn lamps(space: &Space) -> Result<()> {
 }
 ```
 
+A side may declare actions the space's agent takes on what it describes when someone asks, such as showing a terminal's charts for another region: each action has a name, a description for the agent and typed parameters, a choice of values, a bounded number or short text, and is harmless unless marked consequential. Each object offers those it takes by name, the server checks every call against them and who asked, and the side is handed each as an `Intent` whose `acted()` names it, which it answers, done or refused with a reason:
+
+```rust
+use std::time::Duration;
+use tomori_environment::{Action, Choice, Object, Outcome, Parameter, Result, Space};
+
+fn terminals(space: &Space) -> Result<()> {
+    let regions = [Choice::new("eu-belgium").labelled("Belgium"), Choice::new("us-east-1").labelled("US East")];
+    space.declare_actions(vec![
+        Action::new("set_region", "Show this terminal's charts for another region")
+            .with(Parameter::choice("region", "the region to show", regions)),
+    ])?;
+    space.describe(vec![
+        Object::new("terminal-2", "deck terminal 2").with_reference("terminal/2").offering(["set_region"]),
+    ])?;
+    while let Some(intent) = space.next_intent(Duration::from_secs(1)) {
+        if let Some(acted) = intent.acted() {
+            space.answer(acted.ticket(), Outcome::done("Terminal 2 now shows Belgium"));
+        }
+    }
+    Ok(())
+}
+```
+
 A side can also publish panels onto its environment's own walls, text, lists of rows it highlights by id, or live charts, by ids it chooses, with `Space::publish(Panel::chart("pressure", "Scaling pressure", chart))`, updating one in place by publishing it again and taking it away with `Space::retract`; the chart is `tomori_environment::chart::Chart`, a small bounded spec of evenly spaced points, a gap where nothing was measured.
 
 [Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).

@@ -32,6 +32,7 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
+pub(crate) mod agent_actions;
 pub(crate) mod agent_inspect;
 mod agent_pairing;
 pub(crate) mod agent_panels;
@@ -462,6 +463,15 @@ impl tomori_environment::Outlet for SpaceOutlet {
             .upgrade()
             .map_or(Ok(()), |hub| hub.channel_remove_anchor(self, name))
     }
+
+    fn declare_actions(
+        &self,
+        actions: Vec<tomori_environment::Action>,
+    ) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_declare_actions(self, actions))
+    }
 }
 
 pub struct Hub {
@@ -503,6 +513,8 @@ pub struct Hub {
     knock_timeout: RwLock<Duration>,
     /// How long the agent waits for an environment's server side to answer an inspection; see [`agent_inspect::INSPECT_TIMEOUT`].
     inspect_timeout: RwLock<Duration>,
+    /// How long the agent waits for an environment's server side to answer an action; see [`agent_actions::ACT_TIMEOUT`].
+    act_timeout: RwLock<Duration>,
     /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
     tools: tools::Tools,
     /// What highlights the agent's code panels, outside the lock; see [`crate::highlighting`].
@@ -768,6 +780,10 @@ struct SpaceRecord {
     restoring: bool,
     /// What the server side of the space's environment keeps for it, for its current binding only. See `design/environments.md`.
     channel: Option<crate::channel::Channel>,
+    /// How many more actions the space's agent may take on what its environment shows, once it has taken one, kept
+    /// with the space rather than its binding, so that changing environment refills nothing. See
+    /// `design/environment-actions.md`.
+    acts: Option<crate::channel::Acts>,
     /// The binding of the space's environment whose server side has stopped, failed or finished, which changes no
     /// panels from then on, any thread it left running included, until a side is run again for a new binding.
     stopped: Option<u64>,
@@ -2160,6 +2176,7 @@ impl Hub {
             pairing_open_for: RwLock::new(PAIRING_OPEN_FOR),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             inspect_timeout: RwLock::new(agent_inspect::INSPECT_TIMEOUT),
+            act_timeout: RwLock::new(agent_actions::ACT_TIMEOUT),
             tools: tools::Tools::default(),
             highlighter: RwLock::new(crate::highlighting::highlighter()),
             clock: RwLock::new(None),
@@ -2237,6 +2254,21 @@ impl Hub {
         let mut state = self.lock();
         if let Some(record) = self.current_channel(&mut state, outlet) {
             record.objects = objects;
+        }
+        Ok(())
+    }
+
+    /// The actions the side of `outlet`'s binding declares on what it describes, replacing those it declared before, or
+    /// why they are refused, keeping none of them. See `design/environment-actions.md`.
+    fn channel_declare_actions(
+        &self,
+        outlet: &SpaceOutlet,
+        actions: Vec<tomori_environment::Action>,
+    ) -> tomori_environment::Result<()> {
+        let actions = crate::channel::actions(actions)?;
+        let mut state = self.lock();
+        if let Some(record) = self.current_channel(&mut state, outlet) {
+            record.actions = actions;
         }
         Ok(())
     }
@@ -5643,6 +5675,7 @@ impl Hub {
             placements: std::collections::BTreeMap::new(),
             restoring: false,
             channel: None,
+            acts: None,
             stopped: None,
             stage: crate::stage::Stage::default(),
             summoned: None,
@@ -5808,6 +5841,7 @@ impl Hub {
                     placements: kept.placements,
                     restoring: true,
                     channel: None,
+                    acts: None,
                     stopped: None,
                     stage,
                     summoned: None,

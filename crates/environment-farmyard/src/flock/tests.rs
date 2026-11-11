@@ -412,3 +412,86 @@ fn each_hen_has_her_own_reference_and_is_inspected_by_it() {
     assert_eq!(flock.inspect("hen/nobody", 0), None);
     assert_eq!(flock.inspect("chicken-0", 0), None);
 }
+
+#[test]
+fn the_agent_has_a_hen_on_the_ground_peck_a_bounded_number_of_times() {
+    let mut flock = flock("space-1");
+    let pip = flock.reference(0);
+    let name = flock.hens()[0].name.clone();
+    // Standing about at the start, she pecks, beginning a moment from now, for as many pecks as asked.
+    let ((index, behaviour), summary) = flock.peck(&pip, 3, 1_000).unwrap();
+    assert_eq!((index, behaviour.since), (0, 1_000 + LEAD));
+    assert_eq!(
+        behaviour.doing,
+        Doing::Peck {
+            until: 1_000 + LEAD + 3 * crate::behaviour::PECK_MILLIS
+        }
+    );
+    assert_eq!(flock.hens()[0].behaviour, behaviour);
+    assert_eq!(summary, format!("{name} pecks at the ground 3 times."));
+    // Held within 1 and the most.
+    let ((_, many), _) = flock.peck(&pip, 99, 2_000).unwrap();
+    assert_eq!(
+        many.doing,
+        Doing::Peck {
+            until: 2_000 + LEAD + PECKS * crate::behaviour::PECK_MILLIS
+        }
+    );
+    let ((_, none), summary) = flock.peck(&pip, 0, 3_000).unwrap();
+    assert_eq!(
+        none.doing,
+        Doing::Peck {
+            until: 3_000 + LEAD + crate::behaviour::PECK_MILLIS
+        }
+    );
+    assert!(summary.ends_with("1 times."));
+    assert_eq!(
+        flock.peck("hen/nobody", 1, 0),
+        Err("There is no such hen in the yard now.".to_owned())
+    );
+    // Up in the coop, or running off, she cannot.
+    let mut flock = Flock::new(seed("space-1"), Arc::new(chicken()), 0);
+    let mut now = 0;
+    let mut refused = 0;
+    while now < 30 * 60_000 && refused == 0 {
+        flock.update(now);
+        for index in 0..flock.hens().len() {
+            let up = flock.position(index, now).y > 0.01
+                || flock.hens()[index].behaviour.doing == Doing::Roost;
+            if up {
+                let reference = flock.reference(index);
+                let why = flock.peck(&reference, 1, now).unwrap_err();
+                assert!(why.contains("so she cannot peck now"), "{why}");
+                refused += 1;
+            }
+        }
+        now += 250;
+    }
+    assert!(refused > 0);
+    let mut flock = flock_running();
+    let reference = flock.reference(0);
+    let why = flock.peck(&reference, 1, 10_000).unwrap_err();
+    assert!(why.contains("running off, startled"), "{why}");
+}
+
+/// A flock whose first chicken was startled at 6 s, pointed at by two at once, and is running off.
+fn flock_running() -> Flock {
+    let mut flock = Flock::new(seed("space-1"), Arc::new(chicken()), 0);
+    for by in [1, 2] {
+        flock.ask(
+            by,
+            Intent::Notice {
+                notice: 0,
+                toward: [0.0, 0.0],
+            },
+            5_000,
+        );
+    }
+    let mut now = 5_000;
+    while !matches!(flock.hens()[0].behaviour.doing, Doing::Sprint { .. }) {
+        flock.update(now);
+        now += 50;
+        assert!(now < 60_000, "never startled");
+    }
+    flock
+}

@@ -446,6 +446,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "space",
             "presence",
             "inspect",
+            "act",
             "panels",
             "update_panel",
             "move_panel",

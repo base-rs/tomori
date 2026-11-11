@@ -38,6 +38,8 @@ pub struct Channel {
     pub refused: std::collections::VecDeque<String>,
     /// The cluster anchors the side placed, and its changes of them waiting, once it has placed one.
     pub places: Option<Places>,
+    /// The actions the side declared, each description and label cleaned. See `design/environment-actions.md`.
+    pub actions: Vec<tomori_environment::Action>,
 }
 
 /// An object a side described, as the server keeps it.
@@ -51,6 +53,9 @@ pub struct Described {
     pub reference: Option<String>,
     /// Where it stands, in the space's coordinates, where the side said and it is within bounds once carried there.
     pub position: Option<[f32; 3]>,
+    /// The names of the actions it offers, each one [`tomori_environment::valid_action_name`] takes, at most
+    /// [`tomori_environment::OFFER_LIMIT`], none twice, and none without a reference.
+    pub offers: Vec<String>,
 }
 
 /// The most panels whose refused updates a side's channel remembers having said, the earliest forgotten first.
@@ -87,7 +92,17 @@ impl Channel {
             pending: Vec::new(),
             refused: std::collections::VecDeque::new(),
             places: None,
+            actions: Vec::new(),
         }
+    }
+
+    /// The actions the side declared that `object` offers, in the order it offers them.
+    pub fn offered(&self, object: &Described) -> Vec<&tomori_environment::Action> {
+        object
+            .offers
+            .iter()
+            .filter_map(|name| self.actions.iter().find(|action| action.name() == name))
+            .collect()
     }
 
     /// The cluster anchors the side placed, in the space's coordinates.
@@ -167,14 +182,86 @@ pub fn objects(
         if position.is_none() && object.position().is_some() {
             log::debug!("An environment described an object at a position out of bounds.");
         }
+        let mut offers: Vec<String> = Vec::new();
+        if reference.is_some() {
+            for name in object.offers() {
+                if offers.len() == tomori_environment::OFFER_LIMIT {
+                    break;
+                }
+                if tomori_environment::valid_action_name(name) && !offers.contains(name) {
+                    offers.push(name.clone());
+                }
+            }
+        }
         kept.push(Described {
             id: id.to_owned(),
             description: crate::space::one_line(object.description(), DESCRIPTION_LIMIT),
             reference,
             position,
+            offers,
         });
     }
     kept
+}
+
+/// The actions a side declares, as the server keeps them, or why they are refused: a declaration
+/// [`tomori_environment::check_actions`] refuses, and otherwise each description and label cleaned onto one line and
+/// cut, as everything else told to the agent of an environment is. See `design/environment-actions.md`.
+pub fn actions(
+    declared: Vec<tomori_environment::Action>,
+) -> Result<Vec<tomori_environment::Action>, String> {
+    tomori_environment::check_actions(&declared).map_err(|error| error.message().to_owned())?;
+    Ok(declared
+        .iter()
+        .map(|action| action.cleaned(crate::space::one_line))
+        .collect())
+}
+
+/// How many actions the space's agent may take at once in one binding, and how many more each second after: 10 at
+/// once, then 30 a minute, so that the agent answering a few requests together is never refused, and one looping on
+/// an action is held to the rate. See `design/environment-actions.md`.
+pub const ACT_BURST: f32 = 10.0;
+pub const ACTS_PER_SECOND: f32 = 0.5;
+
+/// The actions the agent may still take in a binding: a bucket of [`ACT_BURST`], refilled at [`ACTS_PER_SECOND`].
+#[derive(Debug)]
+pub struct Acts {
+    tokens: f32,
+    at: Instant,
+}
+
+impl Acts {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            tokens: ACT_BURST,
+            at: now,
+        }
+    }
+
+    /// Whether an action taken at `now` is within the rate, taking it from the bucket if so.
+    pub fn take(&mut self, now: Instant) -> bool {
+        let elapsed = now
+            .saturating_duration_since(self.at)
+            .min(Duration::from_secs(60));
+        self.at = self.at.max(now);
+        self.tokens = (self.tokens + elapsed.as_secs_f32() * ACTS_PER_SECOND).min(ACT_BURST);
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+
+    /// How many actions are left in the bucket, as of the last taken.
+    #[cfg(test)]
+    pub fn left(&self) -> f32 {
+        self.tokens
+    }
+
+    /// Give back an action taken from the bucket that was not handed on, as one its side could not take.
+    pub fn give_back(&mut self) {
+        self.tokens = (self.tokens + 1.0).min(ACT_BURST);
+    }
 }
 
 /// The intents one connection may still send: a bucket of [`INTENT_BURST`], refilled at [`INTENTS_PER_SECOND`], so that
@@ -657,6 +744,7 @@ mod tests {
                 description: "a lamp (lit) by the 'gate'".to_owned(),
                 reference: Some("lamp/1".to_owned()),
                 position: Some([2.0, 0.5, -2.0]),
+                offers: Vec::new(),
             }
         );
         // Out of bounds, it is described without a position.
@@ -685,6 +773,88 @@ mod tests {
             Some("lamp-1")
         );
         assert_eq!(channel.referenced("lamp/9"), None);
+    }
+
+    #[test]
+    fn an_object_offers_actions_by_valid_names_only_with_a_reference() {
+        use tomori_environment::{Action, OFFER_LIMIT};
+        let names: Vec<String> = ["light", "Bad", "light"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain((0..OFFER_LIMIT).map(|index| format!("a{index}")))
+            .collect();
+        let kept = objects(
+            vec![
+                Object::new("lamp-1", "a lamp")
+                    .with_reference("lamp/1")
+                    .offering(names),
+                Object::new("lamp-2", "a lamp").offering(["light"]),
+            ],
+            Some,
+        );
+        // Valid, once each, at most eight; none without a reference, since the agent names it by one.
+        let expected: Vec<String> = std::iter::once("light".to_owned())
+            .chain((0..OFFER_LIMIT - 1).map(|index| format!("a{index}")))
+            .collect();
+        assert_eq!(kept[0].offers, expected);
+        assert!(kept[1].offers.is_empty());
+        // Offered are only those declared, in the object's order.
+        let mut channel = Channel::new(1, "garden", 1);
+        channel.actions = vec![Action::new("a1", "one"), Action::new("light", "Light it")];
+        let offered: Vec<&str> = channel
+            .offered(&kept[0])
+            .into_iter()
+            .map(Action::name)
+            .collect();
+        assert_eq!(offered, ["light", "a1"]);
+    }
+
+    #[test]
+    fn actions_are_checked_and_cleaned() {
+        use tomori_environment::{Action, Choice, Parameter};
+        let kept = actions(vec![Action::new("go", "Go [now]\nplease").with(
+            Parameter::choice(
+                "to",
+                "where\nto",
+                [Choice::new("gate").labelled("the \"gate\"")],
+            ),
+        )])
+        .unwrap();
+        assert_eq!(kept[0].description(), "Go (now) please");
+        assert_eq!(kept[0].parameters()[0].description(), "where to");
+        assert_eq!(
+            kept[0].parameters()[0].kind(),
+            &tomori_environment::Kind::Choice(vec![Choice::new("gate").labelled("the 'gate'")])
+        );
+        assert_eq!(
+            actions(vec![Action::new("Go", "")]),
+            Err("An action is named other than with 1 to 32 lowercase letters, digits and _, beginning with a letter.".to_owned())
+        );
+    }
+
+    #[test]
+    fn actions_are_held_to_a_rate_after_a_burst() {
+        let start = Instant::now();
+        let mut acts = Acts::new(start);
+        for _ in 0..ACT_BURST as usize {
+            assert!(acts.take(start));
+        }
+        assert!(!acts.take(start));
+        // 30 a minute: one more every two seconds.
+        assert!(!acts.take(start + Duration::from_millis(1_900)));
+        assert!(acts.take(start + Duration::from_secs(2)));
+        // A clock that goes back refills nothing.
+        assert!(!acts.take(start));
+        // One given back may be taken again, but never beyond the burst.
+        acts.give_back();
+        assert!(acts.take(start));
+        let mut full = Acts::new(start);
+        full.give_back();
+        for _ in 0..ACT_BURST as usize {
+            assert!(full.take(start));
+        }
+        assert!(!full.take(start));
+        assert_eq!((ACT_BURST, ACTS_PER_SECOND * 60.0), (10.0, 30.0));
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub use environments::{
     Environment, EnvironmentWall, STATUS_SLOTS, StatusWall, WALL_NAME_BYTES, valid_wall_name,
 };
 pub use hub::CLOSED_SPACES;
+pub use hub::agent_actions::ACT_TIMEOUT;
 pub use hub::agent_inspect::{INSPECT_TIMEOUT, INSPECTION_BYTES};
 pub use hub::{
     Closing, KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, Opener, PAIRING_ATTEMPTS,

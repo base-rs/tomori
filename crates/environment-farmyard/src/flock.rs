@@ -51,6 +51,9 @@ pub const NAMES: [&str; 8] = [
     "Pepper",
 ];
 
+/// The most times the space's agent may have a chicken peck at once, with [`Flock::peck`].
+pub const PECKS: u64 = 8;
+
 /// The chance a chicken goes to roost in the coop, each time it chooses what to do, if nobody else is.
 pub const VISITS: f32 = 0.08;
 
@@ -506,6 +509,41 @@ impl Flock {
                 alone.then(|| (away, self.begin(away, Doing::Recover, now + LEAD)))
             }
         }
+    }
+
+    /// The space's agent has the chicken of `reference` peck at the ground `pecks` times, beginning [`LEAD`] from `now`,
+    /// as someone asked: taken only of a chicken the flock has, on the ground, neither roosting nor running. Returns the
+    /// change it makes and a summary of it, or why it is refused, as the agent is told it. See
+    /// `design/environment-actions.md`.
+    pub fn peck(
+        &mut self,
+        reference: &str,
+        pecks: u64,
+        now: u64,
+    ) -> Result<((usize, Behaviour), String), String> {
+        let index = (0..self.hens.len())
+            .find(|index| self.reference(*index) == reference)
+            .ok_or_else(|| "There is no such hen in the yard now.".to_owned())?;
+        let doing = self.hens[index].behaviour.doing;
+        let grounded = self.position(index, now).y < 0.01 && doing != Doing::Roost;
+        if !grounded || matches!(doing, Doing::Sprint { .. }) {
+            return Err(format!(
+                "{} is {}, so she cannot peck now.",
+                self.hens[index].name,
+                self.doing(index, now)
+            ));
+        }
+        let since = now + LEAD;
+        let until = since + pecks.clamp(1, PECKS) * crate::behaviour::PECK_MILLIS;
+        let behaviour = self.begin(index, Doing::Peck { until }, since);
+        Ok((
+            (index, behaviour),
+            format!(
+                "{} pecks at the ground {} times.",
+                self.hens[index].name,
+                pecks.clamp(1, PECKS)
+            ),
+        ))
     }
 
     /// What chicken `index` is doing at `now`, in words.

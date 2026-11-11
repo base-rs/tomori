@@ -45,6 +45,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 tomori-scene = { path = "../scene" }
+# The farmyard's actions, taken through Tomori's MCP endpoint as the space's agent takes them, by its session.
+serde_json = "1"
+tomori-backend = { path = "../backend" }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
