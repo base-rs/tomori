@@ -155,8 +155,16 @@ fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
             "zone is text.",
         ),
         (
-            json!({"note": "x", "every_minutes": 2}),
-            "at most every 5 minutes",
+            json!({"note": "x", "every_seconds": 30}),
+            "at most every minute",
+        ),
+        (
+            json!({"note": "x", "in_seconds": -1}),
+            "in_seconds is a whole number",
+        ),
+        (
+            json!({"note": "x", "every_seconds": 604_801}),
+            "every_seconds is a whole number, at most 604800.",
         ),
         (json!({"note": "x"}), "Give exactly one schedule"),
         (
@@ -207,4 +215,81 @@ fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
 /// `timers` called by a session bound to no space.
 fn call_other(server: &TestServer, token: &str) -> Value {
     call(server, token, "ses_nobody", "timers", json!({}))
+}
+
+#[test]
+fn a_timer_set_seconds_ahead_fires_at_its_second_through_the_server() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_tools(backend.clone(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default()))
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Gym".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: None,
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Gym");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&backend.started()[0]);
+    let call = |name: &str, arguments: Value| call(&server, &token, &session, name, arguments);
+
+    // Every so many seconds, and once at a time to the second, are set and said so.
+    let set = call(
+        "set_timer",
+        json!({"name": "intervals", "note": "Next exercise", "every_seconds": 90}),
+    );
+    assert_eq!(set["structuredContent"]["timer"]["schedule"], "every 90 s");
+    let set = call(
+        "set_timer",
+        json!({"name": "stretch", "note": "Stretch", "once_at": "23:59:59"}),
+    );
+    assert_eq!(
+        set["structuredContent"]["timer"]["schedule"],
+        "once at 23:59:59"
+    );
+    call("cancel_timer", json!({"name": "intervals"}));
+    call("cancel_timer", json!({"name": "stretch"}));
+
+    // Set two seconds ahead, it fires, and is gone from everyone's view, within half a second of its time, give or take
+    // how long the call and the space's state take to arrive.
+    let started = std::time::Instant::now();
+    let set = call(
+        "set_timer",
+        json!({"name": "plank", "note": "Plank done", "in_seconds": 2, "condition": "always"}),
+    );
+    let took = started.elapsed();
+    let schedule = set["structuredContent"]["timer"]["schedule"]
+        .as_str()
+        .unwrap();
+    assert!(schedule.starts_with("once at "), "{schedule}");
+    // To the second, unless it falls on a minute, as one time in sixty.
+    assert!(
+        ["once at 09:17:30", "once at 09:17"]
+            .iter()
+            .any(|said| said.len() == schedule.len()),
+        "{schedule}"
+    );
+    assert_eq!(
+        set["structuredContent"]["timer"]["next_in"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .last(),
+        Some('s')
+    );
+    ada.space(|state| state.timers.iter().any(|timer| timer.name == "plank"));
+    ada.space(|state| state.timers.is_empty());
+    let fired = started.elapsed();
+    assert!(
+        fired >= std::time::Duration::from_millis(1400),
+        "fired after {fired:?}"
+    );
+    assert!(
+        fired <= took + std::time::Duration::from_millis(2900),
+        "fired after {fired:?}, the call taking {took:?}"
+    );
 }

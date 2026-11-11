@@ -110,6 +110,24 @@ impl Hub {
         }
     }
 
+    /// The soonest occurrence after `now` of a timer in a space whose timers [`Self::tick_timers`] looks at, so that the
+    /// server looks at them then, within milliseconds of it, rather than at its next sweep. Occurrences already due are
+    /// left to the sweep, so that one held back, as after a restart, never has the server look again at once.
+    pub fn next_timer_due(&self, now: jiff::Timestamp) -> Option<jiff::Timestamp> {
+        let now = now.as_second();
+        let state = self.lock();
+        state
+            .spaces
+            .iter()
+            .filter(|record| {
+                !record.restoring && !record.model.is_closed() && !record.model.is_reconnecting()
+            })
+            .filter_map(|record| record.model.timers().next_due())
+            .filter(|due| *due > now)
+            .min()
+            .map(instant)
+    }
+
     /// Set the timer `request` asks for, in the space bound to `session`, replacing one of the same name, as its agent
     /// asked: everyone in it sees it, and it is kept and logged. See `design/timers.md`.
     pub(crate) fn agent_set_timer(&self, session: &str, request: Request) -> Result<Value, String> {
@@ -201,16 +219,18 @@ impl Hub {
 }
 
 /// A timer as the agent's tools describe it at `now`: its name, note, schedule and condition in short words, zone,
-/// when it next fires, in its zone and how long from now, and what it has done.
+/// when it next fires, in its zone, to the second for a timer set in seconds, and how long from now, and what it has
+/// done.
 fn described(timer: &Timer, now: jiff::Timestamp) -> Value {
     let known = crate::timers::zone(&timer.zone);
     let unknown = known.is_err();
     let zone = known.unwrap_or(jiff::tz::TimeZone::UTC);
-    let local = |at: i64| {
-        zone.to_datetime(instant(at))
-            .strftime("%a %Y-%m-%d %H:%M")
-            .to_string()
+    let format = if timer.schedule.to_the_second(&zone) {
+        "%a %Y-%m-%d %H:%M:%S"
+    } else {
+        "%a %Y-%m-%d %H:%M"
     };
+    let local = |at: i64| zone.to_datetime(instant(at)).strftime(format).to_string();
     json!({
         "name": timer.name,
         "note": timer.note,

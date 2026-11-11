@@ -141,6 +141,85 @@ fn a_timer_fires_only_while_someone_is_present_and_waits_for_the_agent_s_turn() 
     );
 }
 
+/// A timer set `seconds` from now.
+fn plank(seconds: u32) -> Request {
+    Request {
+        name: Some("plank".to_owned()),
+        note: "Thirty seconds of plank are up".to_owned(),
+        in_seconds: Some(seconds),
+        ..Request::default()
+    }
+}
+
+/// 09:17 and `milliseconds` more.
+fn moment(milliseconds: i64) -> jiff::Timestamp {
+    at("2026-11-11 09:17") + jiff::SignedDuration::from_millis(milliseconds)
+}
+
+#[test]
+fn a_timer_set_thirty_seconds_ahead_fires_at_its_second() {
+    let (hub, _jobs, space, commands, ada) = space();
+    engage(&ada, tomori_protocol::Engagement::Engaged);
+    hub.set_clock(moment(400));
+    let set = hub.agent_set_timer("session", plank(30)).unwrap();
+    assert_eq!(set["timer"]["schedule"], "once at 09:17:30");
+    assert_eq!(set["timer"]["next"], "Wed 2026-11-11 09:17:30");
+    assert_eq!(set["timer"]["next_in"], "30 s");
+    assert_eq!(
+        hub.tool_timers("session").unwrap()["timers"][0]["next_in"],
+        "30 s"
+    );
+    // The server looks at the timers as it falls due, rather than at its next look, leaving what is due to that look.
+    assert_eq!(hub.next_timer_due(moment(400)), Some(moment(30_000)));
+    assert_eq!(hub.next_timer_due(moment(30_000)), None);
+    // Everyone's dial counts down to its second.
+    let seen = super::anchors::state(&ada).unwrap();
+    assert_eq!(seen.timers[0].next, Some(moment(30_000).as_second() as u64));
+    assert_eq!(seen.timers[0].schedule, "once at 09:17:30");
+    hub.lock().space_mut(&space).unwrap().model.quieten();
+    hub.tick_timers(moment(29_900));
+    assert!(handed(&commands).is_empty());
+    hub.tick_timers(moment(30_000));
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        prompts[0].text,
+        "[Timer \"plank\" (once at 09:17:30, when present): fired 09:17:30; present: ada; its last firing; note: \"Thirty seconds of plank are up\"]"
+    );
+    assert!(super::anchors::state(&ada).unwrap().timers.is_empty());
+}
+
+#[test]
+fn a_timer_seconds_ahead_that_falls_due_during_a_turn_waits_for_it_to_end() {
+    let (hub, _jobs, space, commands, ada) = space();
+    engage(&ada, tomori_protocol::Engagement::Engaged);
+    hub.agent_set_timer("session", plank(30)).unwrap();
+    // Ada asks something, and the agent is still answering as the timer falls due: it fires at its second, its dial
+    // going, but its note waits.
+    let words = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: words.key });
+    hub.drive_event(&space, Event::Busy);
+    hub.tick_timers(moment(30_000));
+    assert!(handed(&commands).is_empty());
+    assert!(super::anchors::state(&ada).unwrap().timers.is_empty());
+    // The turn ends, at 09:17:42: a quiet moment first, so the note comes at least 10 s after the turn, saying when it
+    // fired.
+    hub.drive_event(&space, Event::Idle);
+    hub.tick_timers(moment(42_000));
+    assert!(
+        handed(&commands).is_empty(),
+        "not straight after the agent spoke"
+    );
+    hub.lock().space_mut(&space).unwrap().model.quieten();
+    hub.tick_timers(moment(52_000));
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        prompts[0].text,
+        "[Timer \"plank\" (once at 09:17:30, when present): fired 09:17:30; present: ada; its last firing; note: \"Thirty seconds of plank are up\"]"
+    );
+}
+
 #[test]
 fn firings_coalesce_while_the_agent_works_and_ride_on_participants_words() {
     let (hub, _jobs, space, commands, ada) = space();
@@ -283,12 +362,13 @@ fn the_timer_tools_list_and_cancel_and_need_the_space_s_own_session() {
         hub.agent_set_timer(
             "session",
             Request {
-                every_minutes: Some(1),
+                every_minutes: None,
+                every_seconds: Some(30),
                 ..hourly("x")
             }
         )
         .unwrap_err()
-        .contains("at most every 5 minutes")
+        .contains("at most every minute")
     );
     // A timer kept in a zone this server does not know says so, going by UTC.
     let kept = hub.lock().space(&space).unwrap().model.timers().kept();

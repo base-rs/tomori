@@ -140,6 +140,9 @@ impl Pairing {
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
 pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// The longest the server goes without looking at the agents' timers, and judging workers, by the clock.
+const TIMER_LOOK: Duration = Duration::from_secs(1);
+
 /// The most visitors connected at once, so that visitors cannot take every connection slot from participants. See `design/security.md`.
 pub const DEFAULT_MAX_VISITORS: usize = 64;
 
@@ -556,7 +559,7 @@ impl Server {
                 }
             }
         };
-        let (served, ((), ((), ((), ((), ((), ((), ()))))))) = zip(
+        let (served, ((), ((), ((), ((), ((), ((), ((), ())))))))) = zip(
             serving,
             zip(
                 tools,
@@ -570,7 +573,10 @@ impl Server {
                                 self.pace(scheduler, &services),
                                 zip(
                                     self.publish(scheduler, counts, &services),
-                                    self.refresh_cards(scheduler, &services),
+                                    zip(
+                                        self.refresh_cards(scheduler, &services),
+                                        self.look_at_timers(scheduler, &services),
+                                    ),
                                 ),
                             ),
                         ),
@@ -725,6 +731,33 @@ impl Server {
                 }
                 crate::cards::Next::Idle => {
                     select(pin!(listener), pin!(cancellation.cancelled())).await;
+                }
+            }
+        }
+    }
+
+    /// Look at the agents' timers by the clock about every second, [`TIMER_LOOK`], and as the soonest falls due, so that
+    /// one set seconds ahead fires within milliseconds of its second, and one due sooner than the server would look
+    /// again, as one set a second ahead, within half a second of it. See `design/timers.md`.
+    async fn look_at_timers<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let mut timer = scheduler.timer();
+        loop {
+            let wall = jiff::Timestamp::now();
+            let wait = self
+                .hub
+                .next_timer_due(wall)
+                .and_then(|due| Duration::try_from(due.duration_since(wall)).ok())
+                .map_or(TIMER_LOOK, |until| until.min(TIMER_LOOK));
+            match scheduler
+                .timer_wait_until(&mut timer, scheduler.now() + wait, cancellation)
+                .await
+            {
+                Ok(()) => self.hub.tick_timers(jiff::Timestamp::now()),
+                Err(error) => {
+                    if !cancellation.is_cancelled() {
+                        log::error!("The agents' timer failed: {error}");
+                    }
+                    return;
                 }
             }
         }
@@ -1002,8 +1035,6 @@ impl Server {
                 Ok(()) => {
                     let now = scheduler.now();
                     self.admission.sweep(now, self.request_timeout);
-                    // The agents' timers go by the clock, looked at each sweep. See `design/timers.md`.
-                    self.hub.tick_timers(jiff::Timestamp::now());
                     self.hub.sweep(now, &self.keepalive, self.request_timeout);
                     self.hub.forget_departed(now, self.retention);
                     self.revoke_withdrawn();
@@ -2693,6 +2724,8 @@ mod tests {
         let server = server().with_counts(drop::<Counts>);
         block_on(server.sweep(&scheduler, &live));
         block_on(server.sweep(&scheduler, &cancelled));
+        block_on(server.look_at_timers(&scheduler, &live));
+        block_on(server.look_at_timers(&scheduler, &cancelled));
         // A deferred snapshot is waited for.
         let (commands, _receiver) = async_channel::unbounded();
         let request = crate::hub::CreateRequest {

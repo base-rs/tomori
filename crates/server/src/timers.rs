@@ -17,11 +17,19 @@ use schedule::{Days, Schedule, instant, minutes};
 /// The most timers a space keeps.
 pub const MOST: usize = 8;
 
-/// The fewest minutes between two occurrences of a timer.
-pub const LEAST_MINUTES: u32 = 5;
+/// The fewest seconds between two occurrences of a timer: a minute, since each firing wakes the agent for a turn, and
+/// the event queue tells notes alone at most every 30 seconds and 10 seconds after a turn, so that firings closer than
+/// that could not be told in time. A single firing may be as soon as a second from now.
+pub const LEAST_SECONDS: u32 = 60;
 
 /// The most minutes between two occurrences of a timer that fires every so many minutes: a week.
 pub const LONGEST_EVERY: u32 = 7 * 1440;
+
+/// The most seconds between two occurrences of a timer that fires every so many seconds: a week.
+pub const LONGEST_EVERY_SECONDS: u32 = LONGEST_EVERY * 60;
+
+/// The furthest ahead, in seconds, a timer set some seconds from now may fire: a year.
+pub const FURTHEST_SECONDS: u32 = FURTHEST_DAYS as u32 * 86_400;
 
 /// The fewest minutes between two occurrences of a timer that fires whether or not anyone is present.
 pub const LEAST_ALWAYS_MINUTES: u32 = 15;
@@ -133,12 +141,14 @@ pub struct Timer {
     pub limited: u32,
 }
 
-/// One firing of a timer, for the space's event queue: the timer's name, which coalesces its firings, and the note's
-/// text, without its brackets.
+/// One firing of a timer, for the space's event queue: the timer's name, which coalesces its firings, the note's text,
+/// without its brackets, and whether it is told on time, without the gap since the last prompt of notes alone, as a
+/// one-off's is, such as a 30-second timer someone asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Firing {
     pub name: String,
     pub text: String,
+    pub on_time: bool,
 }
 
 /// What the agent asked `set_timer` for, its arguments read but not yet checked.
@@ -147,10 +157,12 @@ pub struct Request {
     pub name: Option<String>,
     pub note: String,
     pub every_minutes: Option<u32>,
+    pub every_seconds: Option<u32>,
     pub daily_at: Option<String>,
     pub days: Option<Vec<String>>,
     pub once_at: Option<String>,
     pub in_minutes: Option<u32>,
+    pub in_seconds: Option<u32>,
     pub cron: Option<String>,
     pub condition: Option<Condition>,
     pub zone: Option<String>,
@@ -174,10 +186,10 @@ pub fn system_zone() -> String {
 }
 
 /// A date and time, `YYYY-MM-DD HH:MM` or `YYYY-MM-DDTHH:MM`, or a time of day, `HH:MM`, its next occurrence after
-/// `now`, as the instant in `zone` it names, or `None`.
+/// `now`, either to the second, as `HH:MM:SS`, as the instant in `zone` it names, or `None`.
 fn moment(text: &str, now: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
     let text = text.trim();
-    if let Some(time) = schedule::time_of_day(text) {
+    if let Some(time) = schedule::time_of_day_to_second(text) {
         let today = zone.to_datetime(now).date();
         let at = schedule::resolve(zone, today.to_datetime(time));
         return Some(if at > now {
@@ -190,25 +202,35 @@ fn moment(text: &str, now: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
     let date: jiff::civil::Date = date.parse().ok()?;
     Some(schedule::resolve(
         zone,
-        date.to_datetime(schedule::time_of_day(time)?),
+        date.to_datetime(schedule::time_of_day_to_second(time)?),
     ))
 }
 
-/// A time as the agent reads it in `zone`: `HH:MM` today, or `Tue HH:MM` on another day.
-fn clock(at: Timestamp, now: Timestamp, zone: &TimeZone) -> String {
+/// A time as the agent reads it in `zone`: `HH:MM` today, or `Tue HH:MM` on another day, with its seconds, as
+/// `HH:MM:SS`, where `seconds` says.
+fn clock(at: Timestamp, now: Timestamp, zone: &TimeZone, seconds: bool) -> String {
     let (at, now) = (zone.to_datetime(at), zone.to_datetime(now));
+    let time = if seconds { "%H:%M:%S" } else { "%H:%M" };
     if at.date() == now.date() {
-        at.strftime("%H:%M").to_string()
+        at.strftime(time).to_string()
     } else {
-        at.strftime("%a %H:%M").to_string()
+        at.strftime(&format!("%a {time}")).to_string()
     }
 }
 
-/// How long until `at` from `now`, in the largest whole unit, as `12 min` or `3 h`.
+/// The whole second nearest `now`, which a timer set some seconds from now counts from, so that it fires within half a
+/// second of when it was asked for.
+fn nearest_second(now: Timestamp) -> i64 {
+    now.as_millisecond().saturating_add(500).div_euclid(1000)
+}
+
+/// How long until `at` from `now`, rounded up to the second: seconds under a minute, as `27 s`, minutes and seconds
+/// under ten, as `2 min 5 s`, and otherwise in the largest whole unit, as `12 min` or `3 h`.
 pub fn until(at: Timestamp, now: Timestamp) -> String {
-    let seconds = (at.as_second() - now.as_second()).max(0);
+    let seconds = ((at.as_millisecond() - now.as_millisecond()).max(0) + 999) / 1000;
     match seconds {
-        0..60 => "under a minute".to_owned(),
+        0..60 => format!("{seconds} s"),
+        60..600 if seconds % 60 != 0 => format!("{} min {} s", seconds / 60, seconds % 60),
         60..7200 => format!("{} min", seconds / 60),
         7200..172_800 => format!("{} h", seconds / 3600),
         _ => format!("{} days", seconds / 86_400),
@@ -250,9 +272,11 @@ impl Timer {
         let condition = request.condition.unwrap_or(Condition::Present);
         let forms = [
             request.every_minutes.is_some(),
+            request.every_seconds.is_some(),
             request.daily_at.is_some(),
             request.once_at.is_some(),
             request.in_minutes.is_some(),
+            request.in_seconds.is_some(),
             request.cron.is_some(),
         ];
         let furthest = now + minutes(FURTHEST_DAYS * 1440);
@@ -261,10 +285,21 @@ impl Timer {
                 if let Some(every) = request.every_minutes {
                     if !(1..=LONGEST_EVERY).contains(&every) {
                         return Err(format!(
-                            "every_minutes is from {LEAST_MINUTES} to {LONGEST_EVERY}, a week."
+                            "every_minutes is from {} to {LONGEST_EVERY}, a week.",
+                            LEAST_SECONDS / 60
                         ));
                     }
                     Schedule::every(every, now)
+                } else if let Some(every) = request.every_seconds {
+                    if !(1..=LONGEST_EVERY_SECONDS).contains(&every) {
+                        return Err(format!(
+                            "every_seconds is from {LEAST_SECONDS} to {LONGEST_EVERY_SECONDS}, a week."
+                        ));
+                    }
+                    Schedule::EverySeconds {
+                        seconds: every,
+                        from: nearest_second(now),
+                    }
                 } else if let Some(at) = &request.daily_at {
                     let days = request.days.as_deref().unwrap_or_default();
                     let days = if days.is_empty() {
@@ -281,7 +316,7 @@ impl Timer {
                     }
                 } else if let Some(at) = &request.once_at {
                     let at = moment(at, now, &zone).ok_or(
-                        "once_at is a time of day, HH:MM, the next one, or a date and time, YYYY-MM-DD HH:MM.",
+                        "once_at is a time of day, HH:MM or HH:MM:SS, the next one, or a date and time, YYYY-MM-DD HH:MM or HH:MM:SS.",
                     )?;
                     if at <= now || at > furthest {
                         return Err(format!(
@@ -296,6 +331,13 @@ impl Timer {
                     Schedule::Once {
                         at: (now + minutes(after.into())).as_second(),
                     }
+                } else if let Some(after) = request.in_seconds {
+                    if !(1..=FURTHEST_SECONDS).contains(&after) {
+                        return Err(format!("in_seconds is from 1 to {FURTHEST_SECONDS}."));
+                    }
+                    Schedule::Once {
+                        at: nearest_second(now) + i64::from(after),
+                    }
                 } else {
                     let cron = request.cron.as_deref().unwrap_or_default();
                     Schedule::Cron {
@@ -304,19 +346,22 @@ impl Timer {
                 }
             }
             _ => {
-                return Err("Give exactly one schedule: every_minutes, daily_at (with days), once_at, in_minutes or cron.".to_owned());
+                return Err("Give exactly one schedule: every_minutes, every_seconds, daily_at (with days), once_at, in_minutes, in_seconds or cron.".to_owned());
             }
         };
         if request.days.is_some() && request.daily_at.is_none() {
             return Err("days goes with daily_at.".to_owned());
         }
-        let least = match condition {
-            Condition::Always => LEAST_ALWAYS_MINUTES,
-            _ => LEAST_MINUTES,
+        let (least, said) = match condition {
+            Condition::Always => (
+                LEAST_ALWAYS_MINUTES * 60,
+                format!("{LEAST_ALWAYS_MINUTES} minutes"),
+            ),
+            _ => (LEAST_SECONDS, "minute".to_owned()),
         };
         if schedule.least_gap().is_some_and(|gap| gap < least) {
             return Err(format!(
-                "A timer that fires {} fires at most every {least} minutes, its occurrences at least {least} minutes apart.",
+                "A timer that fires {} fires at most every {said}, its occurrences at least {least} seconds apart; only a single firing, as in_seconds sets, may be sooner.",
                 condition.describe()
             ));
         }
@@ -324,7 +369,7 @@ impl Timer {
             None => None,
             Some(until) => {
                 let at = moment(until, now, &zone)
-                    .ok_or("until is a time of day, HH:MM, the next one, or a date and time, YYYY-MM-DD HH:MM.")?;
+                    .ok_or("until is a time of day, HH:MM or HH:MM:SS, the next one, or a date and time, YYYY-MM-DD HH:MM or HH:MM:SS.")?;
                 if at <= now || at > furthest {
                     return Err(format!(
                         "until is after now and within {FURTHEST_DAYS} days."
@@ -397,17 +442,21 @@ impl Timer {
         present: &[String],
     ) -> Firing {
         let zone = self.time_zone();
+        let seconds = self.schedule.to_the_second(&zone);
         let mut said = vec![if arrived {
             format!(
                 "fired {} as someone arrived, due {}",
-                clock(now, now, &zone),
-                clock(due, now, &zone)
+                clock(now, now, &zone, seconds),
+                clock(due, now, &zone, seconds)
             )
         } else {
-            format!("fired {}", clock(due, now, &zone))
+            format!("fired {}", clock(due, now, &zone, seconds))
         }];
         if let Some(last) = self.last_fired {
-            said.push(format!("last fired {}", clock(instant(last), now, &zone)));
+            said.push(format!(
+                "last fired {}",
+                clock(instant(last), now, &zone, seconds)
+            ));
         }
         if missed > 0 {
             let more = if missed >= COUNTED { "at least " } else { "" };
@@ -452,15 +501,21 @@ impl Timer {
                 self.describe(),
                 said.join("; ")
             ),
+            on_time: matches!(self.schedule, Schedule::Once { .. }),
         }
     }
 }
 
-/// How a timer looks to a participant now, for the space's state.
+/// How a timer looks to a participant now, for the space's state: just fired for a minute, or half the time between
+/// its occurrences where that is shorter, so that one every minute counts down between its firings.
 fn view(timer: &Timer, now: Timestamp, attended: bool) -> tomori_protocol::Timer {
+    let fired_for = timer
+        .schedule
+        .least_gap()
+        .map_or(FIRED_SECONDS, |gap| FIRED_SECONDS.min(i64::from(gap) / 2));
     let state = if timer
         .last_fired
-        .is_some_and(|last| now.as_second() - last < FIRED_SECONDS)
+        .is_some_and(|last| now.as_second() - last < fired_for)
     {
         tomori_protocol::TimerState::Fired
     } else if timer.waiting.is_some() {
@@ -600,6 +655,12 @@ impl Timers {
 
     pub fn list(&self) -> &[Timer] {
         &self.timers
+    }
+
+    /// The soonest of its timers' next occurrences, in seconds since the Unix epoch, so that the server looks at them
+    /// then rather than at its next sweep.
+    pub fn next_due(&self) -> Option<i64> {
+        self.timers.iter().filter_map(|timer| timer.next).min()
     }
 
     /// Set the timer `request` asks for at `now`, in `default_zone` unless it names one, replacing one of the same name:
