@@ -44,6 +44,10 @@ pub struct Input {
     /// Whether the agent appears at `anchor` at once this frame, rather than moving there, as when a space opens with
     /// it at its home, or the space changes environment. See `design/environments.md`.
     pub appearing: bool,
+    /// Whether the swarm's agents fly to `anchor` from where they are this frame, as this client's participant joins or
+    /// leaves a space, though the agent's place appears there at once where `appearing` says: a flight that only this
+    /// client shows, which never moves the agent for anyone else. See `design/arrival.md`.
+    pub flying: bool,
     /// The participant's head, to face them, where it is known.
     pub head: Option<Vec3>,
     /// A point the agent is acting on or a participant is pointing at, if any. The frame step gives none yet: where it
@@ -71,6 +75,7 @@ impl Input {
             speaking: false,
             anchor,
             appearing: false,
+            flying: false,
             head: None,
             attention: None,
             attractor: None,
@@ -97,6 +102,12 @@ impl Input {
     /// This input, with the agent appearing at its anchor at once, or not.
     pub fn appearing(mut self, appearing: bool) -> Self {
         self.appearing = appearing;
+        self
+    }
+
+    /// This input, with the swarm's agents flying to its anchor from where they are, or not.
+    pub fn flying(mut self, flying: bool) -> Self {
+        self.flying = flying;
         self
     }
 
@@ -178,7 +189,9 @@ impl Avatar for SwarmAvatar {
             1.0
         };
         self.swarm.draw_in(size, input.dt);
-        if input.appearing {
+        if input.flying {
+            self.swarm.fly_to(input.anchor);
+        } else if input.appearing {
             self.swarm.appear_at(input.anchor);
         } else {
             self.swarm.set_anchor(input.anchor);
@@ -409,6 +422,13 @@ impl Coordinator {
                 points.push(input.anchor.position.to_array());
             }
         }
+    }
+
+    /// Carry the swarm's agents as what stood at `from` is carried to `to`, as when the participant's room is moved in
+    /// the scene under them as they leave a space, so that they stay where the participant saw them. See
+    /// [`Swarm::carry`].
+    pub fn carry(&mut self, from: Anchor, to: Anchor) {
+        self.swarm.swarm.carry(from, to);
     }
 
     /// The swarm for the renderer to draw: the built-in swarm, or none, at the anchor, while another avatar shows.

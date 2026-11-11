@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The swarm flies between the lobby and the space again.** As you join a space, the swarm's cubes stream from where they stood in the lobby to wherever the agent is, at its home or following someone, setting off as the environment grows in about you, and as you leave, they stream back to the lobby as it shrinks away, so that the swarm carries you from one to the other rather than appearing there. Only you see the flight: everyone else already in the space sees the agent stay where it was, and nothing is sent to the server. See `design/arrival.md`.
+
+- For other clients: **the swarm's flight.** `tomori-scene`'s `avatar::Input` gains `flying`, with `Input::flying`, and `Coordinator` gains `carry`; `Swarm` gains `fly_to`, `flying` and `carry`, with `swarm::STAGGER`, and, in a flight, `appear_at` flies on instead.
+
 - **The farmyard has a New Zealand backdrop.** Beyond the fence, pasture rises to bush-clad foothills ringing the yard; a waterfall falls down a cliff behind the coop, to your right as you arrive, into a pool, and the river it feeds winds round the yard's right side, both moving; tree ferns, cabbage trees, flax and tall podocarps stand in the bush; and beyond, ranges fade bluer into the dusk, the highest under snow, under the moon. It is scenery only: you still land only in the yard, and the chickens stay there. It is modest for the Quest, about 19,500 triangles in eight draws. An older headset shows the farmyard as before. See `design/farmyard.md`.
 
 - For environments and ambient sound: **the farmyard names where its water and bush are.** `tomori-environment-farmyard`'s `layout` gains `sounds()`, naming the `waterfall`, `pool`, each `river` point and each `bush` patch with its place, with `WATERFALL`, `WATERFALL_LIP`, `WATERFALL_FOOT`, `POOL`, `RIVER`, `BUSH` and `nearest_river`; its new `backdrop` module builds the foothills, the plants (`plants`, `Kind`), the ranges and the water, with `ground`; `props` gains `pines` and `evening`. `tomori-environment-farmyard-client`'s `scenery` gains `Clock` and `Farmyard::with_clock`. See the farmyard crate's `context/backdrop.md`.
