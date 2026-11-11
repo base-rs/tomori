@@ -40,7 +40,7 @@ pub enum Key {
     Back,
     A,
     Y,
-    /// The left stick click.
+    /// Mute spoken replies, as the hand menu's row does; the headset's left stick click toggles the live microphone instead.
     Mute,
     /// The right stick click.
     Replay,

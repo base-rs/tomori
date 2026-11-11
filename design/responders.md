@@ -60,7 +60,7 @@ What each control does in each situation, as the frame before found it, before #
 | Left stick (arrows) | travel's, inactive | travel's, inactive | travel, the panel along | travel where it travels, else nothing | travel where it travels, else nothing | travel where it travels, else `left_stick` to the client side | travel where it travels, else `left_stick` to the client side |
 | Right grip (G) | — | detaches or reattaches it | carrying | pulls it off | takes the card, or takes hold of the wall | never the environment's; since the campsite, takes it if it takes the grip | nothing; since the campsite, an object within reach of the hand that takes it |
 | Wheel (desktop) | — | nothing | nothing | scrolls it | nothing | nothing | nothing |
-| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at |  |  |  |  |  |  |
+| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at; since, the left stick click toggles the live microphone, muting is the hand menu's and the left grip does nothing (`interaction.md`) |  |  |  |  |  |  |
 
 Hold B for a second to leave is not a rung: every press but one on a panel or wall carried starts it, whichever rung took the press (`interaction.md`; `Step::buttons`).
 
@@ -182,7 +182,7 @@ Map the physical controls once, per device, to abstract actions, and route actio
 | `Grab` | hold | right grip | G | — | the transcript (detach) |
 | `Square` | press | right stick click | R | — | a panel or wall carried |
 
-`Scroll` borrows AppKit's `scrollWheel:`, which goes to the view under the pointer rather than to the first responder, as Tomori's stick does; a panel reads it as scrolling, a panel carried as pushing, pulling and turning, a globe as turning. Not actions, and never routed: talking (X), pinning the menu (Y), muting (left stick click), the live microphone (left grip) and holding B to leave, which observes every `Back` press.
+`Scroll` borrows AppKit's `scrollWheel:`, which goes to the view under the pointer rather than to the first responder, as Tomori's stick does; a panel reads it as scrolling, a panel carried as pushing, pulling and turning, a globe as turning. Not actions, and never routed: talking (X), pinning the menu (Y), muting (left stick click, since the hand menu's), the live microphone (left grip, since the left stick click) and holding B to leave, which observes every `Back` press.
 
 ### Responders
 

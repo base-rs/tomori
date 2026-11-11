@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The headset's own logic, from plain copies of what OpenXR reports: the controllers' actions as buttons, which poses can be trusted, where the scene stands after a recentre, which palm shows what from the controllers and hand tracking, the live microphone's grip, the session's focus and the vibrations to give. `xr.rs` reads the runtime into these types and carries out what they decide.
+//! The headset's own logic, from plain copies of what OpenXR reports: the controllers' actions as buttons, which poses can be trusted, where the scene stands after a recentre, which palm shows what from the controllers and hand tracking, the live microphone's click of the left stick, the session's focus and the vibrations to give. `xr.rs` reads the runtime into these types and carries out what they decide.
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
@@ -22,8 +22,10 @@ use tomori_client::feedback::{Feedback, Hand as Side, Haptic};
 
 /// How often an applied recenter is logged at info, when the runtime repeats them.
 const RECENTER_LOG: Duration = Duration::from_secs(60);
-/// How far the left grip is squeezed to toggle the live microphone.
-const AUDIENCE_GRIP: f32 = 0.75;
+/// How far from its middle the left stick may lean as it is clicked to turn the live microphone on: below the 0.6 and
+/// 0.7 at which a push turns or aims, so that a click pressed into a push of travel never opens the microphone. See
+/// `design/live-audio.md`.
+const LIVE_CLICK_REST: f32 = 0.5;
 
 /// An action's state, as one sync of the runtime's actions gives it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -45,9 +47,9 @@ pub struct Actions {
     pub refresh: Action<bool>,
     pub navigation: Action<Vec2>,
     pub presentation_navigation: Action<Vec2>,
-    pub sound_toggle: Action<bool>,
+    /// The left stick's click, which toggles the live microphone.
+    pub live_toggle: Action<bool>,
     pub replay: Action<bool>,
-    pub audience_grip: Action<f32>,
     pub transcript_grip: Action<f32>,
 }
 
@@ -88,10 +90,10 @@ pub struct Controls {
     /// The left stick's action is bound to a connected controller, so that a stick that reads zero because it was lost is not taken for a released one.
     pub navigation_active: bool,
     pub presentation_navigation: Vec2,
-    pub sound_toggle: bool,
+    /// The left stick's click is held, which toggles the live microphone once as it goes down.
+    pub live_toggle: bool,
+    pub live_toggle_active: bool,
     pub replay: bool,
-    pub audience_grip: f32,
-    pub audience_grip_active: bool,
     /// The right grip's value, while its action is active.
     pub transcript_grip: Option<f32>,
 }
@@ -122,18 +124,13 @@ impl Controls {
             navigation: axis(actions.navigation),
             navigation_active: actions.navigation.active,
             presentation_navigation: axis(actions.presentation_navigation),
-            sound_toggle: pressed(actions.sound_toggle),
+            live_toggle: held(actions.live_toggle),
+            live_toggle_active: actions.live_toggle.active,
             replay: pressed(actions.replay),
-            audience_grip_active: actions.audience_grip.active,
             transcript_grip: actions
                 .transcript_grip
                 .active
                 .then_some(actions.transcript_grip.value),
-            audience_grip: if actions.audience_grip.active {
-                actions.audience_grip.value
-            } else {
-                0.0
-            },
             ..Self::default()
         }
     }
@@ -155,7 +152,8 @@ impl Controls {
             back_held: self.back_held,
             y: self.refresh,
             talk: self.talk,
-            mute: self.sound_toggle,
+            // The left stick's click is the live microphone's, which the headset toggles itself; muting is the hand menu's.
+            mute: false,
             replay: self.replay,
             left_stick: self.navigation,
             right_stick: self.presentation_navigation,
@@ -164,14 +162,14 @@ impl Controls {
     }
 }
 
-/// A held grip toggles once; after focus loss it must be released first.
+/// A held click of the left stick toggles the live microphone once; after focus loss it must be released first.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct LiveGrip {
+pub struct LiveClick {
     held: bool,
     blocked: bool,
 }
 
-impl LiveGrip {
+impl LiveClick {
     pub fn blur(&mut self) {
         self.held = false;
         self.blocked = true;
@@ -417,7 +415,7 @@ pub struct Headset {
     anchor: SceneAnchor,
     /// Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
     engagement: Tracker,
-    audience_toggle: LiveGrip,
+    live_toggle: LiveClick,
     focused: bool,
     running: bool,
     /// Ask for the microphone once the scene has been shown with focus, instead of on the first recording; see [`MicrophoneRequest`].
@@ -436,7 +434,7 @@ impl Headset {
             step: Step::default(),
             anchor: SceneAnchor::default(),
             engagement,
-            audience_toggle: LiveGrip::default(),
+            live_toggle: LiveClick::default(),
             focused: false,
             running: false,
             microphone: MicrophoneRequest::default(),
@@ -455,7 +453,7 @@ impl Headset {
     }
 
     fn blur(&mut self, conversation: &mut Conversation) {
-        self.audience_toggle.blur();
+        self.live_toggle.blur();
         self.step.blur(conversation);
     }
 
@@ -559,11 +557,15 @@ impl Headset {
         feedback: &mut Feedback,
         now: Instant,
     ) {
-        if self.audience_toggle.update(
+        // Clicking the left stick toggles the live microphone. It always turns it off, but turns it on only with the
+        // stick at rest, so that a click pressed into a push of travel never opens the microphone.
+        if self.live_toggle.update(
             self.focused,
-            controls.audience_grip_active,
-            controls.audience_grip > AUDIENCE_GRIP,
-        ) {
+            controls.live_toggle_active,
+            controls.live_toggle,
+        ) && (conversation.live()
+            || (self.step.left_stick_free() && controls.navigation.length() < LIVE_CLICK_REST))
+        {
             conversation.toggle_live();
         }
         self.step.buttons(
@@ -729,9 +731,8 @@ mod tests {
             refresh: action(held, active, changed),
             navigation: action(Vec2::new(0.8, -0.7), active, changed),
             presentation_navigation: action(Vec2::new(-0.9, 0.6), active, changed),
-            sound_toggle: action(held, active, changed),
+            live_toggle: action(held, active, changed),
             replay: action(held, active, changed),
-            audience_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
             transcript_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
         }
     }
@@ -753,7 +754,6 @@ mod tests {
         assert_eq!(controls.reset, expected);
         assert_eq!(controls.back, expected);
         assert_eq!(controls.refresh, expected);
-        assert_eq!(controls.sound_toggle, expected);
         assert_eq!(controls.replay, expected);
     }
 
@@ -788,7 +788,7 @@ mod tests {
             let mut controls = Controls::from_actions(actions(held, true, changed), true);
             controls.set_locations(locations);
             assert_eq!(controls.talk, held);
-            assert_eq!(controls.audience_grip, if held { 1.0 } else { 0.0 });
+            assert_eq!(controls.live_toggle, held);
             assert_press_edges(&controls, held && changed);
         }
     }
@@ -803,7 +803,7 @@ mod tests {
             controls.set_locations(locations);
             assert!(controls.talk && controls.trigger == Some(1.0));
             assert_press_edges(&controls, true);
-            assert_eq!(controls.audience_grip, 1.0);
+            assert!(controls.live_toggle);
             assert_eq!(controls.transcript_grip, Some(1.0));
             assert_eq!(controls.navigation.x, 0.8);
             assert!(controls.navigation_active);
@@ -847,7 +847,7 @@ mod tests {
             assert!(!controls.talk && controls.trigger.is_none());
             assert!(!controls.talk_active);
             assert_press_edges(&controls, false);
-            assert_eq!(controls.audience_grip, 0.0);
+            assert!(!controls.live_toggle && !controls.live_toggle_active);
             assert_eq!(controls.transcript_grip, None);
             assert_eq!(controls.navigation, Vec2::ZERO);
             assert!(!controls.navigation_active);
@@ -863,12 +863,13 @@ mod tests {
     }
 
     #[test]
-    fn audience_grip_does_not_start_push_to_talk() {
+    fn the_left_stick_click_does_not_start_push_to_talk_nor_mute() {
         let mut input = actions(false, true, false);
-        input.audience_grip = action(1.0, true, true);
+        input.live_toggle = action(true, true, true);
         let controls = Controls::from_actions(input, true);
-        assert_eq!(controls.audience_grip, 1.0);
+        assert!(controls.live_toggle);
         assert!(!controls.talk);
+        assert!(!controls.buttons().mute, "muting is the hand menu's");
         assert_press_edges(&controls, false);
     }
 
@@ -884,7 +885,7 @@ mod tests {
                 back_held: true,
                 y: true,
                 talk: true,
-                mute: true,
+                mute: false,
                 replay: true,
                 left_stick: Vec2::new(0.8, -0.7),
                 right_stick: Vec2::new(-0.9, 0.6),
@@ -894,15 +895,15 @@ mod tests {
     }
 
     #[test]
-    fn live_grip_requires_release_after_focus_loss() {
-        let mut grip = LiveGrip::default();
+    fn the_live_click_requires_release_after_focus_loss() {
+        let mut grip = LiveClick::default();
         assert!(grip.update(true, true, true));
         assert!(!grip.update(true, true, true));
         assert!(!grip.update(false, true, true));
         assert!(!grip.update(true, true, true));
         assert!(!grip.update(true, true, false));
         assert!(grip.update(true, true, true));
-        // An inactive action is not evidence that the grip was released.
+        // An inactive action is not evidence that the click was released.
         assert!(!grip.update(true, false, false));
         assert!(!grip.update(true, true, true));
         assert!(!grip.update(true, true, false));
@@ -1266,27 +1267,228 @@ mod tests {
         assert_eq!(headset.tick(start + Duration::from_millis(1500)), 0.5);
     }
 
+    /// The left stick clicked, `held`, leaning to `stick`.
+    fn click(held: bool, stick: Vec2) -> Controls {
+        Controls {
+            live_toggle: held,
+            live_toggle_active: true,
+            navigation: stick,
+            navigation_active: true,
+            ..Controls::default()
+        }
+    }
+
+    /// Whether `actions` open a microphone: live, or for words.
+    fn opens_a_microphone(actions: &[tomori_client::connection::Action]) -> bool {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                tomori_client::connection::Action::StartLive(_)
+                    | tomori_client::connection::Action::BeginUtterance(_)
+            )
+        })
+    }
+
     #[test]
-    fn a_firm_left_squeeze_toggles_the_live_microphone_once() {
+    fn a_click_of_the_left_stick_toggles_the_live_microphone_once() {
         let mut conversation = joined();
         let mut feedback = felt();
         let start = Instant::now();
         let mut headset = Headset::new(&mut conversation, &mut feedback, start);
         headset.session(SessionState::Focused, &mut conversation, start);
-        let grip = |value| Controls {
-            audience_grip: value,
-            audience_grip_active: true,
-            ..Controls::default()
-        };
-        headset.buttons(&grip(0.7), &mut conversation, &mut feedback, start);
-        assert!(!conversation.live(), "not firm enough");
-        headset.buttons(&grip(0.9), &mut conversation, &mut feedback, start);
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
         assert!(conversation.live());
-        headset.buttons(&grip(0.9), &mut conversation, &mut feedback, start);
+        assert_eq!(
+            conversation.take_actions(),
+            [tomori_client::connection::Action::StartLive(0)]
+        );
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
         assert!(conversation.live(), "held, it toggles once");
-        headset.buttons(&grip(0.0), &mut conversation, &mut feedback, start);
-        headset.buttons(&grip(0.9), &mut conversation, &mut feedback, start);
+        headset.buttons(
+            &click(false, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(conversation.live(), "let go, it stays live");
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
         assert!(!conversation.live());
+        assert!(!opens_a_microphone(&conversation.take_actions()));
+        // A click that leans the stick a little, as a firm press does, still turns it on.
+        headset.buttons(
+            &click(false, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::new(0.1, 0.15)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(conversation.live());
+    }
+
+    #[test]
+    fn a_click_pressed_into_a_push_of_travel_never_turns_the_microphone_on_but_always_turns_it_off()
+    {
+        let mut conversation = joined();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        // Clicked as the stick is pushed forward to aim, in one frame, or while held there.
+        headset.buttons(
+            &click(true, Vec2::new(0.0, 0.9)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live(), "pushed as it is clicked");
+        headset.buttons(
+            &click(false, Vec2::new(0.0, 0.9)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::new(0.0, 0.9)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live(), "clicked while aiming");
+        // Eased off to 0.3, the push still aims, until the stick returns to the middle.
+        headset.buttons(
+            &click(false, Vec2::new(0.0, 0.3)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::new(0.0, 0.3)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live(), "clicked while a push is under way");
+        assert!(!opens_a_microphone(&conversation.take_actions()));
+        // Back at the middle, a click turns it on; and, pushed again, a click turns it off.
+        headset.buttons(
+            &click(false, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(conversation.live());
+        headset.buttons(
+            &click(false, Vec2::new(0.9, 0.0)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::new(0.9, 0.0)),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live(), "off whatever the stick does");
+        // A stick that reads nonsense is not at rest.
+        headset.buttons(
+            &click(false, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.buttons(
+            &click(true, Vec2::NAN),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live());
+    }
+
+    #[test]
+    fn the_grips_the_triggers_and_a_click_without_focus_or_a_space_open_no_microphone() {
+        let mut conversation = joined();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        // The right trigger and right grip, squeezed and let go, and every other action's state but X's and the
+        // left stick click's: the left trigger and left grip are bound to nothing.
+        let mut input = actions(true, true, true);
+        input.talk = action(false, true, false);
+        input.live_toggle = action(false, true, false);
+        input.navigation = action(Vec2::ZERO, true, false);
+        for _ in 0..2 {
+            for controls in [
+                Controls::from_actions(input, true),
+                Controls::from_actions(actions(false, true, true), true),
+            ] {
+                let controls = Controls {
+                    talk: false,
+                    live_toggle: false,
+                    ..controls
+                };
+                headset.buttons(&controls, &mut conversation, &mut feedback, start);
+                assert!(!conversation.live());
+            }
+        }
+        assert!(!opens_a_microphone(&conversation.take_actions()));
+        // Without focus, a click opens nothing, and held through focus returning, it must be let go first.
+        headset.session(SessionState::Visible, &mut conversation, start);
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        headset.session(SessionState::Focused, &mut conversation, start);
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live());
+        assert!(!opens_a_microphone(&conversation.take_actions()));
+        // In the lobby, a click opens nothing either.
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        headset.buttons(
+            &click(true, Vec2::ZERO),
+            &mut conversation,
+            &mut feedback,
+            start,
+        );
+        assert!(!conversation.live());
+        assert!(!opens_a_microphone(&conversation.take_actions()));
     }
 
     #[test]

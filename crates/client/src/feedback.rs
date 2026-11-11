@@ -168,7 +168,7 @@ pub enum Event {
     CatchingUp,
     /// Someone knocks to take part.
     Knock,
-    /// The left grip turned the live microphone on.
+    /// The live microphone turned on, as the left stick was clicked.
     LiveOn,
     /// The live microphone turned off.
     LiveOff,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Live audio is on the left stick click.** Click the left stick to turn live audio on or off, rather than squeezing the left grip, which now does nothing, as the left trigger doesn't, so that both are free for taking hold of things. A click while you push the stick to travel never turns live audio on, though it always turns it off. Mute spoken replies from the hand menu's **Spoken replies** row instead; the desktop window's V still mutes. See `design/live-audio.md`.
+
+- For clients: `tomori-scene`'s headset `Actions` and `Controls` replace `sound_toggle` and `audience_grip` with `live_toggle`, `LiveGrip` becomes `LiveClick`, and `Step` gains `left_stick_free`. **Breaking** for code that builds them.
+
 - **The morepork calls several times in a row.** In the farmyard, the ruru now calls as a morepork does, usually four or five times in a row, 1.5 to 2.5 s apart, and sometimes just once, from the same spot in the bush, a few minutes between runs. The tūī sometimes sings a second or third phrase before it pauses. See `design/farmyard.md`.
 
 - For environments: **calls in runs.** `tomori-client`'s ambience `Call` gains `run`, a `Run` (`Run::weighted`, with `gap`, `vary` and `order`, `Order::Alternate` or `Random`, and `RUN_CALLS`), heard several times in a row from one place, each call a gap after the last's end and the call's interval after the run's end; a call without one is heard as before. `Scheduler` gains `with_lengths`. **Breaking** for code that builds `Call` field by field without `..`. See `design/spatial-audio.md`.
