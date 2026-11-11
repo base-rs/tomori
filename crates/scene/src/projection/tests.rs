@@ -1347,6 +1347,289 @@ fn a_panel_let_go_near_a_wall_snaps_into_its_layout() {
     assert!(projector.pending.is_none());
 }
 
+/// A panel floating at `at`, facing home.
+fn floating_at(id: &str, at: Vec3) -> Panel {
+    panel(
+        id,
+        Place::Free {
+            pose: Pose::upright_facing(at.to_array(), HOME.to_array()),
+        },
+    )
+}
+
+/// Which way `slot` faces.
+fn facing_of(slot: Mat4) -> Vec3 {
+    slot.z_axis.truncate().normalize()
+}
+
+#[test]
+fn a_panel_let_go_with_the_ray_on_a_far_wall_but_carried_near_floats_where_it_is() {
+    let far = wall("far", WallKind::Added, 0.0, 5.0);
+    let ahead = HOME - Vec3::Z * 1.5;
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![far.clone()])
+        .with_panels(vec![floating_at("a", ahead)]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    projector.update(input(&shown, at(ahead), 0.0, now));
+    projector.update(input(&shown, at(ahead), 1.0, now));
+    assert_eq!(projector.held(), Some("a"));
+    // Pointed at the far wall's slot, carried 1.5 m from home, it would float: nothing is outlined, and the hint says so.
+    let slot = slot_frames(&far, model(&far.pose).unwrap())[1];
+    let ray = at(slot.w_axis.truncate());
+    let output = projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(output.preview, None);
+    let hint = output.hint.unwrap().canvas.unwrap().plain();
+    assert!(hint.contains("leave it floating"), "{hint}");
+    // Let go, it floats where it is, as far along the ray as it was carried.
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    let Some((_, Target::Free(left))) = output.placed else {
+        unreachable!("floating, not {:?}", output.placed);
+    };
+    assert!(Vec3::from_array(left.position).distance(ray.unwrap().at(1.5)) < 1e-3);
+    // A panel the server puts on that wall, as the agent's are, stands in its slot as ever.
+    let placed = Projection::new("s", "sky")
+        .with_walls(vec![far])
+        .with_panels(vec![panel("b", on("far", 1))]);
+    let output = projector.update(input(&placed, None, 0.0, now + PENDING));
+    assert!(output.sheets.iter().any(|sheet| sheet.model == Some(slot)));
+    assert_eq!(output.preview, None);
+}
+
+#[test]
+fn how_near_a_panel_must_come_to_dock_grows_with_the_participants_distance_from_the_wall() {
+    assert_eq!(capture(0.0), CAPTURE_LEAST);
+    assert_eq!(capture(2.0), CAPTURE_LEAST);
+    assert!((capture(3.0) - 0.45).abs() < 1e-6);
+    assert!((capture(6.0) - 0.9).abs() < 1e-6);
+    assert_eq!(capture(12.0), CAPTURE_MOST);
+    // Half a metre in front of a slot docks on a wall 4 m away, but not on one 2 m away; 95 cm docks on one 12 m away,
+    // and no more than a metre does on any.
+    for (distance, depth, docks) in [
+        (2.0, 0.25, true),
+        (2.0, 0.5, false),
+        (4.0, 0.5, true),
+        (4.0, 0.7, false),
+        (12.0, 0.95, true),
+        (12.0, 1.05, false),
+    ] {
+        let near = wall("w", WallKind::Added, 0.0, distance);
+        let frame = model(&near.pose).unwrap();
+        let slot = slot_frames(&near, frame)[1];
+        let centre = slot.w_axis.truncate() + facing_of(slot) * depth;
+        let walls = [(&near, frame)];
+        assert_eq!(
+            dock(&walls, centre, HOME, None).is_some(),
+            docks,
+            "{distance} m away, {depth} m out"
+        );
+    }
+}
+
+#[test]
+fn a_panel_docking_holds_its_slot_a_little_further_out_and_past_halfway_to_the_next() {
+    let near = wall("w", WallKind::Added, 0.0, 4.0);
+    let frame = model(&near.pose).unwrap();
+    let slots = slot_frames(&near, frame);
+    let walls = [(&near, frame)];
+    let middle = slots[1].w_axis.truncate();
+    let reach = capture(HOME.distance(middle));
+    let out = |depth: f32| middle + facing_of(slots[1]) * depth;
+    // Within reach it docks; a little beyond, it holds the slot it docks in, but takes none it did not; well beyond,
+    // a quarter more, it lets go.
+    let docked = dock(&walls, out(reach * 0.9), HOME, None).unwrap();
+    assert_eq!((docked.wall.as_str(), docked.slot), ("w", 1));
+    assert_eq!(
+        dock(&walls, out(reach * 1.1), HOME, Some(&docked)),
+        Some(docked.clone())
+    );
+    assert_eq!(dock(&walls, out(reach * 1.1), HOME, None), None);
+    assert_eq!(dock(&walls, out(reach * 1.3), HOME, Some(&docked)), None);
+    // Just past halfway to the slot beside it, it stays; well past, the other takes it.
+    let across = slots[2].w_axis.truncate() - middle;
+    let along = |share: f32| middle + across * share;
+    assert_eq!(dock(&walls, along(0.52), HOME, None).unwrap().slot, 2);
+    assert_eq!(
+        dock(&walls, along(0.52), HOME, Some(&docked)).unwrap().slot,
+        1
+    );
+    assert_eq!(
+        dock(&walls, along(0.56), HOME, Some(&docked)).unwrap().slot,
+        2
+    );
+    // Nor does it flicker carried back and forth across the edge of reach.
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![near.clone()])
+        .with_panels(vec![floating_at("a", out(reach * 0.9))]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    // Carried 2 m along a ray straight at the slot, moved nearer it or further out.
+    let towards =
+        |depth: f32| Ray::new(out(depth) + facing_of(slots[1]) * 2.0, -facing_of(slots[1]));
+    projector.update(input(&shown, towards(reach * 0.9), 0.0, now));
+    projector.update(input(&shown, towards(reach * 0.9), 1.0, now));
+    let preview = |projector: &mut Projector, depth: f32| {
+        projector
+            .update(input(&shown, towards(depth), 1.0, now))
+            .preview
+    };
+    let slot = Some(("w".to_owned(), 1));
+    assert_eq!(preview(&mut projector, reach * 0.9), slot);
+    assert_eq!(preview(&mut projector, reach * 1.1), slot);
+    assert_eq!(preview(&mut projector, reach * 0.95), slot);
+    assert_eq!(preview(&mut projector, reach * 1.3), None);
+    assert_eq!(preview(&mut projector, reach * 1.1), None);
+    assert_eq!(preview(&mut projector, reach * 0.9), slot);
+}
+
+#[test]
+fn a_panel_held_deep_in_front_of_a_wall_changes_slot_by_how_far_across_it_moves() {
+    // A wall 8 m away, whose reach is a metre, so that a panel 0.5 m or 0.9 m out still docks.
+    let far = wall("w", WallKind::Added, 0.0, 8.0);
+    let frame = model(&far.pose).unwrap();
+    let slots = slot_frames(&far, frame);
+    let walls = [(&far, frame)];
+    let middle = slots[1].w_axis.truncate();
+    let across = slots[2].w_axis.truncate() - middle;
+    for depth in [0.5, 0.9] {
+        let at = |share: f32| middle + across * share + facing_of(slots[1]) * depth;
+        let docked = dock(&walls, at(0.0), HOME, None).unwrap();
+        assert_eq!(docked.slot, 1, "{depth} m out");
+        // Just past halfway it stays, 5 cm across nearer the next being too little, however deep it is held.
+        assert_eq!(
+            dock(&walls, at(0.52), HOME, Some(&docked)).unwrap().slot,
+            1,
+            "{depth} m out"
+        );
+        // Well past halfway, and over the next slot's middle, the next takes it.
+        assert_eq!(
+            dock(&walls, at(0.56), HOME, Some(&docked)).unwrap().slot,
+            2,
+            "{depth} m out"
+        );
+        assert_eq!(
+            dock(&walls, at(1.0), HOME, Some(&docked)).unwrap().slot,
+            2,
+            "{depth} m out"
+        );
+    }
+}
+
+#[test]
+fn a_panel_docks_only_from_a_walls_front() {
+    let near = wall("w", WallKind::Added, 0.0, 3.0);
+    let frame = model(&near.pose).unwrap();
+    let slot = slot_frames(&near, frame)[1];
+    let walls = [(&near, frame)];
+    let out = |depth: f32| slot.w_axis.truncate() + facing_of(slot) * depth;
+    // In front, or pushed a few centimetres into it, it docks; further behind, at its back, it does not.
+    assert_eq!(dock(&walls, out(0.2), HOME, None).unwrap().slot, 1);
+    assert_eq!(dock(&walls, out(-0.04), HOME, None).unwrap().slot, 1);
+    assert_eq!(dock(&walls, out(-BEHIND - 0.01), HOME, None), None);
+    assert_eq!(dock(&walls, out(-0.2), HOME, None), None);
+    // Nor does the slot it docks in hold it once behind.
+    let docked = dock(&walls, out(0.2), HOME, None).unwrap();
+    assert_eq!(dock(&walls, out(-0.1), HOME, Some(&docked)), None);
+}
+
+#[test]
+fn a_panel_pushed_as_far_as_it_goes_docks_on_a_wall_as_far_as_the_ray_once_reached() {
+    use crate::manipulation::FARTHEST;
+    assert_eq!(FARTHEST, 8.0);
+    let far = wall("far", WallKind::Added, 0.0, 8.5);
+    let slot = slot_frames(&far, model(&far.pose).unwrap())[1];
+    let ahead = HOME + (slot.w_axis.truncate() - HOME).normalize() * 2.0;
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![far])
+        .with_panels(vec![floating_at("a", ahead)]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(slot.w_axis.truncate());
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(projector.held(), Some("a"));
+    let output = projector.update(Input {
+        stick: Vec2::Y,
+        dt: 10.0,
+        ..input(&shown, ray, 1.0, now)
+    });
+    assert_eq!(output.preview, Some(("far".to_owned(), 1)));
+    projector.update(input(&shown, ray, 1.0, now));
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert_eq!(
+        output.placed,
+        Some(("a".to_owned(), Target::Wall("far".to_owned(), 1)))
+    );
+}
+
+#[test]
+fn a_panel_carried_docks_in_the_slot_under_its_middle_not_the_ray_and_is_drawn_gliding_into_it() {
+    let near = wall("w", WallKind::Added, 0.0, 3.0);
+    let slots = slot_frames(&near, model(&near.pose).unwrap());
+    // A quarter of a metre in front of the first slot, on a ray that goes on to meet the third.
+    let centre = slots[0].w_axis.truncate() + facing_of(slots[0]) * 0.25;
+    let direction = (slots[2].w_axis.truncate() - centre).normalize();
+    let origin = centre - direction * 1.5;
+    let ray = Ray::new(origin, direction);
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![near])
+        .with_panels(vec![floating_at("a", centre)]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(projector.held(), Some("a"));
+    let drawn = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .find(|sheet| {
+                sheet
+                    .canvas
+                    .as_deref()
+                    .unwrap()
+                    .plain()
+                    .starts_with("Panel a")
+            })
+            .unwrap()
+            .model
+            .unwrap()
+    };
+    // It docks in the first, and is drawn on its way there, then there, just in front of it, facing as it faces, at its
+    // own size.
+    let output = projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(output.preview, Some(("w".to_owned(), 0)));
+    let there = docked(slots[0]);
+    let gliding = drawn(&output).w_axis.truncate();
+    let whole = centre.distance(there.w_axis.truncate());
+    assert!(gliding.distance(centre) > 0.1 * whole && gliding.distance(centre) < 0.9 * whole);
+    let output = projector.update(Input {
+        dt: 1.0,
+        ..input(&shown, ray, 1.0, now)
+    });
+    assert!(drawn(&output).abs_diff_eq(there, 1e-4));
+    assert!(output.end.unwrap().distance(there.w_axis.truncate()) < 1e-4);
+    assert!((facing_of(drawn(&output)) - facing_of(slots[0])).length() < 1e-4);
+    // Carried away from the wall, it glides back to the ray, and docks nowhere.
+    let away = Ray::new(origin, Vec3::Z);
+    let output = projector.update(input(&shown, away, 1.0, now));
+    assert_eq!(output.preview, None);
+    let held = away.unwrap().at(1.5);
+    assert!(drawn(&output).w_axis.truncate().distance(held) > 0.01);
+    let output = projector.update(Input {
+        dt: 1.0,
+        ..input(&shown, away, 1.0, now)
+    });
+    assert!(drawn(&output).w_axis.truncate().distance(held) < 1e-3);
+    // Back, it docks again; let go, it goes into the first slot, though the ray meets the third.
+    projector.update(input(&shown, ray, 1.0, now));
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert_eq!(
+        output.placed,
+        Some(("a".to_owned(), Target::Wall("w".to_owned(), 0)))
+    );
+}
+
 #[test]
 fn the_grip_pulls_off_nothing_behind_something_nearer_or_while_the_panels_do_not_take_it() {
     let shown = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
@@ -1560,8 +1843,8 @@ fn the_nearest_panel_on_the_ray_is_pointed_at_and_a_panel_snaps_onto_the_nearest
     let ray = Ray::new(HOME, -Vec3::Z);
     let output = projector.update(input(&shown, ray, 0.0, now));
     assert_eq!(output.pointed.unwrap().0, "before");
-    // Pulled off and let go between the walls, nearer the far one, while the ray aims at no slot, as while a teleport is
-    // aimed, it snaps into the nearest slot of that, the slot it is carried in front of.
+    // Pulled off and let go between the walls, nearer the far one, while a teleport is aimed, it snaps into the nearest
+    // slot of that, the slot it is carried in front of.
     projector.update(input(&shown, ray, 1.0, now));
     let between = Ray::new(HOME - Vec3::Z * (3.2 - 1.5), -Vec3::Z);
     let aiming = |grip: f32| Input {
@@ -1575,7 +1858,7 @@ fn the_nearest_panel_on_the_ray_is_pointed_at_and_a_panel_snaps_onto_the_nearest
         output.placed,
         Some(("before".to_owned(), Target::Wall("far".to_owned(), 1)))
     );
-    // Pointing, the slot the ray meets first decides, on the near wall.
+    // Pointing, as the ray meets the near wall first, the slot nearest the panel's middle still decides, on the far wall.
     let mut projector = Projector::default();
     projector.update(input(&shown, ray, 0.0, now));
     projector.update(input(&shown, ray, 1.0, now));
@@ -1583,7 +1866,7 @@ fn the_nearest_panel_on_the_ray_is_pointed_at_and_a_panel_snaps_onto_the_nearest
     let output = projector.update(input(&shown, between, 0.0, now));
     assert_eq!(
         output.placed,
-        Some(("before".to_owned(), Target::Wall("near".to_owned(), 1)))
+        Some(("before".to_owned(), Target::Wall("far".to_owned(), 1)))
     );
 }
 
@@ -1835,24 +2118,23 @@ fn a_wall_s_label_is_its_kind_s_or_the_name_its_environment_gave_it_cut_to_a_lin
 }
 
 #[test]
-fn the_ray_aims_at_each_slot_of_a_curved_wall_in_its_own_plane() {
+fn a_panel_carried_docks_in_each_slot_of_a_curved_wall_in_its_own_plane() {
     let wall = curved();
     let frame = model(&wall.pose).unwrap();
     let slots = slot_frames(&wall, frame);
     let walls = [(&wall, frame)];
     for (index, slot) in slots.iter().enumerate() {
-        // At its middle, and at its outer edge, where a flat plane through the wall's middle would miss it or name
-        // another.
+        // Carried a little in front of its middle, and of its outer edge, where a flat plane through the wall's middle
+        // would miss it or name another.
         let (width, _) = panel_size();
         for local in [Vec3::ZERO, Vec3::X * width * 0.48, -Vec3::X * width * 0.48] {
-            let point = slot.transform_point3(local);
-            let aimed = aim(&walls, &Ray::new(HOME, point - HOME).unwrap()).unwrap();
+            let centre = slot.transform_point3(local + Vec3::Z * 0.1);
+            let docked = dock(&walls, centre, HOME, None).unwrap();
             assert_eq!(
-                (aimed.wall.as_str(), aimed.slot),
+                (docked.wall.as_str(), docked.slot),
                 (TOMORI_WALL, index as u32)
             );
-            assert!(aimed.point.unwrap().distance(point) < 1e-3);
-            assert_eq!(aimed.model, *slot);
+            assert_eq!(docked.model, *slot);
         }
     }
     // A panel pointed at in a curved wall's slot is hit in that slot's plane too.
@@ -1862,15 +2144,15 @@ fn the_ray_aims_at_each_slot_of_a_curved_wall_in_its_own_plane() {
     let edge = slots[0].transform_point3(-Vec3::X * panel_size().0 * 0.45);
     let output = Projector::default().update(input(&shown, at(edge), 0.0, Instant::now()));
     assert_eq!(output.pointed.unwrap().0, "a");
-    // Above the row, beyond the reach, or from behind a nearer slot, nothing else is aimed at.
-    let above = slots[2].transform_point3(Vec3::Y * panel_size().1);
-    assert_eq!(aim(&walls, &Ray::new(HOME, above - HOME).unwrap()), None);
-    let far = Ray::new(Vec3::new(0.0, 0.52, 9.0), -Vec3::Z).unwrap();
-    assert_eq!(aim(&walls, &far), None);
+    // Well above the row, or far in front of it, it docks nowhere.
+    let above = slots[2].transform_point3(Vec3::Y * panel_size().1 * 3.0);
+    assert_eq!(dock(&walls, above, HOME, None), None);
+    assert_eq!(dock(&walls, Vec3::new(0.0, 0.52, 2.0), HOME, None), None);
 }
 
 #[test]
-fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_under_the_ray() {
+fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_under_its_middle() {
+    use crate::manipulation::RATE;
     let shown = projection(vec![
         panel("a", on(TOMORI_WALL, 0)),
         panel("b", on("wall-1", 4)),
@@ -1880,10 +2162,27 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
     let pick = at(slot_centre(&shown, 0));
     projector.update(input(&shown, pick, 0.0, now));
     projector.update(input(&shown, pick, 1.0, now));
-    // Away from every wall, nothing is shown.
+    let carried_size = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .find_map(|sheet| {
+                sheet
+                    .canvas
+                    .as_deref()
+                    .filter(|canvas| canvas.plain().starts_with("Panel a"))
+            })
+            .unwrap()
+            .size()
+    };
+    // Away from every wall, nothing is shown, and it fits its text.
     let away = Ray::new(HOME, Vec3::new(-1.0, 0.2, 0.3));
     let output = projector.update(input(&shown, away, 1.0, now));
     assert_eq!(output.preview, None);
+    assert_eq!(
+        carried_size(&output),
+        fitted_size(&shown.panels[0], Fit::Text)
+    );
     let ghosts = |output: &Output| {
         output
             .sheets
@@ -1893,14 +2192,28 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
             .collect::<Vec<_>>()
     };
     assert!(ghosts(&output).is_empty());
-    // Pointed at the added wall's slot 4, which another panel holds, its outline is drawn there, over that panel, and
-    // the ray ends on the slot.
+    // Pointed at the added wall's slot 4, which another panel holds, 5 m away, but carried 3 m from home, 2 m short of
+    // it, nothing is shown either: pointing at a wall does not put a panel on it.
     let added = &shown.wall("wall-1").unwrap();
     let frame = model(&added.pose).unwrap();
     let target = slot_frames(added, frame)[4];
     let toward = target.w_axis.truncate();
     let ray = at(toward);
     let output = projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(output.preview, None);
+    assert!(ghosts(&output).is_empty());
+    // Pushed along the ray up to the wall, its outline is drawn there, over that panel, the panel is drawn pulled into
+    // the slot, just in front of it, at the slot's size, and the ray ends on it.
+    let carried = HOME.distance(slot_centre(&shown, 0));
+    projector.update(Input {
+        stick: Vec2::Y,
+        dt: (HOME.distance(toward) / carried).ln() / RATE,
+        ..input(&shown, ray, 1.0, now)
+    });
+    let output = projector.update(Input {
+        dt: 1.0,
+        ..input(&shown, ray, 1.0, now)
+    });
     assert_eq!(output.preview, Some(("wall-1".to_owned(), 4)));
     assert_eq!(
         ghosts(&output),
@@ -1927,26 +2240,12 @@ fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_u
     let b = order.iter().position(|title| title == "Panel b").unwrap();
     let ghost = order.iter().position(|title| title == "ghost").unwrap();
     assert!(ghost > b, "{order:?}");
-    assert!(output.end.unwrap().distance(toward) < 1e-3);
-    // The panel carried still floats in the hand, fitting its text.
-    let carried = output
-        .sheets
-        .iter()
-        .find(|sheet| {
-            sheet
-                .canvas
-                .as_deref()
-                .unwrap()
-                .plain()
-                .starts_with("Panel a")
-        })
-        .unwrap();
-    assert_eq!(
-        carried.canvas.as_deref().unwrap().size(),
-        fitted_size(&shown.panels[0], Fit::Text)
-    );
-    // Turned and pushed, it still goes where the ray points: let go, it is put in that slot, and shown there at once,
-    // at the slot's size, until the server agrees.
+    let pulled = docked(target).w_axis.truncate();
+    assert!(output.end.unwrap().distance(pulled) < 1e-3);
+    assert!((pulled.distance(toward) - DOCK_LIFT).abs() < 1e-4);
+    assert_eq!(carried_size(&output), panel_size());
+    // Turned, it still goes into the slot under it: let go, it is put in that slot, and shown there at once, at the
+    // slot's size, until the server agrees.
     projector.update(Input {
         stick: Vec2::X,
         ..input(&shown, ray, 1.0, now)
@@ -2329,7 +2628,7 @@ fn the_server_takes_each_slot_to_be_where_it_is_drawn() {
 }
 
 #[test]
-fn a_tilted_wall_draws_its_panels_tilted_with_it_and_the_ray_aims_at_its_slots_where_they_stand() {
+fn a_tilted_wall_draws_its_panels_tilted_with_it_and_docks_panels_in_its_slots_where_they_stand() {
     // A wall above and ahead, tilted down towards home, a panel in its first slot.
     let wall = Wall::new(
         "wall-1",
@@ -2351,13 +2650,15 @@ fn a_tilted_wall_draws_its_panels_tilted_with_it_and_the_ray_aims_at_its_slots_w
         .find(|model| model.w_axis.truncate().distance(slots[0].w_axis.truncate()) < 0.05)
         .expect("the panel in its slot");
     assert!(drawn.transform_vector3(Vec3::Z).normalize().y < -0.4);
-    // The ray aims at each slot where it stands, tilted, and points at the panel there.
+    // A panel carried in front of each slot, as it stands, tilted, docks there, and the ray points at the panel there.
     let walls = [(&wall, frame)];
     for (index, slot) in slots.iter().enumerate() {
-        let point = slot.transform_point3(Vec3::ZERO);
-        let aimed = aim(&walls, &Ray::new(HOME, point - HOME).unwrap()).unwrap();
-        assert_eq!((aimed.wall.as_str(), aimed.slot), ("wall-1", index as u32));
-        assert!(aimed.point.unwrap().distance(point) < 1e-3);
+        let centre = slot.transform_point3(Vec3::Z * 0.2);
+        let docked = dock(&walls, centre, HOME, None).unwrap();
+        assert_eq!(
+            (docked.wall.as_str(), docked.slot),
+            ("wall-1", index as u32)
+        );
     }
     let output = Projector::default().update(input(
         &shown,
@@ -2643,17 +2944,45 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
     let shown = projection(vec![on_wall.clone()]);
     let mut projector = Projector::default();
     projector.update(input(&shown, None, 0.0, now));
-    projector.update(Input {
+    let in_slot = projector.update(Input {
         scroll: Some(("c", 4.0)),
         ..input(&shown, None, 0.0, now)
     });
     assert_eq!(projector.scroll("c"), 4);
-    // Pulled off and carried, it is as tall as its code, and pointed at at that size, its hint below it.
+    let in_slot = in_slot
+        .sheets
+        .iter()
+        .find_map(|sheet| {
+            sheet
+                .canvas
+                .as_deref()
+                .filter(|canvas| canvas.plain().starts_with("javascript"))
+        })
+        .unwrap()
+        .size();
+    // Pulled off, it docks in its slot, at the size it had there, where it is.
     let centre = slot_centre(&shown, 0);
     projector.update(input(&shown, at(centre), 0.0, now));
     let output = projector.update(input(&shown, at(centre), 1.0, now));
     assert!(output.picked);
     let output = projector.update(input(&shown, at(centre), 1.0, now));
+    let docked = output
+        .sheets
+        .iter()
+        .find_map(|sheet| {
+            sheet
+                .canvas
+                .as_deref()
+                .filter(|canvas| canvas.plain().starts_with("javascript"))
+        })
+        .unwrap();
+    assert_eq!(docked.size(), in_slot);
+    // Carried away from the wall, it is as tall as its code, and pointed at at that size, its hint below it.
+    let away = Ray::new(HOME, Vec3::new(-1.0, 0.2, 0.3));
+    let output = projector.update(Input {
+        dt: 1.0,
+        ..input(&shown, away, 1.0, now)
+    });
     let carried = output
         .sheets
         .iter()
@@ -2674,7 +3003,8 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
     assert_eq!(drawn.first().unwrap().0, 1);
     assert_eq!(drawn.last().unwrap().0, 17);
     let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
-    assert!(hint.y < centre.y - canvas.size().1 / 2.0);
+    let carried_at = carried.model.unwrap().w_axis.truncate();
+    assert!(hint.y < carried_at.y - canvas.size().1 / 2.0);
     // Left floating, it stays so; the server agrees.
     projector.update(input(&shown, at(centre + Vec3::X * 2.0), 0.0, now));
     on_wall.place = Place::Free {

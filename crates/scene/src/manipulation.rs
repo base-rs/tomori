@@ -8,9 +8,10 @@
 //! gestures. See `design/projection.md`.
 use glam::Vec2;
 
-/// The nearest and farthest something carried goes along the ray, in metres.
+/// The nearest and farthest something carried goes along the ray, in metres: as far as the ray once reached to put a
+/// panel on a wall, so that a panel docks on a wall about 9 m away, pushed to it. See `design/projection.md`.
 pub const NEAREST: f32 = 0.3;
-pub const FARTHEST: f32 = 5.0;
+pub const FARTHEST: f32 = 8.0;
 /// How fast a full push moves something carried along the ray, as a proportion of how far it is, each second: it moves by
 /// the same proportion of its distance near or far, so that it feels alike at arm's length and across the room.
 pub const RATE: f32 = 1.2;

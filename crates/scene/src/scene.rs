@@ -6421,7 +6421,8 @@ mod tests {
                 .map(|sheet| sheet.model.unwrap().w_axis.truncate())
                 .unwrap()
         };
-        let before = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, FRAME));
+        // Long enough for it to glide into the slot it docks in, where it was.
+        let before = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, 0.5));
         buttons(
             &mut step,
             &mut conversation,
@@ -6507,23 +6508,48 @@ mod tests {
         senses.grip = Some(1.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert_eq!(step.projector.held(), Some("panel-1"));
-        // Pointed at the wall's fourth slot, its outline shows there, and the ray ends on it.
+        // Pointed at the wall's fourth slot, but carried well short of it, no outline shows, and the ray ends on the
+        // panel, where it is carried.
         let middle = slot.w_axis.truncate();
         senses.ray = Ray::new(arrival::HOME, middle - arrival::HOME);
-        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         let outline = slot * Mat4::from_translation(Vec3::Z * 0.01);
-        assert!(
+        let outlined = |output: &Frame<'_>| {
             output
                 .projection
                 .iter()
                 .any(|sheet| sheet.model == Some(outline))
+        };
+        let beam = |output: &Frame<'_>| {
+            output
+                .arrival
+                .as_ref()
+                .and_then(|arrival| arrival.ray)
+                .unwrap()
+                .end
+        };
+        let carried = ahead.distance(arrival::HOME);
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(!outlined(&output));
+        assert!((beam(&output).distance(arrival::HOME) - carried).abs() < 1e-3);
+        // Pushed along the ray up to the wall with the right stick, its outline shows there, and the panel and the ray's
+        // end are pulled into the slot.
+        let push = (middle.distance(arrival::HOME) / carried).ln() / crate::manipulation::RATE;
+        let stick = |right_stick: Vec2| Buttons {
+            right_stick,
+            ..Buttons::default()
+        };
+        step.buttons(&stick(Vec2::Y), true, &mut conversation, &mut felt(), now);
+        step.update(&senses, &mut conversation, &mut felt(), now, push);
+        step.buttons(
+            &stick(Vec2::ZERO),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
         );
-        let beam = output
-            .arrival
-            .as_ref()
-            .and_then(|arrival| arrival.ray)
-            .unwrap();
-        assert!(beam.end.distance(middle) < 1e-3);
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, 1.0);
+        assert!(outlined(&output));
+        assert!(beam(&output).distance(middle + slot.z_axis.truncate().normalize() * 0.02) < 1e-3);
         // Let go, it is put in that slot, for everyone.
         senses.grip = Some(0.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
