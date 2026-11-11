@@ -129,6 +129,7 @@ fn start(backend: &FakeBackend) -> TestServer {
                 Environment::new("quiet", "Quiet").with_server_side(Quiet),
             ])
             .with_inspect_timeout(WAIT)
+            .with_act_timeout(WAIT)
     })
 }
 
@@ -326,6 +327,17 @@ fn the_agent_inspects_an_id_for_the_details_its_environment_gives() {
     assert_eq!(quiet["details"], Value::Null);
     assert_eq!(quiet["description"], "a mossy stone");
 
+    // What the side declares no actions on offers none to take.
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            Some(&one),
+            "act",
+            json!({ "id": "observe:hen/marigold", "action": "peck" })
+        )),
+        "Marigold, a hen in the farmyard, pecking at the ground by the coop offers no actions now."
+    );
     // Ids the space does not have now, of another environment, or not ids at all, are refused, saying why.
     assert_eq!(
         failure(&inspect(Some(&one), "observe:hen/pip")),

@@ -4127,6 +4127,8 @@ dependencies = [
  "image",
  "libc",
  "pollster",
+ "serde_json",
+ "tomori-backend",
  "tomori-client",
  "tomori-client-quest",
  "tomori-client-spectator",

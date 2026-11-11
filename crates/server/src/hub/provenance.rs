@@ -84,7 +84,59 @@ impl Hub {
     }
 }
 
+/// How long ago `given`, the entry given to the agent last, was given, if within [`REQUEST_RECENT`] of `now`, so that
+/// words said earlier, or a turn left running, are no standing permission; or why not, for the agent. See
+/// `design/security.md`.
+pub(super) fn recent(given: &crate::space::Given, now: Instant) -> Result<Duration, String> {
+    let ago = now.saturating_duration_since(given.at);
+    if ago > REQUEST_RECENT {
+        return Err(format!(
+            "The words you were given last in this space are more than {} old, so Tomori will not act on them. Ask whoever wants this to say it again.",
+            super::spoken(REQUEST_RECENT)
+        ));
+    }
+    Ok(ago)
+}
+
+/// Whether `given`, the entry given to the agent last, still stands behind what it does: nothing reached its session
+/// since that did not come through Tomori, Tomori gave it no notes of its own since, such as a timer firing, and Tomori
+/// has not lost its connection to the session since. Returns why not, for the agent. See `design/security.md`.
+pub(super) fn standing(given: &crate::space::Given) -> Result<(), String> {
+    // Input that did not come through Tomori, typed into the session or reported by the agent's service, came after the words, so they are not what the agent acts on now.
+    match given.superseded {
+            Some(Superseded::Input) => {
+                Err(
+                    "Input that did not come through Tomori reached you after the words you were given last in this space, such as a message typed into your session or a sub-agent's report, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                )
+            }
+            Some(Superseded::Event) => {
+                Err(
+                    "Tomori gave you its own notes after the words you were given last in this space, such as a timer firing, which no participant asked for, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                )
+            }
+            Some(Superseded::Reconnected) => {
+                Err(
+                    "Tomori lost its connection to your session after the words you were given last in this space, so it cannot tell that nothing else reached you since. Ask whoever wants this to say it again, and wait for their words before you act."
+                        .to_owned(),
+                )
+            }
+            None => Ok(()),
+        }
+}
+
 impl HubState {
+    /// The entry given to the agent of `space` last, which began its current turn, or why there is none. See
+    /// `design/security.md`.
+    pub(super) fn given(&self, space: &str) -> Result<&crate::space::Given, String> {
+        self.space(space)
+            .and_then(|record| record.model.given())
+            .ok_or_else(|| {
+                "No participant's words have been given to you in this space since the server started, so Tomori cannot tell who asked. Ask them to say it.".to_owned()
+            })
+    }
+
     /// Check that `requested_by` asked for what the agent of `space` is about to do, as [`Needs`] says they must be able to: the entry given to the agent last, within [`REQUEST_RECENT`] of `now`, is theirs, said on a participant's connection, is still the agent's latest input, with nothing given to its session since that did not come through Tomori, and they are in the space now, connected, with the role needed. Returns who asked, or why the tool is refused, which names no one but whoever the agent named. See `design/security.md`.
     pub(super) fn requester(
         &self,
@@ -109,41 +161,9 @@ impl HubState {
             .ok_or(
                 "This tool needs requested_by: the name of the participant whose words asked for it, as Tomori gave you their words, such as Ada for \"Ada: …\".",
             )?;
-        let given = self
-            .space(space)
-            .and_then(|record| record.model.given())
-            .ok_or(
-                "No participant's words have been given to you in this space since the server started, so Tomori cannot tell who asked. Ask them to say it.",
-            )?;
-        let ago = now.saturating_duration_since(given.at);
-        if ago > REQUEST_RECENT {
-            return Err(format!(
-                "The words you were given last in this space are more than {} old, so Tomori will not act on them. Ask whoever wants this to say it again.",
-                super::spoken(REQUEST_RECENT)
-            ));
-        }
-        // Input that did not come through Tomori, typed into the session or reported by the agent's service, came after the words, so they are not what the agent acts on now.
-        match given.superseded {
-            Some(Superseded::Input) => {
-                return Err(
-                    "Input that did not come through Tomori reached you after the words you were given last in this space, such as a message typed into your session or a sub-agent's report, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
-                        .to_owned(),
-                );
-            }
-            Some(Superseded::Event) => {
-                return Err(
-                    "Tomori gave you its own notes after the words you were given last in this space, such as a timer firing, which no participant asked for, so Tomori cannot tell that a participant asked for this. Ask whoever wants this to say it again, and wait for their words before you act."
-                        .to_owned(),
-                );
-            }
-            Some(Superseded::Reconnected) => {
-                return Err(
-                    "Tomori lost its connection to your session after the words you were given last in this space, so it cannot tell that nothing else reached you since. Ask whoever wants this to say it again, and wait for their words before you act."
-                        .to_owned(),
-                );
-            }
-            None => {}
-        }
+        let given = self.given(space)?;
+        let ago = recent(given, now)?;
+        standing(given)?;
         // The speaker as the agent read them: the words that began its turn are the request it acts on. A handle,
         // `Ada#23`, names them by their tag too; a name alone must be theirs alone in the space.
         let key = tomori_protocol::text::name_key;

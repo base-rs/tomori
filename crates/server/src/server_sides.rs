@@ -66,6 +66,8 @@ struct Running {
     /// How many of the side's inspections are under way, those whose waiting has ended but whose inspector has not
     /// returned included.
     inspecting: Arc<AtomicUsize>,
+    /// How many actions handed to the side wait for its answer.
+    acting: Arc<AtomicUsize>,
 }
 
 /// The most inspections of one binding's side under way at once, so that a side that never answers holds at most this
@@ -88,6 +90,29 @@ pub(crate) enum Uninspectable {
     Silent,
     /// [`INSPECTIONS`] are under way already.
     Busy,
+}
+
+/// The most actions of one binding's side waiting for its answer at once, as for inspections. See
+/// `design/environment-actions.md`.
+pub(crate) const ACTIONS: usize = 4;
+
+/// An action handed to a side: where to wait for its answer, its ticket, and its count against [`ACTIONS`], until it is
+/// dropped.
+pub(crate) struct Handed {
+    pub inbox: Inbox,
+    pub ticket: u64,
+    _acting: Inspecting,
+}
+
+/// Why an action cannot be handed to a side.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Unactable {
+    /// No side runs for the space's binding.
+    Silent,
+    /// [`ACTIONS`] wait for its answer already.
+    Busy,
+    /// Its inbox is full, as it is not keeping up.
+    Full,
 }
 
 #[derive(Default)]
@@ -168,6 +193,37 @@ impl ServerSides {
             return Err(Uninspectable::Busy);
         }
         Ok((inspector, inspecting))
+    }
+
+    /// Hand the action `action` on the object of `reference`, with `parameters`, to the side running for `binding` of
+    /// `space`, on the word of `participant`, or why it cannot be.
+    pub(crate) fn act(
+        &self,
+        space: &str,
+        binding: u64,
+        participant: u32,
+        reference: &str,
+        action: &str,
+        parameters: &str,
+    ) -> Result<Handed, Unactable> {
+        let running = self.running.lock().expect("never left poisoned");
+        let running = running
+            .get(space)
+            .filter(|running| running.binding == binding)
+            .ok_or(Unactable::Silent)?;
+        let acting = Inspecting(running.acting.clone());
+        if running.acting.fetch_add(1, Ordering::SeqCst) >= ACTIONS {
+            return Err(Unactable::Busy);
+        }
+        let ticket = running
+            .inbox
+            .act(participant, reference, action, parameters)
+            .ok_or(Unactable::Full)?;
+        Ok(Handed {
+            inbox: running.inbox.clone(),
+            ticket,
+            _acting: acting,
+        })
     }
 
     /// The binding the side of `space` runs for, if one does.
@@ -284,6 +340,7 @@ impl ServerSides {
                     cancellation,
                     inbox,
                     inspecting: Arc::default(),
+                    acting: Arc::default(),
                 },
             );
         }
@@ -621,6 +678,53 @@ mod tests {
         assert_eq!(
             sides.inspector("space-2").err(),
             Some(Uninspectable::Silent)
+        );
+        sides.reconcile(&environments, &[]);
+        eventually("the sides never ended", || sides.alive() == 0);
+    }
+
+    #[test]
+    fn an_action_is_handed_only_to_its_binding_s_side_a_few_at_once() {
+        let sides = ServerSides::default();
+        let (environments, started) = offered(until_cancelled);
+        assert_eq!(
+            sides.act("space-1", 0, 1, "hen/pip", "peck", "{}").err(),
+            Some(Unactable::Silent)
+        );
+        sides.reconcile(&environments, &[wanted("space-1", "observe")]);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let binding = sides.binding("space-1").unwrap();
+        // Another binding's side is never handed it.
+        assert_eq!(
+            sides
+                .act("space-1", binding + 1, 1, "hen/pip", "peck", "{}")
+                .err(),
+            Some(Unactable::Silent)
+        );
+        let waiting: Vec<Handed> = (0..ACTIONS)
+            .map(|_| {
+                sides
+                    .act("space-1", binding, 1, "hen/pip", "peck", "{}")
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(waiting[0].ticket, 1);
+        assert_eq!(
+            sides
+                .act("space-1", binding, 1, "hen/pip", "peck", "{}")
+                .err(),
+            Some(Unactable::Busy)
+        );
+        drop(waiting);
+        // A side not keeping up, its inbox full, is handed nothing more.
+        for _ in 0..tomori_environment::WAITING_INTENT_LIMIT - ACTIONS {
+            assert!(sides.deliver("space-1", Intent::new(1, "{}")));
+        }
+        assert_eq!(
+            sides
+                .act("space-1", binding, 1, "hen/pip", "peck", "{}")
+                .err(),
+            Some(Unactable::Full)
         );
         sides.reconcile(&environments, &[]);
         eventually("the sides never ended", || sides.alive() == 0);

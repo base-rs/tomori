@@ -7,10 +7,10 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tomori_environment::{Error, Object, Result, ServerSide, Space};
+use tomori_environment::{Action, Error, Object, Outcome, Parameter, Result, ServerSide, Space};
 
 use crate::chicken::Chicken;
-use crate::flock::{Event, Flock, Intent, seed};
+use crate::flock::{Event, Flock, Intent, PECKS, seed};
 
 /// How long the side waits for an intent before moving the flock on, and how often it describes the chickens to the
 /// space's agent.
@@ -20,6 +20,20 @@ pub const DESCRIBE: Duration = Duration::from_secs(1);
 /// The farmyard's server side.
 #[derive(Default)]
 pub struct FarmyardSide;
+
+/// The actions the space's agent may take on a hen: having her peck at the ground, which changes only what the yard
+/// shows, for a moment, so it needs nobody named. See `design/environment-actions.md`.
+pub fn actions() -> Vec<Action> {
+    vec![
+        Action::new(
+            "peck",
+            "Have this hen peck at the ground for a moment, as if she found something",
+        )
+        .with(
+            Parameter::number("pecks", "how many times she pecks", 1.0, PECKS as f64).stepped(1.0),
+        ),
+    ]
+}
 
 fn json(value: impl serde::Serialize) -> String {
     serde_json::to_string(&value).expect("the flock's messages are JSON")
@@ -48,12 +62,27 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     let flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
     space.share(json(flock.state(clock())))?;
     drop(flock);
+    space.declare_actions(actions())?;
     let mut described: Option<Instant> = None;
     while !space.cancellation().is_cancelled() {
         let mut changes = Vec::new();
         let intent = space.next_intent(TICK);
         let mut flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(intent) = intent {
+        if let Some(acted) = intent.as_ref().and_then(|intent| intent.acted()) {
+            // The server checked the action against what the side declared: only peck, with a whole number of pecks.
+            let pecks = serde_json::from_str::<serde_json::Value>(acted.parameters())
+                .ok()
+                .and_then(|parameters| parameters["pecks"].as_f64())
+                .unwrap_or(1.0) as u64;
+            let outcome = match flock.peck(acted.reference(), pecks, clock()) {
+                Ok((change, summary)) => {
+                    changes.push(change);
+                    Outcome::done(summary)
+                }
+                Err(reason) => Outcome::refused(reason),
+            };
+            space.answer(acted.ticket(), outcome);
+        } else if let Some(intent) = intent {
             match serde_json::from_str::<Intent>(intent.payload()) {
                 Ok(asked) => changes.extend(flock.ask(intent.participant(), asked, clock())),
                 Err(_) => log::debug!("A farmyard intent could not be read."),
@@ -84,6 +113,7 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                         Object::new(id, description)
                             .with_reference(reference)
                             .at(flock.position(index, now).to_array())
+                            .offering(["peck"])
                     })
                     .collect(),
             )?;

@@ -16,6 +16,7 @@ struct Kept {
     states: Mutex<Vec<String>>,
     events: Mutex<Vec<String>>,
     objects: Mutex<Vec<Vec<Object>>>,
+    actions: Mutex<Vec<tomori_environment::Action>>,
 }
 
 impl Outlet for Kept {
@@ -32,6 +33,11 @@ impl Outlet for Kept {
 
     fn describe(&self, objects: Vec<Object>) -> Result<()> {
         self.objects.lock().unwrap().push(objects);
+        Ok(())
+    }
+
+    fn declare_actions(&self, actions: Vec<tomori_environment::Action>) -> Result<()> {
+        *self.actions.lock().unwrap() = actions;
         Ok(())
     }
 }
@@ -96,6 +102,50 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     assert_eq!(running.join().unwrap(), Ok(()));
 }
 
+#[test]
+fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
+    let cancellation = Cancellation::new();
+    let kept = Arc::new(Kept::default());
+    let space = Space::with_cancellation("space-1", "Fleet", "/", cancellation.child())
+        .with_outlet(kept.clone());
+    let inbox = space.inbox();
+    let running = std::thread::spawn(move || FarmyardSide.run(&space));
+    eventually(|| !kept.objects.lock().unwrap().is_empty());
+    // Declared once, a peck that changes only what the yard shows, a whole number of times, which each hen offers.
+    assert_eq!(*kept.actions.lock().unwrap(), actions());
+    assert_eq!(tomori_environment::check_actions(&actions()), Ok(()));
+    assert!(!actions()[0].is_consequential());
+    let objects = kept.objects.lock().unwrap()[0].clone();
+    assert!(objects.iter().all(|object| object.offers() == ["peck"]));
+    let reference = objects[0].reference().unwrap().to_owned();
+    // Taken on a hen standing about at the start, she pecks, announced to everyone; the agent is told it was done.
+    let ticket = inbox.act(3, &reference, "peck", r#"{"pecks":2}"#).unwrap();
+    let outcome = inbox.outcome(ticket, Duration::from_secs(10)).unwrap();
+    assert!(outcome.is_done(), "{outcome:?}");
+    assert!(
+        outcome.message().ends_with("pecks at the ground 2 times."),
+        "{outcome:?}"
+    );
+    eventually(|| {
+        kept.events.lock().unwrap().iter().any(|event| {
+            let event: crate::flock::Event = serde_json::from_str(event).unwrap();
+            event.chicken == 0 && matches!(event.behaviour.doing, Doing::Peck { .. })
+        })
+    });
+    // On a hen it does not have, it is refused, saying why.
+    let ticket = inbox
+        .act(3, "hen/nobody", "peck", r#"{"pecks":1}"#)
+        .unwrap();
+    let outcome = inbox.outcome(ticket, Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        outcome,
+        Outcome::refused("There is no such hen in the yard now.")
+    );
+    // It stops with the space.
+    cancellation.cancel();
+    assert_eq!(running.join().unwrap(), Ok(()));
+}
+
 /// An outlet that refuses everything, as one for a space that has gone might.
 struct Refusing;
 
@@ -155,8 +205,29 @@ fn the_side_stops_when_its_space_refuses_what_it_sends() {
     let space = Space::new("space-1", "Fleet", "/").with_outlet(Arc::new(Describing));
     let started = Instant::now() - Duration::from_secs(60);
     assert_eq!(
-        run(&space, Some(chicken), started),
+        run(&space, Some(chicken.clone()), started),
         Err(Error::new("announced"))
+    );
+    // One that keeps the state but refuses its actions stops it as it declares them.
+    struct Declaring;
+    impl Outlet for Declaring {
+        fn share(&self, _state: String) -> Result<()> {
+            Ok(())
+        }
+        fn announce(&self, _event: String, _state: String) -> Result<()> {
+            Ok(())
+        }
+        fn describe(&self, _objects: Vec<Object>) -> Result<()> {
+            Ok(())
+        }
+        fn declare_actions(&self, _actions: Vec<tomori_environment::Action>) -> Result<()> {
+            Err(Error::new("declared"))
+        }
+    }
+    let space = Space::new("space-1", "Fleet", "/").with_outlet(Arc::new(Declaring));
+    assert_eq!(
+        run(&space, Some(chicken), Instant::now()),
+        Err(Error::new("declared"))
     );
     // Without its chickens, it cannot run.
     let space = Space::new("space-1", "Fleet", "/");

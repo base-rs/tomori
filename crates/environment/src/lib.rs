@@ -11,18 +11,30 @@
 //!
 //! A side may place cluster anchors as its state changes, named places that workers, panels and the agent gather at, such as a rack that starts alerting, and remove them again: see [`Space::place_anchor`].
 //!
+//! A side may declare [actions](Action) on what it describes, which the space's agent takes when someone asks, each
+//! reaching it as an [`Intent`] whose [`Intent::acted`] names it, which it answers with [`Space::answer`]: see
+//! [`Space::declare_actions`].
+//!
 //! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`]. A participant's choice of a row it marks [choosable](Row::choosable) reaches it as an [`Intent`] whose [`Intent::chosen`] names the row.
 //!
 //! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`], and the cluster anchors it places by [`ANCHOR_LIMIT`], [`ANCHOR_NAME_BYTES`], [`ANCHOR_LABEL_LIMIT`], [`ANCHOR_INTERVAL`], [`ANCHOR_CHANGES_PER_SECOND`] and [`ANCHOR_BURST`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use base_scheduler::Cancellation;
 
+mod action;
 mod panel;
 pub mod sightlines;
+
+pub use action::{
+    ACTION_DESCRIPTION_LIMIT, ACTION_LIMIT, ACTION_NAME_BYTES, ACTIONS_LIMIT, Acted, Action,
+    CHOICE_LABEL_LIMIT, CHOICE_LIMIT, Choice, Kind, OFFER_LIMIT, OUTCOME_LIMIT, Outcome,
+    PARAMETER_DESCRIPTION_LIMIT, PARAMETER_LIMIT, Parameter, TEXT_LIMIT, check_actions,
+    valid_action_name,
+};
 
 pub use panel::{
     PANEL_ID_BYTES, PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_panel_id,
@@ -129,6 +141,7 @@ pub struct Intent {
     participant: u32,
     payload: String,
     chosen: Option<Chosen>,
+    acted: Option<Acted>,
 }
 
 /// A participant's choice of a row of a list panel the side published, as the server hands it on: the side's own id
@@ -186,6 +199,7 @@ impl Intent {
             participant,
             payload: payload.into(),
             chosen: None,
+            acted: None,
         }
     }
 
@@ -206,6 +220,29 @@ impl Intent {
             participant,
             payload: String::new(),
             chosen: Some(chosen),
+            acted: None,
+        }
+    }
+
+    /// The action `acted` the space's agent took, on the word of the participant numbered `participant`, or `0`, the
+    /// number the server gives nobody, where nobody's word stands behind it; its payload is empty. The server makes it,
+    /// as the agent takes an action the side declared on something it describes, never from a client's intent; a side's
+    /// own tests make it to try their handling of an action.
+    ///
+    /// ```
+    /// use tomori_environment::{Acted, Intent};
+    ///
+    /// let intent = Intent::action(3, Acted::new(1, "hen/pip", "peck", "{}"));
+    /// assert_eq!(intent.acted().map(Acted::action), Some("peck"));
+    /// assert_eq!((intent.participant(), intent.payload(), intent.chosen()), (3, "", None));
+    /// assert_eq!(Intent::new(3, "{}").acted(), None);
+    /// ```
+    pub fn action(participant: u32, acted: Acted) -> Self {
+        Self {
+            participant,
+            payload: String::new(),
+            chosen: None,
+            acted: Some(acted),
         }
     }
 
@@ -228,6 +265,15 @@ impl Intent {
     /// participant's own, as on anything they asked, validating the row against its own state.
     pub fn chosen(&self) -> Option<&Chosen> {
         self.chosen.as_ref()
+    }
+
+    /// The action the space's agent took on something this side describes, if this is one rather than the client
+    /// side's own intent. Only the server makes one, once it has checked it against what the side declared and the
+    /// object offers now, and checked who asked as the action needs: a client's intent is never one, whatever its
+    /// payload says. The side answers it with [`Space::answer`], by its [`Acted::ticket`], still validating it against
+    /// its own state. See `design/environment-actions.md`.
+    pub fn acted(&self) -> Option<&Acted> {
+        self.acted.as_ref()
     }
 }
 
@@ -259,6 +305,7 @@ pub struct Object {
     description: String,
     reference: Option<String>,
     position: Option<[f32; 3]>,
+    offers: Vec<String>,
 }
 
 /// The longest reference of an object, in bytes: a longer one is left out, and the object described without it.
@@ -318,6 +365,7 @@ impl Object {
             description: description.into(),
             reference: None,
             position: None,
+            offers: Vec::new(),
         }
     }
 
@@ -338,6 +386,28 @@ impl Object {
     pub fn with_reference(mut self, reference: impl Into<String>) -> Self {
         self.reference = Some(reference.into());
         self
+    }
+
+    /// This object, offering the actions the side declared by the names `actions`, after any it offers already, which
+    /// the space's agent may take on it, by its reference: so only an object with a reference offers any. The server
+    /// keeps at most [`OFFER_LIMIT`], leaving out a name [`valid_action_name`] refuses or given twice, and offers only
+    /// those the side has declared, with [`Space::declare_actions`]. A side whose object stops taking an action, as a
+    /// terminal frozen during an incident, describes it again without it. See `design/environment-actions.md`.
+    ///
+    /// ```
+    /// use tomori_environment::Object;
+    ///
+    /// let terminal = Object::new("terminal-2", "deck terminal 2").with_reference("terminal/2").offering(["set_region"]);
+    /// assert_eq!(terminal.offers(), ["set_region"]);
+    /// ```
+    pub fn offering(mut self, actions: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.offers.extend(actions.into_iter().map(Into::into));
+        self
+    }
+
+    /// The names of the actions it offers, as the side gave them.
+    pub fn offers(&self) -> &[String] {
+        &self.offers
     }
 
     /// The identity clients name it by.
@@ -435,6 +505,12 @@ pub trait Outlet: Send + Sync {
         let _ = name;
         Ok(())
     }
+    /// Declare the actions the space's agent may take on what the side describes, replacing those declared before. An
+    /// outlet that takes no actions, as one made before actions were, keeps nothing.
+    fn declare_actions(&self, actions: Vec<Action>) -> Result<()> {
+        let _ = actions;
+        Ok(())
+    }
 }
 
 /// An outlet that keeps nothing and sends nothing, for a space made without one.
@@ -464,6 +540,17 @@ struct Waiting {
     intents: Mutex<VecDeque<Intent>>,
     ready: Condvar,
     inspector: Mutex<Option<Arc<dyn Inspector>>>,
+    answers: Mutex<Answers>,
+    answered: Condvar,
+}
+
+/// The actions handed on to a side that wait for its answer, and the answers it gave that the server has not yet taken.
+#[derive(Default)]
+struct Answers {
+    /// The ticket the next action is given, counting from 1.
+    next: u64,
+    waiting: HashSet<u64>,
+    given: HashMap<u64, Outcome>,
 }
 
 /// Where the server hands on the intents participants send to the side of a space: see [`Space::inbox`].
@@ -485,6 +572,51 @@ impl Inbox {
         intents.push_back(intent);
         self.0.ready.notify_all();
         true
+    }
+
+    /// Hand on the action `action` taken on the object of `reference` with `parameters`, as the server checked them, on
+    /// the word of the participant numbered `participant`, unless [`WAITING_INTENT_LIMIT`] intents are already waiting,
+    /// when it is dropped. Returns the ticket the side answers it by, which [`Inbox::outcome`] waits for, or `None` if it
+    /// was dropped.
+    pub fn act(
+        &self,
+        participant: u32,
+        reference: &str,
+        action: &str,
+        parameters: &str,
+    ) -> Option<u64> {
+        let mut answers = self
+            .0
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let ticket = answers.next + 1;
+        let acted = Acted::new(ticket, reference, action, parameters);
+        if !self.push(Intent::action(participant, acted)) {
+            return None;
+        }
+        answers.next = ticket;
+        answers.waiting.insert(ticket);
+        Some(ticket)
+    }
+
+    /// The side's answer to the action handed on as `ticket`, waiting for it for at most `timeout`; `None` if it did not
+    /// answer in time, after which an answer it gives is not taken.
+    pub fn outcome(&self, ticket: u64, timeout: Duration) -> Option<Outcome> {
+        let answers = self
+            .0
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (mut answers, _) = self
+            .0
+            .answered
+            .wait_timeout_while(answers, timeout, |answers| {
+                !answers.given.contains_key(&ticket)
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        answers.waiting.remove(&ticket);
+        answers.given.remove(&ticket)
     }
 
     /// The inspector the side last gave with [`Space::inspect_with`], if it gave one.
@@ -704,6 +836,56 @@ impl Space {
         self.outlet.remove_anchor(name)
     }
 
+    /// Declare the actions the space's agent may take on what this side describes, replacing those declared before:
+    /// each object offers those it applies to by name, with [`Object::offering`], and each the agent takes reaches the
+    /// side as an [`Intent`] whose [`Intent::acted`] names it, which the side answers with [`Space::answer`]. The server
+    /// refuses, saying why, a declaration [`check_actions`] refuses, and keeps none of it; it cleans each description
+    /// and label onto one line and cuts it after [`ACTION_DESCRIPTION_LIMIT`], [`PARAMETER_DESCRIPTION_LIMIT`] or
+    /// [`CHOICE_LABEL_LIMIT`] characters. What it keeps belongs to the side's binding. See
+    /// `design/environment-actions.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Action, Parameter, Space};
+    ///
+    /// let space = Space::new("space-1-1", "Yard", "/");
+    /// let pecks = Parameter::number("pecks", "how many times", 1.0, 8.0).stepped(1.0);
+    /// space.declare_actions(vec![Action::new("peck", "Have this hen peck at the ground").with(pecks)]).unwrap();
+    /// ```
+    pub fn declare_actions(&self, actions: Vec<Action>) -> Result<()> {
+        self.outlet.declare_actions(actions)
+    }
+
+    /// Answer the action handed to this side as `ticket`, [`Acted::ticket`], with `outcome`: done, with a summary of
+    /// what changed, or refused, with the reason. The server waits for an answer for at most a few seconds, telling the
+    /// agent then that the environment did not answer; an answer to an action no longer waited for, as one answered
+    /// already or too late, is not taken. Returns whether it was.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tomori_environment::{Outcome, Space};
+    ///
+    /// let space = Space::new("space-1-1", "Yard", "/");
+    /// let ticket = space.inbox().act(3, "hen/pip", "peck", r#"{"pecks":2}"#).unwrap();
+    /// let intent = space.next_intent(Duration::ZERO).unwrap();
+    /// assert_eq!(intent.acted().unwrap().ticket(), ticket);
+    /// assert!(space.answer(ticket, Outcome::done("Pip pecks at the ground.")));
+    /// assert_eq!(space.inbox().outcome(ticket, Duration::ZERO), Some(Outcome::done("Pip pecks at the ground.")));
+    /// assert!(!space.answer(ticket, Outcome::done("again")));
+    /// ```
+    pub fn answer(&self, ticket: u64, outcome: Outcome) -> bool {
+        let mut answers = self
+            .waiting
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !answers.waiting.remove(&ticket) {
+            return false;
+        }
+        answers.given.insert(ticket, outcome);
+        self.waiting.answered.notify_all();
+        true
+    }
+
     /// Answer the space's agent with `inspector` when it inspects what this side described with a reference, replacing
     /// any inspector given before. A side that gives none has nothing more to say of what it describes. It answers for
     /// as long as the side's binding lasts, and the server forgets it with the binding.
@@ -810,6 +992,7 @@ mod tests {
         let rack = Anchor::new("rack/a12", tomori_protocol::Pose::HOME);
         assert_eq!(space.place_anchor(rack), Ok(()));
         assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
+        assert_eq!(space.declare_actions(vec![Action::new("a", "b")]), Ok(()));
     }
 
     #[test]
@@ -836,6 +1019,66 @@ mod tests {
         let rack = Anchor::new("rack/a12", tomori_protocol::Pose::HOME);
         assert_eq!(space.place_anchor(rack), Ok(()));
         assert_eq!(space.remove_anchor("rack/a12"), Ok(()));
+        // Nor actions, made before them.
+        assert_eq!(space.declare_actions(Vec::new()), Ok(()));
+    }
+
+    #[test]
+    fn an_action_is_an_intent_apart_from_any_payload_answered_by_its_ticket() {
+        let space = Space::new("space-1-5", "Yard", "/");
+        let inbox = space.inbox();
+        // A client's intent is never an action, whatever it says.
+        let forged = Intent::new(4, r#"{"acted":{"ticket":1,"action":"peck"}}"#);
+        assert_eq!(forged.acted(), None);
+        assert!(inbox.push(forged.clone()));
+        let first = inbox.act(4, "hen/pip", "peck", r#"{"pecks":2}"#).unwrap();
+        let second = inbox.act(0, "hen/pip", "peck", r#"{"pecks":3}"#).unwrap();
+        assert_eq!((first, second), (1, 2));
+        // In order with the client side's intents.
+        assert_eq!(space.next_intent(Duration::ZERO), Some(forged));
+        let intent = space.next_intent(Duration::ZERO).unwrap();
+        assert_eq!(intent.participant(), 4);
+        assert_eq!(
+            intent.acted(),
+            Some(&Acted::new(1, "hen/pip", "peck", r#"{"pecks":2}"#))
+        );
+        // An answer given before the server waits is kept for it; one not waited for in time is not taken.
+        assert!(space.answer(first, Outcome::refused("She is roosting.")));
+        assert_eq!(
+            inbox.outcome(first, Duration::ZERO),
+            Some(Outcome::refused("She is roosting."))
+        );
+        assert_eq!(inbox.outcome(second, Duration::from_millis(1)), None);
+        assert!(!space.answer(second, Outcome::done("late")));
+        assert!(!space.answer(99, Outcome::done("never asked")));
+        // Answered from the side's thread while the server waits.
+        let _second = space.next_intent(Duration::ZERO);
+        let ticket = inbox.act(1, "hen/pip", "peck", "{}").unwrap();
+        let side = std::thread::spawn(move || {
+            let intent = space.next_intent(Duration::from_secs(10)).unwrap();
+            space.answer(intent.acted().unwrap().ticket(), Outcome::done("Pecked."))
+        });
+        assert_eq!(
+            inbox.outcome(ticket, Duration::from_secs(10)),
+            Some(Outcome::done("Pecked."))
+        );
+        assert!(side.join().unwrap());
+        // Dropped, as any intent, beyond the inbox's limit, and given no ticket.
+        let space = Space::new("space-1-6", "Yard", "/");
+        for participant in 0..WAITING_INTENT_LIMIT as u32 {
+            assert!(space.inbox().push(Intent::new(participant, "{}")));
+        }
+        assert_eq!(space.inbox().act(1, "hen/pip", "peck", "{}"), None);
+        let _ = space.next_intent(Duration::ZERO);
+        assert_eq!(space.inbox().act(1, "hen/pip", "peck", "{}"), Some(1));
+    }
+
+    #[test]
+    fn an_object_offers_the_actions_it_names() {
+        let object = Object::new("chicken-1", "Pip").with_reference("hen/pip");
+        assert!(object.offers().is_empty());
+        let object = object.offering(["peck"]).offering(vec!["look".to_owned()]);
+        assert_eq!(object.offers(), ["peck", "look"]);
     }
 
     #[test]

@@ -7182,6 +7182,8 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
     hub.shutdown();
 }
 
+#[path = "hub_tests/actions.rs"]
+mod actions;
 #[path = "hub_tests/anchors.rs"]
 mod anchors;
 #[path = "hub_tests/following.rs"]

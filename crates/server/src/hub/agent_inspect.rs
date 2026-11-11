@@ -40,7 +40,24 @@ pub(crate) struct Asking {
     description: String,
     /// The side's inspector and the inspection counted against its limit, or `None` if it gave none.
     inspector: Option<(Arc<dyn Inspector>, Inspecting)>,
+    /// The actions it offers, or the one asked for, as the side declared them. See `design/environment-actions.md`.
+    actions: Vec<tomori_environment::Action>,
+    /// Whether one action was asked for, to be told whole.
+    one: bool,
 }
+
+/// The most bytes an inspection's result takes as it is sent, as structured content and again as text, so that the
+/// agent can always read it: room for the side's details, at most [`INSPECTION_BYTES`] as JSON, sent twice and
+/// escaped, and for what it offers. Where its actions would take more, their choices are told in part, and then their
+/// names alone. See `design/environment-actions.md`.
+pub const RESULT_BYTES: usize = 64 * 1024;
+
+/// How many of [`RESULT_BYTES`] are left for the result around what an inspection says, in both forms.
+const RESULT_ROOM: usize = 256;
+
+/// How many of a choice's values an inspection tells, in turn, until its result fits within [`RESULT_BYTES`]: all of
+/// them, then the first few, then none, with how many there are.
+const CHOICES_TOLD: [Option<usize>; 4] = [None, Some(16), Some(4), Some(0)];
 
 /// `text` as the agent is told an environment's words: on one line, without control or format characters, cut.
 fn cleaned(text: &str) -> String {
@@ -116,8 +133,16 @@ impl Hub {
     /// What the agent of the space bound to `session` asks to inspect by `id`, an environment's identifier and an
     /// object's reference, as the agent was told it: an object the space's environment describes with it now; or why
     /// it cannot be inspected. See `design/environments.md`.
-    pub(crate) fn agent_inspect(&self, session: &str, id: &str) -> Result<Asking, String> {
+    pub(crate) fn agent_inspect(
+        &self,
+        session: &str,
+        id: &str,
+        action: Option<&str>,
+    ) -> Result<Asking, String> {
         crate::limits::check(id, ID_BYTES, "id")?;
+        if let Some(action) = action {
+            crate::limits::check(action, tomori_environment::ACTION_NAME_BYTES, "action")?;
+        }
         let state = self.lock();
         let space = self.calling_space(&state, session)?;
         let Some((environment, reference)) = id.rsplit_once(':') else {
@@ -137,13 +162,41 @@ impl Hub {
             .get(current)
             .map_or(current.as_str(), |environment| environment.label())
             .to_owned();
-        // An object the side describes now, or else a panel it publishes now.
-        let described = record
+        // An object the side describes now, with the actions it offers, or else a panel it publishes now.
+        let channel = record
             .channel
             .as_ref()
-            .filter(|channel| &channel.environment == current)
-            .and_then(|channel| channel.referenced(reference))
-            .map(|described| described.description.clone())
+            .filter(|channel| &channel.environment == current);
+        let object = channel.and_then(|channel| {
+            channel
+                .referenced(reference)
+                .map(|object| (channel, object))
+        });
+        let mut actions: Vec<tomori_environment::Action> = object
+            .map_or_else(Vec::new, |(channel, object)| {
+                channel.offered(object).into_iter().cloned().collect()
+            });
+        if let Some(action) = action {
+            let names: Vec<&str> = actions.iter().map(|offered| offered.name()).collect();
+            let Some(index) = names.iter().position(|name| *name == action) else {
+                return Err(if names.is_empty() {
+                    format!(
+                        "{} offers no actions now.",
+                        crate::space::one_line(id, ID_BYTES)
+                    )
+                } else {
+                    format!(
+                        "{} offers no action called {} now; it offers {}.",
+                        crate::space::one_line(id, ID_BYTES),
+                        crate::space::one_line(action, tomori_environment::ACTION_NAME_BYTES),
+                        names.join(", ")
+                    )
+                });
+            };
+            actions = vec![actions.swap_remove(index)];
+        }
+        let described = object
+            .map(|(_, described)| described.description.clone())
             .or_else(|| record.stage.referenced(current, reference))
             .ok_or_else(|| {
                 format!(
@@ -168,6 +221,8 @@ impl Hub {
             label,
             description: described,
             inspector,
+            actions,
+            one: action.is_some(),
         })
     }
 
@@ -183,17 +238,51 @@ impl Hub {
             label,
             description,
             inspector,
+            actions,
+            one,
         } = asking;
+        // Its actions as fully as fit, with what to do about any left out.
         let result = |details: Value, next: &str| {
-            json!({
-                "space": space,
-                "id": id,
-                "environment": environment,
-                "description": description,
-                "details": details,
-                "note": NOTE,
-                "next": next,
-            })
+            let told = |actions: Value, more: &str| {
+                let offers = if actions.as_array().is_some_and(Vec::is_empty) {
+                    ""
+                } else {
+                    " It offers the actions listed, which you may take on it with act when someone asks."
+                };
+                json!({
+                    "space": space,
+                    "id": id,
+                    "environment": environment,
+                    "description": description,
+                    "details": details,
+                    "actions": actions,
+                    "note": NOTE,
+                    "next": format!("{next}{offers}{more}"),
+                })
+            };
+            let ask = if one {
+                " Some of its choices are left out, as choices_total counts them: ask whoever asked to name one."
+            } else {
+                " Some choices are left out, as choices_total counts them: inspect it again with action, naming one, for that action whole."
+            };
+            for (index, most) in CHOICES_TOLD.into_iter().enumerate() {
+                let listed = actions
+                    .iter()
+                    .map(|action| super::agent_actions::told(action, most))
+                    .collect();
+                let fitted = told(listed, if index == 0 { "" } else { ask });
+                if super::agent_panels::sent(&fitted) + RESULT_ROOM <= RESULT_BYTES {
+                    return fitted;
+                }
+            }
+            let named = actions
+                .iter()
+                .map(|action| json!({ "name": action.name(), "consequential": action.is_consequential() }))
+                .collect();
+            told(
+                named,
+                " Its actions are listed by name alone: inspect it again with action, naming one, for that action.",
+            )
         };
         let Some((inspector, inspecting)) = inspector else {
             return Ok(result(

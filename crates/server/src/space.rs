@@ -35,6 +35,10 @@ pub struct Given {
     pub speaker: String,
     /// When it was given to the agent.
     pub at: std::time::Instant,
+    /// Whether Tomori's own notes, such as a timer that fired or a worker's report, were carried in front of the
+    /// words, so that what the agent does in the turn may answer the notes rather than the words. See
+    /// `design/environment-actions.md`.
+    pub carried: bool,
     /// Whether input that did not come through Tomori, or that Tomori may have missed, reached the agent after it, so
     /// that its words are no longer the agent's latest input, and why.
     pub superseded: Option<Superseded>,
@@ -209,11 +213,13 @@ enum Resolved {
     Card { id: String, description: String },
     /// Something the space's environment presents, as its server side last described it as the utterance began, with
     /// the id the agent may inspect it by, its reference after the environment's identifier, if it has one. See
-    /// `design/environments.md`.
+    /// `design/environments.md`. With the names of the actions it offers, the first few, which the agent may take on it
+    /// with `act`. See `design/environment-actions.md`.
     Object {
         id: String,
         description: String,
         reference: Option<String>,
+        offers: Vec<String>,
     },
     /// A panel projected in the space, as the stage described it as the utterance began. See `design/projection.md`.
     Panel { id: String, description: String },
@@ -309,10 +315,17 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
         Attended(Resolved::Object {
             description,
             reference,
+            offers,
             ..
         }) => {
             return match reference {
-                Some(reference) => format!("{description} (id {reference})"),
+                Some(reference) if offers.is_empty() => format!("{description} (id {reference})"),
+                Some(reference) => {
+                    format!(
+                        "{description} (id {reference}; offers {})",
+                        offers.join(", ")
+                    )
+                }
                 None => description.clone(),
             };
         }
@@ -322,6 +335,26 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
         }
     };
     describe_worker(backend, id, title, workers)
+}
+
+/// The most actions the note before someone's words names of what they point at, and the most characters their names
+/// take together, so that the note stays short; the agent finds the rest with `inspect`.
+const OFFERED_NAMES: usize = 3;
+const OFFERED_CHARS: usize = 60;
+
+/// The names of the first of `actions` the note before someone's words names, within [`OFFERED_NAMES`] and
+/// [`OFFERED_CHARS`].
+fn offered_names(actions: &[&tomori_environment::Action]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut length = 0;
+    for action in actions.iter().take(OFFERED_NAMES) {
+        length += action.name().len() + if names.is_empty() { 0 } else { 2 };
+        if length > OFFERED_CHARS {
+            break;
+        }
+        names.push(action.name().to_owned());
+    }
+    names
 }
 
 /// The worker `id`, titled `title` as the space last knew it, described from `workers`, the space's workers when the
@@ -1764,6 +1797,7 @@ impl SpaceModel {
                         .reference
                         .as_ref()
                         .map(|reference| inspectable(&channel.environment, reference)),
+                    offers: offered_names(&channel.offered(described)),
                 }))
             }
             // A panel's identity is only looked up: the stage describes the panel it has.
@@ -2035,6 +2069,7 @@ impl SpaceModel {
             return self.event_prompt(now, hold);
         }
         let events = self.events.block();
+        let carried = events.is_some();
         // An entry is sending only while it is in flight, which nothing is.
         let entry = self.queue.begin_next().expect("an entry is queued");
         let key = entry.id.clone();
@@ -2091,6 +2126,7 @@ impl SpaceModel {
             source,
             speaker,
             at: std::time::Instant::now(),
+            carried,
             superseded: None,
         });
         Some(prompt)
@@ -2169,6 +2205,7 @@ impl SpaceModel {
             source,
             speaker: speaker.to_owned(),
             at,
+            carried: false,
             superseded: None,
         });
     }
@@ -4311,6 +4348,45 @@ mod tests {
         assert_eq!(
             inspectable(&"e".repeat(100), "hen/pip"),
             format!("{}…:hen/pip", "e".repeat(ENVIRONMENT_CHARS))
+        );
+        // What it offers is named after its id, the first few, within their bound.
+        channel.actions = ["peck", "look", "cluck", "roost"]
+            .into_iter()
+            .chain([
+                "a_very_long_action_name_indeed",
+                "another_rather_long_name_tooo",
+            ])
+            .map(|name| tomori_environment::Action::new(name, "something"))
+            .collect();
+        channel.objects = crate::channel::objects(
+            vec![
+                tomori_environment::Object::new("chicken-2", "Marigold, a hen")
+                    .with_reference("hen/marigold")
+                    .offering(["peck", "look", "cluck", "roost"]),
+                tomori_environment::Object::new("chicken-3", "Pip, a hen")
+                    .with_reference("hen/pip")
+                    .offering([
+                        "a_very_long_action_name_indeed",
+                        "another_rather_long_name_tooo",
+                        "peck",
+                    ]),
+            ],
+            Some,
+        );
+        let resolved = |objects: &[&str]| {
+            let named: Vec<_> = objects
+                .iter()
+                .map(|object| tomori_protocol::Resource::object(*object))
+                .collect();
+            space.resolve(&named, None, Some(&channel))
+        };
+        assert_eq!(
+            context("opencode", &resolved(&["chicken-2"]), &[]).unwrap(),
+            "[Pointing at Marigold, a hen (id farmyard:hen/marigold; offers peck, look, cluck)]"
+        );
+        assert_eq!(
+            context("opencode", &resolved(&["chicken-3"]), &[]).unwrap(),
+            "[Pointing at Pip, a hen (id farmyard:hen/pip; offers a_very_long_action_name_indeed)]"
         );
     }
 
