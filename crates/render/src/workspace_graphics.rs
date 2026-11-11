@@ -2016,10 +2016,9 @@ mod tests {
                 .iter()
                 .chain([&glam::Vec3::new(6.0, 1.2, -9.0)])
             {
+                // Clear of the others above and below it, since they stand together.
                 assert!(
-                    (sign.y - other.y).abs() >= SIGN_APART[0] * scale - 1e-4
-                        || (sign.x - other.x).hypot(sign.z - other.z)
-                            >= SIGN_APART[1] * scale - 1e-4,
+                    (sign.y - other.y).abs() >= SIGN_APART[0] * scale - 1e-4,
                     "{index}: {sign} {other}"
                 );
             }
