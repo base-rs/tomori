@@ -7,9 +7,10 @@
 //! says what to do there, standing and safe with a headset on. It is a track of packed earth, a little darker than the
 //! yard's, raised a little above the meadow, with raised edges and a few stones along them, low-poly as the yard is.
 //!
-//! Participants walk it as they walk the yard: its band ([`outlines`]) and the clearings beside it ([`clearings`]) are
-//! walkable at the height each is drawn, within a centimetre of the yard's earth, joined to it through the gate
-//! ([`GATEWAY`]), a pair of teleport pads ([`pads`]) takes them between the yard and the lookout, and pointing at the
+//! Participants walk it as they walk the yard: its track, from crest to crest, and the clearings beside it
+//! ([`clearings`]) are drawn as ground ([`ground`]), walkable where they are drawn, within a centimetre of the yard's
+//! earth, joined to it through the gate ([`GATEWAY`], [`way_out`]), a pair of teleport pads ([`pads`]) takes them
+//! between the yard and the lookout, and pointing at the
 //! waterfall rock from the lookout, or at the lookout's seat from the rock, takes them there ([`targets`]). Its
 //! stations, viewpoints and the rock are named anchors ([`places`]), and its posts, its seat and the rock are solids
 //! ([`solids`]). It stays within [`REACH`] of the backdrop's middle, so that the
@@ -405,35 +406,12 @@ pub fn clearings() -> Vec<(Vec2, f32)> {
     clearings
 }
 
-/// How many stretches the loop's band is declared in, each a polygon, overlapping the next by a step, since one
-/// outline cannot have the hole the loop goes round.
-pub const STRETCHES: usize = 4;
-
-/// The walkable outlines of the trail, each its corners in order on the ground and its height, as drawn there: the
-/// loop's band, [`WIDTH`] wide, in [`STRETCHES`], each overlapping the next, at [`HEIGHT`]; and the way out through the
-/// gate, from the yard's earth to the fence at [`EARTH`], and from there to the loop on its track at [`HEIGHT`].
-pub fn outlines() -> Vec<(Vec<Vec2>, f32)> {
-    let count = centreline().len();
-    let mut outlines: Vec<(Vec<Vec2>, f32)> = (0..STRETCHES)
-        .map(|stretch| {
-            let (from, to) = (
-                stretch * count / STRETCHES,
-                (stretch + 1) * count / STRETCHES + 1,
-            );
-            let sides: Vec<(Vec2, Vec2)> = (from..=to)
-                .map(|index| {
-                    let (point, _, outward) = frame(index);
-                    (point + outward * HALF, point - outward * HALF)
-                })
-                .collect();
-            let outline = sides
-                .iter()
-                .map(|(outer, _)| *outer)
-                .chain(sides.iter().rev().map(|(_, inner)| *inner))
-                .collect();
-            (outline, HEIGHT)
-        })
-        .collect();
+/// The walkable outlines of the way out through the gate, each its corners in order on the ground and its height, as
+/// drawn there: from the yard's earth to the fence at [`EARTH`], and from there to the loop on its track at [`HEIGHT`],
+/// [`WIDTH`] wide, the trail's whole width. Declared by hand, unlike the rest of the trail, since the gate's posts
+/// stand closer to it than the clearance that keeps participants from what stands on the ground: 0.12 m, rather than
+/// `layout::CLEARANCE`.
+pub fn way_out() -> Vec<(Vec<Vec2>, f32)> {
     let [inside, loop_] = GATEWAY;
     let across = |from: f32, to: f32| {
         vec![
@@ -444,9 +422,10 @@ pub fn outlines() -> Vec<(Vec<Vec2>, f32)> {
         ]
     };
     let fence = layout::FENCE.high.y;
-    outlines.push((across(inside.y, fence), EARTH));
-    outlines.push((across(fence, loop_.y), HEIGHT));
-    outlines
+    vec![
+        (across(inside.y, fence), EARTH),
+        (across(fence, loop_.y), HEIGHT),
+    ]
 }
 
 /// The log seat at the lookout, beyond the trail, facing the pool: its middle, the way it lies, along the trail, how
@@ -595,7 +574,8 @@ fn section(point: Vec2, outward: Vec2) -> [Vec3; 6] {
 }
 
 /// The track along `points`, each with the way out of it, as bands across it, quads between each band and the next:
-/// its middle and, either side, its raised edges sloping down to the meadow.
+/// its middle and, either side, its raised edges sloping down to the meadow; drawn as ground from one crest to the
+/// other, [`WIDTH`] wide, but not beyond them, down to the meadow, which participants do not walk on.
 fn track(shapes: &mut Shapes, points: &[(Vec2, Vec2)]) {
     let sections: Vec<[Vec3; 6]> = points
         .iter()
@@ -614,7 +594,11 @@ fn track(shapes: &mut Shapes, points: &[(Vec2, Vec2)]) {
             } else {
                 colors::EDGE
             };
-            facing(shapes, &corners, Vec3::Y, color);
+            if (1..=3).contains(&strip) {
+                shapes.ground(|shapes| facing(shapes, &corners, Vec3::Y, color));
+            } else {
+                facing(shapes, &corners, Vec3::Y, color);
+            }
         }
     }
 }
@@ -721,6 +705,17 @@ fn log(shapes: &mut Shapes) {
 /// The trail, as a model of one node whose mesh draws it all: its track round the loop and out through the gate, its
 /// clearings, the stones along its edges, the stations' posts and the seat.
 pub fn model() -> Model {
+    backdrop::built("trail", shapes())
+}
+
+/// What the trail draws as ground, which participants walk on, each triangle as [`model`] draws it: its track round
+/// the loop and out through the gate, from crest to crest, and its clearings.
+pub fn ground() -> Vec<[Vec3; 3]> {
+    shapes().walkable().to_vec()
+}
+
+/// The trail's shapes.
+fn shapes() -> Shapes {
     let mut shapes = Shapes::new();
     let count = centreline().len();
     let points: Vec<(Vec2, Vec2)> = (0..=count)
@@ -742,12 +737,14 @@ pub fn model() -> Model {
     track(&mut shapes, &gateway);
     // The clearings, a little below the track where they meet it.
     for (middle, radius) in clearings() {
-        shapes.disc(
-            Vec3::new(middle.x, CLEARING_HEIGHT, middle.y),
-            radius,
-            9,
-            colors::CLEARING,
-        );
+        shapes.ground(|shapes| {
+            shapes.disc(
+                Vec3::new(middle.x, CLEARING_HEIGHT, middle.y),
+                radius,
+                9,
+                colors::CLEARING,
+            )
+        });
     }
     // A few stones along its edges, now one side, now the other, but where a clearing or the gate opens it.
     for stone in 0..24u32 {
@@ -774,7 +771,7 @@ pub fn model() -> Model {
         post(&mut shapes, station);
     }
     log(&mut shapes);
-    backdrop::built("trail", shapes)
+    shapes
 }
 
 #[cfg(test)]

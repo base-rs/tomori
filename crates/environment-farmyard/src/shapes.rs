@@ -15,6 +15,9 @@ pub struct Shapes {
     indices: Vec<u32>,
     /// Varies each face's colour a little, the same each time the shapes are built.
     faces: u32,
+    /// The faces drawn as ground, which participants walk on, each a triangle, and whether what is drawn now is.
+    ground: Vec<[Vec3; 3]>,
+    marking: bool,
 }
 
 /// `color`, linear RGB, as a vertex colour, varied a little by `seed`, by at most `amount` of itself.
@@ -49,6 +52,25 @@ impl Shapes {
             self.indices
                 .extend([first, first + index, first + index + 1]);
         }
+        if self.marking {
+            self.ground.extend(
+                (1..corners.len() - 1)
+                    .map(|index| [corners[0], corners[index], corners[index + 1]]),
+            );
+        }
+    }
+
+    /// Draw what `draw` draws as ground, too: the faces participants walk on, as Tomori derives where they may land
+    /// from them, less what stands on them, so that what is walked on is what is drawn.
+    pub fn ground(&mut self, draw: impl FnOnce(&mut Self)) {
+        let marking = std::mem::replace(&mut self.marking, true);
+        draw(self);
+        self.marking = marking;
+    }
+
+    /// The faces drawn as ground so far, each a triangle.
+    pub fn walkable(&self) -> &[[Vec3; 3]] {
+        &self.ground
     }
 
     /// A box centred at `centre`, `half` its size on each axis, turned by `turn` about its centre.
@@ -231,6 +253,30 @@ mod tests {
                 .all(|color| (color.x - 1.0).abs() < 0.15 && color.w == 1.0)
         );
         assert!(primitive.colors.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn only_what_is_drawn_as_ground_is_walked_on() {
+        let mut shapes = Shapes::new();
+        shapes.block(Vec3::ZERO, Vec3::ONE, Vec3::ONE);
+        shapes.ground(|shapes| {
+            shapes.disc(Vec3::X * 3.0, 0.5, 6, Vec3::ONE);
+            // Within, still ground, and after it, too.
+            shapes.ground(|shapes| shapes.disc(Vec3::X * 5.0, 0.5, 4, Vec3::ONE));
+            shapes.disc(Vec3::X * 7.0, 0.5, 3, Vec3::ONE);
+        });
+        shapes.disc(Vec3::X * 9.0, 0.5, 8, Vec3::ONE);
+        // The hexagon's four triangles, the square's two and the triangle, as drawn, and nothing of the block.
+        let ground = shapes.walkable();
+        assert_eq!(ground.len(), 4 + 2 + 1);
+        assert!(
+            ground
+                .iter()
+                .flatten()
+                .all(|corner| corner.y == 0.0 && corner.x > 2.0 && corner.x < 8.0)
+        );
+        let drawn = shapes.primitive(0);
+        assert_eq!(drawn.indices.len() / 3, 12 + 4 + 2 + 1 + 6);
     }
 
     #[test]

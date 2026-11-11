@@ -5,7 +5,8 @@
 //! towards −Z, and the ground at 0: the fence and its gate, the coop and its ramp, the water trough, the feed, the hay,
 //! the notice board and the workbench in the front left corner; and where participants arrive, [`ARRIVAL`], and where
 //! the agent's home is, [`AGENT_HOME`], at the heart of the workbench's curve. The scenery draws them here, the
-//! participants land where [`walkable`] says, and the flock keeps clear of them, so that all three agree; Tomori
+//! participants land on the ground it draws clear of them, as `crate::walkable` derives, and the flock keeps clear of
+//! them, so that all three agree; Tomori
 //! carries them all into a space's coordinates, where the arrival is home, at the origin facing −Z (see
 //! `design/environments.md`).
 use glam::{Vec2, Vec3};
@@ -56,8 +57,12 @@ impl Footprint {
 pub const FENCE: Footprint = Footprint::new([-5.0, -11.0], [5.0, 1.6]);
 /// The gate, the gap in the fence in front of home, from one post to the other along X.
 pub const GATE: [f32; 2] = [-0.8, 0.8];
-/// How tall the fence's posts are.
+/// How tall the fence's posts are, and how thick, square.
 pub const FENCE_HEIGHT: f32 = 1.0;
+pub const FENCE_POST: f32 = 0.12;
+/// How thick the gate's two posts are, square, and how tall, taller than the fence's.
+pub const GATE_POST: f32 = 0.16;
+pub const GATE_HEIGHT: f32 = FENCE_HEIGHT * 1.35;
 
 /// The coop: a hen house raised on legs, its door facing +Z, towards home.
 pub const COOP: Footprint = Footprint::new([-3.8, -9.4], [-1.8, -7.8]);
@@ -106,6 +111,7 @@ pub const TROUGH_HEIGHT: f32 = 0.38;
 /// The feeder, a round tray the grain is scattered about, and how far the grain is scattered.
 pub const FEEDER: Vec2 = Vec2::new(0.8, -6.8);
 pub const FEEDER_RADIUS: f32 = 0.28;
+pub const FEEDER_HEIGHT: f32 = 0.35;
 pub const GRAIN_RADIUS: f32 = 0.9;
 /// Where the farmyard's own projection wall stands, the middle of its face: on the notice board against the right of
 /// the fence, short of the trough, a little below eye height, facing into the yard, along −X, for what the agent
@@ -123,8 +129,9 @@ pub const NOTICEBOARD_BACK: [[f32; 3]; 2] = [[4.585, 1.08, -5.56], [4.63, 1.82, 
 pub const NOTICEBOARD_POSTS: [[f32; 2]; 2] = [[4.63, -5.62], [4.63, -3.98]];
 pub const NOTICEBOARD_POST: f32 = 0.09;
 pub const NOTICEBOARD_HEIGHT: f32 = 2.05;
-/// The hay bales, stacked in the back corner.
+/// The hay bales, stacked in the back corner, and how high they are stacked.
 pub const HAY: Footprint = Footprint::new([3.0, -10.7], [4.6, -9.5]);
+pub const HAY_HEIGHT: f32 = 1.2;
 
 /// Where participants arrive in the yard, home: inside the gate, on the earth, facing [`ARRIVAL_FACING`], so that they
 /// see at once the coop and the yard, the agent at its workbench to their left. Travel from there is free.
@@ -247,8 +254,8 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
         solid(COOP.grown(0.18), COOP_RIDGE + 0.1),
         solid(ramp(), COOP_FLOOR),
         solid(TROUGH, TROUGH_HEIGHT),
-        solid(feeder, 0.35),
-        solid(HAY, 1.2),
+        solid(feeder, FEEDER_HEIGHT),
+        solid(HAY, HAY_HEIGHT),
         solid(noticeboard(), NOTICEBOARD_HEIGHT),
     ];
     solids.extend(
@@ -406,74 +413,10 @@ pub fn stones() -> Vec<Stone> {
 }
 
 /// How far the earth participants land on in the yard stops short of each of what stands in it, [`obstacles`], clear
-/// of the coop's roof, which overhangs its walls by 0.18 m; and how far short of the fence.
+/// of the coop's roof, which overhangs its walls by 0.18 m, and of what stands beside the trail; and how far short of
+/// the fence's line, its posts' middles. Where participants land is derived from them, as `crate::walkable` says.
 pub const CLEARANCE: f32 = 0.25;
 pub const FENCE_CLEARANCE: f32 = 0.4;
-
-/// Where participants may land in the yard: everywhere inside the fence, by [`FENCE_CLEARANCE`], but within
-/// [`CLEARANCE`] of what stands in it ([`obstacles`]), as rectangles a teleport profile's surfaces are made of, at the
-/// ground's height, none overlapping another. They are cut from the yard along every edge of what stands in it, so
-/// that the open ground between things, such as beside the feeder or between the trough and the hay, is never left
-/// out, as it was when the rectangles were laid by hand.
-pub fn open_ground() -> Vec<Footprint> {
-    let yard = FENCE.grown(-FENCE_CLEARANCE);
-    let kept: Vec<Footprint> = obstacles()
-        .iter()
-        .map(|obstacle| obstacle.grown(CLEARANCE))
-        .collect();
-    // Every edge of the yard and of what stands in it, within the yard, along `axis`, in order.
-    let cuts = |axis: usize| {
-        let mut cuts: Vec<f32> = [yard.low, yard.high]
-            .into_iter()
-            .chain(
-                kept.iter()
-                    .flat_map(|footprint| [footprint.low, footprint.high]),
-            )
-            .map(|corner| corner[axis].clamp(yard.low[axis], yard.high[axis]))
-            .collect();
-        cuts.sort_by(f32::total_cmp);
-        cuts.dedup();
-        cuts
-    };
-    let (across, along) = (cuts(0), cuts(1));
-    let mut ground: Vec<Footprint> = Vec::new();
-    // Those still growing along Z, as indices into `ground`.
-    let mut growing: Vec<usize> = Vec::new();
-    for band in along.windows(2) {
-        // The runs of open cells across this band, each cell entirely within or beyond each kept footprint.
-        let mut runs: Vec<[f32; 2]> = Vec::new();
-        for cell in across.windows(2) {
-            let middle = Vec2::new((cell[0] + cell[1]) * 0.5, (band[0] + band[1]) * 0.5);
-            if kept.iter().any(|footprint| footprint.contains(middle)) {
-                continue;
-            }
-            match runs.last_mut() {
-                Some(run) if run[1] == cell[0] => run[1] = cell[1],
-                _ => runs.push([cell[0], cell[1]]),
-            }
-        }
-        // A run as wide as one in the band before carries it on; any other begins a rectangle of its own.
-        let mut next = Vec::new();
-        for run in runs {
-            let carried = growing.iter().copied().find(|&index| {
-                let footprint = ground[index];
-                footprint.low.x == run[0] && footprint.high.x == run[1]
-            });
-            match carried {
-                Some(index) => {
-                    ground[index].high.y = band[1];
-                    next.push(index);
-                }
-                None => {
-                    next.push(ground.len());
-                    ground.push(Footprint::new([run[0], band[0]], [run[1], band[1]]));
-                }
-            }
-        }
-        growing = next;
-    }
-    ground
-}
 
 /// The middle of the land beyond the fence, about which the backdrop's foothills ring the yard: the yard's middle.
 pub const BACKDROP_CENTRE: Vec2 = Vec2::new(0.0, -4.0);
@@ -601,32 +544,53 @@ pub fn nearest_river(point: Vec2) -> (Vec3, f32) {
         .expect("the river has reaches")
 }
 
-/// [`open_ground`]'s rectangles, as `(centre, size)` on the ground, for a teleport profile.
-pub fn walkable() -> Vec<(Vec3, Vec2)> {
-    open_ground()
-        .iter()
-        .map(|footprint| {
-            let centre = footprint.centre();
-            (Vec3::new(centre.x, 0.0, centre.y), footprint.size())
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The walkable ground's triangles within the fence, the yard's, seen from above.
+    fn yard_ground() -> Vec<[Vec2; 3]> {
+        crate::walkable::navmesh()
+            .triangles()
+            .iter()
+            .map(|triangle| triangle.map(|corner| Vec2::new(corner.x, corner.z)))
+            .filter(|triangle| {
+                triangle
+                    .iter()
+                    .all(|corner| FENCE.grown(1e-3).contains(*corner))
+            })
+            .collect()
+    }
+
+    /// Whether `point`, seen from above, is on the walkable ground.
+    fn on(point: Vec2) -> bool {
+        crate::walkable::height_at(point).is_some()
+    }
+
     #[test]
     fn nobody_lands_on_anything_and_everything_is_inside_the_fence() {
         let inside = FENCE.grown(-0.3);
-        let ground = open_ground();
-        for footprint in &ground {
-            assert!(inside.contains(footprint.low) && inside.contains(footprint.high));
-            for obstacle in obstacles() {
-                assert!(
-                    !footprint.overlaps(&obstacle.grown(0.2)),
-                    "{footprint:?} {obstacle:?}"
-                );
+        // Beyond the fence's clearance, the yard's ground reaches only between the gate's posts, within the way out.
+        let [gateway, _] = crate::trail::GATEWAY;
+        let way_out = Footprint::new(
+            [gateway.x - crate::trail::HALF, gateway.y],
+            [gateway.x + crate::trail::HALF, FENCE.high.y],
+        )
+        .grown(1e-3);
+        let ground = yard_ground();
+        let count = ground.len();
+        assert!(count > 50, "{count}");
+        for triangle in &ground {
+            // Its corners, the middles of its edges and its own middle are clear of everything that stands in the yard.
+            let middle = (triangle[0] + triangle[1] + triangle[2]) / 3.0;
+            let points = [0, 1, 2].map(|corner| triangle[corner]).into_iter().chain(
+                [0, 1, 2].map(|corner| (triangle[corner] + triangle[(corner + 1) % 3]) * 0.5),
+            );
+            for point in points.chain([middle]) {
+                assert!(inside.contains(point) || way_out.contains(point), "{point}");
+                for obstacle in obstacles() {
+                    assert!(!obstacle.grown(0.2).contains(point), "{point} {obstacle:?}");
+                }
             }
         }
         // Everything stands well inside the fence, but the workbench, whose rack stands just inside it.
@@ -644,7 +608,6 @@ mod tests {
         }
         // Where participants arrive is walkable, and so is the spot to peek in at the coop's window from, and the ground
         // beneath the agent's home.
-        let on = |point: Vec2| ground.iter().any(|footprint| footprint.contains(point));
         assert!(on(Vec2::new(ARRIVAL.x, ARRIVAL.z)));
         assert!(on(Vec2::new(
             COOP.high.x + 0.6,
@@ -655,19 +618,30 @@ mod tests {
         assert_eq!(DOOR.z, COOP.high.y);
         assert!(COOP.contains(Vec2::new(DOOR.x, DOOR.z)));
         assert!(ramp().high.y > COOP.high.y);
-        // The teleport profile's rectangles are these, on the ground; and no two of them overlap.
-        let declared = walkable();
-        assert_eq!(declared.len(), ground.len());
-        for ((centre, size), footprint) in declared.iter().zip(&ground) {
-            assert_eq!(centre.y, 0.0);
-            assert!(
-                (Vec2::new(centre.x, centre.z) - footprint.centre()).length() < 1e-6
-                    && *size == footprint.size()
-            );
-        }
-        for (index, footprint) in ground.iter().enumerate() {
-            for other in &ground[index + 1..] {
-                assert!(!footprint.overlaps(other), "{footprint:?} {other:?}");
+        // The yard's ground is on its earth, and none of its triangles overlaps another: every 10 cm over the yard, a
+        // point well within one is within no other.
+        let mesh = crate::walkable::navmesh();
+        assert!(
+            mesh.triangles()
+                .iter()
+                .flatten()
+                .filter(|corner| FENCE.grown(-0.01).contains(Vec2::new(corner.x, corner.z)))
+                .all(|corner| corner.y == 0.0)
+        );
+        for column in 0..=(FENCE.size().x * 10.0).round() as u32 {
+            for row in 0..=(FENCE.size().y * 10.0).round() as u32 {
+                let point = FENCE.low + Vec2::new(column as f32, row as f32) * 0.1 + 0.003;
+                let within = ground
+                    .iter()
+                    .filter(|[a, b, c]| {
+                        let doubled = (*b - *a).perp_dot(*c - *a);
+                        [(*a, *b), (*b, *c), (*c, *a)].iter().all(|(from, to)| {
+                            (*to - *from).perp_dot(point - *from) * doubled.signum()
+                                > 1e-3 * from.distance(*to)
+                        })
+                    })
+                    .count();
+                assert!(within <= 1, "{point}: {within}");
             }
         }
     }
@@ -680,8 +654,6 @@ mod tests {
         // ramp's foot to the back fence, nor lets anyone land on the coop, its ramp, the trough, the feeder, the hay, the
         // notice board or the workbench.
         const { assert!(CLEARANCE >= 0.2 && CLEARANCE <= 0.3) };
-        let ground = open_ground();
-        let on = |point: Vec2| ground.iter().any(|footprint| footprint.contains(point));
         let kept: Vec<Footprint> = obstacles()
             .iter()
             .map(|obstacle| obstacle.grown(CLEARANCE))
@@ -714,9 +686,15 @@ mod tests {
             assert!(on(Vec2::new(FEEDER.x, z)), "{z}");
         }
         assert!(on(Vec2::new(3.7, (TROUGH.low.y + HAY.high.y) * 0.5)));
-        // And beyond the fence's clearance, nowhere.
-        for footprint in &ground {
-            assert!(yard.contains(footprint.low) && yard.contains(footprint.high));
+        // And beyond the fence's clearance, nowhere but between the gate's posts, where the way out goes.
+        for triangle in yard_ground() {
+            for corner in triangle {
+                assert!(
+                    yard.grown(1e-4).contains(corner)
+                        || (corner.x.abs() <= 0.4 + 1e-4 && corner.y <= FENCE.high.y + 1e-3),
+                    "{corner}"
+                );
+            }
         }
     }
 
@@ -1053,11 +1031,7 @@ mod tests {
         // Read from the earth in front of it, within reach, as the agent's panels go there for whoever asks from that
         // side of the yard; and the arrival's sightlines to the Tomori wall and the agent stay clear of it.
         let before = Vec3::new(NOTICEBOARD.x - 2.0, 0.0, NOTICEBOARD.z + 0.4);
-        assert!(
-            open_ground()
-                .iter()
-                .any(|footprint| footprint.contains(Vec2::new(before.x, before.z)))
-        );
+        assert!(on(Vec2::new(before.x, before.z)));
         let reader = Spot::facing(before.to_array(), NOTICEBOARD.to_array());
         let wall = Spot::facing(NOTICEBOARD.to_array(), NOTICEBOARD_FACING.to_array());
         // Its row is narrower than the Tomori wall's, whose ends `readable` checks too, so its own ends stand clear.

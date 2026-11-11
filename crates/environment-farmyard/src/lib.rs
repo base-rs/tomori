@@ -33,6 +33,7 @@ pub mod props;
 mod shapes;
 pub mod side;
 pub mod trail;
+pub mod walkable;
 pub mod workbench;
 
 /// The identifier spaces name the farmyard by.

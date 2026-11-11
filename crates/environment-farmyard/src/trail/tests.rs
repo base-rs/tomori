@@ -147,24 +147,26 @@ fn the_way_out_goes_from_the_yard_s_earth_between_the_gate_s_posts_to_the_loop()
     assert_eq!(outside, centreline()[0]);
     // It begins on the yard's earth, where participants land, its whole width.
     for corner in [inside - Vec2::X * HALF, inside + Vec2::X * HALF] {
-        assert!(
-            layout::open_ground()
-                .iter()
-                .any(|walkable| walkable.contains(corner)),
-            "{corner}"
-        );
+        assert_eq!(crate::walkable::height_at(corner), Some(EARTH), "{corner}");
     }
     // Between the gate's posts, clear of them, straight out to the loop's first point, beyond the fence.
-    let post = 0.08;
+    let post = layout::GATE_POST * 0.5;
     assert!(inside.x - HALF > layout::GATE[0] + post && inside.x + HALF < layout::GATE[1] - post);
     assert!(inside.y < FENCE.high.y && outside.y > FENCE.high.y + HALF);
     assert_eq!(inside.x, outside.x);
     // Its outlines are two rectangles, the yard's earth overlapping the first, at the earth's height, to the fence,
-    // where the second takes it on at the track's to the loop, whose band overlaps it.
-    let outlines = outlines();
-    assert_eq!(outlines.len(), STRETCHES + 2);
+    // where the second takes it on at the track's to the loop, whose band overlaps it. They are declared by hand, since
+    // the gate's posts stand nearer the trail's width than the clearance kept from what stands on the ground: a
+    // participant may land beside them, but not on them.
+    let outlines = way_out();
+    assert_eq!(outlines.len(), 2);
     let fence = FENCE.high.y;
-    for ((outline, height), (from, to, at)) in outlines[STRETCHES..]
+    let clearance = (layout::GATE[1] - post) - (inside.x + HALF);
+    assert!(
+        clearance > 0.1 && clearance < layout::CLEARANCE,
+        "{clearance}"
+    );
+    for ((outline, height), (from, to, at)) in outlines
         .iter()
         .zip([(inside.y, fence, EARTH), (fence, outside.y, HEIGHT)])
     {
@@ -176,11 +178,10 @@ fn the_way_out_goes_from_the_yard_s_earth_between_the_gate_s_posts_to_the_loop()
         );
         assert_eq!((low, high), (Vec2::new(-HALF, from), Vec2::new(HALF, to)));
     }
-    // The loop's stretches are all on its track.
-    assert!(
-        outlines[..STRETCHES]
-            .iter()
-            .all(|(_, height)| *height == HEIGHT)
+    // The loop's track, which the second meets, is walkable where it is drawn, on its track.
+    assert_eq!(
+        crate::walkable::height_at(outside - Vec2::Y * (HALF - 0.05)),
+        Some(HEIGHT)
     );
 }
 
@@ -415,12 +416,7 @@ fn a_pair_of_pads_joins_the_yard_and_the_lookout_off_the_way() {
         Vec2::new(pad, -pad),
     ] {
         let at = Vec2::new(yard.centre.x, yard.centre.z) + corner;
-        assert!(
-            layout::open_ground()
-                .iter()
-                .any(|walkable| walkable.contains(at)),
-            "{at}"
-        );
+        assert_eq!(crate::walkable::height_at(at), Some(EARTH), "{at}");
     }
     assert!(
         Vec2::new(yard.centre.x, yard.centre.z)
