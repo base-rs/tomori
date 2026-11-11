@@ -603,7 +603,9 @@ impl Hub {
                 .map(|(key, name, at)| crate::proximity::Person { key, name, at: *at })
                 .collect();
             let record = state.space_mut(&space).expect("listed above");
-            let notes = record.proximity.observe(now, &people, &anchors);
+            let notes = record
+                .proximity
+                .observe(now, &record.model.environment, &people, &anchors);
             if !told || notes.is_empty() {
                 continue;
             }

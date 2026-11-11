@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Tomori can be told when you walk up to a place.** An environment can now mark any of its places, such as an exercise station along a trail, so that as you come within a couple of metres of it the agent is told, once, between its replies, which place it is and what its label says, and may say something about it, such as encouraging you through the station's ten squats. Lingering at its edge or pacing beside it says nothing more, and coming back to it within two minutes is not told again; visitors are never told of. `presence` says how near each such place tells the agent, and who is near it now. See `design/environments.md`.
+- **Tomori can be told when you walk up to a place.** An environment can now mark any of its places, such as an exercise station along a trail, so that as you come within a couple of metres of it the agent is told, once, between its replies, which place it is and what its label says, and may say something about it, such as encouraging you through the station's ten squats. Lingering at its edge or pacing beside it says nothing more, coming back to it within two minutes is not told again, and arriving in the space already standing at one says nothing; visitors are never told of. `presence` says how near each such place tells the agent, and who is near it now. See `design/environments.md`.
 
 - For environments: **anchors may notify the agent.** `tomori_protocol::cluster::Anchor` gains `notify_within`, a radius from 0.3 to 10 m across the floor (`cluster::LEAST_NOTIFY`, `MOST_NOTIFY`), with `Anchor::notify_within(metres)`, for anchors declared with `Environment::with_anchor` and placed with `Space::place_anchor` alike; `checked` refuses one out of bounds. An older client ignores it.
 

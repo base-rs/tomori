@@ -3,8 +3,9 @@
 
 //! Who is near the space's anchors that notify its agent: a participant coming within an anchor's `notify_within` is
 //! told to the agent once, as a note of Tomori's, and again only after they have gone [`HYSTERESIS`] beyond it and
-//! [`COOLDOWN`] has passed since. Pure: the time, the people and the anchors are given. See `design/environments.md`.
-use std::collections::{BTreeMap, HashMap};
+//! [`COOLDOWN`] has passed since. Someone first seen, as they arrive, or everyone, as the environment changes, is taken
+//! within the anchors they stand in without a note, since they did not come near. Pure: the time, the people and the anchors are given. See `design/environments.md`.
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use tomori_protocol::cluster::Anchor;
@@ -31,18 +32,27 @@ pub struct Proximity {
     within: BTreeMap<(String, String), String>,
     /// When each participant was last told near each anchor, kept for [`COOLDOWN`].
     told: HashMap<(String, String), Instant>,
+    /// Who was looked at last, by key, in which environment.
+    seen: BTreeSet<String>,
+    environment: Option<String>,
 }
 
 impl Proximity {
-    /// Look at `people` among `anchors` at `now`: those that came within an anchor's radius since the last look, and
-    /// were not told near it within [`COOLDOWN`], are returned, each by the key its note coalesces under and the note.
-    /// Someone no longer among `people`, or near an anchor that is gone or no longer notifies, is no longer within it.
+    /// Look at `people` among `anchors` of `environment` at `now`: those that came within an anchor's radius since the
+    /// last look, in the same environment, and were not told near it within [`COOLDOWN`], are returned, each by the key
+    /// its note coalesces under and the note. Someone no longer among `people`, or near an anchor that is gone or no
+    /// longer notifies, is no longer within it.
     pub fn observe(
         &mut self,
         now: Instant,
+        environment: &str,
         people: &[Person<'_>],
         anchors: &[Anchor],
     ) -> Vec<(String, String)> {
+        if self.environment.as_deref() != Some(environment) {
+            self.environment = Some(environment.to_owned());
+            self.seen.clear();
+        }
         let mut notes = Vec::new();
         let mut within = BTreeMap::new();
         for anchor in anchors {
@@ -61,10 +71,11 @@ impl Proximity {
                 if distance > radius {
                     continue;
                 }
-                if self
-                    .told
-                    .get(&pair)
-                    .is_none_or(|told| now.saturating_duration_since(*told) >= COOLDOWN)
+                if self.seen.contains(person.key)
+                    && self
+                        .told
+                        .get(&pair)
+                        .is_none_or(|told| now.saturating_duration_since(*told) >= COOLDOWN)
                 {
                     self.told.insert(pair.clone(), now);
                     notes.push((
@@ -76,14 +87,15 @@ impl Proximity {
             }
         }
         self.within = within;
+        self.seen = people.iter().map(|person| person.key.to_owned()).collect();
         self.told
             .retain(|_, told| now.saturating_duration_since(*told) < COOLDOWN);
         notes
     }
 
-    /// Whether nobody is within any anchor, as last looked at.
+    /// Whether nobody was looked at last.
     pub fn is_empty(&self) -> bool {
-        self.within.is_empty()
+        self.seen.is_empty()
     }
 
     /// The names of those within the anchor `name`, as last looked at.

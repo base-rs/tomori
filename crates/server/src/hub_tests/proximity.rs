@@ -125,6 +125,7 @@ fn a_note_rides_on_words_and_visitors_tell_nothing() {
     let vic = Client::greeted(&hub, Access::visitor(), "vic");
     vic.join(&space);
     vic.send(standing([0.0, 1.6, -6.0]));
+    ada.send(standing([6.0, 1.6, -6.0]));
     // A visitor reports no presence, so where they stand is not known, and nobody is told of them.
     assert_eq!(hub.lock().space(&space).unwrap().model.visitors.len(), 1);
     assert!(
@@ -173,7 +174,14 @@ fn anchors_placed_and_removed_while_someone_is_within_them() {
     .unwrap();
     hub.sweep_proximity(now);
     assert_eq!(listed(&hub, "hen/marigold"), Value::Null);
-    assert!(hub.lock().space(&space).unwrap().proximity.is_empty());
+    assert!(
+        hub.lock()
+            .space(&space)
+            .unwrap()
+            .proximity
+            .within("hen/marigold")
+            .is_empty()
+    );
     // Placed again, within the cooldown, she is within it, but it is not told again.
     hub.channel_place_anchor_at(&outlet, hen, now + tomori_environment::ANCHOR_INTERVAL * 2)
         .unwrap();
@@ -211,6 +219,10 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
         limits: None,
     });
     other.join(&space);
+    // Each arrives away from the station, then walks up to it.
+    ada.send(standing([6.0, 1.6, 0.0]));
+    other.send(standing([6.0, 1.6, 0.0]));
+    hub.sweep_proximity(Instant::now());
     ada.send(standing([0.0, 1.6, -6.0]));
     other.send(standing([1.0, 1.6, -6.0]));
     hub.sweep_proximity(Instant::now());
