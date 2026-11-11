@@ -175,12 +175,28 @@ impl Feeder {
                         .chain(&loops)
                         .chain(calls.iter().flatten())
                         .any(Option::is_some);
+                    // How long each call's variants last, from which a run's gaps count.
+                    let lengths = calls
+                        .iter()
+                        .map(|variants| {
+                            variants
+                                .iter()
+                                .map(|bytes| {
+                                    bytes
+                                        .as_ref()
+                                        .and_then(|bytes| Decoder::new(bytes.clone(), false).ok())
+                                        .map_or(Duration::ZERO, |decoder| decoder.length())
+                                })
+                                .collect()
+                        })
+                        .collect();
                     Prepared {
                         beds,
                         loops,
                         calls,
                         audible,
-                        scheduler: Scheduler::new(&ambience.calls, self.seed, now),
+                        scheduler: Scheduler::new(&ambience.calls, self.seed, now)
+                            .with_lengths(lengths),
                         started: vec![false; ambience.beds.len() + ambience.loops.len()],
                         ambience,
                     }

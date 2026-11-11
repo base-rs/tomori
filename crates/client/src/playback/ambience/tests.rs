@@ -243,3 +243,245 @@ fn calls_held_back_are_heard_once_and_then_after_their_interval() {
     let due = scheduler.due(&nowhere, late).unwrap();
     assert_eq!(due.position[1], 0.0);
 }
+
+/// The farmyard's ruru: usually four or five calls in a row, sometimes one, 1.5 to 2.5 s apart, its two calls 1.25 s
+/// long, the runs 120 to 300 s apart.
+fn calling_ruru() -> Call {
+    Call::new(vec![Slot::missing("ruru-1"), Slot::missing("ruru-2")])
+        .every(Duration::from_secs(120), Duration::from_secs(300))
+        .around(&[[-10.0, 6.0, -20.0], [10.0, 6.0, -20.0]], 5.0)
+        .pitch(0.98, 1.02)
+        .gain(13.0, 17.0)
+        .run(
+            Run::weighted(&[15.0, 5.0, 15.0, 25.0, 25.0, 15.0])
+                .gap(Duration::from_millis(1_500), Duration::from_millis(2_500)),
+        )
+}
+
+const RURU: Duration = Duration::from_millis(1_250);
+
+/// Every call heard, each at the moment it is due, until `until`, with each variant `RURU` long.
+fn hear_exactly(calls: &[Call], seed: u64, until: Duration) -> Vec<(Duration, Due)> {
+    let lengths = calls
+        .iter()
+        .map(|call| vec![RURU; call.variants.len()])
+        .collect();
+    let mut scheduler = Scheduler::new(calls, seed, Duration::ZERO).with_lengths(lengths);
+    let mut heard = Vec::new();
+    loop {
+        let now = scheduler.next().iter().copied().min().unwrap();
+        if now > until {
+            return heard;
+        }
+        while let Some(due) = scheduler.due(calls, now) {
+            heard.push((now, due));
+        }
+    }
+}
+
+/// When a call heard at `at` as `due` ends.
+fn end(at: Duration, due: &Due) -> Duration {
+    at + RURU.div_f64(f64::from(due.pitch))
+}
+
+/// The calls heard, in runs: each heard within its run's longest gap of the last's end.
+fn runs(heard: &[(Duration, Due)], gap: Duration) -> Vec<Vec<(Duration, Due)>> {
+    let mut runs: Vec<Vec<(Duration, Due)>> = Vec::new();
+    for (at, due) in heard {
+        match runs.last_mut() {
+            Some(run) if *at <= end(run[run.len() - 1].0, &run[run.len() - 1].1) + gap => {
+                run.push((*at, *due))
+            }
+            _ => runs.push(vec![(*at, *due)]),
+        }
+    }
+    runs
+}
+
+#[test]
+fn a_run_is_as_long_as_its_weights_say() {
+    let calls = [calling_ruru()];
+    let heard = hear_exactly(&calls, 7, Duration::from_secs(500_000));
+    let runs = runs(&heard, Duration::from_millis(2_500));
+    assert!(runs.len() > 2_000, "{}", runs.len());
+    let mut counts = [0usize; 8];
+    for run in &runs {
+        counts[run.len().min(7)] += 1;
+    }
+    // Never none or more than six, and each as often as its weight, within two in a hundred.
+    assert_eq!((counts[0], counts[7]), (0, 0));
+    for (length, weight) in [
+        (1, 15.0),
+        (2, 5.0),
+        (3, 15.0),
+        (4, 25.0),
+        (5, 25.0),
+        (6, 15.0),
+    ] {
+        let share = 100.0 * counts[length] as f64 / runs.len() as f64;
+        assert!(
+            (share - weight).abs() < 2.0,
+            "{length}: {share}% for {weight}"
+        );
+    }
+}
+
+#[test]
+fn a_run_is_one_bird_calling_within_its_gap_and_the_next_comes_after_its_end() {
+    let calls = [calling_ruru()];
+    let heard = hear_exactly(&calls, 11, Duration::from_secs(100_000));
+    let runs = runs(&heard, Duration::from_millis(2_500));
+    let close = |a: Duration, b: Duration| a.abs_diff(b) < Duration::from_micros(10);
+    for run in &runs {
+        let first = run[0].1;
+        for pair in run.windows(2) {
+            let ((at, due), (next, then)) = (pair[0], pair[1]);
+            // From the end of one to the start of the next, within its gap.
+            let gap = next - end(at, &due);
+            assert!(
+                (Duration::from_millis(1_500)..=Duration::from_millis(2_500)).contains(&gap),
+                "{gap:?}"
+            );
+            // The two calls alternating, the same bird, at about its pitch and gain, within the call's ranges.
+            assert_eq!(then.variant, 1 - due.variant);
+            assert_eq!(then.position, first.position);
+            assert!((then.pitch / first.pitch - 1.0).abs() <= 0.01 + 1e-6);
+            assert!((0.98..=1.02).contains(&then.pitch));
+            let decibels = 20.0 * then.gain.log10();
+            assert!((decibels - 20.0 * first.gain.log10()).abs() <= 1.0 + 1e-3);
+            assert!((13.0 - 1e-3..=17.0 + 1e-3).contains(&decibels));
+        }
+    }
+    // Each run 120 to 300 s after the last's end, from somewhere else in the bush.
+    for pair in runs.windows(2) {
+        let last = pair[0][pair[0].len() - 1];
+        let rest = pair[1][0].0 - end(last.0, &last.1);
+        assert!(
+            (Duration::from_secs(120)..=Duration::from_secs(300)).contains(&rest)
+                || close(rest, Duration::from_secs(300)),
+            "{rest:?}"
+        );
+    }
+    assert!(
+        runs.windows(2)
+            .any(|pair| pair[0][0].1.position != pair[1][0].1.position)
+    );
+    assert_eq!(
+        heard,
+        hear_exactly(&calls, 11, Duration::from_secs(100_000))
+    );
+}
+
+#[test]
+fn a_run_held_back_past_its_gap_begins_again_and_one_heard_late_goes_on() {
+    let calls = [calling_ruru().run(
+        Run::weighted(&[0.0, 0.0, 0.0, 1.0]).gap(Duration::from_secs(2), Duration::from_secs(2)),
+    )];
+    let lengths = vec![vec![RURU; 2]];
+    let mut scheduler = Scheduler::new(&calls, 5, Duration::ZERO).with_lengths(lengths);
+    let start = scheduler.next()[0];
+    let first = scheduler.due(&calls, start).unwrap();
+    let second = end(start, &first) + Duration::from_secs(2);
+    assert_eq!(scheduler.next()[0], second);
+    // Heard a second late, as under a busy thread, the run goes on, from the same bird, its next gap from this end.
+    let late = second + Duration::from_secs(1);
+    let next = scheduler.due(&calls, late).unwrap();
+    assert_eq!(next.position, first.position);
+    assert_eq!(
+        scheduler.next()[0],
+        end(late, &next) + Duration::from_secs(2)
+    );
+    // An hour late, as after ambience was off, the run begins again, a whole run of four from another bird.
+    let resumed = Duration::from_secs(3_600);
+    let heard: Vec<Due> = (0..4)
+        .map(|_| {
+            let at = scheduler.next()[0].max(resumed);
+            scheduler.due(&calls, at).unwrap()
+        })
+        .collect();
+    assert!(heard.iter().all(|due| due.position == heard[0].position));
+    assert_ne!(heard[0].position, first.position);
+    assert!(scheduler.next()[0] >= resumed + Duration::from_secs(120));
+}
+
+#[test]
+fn a_run_is_declared_within_its_bounds_and_a_call_without_one_is_heard_as_before() {
+    let run = Run::weighted(&[1.0])
+        .gap(Duration::from_secs(3), Duration::from_secs(1))
+        .vary(-1.0, -2.0)
+        .order(Order::Random);
+    assert_eq!(run.gap, [Duration::from_secs(3); 2]);
+    assert_eq!(run.vary, [0.0, 0.0]);
+    assert_eq!(run.order, Order::Random);
+    let default = Run::weighted(&[]);
+    assert_eq!(
+        default.gap,
+        [Duration::from_secs(1), Duration::from_secs(2)]
+    );
+    assert_eq!(
+        (default.vary, default.order),
+        ([0.01, 1.0], Order::Alternate)
+    );
+    assert_eq!(tui().run, None);
+    // Weights that are not finite or below 0 are never chosen, nor those beyond its most calls, and none is one call.
+    for (weights, length) in [
+        (vec![f32::NAN, -1.0, f32::INFINITY, 2.0], 4),
+        (
+            (0..RUN_CALLS + 4)
+                .map(|index| if index < RUN_CALLS { 0.0 } else { 1.0 })
+                .collect(),
+            1,
+        ),
+        (Vec::new(), 1),
+    ] {
+        let calls = [calling_ruru().run(Run::weighted(&weights))];
+        let runs = runs(
+            &hear_exactly(&calls, 3, Duration::from_secs(20_000)),
+            Duration::from_secs(2),
+        );
+        assert!(runs.len() > 50);
+        assert!(runs.iter().all(|run| run.len() == length), "{weights:?}");
+    }
+    // Taken at random, its variants are any, the last again too, and without its lengths a gap counts from its start.
+    let calls = [calling_ruru().run(
+        Run::weighted(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+            .gap(Duration::from_secs(1), Duration::from_secs(1))
+            .order(Order::Random),
+    )];
+    let mut scheduler = Scheduler::new(&calls, 2, Duration::ZERO);
+    let mut at = scheduler.next()[0];
+    let mut heard = Vec::new();
+    for _ in 0..40 {
+        heard.push(scheduler.due(&calls, at).unwrap().variant);
+        let next = scheduler.next()[0];
+        if heard.len() % 8 != 0 {
+            assert_eq!(next - at, Duration::from_secs(1));
+        }
+        at = next;
+    }
+    assert!(heard.windows(2).any(|pair| pair[0] == pair[1]));
+    assert!(heard.windows(2).any(|pair| pair[0] != pair[1]));
+    // A call without a run is heard exactly as it was before runs, its lengths known or not.
+    let calls = [tui(), ruru()];
+    let mut known = Scheduler::new(&calls, 42, Duration::ZERO).with_lengths(vec![
+        vec![Duration::from_secs(5); 3],
+        vec![Duration::from_secs(1)],
+    ]);
+    let without = hear(&calls, 42, 3_600);
+    for (at, due) in &without {
+        assert_eq!(known.due(&calls, *at), Some(*due));
+    }
+    let first: Vec<_> = without
+        .iter()
+        .take(3)
+        .map(|(at, due)| (at.as_secs(), due.call, due.variant, due.pitch, due.gain))
+        .collect();
+    assert_eq!(first, BEFORE_RUNS);
+}
+
+/// The first calls of `tui` and `ruru` from seed 42, as the scheduler gave them before calls had runs.
+const BEFORE_RUNS: [(u64, usize, usize, f32, f32); 3] = [
+    (20, 1, 0, 1.0, 1.0),
+    (23, 0, 0, 1.033_032, 0.576_807),
+    (46, 0, 1, 0.914_610_74, 0.758_481_3),
+];

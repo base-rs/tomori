@@ -10,7 +10,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use tomori_assets::{AssetRef, Digest, Library};
-use tomori_scene::ambience::{Ambience, Bed, Call, Loop, Slot};
+use tomori_scene::ambience::{Ambience, Bed, Call, Loop, Order, Run, Slot};
 
 use crate::{ID, VERSION, layout};
 use tomori_environment_farmyard::campsite;
@@ -149,10 +149,12 @@ fn with(found: &[(&str, &str)]) -> Ambience {
                 .radius(FIRE_RADIUS)
                 .gain(FIRE_GAIN),
         )
+        // A tūī often sings a phrase or two, sometimes three, then pauses, a phrase again as often as another.
         .with_call(
             birds(&["tui-1", "tui-2", "tui-3"], [25, 70])
                 .pitch(0.96, 1.04)
-                .gain(14.0, 18.0),
+                .gain(14.0, 18.0)
+                .run(tui()),
         )
         .with_call(
             birds(&["bellbird-1", "bellbird-2", "bellbird-3"], [30, 90])
@@ -164,12 +166,27 @@ fn with(found: &[(&str, &str)]) -> Ambience {
                 .pitch(0.9, 1.05)
                 .gain(12.0, 17.0),
         )
-        // The farmyard is always evening, when the ruru calls, but rarely, as one owl would.
+        // The farmyard is always evening, when the ruru calls, but rarely, as one owl would, several times in a row.
         .with_call(
             birds(&["ruru-1", "ruru-2"], [120, 300])
                 .pitch(0.98, 1.02)
-                .gain(13.0, 17.0),
+                .gain(13.0, 17.0)
+                .run(ruru()),
         )
+}
+
+/// A ruru's run: usually three to six calls, most often four or five, sometimes just one, 1.5 to 2.5 s apart, its two
+/// calls in turn, as one owl's "more-pork" again and again.
+fn ruru() -> Run {
+    Run::weighted(&[15.0, 5.0, 15.0, 25.0, 25.0, 15.0])
+        .gap(Duration::from_millis(1_500), Duration::from_millis(2_500))
+}
+
+/// A tūī's run: a phrase, most often, or two, or now and then three, 1 to 3 s apart, any of its phrases, the last too.
+fn tui() -> Run {
+    Run::weighted(&[60.0, 30.0, 10.0])
+        .gap(Duration::from_secs(1), Duration::from_secs(3))
+        .order(Order::Random)
 }
 
 #[cfg(test)]

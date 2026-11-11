@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use super::super::{Bed, Call, Loop};
+use super::super::{Bed, Call, Loop, Run};
 use super::*;
 use crate::playback::Layout;
 use crate::playback::spatial::{Listener, Scene};
@@ -391,4 +391,53 @@ fn blocks_go_round_and_are_never_more_than_the_callback_has_room_to_give_back() 
     drop(bus);
     feeder.pump(Duration::ZERO);
     assert_eq!(feeder.playing(), 0);
+}
+
+#[test]
+fn a_sound_lasts_as_its_last_page_says_and_a_run_waits_out_each_call() {
+    // Half a second, by its last page; nothing for what has no pages, nor for a last page cut short.
+    let decoder = Decoder::new(Arc::from(MONO), false).unwrap();
+    assert_eq!(decoder.length(), Duration::from_millis(500));
+    assert_eq!(super::super::decoder::frames(b"not a sound"), 0);
+    let pages = ogg_pages(MONO);
+    let cut = &MONO[..pages[pages.len() - 1].2 - 1];
+    assert!(super::super::decoder::frames(cut) < FRAMES as u64);
+    // A last page on which no packet ends leaves the length where the page before says.
+    let mut unended = MONO.to_vec();
+    let last = pages[pages.len() - 1].0;
+    unended[last + 6..last + 14].fill(0xff);
+    assert_eq!(
+        super::super::decoder::frames(&unended),
+        super::super::decoder::frames(cut)
+    );
+    let header = &MONO[..pages[pages.len() - 1].0 + 27];
+    assert_eq!(
+        super::super::decoder::frames(header),
+        super::super::decoder::frames(cut)
+    );
+    // A run of three: each next call a second after the last's half second, at its pitch, then a long rest.
+    let (mut feeder, _bus) = pair(3);
+    feeder.apply(Command::Gain(1.0), Duration::ZERO);
+    let call = Call::new(vec![mono(), Slot::missing("ruru-2")])
+        .every(Duration::from_secs(600), Duration::from_secs(600))
+        .run(Run::weighted(&[0.0, 0.0, 1.0]).gap(Duration::from_secs(1), Duration::from_secs(1)));
+    feeder.apply(ambience(Ambience::new().with_call(call)), Duration::ZERO);
+    let next = |feeder: &Feeder| feeder.prepared.as_ref().unwrap().scheduler.next()[0];
+    let mut at = next(&feeder);
+    let mut heard = 0;
+    for _ in 0..3 {
+        feeder.pump(at);
+        heard = feeder.playing().max(heard);
+        let then = next(&feeder);
+        // Its silent variant lasts no time.
+        assert!(
+            [Duration::from_secs(1), Duration::from_millis(1_500)].contains(&(then - at))
+                || then - at >= Duration::from_secs(600),
+            "{:?}",
+            then - at
+        );
+        at = then;
+    }
+    assert!(heard >= 1);
+    assert!(at >= Duration::from_secs(600));
 }
