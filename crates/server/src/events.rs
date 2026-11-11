@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! A space's event queue: notes from Tomori's own sources, its timers first, waiting to be told to the space's agent.
-//! A source's notes coalesce by their key, a burst is told as one prompt, and a prompt of notes alone waits for the
-//! agent's turn to end, for a quiet moment after it, and for a gap since the last, while participants' words take the
-//! notes with them. Pure: the time is given. See `design/timers.md`.
+//! A space's event queue: notes from Tomori's own sources, its timers, its workers and who comes near its anchors,
+//! waiting to be told to the space's agent. A source's notes coalesce by their key, a burst is told as one prompt, and
+//! a prompt of notes alone waits for the agent's turn to end, for a quiet moment after it, and for a gap since the
+//! last, while participants' words take the notes with them. Pure: the time is given. See `design/timers.md`.
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,9 @@ pub enum Source {
     Timer,
     /// The space's workers, keyed by the condition the note is about. See `design/events.md`.
     Worker,
+    /// A participant coming near one of the space's anchors, keyed by the participant and the anchor. See
+    /// `design/environments.md`.
+    Proximity,
 }
 
 #[derive(Debug)]

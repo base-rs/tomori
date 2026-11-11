@@ -48,7 +48,9 @@ fn engage(client: &Client, state: tomori_protocol::Engagement) {
 }
 
 /// What the agent was handed since last asked.
-fn handed(commands: &async_channel::Receiver<SpaceCommand>) -> Vec<tomori_backend::Prompt> {
+pub(super) fn handed(
+    commands: &async_channel::Receiver<SpaceCommand>,
+) -> Vec<tomori_backend::Prompt> {
     std::iter::from_fn(|| commands.try_recv().ok())
         .filter_map(|command| match command {
             SpaceCommand::Send(prompt) => Some(prompt),
@@ -58,7 +60,7 @@ fn handed(commands: &async_channel::Receiver<SpaceCommand>) -> Vec<tomori_backen
 }
 
 /// The agent takes `prompt` and ends its turn.
-fn take(hub: &Hub, space: &str, prompt: &tomori_backend::Prompt) {
+pub(super) fn take(hub: &Hub, space: &str, prompt: &tomori_backend::Prompt) {
     hub.drive_event(
         space,
         Event::Delivered {

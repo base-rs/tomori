@@ -829,6 +829,9 @@ struct SpaceRecord {
     agent_at: Option<(String, tomori_protocol::Pose)>,
     /// How often the agent has placed workers and moved itself of its own accord, for this run only.
     rates: crate::places::Rates,
+    /// Who is within the space's anchors that notify its agent, and when each was last told, for this run only. See
+    /// `design/environments.md`.
+    proximity: crate::proximity::Proximity,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -3248,6 +3251,7 @@ impl Hub {
         self.flush_publishes(now);
         self.flush_anchors(now);
         self.sweep_places(now);
+        self.sweep_proximity(now);
         // Such as after a closed space was forgotten.
         self.keep();
     }
@@ -5687,6 +5691,7 @@ impl Hub {
             bound: None,
             agent_at: None,
             rates: Default::default(),
+            proximity: Default::default(),
             active: None,
         });
         // Created now, it is active from now.
@@ -5853,6 +5858,7 @@ impl Hub {
                     bound: None,
                     agent_at: None,
                     rates: Default::default(),
+                    proximity: Default::default(),
                     active: kept.active,
                 });
             }

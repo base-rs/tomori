@@ -2189,6 +2189,13 @@ impl SpaceModel {
         self.timers.views() != before
     }
 
+    /// Queue Tomori's note `text`, that a participant came near one of the space's anchors, under `key`, which names
+    /// both, for the agent, as a timer's firing waits. See `design/environments.md`.
+    pub fn tell_proximity(&mut self, key: &str, text: String) {
+        self.events
+            .push(crate::events::Source::Proximity, key, text);
+    }
+
     /// The entry given to the agent last, which began its current turn, if it has not failed to be delivered. See
     /// [`Given`].
     pub fn given(&self) -> Option<&Given> {

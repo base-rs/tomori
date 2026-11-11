@@ -243,7 +243,16 @@ pub struct Anchor {
     /// towards it clear: the whole ring without one. Only a ring takes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sweep: Option<f32>,
+    /// How near, in metres across the floor, from [`LEAST_NOTIFY`] to [`MOST_NOTIFY`], a participant comes to its point
+    /// for the space's agent to be told, once, in a note of Tomori's: none, by default, for an anchor nobody is told of.
+    /// See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_within: Option<f32>,
 }
+
+/// The least and the most radius an anchor may notify the agent within, in metres.
+pub const LEAST_NOTIFY: f32 = 0.3;
+pub const MOST_NOTIFY: f32 = 10.0;
 
 /// The most bytes in an anchor's kind.
 pub const KIND_BYTES: usize = 32;
@@ -268,7 +277,25 @@ impl Anchor {
             placed: false,
             formation: Formation::Arc,
             sweep: None,
+            notify_within: None,
         }
+    }
+
+    /// This anchor, which tells the space's agent when a participant comes within `metres` of its point, such as an
+    /// exercise station along a trail.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::cluster::Anchor;
+    ///
+    /// let station = Anchor::new("station-1", Pose::at([12.0, 0.0, -20.0])).notify_within(1.8);
+    /// assert_eq!(station.notify_within, Some(1.8));
+    /// assert_eq!(station.checked(), Ok(()));
+    /// assert!(station.clone().notify_within(0.0).checked().is_err());
+    /// ```
+    pub fn notify_within(mut self, metres: f32) -> Self {
+        self.notify_within = Some(metres);
+        self
     }
 
     /// This anchor, whose cluster stands in `formation` about its point, such as a ring about the agent's home.
@@ -330,6 +357,12 @@ impl Anchor {
         }
         if self.sweep.is_some_and(|sweep| !valid_sweep(sweep)) {
             return Err("its sweep is not from 90° to 360°");
+        }
+        if self
+            .notify_within
+            .is_some_and(|metres| !(LEAST_NOTIFY..=MOST_NOTIFY).contains(&metres))
+        {
+            return Err("its notify_within is not from 0.3 to 10 m");
         }
         if self.kind.as_deref().is_some_and(|kind| {
             !(1..=KIND_BYTES).contains(&kind.len())
