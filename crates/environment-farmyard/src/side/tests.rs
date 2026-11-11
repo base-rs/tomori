@@ -398,14 +398,21 @@ fn the_side_announces_in_turn_at_the_pace_the_server_takes_and_drops_the_oldest_
     for event in 0..100 {
         pace.push(event.to_string());
     }
-    // The burst less the state it shared, then thirty a second, in order.
+    // The burst less the state it shared and what it keeps in hand, then thirty a second, in order.
+    let burst = tomori_environment::UPDATE_BURST as usize - 1 - SPARE as usize;
     let due = pace.due(now);
-    assert_eq!(due.len(), tomori_environment::UPDATE_BURST as usize - 1);
+    assert_eq!(due.len(), burst);
     assert_eq!(due[0], "0");
     assert!(pace.due(now).is_empty());
     let later = pace.due(now + Duration::from_secs(1));
     assert_eq!(later.len(), tomori_environment::UPDATES_PER_SECOND as usize);
-    assert_eq!(later[0], (tomori_environment::UPDATE_BURST - 1).to_string());
+    assert_eq!(later[0], burst.to_string());
+    // Twenty a second, as the stones moving are said, never waits.
+    let mut steady = Pace::new(now);
+    for tick in 1..2_000u64 {
+        steady.push(tick.to_string());
+        assert_eq!(steady.due(now + Duration::from_millis(tick * 50)).len(), 1);
+    }
     // Beyond what may wait, the oldest goes.
     let mut pace = Pace::new(now);
     for event in 0..WAITING + 5 {

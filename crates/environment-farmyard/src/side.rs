@@ -65,6 +65,12 @@ pub use crate::beach::Event as Stones;
 /// The most events the side keeps waiting to be announced: beyond it, the oldest is dropped, which the log says.
 pub const WAITING: usize = 1024;
 
+/// How many of the updates it may make the side keeps in hand, unspent: the server counts them as it takes each, a
+/// moment after the side counted them, and later still while the hub is busy, so that a side spending its last would be
+/// refused, and stop, whenever the server's moment fell sooner after its last than the side's. A fifth of a second's
+/// worth, which only a burst ever reaches.
+pub const SPARE: f32 = 6.0;
+
 /// The side's own pace of announcing, held to the rate the server takes a side's updates at,
 /// [`tomori_environment::UPDATES_PER_SECOND`] after a burst of [`tomori_environment::UPDATE_BURST`], so that a burst of
 /// changes, as several participants taking stones and sticks at once, waits its turn, in order, rather than being
@@ -103,7 +109,7 @@ impl Pace {
         self.tokens = (self.tokens
             + elapsed.as_secs_f32() * tomori_environment::UPDATES_PER_SECOND as f32)
             .min(tomori_environment::UPDATE_BURST as f32);
-        let count = (self.tokens.floor() as usize).min(self.waiting.len());
+        let count = ((self.tokens - SPARE).floor().max(0.0) as usize).min(self.waiting.len());
         self.tokens -= count as f32;
         self.waiting.drain(..count).collect()
     }
