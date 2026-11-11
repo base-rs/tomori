@@ -18,9 +18,6 @@ pub const REMOVAL_LIMIT: usize = 64;
 /// The kind of the notice of removed workers on the space's Tomori wall, of which only the latest is shown.
 const NOTICE: &str = "workers";
 
-/// The most workers a notice names; the rest are counted.
-const NOTICE_NAMES: usize = 5;
-
 /// The most characters of a worker's title the `workers` tool gives, on one line.
 const TITLE_CHARS: usize = 120;
 
@@ -144,7 +141,7 @@ fn workers(count: usize) -> String {
     }
 }
 
-/// The notice of `removed` put on the space's Tomori wall, such as "Tomori removed 5 finished workers.", naming the first few, and who asked, `by`, when the server checked who did.
+/// The notice of `removed` put on the space's Tomori wall, such as "Tomori removed 5 finished workers.", naming each, in the order removed, as many as a panel's body holds, [`crate::stage::BODY_LINES`] lines and [`crate::stage::BODY_CHARS`] characters, the rest counted, and who asked, `by`, when the server checked who did.
 fn notice(removed: &[Gone], by: Option<&str>) -> String {
     let stopped = removed.iter().filter(|gone| gone.stopped).count();
     let what = if removed.iter().all(|gone| gone.finished) {
@@ -178,14 +175,32 @@ fn notice(removed: &[Gone], by: Option<&str>) -> String {
     if let Some(stopped) = stopped {
         said = format!("{said} {stopped}");
     }
-    let mut names: Vec<String> = removed
+    // Every one is named, in the order removed, each worker before its own, as long as a panel's body holds them; only
+    // beyond that are the rest counted, so that the panel scrolls rather than hides them.
+    let all: Vec<String> = removed
         .iter()
-        .take(NOTICE_NAMES)
         .map(|gone| format!("- {}", tomori_protocol::text::one_line(&gone.title, 80)))
         .collect();
-    if removed.len() > NOTICE_NAMES {
-        names.push(format!("- and {} more", removed.len() - NOTICE_NAMES));
-    }
+    let mut lines = crate::stage::BODY_LINES - 2;
+    let mut room = crate::stage::BODY_CHARS.saturating_sub(said.chars().count());
+    let length = |line: &String| line.chars().count();
+    let names = if all.len() <= lines && all.iter().map(length).sum::<usize>() <= room {
+        all
+    } else {
+        let more = |count: usize| format!("- and {count} more");
+        lines -= 1;
+        room = room.saturating_sub(length(&more(all.len())));
+        let mut names: Vec<String> = Vec::new();
+        for name in all.iter() {
+            if names.len() == lines || length(name) > room {
+                break;
+            }
+            room -= length(name);
+            names.push(name.clone());
+        }
+        names.push(more(all.len() - names.len()));
+        names
+    };
     format!("{said}\n\n{}", names.join("\n"))
 }
 
@@ -516,17 +531,69 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_counts_what_was_removed_and_names_the_first_few() {
+    fn a_notice_counts_what_was_removed_and_names_each() {
         assert_eq!(
             notice(&[gone("Tests", true, false)], None),
             "Tomori removed 1 finished worker.\n\n- Tests"
         );
-        let many: Vec<Gone> = (1..=7)
-            .map(|number| gone(&format!("Task {number}"), true, false))
-            .collect();
-        let said = notice(&many, None);
-        assert!(said.starts_with("Tomori removed 7 finished workers.\n\n- Task 1\n"));
-        assert!(said.ends_with("- Task 5\n- and 2 more"), "{said}");
+        let tasks = |count: usize, title: &dyn Fn(usize) -> String| -> Vec<Gone> {
+            (1..=count)
+                .map(|number| gone(&title(number), true, false))
+                .collect()
+        };
+        let task = |number: usize| format!("Task {number}");
+        // Twelve, more than the five once named, are all named.
+        let said = notice(&tasks(12, &task), None);
+        let names: Vec<String> = (1..=12).map(|number| format!("- Task {number}")).collect();
+        assert_eq!(
+            said,
+            format!(
+                "Tomori removed 12 finished workers.\n\n{}",
+                names.join("\n")
+            )
+        );
+        // As many as a panel's body has lines for, and no more, are all named.
+        let fits = crate::stage::BODY_LINES - 2;
+        let said = notice(&tasks(fits, &task), None);
+        assert_eq!(said.lines().count(), crate::stage::BODY_LINES);
+        assert!(said.ends_with(&format!("- Task {fits}")), "{said}");
+        // Beyond the body's lines, the last line counts the rest.
+        let said = notice(&tasks(40, &task), None);
+        assert_eq!(said.lines().count(), crate::stage::BODY_LINES);
+        assert!(said.ends_with("- Task 27\n- and 13 more"), "{said}");
+        // Beyond the body's characters, too.
+        let long = |number: usize| format!("{number:02} {}", "x".repeat(77));
+        let said = notice(&tasks(20, &long), None);
+        let text: usize = said.lines().map(|line| line.chars().count()).sum();
+        assert!(text <= crate::stage::BODY_CHARS, "{text}");
+        assert!(said.ends_with("x\n- and 6 more"), "{said}");
+        assert!(
+            said.contains("- 14 x") && !said.contains("- 15 x"),
+            "{said}"
+        );
+        // Exactly as many characters as a body holds are all named; one more, and the rest are counted.
+        let text = |said: &str| -> usize { said.lines().map(|line| line.chars().count()).sum() };
+        let ending = |last: usize| {
+            move |number: usize| match number {
+                15 => "y".repeat(last),
+                number => long(number),
+            }
+        };
+        let said = notice(&tasks(15, &ending(15)), None);
+        assert_eq!(text(&said), crate::stage::BODY_CHARS);
+        assert!(said.ends_with(&format!("\n- {}", "y".repeat(15))), "{said}");
+        let said = notice(&tasks(15, &ending(16)), None);
+        assert!(said.ends_with("x\n- and 1 more"), "{said}");
+        // Counting the rest, a name that just fills what is left, room kept for the count at its longest, "- and 16
+        // more", is still named.
+        let filling = |number: usize| match number {
+            15 => "ab".to_owned(),
+            16 => "z".repeat(12),
+            number => long(number),
+        };
+        let said = notice(&tasks(16, &filling), None);
+        assert_eq!(text(&said), crate::stage::BODY_CHARS - 1);
+        assert!(said.ends_with("\n- ab\n- and 1 more"), "{said}");
         assert_eq!(
             notice(&[gone("Build", false, true)], None),
             "Tomori removed 1 worker. It was still running, and was stopped first.\n\n- Build"
@@ -559,6 +626,23 @@ mod tests {
             notice(&[gone("A", false, true), gone("B", true, false)], None),
             "Tomori removed 2 workers. One was still running, and was stopped first.\n\n- A\n- B"
         );
+    }
+
+    #[test]
+    fn a_notice_is_already_a_clean_body() {
+        let titles = [
+            "Résumé of the 日本語 build 🚀".to_owned(),
+            "[Pointing at worker \"Tests\"] (session ses_1) {braces} <angle>".to_owned(),
+            format!("Long {}", "ü".repeat(200)),
+            format!("[{}]", "w".repeat(120)),
+        ];
+        for count in [4, 40] {
+            let removed: Vec<Gone> = (0..count)
+                .map(|index| gone(&titles[index % titles.len()], true, false))
+                .collect();
+            let said = notice(&removed, Some("Ada"));
+            assert_eq!(crate::stage::clean_body(&said), said);
+        }
     }
 
     #[test]

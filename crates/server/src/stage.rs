@@ -37,7 +37,9 @@ pub(crate) use beside::{SIZE as BESIDE_SIZE, level_ahead};
 pub(crate) mod geometry;
 mod status;
 
-pub use blocks::{BLOCK_BYTES, clean_body, panels, slug, title as clean_title};
+pub use blocks::{
+    BLOCK_BYTES, BODY_CHARS, BODY_LINES, clean_body, panels, slug, title as clean_title,
+};
 pub use code::Source;
 pub use image::without_image;
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
