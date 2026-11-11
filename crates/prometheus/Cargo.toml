@@ -19,6 +19,8 @@ base-scheduler = "0.5.0"
 base-scheduler-native = "0.5.0"
 form_urlencoded = "1"
 futures-lite = "2"
+# The requests and connection drivers a client's thread runs at once.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 serde_json = "1"
 # The roots an endpoint's certificate is checked against.

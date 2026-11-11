@@ -231,7 +231,11 @@ fn an_instant_query_is_posted_with_its_time_and_token_over_one_kept_connection()
     assert_eq!(fake.next().connection, seen.connection);
 
     let debug = format!("{client:?}");
-    assert!(debug.starts_with("Client { authenticated: true, timeout: 30s, method: Post"));
+    assert!(
+        debug.starts_with(
+            "Client { authenticated: true, timeout: 30s, concurrency: 4, method: Post"
+        )
+    );
     assert!(!debug.contains("s3cret"));
 }
 
@@ -521,7 +525,7 @@ fn labels_are_filtered_by_the_client() {
 }
 
 #[test]
-fn a_large_answer_is_refused_and_the_next_call_reconnects() {
+fn a_large_answer_is_refused_and_the_next_call_succeeds() {
     let fake = Fake::start();
     let client = fake.client().max_response_bytes(100).build().unwrap();
     fake.reply(200, "", &"x".repeat(1000));
@@ -529,10 +533,10 @@ fn a_large_answer_is_refused_and_the_next_call_reconnects() {
         client.query("up", at()).unwrap_err(),
         Error::Limit("the answer is larger than 100 bytes".into())
     );
-    let first = fake.next().connection;
+    fake.next();
     fake.success(json!({"resultType": "vector", "result": []}));
     client.query("up", at()).unwrap();
-    assert_ne!(fake.next().connection, first);
+    fake.next();
 }
 
 #[test]
@@ -608,15 +612,19 @@ fn a_configuration_that_cannot_be_used_is_refused() {
     for (builder, why) in [
         (
             builder().timeout(Duration::ZERO),
-            "the time-out and limits must be more than zero",
+            "the time-out, concurrency and limits must be more than zero",
         ),
         (
             builder().max_response_bytes(0),
-            "the time-out and limits must be more than zero",
+            "the time-out, concurrency and limits must be more than zero",
         ),
         (
             builder().max_query_bytes(0),
-            "the time-out and limits must be more than zero",
+            "the time-out, concurrency and limits must be more than zero",
+        ),
+        (
+            builder().concurrency(0),
+            "the time-out, concurrency and limits must be more than zero",
         ),
         (
             builder().user_agent(""),
@@ -776,6 +784,7 @@ fn requests_whose_callers_gave_up_are_skipped_without_losing_the_connection() {
             .jobs
             .send_blocking(Job {
                 request,
+                slot: client.shared.slots.take(false, Duration::ZERO).unwrap(),
                 cancellation,
                 deadline: std::time::Instant::now(),
                 reply,
@@ -860,6 +869,7 @@ fn a_panic_in_the_clients_thread_fails_only_its_request() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let job = Job {
         request,
+        slot: client.shared.slots.take(false, Duration::ZERO).unwrap(),
         cancellation: Cancellation::new(),
         deadline,
         reply,
@@ -996,9 +1006,9 @@ fn an_address_that_never_connects_is_skipped_within_the_time_out_and_the_one_tha
         "{error}"
     );
     assert_eq!(*attempts.lock().unwrap(), [stall, working]);
-    // The failure ended the connection, so the next request connects again, to the address that connected first.
+    // The failure retired only its connection, so the next request opens another to the address that connected, without trying the stalling one again.
     client.query("up", at()).unwrap();
-    assert_eq!(*attempts.lock().unwrap(), [stall, working, working]);
+    assert_eq!(*attempts.lock().unwrap(), [stall, working]);
 }
 
 #[test]
@@ -1037,4 +1047,604 @@ fn an_address_still_connecting_when_its_caller_gives_up_is_not_preferred() {
         *attempts.lock().unwrap(),
         [refusing, stall, refusing, stall]
     );
+}
+
+/// How the scripted fake answers a request.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// An empty vector, after a wait.
+    Success(Duration),
+    /// A status with an empty body, after a wait.
+    Status(u16, Duration),
+    /// Promise a longer body than is sent, then hang up.
+    Truncated,
+}
+
+/// A request the scripted fake received: its connection, its expression and its `authorization` field.
+#[derive(Clone, Debug)]
+struct Heard {
+    connection: usize,
+    query: String,
+    authorization: Option<String>,
+}
+
+/// A fake Prometheus that answers every request at once, on each connection's own thread, as a script says, counting the requests in flight together.
+struct Scripted {
+    url: String,
+    heard: Arc<Mutex<Vec<Heard>>>,
+    in_flight: Arc<AtomicUsize>,
+    most: Arc<AtomicUsize>,
+    /// Connections the client has closed.
+    closed: Arc<AtomicUsize>,
+}
+
+impl Scripted {
+    fn start(script: impl Fn(&Heard) -> Answer + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Self {
+            url,
+            heard: Arc::default(),
+            in_flight: Arc::default(),
+            most: Arc::default(),
+            closed: Arc::default(),
+        };
+        let script = Arc::new(script);
+        let (heard, in_flight, most, closed) = (
+            fake.heard.clone(),
+            fake.in_flight.clone(),
+            fake.most.clone(),
+            fake.closed.clone(),
+        );
+        thread::spawn(move || {
+            for (connection, stream) in listener.incoming().enumerate() {
+                let (script, heard, in_flight, most, closed) = (
+                    script.clone(),
+                    heard.clone(),
+                    in_flight.clone(),
+                    most.clone(),
+                    closed.clone(),
+                );
+                thread::spawn(move || {
+                    let stream = stream.unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut stream = stream;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            closed.fetch_add(1, Ordering::SeqCst);
+                            return;
+                        }
+                        let (mut length, mut authorization) = (0, None);
+                        loop {
+                            let mut header = String::new();
+                            reader.read_line(&mut header).unwrap();
+                            let Some((name, value)) = header.trim_end().split_once(':') else {
+                                break;
+                            };
+                            match name.to_ascii_lowercase().as_str() {
+                                "content-length" => length = value.trim().parse().unwrap(),
+                                "authorization" => authorization = Some(value.trim().to_owned()),
+                                _ => {}
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).unwrap();
+                        let query = form(&String::from_utf8(body).unwrap())
+                            .into_iter()
+                            .find(|(name, _)| name == "query")
+                            .map(|(_, value)| value)
+                            .unwrap_or_default();
+                        let request = Heard {
+                            connection,
+                            query,
+                            authorization,
+                        };
+                        heard.lock().unwrap().push(request.clone());
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        let answer = script(&request);
+                        let (status, wait, promised, body) = match answer {
+                            Answer::Success(wait) => {
+                                let body = json!({"status": "success", "data": {"resultType": "vector", "result": []}}).to_string();
+                                (200, wait, body.len(), body)
+                            }
+                            Answer::Status(status, wait) => (status, wait, 0, String::new()),
+                            Answer::Truncated => (200, Duration::ZERO, 100, "{}".into()),
+                        };
+                        thread::sleep(wait);
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        let head =
+                            format!("HTTP/1.1 {status} Fake\r\ncontent-length: {promised}\r\n\r\n");
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body.as_bytes());
+                        if promised != body.len() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        fake
+    }
+
+    fn heard(&self) -> Vec<Heard> {
+        self.heard.lock().unwrap().clone()
+    }
+
+    /// Wait until the fake has heard `count` requests.
+    fn wait_for(&self, count: usize) {
+        while self.heard.lock().unwrap().len() < count {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// `slow` queries are answered after `wait`, any others at once.
+fn slow_and_fast(wait: Duration) -> impl Fn(&Heard) -> Answer + Send + Sync + 'static {
+    move |heard| {
+        if heard.query.starts_with("slow") {
+            Answer::Success(wait)
+        } else {
+            Answer::Success(Duration::ZERO)
+        }
+    }
+}
+
+/// Run `query` on its own thread with a clone of `client`, for how long it took and what it gave.
+fn spawn_query(
+    client: &Client,
+    query: &'static str,
+    call: Call,
+) -> thread::JoinHandle<(Duration, Result<Response<Data>, Error>)> {
+    let client = client.clone();
+    thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = client.query_with(query, at(), call);
+        (started.elapsed(), result)
+    })
+}
+
+#[test]
+fn two_slow_requests_finish_together_over_connections_of_their_own() {
+    let slow = Duration::from_millis(600);
+    let fake = Scripted::start(slow_and_fast(slow));
+    let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
+    let started = std::time::Instant::now();
+    let requests = [
+        spawn_query(&client, "slow1", Call::new()),
+        spawn_query(&client, "slow2", Call::new()),
+    ];
+    for request in requests {
+        assert!(request.join().unwrap().1.is_ok());
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed >= slow && elapsed < slow * 2, "{elapsed:?}");
+    let heard = fake.heard();
+    assert_ne!(heard[0].connection, heard[1].connection);
+    assert_eq!(fake.most.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn no_more_requests_than_the_concurrency_are_in_flight() {
+    let slow = Duration::from_millis(200);
+    let fake = Scripted::start(slow_and_fast(slow));
+    let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
+    let started = std::time::Instant::now();
+    let requests: Vec<_> = (0..5)
+        .map(|_| spawn_query(&client, "slow", Call::new()))
+        .collect();
+    for request in requests {
+        assert!(request.join().unwrap().1.is_ok());
+    }
+    // Five requests, two at a time, take three turns.
+    assert!(started.elapsed() >= slow * 3);
+    assert_eq!(fake.most.load(Ordering::SeqCst), 2);
+    // Connections are kept and reused, so no more are opened than were needed at once.
+    let mut connections: Vec<_> = fake.heard().iter().map(|heard| heard.connection).collect();
+    connections.sort();
+    connections.dedup();
+    assert_eq!(connections.len(), 2);
+}
+
+#[test]
+fn a_slow_request_does_not_hold_up_a_fast_one() {
+    let fake = Scripted::start(slow_and_fast(Duration::from_secs(3)));
+    let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
+    let slow = spawn_query(&client, "slow", Call::new());
+    fake.wait_for(1);
+    let started = std::time::Instant::now();
+    client.query("fast", at()).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(slow.join().unwrap().1.is_ok());
+}
+
+#[test]
+fn a_token_refused_to_requests_in_flight_together_is_renewed_once() {
+    // No refusal is sent until all four requests have arrived with the first token, so that every one is refused while the others are in flight.
+    let together = Arc::new(std::sync::Barrier::new(4));
+    let fake = Scripted::start(move |heard| match heard.authorization.as_deref() {
+        Some("Bearer token-1") => {
+            together.wait();
+            Answer::Status(401, Duration::ZERO)
+        }
+        _ => Answer::Success(Duration::ZERO),
+    });
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let client = Client::builder(&fake.url)
+        .token_source(move || {
+            let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Token::new(&format!("token-{count}")).unwrap())
+        })
+        .build()
+        .unwrap();
+    client.token(None).unwrap();
+    let requests: Vec<_> = (0..4)
+        .map(|_| spawn_query(&client, "up", Call::new()))
+        .collect();
+    for request in requests {
+        assert!(request.join().unwrap().1.is_ok());
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    let heard = fake.heard();
+    let refused = heard
+        .iter()
+        .filter(|heard| heard.authorization.as_deref() == Some("Bearer token-1"))
+        .count();
+    assert_eq!((refused, heard.len()), (4, 8));
+}
+
+#[test]
+fn a_failed_connection_is_retired_without_disturbing_the_others() {
+    let fake = Scripted::start(|heard| match heard.query.as_str() {
+        "slow" => Answer::Success(Duration::from_millis(500)),
+        "broken" => Answer::Truncated,
+        _ => Answer::Success(Duration::ZERO),
+    });
+    let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
+    let slow = spawn_query(&client, "slow", Call::new());
+    fake.wait_for(1);
+    let error = client.query("broken", at()).unwrap_err();
+    assert!(
+        matches!(&error, Error::Transport(message) if message.starts_with("could not read the answer")),
+        "{error}"
+    );
+    assert!(slow.join().unwrap().1.is_ok());
+    client.query("up", at()).unwrap();
+    let heard = fake.heard();
+    assert_ne!(heard[0].connection, heard[1].connection);
+    // The next request reuses the slow request's connection, which the failure left alone.
+    assert_eq!(heard[2].connection, heard[0].connection);
+}
+
+#[test]
+fn waiting_for_a_slot_is_told_apart_from_the_source_not_answering() {
+    let fake = Scripted::start(slow_and_fast(Duration::from_millis(800)));
+    let client = Client::builder(&fake.url).concurrency(1).build().unwrap();
+    let slow = spawn_query(&client, "slow", Call::new());
+    fake.wait_for(1);
+    let short = Duration::from_millis(100);
+    assert_eq!(
+        client
+            .query_with("fast", at(), Call::new().timeout(short))
+            .unwrap_err(),
+        Error::Queued(short)
+    );
+    assert!(slow.join().unwrap().1.is_ok());
+    // With a slot, the same time-out is the source's to keep.
+    assert_eq!(
+        client
+            .query_with("slow", at(), Call::new().timeout(short))
+            .unwrap_err(),
+        Error::Timeout(short)
+    );
+    assert_eq!(fake.heard().len(), 2);
+}
+
+#[test]
+fn background_requests_leave_a_slot_for_others() {
+    let fake = Scripted::start(slow_and_fast(Duration::from_millis(800)));
+    let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
+    let background = Call::new().background();
+    let slow = spawn_query(&client, "slow", background);
+    fake.wait_for(1);
+    let short = Duration::from_millis(100);
+    assert_eq!(
+        client
+            .query_with("slow", at(), background.timeout(short))
+            .unwrap_err(),
+        Error::Queued(short)
+    );
+    let started = std::time::Instant::now();
+    client.query("fast", at()).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(slow.join().unwrap().1.is_ok());
+}
+
+#[test]
+fn a_call_may_have_a_time_out_of_its_own() {
+    let fake = Fake::start();
+    let client = fake.client().build().unwrap();
+    let call = Call::new().timeout(Duration::from_millis(1500));
+    fake.success(json!({"resultType": "matrix", "result": []}));
+    let range = Range::new(
+        at() - Duration::from_secs(60),
+        at(),
+        Duration::from_secs(60),
+    );
+    client.query_range_with("up", range, call).unwrap();
+    assert!(form(&fake.next().body).contains(&("timeout".to_owned(), "1.500".to_owned())));
+    fake.success(vector());
+    let long = Call::new().timeout(Duration::MAX);
+    client.query_with("up", at(), long).unwrap();
+    assert!(form(&fake.next().body).contains(&("timeout".to_owned(), "86400.000".to_owned())));
+    assert_eq!(
+        client
+            .query_with("up", at(), Call::new().timeout(Duration::ZERO))
+            .unwrap_err(),
+        Error::Invalid("a time-out must be more than zero".into())
+    );
+    assert!(fake.seen.try_recv().is_err());
+}
+
+#[test]
+fn dropping_a_client_with_requests_in_flight_stops_it_promptly() {
+    let fake = Scripted::start(slow_and_fast(Duration::from_secs(1)));
+    let mut builder = Client::builder(&fake.url).concurrency(3);
+    builder.drop_wait = Duration::from_secs(30);
+    let client = builder.build().unwrap();
+    let short = Call::new().timeout(Duration::from_millis(200));
+    let requests: Vec<_> = (0..3)
+        .map(|_| spawn_query(&client, "slow", short))
+        .collect();
+    for request in requests {
+        assert_eq!(
+            request.join().unwrap().1.unwrap_err(),
+            Error::Timeout(Duration::from_millis(200))
+        );
+    }
+    let started = std::time::Instant::now();
+    drop(client);
+    // The thread stopped of its own accord, well within the wait.
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // Every connection was closed, which the fake sees once it has answered.
+    while fake.closed.load(Ordering::SeqCst) < 3 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// An HTTPS fake whose first `answered` connections have their requests answered with an empty vector, a `slow` query after 800 ms, and whose later connections never complete the handshake, as an address that stops connecting. With `keep_alive`, a connection answers request after request; otherwise it closes after its first. It records which connection each request came on.
+fn tls_fake(
+    config: Arc<rustls::ServerConfig>,
+    answered: usize,
+    keep_alive: bool,
+) -> (std::net::SocketAddr, Arc<Mutex<Vec<usize>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let record = heard.clone();
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for (index, stream) in listener.incoming().enumerate() {
+            let stream = stream.unwrap();
+            if index >= answered {
+                held.push(stream);
+                continue;
+            }
+            let (config, record) = (config.clone(), record.clone());
+            thread::spawn(move || {
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut tls = rustls::StreamOwned::new(connection, stream);
+                loop {
+                    let mut reader = BufReader::new(&mut tls);
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse().unwrap();
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    record.lock().unwrap().push(index);
+                    if String::from_utf8_lossy(&body).contains("query=slow") {
+                        thread::sleep(Duration::from_millis(800));
+                    }
+                    let answer = json!({"status": "success", "data": {"resultType": "vector", "result": []}}).to_string();
+                    let close = if keep_alive {
+                        ""
+                    } else {
+                        "connection: close\r\n"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n{close}\r\n{answer}",
+                        answer.len()
+                    );
+                    let _ = tls.write_all(response.as_bytes());
+                    if !keep_alive {
+                        tls.conn.send_close_notify();
+                        let _ = tls.flush();
+                        return;
+                    }
+                    let _ = tls.flush();
+                }
+            });
+        }
+    });
+    (address, heard)
+}
+
+/// An HTTPS fake whose first `answered` connections each answer one request and close, and whose later connections stall.
+fn answering_then_stalling(
+    config: Arc<rustls::ServerConfig>,
+    answered: usize,
+) -> std::net::SocketAddr {
+    tls_fake(config, answered, false).0
+}
+
+#[test]
+fn a_kept_address_that_stops_connecting_is_passed_over_for_another() {
+    let (server, roots) = certificate();
+    let (flaky, working) = (
+        answering_then_stalling(server.clone(), 1),
+        answering_then_stalling(server, usize::MAX),
+    );
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = Client::builder("https://localhost").timeout(Duration::from_secs(4));
+    builder.resolver = Some(Arc::new(move || vec![flaky, working]));
+    builder.attempts = Some(attempts.clone());
+    builder.tls = Some(roots);
+    let client = builder.build().unwrap();
+    client.query("up", at()).unwrap();
+    assert_eq!(*attempts.lock().unwrap(), [flaky]);
+    // A new connection to the kept address stalls, so within its share of the time the request finds the other, trying the stalled one last.
+    let started = std::time::Instant::now();
+    client.query("up", at()).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(*attempts.lock().unwrap(), [flaky, working]);
+    client.query("up", at()).unwrap();
+    assert_eq!(*attempts.lock().unwrap(), [flaky, working]);
+}
+
+#[test]
+fn a_caller_giving_up_on_a_new_connection_leaves_the_kept_address_and_its_other_connections() {
+    let (server, roots) = certificate();
+    let (only, heard) = tls_fake(server, 1, true);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = Client::builder("https://localhost").concurrency(2);
+    builder.resolver = Some(Arc::new(move || vec![only]));
+    builder.attempts = Some(attempts.clone());
+    builder.tls = Some(roots);
+    let client = builder.build().unwrap();
+    let slow = spawn_query(&client, "slow", Call::new());
+    while heard.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The first connection is busy, and a second never completes connecting: the host's only address is waited for, as long as the caller waits.
+    let short = Duration::from_millis(200);
+    assert_eq!(
+        client
+            .query_with("up", at(), Call::new().timeout(short))
+            .unwrap_err(),
+        Error::Timeout(short)
+    );
+    assert!(slow.join().unwrap().1.is_ok());
+    // Only the connection being made was given up: the next request reuses the first, over the address kept.
+    client.query("up", at()).unwrap();
+    assert_eq!(*heard.lock().unwrap(), [0, 0]);
+    drop(client);
+    assert_eq!(*attempts.lock().unwrap(), [only]);
+}
+
+#[test]
+fn a_request_waiting_for_another_to_find_an_address_can_be_given_up() {
+    let (_, roots) = certificate();
+    let stall = stalling();
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = Client::builder("https://localhost").timeout(Duration::from_secs(1));
+    builder.resolver = Some(Arc::new(move || vec![stall]));
+    builder.attempts = Some(attempts.clone());
+    builder.tls = Some(roots);
+    let client = builder.build().unwrap();
+    let finding = spawn_query(&client, "up", Call::new());
+    while attempts.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let short = Duration::from_millis(100);
+    assert_eq!(
+        client
+            .query_with("up", at(), Call::new().timeout(short))
+            .unwrap_err(),
+        Error::Timeout(short)
+    );
+    assert_eq!(
+        finding.join().unwrap().1.unwrap_err(),
+        Error::Timeout(Duration::from_secs(1))
+    );
+    drop(client);
+    // The request that gave up never tried an address of its own.
+    assert_eq!(*attempts.lock().unwrap(), [stall]);
+}
+
+#[test]
+fn requests_together_on_a_kept_address_that_stops_connecting_forget_it_once() {
+    let (server, roots) = certificate();
+    let (flaky, refusing) = (answering_then_stalling(server, 1), refusing());
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = Client::builder("https://localhost")
+        .timeout(Duration::from_secs(2))
+        .concurrency(2);
+    builder.resolver = Some(Arc::new(move || vec![flaky, refusing]));
+    builder.attempts = Some(attempts.clone());
+    builder.tls = Some(roots);
+    let client = builder.build().unwrap();
+    client.query("up", at()).unwrap();
+    // Both stall connecting to the kept address and pass it over; the first to find the addresses again finds the other refusing and the kept one still stalling, and the second waits for it.
+    let requests = [
+        spawn_query(&client, "up", Call::new()),
+        spawn_query(&client, "up", Call::new()),
+    ];
+    for request in requests {
+        assert_eq!(
+            request.join().unwrap().1.unwrap_err(),
+            Error::Timeout(Duration::from_secs(2))
+        );
+    }
+    drop(client);
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts[..3], [flaky, refusing, flaky]);
+}
+
+#[test]
+fn a_renewal_holds_up_only_callers_that_need_its_token() {
+    let (entered, renewing) = channel();
+    let (release, released) = channel::<()>();
+    let released = Mutex::new(released);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let client = Client::builder("http://127.0.0.1:9")
+        .token_source(move || {
+            let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if count == 2 {
+                entered.send(()).unwrap();
+                released.lock().unwrap().recv().unwrap();
+            }
+            Ok(Token::new(&format!("token-{count}")).unwrap())
+        })
+        .build()
+        .unwrap();
+    assert_eq!(client.token(None).unwrap().unwrap().1, 1);
+    // A caller whose request was refused renews, and the source takes its time.
+    let renewer = {
+        let client = client.clone();
+        thread::spawn(move || client.token(Some(1)).unwrap().unwrap())
+    };
+    renewing.recv().unwrap();
+    // A caller whose token is still good is not held up meanwhile.
+    let (token, generation) = client.token(None).unwrap().unwrap();
+    assert_eq!((token.expose(), generation), ("token-1", 1));
+    // Another refused caller waits for the renewal rather than asking again.
+    let waiter = {
+        let client = client.clone();
+        thread::spawn(move || client.token(Some(1)).unwrap().unwrap())
+    };
+    while client.shared.kept().waiting == 0 {
+        thread::sleep(Duration::from_millis(1));
+    }
+    release.send(()).unwrap();
+    for caller in [renewer, waiter] {
+        let (token, generation) = caller.join().unwrap();
+        assert_eq!((token.expose(), generation), ("token-2", 2));
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
 }

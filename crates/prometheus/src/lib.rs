@@ -30,7 +30,7 @@
 //! The crate logs nothing. The token is sent only in the `authorization` field of the client's own requests, and is in no error, `Debug` output or log; errors and warnings quote the source's own text only scrubbed of the token and the endpoint (see [`Error`]).
 use std::fmt;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,7 @@ mod error;
 mod labels;
 mod metric;
 pub mod promql;
+mod slots;
 mod system;
 mod time;
 mod token;
@@ -60,6 +61,7 @@ pub use token::{Token, TokenSource};
 
 use data::Answer;
 use error::Scrub;
+use slots::Slots;
 use worker::{Job, Outgoing, Reply, Settings};
 
 /// The README's examples, checked as documentation tests.
@@ -67,8 +69,11 @@ use worker::{Job, Outgoing, Reply, Settings};
 #[cfg(doctest)]
 pub struct ReadmeDoctests;
 
-/// How long a call may take unless the application sets another time-out.
+/// How long a request may take unless the application or the call sets another time-out.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many requests a client sends at once unless the application sets another concurrency.
+pub const DEFAULT_CONCURRENCY: usize = 4;
 
 /// How long a client keeps a token before asking its source for another, unless the application sets another lifetime: 40 minutes, within the hour an identity token usually lasts.
 pub const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(40 * 60);
@@ -101,11 +106,45 @@ pub enum QueryMethod {
     Get,
 }
 
+/// How one call is sent, for [`Client::query_with`] and [`Client::query_range_with`]: its own time-out, and whether it is a background request.
+///
+/// ```
+/// use std::time::Duration;
+/// let fleet = tomori_prometheus::Call::new()
+///     .timeout(Duration::from_secs(60))
+///     .background();
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Call {
+    timeout: Option<Duration>,
+    background: bool,
+}
+
+impl Call {
+    /// A call with the client's time-out, not in the background.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This call's time-out in place of the client's, at most [`MAX_TIMEOUT`], which a longer one is taken as, as [`Builder::timeout`] describes.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Send this call as a background request, such as a slow read of a whole fleet: a background request never takes a slot while another request waits for one, and background requests together hold at most all but one of the client's slots, so that one is always left for other requests. With a concurrency of 1, a background request takes the only slot when no other request is waiting, and a request that comes after waits for it to finish: give a client that sends background requests a concurrency of at least 2 for them to run alongside others.
+    pub fn background(mut self) -> Self {
+        self.background = true;
+        self
+    }
+}
+
 /// The configuration of a [`Client`], from [`Client::builder`].
 pub struct Builder {
     endpoint: String,
     tokens: Option<Arc<dyn TokenSource>>,
     timeout: Duration,
+    concurrency: usize,
     token_lifetime: Duration,
     max_response_bytes: usize,
     max_query_bytes: usize,
@@ -131,9 +170,17 @@ impl Builder {
         self
     }
 
-    /// How long each request may take, from when it is queued, waiting for other callers' requests included, until its answer is read; [`DEFAULT_TIMEOUT`] otherwise, and at most [`MAX_TIMEOUT`], which a longer one is taken as. It is sent as Prometheus's evaluation `timeout` too. A call whose first request is refused with HTTP 401 asks the token source again and sends a second request with a time-out of its own, so a call can take twice the time-out, and the token source's time, which is not bounded here, besides.
+    /// How long each request may wait for a slot, and then, separately, take from when it has one until its answer is read; [`DEFAULT_TIMEOUT`] otherwise, and at most [`MAX_TIMEOUT`], which a longer one is taken as. A call may set its own with [`Call::timeout`]. A request that finds no slot within it fails as [`Error::Queued`], and one the source does not answer within it as [`Error::Timeout`]. It is sent as Prometheus's evaluation `timeout` too. A call whose first request is refused with HTTP 401 asks the token source again and sends a second request with time-outs of its own, so a call can take four times the time-out, and the token source's time, which is not bounded here, besides.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// How many requests the client and its clones send at once, each over a connection of its own; [`DEFAULT_CONCURRENCY`] otherwise. A request waits for a slot while this many are in flight. Background requests ([`Call::background`]) hold at most all but one of them, and let waiting requests go first.
+    ///
+    /// The address the client keeps has at most twice this many connections, counting those still closing; when the client moves to another address, the old one's connections close as their requests end, so for a moment there may be more. Each request in flight may hold its answer, up to [`Builder::max_response_bytes`], so the answers may take about this many times that much memory at once.
+    pub fn concurrency(mut self, requests: usize) -> Self {
+        self.concurrency = requests;
         self
     }
 
@@ -183,9 +230,13 @@ impl Builder {
     pub fn build(self) -> Result<Client, Error> {
         let endpoint = endpoint::parse(&self.endpoint)?;
         let prefix = endpoint::prefix(&self.api_prefix)?;
-        if self.timeout.is_zero() || self.max_response_bytes == 0 || self.max_query_bytes == 0 {
+        if self.timeout.is_zero()
+            || self.concurrency == 0
+            || self.max_response_bytes == 0
+            || self.max_query_bytes == 0
+        {
             return Err(Error::Invalid(
-                "the time-out and limits must be more than zero".into(),
+                "the time-out, concurrency and limits must be more than zero".into(),
             ));
         }
         if self.user_agent.is_empty()
@@ -210,6 +261,7 @@ impl Builder {
             endpoint,
             user_agent: self.user_agent,
             max_response_bytes: self.max_response_bytes,
+            concurrency: self.concurrency,
             #[cfg(test)]
             resolver: self.resolver,
             #[cfg(test)]
@@ -220,7 +272,7 @@ impl Builder {
                 NativeScheduler::with_options(NativeOptions {
                     workers: 1,
                     threads: 2,
-                    capacity: 16,
+                    capacity: self.concurrency.saturating_mul(2).max(16),
                     ..Default::default()
                 })
             })
@@ -246,8 +298,10 @@ impl Builder {
                 drop_wait: self.drop_wait,
                 tokens: self.tokens,
                 token: Mutex::new(Kept::default()),
+                renewed: Condvar::new(),
                 token_lifetime: self.token_lifetime,
                 timeout: self.timeout.min(MAX_TIMEOUT),
+                slots: Slots::new(self.concurrency),
                 max_query_bytes: self.max_query_bytes,
                 path,
                 method: self.method,
@@ -276,7 +330,7 @@ fn tls() -> Arc<rustls::ClientConfig> {
 
 /// A blocking Prometheus client, for a server side's own thread.
 ///
-/// It sends one request at a time, on a thread and scheduler of its own, over one connection that it keeps for the next request and replaces after any failure, trying each of the host's addresses in turn until one connects; a caller on another thread waits its turn, within its time-out. Clones share the thread, the connection and the token. Dropping the last stops the thread and waits for it, for at most [`DROP_WAIT`], since a lookup stuck in the system's resolver cannot be interrupted; the thread then stops on its own once the lookup ends.
+/// It sends up to [`Builder::concurrency`] requests at once, from any of its callers' threads, on a thread and scheduler of its own, each over a connection of the HTTP client's pool, which keeps connections for the requests after and retires one after a failure on it, leaving the others. It tries each of the host's addresses in turn until one connects, and keeps to that address until connecting to it fails. A request waits for a free slot within its time-out, which fails as [`Error::Queued`], distinct from the source not answering, [`Error::Timeout`], and then has its time-out again for its exchange; a caller can give each call its own time-out, and mark slow reads as background requests, which leave a slot for others, with [`Call`]. Clones share the thread, the connections, the slots and the token. Dropping the last stops the thread and waits for it, for at most [`DROP_WAIT`], since a lookup stuck in the system's resolver cannot be interrupted; the thread then stops on its own once the lookup ends.
 ///
 /// It sends a request again only when the endpoint refused it with HTTP 401, once, with a new token from its source, unless another caller has renewed the token meanwhile. Nothing else is retried: a 429 or 5xx is reported as [`Error::Status`], or [`Error::Query`] when Prometheus explains it, with the `retry-after` the source gave, for the caller to wait as it polls at its own cadence; a request that meets a connection the source has just closed fails as [`Error::Transport`], and the next call opens a new one. Redirects are not followed, so a token is never sent to another place.
 #[derive(Clone)]
@@ -293,8 +347,12 @@ struct Shared {
     drop_wait: Duration,
     tokens: Option<Arc<dyn TokenSource>>,
     token: Mutex<Kept>,
+    /// Notified as a renewal ends.
+    renewed: Condvar,
     token_lifetime: Duration,
     timeout: Duration,
+    /// The slots each request takes before it is sent.
+    slots: Arc<Slots>,
     max_query_bytes: usize,
     /// The endpoint's path and the API's prefix, before each call.
     path: String,
@@ -310,6 +368,29 @@ struct Shared {
 struct Kept {
     token: Option<(Token, Instant)>,
     generation: u64,
+    /// Whether a caller is asking the source for a token, which others needing one wait for.
+    renewing: bool,
+    /// Callers waiting for a renewal, in tests.
+    #[cfg(test)]
+    waiting: usize,
+}
+
+/// A caller's turn to ask the token source, ended as it is dropped, a panicking source's included.
+struct Renewing<'a> {
+    shared: &'a Shared,
+}
+
+impl Drop for Renewing<'_> {
+    fn drop(&mut self) {
+        self.shared.kept().renewing = false;
+        self.shared.renewed.notify_all();
+    }
+}
+
+impl Shared {
+    fn kept(&self) -> MutexGuard<'_, Kept> {
+        self.token.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Drop for Shared {
@@ -331,6 +412,7 @@ impl fmt::Debug for Client {
             .debug_struct("Client")
             .field("authenticated", &shared.tokens.is_some())
             .field("timeout", &shared.timeout)
+            .field("concurrency", &shared.slots.limit())
             .field("method", &shared.method)
             .field("labels", &shared.labels)
             .finish_non_exhaustive()
@@ -344,6 +426,7 @@ impl Client {
             endpoint: endpoint.to_owned(),
             tokens: None,
             timeout: DEFAULT_TIMEOUT,
+            concurrency: DEFAULT_CONCURRENCY,
             token_lifetime: DEFAULT_TOKEN_LIFETIME,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_query_bytes: DEFAULT_MAX_QUERY_BYTES,
@@ -363,7 +446,17 @@ impl Client {
 
     /// Evaluate `expression` at `at`, an instant query. Evaluating several queries at one `at` makes them agree.
     pub fn query(&self, expression: &str, at: Timestamp) -> Result<Response<Data>, Error> {
-        self.call("query", expression, &[("time", at.to_string())])
+        self.query_with(expression, at, Call::new())
+    }
+
+    /// Evaluate `expression` at `at`, as [`Client::query`] does, sent as `call` says.
+    pub fn query_with(
+        &self,
+        expression: &str,
+        at: Timestamp,
+        call: Call,
+    ) -> Result<Response<Data>, Error> {
+        self.call("query", expression, &[("time", at.to_string())], call)
     }
 
     /// Evaluate `expression` at every step of `range`, a range query, whose series have at most [`MAX_POINTS`] points.
@@ -371,6 +464,16 @@ impl Client {
         &self,
         expression: &str,
         range: Range,
+    ) -> Result<Response<Vec<Series>>, Error> {
+        self.query_range_with(expression, range, Call::new())
+    }
+
+    /// Evaluate `expression` at every step of `range`, as [`Client::query_range`] does, sent as `call` says.
+    pub fn query_range_with(
+        &self,
+        expression: &str,
+        range: Range,
+        call: Call,
     ) -> Result<Response<Vec<Series>>, Error> {
         let points = range.points().ok_or(Error::Invalid(
             "a range must not end before it starts, and its step must be at least a millisecond"
@@ -389,6 +492,7 @@ impl Client {
                 ("end", range.end.to_string()),
                 ("step", time::seconds(range.step)),
             ],
+            call,
         )?;
         match response.data {
             Data::Matrix(series) => Ok(Response {
@@ -406,8 +510,13 @@ impl Client {
         call: &str,
         expression: &str,
         parameters: &[(&str, String)],
+        options: Call,
     ) -> Result<Response<Data>, Error> {
         let shared = &self.shared;
+        let timeout = options.timeout.unwrap_or(shared.timeout).min(MAX_TIMEOUT);
+        if timeout.is_zero() {
+            return Err(Error::Invalid("a time-out must be more than zero".into()));
+        }
         if expression.len() > shared.max_query_bytes {
             return Err(Error::Limit(format!(
                 "a query of {} bytes is more than {}",
@@ -420,7 +529,7 @@ impl Client {
         for (name, value) in parameters {
             form.append_pair(name, value);
         }
-        form.append_pair("timeout", &time::seconds(shared.timeout));
+        form.append_pair("timeout", &time::seconds(timeout));
         let form = form.finish();
         let path = format!("{}/{call}", shared.path);
         let post = shared.method == QueryMethod::Post;
@@ -432,14 +541,15 @@ impl Client {
         let mut refused = None;
         loop {
             let token = self.token(refused)?;
-            let reply = self.send(Outgoing {
+            let request = Outgoing {
                 post,
                 target: target.clone(),
                 body: body.clone(),
                 authorization: token
                     .as_ref()
                     .map(|(token, _)| format!("Bearer {}", token.expose())),
-            })?;
+            };
+            let reply = self.send(request, timeout, options.background)?;
             if reply.status == 401
                 && let Some((_, generation)) = &token
                 && refused.is_none()
@@ -486,31 +596,62 @@ impl Client {
         let Some(source) = &shared.tokens else {
             return Ok(None);
         };
-        let mut kept = shared.token.lock().unwrap_or_else(PoisonError::into_inner);
-        let fresh = match &kept.token {
-            Some((_, since)) => {
-                since.elapsed() < shared.token_lifetime && refused != Some(kept.generation)
+        let mut kept = shared.kept();
+        loop {
+            let fresh = match &kept.token {
+                Some((token, since)) => (since.elapsed() < shared.token_lifetime
+                    && refused != Some(kept.generation))
+                .then(|| (token.clone(), kept.generation)),
+                None => None,
+            };
+            if let Some(fresh) = fresh {
+                return Ok(Some(fresh));
             }
-            None => false,
-        };
-        if !fresh {
-            let token = source
-                .token()
-                .map_err(|message| Error::Auth(self.scrub().quote(&message)))?;
-            kept.token = Some((token, Instant::now()));
-            kept.generation += 1;
+            if !kept.renewing {
+                break;
+            }
+            // Another caller is asking the source: take what it is given, rather than ask again.
+            #[cfg(test)]
+            {
+                kept.waiting += 1;
+            }
+            kept = shared
+                .renewed
+                .wait(kept)
+                .unwrap_or_else(PoisonError::into_inner);
+            #[cfg(test)]
+            {
+                kept.waiting -= 1;
+            }
         }
-        let (token, _) = kept.token.as_ref().expect("a token was just kept");
-        Ok(Some((token.clone(), kept.generation)))
+        // The source is asked without the lock, so that callers whose token is still good never wait for it.
+        kept.renewing = true;
+        drop(kept);
+        let renewing = Renewing { shared };
+        let token = source
+            .token()
+            .map_err(|message| Error::Auth(self.scrub().quote(&message)))?;
+        let mut kept = shared.kept();
+        kept.token = Some((token.clone(), Instant::now()));
+        kept.generation += 1;
+        let generation = kept.generation;
+        drop(kept);
+        drop(renewing);
+        Ok(Some((token, generation)))
     }
 
-    /// Send `request` on the client's thread and wait for its reply, within the time-out.
-    fn send(&self, request: Outgoing) -> Result<Reply, Error> {
+    /// Take a slot for `request`, within `timeout`, then send it on the client's thread and wait for its reply, within `timeout` again.
+    fn send(&self, request: Outgoing, timeout: Duration, background: bool) -> Result<Reply, Error> {
+        let slot = self
+            .shared
+            .slots
+            .take(background, timeout)
+            .ok_or(Error::Queued(timeout))?;
         let (reply, answer) = sync_channel(1);
         let cancellation = Cancellation::new();
-        let timeout = self.shared.timeout;
         let job = Job {
             request,
+            slot,
             cancellation: cancellation.clone(),
             deadline: Instant::now() + timeout,
             reply,
@@ -519,7 +660,7 @@ impl Client {
             return Err(Error::Transport("the client's thread has stopped".into()));
         }
         let answer = answer.recv_timeout(timeout);
-        // The thread stops working on a request nobody waits for any longer. One answered needs nothing stopped, and cancelling it could retire the kept connection before the HTTP client has returned it to its pool.
+        // The thread stops working on a request nobody waits for any longer, retiring its connection and giving back its slot. One answered needs nothing stopped, and cancelling it could retire its connection before the HTTP client has returned it to its pool.
         if answer.is_err() {
             cancellation.cancel();
         }

@@ -4320,6 +4320,7 @@ dependencies = [
  "base-scheduler-native",
  "form_urlencoded",
  "futures-lite",
+ "futures-util",
  "rcgen",
  "rustls",
  "serde_json",
