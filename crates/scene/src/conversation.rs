@@ -31,21 +31,32 @@ const BODY_ROWS: usize = ROWS - 4;
 
 /// What the headset states in each `Hello` that it reads and draws at most, as a conversation does unless
 /// [`Conversation::set_limits`] says otherwise: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], so that its code
-/// panels are sent whole, but a projection within today's bounds, [`tomori_protocol::Limits::TODAY`], chosen while the
-/// frame step laid out every panel's face each frame, about 0.7 ms for a full panel on a desktop machine, so that 90
-/// full panels took longer than a headset's frame. Faces are now kept between frames; more waits until what more panels
-/// cost is measured on the headset. See `design/clients.md`.
-pub const HEADSET_LIMITS: tomori_protocol::Limits =
-    tomori_protocol::Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32);
+/// panels are sent whole, but today's panels, [`tomori_protocol::Limits::TODAY`]'s twelve floating and ninety in all,
+/// chosen while the frame step laid out every panel's face each frame, about 0.7 ms for a full panel on a desktop
+/// machine, so that 90 full panels took longer than a headset's frame. Faces are now kept between frames; more panels
+/// wait until what they cost is measured on the headset. Its walls are the Tomori wall, the sixteen an environment may
+/// declare and today's six owners add, and its slots six for each, so that an environment declaring sixteen standard
+/// walls is drawn whole: a wall costs a board, and a slot no more than a board of its own, a few quads each, built and
+/// compared every frame and meshed again as they change or change place in the draw order, beside the panels they
+/// hold, which stay as many. See `design/clients.md`.
+pub const HEADSET_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TODAY
+    .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+    .with_projection(
+        1 + 16 + 6,
+        tomori_protocol::WALL_SLOTS * (1 + 16 + 6),
+        tomori_protocol::PROJECTION_FLOATING,
+        tomori_protocol::PROJECTION_PANELS,
+    );
 
-/// What the desktop window states: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], and twice today's walls owners
-/// add, slots, floating panels and panels, since a desktop machine lays them out about three times as fast as a headset
-/// and a slower frame there is not felt as it is in a headset. See [`HEADSET_LIMITS`] and `design/clients.md`.
+/// What the desktop window states: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], twice today's walls owners
+/// add, with the Tomori wall and the sixteen an environment may declare, six slots for each, and twice today's floating
+/// panels and panels, since a desktop machine lays them out about three times as fast as a headset and a slower frame
+/// there is not felt as it is in a headset. See [`HEADSET_LIMITS`] and `design/clients.md`.
 pub const DESKTOP_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TODAY
     .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
     .with_projection(
-        1 + 6 + 12,
-        2 * tomori_protocol::PROJECTION_SLOTS,
+        1 + 16 + 12,
+        tomori_protocol::WALL_SLOTS * (1 + 16 + 12),
         2 * tomori_protocol::PROJECTION_FLOATING,
         2 * tomori_protocol::PROJECTION_PANELS,
     );
@@ -13222,15 +13233,16 @@ mod tests {
         }
 
         #[test]
-        fn the_headset_states_today_s_projection_and_the_desktop_window_twice_it_both_with_the_longest_frames()
+        fn the_headset_states_today_s_panels_and_the_desktop_window_twice_them_both_with_sixteen_declared_walls_and_the_longest_frames()
          {
             use tomori_client::connection::Session;
             use tomori_protocol::{Limits, MOST_FRAME_BYTES};
             let longest = Limits::TODAY.with_frame_bytes(MOST_FRAME_BYTES as u32);
             let mut conversation = joined();
-            assert_eq!(HEADSET_LIMITS, longest);
+            // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each.
+            assert_eq!(HEADSET_LIMITS, longest.with_projection(23, 138, 12, 90));
             assert_eq!(Session::limits(&conversation), HEADSET_LIMITS);
-            assert_eq!(DESKTOP_LIMITS, longest.with_projection(19, 156, 24, 180));
+            assert_eq!(DESKTOP_LIMITS, longest.with_projection(29, 174, 24, 180));
             conversation.set_limits(DESKTOP_LIMITS);
             assert_eq!(Session::limits(&conversation), DESKTOP_LIMITS);
         }

@@ -679,10 +679,10 @@ impl Environment {
 
     /// The environment, with projection walls of its own, `walls`, in its own coordinates, each a pose, upright and
     /// facing along its +Z, or an [`EnvironmentWall`], which says its grid and the size of its slots too, of which the
-    /// server uses at most six. They are part of the place, locked until a space's owner unlocks them, such as a notice
-    /// board or a console people walk up to and put what the agent shows on. The agent projects onto them, as onto the
-    /// Tomori wall, for whoever asks nearest them, and what is on them is kept for the space in this environment,
-    /// hidden while the space is in another. See `design/projection.md`.
+    /// server uses the first sixteen, ignoring any more. They are part of the place, locked until a space's owner
+    /// unlocks them, such as a notice board or a console people walk up to and put what the agent shows on. The agent
+    /// projects onto them, as onto the Tomori wall, for whoever asks nearest them, and what is on them is kept for the
+    /// space in this environment, hidden while the space is in another. See `design/projection.md`.
     ///
     /// ```
     /// use tomori_protocol::{Grid, Pose};
@@ -1812,6 +1812,17 @@ mod tests {
         );
         assert_eq!(
             farm.clone().with_status_wall(StatusWall::own(2)).status(),
+            Status::Beneath
+        );
+        // Of seventeen walls, the sixteenth may be its status wall, and the seventeenth, ignored, may not.
+        let deck = Environment::new("deck", "Deck").with_walls(vec![board; 17]);
+        assert_eq!(deck.walls().len(), 17);
+        assert_eq!(
+            deck.clone().with_status_wall(StatusWall::own(15)).status(),
+            Status::Own(15)
+        );
+        assert_eq!(
+            deck.with_status_wall(StatusWall::own(16)).status(),
             Status::Beneath
         );
         // One it stands, laid out as it says, at its pose; beyond reach, the default.

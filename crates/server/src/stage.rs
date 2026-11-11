@@ -57,12 +57,17 @@ use tomori_protocol::{
 };
 
 /// The most walls owners may add in one environment of a space: sixty, ten times as many as before frames were
-/// negotiated, so that, with the Tomori wall and the environment's own, they are [`tomori_protocol::Limits::MOST`]'s.
+/// negotiated, so that, with the Tomori wall and [`DECLARED_WALLS`] of the environment's own, they are
+/// [`tomori_protocol::Limits::MOST`]'s.
 /// A client is sent only those within what it states it draws. See `design/projection.md`.
 pub const ADDED_WALLS: usize = 60;
 
-/// The most walls of an environment's own that are used.
-pub const DECLARED_WALLS: usize = 6;
+/// The most walls of an environment's own that are used, the first it declares; any more are ignored. Sixteen, where
+/// six were before, so that a console of a wall for each of its stations fits with room to grow: the walls' slots
+/// together are still bounded by [`SLOTS`], which bounds the projection's size, so more walls cost only their own few
+/// hundred bytes each, and the headset and the desktop window state walls and slots enough to draw sixteen standard
+/// walls with the Tomori wall and the walls owners add. See `design/projection.md`.
+pub const DECLARED_WALLS: usize = 16;
 
 /// The most panels left floating in one environment of a space, [`tomori_protocol::Limits::MOST`]'s; leaving another
 /// floating takes away the one that has floated longest. A client is sent the most recently left of them, as many as it
@@ -121,23 +126,37 @@ pub fn default_stage() -> Pose {
 /// How much less than a frame's payload the JSON of a projection takes, for the message around it.
 const MESSAGE_BYTES: usize = 4 * 1024;
 
-/// `shown`, within what one connection takes, `limits`: the walls in order, the Tomori wall first, then the
-/// environment's own and those owners added, while they are fewer than its walls and their slots together within its
-/// slots. A join to a wall left out is left out too, so that the edge it was on is drawn. See `design/projection.md`.
+/// `shown`, within what one connection takes, `limits`: the status wall first, whichever wall holds the role, so that
+/// a client of fewer walls or slots never loses the space's status panels, then the others in order, the Tomori wall,
+/// the environment's own and those owners added, while they are fewer than its walls and their slots together within
+/// its slots; kept in the order shown. A join to a wall left out is left out too, so that the edge it was on is drawn.
+/// See `design/projection.md`.
 fn walls_within(shown: Vec<Wall>, limits: &tomori_protocol::Limits) -> Vec<Wall> {
     let mut slots = 0;
-    let mut kept: Vec<Wall> = Vec::new();
-    for wall in shown {
+    let mut chosen = vec![false; shown.len()];
+    let order = shown
+        .iter()
+        .enumerate()
+        .filter(|(_, wall)| wall.status)
+        .chain(shown.iter().enumerate().filter(|(_, wall)| !wall.status));
+    let mut count = 0;
+    for (index, wall) in order {
         let more = wall.slots() as usize;
-        if kept.len() == limits.walls as usize {
+        if count == limits.walls as usize {
             break;
         }
         if slots + more > limits.slots as usize {
             continue;
         }
         slots += more;
-        kept.push(wall);
+        count += 1;
+        chosen[index] = true;
     }
+    let mut kept: Vec<Wall> = shown
+        .into_iter()
+        .zip(chosen)
+        .filter_map(|(wall, chosen)| chosen.then_some(wall))
+        .collect();
     let ids: BTreeSet<String> = kept.iter().map(|wall| wall.id.clone()).collect();
     for wall in &mut kept {
         wall.joined.retain(|join| ids.contains(&join.wall));
@@ -2966,9 +2985,11 @@ mod tests {
                 ("c".into(), on(&added, 0)),
             ]
         );
-        // An environment declares at most so many walls.
-        let many: Vec<crate::EnvironmentWall> = (0..10)
-            .map(|index| pose(index as f32, -5.0).into())
+        // An environment declares at most sixteen walls: a seventeenth is ignored, shown to nobody, changed by nobody
+        // and holding no panel.
+        assert_eq!(DECLARED_WALLS, 16);
+        let many: Vec<crate::EnvironmentWall> = (0..=DECLARED_WALLS)
+            .map(|index| pose(index as f32 - 8.0, -5.0).into())
             .collect();
         let walls = Walls {
             declared: &many,
@@ -2978,7 +2999,42 @@ mod tests {
         assert_eq!(view.walls.len(), 1 + DECLARED_WALLS + 1);
         assert_eq!(view.walls[0].kind, WallKind::Tomori);
         assert_eq!(view.walls[1].kind, WallKind::Environment);
+        assert_eq!(view.walls[DECLARED_WALLS].id, "environment-15");
         assert_eq!(view.walls[DECLARED_WALLS + 1].kind, WallKind::Added);
+        assert!(view.wall("environment-16").is_none());
+        assert!(
+            stage
+                .lock_wall(&walls, "environment-15", false, false)
+                .unwrap()
+        );
+        assert!(
+            stage
+                .lock_wall(&walls, "environment-16", false, false)
+                .is_err()
+        );
+        assert!(stage.set_wall(&walls, "environment-15", grid(2, 1)).is_ok());
+        assert!(
+            stage
+                .set_wall(&walls, "environment-16", grid(2, 1))
+                .is_err()
+        );
+        let to = |wall: &str| Destination::Wall {
+            wall: wall.into(),
+            slot: Some(0),
+        };
+        let content = |title: &str| Content::parse(&format!("title: {title}\n---\nBody")).unwrap();
+        stage.project_to(&walls, content("Sixteenth"), &to("environment-15"), 0);
+        stage.project_to(&walls, content("Seventeenth"), &to("environment-16"), 0);
+        let view = stage.view("s", &walls, 0);
+        let place = |title: &str| {
+            view.panels
+                .iter()
+                .find(|panel| panel.title == title)
+                .map(|panel| panel.place.clone())
+        };
+        assert_eq!(place("Sixteenth"), Some(on("environment-15", 0)));
+        assert!(place("Seventeenth").is_some());
+        assert_ne!(place("Seventeenth"), Some(on("environment-16", 0)));
     }
 
     #[test]
@@ -3866,8 +3922,9 @@ mod tests {
             declared: &declared,
             ..SKY
         };
-        // The Tomori wall's six and the environment's 36, fifty-four walls added of twelve and six of fifteen: every
-        // slot there can be, and as many floating as there can be, then every slot full.
+        // The Tomori wall's six and the environment's 96, on sixteen walls, thirty-nine walls added of twelve and
+        // twenty-one of ten: every wall and slot there can be, and as many floating as there can be, then every slot
+        // full.
         let mut stage = Stage::default();
         let mut ids = vec![TOMORI_WALL.to_owned()];
         ids.extend((0..DECLARED_WALLS).map(|index| format!("environment-{index}")));
@@ -3875,8 +3932,8 @@ mod tests {
             let id = stage
                 .add_wall(&walls, &spread(index, 5.0, 2.5), None)
                 .unwrap();
-            let columns = if index < 54 { 4 } else { 5 };
-            stage.set_wall(&walls, &id, grid(columns, 3)).unwrap();
+            let (columns, rows) = if index < 39 { (4, 3) } else { (5, 2) };
+            stage.set_wall(&walls, &id, grid(columns, rows)).unwrap();
             ids.push(id);
         }
         assert_eq!(stage.slots_shown(&walls), SLOTS);
@@ -3931,25 +3988,31 @@ mod tests {
             .filter(free)
             .map(|panel| panel.id.as_str())
             .collect();
-        // An older client, which states nothing, and the headset, which takes longer frames but draws as many as
-        // before, are sent today's: the Tomori wall, the environment's six and the three added walls that fit in 78
-        // slots, their panels, and the twelve floating most recently, in the same order.
+        // An older client, which states nothing, is sent today's: the Tomori wall and the first twelve of the
+        // environment's sixteen, which fill 78 slots, their panels and the twelve floating most recently; and the
+        // headset, which takes longer frames and as many panels as before, on the walls of sixteen declared and six
+        // added, all sixteen and the three added walls that fit in 138 slots, and of their panels and those floating
+        // the ninety put where they are most recently, here all on its walls. Each in the same order.
         let headset = tomori_protocol::Limits::TODAY
-            .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32);
-        for limits in [tomori_protocol::Limits::TODAY, headset] {
+            .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+            .with_projection(23, 138, 12, 90);
+        for (limits, walls_sent, slots_sent, floating_sent) in [
+            (tomori_protocol::Limits::TODAY, 13, 78, 12),
+            (headset, 20, 138, 0),
+        ] {
             let today = stage.view_within("s", &walls, u64::MAX, &limits);
             assert_eq!(
                 (today.walls.len(), slots(&today), today.panels.len()),
-                (10, 78, 90)
+                (walls_sent, slots_sent, 90)
             );
-            assert_eq!(today.walls[..], most.walls[..10]);
+            assert_eq!(today.walls[..], most.walls[..walls_sent]);
             let floating: Vec<&str> = today
                 .panels
                 .iter()
                 .filter(free)
                 .map(|panel| panel.id.as_str())
                 .collect();
-            assert_eq!(floating, floated[floated.len() - 12..]);
+            assert_eq!(floating, floated[floated.len() - floating_sent..]);
             let size = serde_json::to_vec(&tomori_protocol::ServerMessage::Projection {
                 projection: Box::new(today),
             })
@@ -3957,25 +4020,206 @@ mod tests {
             .len();
             assert!(size <= tomori_protocol::MAX_FRAME_BYTES, "{size} bytes");
         }
-        // The desktop window's twice today's: walls while their slots fit in 156, sixteen of 150, and one more
-        // floating for each slot fewer, thirty, 180 in all.
-        let desktop = headset.with_projection(19, 156, 24, 180);
+        // The desktop window's: walls while their slots fit in 174, the sixteen declared and six added, and of their
+        // panels and its twenty-four floating, the 180 put where they are most recently, six of them floating.
+        let desktop = headset.with_projection(29, 174, 24, 180);
         let shown = stage.view_within("s", &walls, u64::MAX, &desktop);
         assert_eq!(
             (shown.walls.len(), slots(&shown), shown.panels.len()),
-            (16, 150, 180)
+            (23, 174, 180)
         );
-        assert_eq!(shown.panels.iter().filter(free).count(), 30);
+        assert_eq!(shown.panels.iter().filter(free).count(), 6);
         // Taking more panels than its walls and floating panels hold, it is sent no more floating.
         let more = headset.with_projection(13, 78, 12, 900);
         let shown = stage.view_within("s", &walls, u64::MAX, &more);
         assert_eq!(shown.panels.len(), 90);
         assert_eq!(shown.panels.iter().filter(free).count(), 12);
         // Fewer panels than that, the newest are sent, here all on walls, none floating.
-        let few = headset.with_projection(67, 780, 120, 100);
+        let few = headset.with_projection(77, 780, 120, 100);
         let shown = stage.view_within("s", &walls, u64::MAX, &few);
         assert_eq!(shown.panels.len(), 100);
         assert!(!shown.panels.iter().any(|panel| free(&panel)));
+    }
+
+    #[test]
+    fn walls_added_beyond_the_slots_left_when_a_declaration_grows_are_hidden_until_room_frees() {
+        // Six walls declared, of six slots, and sixty walls added of twelve.
+        let six: Vec<crate::EnvironmentWall> = (0..6)
+            .map(|index| pose(index as f32 * 2.5 - 8.0, -5.0).into())
+            .collect();
+        let before = Walls {
+            declared: &six,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let mut added = Vec::new();
+        for index in 0..ADDED_WALLS {
+            let id = stage
+                .add_wall(&before, &spread(index, 5.0, 2.5), None)
+                .unwrap();
+            stage.set_wall(&before, &id, grid(4, 3)).unwrap();
+            added.push(id);
+        }
+        assert_eq!(stage.slots_shown(&before), 6 + 36 + 720);
+        let slots = |view: &Projection| view.walls.iter().map(Wall::slots).sum::<u32>() as usize;
+        assert_eq!(stage.view("s", &before, 0).walls.len(), 1 + 6 + added.len());
+        // The environment, at a later version, declares sixteen of 24 slots: the walls added last no longer fit, and
+        // are hidden from everyone, kept.
+        let sixteen: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
+            .map(|index| {
+                crate::EnvironmentWall::new(pose(index as f32 * 2.5 - 20.0, -5.0))
+                    .with_grid(tomori_protocol::Grid::from((8, 3)))
+            })
+            .collect();
+        let after = Walls {
+            declared: &sixteen,
+            ..SKY
+        };
+        let view = stage.view("s", &after, 0);
+        assert!(slots(&view) <= SLOTS);
+        let hidden: Vec<&String> = added.iter().filter(|id| view.wall(id).is_none()).collect();
+        assert_eq!(hidden.len(), 28);
+        assert_eq!(hidden[0], &added[added.len() - 28]);
+        // An owner removing walls that are shown brings those hidden back, in turn, while a new wall is refused,
+        // saying why, the hidden walls' slots still counted.
+        for id in &added[..3] {
+            stage.remove_wall(&after, id).unwrap();
+        }
+        assert!(
+            stage
+                .add_wall(&after, &pose(0.0, 8.0), None)
+                .unwrap_err()
+                .starts_with("The walls here hold as many slots")
+        );
+        let view = stage.view("s", &after, 0);
+        assert!(view.wall(hidden[0]).is_some() && view.wall(hidden[2]).is_some());
+        assert!(view.wall(hidden[3]).is_none());
+    }
+
+    #[test]
+    fn sixteen_declared_walls_of_the_largest_grid_and_longest_names_at_every_limit_fit_a_frame_and_presence()
+     {
+        let wide = |count: usize| "\u{1F600}".repeat(count);
+        let source = format!(
+            "title: {}\na: {}\nb: {}\nc: {}\nd: {}\n---\n{}",
+            wide(200),
+            wide(200),
+            wide(200),
+            wide(200),
+            wide(200),
+            vec![wide(40); 2 * blocks::BODY_LINES].join("\n")
+        );
+        let largest = Content::parse(&source).unwrap();
+        // Sixteen walls of 24 slots each, every one named as long as a name may be, and every name its own.
+        let names: Vec<&'static str> = (0..DECLARED_WALLS)
+            .map(|index| &*format!("Deck console station {index:03}").leak())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name.len() == crate::WALL_NAME_BYTES)
+        );
+        let declared: Vec<crate::EnvironmentWall> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                crate::EnvironmentWall::new(spread(index, -5.0, 2.5))
+                    .with_grid(tomori_protocol::Grid::from((8, 3)))
+                    .with_name(name)
+            })
+            .collect();
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        let shown = stage.walls(&walls);
+        assert_eq!(shown.len(), 1 + DECLARED_WALLS);
+        assert!(
+            shown[1..]
+                .iter()
+                .zip(&names)
+                .all(|(wall, name)| wall.slots() == 24 && wall.name.as_deref() == Some(*name))
+        );
+        // The Tomori wall's 6 and the environment's 384, then sixty walls added of six and seven slots: every wall and
+        // slot there can be, as many floating as there can be, then every slot full.
+        let mut ids = vec![TOMORI_WALL.to_owned()];
+        ids.extend((0..DECLARED_WALLS).map(|index| format!("environment-{index}")));
+        for index in 0..ADDED_WALLS {
+            let id = stage
+                .add_wall(&walls, &spread(index, 5.0, 2.5), None)
+                .unwrap();
+            if index % 2 == 1 {
+                stage.set_wall(&walls, &id, grid(7, 1)).unwrap();
+            }
+            ids.push(id);
+        }
+        assert_eq!(stage.slots_shown(&walls), SLOTS);
+        for index in 0..FLOATING {
+            let id = stage.project(&walls, largest.clone(), None, 0);
+            stage
+                .place(&walls, &id, Target::Free(spread(index, 0.0, 0.4)))
+                .unwrap();
+        }
+        for (id, wall) in ids.iter().zip(stage.walls(&walls)) {
+            let to = Destination::Wall {
+                wall: id.clone(),
+                slot: None,
+            };
+            for _ in 0..wall.slots() {
+                stage.project_to(&walls, largest.clone(), &to, 0);
+            }
+        }
+        let mut most = stage.view(&"s".repeat(64), &walls, u64::MAX);
+        let limits = tomori_protocol::Limits::MOST;
+        assert_eq!(
+            (most.walls.len(), most.panels.len()),
+            (limits.walls as usize, limits.panels as usize)
+        );
+        for wall in &mut most.walls {
+            wall.version = u64::MAX;
+        }
+        for panel in &mut most.panels {
+            panel.version = u64::MAX;
+        }
+        let bytes = |view: &Projection| {
+            serde_json::to_vec(&tomori_protocol::ServerMessage::Projection {
+                projection: Box::new(view.clone().with_revision(u64::MAX)),
+            })
+            .unwrap()
+            .len()
+        };
+        // Within the longest frame, about 6.1 MB, the walls themselves about 12.5 KB of it, about 160 bytes each.
+        let size = bytes(&most);
+        assert!(size <= tomori_protocol::MOST_FRAME_BYTES, "{size} bytes");
+        assert!((5_800_000..6_400_000).contains(&size), "{size} bytes");
+        let mut bare = most.clone();
+        bare.panels.clear();
+        let walls_bytes = bytes(&bare);
+        assert!(
+            (10_000..15_000).contains(&walls_bytes),
+            "{walls_bytes} bytes"
+        );
+        // An older client is sent the Tomori wall and the first three of the sixteen, 78 slots, within its frame.
+        let today = stage.view_within("s", &walls, u64::MAX, &tomori_protocol::Limits::TODAY);
+        assert_eq!(today.walls.len(), 4);
+        let size = bytes(&today);
+        assert!(size <= tomori_protocol::MAX_FRAME_BYTES, "{size} bytes");
+        // What `presence` tells the agent of the walls: each wall with its slots, and each slot's panel by its title,
+        // about 378 KB here, bounded by the slots and panels rather than by how many walls hold them; each wall
+        // itself, with its name and its slots listed free, under 400 bytes, all 77 about 25 KB, so that ten more walls
+        // than before add about 4 KB to it. Bounding it is #328.
+        let (listed, floating) = crate::presence::walls(&most);
+        let listed = serde_json::to_vec(&listed).unwrap().len();
+        let floating = serde_json::to_vec(&floating).unwrap().len();
+        assert!(
+            (360_000..400_000).contains(&(listed + floating)),
+            "{listed} and {floating} bytes"
+        );
+        let (empty, _) = crate::presence::walls(&bare);
+        let empty = serde_json::to_vec(&empty).unwrap().len();
+        assert!(empty < most.walls.len() * 400, "{empty} bytes");
+        assert!((20_000..30_000).contains(&empty), "{empty} bytes");
     }
 
     /// A code panel of `language`, titled with it, of `lines` lines.

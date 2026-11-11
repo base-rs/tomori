@@ -479,7 +479,7 @@ fn tools() -> Value {
         set_wall,
         {
             "name": "add_wall",
-            "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked, a big wall, of a scale above 2, as many times further as its scale is above 2; columns, rows, scale, aspect or slot_width and slot_height, radius and tilt lay it out as set_wall does, by default three columns of two rows of standard slots, flat and upright. At most six are added in each environment. Only when someone in the space asks; then tell them.",
+            "description": "Add a wall to your space, for everyone in it, as someone asks: place, front or front NAME, stands it 1.8 m in front of them, facing them, by default whoever asked, a big wall, of a scale above 2, as many times further as its scale is above 2; columns, rows, scale, aspect or slot_width and slot_height, radius and tilt lay it out as set_wall does, by default three columns of two rows of standard slots, flat and upright. At most sixty are added in each environment, while the walls there hold at most 780 slots together. Only when someone in the space asks; then tell them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
