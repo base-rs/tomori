@@ -7284,3 +7284,55 @@ mod proximity;
 mod timers;
 #[path = "hub_tests/watching.rs"]
 mod watching;
+
+/// A side that keeps who it was last told takes part in its space, for a test to read.
+struct Present(Arc<Mutex<Option<Vec<u32>>>>);
+
+impl tomori_environment::ServerSide for Present {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        while !space.cancellation().is_cancelled() {
+            *self.0.lock().unwrap() = space.present();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_side_is_told_as_the_hub_sweeps_who_takes_part_in_its_space_but_not_its_visitors() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(None));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_server_side(Present(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let told = |what: &str, expected: Option<Vec<u32>>| {
+        eventually_in(what, || *seen.lock().unwrap() == expected);
+    };
+    // Until the hub sweeps, the side knows nothing of who is there.
+    told("nothing said", None);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    vic.join(&id);
+    let source = |client: &Client| {
+        let state = hub.lock();
+        let key = state.connections[&client.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    let ada_source = source(&ada);
+    hub.sweep_present();
+    told("Ada, and not the visitor", Some(vec![ada_source]));
+    // Gone from the space, she is no longer there, and nobody is.
+    hub.disconnect(ada.connection);
+    hub.sweep_present();
+    told("nobody", Some(Vec::new()));
+}

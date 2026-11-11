@@ -65,7 +65,9 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     });
     let first: State = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
     let objects = kept.objects.lock().unwrap()[0].clone();
-    assert_eq!(objects.len(), first.chickens.len());
+    // Each hen, then the campsite's bonfire and its sticks.
+    assert_eq!(objects.len(), first.chickens.len() + 1 + campsite::STICKS);
+    assert_eq!(objects[first.chickens.len()].id(), "bonfire");
     assert_eq!(objects[0].id(), "chicken-0");
     assert!(
         objects[0]
@@ -116,7 +118,13 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
     assert_eq!(tomori_environment::check_actions(&actions()), Ok(()));
     assert!(!actions()[0].is_consequential());
     let objects = kept.objects.lock().unwrap()[0].clone();
-    assert!(objects.iter().all(|object| object.offers() == ["peck"]));
+    // Every hen offers it, and nothing at the campsite does.
+    for object in &objects {
+        let hen = object
+            .reference()
+            .is_some_and(|reference| reference.starts_with("hen/"));
+        assert_eq!(object.offers().is_empty(), !hen, "{}", object.id());
+    }
     let reference = objects[0].reference().unwrap().to_owned();
     // Taken on a hen standing about at the start, she pecks, announced to everyone; the agent is told it was done.
     let ticket = inbox.act(3, &reference, "peck", r#"{"pecks":2}"#).unwrap();
@@ -243,4 +251,69 @@ fn the_side_stops_when_its_space_refuses_what_it_sends() {
         .with_outlet(kept.clone());
     assert_eq!(FarmyardSide.run(&space), Ok(()));
     assert_eq!(kept.states.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_what_a_leaver_held()
+{
+    let cancellation = Cancellation::new();
+    let kept = Arc::new(Kept::default());
+    let space = Space::with_cancellation("space-1", "Fleet", "/", cancellation.child())
+        .with_outlet(kept.clone());
+    let inbox = space.inbox();
+    let running = std::thread::spawn(move || FarmyardSide.run(&space));
+    eventually(|| !kept.states.lock().unwrap().is_empty());
+    // Its state has every stick, on its log, beside the flock.
+    let shared: campsite::Shared = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
+    assert_eq!(shared.sticks.len(), campsite::STICKS);
+    assert!(shared.sticks.iter().all(campsite::Stick::fresh));
+    // Two take stick 2 at once: the first holds it, announced to everyone; the second changes nothing.
+    let sticks = |kept: &Kept| -> Vec<campsite::Event> {
+        kept.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| serde_json::from_str::<campsite::Event>(event).ok())
+            .collect()
+    };
+    inbox.set_present(vec![3, 4]);
+    assert!(inbox.push(Asked::new(3, r#"{"grab": 2, "epoch": 0}"#)));
+    assert!(inbox.push(Asked::new(4, r#"{"grab": 2, "epoch": 0}"#)));
+    eventually(|| !sticks(&kept).is_empty());
+    std::thread::sleep(Duration::from_millis(100));
+    let told = sticks(&kept);
+    assert_eq!(told.len(), 1);
+    assert_eq!((told[0].stick, told[0].now.held), (2, Some(3)));
+    let state: campsite::Shared =
+        serde_json::from_str(kept.states.lock().unwrap().last().unwrap()).unwrap();
+    assert_eq!(state.sticks[2].held, Some(3));
+    // Described in a hand, it is not said where it is, which only presence says; the others are, on their log.
+    eventually(|| {
+        kept.objects.lock().unwrap().last().is_some_and(|objects| {
+            objects.iter().any(|object| {
+                object.id() == "stick-2"
+                    && object.description().contains("held")
+                    && object.position().is_none()
+            })
+        })
+    });
+    let objects = kept.objects.lock().unwrap().last().unwrap().clone();
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.id() == "stick-1" && object.position().is_some())
+    );
+    // The agent may inspect it, as the campsite's.
+    let inspector = inbox.inspector().unwrap();
+    let details: serde_json::Value =
+        serde_json::from_str(&inspector.inspect("campsite/stick-2").unwrap().unwrap()).unwrap();
+    assert_eq!(details["held_by"], 3);
+    // Its holder gone from the space, it goes back on its log, fresh, for everyone.
+    inbox.set_present(vec![4]);
+    eventually(|| sticks(&kept).len() == 2);
+    let back = &sticks(&kept)[1];
+    assert_eq!(back.stick, 2);
+    assert!(back.now.fresh());
+    cancellation.cancel();
+    assert_eq!(running.join().unwrap(), Ok(()));
 }

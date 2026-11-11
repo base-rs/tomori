@@ -5,8 +5,10 @@
 //! yard and the coop, models drawn with `tomori-assets`, lit by the moon and the lanterns' warm light; beyond them the
 //! backdrop, its foothills and its bush, models too, its river and waterfall, drawn with a shader of its own that moves
 //! them, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the
-//! stations' plaques, their text drawn from the renderer's glyph atlas; all of it growing out of the space through the
-//! reveal sphere as the space's environment does.
+//! stations' plaques, their text drawn from the renderer's glyph atlas; the campsite by the pool, its bonfire's flames
+//! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
+//! marshmallow sticks where its client side shows them; all of it growing out of the space through the reveal sphere as
+//! the space's environment does.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,6 +20,7 @@ use tomori_render::scenery::{Scenery, Target};
 use wgpu::util::DeviceExt;
 
 use tomori_environment_farmyard::backdrop::{self, Kind};
+use tomori_environment_farmyard::campsite;
 use tomori_environment_farmyard::coop::{self, Coop};
 use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
@@ -54,6 +57,143 @@ struct WaterVertex {
     flow: [f32; 2],
 }
 
+/// A corner of the fire's flames and embers, as its shader reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct FireVertex {
+    foot: [f32; 3],
+    corner: [f32; 2],
+    color: [f32; 4],
+    motion: [f32; 4],
+}
+
+/// A flame's tongue standing on `foot`, `height` tall and `width` across at its foot, moving by `phase`, from `base`'s
+/// colour at its foot to `tip`'s, each with how brightly it glows: three triangles, its foot, its middle and its tip.
+fn tongue(
+    foot: Vec3,
+    (height, width): (f32, f32),
+    phase: f32,
+    (base, tip): (glam::Vec4, glam::Vec4),
+) -> [FireVertex; 9] {
+    let corner = |x: f32, y: f32| FireVertex {
+        foot: foot.to_array(),
+        corner: [x, y],
+        color: base.lerp(tip, y).to_array(),
+        motion: [phase, height, width * 0.5, 0.0],
+    };
+    let (left, right) = (corner(-1.0, 0.0), corner(1.0, 0.0));
+    let (middle_left, middle_right) = (corner(-1.0, 0.45), corner(1.0, 0.45));
+    let top = corner(0.0, 1.0);
+    [
+        left,
+        right,
+        middle_right,
+        left,
+        middle_right,
+        middle_left,
+        middle_left,
+        middle_right,
+        top,
+    ]
+}
+
+/// An ember rising from `foot` as far as `rise` over its life, `size` across, moving by `phase`: two triangles.
+fn ember(foot: Vec3, rise: f32, size: f32, phase: f32) -> [FireVertex; 6] {
+    let corner = |x: f32, y: f32| FireVertex {
+        foot: foot.to_array(),
+        corner: [x, y],
+        color: [1.0, 0.5, 0.12, 2.2],
+        motion: [phase, rise, size, 1.0],
+    };
+    let [a, b, c, d] = [
+        corner(-1.0, 0.0),
+        corner(1.0, 0.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ];
+    [a, b, c, a, c, d]
+}
+
+/// The bonfire's flames and embers: five orange tongues about the fire's middle, three yellow ones within them, and a
+/// dozen embers rising, each moving by a phase of its own.
+pub(crate) fn bonfire() -> Vec<FireVertex> {
+    use tomori_environment_farmyard::props::scatter;
+    let middle = campsite::FIRE + Vec3::Y * (tomori_environment_farmyard::trail::LIFT + 0.02);
+    let mut vertices = Vec::new();
+    let outer = (
+        glam::Vec4::new(1.0, 0.42, 0.07, 1.5),
+        glam::Vec4::new(0.9, 0.16, 0.02, 0.45),
+    );
+    let inner = (
+        glam::Vec4::new(1.0, 0.86, 0.5, 1.7),
+        glam::Vec4::new(1.0, 0.5, 0.08, 0.8),
+    );
+    for index in 0..5u32 {
+        let turn = index as f32 / 5.0 * std::f32::consts::TAU + 0.3;
+        let foot = middle + Vec3::new(turn.sin(), 0.0, turn.cos()) * 0.1;
+        let height = 0.58 + scatter(index + 9900) * 0.22;
+        let width = 0.2 + scatter(index + 9910) * 0.06;
+        vertices.extend(tongue(
+            foot,
+            (height, width),
+            scatter(index + 9920) * 6.0,
+            outer,
+        ));
+    }
+    for index in 0..3u32 {
+        let turn = index as f32 / 3.0 * std::f32::consts::TAU + 1.1;
+        let foot = middle + Vec3::new(turn.sin(), 0.0, turn.cos()) * 0.04;
+        let height = 0.38 + scatter(index + 9930) * 0.12;
+        vertices.extend(tongue(
+            foot,
+            (height, 0.13),
+            scatter(index + 9940) * 6.0,
+            inner,
+        ));
+    }
+    for index in 0..12u32 {
+        let turn = scatter(index + 9950) * std::f32::consts::TAU;
+        let foot = middle + Vec3::new(turn.sin(), 0.0, turn.cos()) * 0.12;
+        vertices.extend(ember(
+            foot,
+            1.1 + scatter(index + 9960) * 0.6,
+            0.012,
+            scatter(index + 9970),
+        ));
+    }
+    vertices
+}
+
+/// The little flame of a marshmallow that burns, at `marshmallow`, the middle of its marshmallow.
+pub(crate) fn alight(marshmallow: Vec3, phase: f32) -> [FireVertex; 9] {
+    tongue(
+        marshmallow - Vec3::Y * campsite::MARSHMALLOW.1 * 0.6,
+        (0.11, 0.05),
+        phase,
+        (
+            glam::Vec4::new(1.0, 0.7, 0.25, 1.4),
+            glam::Vec4::new(0.9, 0.2, 0.03, 0.5),
+        ),
+    )
+}
+
+/// How the bonfire's light flickers at `seconds`: a few waves of its own, about 1, never below 0.75.
+pub fn flicker(seconds: f32) -> f32 {
+    1.0 + 0.12 * (seconds * 8.3).sin()
+        + 0.08 * (seconds * 13.7 + 1.3).sin()
+        + 0.05 * (seconds * 29.0).sin()
+}
+
+/// The bonfire's lamp at `seconds`: warm, a little above its heart, reaching about 5 m, flickering.
+pub fn fire_lamp(seconds: f32) -> Lamp {
+    let flicker = flicker(seconds);
+    Lamp::new(
+        campsite::heart() + Vec3::Y * 0.15,
+        5.0 + 0.3 * (flicker - 1.0),
+        Vec3::new(1.0, 0.5, 0.18) * 2.2 * flicker,
+    )
+}
+
 /// What moves the water: the time since the scenery was made, wrapping every quarter of an hour, or a moment held
 /// still, for pictures that must be the same each time they are drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,8 +213,14 @@ impl Clock {
 }
 
 /// How the farmyard is lit: a cool moon low in the east, the sky's blue overhead and the earth's brown below, the
-/// lanterns' warm light by the coop's door, on the gate and over the workbench, and a dusky haze over the far meadow.
+/// lanterns' warm light by the coop's door, on the gate and over the workbench, the campsite's bonfire, and a dusky haze
+/// over the far meadow.
 pub fn lighting() -> Lighting {
+    lighting_at(0.0)
+}
+
+/// As [`lighting`], with the bonfire's light as it flickers at `seconds`.
+pub fn lighting_at(seconds: f32) -> Lighting {
     Lighting::new(
         evening::MOON.normalize(),
         evening::MOONLIGHT,
@@ -89,6 +235,7 @@ pub fn lighting() -> Lighting {
         3.5,
         palette::GLOW * 1.2,
     ))
+    .with_lamp(fire_lamp(seconds))
 }
 
 /// Where the eye is, from its view and projection: the point every ray of the view begins from, as every scenery is
@@ -147,6 +294,30 @@ fn pipeline(
     (write, compare): (bool, wgpu::CompareFunction),
     label: &str,
 ) -> wgpu::RenderPipeline {
+    blended(
+        target,
+        layout,
+        shader,
+        (vertex, fragment),
+        buffers,
+        (write, compare),
+        None,
+        label,
+    )
+}
+
+/// As [`pipeline`], blending what it draws into what is behind it as `blend` says.
+#[allow(clippy::too_many_arguments)]
+fn blended(
+    target: &Target,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    (vertex, fragment): (&str, &str),
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    (write, compare): (bool, wgpu::CompareFunction),
+    blend: Option<wgpu::BlendState>,
+    label: &str,
+) -> wgpu::RenderPipeline {
     target
         .device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -164,7 +335,7 @@ fn pipeline(
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.format,
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -203,6 +374,83 @@ impl Triangles {
             }),
             count: vertices.len() as u32,
         }
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.draw(0..self.count, 0..1);
+    }
+}
+
+/// The bonfire's flames and embers, which never change, then the little flames of the marshmallows that burn, which
+/// follow them, in one buffer, drawn in one draw, glowing.
+struct Fire {
+    pipeline: wgpu::RenderPipeline,
+    vertices: wgpu::Buffer,
+    lasting: u32,
+    count: u32,
+}
+
+impl Fire {
+    fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
+        let device = target.device;
+        let shader = device.create_shader_module(wgpu::include_wgsl!("fire.wgsl"));
+        let pipeline = blended(
+            target,
+            layout,
+            &shader,
+            ("fire_vertex", "fire_fragment"),
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<FireVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4],
+            })],
+            (false, wgpu::CompareFunction::Less),
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            }),
+            "Farmyard fire",
+        );
+        let lasting = bonfire();
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Farmyard fire"),
+            size: (size_of::<FireVertex>() * (lasting.len() + campsite::STICKS * 9)) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        target
+            .queue
+            .write_buffer(&vertices, 0, bytemuck::cast_slice(&lasting));
+        Self {
+            pipeline,
+            vertices,
+            lasting: lasting.len() as u32,
+            count: lasting.len() as u32,
+        }
+    }
+
+    /// Light the marshmallows at `burning`, and only those, after the bonfire's flames.
+    fn burn(&mut self, queue: &wgpu::Queue, burning: &[Vec3]) {
+        let flames: Vec<FireVertex> = burning
+            .iter()
+            .take(campsite::STICKS)
+            .enumerate()
+            .flat_map(|(index, at)| alight(*at, index as f32 * 1.7))
+            .collect();
+        if !flames.is_empty() {
+            queue.write_buffer(
+                &self.vertices,
+                (size_of::<FireVertex>() * self.lasting as usize) as u64,
+                bytemuck::cast_slice(&flames),
+            );
+        }
+        self.count = self.lasting + flames.len() as u32;
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -439,6 +687,10 @@ pub struct Farmyard {
     made: Instant,
     /// The chickens, uploaded once their client side first shows them, placed as it last did.
     chickens: Option<Drawn>,
+    /// The campsite, its sticks where its client side last showed them, and its bonfire's flames.
+    campsite: Drawn,
+    sticks: Drawn,
+    fire: Fire,
     reveal: Option<(Vec3, f32)>,
 }
 
@@ -517,6 +769,15 @@ impl Farmyard {
         );
         let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader);
         let plaques = Plaques::new(target);
+        let campsite = Drawn::new(
+            device,
+            target.queue,
+            &models,
+            &Arc::new(campsite::model()),
+            Mat4::IDENTITY,
+        );
+        let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
+        let fire = Fire::new(target, &pipeline_layout);
         Self {
             sky,
             cameras,
@@ -530,9 +791,34 @@ impl Farmyard {
             clock,
             made: Instant::now(),
             chickens: None,
+            campsite,
+            sticks,
+            fire,
             reveal: None,
         }
     }
+}
+
+/// The stick's model, built once.
+fn stick() -> Arc<Model> {
+    static STICK: std::sync::OnceLock<Arc<Model>> = std::sync::OnceLock::new();
+    STICK.get_or_init(|| Arc::new(campsite::stick())).clone()
+}
+
+/// The sticks as `shown`, each an instance of the stick's model showing its marshmallow in its shade.
+pub(crate) fn stick_instances(shown: &[crate::campsite::Shown]) -> Vec<Instance> {
+    let model = stick();
+    shown
+        .iter()
+        .map(|stick| {
+            let mut instance = Instance::new(model.clone());
+            instance.transform = stick.transform;
+            for shade in 0..campsite::SHADES {
+                instance.set_shown(&campsite::shade_node(shade), shade == stick.shade);
+            }
+            instance
+        })
+        .collect()
 }
 
 impl Scenery for Farmyard {
@@ -546,6 +832,21 @@ impl Scenery for Farmyard {
         let Some(drawn) = drawn.downcast_ref::<crate::client::Drawn>() else {
             return;
         };
+        // The sticks, where the client side shows them, and the little flames of those that burn.
+        self.models.place(
+            device,
+            queue,
+            &self.sticks.model,
+            &mut self.sticks.batch,
+            &stick_instances(&drawn.sticks),
+        );
+        let burning: Vec<Vec3> = drawn
+            .sticks
+            .iter()
+            .filter(|stick| stick.burning)
+            .map(|stick| stick.marshmallow)
+            .collect();
+        self.fire.burn(queue, &burning);
         let Some(first) = drawn.chickens.first() else {
             return;
         };
@@ -564,6 +865,11 @@ impl Scenery for Farmyard {
     }
 
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
+        // The bonfire's light flickers, once a frame, as the first eye is prepared.
+        if eye == 0 {
+            self.models
+                .set_lighting(queue, &lighting_at(self.clock.seconds(self.made)));
+        }
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
         self.plaques.prepare(queue, eye, scene_to_clip);
@@ -598,7 +904,12 @@ impl Scenery for Farmyard {
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
             .flatten()
-            .chain([&backdrop.trail, &backdrop.foothills])
+            .chain([
+                &self.sticks,
+                &self.campsite,
+                &backdrop.trail,
+                &backdrop.foothills,
+            ])
             .chain(&backdrop.plants)
             .chain([&backdrop.stones, &backdrop.rock])
         {
@@ -607,6 +918,8 @@ impl Scenery for Farmyard {
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         backdrop.water.draw(pass);
         backdrop.ranges.draw(pass);
+        // The bonfire's flames last, added to what is behind them, writing no depth.
+        self.fire.draw(pass);
     }
 
     fn draw_translucent(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {

@@ -300,6 +300,9 @@ pub const CALLED_NEAR: f32 = 3.0;
 pub struct Conversation {
     /// This participant's number on the connected server, from its Welcome, which the server records on their queued input. Kept while the connection is down, since a reconnect keeps it; see `design/security.md`.
     source: Option<u32>,
+    /// The others' right hands in the space, by their numbers, as their presence last said, for what an environment's
+    /// client side draws in their hands. See `design/environments.md`.
+    right_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
@@ -520,6 +523,7 @@ impl Conversation {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             source: None,
+            right_hands: std::collections::BTreeMap::new(),
             role: ConnectionRole::Unknown,
             certificate: None,
             pairing: None,
@@ -880,6 +884,7 @@ impl Conversation {
             log::info!("Connected to {server} as {role:?}");
             self.server_name = name.clone();
             self.source = Some(*source);
+            self.right_hands.clear();
             self.utterance_limit = *utterance_limit;
             self.role = *role;
             self.certificate = *certificate;
@@ -1248,9 +1253,17 @@ impl Conversation {
             }
             // A reply held for this participant while they record, and in the pause after they let go of X.
             ServerMessage::SpeechHeld { held } => self.turn.held(held),
-            // Presence comes with the presence work.
+            // The others' right hands, for what an environment's client side draws in them; the rest of presence is the
+            // scene's and the player's.
+            ServerMessage::Presence { source, right, .. } => match right {
+                Some(right) if self.space.is_some() => {
+                    self.right_hands.insert(source, right);
+                }
+                _ => {
+                    self.right_hands.remove(&source);
+                }
+            },
             ServerMessage::Welcome { .. }
-            | ServerMessage::Presence { .. }
             | ServerMessage::Ping { .. }
             | ServerMessage::Pong { .. } => {}
         }
@@ -1599,6 +1612,7 @@ impl Conversation {
         self.knock = None;
         self.forget_turn();
         self.space = None;
+        self.right_hands.clear();
         self.cards = None;
         self.projection.clear();
         self.channel.clear();
@@ -4631,6 +4645,30 @@ impl Conversation {
     }
 
     /// The joined space, and whether its state is current: not while the connection is down, when the server may have moved on without us.
+    /// This participant's number on the connected server, which the others in the space know them by.
+    pub fn source(&self) -> Option<u32> {
+        self.source
+    }
+
+    /// The right hands of the others in the joined space, by their numbers, as their presence last said, in the space's
+    /// coordinates: only those the space's state still lists, and never this participant's own.
+    pub fn right_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
+        let Some((space, _)) = self.joined_space() else {
+            return Vec::new();
+        };
+        self.right_hands
+            .iter()
+            .filter(|(source, _)| {
+                Some(**source) != self.source
+                    && space
+                        .participants
+                        .iter()
+                        .any(|participant| participant.source == **source)
+            })
+            .map(|(source, pose)| (*source, *pose))
+            .collect()
+    }
+
     pub fn joined_space(&self) -> Option<(&SpaceState, bool)> {
         let space = self.space.as_ref().filter(|_| self.mode == Mode::Space)?;
         Some((

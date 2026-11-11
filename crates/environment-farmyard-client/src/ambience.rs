@@ -2,7 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The farmyard's ambience, an evening in the New Zealand foothills: wind and distant bush everywhere, the river and the
-//! waterfall where the backdrop has them, and native birds calling now and then from its bush. Each is a slot, its sound
+//! waterfall where the backdrop has them, the campsite's bonfire crackling, and native birds calling now and then from
+//! its bush. Each is a slot, its sound
 //! `assets/sounds/SLOT.ogg`, which the build finds; a slot without one is silent until one is dropped in. See
 //! `design/farmyard.md` and `assets/sounds/readme.md`.
 use std::sync::Once;
@@ -12,17 +13,19 @@ use tomori_assets::{AssetRef, Digest, Library};
 use tomori_scene::ambience::{Ambience, Bed, Call, Loop, Slot};
 
 use crate::{ID, VERSION, layout};
+use tomori_environment_farmyard::campsite;
 
 mod found {
     include!(concat!(env!("OUT_DIR"), "/sounds.rs"));
 }
 
 /// Every slot, in the order the ambience declares them: its beds, its loops, and each call's variants.
-pub const SLOTS: [&str; 14] = [
+pub const SLOTS: [&str; 15] = [
     "wind",
     "bush",
     "river",
     "waterfall",
+    "fire",
     "tui-1",
     "tui-2",
     "tui-3",
@@ -39,6 +42,12 @@ pub const SLOTS: [&str; 14] = [
 pub const LICENSE: &str = include_str!("../assets/sounds/LICENSE.md");
 /// The heading it is shown under with a build's other bundled assets'.
 pub const LICENSE_TITLE: &str = "The farmyard's sounds, by the Department of Conservation (NZ), eklemp and Freesound's recordists (CC BY 4.0 and CC0 1.0)";
+
+/// How far from the bonfire it is heard, fading out over the last quarter, before the yard, and how loud: a little
+/// beneath a −23 LUFS bed at unity as mastered, so that beside it, sitting at the campsite, it crackles a few decibels
+/// over the beds and the waterfall beyond, but never over anyone speaking there.
+pub const FIRE_RADIUS: f32 = 12.0;
+pub const FIRE_GAIN: f32 = -2.0;
 
 /// How far above the ground of its bush a bird calls from, in the canopy.
 const CANOPY: f32 = 6.0;
@@ -134,6 +143,11 @@ fn with(found: &[(&str, &str)]) -> Ambience {
             Loop::at(slot("waterfall"), waterfall)
                 .radius(60.0)
                 .gain(8.0),
+        )
+        .with_loop(
+            Loop::at(slot("fire"), campsite::heart().to_array())
+                .radius(FIRE_RADIUS)
+                .gain(FIRE_GAIN),
         )
         .with_call(
             birds(&["tui-1", "tui-2", "tui-3"], [25, 70])

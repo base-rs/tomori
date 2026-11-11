@@ -178,6 +178,14 @@ impl ServerSides {
             .is_some_and(|running| running.inbox.push(intent))
     }
 
+    /// Tell the side running for `space`, if one does, who takes part in it now, `participants`, by their numbers, as
+    /// the hub sweeps. See `tomori_environment::Space::present`.
+    pub(crate) fn present(&self, space: &str, participants: Vec<u32>) {
+        if let Some(running) = self.running.lock().expect("never left poisoned").get(space) {
+            running.inbox.set_present(participants);
+        }
+    }
+
     /// The inspector the side running for `space` gave, with the inspection counted until it is dropped, or why there is
     /// none to ask.
     pub(crate) fn inspector(

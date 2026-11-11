@@ -8,6 +8,7 @@
 //! teleport profile, which a client registers with [`register`]. What its server and clients share is
 //! `tomori-environment-farmyard`. See `design/farmyard.md`.
 pub mod ambience;
+pub mod campsite;
 pub mod client;
 pub mod scenery;
 
@@ -37,6 +38,17 @@ pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
             radius,
         )
     }));
+    // About the campsite's fire, clear of its stones and seats, on its clearing as drawn.
+    surfaces.extend(
+        tomori_environment_farmyard::campsite::standing()
+            .into_iter()
+            .map(|(middle, radius)| {
+                Surface::disc(
+                    glam::Vec3::new(middle.x, trail::CLEARING_HEIGHT, middle.y),
+                    radius,
+                )
+            }),
+    );
     let pads = trail::pads().map(|pad| Pad::at(pad.centre).named(pad.name).facing(pad.facing));
     let targets = trail::targets().map(|target| {
         Target::object(target.foot, target.radius, target.height)
@@ -157,7 +169,10 @@ mod tests {
         // backstep goes up or down of the yard's earth.
         assert_eq!(
             surfaces.len(),
-            layout::WALKABLE.len() + trail::outlines().len() + trail::clearings().len()
+            layout::WALKABLE.len()
+                + trail::outlines().len()
+                + trail::clearings().len()
+                + tomori_environment_farmyard::campsite::standing().len()
         );
         assert!(
             surfaces

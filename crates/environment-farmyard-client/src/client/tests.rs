@@ -328,3 +328,61 @@ fn a_state_or_event_at_the_ends_of_the_clock_is_shown_without_overflowing() {
         assert!(client.clock(later).is_some());
     }
 }
+
+#[test]
+fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_the_grip() {
+    use tomori_environment_farmyard::campsite::{self, Campsite, Pose, Stick};
+    use tomori_scene::client_side::{Grab, Hand, Phase};
+    let epoch = Instant::now();
+    let mut client = FarmyardClient::new("space-1", Some(chicken()), epoch);
+    // The farmyard's state, the flock and the sticks together, as its server side shares it.
+    let flock = Flock::new(flock::seed("space-1"), chicken(), 5_000);
+    let state = tomori_environment_farmyard::side::state(&flock, &Campsite::new(), 5_000);
+    let state = Update::State(Payload::new(serde_json::from_str(&state).unwrap()));
+    let output = client.update(Input::new(vec![state], epoch));
+    assert_eq!(drawn(&output).sticks.len(), campsite::STICKS);
+    // A hand at a stick's handle reaches it, and the ray along it points at it, before any hen.
+    let racked = Pose::racked(0);
+    let handle = racked.butt + racked.along * campsite::HOLD;
+    assert_eq!(client.within_reach(handle).as_deref(), Some("stick-0"));
+    let ray = Ray::new(racked.middle() + Vec3::Y, Vec3::NEG_Y).unwrap();
+    assert_eq!(client.pick(&ray).unwrap().object, "stick-0");
+    // Taken with the grip, by a participant, the server side is asked for it.
+    let hand = Hand::new(
+        handle,
+        glam::Quat::from_rotation_arc(Vec3::NEG_Z, racked.along),
+    );
+    let output = client.update(
+        Input::new(Vec::new(), epoch)
+            .with_grab(Some(Grab::new("stick-0", hand, Phase::Began)))
+            .as_participant(Some(4)),
+    );
+    assert_eq!(
+        output.intents[0].value(),
+        &serde_json::json!({"grab": 0, "epoch": 0})
+    );
+    // Another's stick, as the server side announces it, is drawn in their hand.
+    let event = campsite::Event {
+        clock: 5_100,
+        stick: 3,
+        now: Stick {
+            epoch: 1,
+            held: Some(7),
+            ..Stick::default()
+        },
+    };
+    let theirs = Hand::new(Vec3::new(-4.0, 1.2, -14.0), glam::Quat::IDENTITY);
+    let output = client.update(
+        Input::new(
+            vec![Update::Event(Payload::new(
+                serde_json::to_value(event).unwrap(),
+            ))],
+            epoch,
+        )
+        .with_hands(vec![(7, theirs)]),
+    );
+    assert_eq!(
+        drawn(&output).sticks[3].transform,
+        Pose::held(theirs.position, theirs.orientation).transform()
+    );
+}

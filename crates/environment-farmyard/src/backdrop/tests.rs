@@ -70,6 +70,34 @@ fn beyond_fence(point: Vec2) -> f32 {
 const FAR: f32 = 50.0;
 
 #[test]
+fn the_backdrop_stands_within_the_far_plane_from_where_participants_stand_at_the_campsite() {
+    // A metre short of it rather than two, as the campsite stands a little further out than the trail.
+    let eyes: Vec<Vec3> = crate::campsite::standing()
+        .into_iter()
+        .flat_map(|(middle, radius)| {
+            (0..12).map(move |step| {
+                let yaw = step as f32 / 12.0 * TAU;
+                let at = middle + Vec2::new(yaw.sin(), yaw.cos()) * radius;
+                Vec3::new(at.x, tomori_environment::sightlines::EYES, at.y)
+            })
+        })
+        .collect();
+    let foothills = model();
+    for eye in &eyes {
+        for position in &foothills.meshes[0].primitives[0].positions {
+            assert!(eye.distance(*position) < FAR - 1.0, "{eye} {position}");
+        }
+        for plant in plants() {
+            let (_, height) = plant.size();
+            assert!(
+                eye.distance(plant.at + Vec3::Y * height) < FAR - 1.0,
+                "{plant:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
     let eyes = eyes();
     // The foothills' ground: none of it within 2.5 m of the fence, its edge level with the meadow, and all of it within

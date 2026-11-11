@@ -542,6 +542,8 @@ struct Waiting {
     inspector: Mutex<Option<Arc<dyn Inspector>>>,
     answers: Mutex<Answers>,
     answered: Condvar,
+    /// The participants in the space, by their numbers, as the server last said, or nothing until it has.
+    present: Mutex<Option<Vec<u32>>>,
 }
 
 /// The actions handed on to a side that wait for its answer, and the answers it gave that the server has not yet taken.
@@ -617,6 +619,28 @@ impl Inbox {
             .unwrap_or_else(PoisonError::into_inner);
         answers.waiting.remove(&ticket);
         answers.given.remove(&ticket)
+    }
+
+    /// Say who takes part in the space now, `participants`, by the numbers the server gives them, which
+    /// [`Space::present`] reads; visitors are not among them. The server says as it sweeps, whether or not anyone came or
+    /// went.
+    ///
+    /// ```
+    /// use tomori_environment::Space;
+    ///
+    /// let space = Space::new("space-1-1", "Yard", "/");
+    /// assert_eq!(space.present(), None);
+    /// space.inbox().set_present(vec![7, 3, 7]);
+    /// assert_eq!(space.present(), Some(vec![3, 7]));
+    /// ```
+    pub fn set_present(&self, mut participants: Vec<u32>) {
+        participants.sort_unstable();
+        participants.dedup();
+        *self
+            .0
+            .present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(participants);
     }
 
     /// The inspector the side last gave with [`Space::inspect_with`], if it gave one.
@@ -909,6 +933,19 @@ impl Space {
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(inspector));
     }
 
+    /// Who takes part in the space now, by the numbers the server gives participants, which [`Intent::participant`]
+    /// names them by, in order: as the server last said, as it sweeps, about once a second, so that a side can let go of
+    /// what someone who has left held, or tidy up once nobody is there. Visitors, who send no intents, are not among
+    /// them, nor is anyone whose connection has ended. `None` until the server has said, as for a space made without
+    /// one or by a server from before, when a side should assume nothing.
+    pub fn present(&self) -> Option<Vec<u32>> {
+        self.waiting
+            .present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Where the server hands on intents for this side, and finds its inspector.
     pub fn inbox(&self) -> Inbox {
         Inbox(self.waiting.clone())
@@ -1175,6 +1212,18 @@ mod tests {
             inbox.inspector().unwrap().inspect("x"),
             Err(Error::new("no route"))
         );
+    }
+
+    #[test]
+    fn who_is_present_is_unknown_until_the_server_says_and_then_as_it_last_said() {
+        let space = Space::new("space-1-2", "Yard", "/");
+        assert_eq!(space.present(), None);
+        let inbox = space.inbox();
+        inbox.set_present(vec![4, 1, 4]);
+        assert_eq!(space.present(), Some(vec![1, 4]));
+        // Nobody there is not unknown.
+        inbox.set_present(Vec::new());
+        assert_eq!(space.present(), Some(Vec::new()));
     }
 
     #[test]

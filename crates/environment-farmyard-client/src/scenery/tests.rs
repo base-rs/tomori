@@ -5,7 +5,9 @@
 //! participant arriving sees it, and growing out of a point. `TOMORI_FARMYARD_PREVIEW`, set to a PNG path, saves the
 //! view from home, from beside the coop's window and of the workbench from the yard before it there, and the chickens
 //! beside it, with `-chickens` added to its name; `TOMORI_FARMYARD_COOP_PREVIEW` saves the coop by its ramp and in at its
-//! window, with hens on the ramp and in a nest, as `-1.png`, and the path's stones, as `-2.png`.
+//! window, with hens on the ramp and in a nest, as `-1.png`, and the path's stones, as `-2.png`;
+//! `TOMORI_FARMYARD_CAMPSITE_PREVIEW` saves the campsite from the lookout's log seat, a marshmallow toasting over its
+//! bonfire.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -210,7 +212,7 @@ fn workbench() -> (Vec3, Vec3) {
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["sky.wgsl", "water.wgsl"]);
+    assert_eq!(names, ["fire.wgsl", "sky.wgsl", "water.wgsl"]);
     for (name, source) in files {
         test_gpu::validate_wgsl(&name, &source);
     }
@@ -325,6 +327,7 @@ fn the_chickens_are_drawn_where_their_client_side_shows_them() {
             &queue,
             &crate::client::Drawn {
                 chickens: Vec::new(),
+                sticks: Vec::new(),
             },
         );
         assert_eq!(capture(&device, &queue, &farmyard, 4, close), without);
@@ -563,7 +566,14 @@ fn the_coop_s_ramp_nests_and_perch_and_the_path_s_stones_are_drawn() {
                 controller.instance().clone()
             })
             .collect();
-        farmyard.animate(&device, &queue, &crate::client::Drawn { chickens });
+        farmyard.animate(
+            &device,
+            &queue,
+            &crate::client::Drawn {
+                chickens,
+                sticks: Vec::new(),
+            },
+        );
         let [ramp, window, path] =
             coop_views().map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()));
         if let Ok(path_to) = std::env::var("TOMORI_FARMYARD_COOP_PREVIEW") {
@@ -834,4 +844,225 @@ fn the_river_lies_in_its_channel_below_the_trail_and_the_waterfall_rock_stands_i
         assert!(top.x > pool.x * 1.5 && top.y < top.x + 10.0, "{top} {pool}");
         assert!(pollster::block_on(scope.pop()).is_none());
     });
+}
+
+/// From the lookout's log seat, sitting at its end nearest the fire, looking at the fire, the far seat and its sticks.
+pub(crate) fn campsite_view() -> (Vec3, Vec3) {
+    let (middle, along, length, _) = trail::seat();
+    let end = middle + Vec3::new(along.x, 0.0, along.y) * length * 0.35;
+    let fire = tomori_environment_farmyard::campsite::FIRE;
+    (
+        end + Vec3::new(0.0, 1.15, 0.0),
+        Vec3::new(fire.x - 0.5, 0.4, fire.z - 0.05),
+    )
+}
+
+/// The campsite's sticks as its client side shows them: on their log, but the second, held over the fire by someone
+/// else, its marshmallow toasted golden.
+fn campsite_sticks() -> Vec<crate::campsite::Shown> {
+    use tomori_environment_farmyard::campsite::{self, Shared, Stick};
+    let mut sticks = crate::campsite::Sticks::new();
+    let mut shared = vec![Stick::default(); campsite::STICKS];
+    shared[1] = Stick {
+        epoch: 1,
+        toast: campsite::GOLDEN + 0.05,
+        held: Some(5),
+        lying: None,
+    };
+    sticks.share(Shared { sticks: shared });
+    let along = Vec3::new(0.5, -0.2, -0.85).normalize();
+    let hand = campsite::heart() + Vec3::Y * 0.12
+        - along * (campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD);
+    let hand = tomori_scene::client_side::Hand::new(
+        hand,
+        glam::Quat::from_rotation_arc(Vec3::NEG_Z, along),
+    );
+    sticks.shown(&[(5, hand)])
+}
+
+#[test]
+fn the_campsite_s_bonfire_glows_lighting_its_seats_and_its_sticks_are_drawn_where_its_client_side_shows_them()
+ {
+    use tomori_environment_farmyard::campsite;
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let mut farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(1.3));
+        let view = campsite_view();
+        let none = crate::client::Drawn {
+            chickens: Vec::new(),
+            sticks: Vec::new(),
+        };
+        farmyard.animate(&device, &queue, &none);
+        let without = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        let shown = campsite_sticks();
+        let sticks = crate::client::Drawn {
+            chickens: Vec::new(),
+            sticks: shown.clone(),
+        };
+        farmyard.animate(&device, &queue, &sticks);
+        let with = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_CAMPSITE_PREVIEW") {
+            image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, with.clone())
+                .unwrap()
+                .save(path)
+                .unwrap();
+        }
+        let colour = |pixels: &[u8], point: Vec3| {
+            let at = seen_at(view, point);
+            assert!(
+                (0.05..0.95).contains(&at.0) && (0.05..0.95).contains(&at.1),
+                "{at:?}"
+            );
+            let (x, y) = (
+                (at.0 * PICTURE.0 as f32) as u32,
+                (at.1 * PICTURE.1 as f32) as u32,
+            );
+            let mut sum = [0.0f32; 3];
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    let index = (((y + dy - 1) * PICTURE.0 + x + dx - 1) * 4) as usize;
+                    for channel in 0..3 {
+                        sum[channel] += f32::from(pixels[index + channel]) / 9.0;
+                    }
+                }
+            }
+            sum
+        };
+        // The flames glow, bright and warm, red over green over blue, among the logs above the embers.
+        let brightest = |pixels: &[u8]| {
+            let low = seen_at(view, campsite::FIRE + Vec3::new(-0.2, 0.5, 0.0));
+            let high = seen_at(view, campsite::FIRE + Vec3::new(0.2, 0.05, 0.0));
+            let mut best = [0u8; 3];
+            for y in (low.1.min(high.1) * PICTURE.1 as f32) as u32
+                ..(low.1.max(high.1) * PICTURE.1 as f32) as u32
+            {
+                for x in (low.0.min(high.0) * PICTURE.0 as f32) as u32
+                    ..(low.0.max(high.0) * PICTURE.0 as f32) as u32
+                {
+                    let index = ((y * PICTURE.0 + x) * 4) as usize;
+                    if pixels[index] as u32 + pixels[index + 1] as u32
+                        > best[0] as u32 + best[1] as u32
+                    {
+                        best = [pixels[index], pixels[index + 1], pixels[index + 2]];
+                    }
+                }
+            }
+            best
+        };
+        let flames = brightest(&with);
+        assert!(
+            flames[0] > 220 && flames[0] >= flames[1] && flames[1] > flames[2],
+            "{flames:?}"
+        );
+        // The far seat, by the fire, is lit warmly, redder than the meadow far from it.
+        let (seat, ..) = campsite::seat();
+        let log = colour(&with, seat + Vec3::Y * 0.3);
+        assert!(log[0] > log[2] * 1.4, "{log:?}");
+        // The sticks are drawn where the client side shows them, a marshmallow over the fire golden and warm.
+        let changed = with
+            .chunks(4)
+            .zip(without.chunks(4))
+            .filter(|(a, b)| {
+                a[..3]
+                    .iter()
+                    .zip(&b[..3])
+                    .map(|(a, b)| a.abs_diff(*b) as u32)
+                    .sum::<u32>()
+                    > 30
+            })
+            .count();
+        assert!(changed > 400, "{changed}");
+        // A marshmallow on its log is pale, lit by the fire.
+        let white = colour(&with, shown[0].marshmallow);
+        let bare = colour(&without, shown[0].marshmallow);
+        assert!(
+            white[2] > bare[2] + 20.0 && white[0] > 120.0,
+            "{white:?} {bare:?}"
+        );
+        // Burning marshmallows add their own little flames, and none are added for those that do not burn.
+        let burning: Vec<crate::campsite::Shown> = shown
+            .iter()
+            .map(|stick| crate::campsite::Shown {
+                burning: true,
+                ..*stick
+            })
+            .collect();
+        farmyard.animate(
+            &device,
+            &queue,
+            &crate::client::Drawn {
+                chickens: Vec::new(),
+                sticks: burning,
+            },
+        );
+        assert_eq!(
+            farmyard.fire.count,
+            farmyard.fire.lasting + 9 * campsite::STICKS as u32
+        );
+        farmyard.animate(&device, &queue, &sticks);
+        assert_eq!(farmyard.fire.count, farmyard.fire.lasting);
+        // Growing out of a point far from it, its flames are not drawn before the rest of it.
+        farmyard.set_reveal(Some((Vec3::new(0.0, 1.0, -2.0), 0.5)));
+        let growing = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        let unlit = brightest(&growing);
+        assert!(unlit[0] < 40, "{unlit:?}");
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn the_bonfire_s_light_flickers_and_the_campsite_draws_within_its_budget() {
+    use tomori_environment_farmyard::campsite;
+    // About its middle, never dark, each moment its own.
+    let flickers: Vec<f32> = (0..200).map(|step| flicker(step as f32 * 0.05)).collect();
+    assert!(flickers.iter().all(|value| (0.7..1.3).contains(value)));
+    assert!(
+        flickers
+            .windows(2)
+            .any(|pair| (pair[0] - pair[1]).abs() > 0.02)
+    );
+    // It is the farmyard's fourth lamp, the last a scenery's models are lit by, at the fire, its light changing.
+    let lit = lighting_at(1.0);
+    assert_eq!(lit.lamps.len(), tomori_assets::gpu::LAMPS);
+    assert!(lit.lamps[3].position.distance(campsite::heart()) < 0.3);
+    assert_ne!(lighting_at(1.0).lamps[3], lighting_at(1.4).lamps[3]);
+    assert_eq!(lighting(), lighting_at(0.0));
+    // The campsite, its four sticks, each with one marshmallow shown, and its flames, embers and the little flames of
+    // every marshmallow burning, together within its budget.
+    let triangles = |model: &tomori_assets::Model, shown: &dyn Fn(&str) -> bool| -> usize {
+        model
+            .nodes
+            .iter()
+            .filter(|node| shown(node.name.as_deref().unwrap_or("")))
+            .filter_map(|node| node.mesh)
+            .flat_map(|mesh| &model.meshes[mesh].primitives)
+            .map(|primitive| primitive.indices.len() / 3)
+            .sum()
+    };
+    let site = triangles(&campsite::model(), &|_| true);
+    let stick = triangles(&campsite::stick(), &|name| {
+        name == "stick" || name == campsite::shade_node(0)
+    });
+    let fire = bonfire().len() / 3 + campsite::STICKS * 3;
+    let together = site + campsite::STICKS * stick + fire;
+    println!("campsite {site}, a stick {stick}, the fire {fire}: {together} triangles");
+    assert!(together <= campsite::BUDGET, "{together}");
+    // Each stick shows one marshmallow, of its shade.
+    let shown = campsite_sticks();
+    let instances = stick_instances(&shown);
+    for (instance, stick) in instances.iter().zip(&shown) {
+        let meshes: Vec<usize> = instance.draws().iter().map(|draw| draw.mesh).collect();
+        assert_eq!(meshes.len(), 2);
+        assert_eq!(meshes[1], 1 + stick.shade);
+    }
 }

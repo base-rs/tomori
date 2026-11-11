@@ -2,8 +2,9 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The farmyard's client side, for one space: the flock as its server side shares it, each chicken with its controller,
-//! moved on by the farmyard's clock, which it reads from the server's messages; what the ray points at; the notices it
-//! asks for as a participant points at a chicken and looks away; the clucks it hears; and what its scenery draws.
+//! moved on by the farmyard's clock, which it reads from the server's messages; the campsite's marshmallow sticks, which
+//! a participant takes with the grip and toasts over the fire; what the ray points at; the notices it asks for as a
+//! participant points at a chicken and looks away; the clucks it hears; and what its scenery draws.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,14 +14,16 @@ use tomori_scene::channel::Update;
 use tomori_scene::client_side::{ClientSide, Input, Output, Picked, Sound};
 use tomori_scene::pointing::Ray;
 
+use tomori_environment_farmyard::campsite;
 use tomori_environment_farmyard::chicken::{CLUCK, Chicken, SQUAWK};
 use tomori_environment_farmyard::cluck::{Cluck, RATE, rendered};
 use tomori_environment_farmyard::controller::ChickenController;
 use tomori_environment_farmyard::flock::{self, Event, Intent, MOST, PER_CHICKEN, State};
 
-/// What the farmyard's scenery draws this frame: each chicken, posed and placed.
+/// What the farmyard's scenery draws this frame: each chicken, posed and placed, and each of the campsite's sticks.
 pub struct Drawn {
     pub chickens: Vec<Instance>,
+    pub sticks: Vec<crate::campsite::Shown>,
 }
 
 /// How often, on average, a chicken clucks of its own accord, in slots of this many milliseconds, and the chance it
@@ -54,6 +57,8 @@ pub struct FarmyardClient {
     /// The chicken whose notice this participant holds, pointing at it, and when they last asked each to notice them.
     held: Option<usize>,
     asked: [Option<Instant>; MOST],
+    /// The campsite's sticks.
+    sticks: crate::campsite::Sticks,
 }
 
 impl FarmyardClient {
@@ -69,6 +74,7 @@ impl FarmyardClient {
             last: None,
             held: None,
             asked: [None; MOST],
+            sticks: crate::campsite::Sticks::new(),
         }
     }
 
@@ -99,6 +105,10 @@ impl FarmyardClient {
             _ => None,
         };
         if let Some(state) = state {
+            // The campsite's sticks beside the flock, none in a state from before them.
+            if let Ok(shared) = serde_json::from_value::<campsite::Shared>(state.value().clone()) {
+                self.sticks.share(shared);
+            }
             let Ok(state) = serde_json::from_value::<State>(state.value().clone()) else {
                 log::debug!("A farmyard state could not be read.");
                 return;
@@ -117,6 +127,10 @@ impl FarmyardClient {
             self.held = self.held.filter(|held| *held < self.controllers.len());
         }
         if let Some(event) = event {
+            if let Ok(event) = serde_json::from_value::<campsite::Event>(event.value().clone()) {
+                self.sticks.changed(event);
+                return;
+            }
             let Ok(event) = serde_json::from_value::<Event>(event.value().clone()) else {
                 log::debug!("A farmyard event could not be read.");
                 return;
@@ -208,7 +222,12 @@ impl ClientSide for FarmyardClient {
                 .intersect(ray)
                 .map(|distance| Picked::new(format!("chicken-{index}"), name.clone(), distance))
             })
+            .chain(self.sticks.pick(ray))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    fn within_reach(&self, hand: Vec3) -> Option<String> {
+        self.sticks.within_reach(hand)
     }
 
     fn update(&mut self, input: Input<'_>) -> Output {
@@ -256,12 +275,22 @@ impl ClientSide for FarmyardClient {
         for intent in self.point(input.pointed, input.head, input.now) {
             output = output.with_intent(intent);
         }
+        // The campsite's sticks: the one this participant takes, holds and lets go, and every one where it is drawn.
+        for intent in self
+            .sticks
+            .update(input.grab.as_ref(), input.participant, input.now)
+        {
+            output = output.with_intent(tomori_protocol::Payload::new(
+                serde_json::to_value(intent).expect("an intent is JSON"),
+            ));
+        }
         output.drawing(Arc::new(Drawn {
             chickens: self
                 .controllers
                 .iter()
                 .map(|controller| controller.instance().clone())
                 .collect(),
+            sticks: self.sticks.shown(&input.hands),
         }))
     }
 }

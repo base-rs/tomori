@@ -9,7 +9,8 @@
 //! It is an environment built as another project would build one, from Tomori's published crates and their extension
 //! points, without anything in Tomori's own crates knowing about it. This crate is what its server and its clients
 //! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, the yard with its
-//! workbench, the coop and the backdrop beyond the fence, built in code as `tomori-assets` models; the chicken, its asset, its animator's graph and its
+//! workbench, the coop, the backdrop beyond the fence and the campsite by the pool, built in code as `tomori-assets`
+//! models; the chicken, its asset, its animator's graph and its
 //! controller; what each chicken does, and where that puts it; the flock its server side owns; and the server side
 //! itself, which has nothing that must stay in the server, so that it needs no server crate of its own. Its client half,
 //! the scenery, teleport profile and client side a client registers, is `tomori-environment-farmyard-client`. See
@@ -17,10 +18,11 @@
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 6, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 7, "Farmyard"));
 //! ```
 pub mod backdrop;
 pub mod behaviour;
+pub mod campsite;
 pub mod chicken;
 pub mod cluck;
 pub mod controller;
@@ -43,8 +45,9 @@ pub const ID: &str = "farmyard";
 /// trail round the outside of the fence, whose stations and viewpoints are anchors the agent and its workers may go to,
 /// which an earlier client neither draws nor lets anyone walk, and 6 when the river and the pool sank into a channel and
 /// the waterfall came 1.5 m nearer, with a rock in its pool and an anchor beside it, which an earlier client would show
-/// over its pool where it no longer is.
-pub const VERSION: u32 = 6;
+/// over its pool where it no longer is, and 7 when it gained the campsite beside
+/// the lookout's seat, whose bonfire and sticks an earlier client does not draw, nor its anchor, nor lets anyone hold.
+pub const VERSION: u32 = 7;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

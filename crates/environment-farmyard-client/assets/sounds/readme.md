@@ -7,7 +7,7 @@ The farmyard's ambience plays the sounds in this folder, each named for its slot
 - **Ogg Vorbis**, at 48 kHz (44.1 kHz is resampled as it plays), at about quality 3 to 4.
 - **Stereo** for the beds, `wind` and `bush`, and **mono** for every other slot, which is placed in the scene.
 - **Loudness**: each normalised to −23 LUFS integrated, its true peak no higher than −3 dBTP, so that the declaration's gains, the participant's level and ducking set the mix, not the files.
-- **Loops** (`wind`, `bush`, `river`, `waterfall`) loop without a click: cut at zero crossings, or made with a crossfade, with no fade in or out. Calls start and end in silence, with no more than 50 ms of it either side.
+- **Loops** (`wind`, `bush`, `river`, `waterfall`, `fire`) loop without a click: cut at zero crossings, or made with a crossfade, with no fade in or out. Calls start and end in silence, with no more than 50 ms of it either side.
 - **Size**: at most 1 MiB a file, and 6 MiB together; the build fails beyond either.
 
 ## Slots
@@ -18,6 +18,7 @@ The farmyard's ambience plays the sounds in this folder, each named for its slot
 | `bush` | bed, stereo, −10 dB | Distant native bush at dusk: insects, leaves and a far stream, with no birdsong that stands out | 45 to 90 s |
 | `river` | loop, mono, +5 dB, heard within 35 m along the river | A shallow river over shingle and stones, close up, steady | 30 to 60 s |
 | `waterfall` | loop, mono, +8 dB, heard within 60 m, from the middle of its fall | A small waterfall falling a few metres into a pool | 30 to 60 s |
+| `fire` | loop, mono, −2 dB, heard within 12 m, from among the campsite's flames | A campfire crackling close by, steady, with pops but no roar | 20 to 45 s |
 | `tui-1` to `tui-3` | call, mono, +14 to +18 dB, every 25 to 70 s | A tūī's song, its bell notes, clicks and wheezes, one phrase each | 2 to 6 s |
 | `bellbird-1` to `bellbird-3` | call, mono, +13 to +17 dB, every 30 to 90 s | A bellbird's (korimako's) liquid, bell-like song, one phrase each | 1 to 4 s |
 | `kereru-1`, `kereru-2` | call, mono, +12 to +17 dB, every 90 to 240 s | A kererū's heavy, whooshing wingbeats as it flies over | 1 to 3 s |

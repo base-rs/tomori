@@ -11,6 +11,10 @@ Every sound below was converted to 48 kHz Ogg Vorbis (quality 4) and its level s
 - `river.ogg`: a stream's steady flow at night in Āwhitu Regional Park, New Zealand, by robotjay, from "Stream Flow Night Ambience" on Freesound (https://freesound.org/people/robotjay/sounds/518556/), under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/). Changed: 49 s taken from 0:05 of Freesound's preview, mixed down to mono, high-passed at 60 Hz, made into a 45 s loop by crossfading its last 4 s into its start, and its loudest splashes limited by up to 3.8 dB.
 - `waterfall.ogg`: a small waterfall and a creek running over rocks in Whakanewha Regional Park, Waiheke Island, New Zealand, by brentsimpson, from "Small waterfall, creek running over rocks - Waiheke Island, Aotearoa / New Zealand" on Freesound (https://freesound.org/people/brentsimpson/sounds/727804/), under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/). Changed: 49 s taken from 0:10 of Freesound's preview, mixed down to mono, high-passed at 40 Hz, made into a 45 s loop by crossfading its last 4 s into its start, and its loudest splashes limited by up to 5.5 dB.
 
+## The campsite
+
+- `fire.ogg`: a campfire crackling, recorded with two omnidirectional microphones a foot apart in Vermont, by Spandau, from "campfire.wav" on Freesound (https://freesound.org/people/Spandau/sounds/40699/), under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/). Changed: 34 s taken from 2:20 of Freesound's preview, mixed down to mono, high-passed at 60 Hz and low-passed at 12 kHz, made into a 30 s loop by crossfading its last 4 s into its start, and its nine loudest pops, each a few milliseconds, limited by up to 12 dB.
+
 ## Birds
 
 The tūī, bellbird and kererū are the Department of Conservation's recordings: Source: Department of Conservation (NZ), https://www.doc.govt.nz/nature/native-animals/birds/bird-songs-and-calls/. They are Crown copyright, licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/), as DOC's copyright page says (https://www.doc.govt.nz/footer-links/copyright/).
