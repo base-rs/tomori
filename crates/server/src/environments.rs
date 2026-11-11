@@ -340,8 +340,6 @@ impl StatusWall {
 /// The fewest slots a status wall has, so that two notices can stand together.
 pub const STATUS_SLOTS: u32 = 2;
 
-/// `anchor`, its label cleaned onto one line and cut after `tomori_environment::ANCHOR_LABEL_LIMIT` characters, as an
-/// object's description is, and not said to be placed at run time, whatever it says.
 /// `pose`, in a space's coordinates, in those of the environment whose upright `carriage` carries them there: the
 /// carriage undone, its turn about the vertical taken off the pose's own, whatever its pitch and roll.
 pub(crate) fn uncarried(
@@ -363,6 +361,8 @@ pub(crate) fn uncarried(
     }
 }
 
+/// `anchor`, its label cleaned onto one line and cut after `tomori_environment::ANCHOR_LABEL_LIMIT` characters, as an
+/// object's description is, and not said to be placed at run time, whatever it says.
 pub(crate) fn cleaned(
     mut anchor: tomori_protocol::cluster::Anchor,
 ) -> tomori_protocol::cluster::Anchor {
