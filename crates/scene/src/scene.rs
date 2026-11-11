@@ -7889,7 +7889,14 @@ mod tests {
         let ahead = facing.orientation * Vec3::Z;
         let towards = Vec3::new(2.0, 0.0, 2.3).normalize();
         assert!(ahead.dot(towards) > 0.999, "{ahead}");
-        for _ in 0..(1.0 / FRAME) as usize {
+        // It eases round, gently, never at once.
+        let start = step
+            .update(&senses(), &mut conversation, &mut felt(), now, FRAME)
+            .swarm
+            .anchor()
+            .orientation;
+        assert!(start.angle_between(facing.orientation) > 1.0);
+        for _ in 0..(2.5 / FRAME) as usize {
             step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
         }
         let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
