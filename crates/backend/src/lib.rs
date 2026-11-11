@@ -281,6 +281,42 @@ pub struct Worker {
     pub state: WorkerState,
 }
 
+/// What a worker was last seen doing, as its backend observed it from the agent's events, from which the server judges
+/// whether it has failed, stalled or left a message unanswered. Times are in milliseconds since the Unix epoch, by the
+/// backend's clock as it observed each event. See `design/events.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerActivity {
+    /// When it last made progress: began a step, streamed text, reasoning or a tool's input, called a tool, heard from
+    /// one, or scheduled a retry; or, before any of that, when it was created, began running or was first seen. Never
+    /// zero once reported.
+    pub progressed: u64,
+    /// When the message it has longest left unanswered was sent to it, if it has one: one delivered to it, which only
+    /// progress in a step begun after the delivery answers, or one still queued for it, which no progress answers.
+    pub message: Option<u64>,
+    /// Since when that message has waited on the worker: since it was delivered, or, for one never delivered, since the
+    /// run it was queued behind ended, or since it was sent if none was running; `None` while it is queued behind a run
+    /// that is still going, which is not yet the worker's to answer.
+    pub unanswered_since: Option<u64>,
+    /// The tool it is running, and since when, if a call has begun and not ended. A call whose input is still being
+    /// written is not running.
+    pub tool: Option<RunningTool>,
+    /// How its last step ended, as the agent says, such as `tool-calls` or `stop`.
+    pub finish: Option<String>,
+    /// Why it failed, as the agent service said, such as `BadRequestError: insufficient credit`, if it did and has not
+    /// run again since.
+    pub error: Option<String>,
+    /// It is waiting for a permission or a question to be answered.
+    pub waiting: bool,
+}
+
+/// A tool a worker is running.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningTool {
+    pub name: String,
+    /// When the call began, in milliseconds since the Unix epoch.
+    pub since: u64,
+}
+
 /// A mode a session can be switched to while it runs, as the agent's own interface offers it: for OpenCode, a primary
 /// agent its terminal cycles through with Tab. See `design/agent-backends.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +447,13 @@ pub enum Event {
     /// Worker observation became incomplete; omissions must not imply deletion.
     WorkersUnavailable {
         message: String,
+    },
+    /// What the worker `worker` was last seen doing, replacing what was reported before. A backend reports it as it
+    /// changes, and at least as often as the progress it reports moves on by half a minute while the worker is busy, so
+    /// that the server can tell a worker that has stopped from one that is working. See `design/events.md`.
+    WorkerActivity {
+        worker: String,
+        activity: WorkerActivity,
     },
     /// The session's offered modes or its current mode changed, as the agent confirmed: after a mode request, when the
     /// agent changes mode itself, or once the offered modes are known.

@@ -528,6 +528,12 @@ pub struct Registration {
     /// reconciliation cadence, with the attempts made for each.
     restore_retry: Vec<String>,
     restore_attempts: HashMap<String, u8>,
+    /// What each worker was last seen doing, reported as it changes. See `design/events.md`.
+    activity: crate::activity::Workers,
+    /// The workers whose records are to be read again, their activity having become unknown when the stream was lost,
+    /// and whether that read is running.
+    activity_due: Vec<String>,
+    activity_in_flight: bool,
 }
 
 impl Resync {
@@ -647,6 +653,9 @@ impl Registration {
                 restore_in_flight: false,
                 restore_retry: Vec::new(),
                 restore_attempts: HashMap::new(),
+                activity: crate::activity::Workers::default(),
+                activity_due: Vec::new(),
+                activity_in_flight: false,
             },
             rx,
         )
@@ -946,6 +955,26 @@ impl Registration {
             return;
         }
         self.modes_dirty = !self.deliver_state(Event::ModesChanged(self.modes.clone()));
+    }
+
+    /// Report what the workers whose activity changed were last seen doing, once the session's workers are reported
+    /// and it is not being read again, each after the worker list that names it; those the channel has no room for
+    /// wait for the next try. See `design/events.md`.
+    fn publish_activity(&mut self) {
+        if !self.workers_ready || self.resync.is_some() || !self.activity.is_dirty() {
+            return;
+        }
+        let children = &self.children;
+        let events = &self.events;
+        self.activity.report(
+            |id| children.contains_key(id),
+            |id, activity| {
+                events.try_deliver_state(Event::WorkerActivity {
+                    worker: id.to_owned(),
+                    activity,
+                })
+            },
+        );
     }
 
     fn deliver_state(&self, event: Event) -> bool {
@@ -1867,6 +1896,10 @@ fn connection_lost(registrations: &mut HashMap<String, Registration>) {
         registration.abandon_discovery();
         // A restore being read is read again on the next connection.
         registration.restore_in_flight = false;
+        // What the workers do is unknown until their records are read again on the next connection: what happened
+        // meanwhile, such as a run ending, is in no event that will arrive.
+        registration.activity_in_flight = false;
+        registration.activity_due = registration.activity.unsync();
         let reading = std::mem::take(&mut registration.restore_reading);
         registration.restore_due.extend(reading);
         registration.snapshot_deletions.clear();
@@ -1986,6 +2019,7 @@ impl<F: Future> futures_core::FusedFuture for Fused<F> {
 type SnapshotFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = SnapshotResult> + 'a>>>;
 type ResyncFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ResyncResult> + 'a>>>;
 type RestoreFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = RestoreResult> + 'a>>>;
+type ActivityFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ActivityResult> + 'a>>>;
 type DiscoveryFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = DiscoveryResult> + 'a>>>;
 
 /// Open the server's global event stream, then serve it and the commands,
@@ -2040,6 +2074,7 @@ async fn connected<S: Timers>(
     let mut snapshots: SnapshotFutures<'_> = FuturesUnordered::new();
     let mut resyncs: ResyncFutures<'_> = FuturesUnordered::new();
     let mut restores: RestoreFutures<'_> = FuturesUnordered::new();
+    let mut activities: ActivityFutures<'_> = FuturesUnordered::new();
     let mut discoveries: DiscoveryFutures<'_> = FuturesUnordered::new();
     let mut reconciliations: FuturesUnordered<Pin<Box<dyn Future<Output = ReconcileResult> + '_>>> =
         FuturesUnordered::new();
@@ -2187,6 +2222,18 @@ async fn connected<S: Timers>(
                 start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
                 start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
                 start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
+                continue;
+            }
+            completed = Fused::new(async {
+                if activities.is_empty() {
+                    std::future::pending::<Option<ActivityResult>>().await
+                } else {
+                    activities.next().await
+                }
+            }) => {
+                finish_activity_sync(registrations, completed.expect("a read was in flight"));
+                start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
                 continue;
             }
             completed = Fused::new(async {
@@ -2339,6 +2386,7 @@ async fn connected<S: Timers>(
                 registration.restore_due.extend(retry);
             }
             start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+            start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
             // Retry a session whose read again failed.
                 start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
                 // Go on with a discovery whose retry is due.
@@ -3173,6 +3221,106 @@ fn start_restores<'a, S: Timers>(
     }
 }
 
+/// The records of a session's workers read again after the stream was lost: each worker's latest messages, oldest
+/// first, and its inbox, or `None` where they could not be read, and when.
+struct ActivityResult {
+    id: String,
+    registration: Arc<AtomicU64>,
+    read: Vec<(String, Option<WorkerRecords>)>,
+    at: u64,
+}
+
+/// A worker's latest messages, oldest first, its inbox and its pending permissions and forms.
+type WorkerRecords = (Vec<Value>, Vec<Value>, Vec<Value>);
+
+/// Read again, once the session itself has been, the records of the workers whose activity became unknown when the
+/// stream was lost, at most [`MAX_RESYNCS`] sessions at once, each worker in turn, each read bounded like a snapshot.
+/// See `design/events.md`.
+fn start_activity_syncs<'a, S: Timers>(
+    registrations: &mut HashMap<String, Registration>,
+    activities: &mut ActivityFutures<'a>,
+    client: &'a Client<'_>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: &'a S,
+) {
+    let room = MAX_RESYNCS.saturating_sub(activities.len());
+    let due = registrations.iter_mut().filter(|(_, registration)| {
+        !registration.activity_in_flight
+            && !registration.activity_due.is_empty()
+            && registration.workers_ready
+            && registration.resync.is_none()
+    });
+    for (id, registration) in due.take(room) {
+        registration.activity_in_flight = true;
+        let workers = std::mem::take(&mut registration.activity_due);
+        let identity = registration.events.worker_epoch.clone();
+        let id = id.clone();
+        let local = cancellation.child();
+        activities.push(Box::pin(async move {
+            let mut read = Vec::with_capacity(workers.len());
+            for worker in workers {
+                let records = futures_lite::future::race(
+                    async {
+                        let messages = api::recent_messages(
+                            client,
+                            resolved,
+                            &worker,
+                            crate::activity::SYNCED_MESSAGES,
+                            &local,
+                        )
+                        .await
+                        .ok()?;
+                        // An inbox or requests that cannot be read hold nothing known.
+                        let inbox = api::session_inbox(client, resolved, &worker, &local)
+                            .await
+                            .unwrap_or_default();
+                        let requests = api::session_requests(client, resolved, &worker, &local)
+                            .await
+                            .unwrap_or_default();
+                        Some((messages, inbox, requests))
+                    },
+                    async {
+                        let _ = timers.sleep(SNAPSHOT_TIMEOUT, &local).await;
+                        None
+                    },
+                )
+                .await;
+                read.push((worker, records));
+            }
+            local.cancel();
+            ActivityResult {
+                id,
+                registration: identity,
+                read,
+                at: crate::activity::now(),
+            }
+        }));
+    }
+}
+
+/// Install the workers' records read again, and report their activity, unless the stream was lost again meanwhile,
+/// when they are read again on the next connection.
+fn finish_activity_sync(
+    registrations: &mut HashMap<String, Registration>,
+    completed: ActivityResult,
+) {
+    let Some(registration) = registrations.get_mut(&completed.id).filter(|registration| {
+        Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+            && registration.activity_in_flight
+    }) else {
+        return;
+    };
+    registration.activity_in_flight = false;
+    for (worker, records) in &completed.read {
+        let records = records.as_ref().map(|(messages, inbox, requests)| {
+            (messages.as_slice(), inbox.as_slice(), requests.as_slice())
+        });
+        registration.activity.sync(worker, records, completed.at);
+    }
+    registration.publish_activity();
+}
+
 /// Deliver the messages read again once they ended, after any events already
 /// delivered for them, or hold them if the stream has been lost meanwhile.
 fn finish_restore(registrations: &mut HashMap<String, Registration>, completed: RestoreResult) {
@@ -3453,6 +3601,7 @@ fn dispatch_events_at(
         return;
     };
     apply_worker_event(&value, registrations);
+    apply_worker_activity(&value, registrations);
     let mut overflowed = None;
     if let Some(session_id) = wire::session_id_of(&value)
         && let Some(registration) = registrations.get_mut(&session_id)
@@ -3740,11 +3889,46 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
     }
 }
 
+/// Note what an event says a known worker is doing, for each registered session that knows it. See
+/// `design/events.md`.
+fn apply_worker_activity(value: &Value, registrations: &mut HashMap<String, Registration>) {
+    let Some(kind) = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| crate::activity::relevant(kind))
+    else {
+        return;
+    };
+    let Some(data) = value.get("data") else {
+        return;
+    };
+    let Some(worker) = data
+        .get("sessionID")
+        .or_else(|| data.pointer("/form/sessionID"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let at = crate::activity::now();
+    for registration in registrations.values_mut() {
+        if kind == "session.deleted" {
+            registration.activity.forget(worker);
+        } else if registration.children.contains_key(worker)
+            && registration.activity.apply(worker, kind, data, at)
+            && !registration.activity_due.iter().any(|due| due == worker)
+        {
+            // First seen other than by its creation, as after a restart: what it was doing is read from its records.
+            registration.activity_due.push(worker.to_owned());
+        }
+    }
+}
+
 fn retry_worker_delivery(registrations: &mut HashMap<String, Registration>) {
     for registration in registrations.values_mut() {
         if registration.workers_dirty {
             registration.publish_workers();
         }
+        registration.publish_activity();
         if registration.modes_dirty {
             registration.publish_modes();
         }
@@ -4755,6 +4939,143 @@ mod tests {
         );
         assert!(registrations["other"].children.is_empty());
         assert!(wire::event_for(&event, "parent", &mut HashSet::new()).is_none());
+    }
+
+    /// What a known worker does reaches its session as its activity, after the list that names it, never while the
+    /// session is opening or being read again, and is forgotten with the worker. See `design/events.md`.
+    #[test]
+    fn a_worker_s_activity_is_reported_from_the_events_it_already_reads() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(
+            &mut registrations,
+            "parent".into(),
+            "/tmp",
+            Modes::default(),
+        );
+        let activities =
+            |events: &RegistrationEvents| -> Vec<(String, tomori_backend::WorkerActivity)> {
+                std::iter::from_fn(|| events.try_recv().ok())
+                    .filter_map(QueuedEvent::into_current)
+                    .filter_map(|event| match event {
+                        Event::WorkerActivity { worker, activity } => Some((worker, activity)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+        let send = |registrations: &mut HashMap<String, Registration>, event: Value| {
+            dispatch_events(&event.to_string(), registrations);
+        };
+        // Before the session's workers are reported, the activity waits.
+        let registration = registrations.get_mut("parent").unwrap();
+        registration.children.insert(
+            "child".into(),
+            Worker {
+                id: "child".into(),
+                parent: Some("parent".into()),
+                title: "Worker".into(),
+                state: WorkerState::Running,
+            },
+        );
+        registration.children.insert(
+            "later".into(),
+            Worker {
+                id: "later".into(),
+                parent: Some("parent".into()),
+                title: "Worker".into(),
+                state: WorkerState::Running,
+            },
+        );
+        send(
+            &mut registrations,
+            json!({"type":"session.created","data":{"sessionID":"child","parentID":"parent"}}),
+        );
+        // A worker first seen other than by its creation, as after a restart, has its records read, once.
+        for _ in 0..2 {
+            send(
+                &mut registrations,
+                json!({"type":"session.execution.started","data":{"sessionID":"later"}}),
+            );
+        }
+        assert_eq!(registrations["parent"].activity_due, ["later"]);
+        assert!(activities(&events).is_empty());
+        let registration = registrations.get_mut("parent").unwrap();
+        registration.workers_ready = true;
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        // The session's own events are its own, not a worker's; the activity held while it opened follows them.
+        send(
+            &mut registrations,
+            json!({"type":"session.execution.started","data":{"sessionID":"parent"}}),
+        );
+        let held = activities(&events);
+        assert_eq!(held.len(), 1);
+        assert_eq!((held[0].0.as_str(), &held[0].1.tool), ("child", &None));
+        // While the session is read again, a worker's activity waits too, and is reported once it has been.
+        let registration = registrations.get_mut("parent").unwrap();
+        registration.resync = Some(Resync::default());
+        send(
+            &mut registrations,
+            json!({"type":"session.tool.input.started","data":{"sessionID":"child","id":"t1","name":"shell"}}),
+        );
+        send(
+            &mut registrations,
+            json!({"type":"session.tool.called","data":{"sessionID":"child","id":"t1"}}),
+        );
+        assert!(activities(&events).is_empty());
+        registrations.get_mut("parent").unwrap().resync = None;
+        retry_worker_delivery(&mut registrations);
+        let reported = activities(&events);
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].0, "child");
+        assert_eq!(reported[0].1.tool.as_ref().unwrap().name, "shell");
+        // An event about a session it does not know, or one that says nothing of activity, changes nothing.
+        send(
+            &mut registrations,
+            json!({"type":"session.tool.success","data":{"sessionID":"stranger","id":"t1"}}),
+        );
+        send(
+            &mut registrations,
+            json!({"type":"session.usage.updated","data":{"sessionID":"child"}}),
+        );
+        send(&mut registrations, json!({"type":"session.tool.success"}));
+        send(
+            &mut registrations,
+            json!({"type":"permission.asked","data":{}}),
+        );
+        // A read of the workers' records that was abandoned, as when the stream was lost again, changes nothing.
+        finish_activity_sync(
+            &mut registrations,
+            ActivityResult {
+                id: "parent".into(),
+                registration: events.identity.clone(),
+                read: vec![("child".into(), None)],
+                at: 1,
+            },
+        );
+        assert!(activities(&events).is_empty());
+        send(
+            &mut registrations,
+            json!({"type":"session.tool.success","data":{"sessionID":"child","id":"t1"}}),
+        );
+        assert_eq!(activities(&events)[0].1.tool, None);
+        // Deleted, it is forgotten.
+        send(
+            &mut registrations,
+            json!({"type":"permission.asked","data":{"sessionID":"child","id":"p1","action":"bash"}}),
+        );
+        registrations.get_mut("parent").unwrap().resync = Some(Resync::default());
+        send(
+            &mut registrations,
+            json!({"type":"permission.asked","data":{"sessionID":"child","id":"p2","action":"bash"}}),
+        );
+        send(
+            &mut registrations,
+            json!({"type":"session.deleted","data":{"sessionID":"child"}}),
+        );
+        assert!(!registrations["parent"].activity.is_dirty());
     }
 
     #[test]
@@ -6666,6 +6987,8 @@ mod tests {
         failing_records: HashSet<String>,
         /// Each session's message listing, if not empty.
         messages: HashMap<String, Value>,
+        /// Each session's inbox, if not empty.
+        inboxes: HashMap<String, Value>,
         /// Each session's instruction entries.
         instructions: HashMap<String, BTreeMap<String, Value>>,
         /// The instruction requests received, as method, session and key.
@@ -7099,6 +7422,11 @@ mod tests {
                     })
                     .to_string(),
                 ),
+                Some(_) if path.ends_with("/inbox") => (
+                    "200 OK",
+                    json!({ "data": state.inboxes.get(&id).cloned().unwrap_or_else(|| json!([])) })
+                        .to_string(),
+                ),
                 Some(permissions) if path.ends_with("/permission") => {
                     ("200 OK", json!({ "data": permissions }).to_string())
                 }
@@ -7392,6 +7720,150 @@ mod tests {
                 .iter()
                 .all(|authorization| authorization.as_deref() == Some(basic("second").as_str()))
         );
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(second);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A worker's activity is unknown once the stream is lost, and is read again from its records once the session has
+    /// been: a success missed in the gap leaves no tool running, and a message queued meanwhile is known. See
+    /// `design/events.md`.
+    #[test]
+    fn a_worker_s_activity_is_read_again_after_the_stream_is_lost() {
+        let directory =
+            std::env::temp_dir().join(format!("tomori-opencode-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("service.json");
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            state.children.insert(
+                "s1".into(),
+                vec![fake_child("c1", "s1", 1), fake_child("c2", "s1", 2)],
+            );
+            state.sessions.insert("c1".into(), Vec::new());
+            state.sessions.insert("c2".into(), Vec::new());
+        });
+        let mut first = FakeService::start(shared.clone(), "first");
+        write_service_file(&path, first.address, "first");
+        let resolve_path = path.clone();
+        let mut resolver = crate::endpoint::Resolver::new(None);
+        let (commands, receiver) = Commands::new();
+        let connection = std::thread::spawn(move || {
+            run_thread(
+                Box::new(move || resolver.next_from(None, Some(&resolve_path))),
+                receiver,
+            )
+        });
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Activity".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(id, "s1");
+        let identity = events.identity.clone();
+        let snapshot = block_on(commands.reply_with(|reply| Command::Snapshot {
+            id: id.clone(),
+            identity,
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+        .unwrap();
+        assert_eq!(snapshot.workers.len(), 2);
+        let watched = watch(&events);
+        let activity = |event: &Event| match event {
+            Event::WorkerActivity { worker, activity } if worker == "c1" => Some(activity.clone()),
+            _ => None,
+        };
+        first.send(json!({"type":"session.execution.started","data":{"sessionID":"c1"}}));
+        first.send(json!({"type":"session.tool.input.started","data":{"sessionID":"c1","id":"t1","name":"shell"}}));
+        first.send(json!({"type":"session.tool.called","data":{"sessionID":"c1","id":"t1"}}));
+        first.send(json!({"type":"session.execution.started","data":{"sessionID":"c2"}}));
+        until(&watched, "the worker's running tool", |event| {
+            activity(event).is_some_and(|activity| activity.tool.is_some())
+        });
+        until(
+            &watched,
+            "the second worker's activity",
+            |event| matches!(event, Event::WorkerActivity { worker, .. } if worker == "c2"),
+        );
+
+        // The stream is lost; meanwhile the tool and the run succeed, and a follow-up is queued, none of it seen.
+        first.stop();
+        until(&watched, "the disconnection notice", |event| {
+            *event
+                == Event::Reconnecting {
+                    reason: DISCONNECTED.to_owned(),
+                }
+        });
+        shared.update(|state| {
+            // Newest first, as OpenCode lists them for `order=desc`: the worker answered the message before it.
+            state.messages.insert(
+                "c1".into(),
+                json!([
+                    {"type":"assistant","time":{"created":2,"completed":3},"finish":"stop"},
+                    {"type":"user","time":{"created":1}},
+                ]),
+            );
+            // It now waits on a permission.
+            state.sessions.insert(
+                "c1".into(),
+                vec![json!({"id":"p1","sessionID":"c1","action":"bash","resources":["make"]})],
+            );
+            state.inboxes.insert(
+                "c1".into(),
+                json!([{"id":"m1","type":"user","time":{"created":5}}]),
+            );
+            // The second's records do not answer in time.
+            state.stalled.insert("c2".into());
+        });
+        let second = FakeService::start(shared.clone(), "second");
+        write_service_file(&path, second.address, "second");
+        // Each is read in turn, the second, whose records do not answer in time, first.
+        let mut seen = Vec::new();
+        let read = |seen: &[Event], id: &str| {
+            seen.iter().rev().find_map(|event| match event {
+                Event::WorkerActivity { worker, activity } if worker == id => {
+                    Some(activity.clone())
+                }
+                _ => None,
+            })
+        };
+        while read(&seen, "c1").is_none() || read(&seen, "c2").is_none() {
+            seen.extend(until_within(
+                &watched,
+                Duration::from_secs(15),
+                "the workers' activity read again",
+                |event| matches!(event, Event::WorkerActivity { .. }),
+            ));
+        }
+        let resynchronized = seen
+            .iter()
+            .position(|event| matches!(event, Event::Resynchronized { .. }));
+        let first = seen
+            .iter()
+            .position(|event| matches!(event, Event::WorkerActivity { .. }));
+        assert!(
+            resynchronized.is_some() && resynchronized < first,
+            "the session is read again first: {seen:?}"
+        );
+        let c1 = read(&seen, "c1").unwrap();
+        assert_eq!(c1.tool, None);
+        assert_eq!(c1.finish.as_deref(), Some("stop"));
+        assert_eq!((c1.message, c1.unanswered_since), (Some(5), Some(5)));
+        assert_eq!(c1.progressed, 3);
+        assert!(c1.waiting);
+        // The second starts again from when it was read.
+        let c2 = read(&seen, "c2").unwrap();
+        assert!(c2.progressed > 1_000_000 && c2.tool.is_none());
+        shared.update(|state| {
+            state.stalled.remove("c2");
+        });
 
         drop(commands);
         join_within(connection, Duration::from_secs(5));

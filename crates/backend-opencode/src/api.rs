@@ -1031,6 +1031,93 @@ pub async fn reply_form<'scope>(
     Ok(())
 }
 
+/// `GET /api/session/:id/message?limit=N&order=desc`: a session's latest `limit` messages, oldest first, in one page.
+/// See `design/events.md`.
+pub async fn recent_messages<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    limit: usize,
+    cancellation: &Cancellation,
+) -> Result<Vec<Value>, Failure> {
+    let path = format!(
+        "/api/session/{}/message?limit={limit}&order=desc",
+        urlencoding(session_id)
+    );
+    let list = listed(client, resolved, &path, cancellation, "a message list").await?;
+    Ok(list.into_iter().take(limit).rev().collect())
+}
+
+/// `GET /api/session/:id/inbox`: the messages queued for a session and not yet delivered to it. See `design/events.md`.
+pub async fn session_inbox<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<Vec<Value>, Failure> {
+    const MOST: usize = 64;
+    let path = format!("/api/session/{}/inbox", urlencoding(session_id));
+    let list = listed(client, resolved, &path, cancellation, "an inbox").await?;
+    Ok(list.into_iter().take(MOST).collect())
+}
+
+/// `GET /api/session/:id/permission` and `GET /api/session/:id/form`: the permissions and forms a session waits on.
+/// See `design/events.md`.
+pub async fn session_requests<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<Vec<Value>, Failure> {
+    const MOST: usize = 64;
+    let session = urlencoding(session_id);
+    let mut requests = listed(
+        client,
+        resolved,
+        &format!("/api/session/{session}/permission"),
+        cancellation,
+        "a permission list",
+    )
+    .await?;
+    requests.extend(
+        listed(
+            client,
+            resolved,
+            &format!("/api/session/{session}/form"),
+            cancellation,
+            "a form list",
+        )
+        .await?,
+    );
+    requests.truncate(MOST);
+    Ok(requests)
+}
+
+/// The `data` list `path` answers, which is `what`.
+async fn listed(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    path: &str,
+    cancellation: &Cancellation,
+    what: &str,
+) -> Result<Vec<Value>, Failure> {
+    let response = exchange(
+        client,
+        get(path),
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    let mut value = read_json(response, cancellation).await?;
+    match value.get_mut("data").map(Value::take) {
+        Some(Value::Array(list)) => Ok(list),
+        _ => Err(Failure {
+            status: None,
+            message: format!("the server did not return {what}"),
+        }),
+    }
+}
+
 /// `GET /api/session/:id/message`: bounded recent conversation history.
 pub async fn session_messages<'scope>(
     client: &Client<'scope>,
@@ -2443,6 +2530,82 @@ pub(crate) mod tests {
                 .unwrap();
             let running = session_running(client, resolved, "s1", cancellation, scheduler).await;
             assert_eq!(running.unwrap(), None);
+        });
+    }
+
+    /// A worker's latest messages come oldest first, at most as many as asked, and its inbox as listed; an answer that
+    /// is not a list is refused. See `design/events.md`.
+    #[test]
+    fn a_worker_s_latest_messages_and_inbox_are_read() {
+        let port = service(|_, path| match path {
+            "/api/session/w1/message?limit=2&order=desc" => (
+                "200 OK",
+                r#"{"data":[{"id":"m3"},{"id":"m2"},{"id":"m1"}]}"#.to_owned(),
+            ),
+            "/api/session/w1/inbox" => ("200 OK", r#"{"data":[{"id":"i1"}]}"#.to_owned()),
+            "/api/session/w1/permission" | "/api/session/w4/permission" => {
+                ("200 OK", r#"{"data":[{"id":"p1"}]}"#.to_owned())
+            }
+            "/api/session/w1/form" => ("200 OK", r#"{"data":[{"id":"f1"}]}"#.to_owned()),
+            "/api/session/w4/form" => ("200 OK", r#"{"data":{}}"#.to_owned()),
+            "/api/session/w3/permission" => (
+                "500 Internal Server Error",
+                r#"{"message":"busy"}"#.to_owned(),
+            ),
+            "/api/session/w3/inbox" => (
+                "500 Internal Server Error",
+                r#"{"message":"busy"}"#.to_owned(),
+            ),
+            _ => ("200 OK", r#"{"data":{}}"#.to_owned()),
+        });
+        with_client(port, async |client, resolved, cancellation, _| {
+            let messages = recent_messages(client, resolved, "w1", 2, cancellation)
+                .await
+                .unwrap();
+            assert_eq!(messages, [json!({"id":"m2"}), json!({"id":"m3"})]);
+            let inbox = session_inbox(client, resolved, "w1", cancellation)
+                .await
+                .unwrap();
+            assert_eq!(inbox, [json!({"id":"i1"})]);
+            let requests = session_requests(client, resolved, "w1", cancellation)
+                .await
+                .unwrap();
+            assert_eq!(requests, [json!({"id":"p1"}), json!({"id":"f1"})]);
+            assert!(
+                session_requests(client, resolved, "w3", cancellation)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                session_requests(client, resolved, "w4", cancellation)
+                    .await
+                    .is_err()
+            );
+            let refused = session_inbox(client, resolved, "w2", cancellation)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.message, "the server did not return an inbox");
+            assert!(
+                session_inbox(client, resolved, "w3", cancellation)
+                    .await
+                    .is_err()
+            );
+        });
+    }
+
+    /// A service that cannot be reached answers no records.
+    #[test]
+    fn a_worker_s_records_are_not_read_from_a_service_that_is_gone() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        with_client(port, async |client, resolved, cancellation, _| {
+            assert!(
+                recent_messages(client, resolved, "w1", 2, cancellation)
+                    .await
+                    .is_err()
+            );
         });
     }
 

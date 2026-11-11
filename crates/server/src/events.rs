@@ -34,6 +34,8 @@ pub const BLOCK_CHARS: usize = 2_000;
 pub enum Source {
     /// One of the space's timers, keyed by its name.
     Timer,
+    /// The space's workers, keyed by the condition the note is about. See `design/events.md`.
+    Worker,
 }
 
 #[derive(Debug)]
@@ -157,10 +159,16 @@ impl EventQueue {
     /// Whether a prompt of notes alone may be given at `now`: some wait, the agent's turn ended, at `quiet_since`, at
     /// least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago.
     pub fn ready(&self, now: Instant, quiet_since: Option<Instant>) -> bool {
+        !self.notes.is_empty() && self.may_give(now, quiet_since)
+    }
+
+    /// Whether a prompt of notes alone may be given at `now`, were any waiting: the agent's turn ended, at
+    /// `quiet_since`, at least [`QUIET`] ago, and the last such prompt was at least [`GAP`] ago.
+    pub fn may_give(&self, now: Instant, quiet_since: Option<Instant>) -> bool {
         let since = |at: Option<Instant>, least: Duration| {
             at.is_none_or(|at| now.saturating_duration_since(at) >= least)
         };
-        !self.notes.is_empty() && since(quiet_since, QUIET) && since(self.last, GAP)
+        since(quiet_since, QUIET) && since(self.last, GAP)
     }
 
     /// The key and text of a prompt of every note waiting, given at `now`, if any wait.

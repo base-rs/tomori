@@ -5,6 +5,7 @@
 //! and the hub looking at every space's timers as the clock moves, telling each agent what fired through its space's
 //! event queue. See `design/timers.md` and `design/mcp.md`.
 use serde_json::{Value, json};
+use std::time::Instant;
 
 use super::{Hub, HubState};
 use crate::timers::{Request, Timer, schedule::instant};
@@ -64,9 +65,16 @@ impl Hub {
     /// it. What fires waits in the space's event queue for the agent's turn to end, and is handed over when it may be;
     /// a space whose timers look different is sent to everyone in it, and what is kept is written. A closed space, or one
     /// not yet bound again after a restart, is left as it is, so that what fell due meanwhile is caught up once it is.
-    /// See `design/timers.md`.
+    /// The space's workers are judged at `now` too, as `design/events.md` describes. See `design/timers.md`.
     pub fn tick_timers(&self, now: jiff::Timestamp) {
         let mut changed = false;
+        // A sleep or a jump of the clock is noticed against the monotonic clock, unless a test gives the time.
+        let monotonic = self
+            .clock
+            .read()
+            .expect("never left poisoned")
+            .is_none()
+            .then(Instant::now);
         {
             let mut state = self.lock();
             let ids: Vec<String> = state
@@ -76,17 +84,24 @@ impl Hub {
                     !record.restoring
                         && !record.model.is_closed()
                         && !record.model.is_reconnecting()
-                        && (!record.model.timers().list().is_empty() || record.model.has_events())
+                        && (!record.model.timers().list().is_empty()
+                            || record.model.has_events()
+                            || record.model.watching_workers())
                 })
                 .map(|record| record.model.id.clone())
                 .collect();
             for id in ids {
                 let present = state.present(&id);
                 let record = state.space_mut(&id).expect("listed above");
-                if record.model.tick_timers(now, &present) {
+                let timers = record.model.tick_timers(now, &present);
+                // Its workers go by the same clock, shown changed for everyone but not kept. See `design/events.md`.
+                let workers = record
+                    .model
+                    .tick_workers(u64::try_from(now.as_millisecond()).unwrap_or(0), monotonic);
+                if timers || workers {
                     state.touch_space(&id);
-                    changed = true;
                 }
+                changed |= timers;
                 state.pump(&id);
             }
         }

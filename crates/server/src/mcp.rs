@@ -602,7 +602,7 @@ fn tools() -> Value {
         },
         {
             "name": "workers",
-            "description": "Your space's workers, the sub-agent sessions everyone in it sees: each one's session, title, state (running, waiting, idle, completed, failed, stopped or unknown), whether it has finished and how long ago Tomori saw it finish, and its parent, the worker that started it, or null for one you started.",
+            "description": "Your space's workers, the sub-agent sessions everyone in it sees: each one's session, title, state (running, waiting, idle, completed, failed, stopped, stalled, unanswered or unknown), whether it has finished and how long ago Tomori saw it finish, its parent, the worker that started it, or null for one you started, and its condition, when Tomori judges it failed, stalled (no progress for 10 minutes, or 30 while a tool runs) or unanswered (a message given to it 5 minutes ago or more with no progress since), with how many seconds it has held, why it failed, the tool it is running and how its last step ended, or null.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },

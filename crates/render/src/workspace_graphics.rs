@@ -636,6 +636,8 @@ fn state_label(state: &State) -> (&'static str, [f32; 3]) {
         State::Completed => ("Finished", [0.3, 0.95, 0.65]),
         State::Error => ("Error", [1.0, 0.35, 0.3]),
         State::Stopped => ("Stopped", [0.8, 0.68, 0.55]),
+        State::Stalled => ("Stalled", [1.0, 0.58, 0.14]),
+        State::Unanswered => ("No answer", [1.0, 0.58, 0.14]),
         State::Unknown => ("Unknown", [0.7, 0.65, 0.8]),
     }
 }
@@ -1203,6 +1205,20 @@ fn status_symbol(
             line([0.7, -0.7], [0.7, 0.7]);
             line([0.7, 0.7], [-0.7, 0.7]);
             line([-0.7, 0.7], [-0.7, -0.7]);
+        }
+        // An exclamation mark.
+        State::Stalled => {
+            line([0.0, 0.95], [0.0, -0.35]);
+            line([0.0, -0.7], [0.0, -0.95]);
+        }
+        // An envelope, a message waiting.
+        State::Unanswered => {
+            line([-0.9, 0.6], [0.9, 0.6]);
+            line([0.9, 0.6], [0.9, -0.6]);
+            line([0.9, -0.6], [-0.9, -0.6]);
+            line([-0.9, -0.6], [-0.9, 0.6]);
+            line([-0.9, 0.6], [0.0, -0.1]);
+            line([0.0, -0.1], [0.9, 0.6]);
         }
         State::Unknown => {
             line([0.0, 0.95], [0.9, 0.0]);
@@ -2527,6 +2543,8 @@ mod tests {
             State::Running,
             State::Idle,
             State::Stopped,
+            State::Stalled,
+            State::Unanswered,
             State::Unknown,
         ];
         let mut shapes = Vec::new();
