@@ -3,12 +3,13 @@
 
 //! Tomori's farmyard: an evening yard, fenced, with a red chicken coop raised on legs, its ramp and little door, a water
 //! trough, a feeder with grain scattered about it, hay bales, a curved workbench in a corner where the agent lives,
-//! lanterns, and pines beyond under a rising moon.
+//! lanterns, and pines beyond under a rising moon; and beyond them a New Zealand backdrop, bush-clad foothills, a
+//! waterfall, a river and snowy ranges.
 //!
 //! It is an environment built as another project would build one, from Tomori's published crates and their extension
 //! points, without anything in Tomori's own crates knowing about it. This crate is what its server and its clients
 //! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, the yard with its
-//! workbench and the coop, built in code as `tomori-assets` models; the chicken, its asset, its animator's graph and its
+//! workbench, the coop and the backdrop beyond the fence, built in code as `tomori-assets` models; the chicken, its asset, its animator's graph and its
 //! controller; what each chicken does, and where that puts it; the flock its server side owns; and the server side
 //! itself, which has nothing that must stay in the server, so that it needs no server crate of its own. Its client half,
 //! the scenery, teleport profile and client side a client registers, is `tomori-environment-farmyard-client`. See
@@ -18,6 +19,7 @@
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
 //! assert_eq!((ID, VERSION, LABEL), ("farmyard", 4, "Farmyard"));
 //! ```
+pub mod backdrop;
 pub mod behaviour;
 pub mod chicken;
 pub mod cluck;

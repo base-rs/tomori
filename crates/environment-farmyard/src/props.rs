@@ -2,8 +2,9 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The yard, built in code as one model: the meadow, the packed earth inside the fence, the fence and its gate posts,
-//! the water trough, the feeder and its scattered grain, the hay bales, the trees beyond, and the lantern on the gate
-//! post, whose glass glows. The coop is a model of its own (see [`crate::coop`]).
+//! the water trough, the feeder and its scattered grain, the hay bales, the pines beyond, and the lantern on the gate
+//! post, whose glass glows. The coop is a model of its own (see [`crate::coop`]), and so is the land beyond the pines
+//! (see [`crate::backdrop`]).
 use glam::{Quat, Vec3, Vec4};
 use tomori_assets::{Limits, Material, Mesh, Model, Node, Transform};
 
@@ -30,6 +31,18 @@ pub mod palette {
     pub const SHADOW: Vec3 = Vec3::new(0.03, 0.025, 0.02);
     /// A lantern's warm glow, which its glass gives off.
     pub const GLOW: Vec3 = Vec3::new(1.0, 0.62, 0.28);
+}
+
+/// The evening's light, linear RGB, which the scenery lights the farmyard with and the backdrop's ranges are lit by.
+pub mod evening {
+    use glam::Vec3;
+
+    /// The way towards the moon, low in the east, not of unit length.
+    pub const MOON: Vec3 = Vec3::new(0.62, 0.36, -0.7);
+    /// The moon's light, and the sky's and the ground's.
+    pub const MOONLIGHT: Vec3 = Vec3::new(0.30, 0.34, 0.46);
+    pub const SKY: Vec3 = Vec3::new(0.10, 0.12, 0.2);
+    pub const GROUND: Vec3 = Vec3::new(0.06, 0.05, 0.04);
 }
 
 /// The material most of the yard is drawn with, white, so that its faces' own colours show.
@@ -247,16 +260,28 @@ fn hay(shapes: &mut Shapes) {
     }
 }
 
+/// The pines beyond the fence, each where its trunk stands on the ground and how tall it is: none behind home's view of
+/// the yard's gate, so that the way in stays open, nor in the river or the pool, nor before the waterfall and the
+/// river where participants see them from (see [`crate::backdrop::open`]).
+pub fn pines() -> Vec<(Vec3, f32)> {
+    (0..14)
+        .filter_map(|tree| {
+            let angle = (tree as f32 / 14.0 + scatter(tree * 7) * 0.05) * std::f32::consts::TAU;
+            let distance = 13.0 + scatter(tree * 7 + 1) * 10.0;
+            let at = glam::Vec2::new(angle.cos() * distance, angle.sin() * distance - 4.0);
+            let height = 4.0 + scatter(tree * 7 + 2) * 3.5;
+            let gate = at.y > 4.0 && at.x.abs() < 6.0;
+            (!gate && crate::backdrop::open(at, height * 0.32, height)).then(|| {
+                // Sunk a little, so that none stands proud of a slope.
+                let ground = crate::backdrop::ground(at) - 0.15;
+                (Vec3::new(at.x, ground, at.y), height)
+            })
+        })
+        .collect()
+}
+
 fn trees(shapes: &mut Shapes) {
-    for tree in 0..14 {
-        let angle = (tree as f32 / 14.0 + scatter(tree * 7) * 0.05) * std::f32::consts::TAU;
-        let distance = 13.0 + scatter(tree * 7 + 1) * 10.0;
-        // None behind home's view of the yard's gate, so that the way in stays open.
-        let base = Vec3::new(angle.cos() * distance, 0.0, angle.sin() * distance - 4.0);
-        if base.z > 4.0 && base.x.abs() < 6.0 {
-            continue;
-        }
-        let height = 4.0 + scatter(tree * 7 + 2) * 3.5;
+    for (base, height) in pines() {
         shapes.cylinder(base, 0.18, height * 0.25, 5, palette::BARK);
         for (layer, (from, radius)) in [(0.18, 1.0), (0.42, 0.78), (0.64, 0.55)]
             .into_iter()

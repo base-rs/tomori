@@ -285,6 +285,81 @@ pub const WALKABLE: [Footprint; 6] = [
     Footprint::new([2.6, -7.7], [4.6, -5.9]),
 ];
 
+/// The middle of the land beyond the fence, about which the backdrop's foothills ring the yard: the yard's middle.
+pub const BACKDROP_CENTRE: Vec2 = Vec2::new(0.0, -4.0);
+/// The way the waterfall lies from [`BACKDROP_CENTRE`], as a yaw from −Z towards +X: behind the coop, a little to
+/// its right as participants arrive, so that they see it over the back fence as they come in.
+pub const WATERFALL_AZIMUTH: f32 = -7.5 * std::f32::consts::PI / 180.0;
+/// How far from [`BACKDROP_CENTRE`] the waterfall's cliff rises, from its foot to its lip, and how high its top
+/// stands.
+pub const CLIFF: [f32; 2] = [23.5, 25.0];
+pub const CLIFF_TOP: f32 = 6.5;
+/// Where the waterfall's water leaves the lip of its cliff, and where it meets its pool.
+pub const WATERFALL_LIP: Vec3 = Vec3::new(-3.263, CLIFF_TOP, -28.786);
+pub const WATERFALL_FOOT: Vec3 = Vec3::new(-3.067, POOL.y, -27.299);
+/// The middle of the waterfall's fall, where a sound of it would come from.
+pub const WATERFALL: Vec3 = Vec3::new(-3.165, (CLIFF_TOP + POOL.y) * 0.5, -28.04);
+/// The middle of the pool at the waterfall's foot, at its water's level, and how wide it is to its shore.
+pub const POOL: Vec3 = Vec3::new(-2.741, 1.0, -24.821);
+pub const POOL_RADIUS: f32 = 4.0;
+/// The river, from the pool downstream, its middle at its water's level: towards the yard, then round its right side,
+/// 11 m beyond the fence, and away into the foothills to the front right, behind a spur.
+pub const RIVER: [Vec3; 13] = [
+    POOL,
+    Vec3::new(-0.6, 0.55, -21.6),
+    Vec3::new(2.6, 0.3, -19.6),
+    Vec3::new(6.6, 0.26, -18.8),
+    Vec3::new(10.4, 0.23, -16.6),
+    Vec3::new(13.6, 0.21, -12.8),
+    Vec3::new(15.4, 0.19, -7.8),
+    Vec3::new(16.0, 0.17, -2.8),
+    Vec3::new(15.3, 0.16, 2.2),
+    Vec3::new(15.9, 0.15, 7.0),
+    Vec3::new(18.4, 0.14, 11.6),
+    Vec3::new(23.5, 0.13, 12.5),
+    Vec3::new(28.5, 0.12, 10.0),
+];
+/// How far the river's water reaches either side of its middle, to its shingle.
+pub const RIVER_HALF_WIDTH: f32 = 1.2;
+/// The patches of native bush beyond the fence, `(middle, radius)` on the ground: in the gully by the waterfall, behind
+/// the hay, on the foothills to the left, behind the workbench, and across the river to the right, where tree ferns,
+/// cabbage trees, flax, podocarps and the bush's canopy gather most.
+pub const BUSH: [(Vec2, f32); 5] = [
+    (Vec2::new(-10.5, -25.5), 6.0),
+    (Vec2::new(7.5, -27.5), 6.0),
+    (Vec2::new(-21.0, -9.0), 7.0),
+    (Vec2::new(-16.0, 10.5), 7.0),
+    (Vec2::new(23.0, -8.0), 6.0),
+];
+
+/// Where the backdrop's sounds come from, each a name and a place: the `waterfall` at the middle of its fall, its
+/// `pool`, the `river` at each of its bends and every `bush` patch's middle, on the ground. Ambient sound attaches here.
+pub fn sounds() -> Vec<(&'static str, Vec3)> {
+    let mut sounds = vec![("waterfall", WATERFALL), ("pool", POOL)];
+    sounds.extend(RIVER[1..].iter().map(|point| ("river", *point)));
+    sounds.extend(BUSH.iter().map(|(middle, _)| {
+        let ground = crate::backdrop::ground(*middle);
+        ("bush", Vec3::new(middle.x, ground, middle.y))
+    }));
+    sounds
+}
+
+/// The nearest point to `point` on the river's middle, at its water's level, and how far it is on the ground.
+pub fn nearest_river(point: Vec2) -> (Vec3, f32) {
+    RIVER
+        .windows(2)
+        .map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let along = Vec2::new(to.x - from.x, to.z - from.z);
+            let offset = point - Vec2::new(from.x, from.z);
+            let t = (offset.dot(along) / along.length_squared()).clamp(0.0, 1.0);
+            let nearest = from.lerp(to, t);
+            (nearest, point.distance(Vec2::new(nearest.x, nearest.z)))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("the river has reaches")
+}
+
 /// [`WALKABLE`]'s rectangles, as `(centre, size)` on the ground, for a teleport profile.
 pub fn walkable() -> Vec<(Vec3, Vec2)> {
     WALKABLE

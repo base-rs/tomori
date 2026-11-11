@@ -2,7 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Tomori's farmyard, its client half: the scenery Tomori's clients draw, an evening sky behind the yard and the coop,
-//! built in code and drawn with `tomori-assets`, with the chickens; the client side that shows the chickens from what
+//! built in code and drawn with `tomori-assets`, with the chickens, and the New Zealand backdrop beyond the fence, its
+//! foothills, bush, river, waterfall and ranges; the client side that shows the chickens from what
 //! the farmyard's server side shares; and the teleport profile, which a client registers with [`register`]. What its
 //! server and clients share is `tomori-environment-farmyard`. See `design/farmyard.md`.
 pub mod client;
@@ -40,11 +41,21 @@ pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
 
 /// As [`register`], with `coop`, such as one modelled in Blender and bundled as an asset.
 pub fn register_with(sceneries: &mut tomori_render::scenery::Sceneries, coop: coop::Coop) {
+    registered(sceneries, coop, scenery::Clock::Running);
+}
+
+/// As [`register_with`], its water moved by `clock`.
+pub(crate) fn registered(
+    sceneries: &mut tomori_render::scenery::Sceneries,
+    coop: coop::Coop,
+    clock: scenery::Clock,
+) {
     sceneries.register_versioned(ID, VERSION, move |target| {
-        Box::new(scenery::Farmyard::new(
+        Box::new(scenery::Farmyard::with_clock(
             target,
             &coop,
             tomori_assets::Library::shared(),
+            clock,
         ))
     });
     sceneries.set_locomotion(ID, locomotion());
