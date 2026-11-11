@@ -1324,6 +1324,8 @@ pub(crate) struct AgentState {
     pub pinned_by: Option<String>,
     /// Whom it talks with now, or last did, by their handle.
     pub partner: Option<String>,
+    /// Whom it walks with, by their handle, while it does.
+    pub walking: Option<String>,
     /// How long until it goes home if nothing more is said, while it follows.
     pub returns_in: Option<std::time::Duration>,
     pub movement: tomori_protocol::AgentMovement,
@@ -1332,8 +1334,8 @@ pub(crate) struct AgentState {
 }
 
 /// Where the agent is, as the `presence` and `move_agent` tools say: where it stands, or is going, which way it faces,
-/// whether its place is home, and where that is, and, on its way, where it has reached; its mode, at home, going home, following the speaker, pinned or away where it was
-/// asked to go, and whether it is on its way; whom it talks with, who pinned it and, while it follows, how long until
+/// whether its place is home, and where that is, and, on its way, where it has reached; its mode, at home, going home, following the speaker,
+/// walking with someone, pinned or away where it was asked to go, and whether it is on its way; whom it talks with, who pinned it and, while it follows, how long until
 /// it goes home if nothing more is said; how the space lets it move, and the anchor it stands at. See
 /// `design/environments.md`.
 pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> Value {
@@ -1347,12 +1349,18 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
         .filter(|towards| towards.iter().all(|axis| axis.is_finite()))
         .filter(|towards| towards[0].hypot(towards[2]) > 1e-3)
         .unwrap_or_else(|| rotate(at.orientation, [0.0, 0.0, 1.0]));
-    let mode = match (state.pinned, state.summoned, state.movement.mode) {
-        (true, _, _) => "pinned",
-        (false, None, _) if state.at.is_some() => "going home",
-        (false, None, _) => "home",
-        (false, Some(_), tomori_protocol::Movement::Follow) => "following",
-        (false, Some(_), _) => "away",
+    let mode = match (
+        &state.walking,
+        state.pinned,
+        state.summoned,
+        state.movement.mode,
+    ) {
+        (Some(walker), _, _, _) => format!("walking with {walker}"),
+        (None, true, _, _) => "pinned".to_owned(),
+        (None, false, None, _) if state.at.is_some() => "going home".to_owned(),
+        (None, false, None, _) => "home".to_owned(),
+        (None, false, Some(_), tomori_protocol::Movement::Follow) => "following".to_owned(),
+        (None, false, Some(_), _) => "away".to_owned(),
     };
     let movement = match state.movement.mode {
         tomori_protocol::Movement::Follow => "follows the speaker",

@@ -635,7 +635,13 @@ impl Hub {
             // Who came near where is not logged, as nothing of presence is. See `design/mcp.md`.
             log::debug!("Space {space} tells its agent of someone coming near its anchors.");
             for (key, note) in notes {
-                record.model.tell_proximity(&key, note);
+                // Whom it is about, by their key, which the note's key begins: a reply to it keeps with them.
+                let about = people.iter().map(|person| person.key).find(|person| {
+                    key.strip_prefix(*person)
+                        .and_then(|rest| rest.strip_prefix('/'))
+                        .is_some_and(|anchor| anchors.iter().any(|known| known.name == anchor))
+                });
+                record.model.tell_proximity(&key, about, note);
             }
             state.pump(&space);
         }

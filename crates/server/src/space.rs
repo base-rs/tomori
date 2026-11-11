@@ -190,6 +190,9 @@ pub struct SpaceModel {
     events: crate::events::EventQueue,
     /// When the agent's turn last ended, after which a prompt of notes alone waits a quiet moment.
     quiet_since: Option<std::time::Instant>,
+    /// The participant the notes alone given the agent last were about, while they are its latest input. See
+    /// [`SpaceModel::noted`].
+    noted: Option<String>,
     /// The watch over its workers, which tells the agent of those that failed, stalled or left a message unanswered.
     /// See `design/events.md`.
     watch: crate::watch::Watch,
@@ -904,6 +907,7 @@ impl SpaceModel {
             timers: crate::timers::Timers::default(),
             events: crate::events::EventQueue::default(),
             quiet_since: None,
+            noted: None,
             watch: crate::watch::Watch::default(),
         };
         model.load_messages(snapshot.messages);
@@ -2159,6 +2163,7 @@ impl SpaceModel {
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
         // Who began the turn, from the moment it is given, since the agent may call a tool before delivery is confirmed.
+        self.noted = None;
         self.entries_given += 1;
         self.given = Some(Given {
             entry: self.entries_given,
@@ -2178,8 +2183,10 @@ impl SpaceModel {
         if hold || !self.events.ready(now, self.quiet_since) {
             return None;
         }
+        let about = self.events.about().map(str::to_owned);
         let (key, text) = self.events.prompt(now).expect("ready says notes wait");
         self.supersede(Superseded::Event);
+        self.noted = about;
         self.remember_given(key.clone());
         self.origin = None;
         let prompt = Prompt { key, text };
@@ -2200,6 +2207,14 @@ impl SpaceModel {
     #[cfg(test)]
     pub fn quieten(&mut self) {
         self.quiet_since = self.quiet_since.map(|since| since - crate::events::QUIET);
+    }
+
+    /// Have the agent's last turn have ended a quiet moment ago, and its last prompt of notes alone a gap ago, as a test
+    /// does rather than wait.
+    #[cfg(test)]
+    pub fn lapse(&mut self) {
+        self.quieten();
+        self.events.lapse();
     }
 
     /// Whether Tomori's notes wait for the agent.
@@ -2234,9 +2249,16 @@ impl SpaceModel {
 
     /// Queue Tomori's note `text`, that a participant came near one of the space's anchors, under `key`, which names
     /// both, for the agent, as a timer's firing waits. See `design/environments.md`.
-    pub fn tell_proximity(&mut self, key: &str, text: String) {
+    pub fn tell_proximity(&mut self, key: &str, about: Option<&str>, text: String) {
         self.events
-            .push(crate::events::Source::Proximity, key, text);
+            .push_about(crate::events::Source::Proximity, key, text, about);
+    }
+
+    /// The participant, by their key, that the notes alone which began the agent's latest turn were about, if Tomori's
+    /// notes were its latest input and one was about someone: whoever came near an anchor last, of those told. None
+    /// once anyone's words, or input from elsewhere, are given it after them. See `design/environments.md`.
+    pub fn noted(&self) -> Option<&str> {
+        self.noted.as_deref()
     }
 
     /// The entry given to the agent last, which began its current turn, if it has not failed to be delivered. See
@@ -2262,6 +2284,8 @@ impl SpaceModel {
 
     /// The entry given last is no longer the agent's latest input, for `why`.
     fn supersede(&mut self, why: Superseded) {
+        // Nor are the notes given last, if any were.
+        self.noted = None;
         if let Some(given) = &mut self.given {
             given.superseded.get_or_insert(why);
         }
@@ -2491,6 +2515,8 @@ impl SpaceModel {
             // Set by the hub, which knows where the agent stands.
             pinned: false,
             pins: false,
+            walks: false,
+            walking: None,
             facing: None,
             partner: None,
             via: None,

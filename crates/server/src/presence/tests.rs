@@ -1368,6 +1368,17 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     );
     assert!(followed.get("pinned_by").is_none());
     assert_eq!(followed["returns_home_in_s"], 72);
+    // Walking with someone, its mode says whom, by their id.
+    let walking = agent(
+        &anchors,
+        &AgentState {
+            summoned: Some(ahead),
+            walking: Some("Samuel#11".to_owned()),
+            movement: follow,
+            ..AgentState::default()
+        },
+    );
+    assert_eq!(walking["mode"], "walking with Samuel#11");
     // Turned to someone where it stands, it faces them, as clients turn it, whichever way its spot faced; somewhere it
     // cannot face leaves it facing as its spot does.
     let turned = |facing| {

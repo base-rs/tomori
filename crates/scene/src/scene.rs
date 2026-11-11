@@ -8403,6 +8403,7 @@ mod tests {
                     ClientMessage::PlaceAgent { .. }
                         | ClientMessage::CallAgent
                         | ClientMessage::PinAgent { .. }
+                        | ClientMessage::WalkAgent { .. }
                         | ClientMessage::SetAgentMovement { .. }
                 )
             )

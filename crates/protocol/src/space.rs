@@ -349,6 +349,15 @@ pub struct SpaceState {
     /// server. Absent from older servers. See `design/hand-menu.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pins: bool,
+    /// Whether the server takes [`crate::ClientMessage::WalkAgent`], having the agent walk with a participant or ending
+    /// its walk with them, which a client offers as **Tomori: walk with me** and **Tomori: stop walking with me**, and
+    /// sends only to such a server. Absent from older servers. See `design/hand-menu.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub walks: bool,
+    /// The number of the participant the agent walks with, [`Participant::source`], while it does: it keeps with them
+    /// throughout. Absent otherwise, and from older servers. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walking: Option<u32>,
     /// Where the agent turns to face, in the space's coordinates, while it does, rather than the way it stands facing:
     /// the eyes of whoever began speaking to it. Turned only about the vertical. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1393,6 +1402,8 @@ mod tests {
             movement: Some(AgentMovement::new(Movement::Follow, Some(120))),
             pinned: true,
             pins: true,
+            walks: true,
+            walking: Some(11),
             facing: Some([1.0, 1.6, 2.0]),
             via: Some([0.0, 2.5, -1.0]),
             stream: true,
@@ -1400,6 +1411,10 @@ mod tests {
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["pins"], true);
+        assert_eq!(
+            (&json["walks"], &json["walking"]),
+            (&serde_json::json!(true), &serde_json::json!(11))
+        );
         assert_eq!(json["movement"]["mode"], "follow");
         assert_eq!(json["movement"]["return_after"], 120);
         assert_eq!(
@@ -1411,7 +1426,9 @@ mod tests {
         assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
         // From an older server, none of it, and none of it is written.
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
-        for field in ["movement", "pinned", "pins", "facing", "via", "stream"] {
+        for field in [
+            "movement", "pinned", "pins", "walks", "walking", "facing", "via", "stream",
+        ] {
             assert!(plain.get(field).is_none(), "{field}");
         }
         // A way a newer server names reads as unknown; never going home is no delay.
