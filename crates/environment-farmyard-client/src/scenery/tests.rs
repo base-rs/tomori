@@ -217,7 +217,7 @@ fn workbench() -> (Vec3, Vec3) {
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["fire.wgsl", "sky.wgsl", "water.wgsl"]);
+    assert_eq!(names, ["fern.wgsl", "fire.wgsl", "sky.wgsl", "water.wgsl"]);
     for (name, source) in files {
         test_gpu::validate_wgsl(&name, &source);
     }
@@ -1071,5 +1071,185 @@ fn the_bonfire_s_light_flickers_and_the_campsite_draws_within_its_budget() {
         let meshes: Vec<usize> = instance.draws().iter().map(|draw| draw.mesh).collect();
         assert_eq!(meshes.len(), 2);
         assert_eq!(meshes[1], 1 + stick.shade);
+    }
+}
+
+/// Where the ferns are seen from, as `(eye, target)`: on the trail by the river, looking along it past the ferns on its
+/// banks; and from the trail beside the campsite, looking past its fire to the tree ferns beyond it.
+fn fern_views() -> [(Vec3, Vec3); 2] {
+    let at = |point: glam::Vec2, y: f32| Vec3::new(point.x, y, point.y);
+    let (from, _, _) = trail::frame(10);
+    let (ahead, _, outward) = trail::frame(19);
+    let fire = tomori_environment_farmyard::campsite::FIRE;
+    let (beside, _, _) = trail::frame(38);
+    [
+        (at(from, 1.6), at(ahead + outward * 1.8, 1.0)),
+        (at(beside, 1.6), Vec3::new(fire.x - 1.5, 0.9, fire.z - 1.2)),
+    ]
+}
+
+/// A ponga near the trail, away from the bonfire's light, and the heart of its crown.
+fn ponga() -> Vec3 {
+    use tomori_environment_farmyard::{campsite, ferns};
+    let fire = campsite::FIRE;
+    ferns::ferns()
+        .into_iter()
+        .filter(|fern| fern.kind == ferns::Kind::Ponga)
+        .map(|fern| fern.transform().transform_point3(fern.kind.heart()))
+        .find(|heart| glam::Vec2::new(heart.x - fire.x, heart.z - fire.z).length() > 8.0)
+        .expect("a ponga stands away from the fire")
+}
+
+/// How many pixels of `a` and `b` differ, within `reach` pixels of `at`, fractions across and down.
+fn changed(a: &[u8], b: &[u8], at: (f32, f32), reach: i32) -> usize {
+    let (x, y) = (
+        (at.0 * PICTURE.0 as f32) as i32,
+        (at.1 * PICTURE.1 as f32) as i32,
+    );
+    let mut count = 0;
+    for dy in -reach..reach {
+        for dx in -reach..reach {
+            let (px, py) = (x + dx, y + dy);
+            if px < 0 || py < 0 || px >= PICTURE.0 as i32 || py >= PICTURE.1 as i32 {
+                continue;
+            }
+            let index = ((py as u32 * PICTURE.0 + px as u32) * 4) as usize;
+            let difference: u32 = (0..3)
+                .map(|channel| u32::from(a[index + channel].abs_diff(b[index + channel])))
+                .sum();
+            count += usize::from(difference > 6);
+        }
+    }
+    count
+}
+
+#[test]
+fn the_ferns_stand_about_the_trail_swaying_in_the_breeze_ponga_silver_beneath() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let made = |seconds| {
+            Farmyard::with_clock(
+                &target,
+                &Coop::Built,
+                Library::shared(),
+                Clock::Held(seconds),
+            )
+        };
+        let mut farmyard = made(1.3);
+        let pictures: Vec<Vec<u8>> = fern_views()
+            .into_iter()
+            .map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()))
+            .collect();
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_FERNS_PREVIEW") {
+            for (index, pixels) in pictures.iter().enumerate() {
+                image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone())
+                    .unwrap()
+                    .save(path.replace(".png", &format!("-{}.png", index + 1)))
+                    .unwrap();
+            }
+        }
+        // A ponga's crown, seen from the side, sways in the breeze: a moment later, its fronds have moved.
+        let heart = ponga();
+        let side = (heart + Vec3::new(6.0, 0.0, 0.0)).with_y(1.6);
+        let view = (side, heart);
+        let now = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        let later = capture_sized(&device, &queue, &made(2.4), 4, view, picture());
+        let crown = seen_at(view, heart);
+        assert!(changed(&now, &later, crown, 120) > 300);
+        // Looked up at from beneath, its fronds are silver, grey against the sky; looked down on from above, green.
+        let hues = |pixels: &[u8]| {
+            let (mut silver, mut green) = (0, 0);
+            for pixel in pixels.chunks(4) {
+                let [red, green_, blue] = [0, 1, 2].map(|channel| i32::from(pixel[channel]));
+                if red > 35 && (red - green_).abs() < 12 && (green_ - blue).abs() < 14 {
+                    silver += 1;
+                } else if green_ * 4 > red * 5 && green_ > blue {
+                    green += 1;
+                }
+            }
+            (silver, green)
+        };
+        let tip = heart + Vec3::new(1.4, 0.0, 0.3);
+        let beneath = capture_sized(
+            &device,
+            &queue,
+            &farmyard,
+            4,
+            (tip - Vec3::Y * 1.5, tip + Vec3::new(0.1, 0.0, 0.0)),
+            picture(),
+        );
+        let above = capture_sized(
+            &device,
+            &queue,
+            &farmyard,
+            4,
+            (tip + Vec3::Y * 2.5, tip - Vec3::new(0.1, 0.0, 0.0)),
+            picture(),
+        );
+        let (silver, green) = hues(&beneath);
+        assert!(silver > 100_000 && silver > green * 3, "{silver} {green}");
+        let (silver, green) = hues(&above);
+        assert!(green > 100_000 && green > silver * 3, "{silver} {green}");
+        // Growing out of a point far from it, the ponga is not drawn before the reveal reaches it.
+        farmyard.set_reveal(Some((Vec3::new(0.0, 1.0, -2.0), 0.5)));
+        let growing = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        let again = capture_sized(&device, &queue, &farmyard, 4, view, picture());
+        assert_eq!(growing, again);
+        assert!(changed(&now, &growing, crown, 120) > 3000);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
+    use tomori_environment_farmyard::ferns::{self, Detail};
+    let (vertices, meshes) = fern_vertices();
+    assert_eq!(meshes.len(), ferns::drawn().len());
+    assert_eq!(meshes.last().unwrap().1.end as usize, vertices.len());
+    let all = ferns::all();
+    for eyes in [layout::ARRIVAL + Vec3::Y * 1.6, ponga()] {
+        let details: Vec<Detail> = all.iter().map(|fern| fern.detail(eyes)).collect();
+        let (instances, draws) = fern_instances(&all, &details, &meshes);
+        // Every one, but the koru beyond their distance, which are too small to see.
+        let unseen = all
+            .iter()
+            .zip(&details)
+            .filter(|(fern, detail)| fern.kind == ferns::Kind::Koru && **detail == Detail::Far)
+            .count();
+        assert_eq!(instances.len(), all.len() - unseen);
+        // One draw for each mesh any fern is drawn with, its instances one after another.
+        assert!(draws.len() <= meshes.len());
+        assert!(
+            draws
+                .iter()
+                .all(|(drawn, _)| meshes.iter().any(|(_, vertices)| vertices == drawn))
+        );
+        assert!(
+            draws
+                .windows(2)
+                .all(|pair| pair[0].1.end == pair[1].1.start)
+        );
+        let near = details
+            .iter()
+            .filter(|detail| **detail == Detail::Near)
+            .count();
+        assert!(near > 0 && near < all.len());
+        // Each is drawn where it stands, turned, sized and swaying its own way.
+        for (fern, detail) in all.iter().zip(&details) {
+            let drawn = instances.contains(&FernInstance::from(fern));
+            assert_eq!(
+                drawn,
+                fern.kind != ferns::Kind::Koru || *detail == Detail::Near
+            );
+        }
     }
 }

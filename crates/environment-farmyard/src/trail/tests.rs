@@ -23,7 +23,7 @@ fn band() -> Vec<Vec2> {
         .collect()
 }
 
-/// The solids of the yard and the trail, the plants' and the pines'.
+/// The solids of the yard and the trail, the plants', the pines' and the tree ferns'.
 fn solids() -> Vec<tomori_environment::sightlines::Solid> {
     use tomori_environment::sightlines::Solid;
     let mut solids: Vec<Solid> = layout::solids()
@@ -39,6 +39,7 @@ fn solids() -> Vec<tomori_environment::sightlines::Solid> {
             (base + Vec3::new(reach, height, reach)).to_array(),
         )
     }));
+    solids.extend(crate::ferns::solids());
     solids
 }
 

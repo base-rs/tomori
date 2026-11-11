@@ -23,9 +23,10 @@ pub fn ground() -> Vec<[Vec3; 3]> {
 /// What stands on the farmyard's ground, which participants keep clear of: the yard's obstacles, the coop, its ramp,
 /// the trough, the feeder, the hay, the notice board and the workbench, by [`layout::CLEARANCE`]; the fence, along its
 /// posts, so that the earth stops [`layout::FENCE_CLEARANCE`] short of its line, and the gate's posts; and, beside the
-/// trail, its stations' posts with their plaques, the lookout's seat and the waterfall rock, the plants and pines
-/// beside it ([`trail::beside`]) and the campsite's fire and seat, each as tall as it stands, by
-/// [`layout::CLEARANCE`].
+/// trail, its stations' posts with their plaques, the lookout's seat and the waterfall rock, the plants, pines and tree
+/// ferns' trunks and crowns beside it ([`trail::beside`], [`crate::ferns::solids`]) and the campsite's fire and seat,
+/// each as tall as it stands, by [`layout::CLEARANCE`]. The ground ferns, decoration, are not among them, standing off
+/// the ground by more than the clearance.
 pub fn obstacles() -> Vec<Obstacle> {
     let cuboid =
         |low: Vec3, high: Vec3| Obstacle::cuboid(low, high).with_clearance(layout::CLEARANCE);

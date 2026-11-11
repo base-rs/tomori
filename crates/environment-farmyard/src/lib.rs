@@ -9,7 +9,7 @@
 //! It is an environment built as another project would build one, from Tomori's published crates and their extension
 //! points, without anything in Tomori's own crates knowing about it. This crate is what its server and its clients
 //! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, the yard with its
-//! workbench, the coop, the backdrop beyond the fence and the campsite by the pool, built in code as `tomori-assets`
+//! workbench, the coop, the backdrop beyond the fence, the ferns about the trail and the campsite by the pool, built in code as `tomori-assets`
 //! models; the chicken, its asset, its animator's graph and its
 //! controller; what each chicken does, and where that puts it; the flock its server side owns; and the server side
 //! itself, which has nothing that must stay in the server, so that it needs no server crate of its own. Its client half,
@@ -27,6 +27,7 @@ pub mod chicken;
 pub mod cluck;
 pub mod controller;
 pub mod coop;
+pub mod ferns;
 pub mod flock;
 pub mod layout;
 pub mod props;
