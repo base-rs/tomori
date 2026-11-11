@@ -139,9 +139,10 @@ pub struct Station {
 }
 
 /// The stations, in order along the trail from the gate, at least 7 m apart: each exercise works standing, with a
-/// headset on, without leaning on anything, since the posts and rails are not there to lean on. Each clearing is on the
-/// side of the trail with room for it within [`REACH`]: outwards at the front, by the river and at the lookout, and
-/// towards the fence at the back right corner and by the bush, where the trail runs furthest out.
+/// headset on, counted rather than timed, without leaning on anything, since the posts and rails are not there to lean
+/// on. Each clearing is on the side of the trail with room for it within [`REACH`]: outwards at the front, by the river
+/// and at the lookout, and towards the fence at the back right corner and by the bush, where the trail runs furthest
+/// out.
 pub const STATIONS: [Station; 5] = [
     Station {
         name: "station-1",
@@ -153,8 +154,8 @@ pub const STATIONS: [Station; 5] = [
     },
     Station {
         name: "station-2",
-        label: "Shoulder and neck stretches, 30 seconds",
-        plaque: ["Station 2", "Shoulder and neck", "stretches, 30 s"],
+        label: "10 shoulder rolls and 10 neck tilts, 5 each side",
+        plaque: ["Station 2", "10 shoulder rolls", "and 10 neck tilts"],
         at: 16,
         side: 1.0,
         along: 0.6,
@@ -177,8 +178,8 @@ pub const STATIONS: [Station; 5] = [
     },
     Station {
         name: "station-5",
-        label: "Arm circles and a deep breath, 30 seconds",
-        plaque: ["Station 5", "Arm circles and a", "deep breath, 30 s"],
+        label: "30 arm circles and 3 deep breaths, 15 circles each way",
+        plaque: ["Station 5", "30 arm circles and", "3 deep breaths"],
         at: 49,
         side: -1.0,
         along: 0.6,
