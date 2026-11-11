@@ -17,7 +17,7 @@
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 4, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 5, "Farmyard"));
 //! ```
 pub mod backdrop;
 pub mod behaviour;
@@ -30,6 +30,7 @@ pub mod layout;
 pub mod props;
 mod shapes;
 pub mod side;
+pub mod trail;
 pub mod workbench;
 
 /// The identifier spaces name the farmyard by.
@@ -37,9 +38,11 @@ pub const ID: &str = "farmyard";
 
 /// The farmyard's protocol version, which a server offers it at and a client presents it at. Raise it, in this crate
 /// alone, when a client of the earlier version could not present the farmyard as the server now offers it: 2 when it
-/// gained an arrival of its own, 3 when its wall moved onto the notice board, which an earlier client does not draw, and 4
-/// when the agent's home moved to the workbench, which an earlier client does not draw either.
-pub const VERSION: u32 = 4;
+/// gained an arrival of its own, 3 when its wall moved onto the notice board, which an earlier client does not draw, 4
+/// when the agent's home moved to the workbench, which an earlier client does not draw either, and 5 when it gained the
+/// trail round the outside of the fence, whose stations and viewpoints are anchors the agent and its workers may go to,
+/// which an earlier client neither draws nor lets anyone walk.
+pub const VERSION: u32 = 5;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

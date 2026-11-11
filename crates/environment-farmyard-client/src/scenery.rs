@@ -4,8 +4,9 @@
 //! The farmyard's scenery, as Tomori's clients draw it in each eye's pass: the evening sky behind everything, then the
 //! yard and the coop, models drawn with `tomori-assets`, lit by the moon and the lanterns' warm light; beyond them the
 //! backdrop, its foothills and its bush, models too, its river and waterfall, drawn with a shader of its own that moves
-//! them, and the ranges at the sky's depth; all of it growing out of the space through the reveal sphere as the space's
-//! environment does.
+//! them, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the
+//! stations' plaques, their text drawn from the renderer's glyph atlas; all of it growing out of the space through the
+//! reveal sphere as the space's environment does.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,6 +21,9 @@ use tomori_environment_farmyard::backdrop::{self, Kind};
 use tomori_environment_farmyard::coop::{self, Coop};
 use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
+use tomori_environment_farmyard::trail;
+use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
+use tomori_scene::ui_text::{Row, Style};
 
 /// What the sky's, the ranges' and the water's shaders are told for each eye.
 #[repr(C)]
@@ -208,10 +212,13 @@ impl Triangles {
     }
 }
 
-/// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the water and the ranges.
+/// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the river's stones, the
+/// trail, the water and the ranges.
 struct Backdrop {
     foothills: Drawn,
     plants: Vec<Drawn>,
+    stones: Drawn,
+    trail: Drawn,
     water: Triangles,
     ranges: Triangles,
 }
@@ -243,6 +250,18 @@ impl Backdrop {
                 Drawn::placed(device, queue, models, &Arc::new(kind.model()), &placements)
             })
             .collect();
+        let stones: Vec<Mat4> = backdrop::stones()
+            .iter()
+            .map(backdrop::Stone::transform)
+            .collect();
+        let stones = Drawn::placed(device, queue, models, &Arc::new(backdrop::stone()), &stones);
+        let trail = Drawn::new(
+            device,
+            queue,
+            models,
+            &Arc::new(trail::model()),
+            Mat4::IDENTITY,
+        );
         let shader = device.create_shader_module(wgpu::include_wgsl!("water.wgsl"));
         let water: Vec<WaterVertex> = backdrop::water()
             .into_iter()
@@ -297,8 +316,100 @@ impl Backdrop {
         Self {
             foothills,
             plants,
+            stones,
+            trail,
             water,
             ranges,
+        }
+    }
+}
+
+/// The colour of a plaque's text, pale as paint on dark wood.
+const LETTERING: [f32; 4] = [0.82, 0.76, 0.6, 1.0];
+
+/// How many cells wide a plaque's lines are, and how large a font pixel is on it, so that its text fills its board.
+const PLAQUE_COLUMNS: usize = 18;
+pub(crate) const PLAQUE_PIXEL: f32 = 0.0028;
+
+/// What a station's plaque shows: its name, then its exercise, each line centred, on a clear backing, the board drawn
+/// beneath it.
+pub(crate) fn plaque(lines: &[&str]) -> Canvas {
+    let mut canvas = Canvas::new(PLAQUE_COLUMNS, PLAQUE_PIXEL);
+    canvas.background = [0.0; 4];
+    canvas.padding = (2, 2);
+    for (index, line) in lines.iter().filter(|line| !line.is_empty()).enumerate() {
+        let style = if index == 0 {
+            Style::bold(LETTERING)
+        } else {
+            Style::plain(LETTERING)
+        };
+        let centred = format!("{line:^PLAQUE_COLUMNS$}");
+        canvas.rows.push(Row::text(&centred, style, PLAQUE_COLUMNS));
+    }
+    canvas
+}
+
+/// The stations' plaques, each a panel of its own on its board, drawn from the renderer's glyph atlas.
+struct Plaques {
+    glyphs: tomori_render::glyphs::SharedGlyphs,
+    pipeline: Pipeline,
+    plaques: Vec<(Panel, Arc<Canvas>, Mat4)>,
+}
+
+impl Plaques {
+    fn new(target: &Target) -> Self {
+        let pipeline =
+            Pipeline::shared(target.device, target.format, &target.glyphs, target.samples);
+        let plaques = trail::plaques()
+            .into_iter()
+            .map(|plaque| {
+                (
+                    Panel::new(target.device, &pipeline, 600),
+                    Arc::new(self::plaque(&plaque.lines)),
+                    plaque.transform,
+                )
+            })
+            .collect();
+        Self {
+            glyphs: target.glyphs.clone(),
+            pipeline,
+            plaques,
+        }
+    }
+
+    /// Show each plaque's text, the very canvas it showed, so that it is built again only while glyphs it needs wait
+    /// for the atlas.
+    fn set(&mut self, queue: &wgpu::Queue) {
+        for (panel, canvas, _) in &mut self.plaques {
+            panel.show(queue, canvas);
+        }
+    }
+
+    fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
+        for (panel, _, transform) in &self.plaques {
+            panel.prepare(queue, eye, scene_to_clip * *transform);
+        }
+    }
+
+    /// Draw those the reveal sphere, if the scenery is growing, has reached.
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize, reveal: Option<(Vec3, f32)>) {
+        let mut shown = self
+            .plaques
+            .iter()
+            .filter(|(_, _, transform)| {
+                reveal.is_none_or(|(centre, radius)| {
+                    transform.transform_point3(Vec3::ZERO).distance(centre) < radius
+                })
+            })
+            .map(|(panel, _, _)| panel)
+            .peekable();
+        if shown.peek().is_none() {
+            return;
+        }
+        let binding = self.glyphs.binding();
+        self.pipeline.set(pass, &binding);
+        for panel in shown {
+            panel.draw(pass, &self.pipeline, eye);
         }
     }
 }
@@ -312,6 +423,7 @@ pub struct Farmyard {
     yard: Drawn,
     coop: Drawn,
     backdrop: Backdrop,
+    plaques: Plaques,
     /// The haze's colour and density, which the water is hazed by as the models are.
     haze: [f32; 4],
     clock: Clock,
@@ -395,6 +507,7 @@ impl Farmyard {
             coop::placement(),
         );
         let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader);
+        let plaques = Plaques::new(target);
         Self {
             sky,
             cameras,
@@ -403,6 +516,7 @@ impl Farmyard {
             yard,
             coop,
             backdrop,
+            plaques,
             haze: lighting.haze.extend(lighting.haze_density).to_array(),
             clock,
             made: Instant::now(),
@@ -419,6 +533,7 @@ impl Scenery for Farmyard {
         queue: &wgpu::Queue,
         drawn: &(dyn std::any::Any + Send + Sync),
     ) {
+        self.plaques.set(queue);
         let Some(drawn) = drawn.downcast_ref::<crate::client::Drawn>() else {
             return;
         };
@@ -442,6 +557,7 @@ impl Scenery for Farmyard {
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
+        self.plaques.prepare(queue, eye, scene_to_clip);
         let inverse = scene_to_clip.inverse();
         let camera = SkyCamera {
             inverse_view_projection: if inverse.is_finite() {
@@ -466,20 +582,26 @@ impl Scenery for Farmyard {
         pass.set_pipeline(&self.sky);
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.draw(0..3, 0..1);
-        // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, then the foothills and
-        // the bush beyond, the water, and the ranges at the sky's depth, where nothing else has been drawn.
+        // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, then the
+        // foothills, the bush and the river's stones beyond, the water, and the ranges at the sky's depth, where nothing
+        // else has been drawn.
         let backdrop = &self.backdrop;
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
             .flatten()
-            .chain([&backdrop.foothills])
+            .chain([&backdrop.trail, &backdrop.foothills])
             .chain(&backdrop.plants)
+            .chain([&backdrop.stones])
         {
             self.models.draw(pass, eye, &drawn.model, &drawn.batch);
         }
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         backdrop.water.draw(pass);
         backdrop.ranges.draw(pass);
+    }
+
+    fn draw_translucent(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
+        self.plaques.draw(pass, eye, self.reveal);
     }
 
     fn set_reveal(&mut self, reveal: Option<(Vec3, f32)>) {

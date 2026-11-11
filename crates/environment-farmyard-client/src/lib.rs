@@ -11,21 +11,29 @@ pub mod ambience;
 pub mod client;
 pub mod scenery;
 
-pub use tomori_environment_farmyard::{ID, LABEL, LICENSE, VERSION, chicken, coop, layout};
+pub use tomori_environment_farmyard::{ID, LABEL, LICENSE, VERSION, chicken, coop, layout, trail};
 
 /// The heading the chicken's licence notice, [`LICENSE`], is shown under with a build's other bundled assets'.
 pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple Williams (CC BY 4.0)";
 
 /// Where participants may travel in the farmyard: teleporting onto the yard's ground, clear of what stands in it, and
-/// turning in snaps. See Tomori's `design/locomotion.md`.
+/// along the trail round the outside of the fence, its band and its clearings, which join the yard's earth through the
+/// gate at the same height; turning in snaps; and between the yard and the lookout at the trail's far end by a pair of
+/// teleport pads. See Tomori's `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
 pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
-    use tomori_scene::locomotion::{Locomotion, Surface};
-    Locomotion::teleport(
-        layout::walkable()
-            .into_iter()
-            .map(|(centre, size)| Surface::rectangle(centre, size))
-            .collect(),
-    )
+    use tomori_scene::locomotion::{Locomotion, Pad, Surface};
+    let mut surfaces: Vec<Surface> = layout::walkable()
+        .into_iter()
+        .map(|(centre, size)| Surface::rectangle(centre, size))
+        .collect();
+    surfaces.extend(trail::outlines().into_iter().map(|outline| {
+        Surface::polygon(outline, trail::HEIGHT).expect("the trail's outlines are simple")
+    }));
+    surfaces.extend(trail::clearings().into_iter().map(|(middle, radius)| {
+        Surface::disc(glam::Vec3::new(middle.x, trail::HEIGHT, middle.y), radius)
+    }));
+    let pads = trail::pads().map(|pad| Pad::at(pad.centre).named(pad.name).facing(pad.facing));
+    Locomotion::teleport(surfaces).with_pads([pads])
 }
 
 /// Register the farmyard with a client's `sceneries`: its scenery, at the identity in `tomori-environment-farmyard`,
@@ -118,5 +126,92 @@ mod tests {
         assert_eq!(ambiences[0].1.slots().count(), super::ambience::SLOTS.len());
         assert!(super::LICENSE.contains("Hinoki Maple Williams"));
         assert!(super::LICENSE.contains("https://creativecommons.org/licenses/by/4.0/"));
+    }
+
+    #[test]
+    fn the_trail_is_walkable_end_to_end_joining_the_yard_through_the_gate_without_a_gap_or_a_step()
+    {
+        use glam::{Vec2, Vec3};
+        use tomori_scene::locomotion::{BACKSTEP, Locomotion};
+        use tomori_scene::pointing::Ray;
+
+        use super::{layout, trail};
+        let profile = super::locomotion();
+        let Locomotion::Teleport { surfaces, .. } = &profile else {
+            unreachable!("the farmyard teleports");
+        };
+        // The yard's rectangles, the trail's stretches and its way out, and its clearings, all at the yard's height.
+        assert_eq!(
+            surfaces.len(),
+            layout::WALKABLE.len() + trail::outlines().len() + trail::clearings().len()
+        );
+        assert!(surfaces.iter().all(|surface| surface.height() == 0.0));
+        let on = |point: Vec2| {
+            surfaces
+                .iter()
+                .any(|surface| surface.contains(Vec3::new(point.x, 0.0, point.y)))
+        };
+        // From where participants arrive, out through the gate and round the whole loop back to it, every 5 cm, across
+        // the whole width of the way out and the trail, there is somewhere to stand: no gap anywhere, nor at the gate.
+        let line = trail::centreline();
+        let arrival = Vec2::new(layout::ARRIVAL.x, layout::ARRIVAL.z);
+        let [inside, outside] = trail::GATEWAY;
+        let mut legs = vec![
+            (arrival, inside, 0.0),
+            (inside, outside, trail::HALF - 0.01),
+        ];
+        legs.extend((0..line.len()).map(|index| {
+            (
+                line[index],
+                line[(index + 1) % line.len()],
+                trail::HALF - 0.01,
+            )
+        }));
+        let mut walked = 0.0;
+        for (from, to, wide) in legs {
+            let length = from.distance(to);
+            let across = (to - from).normalize().perp();
+            for step in 0..=(length / 0.05).ceil() as u32 {
+                let point = from.lerp(to, (step as f32 * 0.05 / length).min(1.0));
+                for offset in [-wide, -wide * 0.5, 0.0, wide * 0.5, wide] {
+                    assert!(on(point + across * offset), "{point} {offset}");
+                }
+            }
+            walked += length;
+        }
+        assert!(walked > 60.0, "{walked}");
+        // Each station's clearing too, all of it.
+        for station in &trail::STATIONS {
+            for step in 0..12 {
+                let yaw = step as f32 / 12.0 * std::f32::consts::TAU;
+                let edge =
+                    station.clearing() + Vec2::new(yaw.sin(), yaw.cos()) * (trail::CLEARING - 0.01);
+                assert!(on(edge), "{}", station.name);
+            }
+        }
+        // Stepping back along it, facing back the way one came, steps the whole way everywhere, through the gate and from
+        // one stretch to the next, so that nothing steps or stops there.
+        let mut points = vec![(inside, outside)];
+        points.extend((0..line.len()).map(|index| (line[index], line[(index + 1) % line.len()])));
+        for (from, to) in points {
+            let along = (to - from).normalize();
+            for step in 0..4 {
+                let at = from.lerp(to, step as f32 / 4.0);
+                let head = Vec3::new(at.x, 1.6, at.y);
+                let facing = Vec3::new(-along.x, 0.0, -along.y);
+                let stepped = profile.backstep(head, facing, 0.0).unwrap();
+                assert!((stepped.length() - BACKSTEP).abs() < 1e-4, "{at} {stepped}");
+            }
+        }
+        // Pointing out through the gate from the yard lands on the trail beyond it, at the yard's height.
+        let eyes = Vec3::new(0.0, 1.6, -1.0);
+        let ray = Ray::new(eyes, Vec3::new(0.0, 0.0, 3.5) - eyes).unwrap();
+        let landing = profile.landing(&ray).unwrap();
+        assert!(
+            landing.y == 0.0 && landing.z > layout::FENCE.high.y,
+            "{landing}"
+        );
+        // And the pads, the yard's and the lookout's, each stand on what is declared, so that both may be used.
+        assert_eq!(profile.pads().count(), 1);
     }
 }

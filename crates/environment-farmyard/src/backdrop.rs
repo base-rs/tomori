@@ -23,15 +23,16 @@ use crate::layout::{self, BACKDROP_CENTRE, POOL, POOL_RADIUS, RIVER, RIVER_HALF_
 use crate::props::{self, PLAIN, evening, palette, scatter};
 use crate::shapes::Shapes;
 
-/// The most triangles the backdrop may draw, its foothills, every plant, the ranges and the water together, so that it
-/// stays modest beside the yard on the Quest.
-pub const BUDGET: usize = 20_000;
+/// The most triangles the backdrop may draw, its foothills, every plant, the ranges, the water, the river's stones and
+/// the trail together, so that it stays modest beside the yard on the Quest: 20,000 before the trail and the stones came,
+/// which added about 2,000 in two draws.
+pub const BUDGET: usize = 22_000;
 
 /// How far from [`BACKDROP_CENTRE`] each ring of the foothills' ground is: the first just beyond the fence's corners,
 /// at the meadow's level, the cliff's foot and lip among them ([`layout::CLIFF`]), and the last within 50 m of the eyes,
 /// the headset's far plane, from anywhere participants land in the yard.
 pub const RINGS: [f32; 16] = [
-    11.5, 13.0, 14.5, 16.0, 17.5, 19.0, 20.5, 22.0, 23.5, 25.0, 26.5, 28.5, 30.5, 32.5, 35.0, 37.5,
+    11.5, 13.0, 14.5, 16.0, 17.5, 19.0, 20.5, 22.0, 23.5, 25.0, 26.5, 28.5, 30.5, 32.5, 34.5, 36.0,
 ];
 /// How many segments each ring is drawn in, so that the waterfall's way, [`layout::WATERFALL_AZIMUTH`], is one of them.
 pub const SEGMENTS: usize = 96;
@@ -72,6 +73,8 @@ pub mod colors {
     pub const WATER: Vec3 = Vec3::new(0.02, 0.04, 0.055);
     pub const FALLING: Vec3 = Vec3::new(0.22, 0.27, 0.32);
     pub const FOAM: Vec3 = Vec3::new(0.5, 0.55, 0.6);
+    /// A river stone, paler than the shingle it lies on.
+    pub const STONE: Vec3 = Vec3::new(0.27, 0.27, 0.26);
 }
 
 fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
@@ -98,9 +101,51 @@ fn by_waterfall(point: Vec2) -> (f32, f32) {
     (offset.dot(outward), offset.perp_dot(outward).abs())
 }
 
+/// How far above its water every bank stands, where the water's surface reaches beneath it, so that the water lies
+/// between its banks rather than above them.
+pub const LIP: f32 = 0.1;
+
+/// How far from the river's middle its bed rises out of the water to its banks, [`LIP`] above the water, how far the
+/// banks hold there, beyond where its surface reaches beneath them, and where they have eased back into the land.
+pub const BANKS: [f32; 4] = [
+    RIVER_HALF_WIDTH,
+    RIVER_HALF_WIDTH + 1.2,
+    RIVER_HALF_WIDTH + SPREAD + 0.6,
+    RIVER_HALF_WIDTH + SPREAD + 2.2,
+];
+
+/// The same for the pool, from its middle: its basin's floor, its shore rising to its rim, the rim held beyond its
+/// water and easing back into the land.
+pub const RIM: [f32; 4] = [
+    POOL_RADIUS - 1.4,
+    POOL_RADIUS - 0.2,
+    POOL_RADIUS + 1.4,
+    POOL_RADIUS + 3.0,
+];
+
+/// How deep the river's bed and the pool's basin lie below their water.
+const RIVER_DEPTH: f32 = 0.12;
+const POOL_DEPTH: f32 = 0.3;
+
+/// `height`, raised to a bank by water at `level`, `distance` from its middle, as `profile` gives the bank's shape and
+/// `depth` how deep its bed lies, so far as `weight` takes it: from its bed to [`LIP`] above the water, held, then eased
+/// back into the land, which it never lowers.
+fn banked(
+    height: f32,
+    level: f32,
+    distance: f32,
+    (profile, depth): ([f32; 4], f32),
+    weight: f32,
+) -> f32 {
+    let bank = level - depth + (depth + LIP) * smoothstep(profile[0], profile[1], distance);
+    let hold = 1.0 - smoothstep(profile[2], profile[3], distance);
+    height + (bank - height).max(0.0) * hold * weight
+}
+
 /// How high the ground is at `point` beyond the fence, smoothly, as the foothills' ground is built about it: level with
 /// the meadow within [`RINGS`]' first, rising across the pasture to the foothills, hollowed for the pool and the river,
-/// which runs downhill in its valley, and raised for the waterfall's cliff and the spur behind it.
+/// which runs downhill in its valley between banks that stand above its water, and raised for the waterfall's cliff and
+/// the spur behind it.
 pub fn ground(point: Vec2) -> f32 {
     let offset = point - BACKDROP_CENTRE;
     let radius = offset.length();
@@ -112,13 +157,19 @@ pub fn ground(point: Vec2) -> f32 {
         + ridge(azimuth) * smoothstep(21.0, 34.0, radius).powf(1.5);
     // The pool's basin, and the river's valley, its floor below its water.
     let pool = point.distance(Vec2::new(POOL.x, POOL.z));
-    let basin = smoothstep(POOL_RADIUS - 1.4, POOL_RADIUS + 1.0, pool);
-    height = height.min(POOL.y - 0.3 + (height - POOL.y + 0.3) * basin);
+    let basin = smoothstep(RIM[0], POOL_RADIUS + 1.0, pool);
+    height = height.min(POOL.y - POOL_DEPTH + (height - POOL.y + POOL_DEPTH) * basin);
     // The valley widens where the foothills are higher, so that its sides are not cliffs.
     let (nearest, distance) = layout::nearest_river(point);
     let wide = RIVER_HALF_WIDTH + 3.5 + (height - nearest.y).max(0.0) * 1.2;
     let valley = smoothstep(RIVER_HALF_WIDTH + 0.3, wide, distance);
-    height = height.min(nearest.y - 0.12 + (height - nearest.y + 0.12) * valley);
+    height = height.min(nearest.y - RIVER_DEPTH + (height - nearest.y + RIVER_DEPTH) * valley);
+    // The banks, above the water, where the land would lie below it: the pool's rim, but where the river leaves it, and
+    // the river's, but within the pool's own.
+    let outflow = smoothstep(BANKS[0], BANKS[1], distance);
+    height = banked(height, POOL.y, pool, (RIM, POOL_DEPTH), outflow);
+    let beyond = smoothstep(POOL_RADIUS + 0.6, RIM[2], pool);
+    height = banked(height, nearest.y, distance, (BANKS, RIVER_DEPTH), beyond);
     // The cliff, from its foot to its lip, and the knoll behind it, as high as its top, falling away beyond.
     let (along, across) = by_waterfall(point);
     let spur = (1.0 - smoothstep(5.0, 12.0, across)) * (1.0 - smoothstep(26.5, 30.0, along));
@@ -128,7 +179,7 @@ pub fn ground(point: Vec2) -> f32 {
 }
 
 /// A flat polygon through `corners`, lit from the side `outward` points to, whichever way they wind.
-fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color: Vec3) {
+pub(crate) fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color: Vec3) {
     let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
     if normal.dot(outward) < 0.0 {
         let reversed: Vec<Vec3> = corners.iter().rev().copied().collect();
@@ -138,42 +189,78 @@ fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color: Vec3) {
     }
 }
 
+/// The point of the foothills' ground on ring `ring` of [`RINGS`], at segment `segment` of [`SEGMENTS`] round it: on
+/// [`ground`], level with the meadow on the first ring, and a little rough further out, but along the river.
+fn vertex(ring: usize, segment: usize) -> Vec3 {
+    let radius = RINGS[ring];
+    let point = BACKDROP_CENTRE + way(segment as f32 / SEGMENTS as f32 * TAU) * radius;
+    let rough =
+        smoothstep(25.0, 30.0, radius) * smoothstep(3.0, 6.0, layout::nearest_river(point).1);
+    let jitter = (scatter((ring * SEGMENTS + segment) as u32 + 7000) - 0.5) * 0.6;
+    let height = if ring == 0 {
+        0.0
+    } else {
+        ground(point) + jitter * rough
+    };
+    Vec3::new(point.x, height, point.y)
+}
+
+/// The two triangles the cell of the foothills' ground from `ring` and `segment` is cut into, from its corners on that
+/// ring, `a` and `b`, and the next, `c` and `d`, the diagonal alternating from cell to cell.
+fn cell((ring, segment): (usize, usize), [a, b, c, d]: [Vec3; 4]) -> [[Vec3; 3]; 2] {
+    if (ring + segment) % 2 == 0 {
+        [[a, d, c], [a, c, b]]
+    } else {
+        [[a, d, b], [b, d, c]]
+    }
+}
+
+/// How high the foothills' ground is drawn at `point`, from its triangle there, which follows [`ground`] only at its
+/// corners; `None` within the meadow inside the first ring, or beyond the last.
+pub fn drawn_ground(point: Vec2) -> Option<f32> {
+    let offset = point - BACKDROP_CENTRE;
+    let radius = offset.length();
+    let ring = RINGS.windows(2).position(|pair| radius <= pair[1])?;
+    let azimuth = offset.x.atan2(-offset.y).rem_euclid(TAU);
+    let segment = (azimuth / TAU * SEGMENTS as f32) as usize;
+    // Its cell, or, since a cell's edges are chords inside its rings, one beside it.
+    let rings = ring.saturating_sub(1)..=(ring + 1).min(RINGS.len() - 2);
+    rings
+        .flat_map(|ring| [SEGMENTS - 1, 0, 1].map(move |step| (ring, (segment + step) % SEGMENTS)))
+        .flat_map(|(ring, segment)| {
+            let next = (segment + 1) % SEGMENTS;
+            let corners = [
+                vertex(ring, segment),
+                vertex(ring, next),
+                vertex(ring + 1, next),
+                vertex(ring + 1, segment),
+            ];
+            cell((ring, segment), corners)
+        })
+        .find_map(|[a, b, c]| {
+            let flat = |corner: Vec3| Vec2::new(corner.x, corner.z);
+            let (a2, b2, c2) = (flat(a), flat(b), flat(c));
+            let area = (b2 - a2).perp_dot(c2 - a2);
+            let u = (b2 - point).perp_dot(c2 - point) / area;
+            let v = (c2 - point).perp_dot(a2 - point) / area;
+            let w = 1.0 - u - v;
+            (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
+        })
+}
+
 /// The foothills' ground, a ring of flat triangles from just beyond the fence to the ridge: pasture near the yard,
 /// native bush on the foothills, grey shingle along the river and about the pool, and rock where it is steep, as at
 /// the waterfall's cliff.
 fn foothills(shapes: &mut Shapes) {
-    let grid: Vec<Vec<Vec3>> = RINGS
-        .iter()
-        .enumerate()
-        .map(|(ring, radius)| {
-            (0..SEGMENTS)
-                .map(|segment| {
-                    let point =
-                        BACKDROP_CENTRE + way(segment as f32 / SEGMENTS as f32 * TAU) * *radius;
-                    // The meadow's edge stays level; further out, the ground is a little rough, but along the river.
-                    let rough = smoothstep(25.0, 30.0, *radius)
-                        * smoothstep(3.0, 6.0, layout::nearest_river(point).1);
-                    let jitter = (scatter((ring * SEGMENTS + segment) as u32 + 7000) - 0.5) * 0.6;
-                    let height = if ring == 0 {
-                        0.0
-                    } else {
-                        ground(point) + jitter * rough
-                    };
-                    Vec3::new(point.x, height, point.y)
-                })
-                .collect()
-        })
+    let grid: Vec<Vec<Vec3>> = (0..RINGS.len())
+        .map(|ring| (0..SEGMENTS).map(|segment| vertex(ring, segment)).collect())
         .collect();
     for ring in 0..RINGS.len() - 1 {
         for segment in 0..SEGMENTS {
             let next = (segment + 1) % SEGMENTS;
             let (a, b) = (grid[ring][segment], grid[ring][next]);
             let (c, d) = (grid[ring + 1][next], grid[ring + 1][segment]);
-            let triangles = if (ring + segment) % 2 == 0 {
-                [[a, d, c], [a, c, b]]
-            } else {
-                [[a, d, b], [b, d, c]]
-            };
+            let triangles = cell((ring, segment), [a, b, c, d]);
             for corners in triangles {
                 let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
                 let normal = (corners[1] - corners[0])
@@ -199,7 +286,7 @@ fn foothills(shapes: &mut Shapes) {
 }
 
 /// The materials of the backdrop's models: the yard's.
-fn built(name: &str, shapes: Shapes) -> Model {
+pub(crate) fn built(name: &str, shapes: Shapes) -> Model {
     Model::built(
         vec![Node::new(name, Transform::IDENTITY).with_mesh(0)],
         vec![0],
@@ -429,7 +516,7 @@ fn cabbage_tree(shapes: &mut Shapes) {
 /// An irregular low-poly clump about `centre`, `radius` wide and `height` tall: two rings of six corners, each a
 /// little nearer or further, the upper turned half a corner from the lower, with a point above, and below, unless it
 /// sits on the ground, a point below, so that it reads as a rounded mass of leaves.
-fn clump(
+pub(crate) fn clump(
     shapes: &mut Shapes,
     (centre, radius, height): (Vec3, f32, f32),
     grounded: bool,
@@ -675,7 +762,7 @@ fn candidate(kind: Kind, index: u32) -> Vec2 {
         Kind::Canopy => around(23.0, 35.5),
         Kind::Podocarp => around(23.0, 31.0),
         Kind::Fern => water(2.6, 8.0),
-        Kind::Flax => water(1.8, 3.2),
+        Kind::Flax => water(2.2, 3.6),
         Kind::CabbageTree => around(13.5, 22.0),
     }
 }
@@ -724,6 +811,189 @@ pub fn plants() -> Vec<Plant> {
             });
             found += 1;
         }
+    }
+    placed
+}
+
+/// A river stone: where its foot sits, how it is turned about the vertical, and how large it is, across and up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stone {
+    pub at: Vec3,
+    pub turn: f32,
+    pub size: Vec2,
+}
+
+/// How high the stone's model reaches above its foot and below it, at a metre across.
+pub const STONE_TOP: f32 = 0.42;
+const STONE_BOTTOM: f32 = 0.15;
+
+impl Stone {
+    /// Where the stone's model is drawn.
+    pub fn transform(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(self.size.x, self.size.y, self.size.x),
+            Quat::from_rotation_y(self.turn),
+            self.at,
+        )
+    }
+
+    /// The box it stands within.
+    pub fn solid(&self) -> Solid {
+        let (reach, up) = (self.size.x * 0.5, self.size.y);
+        Solid::new(
+            (self.at - Vec3::new(reach, STONE_BOTTOM * up, reach)).to_array(),
+            (self.at + Vec3::new(reach, STONE_TOP * up, reach)).to_array(),
+        )
+    }
+}
+
+/// The model every river stone is drawn from, a metre across, rounded and low, its foot at its origin, a little of it
+/// below: two rings of five corners, the upper turned half a corner from the lower, and a crown.
+pub fn stone() -> Model {
+    let mut shapes = Shapes::new();
+    let ring = |level: f32, reach: f32, turn: f32, seed: u32| -> Vec<Vec3> {
+        (0..5)
+            .map(|side| {
+                let yaw = (side as f32 + turn) / 5.0 * TAU;
+                let reach = reach * (0.88 + scatter(seed + side) * 0.24);
+                Vec3::new(yaw.sin() * reach, level, yaw.cos() * reach)
+            })
+            .collect()
+    };
+    let (lower, upper) = (
+        ring(-STONE_BOTTOM, 0.46, 0.0, 800),
+        ring(0.24, 0.34, 0.5, 810),
+    );
+    let top = Vec3::new(0.04, STONE_TOP, -0.03);
+    let middle = Vec3::Y * 0.05;
+    for side in 0..5 {
+        let next = (side + 1) % 5;
+        let shade = 0.85 + scatter(side as u32 + 820) * 0.3;
+        for (corners, light) in [
+            ([lower[side], lower[next], upper[side]], 1.0),
+            ([lower[next], upper[next], upper[side]], 0.93),
+            ([upper[side], upper[next], top], 1.1),
+        ] {
+            let outward = corners.iter().copied().sum::<Vec3>() / 3.0 - middle;
+            facing(
+                &mut shapes,
+                &corners,
+                outward,
+                colors::STONE * shade * light,
+            );
+        }
+    }
+    built("stone", shapes)
+}
+
+/// How many stones lie along the river's banks, in its shallows and about the pool's shore.
+pub const SHORE_STONES: u32 = 48;
+pub const SHALLOW_STONES: u32 = 10;
+pub const POOL_STONES: u32 = 12;
+
+/// The river's stones, the same every time: grey and rounded, of every size, along its banks where they rise out of the
+/// water, a few in its shallows, standing out of the water, and about the pool's shore, but where the river leaves it
+/// and before the waterfall; each sitting on the ground as it is drawn, apart from the others and out of the views the
+/// backdrop keeps open.
+pub fn stones() -> Vec<Stone> {
+    let line = layout::river_line(layout::RIVER_STEPS);
+    let lengths: Vec<f32> = line
+        .windows(2)
+        .map(|pair| Vec2::new(pair[1].x - pair[0].x, pair[1].z - pair[0].z).length())
+        .collect();
+    let total: f32 = lengths.iter().sum();
+    // The point of the river's middle `along` it, and the way across it there.
+    let on_river = |mut along: f32| {
+        for (index, length) in lengths.iter().enumerate() {
+            if along <= *length || index == lengths.len() - 1 {
+                let (from, to) = (line[index], line[index + 1]);
+                let middle = from.lerp(to, (along / length).clamp(0.0, 1.0));
+                let tangent = Vec2::new(to.x - from.x, to.z - from.z).normalize();
+                return (middle, tangent.perp());
+            }
+            along -= length;
+        }
+        unreachable!("the river has reaches")
+    };
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let views = views();
+    let mut placed: Vec<Stone> = Vec::new();
+    let place = |placed: &mut Vec<Stone>, point: Vec2, foot: f32, size: Vec2, seed: u32| {
+        let stone = Stone {
+            at: Vec3::new(point.x, foot, point.y),
+            turn: scatter(seed + 5) * TAU,
+            size,
+        };
+        let apart = placed.iter().all(|other| {
+            Vec2::new(other.at.x, other.at.z).distance(point) > (other.size.x + size.x) * 0.6
+        });
+        let solid = stone.solid();
+        if apart && views.iter().all(|(from, to)| !solid.blocks(*from, *to)) {
+            placed.push(stone);
+        }
+    };
+    let shaped = |seed: u32, least: f32, most: f32| {
+        let across = least + (most - least) * scatter(seed + 3).powi(2);
+        Vec2::new(across, across * (0.75 + scatter(seed + 4) * 0.5))
+    };
+    // Along the banks, where they rise out of the water, beyond the pool.
+    for index in 0..SHORE_STONES {
+        let seed = 12_000 + index * 11;
+        let (middle, across) =
+            on_river((index as f32 + scatter(seed)) / SHORE_STONES as f32 * total);
+        let side = if scatter(seed + 1) < 0.5 { 1.0 } else { -1.0 };
+        let distance = BANKS[0] + 0.3 + scatter(seed + 2) * (BANKS[1] - BANKS[0] - 0.2);
+        let point = Vec2::new(middle.x, middle.z) + across * side * distance;
+        if point.distance(pool) < RIM[2] {
+            continue;
+        }
+        // By the river, beyond the first ring; within it, the meadow is level.
+        let foot = drawn_ground(point).unwrap_or(0.0);
+        place(
+            &mut placed,
+            point,
+            foot - 0.03,
+            shaped(seed, 0.3, 0.85),
+            seed,
+        );
+    }
+    // In the shallows, standing out of the water, set into its bed.
+    for index in 0..SHALLOW_STONES {
+        let seed = 13_000 + index * 11;
+        let (middle, across) =
+            on_river((index as f32 + 0.3 + scatter(seed) * 0.4) / SHALLOW_STONES as f32 * total);
+        let point = Vec2::new(middle.x, middle.z) + across * (scatter(seed + 2) - 0.5) * 1.6;
+        if point.distance(pool) < RIM[2] {
+            continue;
+        }
+        place(
+            &mut placed,
+            point,
+            middle.y - 0.08,
+            shaped(seed, 0.45, 0.8),
+            seed,
+        );
+    }
+    // About the pool's shore, where it rises out of the water, but where the river leaves it and before the fall.
+    for index in 0..POOL_STONES {
+        let seed = 14_000 + index * 11;
+        let yaw = (index as f32 + scatter(seed)) / POOL_STONES as f32 * TAU;
+        let point =
+            pool + Vec2::new(yaw.sin(), yaw.cos()) * (POOL_RADIUS - 0.5 + scatter(seed + 2) * 0.5);
+        let (along, across) = by_waterfall(point);
+        let fall = along > layout::CLIFF[0] - 2.5 && across < 3.5;
+        let lip = Vec2::new(layout::RIVER[1].x, layout::RIVER[1].z);
+        if fall || point.distance(lip) < BANKS[2] {
+            continue;
+        }
+        let foot = drawn_ground(point).unwrap_or(0.0);
+        place(
+            &mut placed,
+            point,
+            foot - 0.03,
+            shaped(seed, 0.35, 0.85),
+            seed,
+        );
     }
     placed
 }
@@ -929,30 +1199,9 @@ pub struct Water {
     pub flow: Vec2,
 }
 
-/// The river's middle, smoothed through [`RIVER`]'s points, `steps` to each reach, at its water's level.
-fn river_line(steps: usize) -> Vec<Vec3> {
-    let mut line = Vec::new();
-    for reach in 0..RIVER.len() - 1 {
-        let at = |index: isize| RIVER[index.clamp(0, RIVER.len() as isize - 1) as usize];
-        let [p0, p1, p2, p3] = [-1, 0, 1, 2].map(|offset| at(reach as isize + offset));
-        for step in 0..steps {
-            let t = step as f32 / steps as f32;
-            let (t2, t3) = (t * t, t * t * t);
-            line.push(
-                0.5 * (2.0 * p1
-                    + (p2 - p0) * t
-                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-                    + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3),
-            );
-        }
-    }
-    line.push(RIVER[RIVER.len() - 1]);
-    line
-}
-
-/// How far the water's surface reaches either side of the river's middle, beyond its shingle, so that the shore is
+/// How far the water's surface reaches either side of the river's half width, beneath its banks, so that the shore is
 /// where the ground rises out of it.
-const SPREAD: f32 = 2.2;
+pub const SPREAD: f32 = 1.8;
 
 /// The water, as triangles: the river from the pool, its surface reaching under its banks; the pool; the waterfall,
 /// over the lip and down the cliff in front of its face; and foam and mist about its foot.
@@ -970,7 +1219,7 @@ pub fn water() -> Vec<Water> {
         flow,
     };
     // The river.
-    let line = river_line(3);
+    let line = layout::river_line(layout::RIVER_STEPS);
     let half = RIVER_HALF_WIDTH + SPREAD;
     let mut along = 0.0;
     let sides: Vec<(Vec3, Vec3, f32)> = line
@@ -1144,13 +1393,16 @@ pub fn water() -> Vec<Water> {
     triangles
 }
 
-/// How many triangles each part of the backdrop draws: the foothills' ground, every plant, the ranges and the water.
+/// How many triangles each part of the backdrop draws: the foothills' ground, every plant, the ranges, the water, the
+/// river's stones and the trail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Triangles {
     pub foothills: usize,
     pub plants: usize,
     pub ranges: usize,
     pub water: usize,
+    pub stones: usize,
+    pub trail: usize,
 }
 
 impl Triangles {
@@ -1175,12 +1427,14 @@ impl Triangles {
                 .sum(),
             ranges: ranges().len() / 3,
             water: water().len() / 3,
+            stones: count(&stone()) * stones().len(),
+            trail: count(&crate::trail::model()),
         }
     }
 
     /// Them all together.
     pub fn total(&self) -> usize {
-        self.foothills + self.plants + self.ranges + self.water
+        self.foothills + self.plants + self.ranges + self.water + self.stones + self.trail
     }
 }
 
