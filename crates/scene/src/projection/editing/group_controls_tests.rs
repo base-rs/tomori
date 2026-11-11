@@ -226,25 +226,47 @@ fn along(bar: &Bar) -> Vec<Vec3> {
 
 #[test]
 fn a_group_shows_one_bar_over_none_of_its_slots_and_handles_over_none_however_far_and_large() {
-    for distance in [1.0, 2.0, 4.0, 8.0, 15.0] {
-        for scale in [layout::SCALES.0, 1.0, layout::SCALES.1] {
-            for (name, walls) in arrangements(ahead(distance + 1.0), scale) {
+    let mut raised = 0;
+    // At eye height, and low, where a group's bar would stand in the floor and stands above it instead.
+    for height in [1.5, 0.4] {
+        for scale in [layout::SCALES.0, 1.0, 2.0, layout::SCALES.1] {
+            let at = Pose::upright_facing([0.0, height, -3.0], [0.0, height, 0.0]);
+            for (name, walls) in arrangements(at, scale) {
                 let all: Vec<&Wall> = walls.iter().collect();
-                let context = format!("{name} at {distance} m and {scale}×");
-                // One bar, of its top left wall, over none of its walls' slots.
+                let context = format!("{name} {height} m up at {scale}×");
+                // One bar, of its bottom left wall, below the slots of every wall, or above them all where it would be
+                // in the floor, over none of them and clear of the floor.
                 let bars: Vec<(&Wall, Bar)> = walls
                     .iter()
                     .filter_map(|wall| {
-                        group_bar(wall, model(&wall.pose).unwrap(), HOME, &all)
-                            .map(|bar| (wall, bar))
+                        group_bar(wall, model(&wall.pose).unwrap(), &all).map(|bar| (wall, bar))
                     })
                     .collect();
                 assert_eq!(bars.len(), 1, "{context}");
                 let (bearer, bar) = bars[0];
+                let lowest = walls
+                    .iter()
+                    .map(|wall| {
+                        let frame = model(&wall.pose).unwrap();
+                        let slots = wall.extent();
+                        frame.transform_point3(Vec3::Y * slots.bottom).y
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                let highest = walls
+                    .iter()
+                    .map(|wall| {
+                        let frame = model(&wall.pose).unwrap();
+                        frame.transform_point3(Vec3::Y * wall.extent().top).y
+                    })
+                    .fold(f32::NEG_INFINITY, f32::max);
                 assert!(
-                    super::super::boards::labelled(bearer, &all) || bearer.radius().is_some(),
-                    "{context}"
+                    bar.middle.y < lowest || bar.middle.y > highest,
+                    "{context}: the bar of {}",
+                    bearer.id
                 );
+                let floor = tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+                assert!(bar.middle.y - bar.size / 2.0 >= floor, "{context}");
+                raised += usize::from(bar.middle.y > highest);
                 for wall in &walls {
                     assert!(
                         !over_slots(wall, &along(&bar), (0.0, BAR_THICKNESS * bar.size / 2.0)),
@@ -256,8 +278,12 @@ fn a_group_shows_one_bar_over_none_of_its_slots_and_handles_over_none_however_fa
                 // Each wall's handles, as it is taken hold of, over none of them either, as large as they are drawn.
                 for held in &walls {
                     let (points, size) =
-                        handle_points_among(held, model(&held.pose).unwrap(), HOME, &all, None);
+                        handle_points_among(held, model(&held.pose).unwrap(), &all, None);
                     for (handle, at) in &points {
+                        assert!(
+                            at.y - size / 2.0 >= floor,
+                            "{context}: {handle:?} in the floor"
+                        );
                         for wall in &walls {
                             assert!(
                                 !over_slots(wall, &[*at], (size / 2.0, size / 2.0)),
@@ -271,6 +297,7 @@ fn a_group_shows_one_bar_over_none_of_its_slots_and_handles_over_none_however_fa
             }
         }
     }
+    assert!(raised > 0 && raised < 32, "{raised}");
 }
 
 #[test]
@@ -279,9 +306,9 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
     let all: Vec<&Wall> = walls.iter().collect();
     let frame = |wall: &Wall| model(&wall.pose).unwrap();
     let (bottom, tall) = (&walls[0], &walls[1]);
-    // The wide wall below, joined across its top, bends and steps its columns from below it, and keeps the handles down
-    // its right; its top corners are left out.
-    let (points, _) = handle_points_among(bottom, frame(bottom), HOME, &all, None);
+    // The wide wall below, joined across its top, bends from below it, and keeps the handles of its right edge, its
+    // columns' and their steppers', and of its rows; its top corners are left out.
+    let (points, _) = handle_points_among(bottom, frame(bottom), &all, None);
     let point = |points: &[(Handle, Vec3)], handle| {
         points
             .iter()
@@ -289,15 +316,11 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
             .map(|(_, at)| *at)
     };
     let below = frame(bottom).transform_point3(Vec3::ZERO).y;
-    for handle in [
-        Handle::Bend,
-        Handle::Step(Axis::Columns, -1),
-        Handle::Step(Axis::Columns, 1),
-    ] {
-        assert!(point(&points, handle).unwrap().y < below, "{handle:?}");
-    }
+    assert!(point(&points, Handle::Bend).unwrap().y < below);
     for handle in [
         Handle::Columns,
+        Handle::Step(Axis::Columns, -1),
+        Handle::Step(Axis::Columns, 1),
         Handle::Rows,
         Handle::Corner(-1, -1),
         Handle::Corner(1, -1),
@@ -309,7 +332,7 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
             && point(&points, Handle::Corner(1, 1)).is_none()
     );
     // A tall wall above, joined across its bottom, has the handle of its rows above it, beyond its knob.
-    let (points, _) = handle_points_among(tall, frame(tall), HOME, &all, None);
+    let (points, _) = handle_points_among(tall, frame(tall), &all, None);
     let (rows, knob) = (
         point(&points, Handle::Rows).unwrap(),
         point(&points, Handle::Bend).unwrap(),
@@ -319,12 +342,12 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
     let mut alone = wall("wall-9", (4, 1), 1.0, None, None);
     alone.pose = ahead(2.5);
     assert_eq!(
-        handle_points_among(&alone, frame(&alone), HOME, &[&alone], None),
-        handle_points(&alone, frame(&alone), HOME)
+        handle_points_among(&alone, frame(&alone), &[&alone], None),
+        handle_points(&alone, frame(&alone))
     );
     assert_eq!(
-        group_bar(&alone, frame(&alone), HOME, &[&alone]),
-        Some(bar(&alone, frame(&alone), HOME))
+        group_bar(&alone, frame(&alone), &[&alone]),
+        Some(bar(&alone, frame(&alone)))
     );
     // A wall joined across both its sides keeps the handles of neither; the handle dragged stays, wherever it is.
     let row = group_of(
@@ -341,25 +364,25 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
     );
     let all: Vec<&Wall> = row.iter().collect();
     let middle = &row[1];
-    let (points, _) = handle_points_among(middle, frame(middle), HOME, &all, None);
+    let (points, _) = handle_points_among(middle, frame(middle), &all, None);
     assert!(
         point(&points, Handle::Columns).is_none()
-            && point(&points, Handle::Step(Axis::Rows, 1)).is_none()
+            && point(&points, Handle::Step(Axis::Columns, 1)).is_none()
     );
     assert!(point(&points, Handle::Bend).is_some() && point(&points, Handle::Rows).is_some());
     assert_eq!(
-        handle_point_among(middle, frame(middle), Handle::Columns, HOME, &all, None).0,
+        handle_point_among(middle, frame(middle), Handle::Columns, &all, None).0,
         frame(middle).transform_point3(Vec3::ZERO)
     );
-    // Far away, where handles are large, those that would stand over another wall's slots are left out, but for the
-    // one being dragged, which stays under the hand.
+    // Of large walls, those handles that would stand over another wall's slots are left out, but for the one being
+    // dragged, which stays under the hand.
     let mut restored = 0;
     for (_, walls) in arrangements(ahead(15.0), layout::SCALES.1) {
         let all: Vec<&Wall> = walls.iter().collect();
         for wall in &walls {
-            let (shown, _) = handle_points_among(wall, frame(wall), HOME, &all, None);
+            let (shown, _) = handle_points_among(wall, frame(wall), &all, None);
             for handle in handles(wall, LockControls::default()) {
-                let (kept, _) = handle_points_among(wall, frame(wall), HOME, &all, Some(handle));
+                let (kept, _) = handle_points_among(wall, frame(wall), &all, Some(handle));
                 assert!(shown.iter().all(|shown| kept.contains(shown)));
                 if point(&shown, handle).is_none() && point(&kept, handle).is_some() {
                     restored += 1;
@@ -403,13 +426,13 @@ fn the_group_s_bar_carries_the_group_and_a_wall_below_it_still_comes_out_alone()
     let walls = stacked(ahead(2.5), 1.0);
     let all: Vec<&Wall> = walls.iter().collect();
     let projection = shown(walls.clone());
-    // The bar above the top left tall wall takes hold of it, and its group with it.
-    let bar = group_bar(&walls[1], model(&walls[1].pose).unwrap(), HOME, &all).unwrap();
-    assert!(group_bar(&walls[0], model(&walls[0].pose).unwrap(), HOME, &all).is_none());
+    // The bar below the wide wall, the lowest, takes hold of it, and its group with it.
+    let bar = group_bar(&walls[0], model(&walls[0].pose).unwrap(), &all).unwrap();
+    assert!(group_bar(&walls[1], model(&walls[1].pose).unwrap(), &all).is_none());
     let mut projector = Projector::default();
     projector.update(frame(&projection, at(bar.middle), 0.0));
     projector.update(frame(&projection, at(bar.middle), 1.0));
-    assert_eq!(projector.carried_wall(), Some("wall-2"));
+    assert_eq!(projector.carried_wall(), Some("wall-1"));
     assert_eq!(projector.editor.members.len(), 2);
     // The wide wall below, taken hold of by an empty slot, is carried with its group, and pulled firmly towards the
     // participant comes out alone.
@@ -443,7 +466,7 @@ fn padlock_on(wall: &Wall, walls: &[Wall]) -> Vec<(Handle, f32, f32)> {
         padlock: true,
         reset: false,
     };
-    let (points, _) = handle_points_among_with(wall, frame, HOME, &all, None, controls);
+    let (points, _) = handle_points_among_with(wall, frame, &all, None, controls);
     points
         .into_iter()
         .map(|(handle, at)| {

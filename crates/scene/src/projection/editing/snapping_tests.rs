@@ -522,7 +522,7 @@ fn a_curved_wall_carried_near_a_curved_one_snaps_onto_its_arc_at_its_radius() {
 
 /// Where a curved wall is taken hold of: its bar, above its middle slot.
 fn grip_point_curved(wall: &Wall) -> Vec3 {
-    bar(wall, model(&wall.pose).unwrap(), HOME).middle
+    bar(wall, model(&wall.pose).unwrap()).middle
 }
 
 #[test]
@@ -627,7 +627,7 @@ fn a_tilted_wall_snaps_upright_none_snaps_to_one_tilted_and_a_wall_of_a_group_ha
     let (two, big) = grouped();
     assert!(!handles(&two, LockControls::default()).contains(&Handle::Tilt));
     let all = [&two, &big];
-    let (points, _) = handle_points_among(&two, model(&two.pose).unwrap(), HOME, &all, None);
+    let (points, _) = handle_points_among(&two, model(&two.pose).unwrap(), &all, None);
     assert!(points.iter().all(|(handle, _)| *handle != Handle::Tilt));
     let (alone, _) = pair();
     assert!(handles(&alone, LockControls::default()).contains(&Handle::Tilt));

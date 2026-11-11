@@ -5848,7 +5848,7 @@ mod tests {
             padlock: true,
             reset: false,
         };
-        let (points, _) = handle_points_with(&wall, frame_of, arrival::HOME, lock);
+        let (points, _) = handle_points_with(&wall, frame_of, lock);
         let padlock = points[0].1;
         let run = |role: ConnectionRole, locks: bool| {
             let mut conversation = lobby(role);
@@ -9928,12 +9928,8 @@ mod tests {
             "{:?}",
             ends.end
         );
-        // At the wall's bar, above it, which takes hold of it as its board does: it ends there.
-        let bar = crate::projection::editing::bar(
-            &wall,
-            crate::board::model(&wall.pose).unwrap(),
-            arrival::HOME,
-        );
+        // At the wall's bar, below it, which takes hold of it as its board does: it ends there.
+        let bar = crate::projection::editing::bar(&wall, crate::board::model(&wall.pose).unwrap());
         senses.ray = Ray::new(arrival::HOME, bar.middle - arrival::HOME);
         let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         let ends = beam(&frame);
@@ -9957,7 +9953,6 @@ mod tests {
             &wall,
             frame,
             crate::projection::editing::Handle::Corner(1, 1),
-            arrival::HOME,
         );
         senses.ray = Ray::new(arrival::HOME, corner - arrival::HOME);
         let drawn = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
