@@ -313,6 +313,9 @@ pub struct Editor {
     moved_pending: Vec<Wall>,
     /// Where the walls carried would snap if let go now.
     snap: Option<Snapping>,
+    /// Each wall's bar's face last drawn, by its wall's identity, with what it was drawn from, handed over again while
+    /// that is the same, so that it is not drawn again and its mesh is kept.
+    bars: std::collections::HashMap<String, (BarFace, std::sync::Arc<crate::canvas::Canvas>)>,
 }
 
 /// What the editor needs this frame.
@@ -2311,9 +2314,11 @@ impl Editor {
     /// Each wall's bar, for a participant who may adjust walls, highlighted while the ray meets it or its wall is
     /// carried, with what the grip does there while it is not taken hold of; and the handles of the wall taken hold of,
     /// facing the viewer, and the hint above it, as they are drawn.
-    fn sheets(&self, walls: &[(&Wall, Mat4)], input: &Input<'_>) -> Vec<Sheet> {
+    fn sheets(&mut self, walls: &[(&Wall, Mat4)], input: &Input<'_>) -> Vec<Sheet> {
         let mut sheets = Vec::new();
         let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
+        self.bars
+            .retain(|id, _| all.iter().any(|wall| wall.id == *id));
         if input.rights.adjust {
             for (wall, frame) in walls {
                 let carried = self.carrying() == Some(wall.id.as_str());
@@ -2326,9 +2331,18 @@ impl Editor {
                     continue;
                 };
                 let on = self.bar.as_deref() == Some(wall.id.as_str());
+                let (key, scale) = bar_key(&bar, on || carried);
+                let canvas = match self.bars.get(wall.id.as_str()) {
+                    Some((kept, face)) if *kept == key => face.clone(),
+                    _ => {
+                        let face = crate::frame_timing::drawn(bar_face(key));
+                        self.bars.insert(wall.id.clone(), (key, face.clone()));
+                        face
+                    }
+                };
                 sheets.push(Sheet {
-                    model: Some(bar.model),
-                    canvas: Some(std::sync::Arc::new(bar_face(&bar, on || carried))),
+                    model: Some(bar.model * Mat4::from_scale(Vec3::splat(scale))),
+                    canvas: Some(canvas),
                 });
                 if on && self.editing() != Some(wall.id.as_str()) {
                     let up = frame.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
@@ -2392,7 +2406,7 @@ impl Editor {
                 .into_iter()
                 .flat_map(|at| super::slot_frames(snapped, at));
             sheets.extend(slots.map(|slot| Sheet {
-                canvas: Some(std::sync::Arc::new(ghost(cells))),
+                canvas: Some(crate::frame_timing::drawn(ghost(cells))),
                 model: Some(slot * Mat4::from_translation(Vec3::Z * LIFT)),
             }));
         }
@@ -2404,7 +2418,7 @@ impl Editor {
             for (handle, at) in &points {
                 sheets.push(Sheet {
                     model: Some(facing(*at, input.viewer, 1.0)),
-                    canvas: Some(std::sync::Arc::new(handle_face(
+                    canvas: Some(crate::frame_timing::drawn(handle_face(
                         *handle,
                         size,
                         self.hovered == Some(*handle),
@@ -2470,16 +2484,26 @@ fn curved_at(wall: &Wall, radius: Option<f32>) -> Wall {
     }
 }
 
-/// A bar's face, as long and thick as `bar`, subtle, and bright while `highlighted`.
-fn bar_face(bar: &Bar, highlighted: bool) -> Canvas {
-    // Eight font pixels thick, and as many long as it is.
-    const THICK: usize = 8;
-    let pixel = (BAR_THICKNESS * bar.size / THICK as f32).max(1e-5);
-    let mut canvas = Canvas::new(0, pixel);
-    canvas.padding = (
-        ((bar.half.length() / pixel).round() as usize).max(THICK),
-        THICK / 2,
-    );
+/// What a bar's face is drawn from: its length in font pixels, and whether it is highlighted.
+type BarFace = (usize, bool);
+
+/// Eight font pixels thick, and as many long as it is.
+const BAR_PIXELS: usize = 8;
+const BAR_PIXEL: f32 = BAR_THICKNESS / BAR_PIXELS as f32;
+
+/// What `bar`'s face is drawn from, `highlighted` or not, and the scale it is drawn at: drawn at one size, whatever the
+/// bar's, so that it is the same face as the bar grows and shrinks with its distance from the viewer, and only its
+/// model scales, unless its length in font pixels changes.
+fn bar_key(bar: &Bar, highlighted: bool) -> (BarFace, f32) {
+    let pixel = (BAR_THICKNESS * bar.size / BAR_PIXELS as f32).max(1e-5);
+    let length = ((bar.half.length() / pixel).round() as usize).max(BAR_PIXELS);
+    ((length, highlighted), pixel / BAR_PIXEL)
+}
+
+/// A bar's face, `length` font pixels either way and thick as a bar, subtle, and bright while `highlighted`.
+fn bar_face((length, highlighted): BarFace) -> Canvas {
+    let mut canvas = Canvas::new(0, BAR_PIXEL);
+    canvas.padding = (length, BAR_PIXELS / 2);
     canvas.background = if highlighted {
         HIGHLIGHT
     } else {
@@ -2592,7 +2616,7 @@ fn hint_above(mut canvas: Canvas, above: Vec3, viewer: Vec3) -> Sheet {
     let (_, tall) = canvas.size();
     Sheet {
         model: Some(facing(above + Vec3::Y * tall / 2.0, viewer, 1.0)),
-        canvas: Some(std::sync::Arc::new(canvas)),
+        canvas: Some(crate::frame_timing::drawn(canvas)),
     }
 }
 

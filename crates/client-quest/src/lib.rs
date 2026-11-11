@@ -19,7 +19,7 @@ mod xr_types;
 use tomori_client::identity;
 use tomori_client::{connection, feedback};
 use tomori_render::{controller, graphics, scene_graphics};
-use tomori_scene::{conversation, hands, haptics, log_cadence, scene};
+use tomori_scene::{conversation, frame_timing, hands, haptics, log_cadence, scene};
 
 /// The Android activity a downstream build's `android_main` is given, at the version Tomori uses.
 #[cfg(target_os = "android")]

@@ -8,6 +8,7 @@
 use crate::{
     controller,
     feedback::Hand,
+    frame_timing::{self, Segment},
     graphics::Renderer,
     hands,
     haptics::{self, Haptics, Vibrator},
@@ -192,6 +193,8 @@ pub fn run(
     let mut event_buffer = xr::EventDataBuffer::new();
     let mut frames = 0_u64;
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
+    // What each frame costs this thread, summarized beside the frame log; see `design/rendering.md`.
+    let mut frame_times = frame_timing::FrameTimes::default();
     let mut refreshes = xr_types::Refreshes::default();
     // The last frame's rendering, which may still be on the GPU while this frame's work is done on the CPU.
     let mut rendering: Option<wgpu::SubmissionIndex> = None;
@@ -249,7 +252,10 @@ pub fn run(
                 _ => {}
             }
         }
-        connection.poll(headset.focused() && headset.running(), &mut conversation);
+        let mut timer = frame_timing::Timer::start();
+        timer.time(Segment::Poll, || {
+            connection.poll(headset.focused() && headset.running(), &mut conversation)
+        });
         headset.idle(&mut conversation);
         if !headset.running() {
             refreshes.pause();
@@ -259,6 +265,7 @@ pub fn run(
         }
         controller_models.refresh(&gpu.device, &gpu.queue, &mut renderer);
         let frame = waiter.wait()?;
+        let waited = Instant::now();
         refreshes.frame(
             frame.predicted_display_time.as_nanos(),
             frame.predicted_display_period.as_nanos(),
@@ -267,15 +274,21 @@ pub fn run(
         let now = Instant::now();
         let dt = headset.tick(now);
         let focused = headset.focused();
-        let mut controls = input.sample_actions(&session, focused)?;
-        headset.buttons(&controls, &mut conversation, connection.feedback(), now);
+        let mut controls = timer.time(Segment::Input, || {
+            let controls = input.sample_actions(&session, focused);
+            if let Ok(controls) = &controls {
+                headset.buttons(controls, &mut conversation, connection.feedback(), now);
+            }
+            controls
+        })?;
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
             microphone(&mut headset, &mut connection, &mut conversation, false);
             continue;
         }
-        let (flags, located) =
-            session.locate_views(STEREO, frame.predicted_display_time, &space)?;
+        let (flags, located) = timer.time(Segment::Locate, || {
+            session.locate_views(STEREO, frame.predicted_display_time, &space)
+        })?;
         let views: [View; 2] = match located.as_slice() {
             [left, right]
                 if flags.contains(
@@ -290,17 +303,20 @@ pub fn run(
                 continue;
             }
         };
-        let hands = if focused {
-            input.sample_poses(
-                &session,
-                &space,
-                frame.predicted_display_time,
-                &mut controls,
-            );
-            hand_tracking.sample(&space, frame.predicted_display_time)
-        } else {
-            [None, None]
-        };
+        let hands = timer.time(Segment::Input, || {
+            if focused {
+                input.sample_poses(
+                    &session,
+                    &space,
+                    frame.predicted_display_time,
+                    &mut controls,
+                );
+                hand_tracking.sample(&space, frame.predicted_display_time)
+            } else {
+                [None, None]
+            }
+        });
+        let stepping = Instant::now();
         let drawn = headset.update(
             &views,
             frame.predicted_display_time.as_nanos(),
@@ -311,24 +327,31 @@ pub fn run(
             now,
             dt,
         );
-        scene_graphics::draw(
-            &mut renderer,
-            &gpu.device,
-            &gpu.queue,
-            &mut panels,
-            &drawn.frame,
-        );
-        renderer.update_controllers(&gpu.queue, drawn.controllers, drawn.hands);
+        timer.add(Segment::Step, stepping.elapsed());
+        let uploads = timer.time(Segment::Draw, || {
+            let uploads = scene_graphics::draw(
+                &mut renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut panels,
+                &drawn.frame,
+            );
+            renderer.update_controllers(&gpu.queue, drawn.controllers, drawn.hands);
+            uploads
+        });
+        timer.meshes(uploads.meshes());
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
-        tomori_scene::spatial_audio::listen(
-            &mut connection,
-            drawn.frame.listener,
-            drawn.frame.agent,
-            &conversation,
-        );
+        timer.time(Segment::Audio, || {
+            tomori_scene::spatial_audio::listen(
+                &mut connection,
+                drawn.frame.listener,
+                drawn.frame.agent,
+                &conversation,
+            )
+        });
         // Report this participant's head, controllers and hands to the server, so the others in the space can render them.
         if let Some(presence) = &drawn.frame.presence {
-            presence.send(&mut connection);
+            timer.time(Segment::Presence, || presence.send(&mut connection));
         }
         let (scene_to_space, projections) = (drawn.scene_to_space, drawn.projections);
         let vibrator = XrVibrator {
@@ -336,28 +359,37 @@ pub fn run(
             session: &session,
             hands: &input.hand_paths,
         };
-        for (hand, haptic) in headset.haptics(connection.feedback(), now) {
-            input.haptics.apply(&vibrator, hand, haptic);
-        }
+        timer.time(Segment::Haptics, || {
+            for (hand, haptic) in headset.haptics(connection.feedback(), now) {
+                input.haptics.apply(&vibrator, hand, haptic);
+            }
+        });
         // The frame's budget is the display's period for the CPU's work and the GPU's each, rather than for both one after the other: the last frame's rendering has had this frame's CPU work to finish in, and is waited for only now, so that at most one frame is on the GPU at once. A frame later than the display's refresh is shown again turned but not moved, so near things shake as the head moves; see `design/rendering.md`.
         if let Some(previous) = rendering.take() {
-            gpu.device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: Some(previous),
-                    timeout: None,
+            timer
+                .time(Segment::GpuWait, || {
+                    gpu.device.poll(wgpu::PollType::Wait {
+                        submission_index: Some(previous),
+                        timeout: None,
+                    })
                 })
                 .context("waiting for the last frame's XR rendering")?;
         }
-        let image = swapchain.acquire_image()? as usize;
-        swapchain.wait_image(xr::Duration::INFINITE)?;
-        rendering = Some(renderer.render(
-            &gpu.device,
-            &gpu.queue,
-            &images[image].views,
-            &projections,
-            scene_to_space,
-            &panels.list(scene_to_space),
-        ));
+        let image = timer.time(Segment::ImageWait, || -> Result<usize> {
+            let image = swapchain.acquire_image()? as usize;
+            swapchain.wait_image(xr::Duration::INFINITE)?;
+            Ok(image)
+        })?;
+        rendering = Some(timer.time(Segment::Render, || {
+            renderer.render(
+                &gpu.device,
+                &gpu.queue,
+                &images[image].views,
+                &projections,
+                scene_to_space,
+                &panels.list(scene_to_space),
+            )
+        }));
         // The image goes back to XR once its commands are submitted to the session's queue, which the runtime's composition waits on, rather than once the GPU has finished them; rendering leaves it COLOR_ATTACHMENT_OPTIMAL, as the OpenXR Vulkan swapchain contract requires.
         swapchain.release_image()?;
         let projection_views: Vec<_> = located
@@ -388,15 +420,23 @@ pub fn run(
                 .space(&space)
                 .views(&projection_views)],
         )?;
+        timer.add(Segment::Frame, waited.elapsed());
         frames += 1;
+        timer.time(Segment::Microphone, || {
+            microphone(&mut headset, &mut connection, &mut conversation, true)
+        });
+        frame_times.record(timer.finish());
         // Once at the first frame, then a summary at most once a minute: per-frame lines would push lifecycle events out of logcat within minutes.
         if let Some(due) = frame_log.record(Instant::now()) {
             log::info!(
                 "{}",
                 xr_types::frame_summary(frames, &due, refreshes.take())
             );
+            // What those frames cost this thread, beside their rate; see `design/rendering.md`.
+            if let Some(summary) = frame_times.summary() {
+                log::info!("{summary}");
+            }
         }
-        microphone(&mut headset, &mut connection, &mut conversation, true);
     }
     if headset.running() && session.request_exit().is_ok() {
         // xrEndSession is legal only after the runtime enters STOPPING.

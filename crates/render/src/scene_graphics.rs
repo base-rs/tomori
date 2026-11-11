@@ -29,18 +29,63 @@ pub struct Panels {
     /// its mesh for as long as the frame step hands over the same face, wherever it is drawn among the others, and then
     /// a few more, the latest shown, so that their buffers need not be made again; see `design/rendering.md`.
     cards: Vec<Card>,
-    /// Which of them shows each face, by its canvas's address, which it holds, so that no other has it.
-    faces: HashMap<usize, usize>,
+    /// Which of them show each face, by its canvas's address, which each holds, so that no other face has it: as many
+    /// as draw it at once, as each of a curved wall's slots draws its one board.
+    faces: HashMap<usize, Vec<usize>>,
     /// Those drawn now, in order, with their models.
     drawn: Vec<(usize, Mat4)>,
     /// How many times cards have been set, the current one's number.
     frame: u64,
 }
 
-/// A projection's panel on the GPU, and the last time it was drawn.
+/// A projection's panel on the GPU, the face it shows, by its canvas's address, and the last time it was drawn.
 struct Card {
     panel: Panel,
+    face: usize,
     shown: u64,
+}
+
+/// The meshes of the panels that [`draw`] built afresh, and those whose frame alone it recoloured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Uploads {
+    pub built: usize,
+    pub recoloured: usize,
+}
+
+impl Uploads {
+    /// Both together: every mesh written.
+    pub fn meshes(&self) -> usize {
+        self.built + self.recoloured
+    }
+
+    /// What `panels` built and recoloured since they had `before`.
+    fn since<'a>(before: (usize, usize), panels: impl IntoIterator<Item = &'a Panel>) -> Self {
+        let (built, recoloured) = builds(panels);
+        Self {
+            built: built - before.0,
+            recoloured: recoloured - before.1,
+        }
+    }
+}
+
+impl std::ops::Add for Uploads {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            built: self.built + other.built,
+            recoloured: self.recoloured + other.recoloured,
+        }
+    }
+}
+
+/// How many times each of `panels` built its mesh and recoloured its frame, together.
+fn builds<'a>(panels: impl IntoIterator<Item = &'a Panel>) -> (usize, usize) {
+    panels
+        .into_iter()
+        .fold((0, 0), |(built, recoloured), panel| {
+            (built + panel.builds.0, recoloured + panel.builds.1)
+        })
 }
 
 /// How many cards not drawn now are kept, the latest drawn first, for faces to come; beyond them, the GPU's buffers of
@@ -73,22 +118,23 @@ impl Panels {
     }
 
     /// Upload the projection's walls and panels and the inbox and cards, `sheets`, in the order to draw them, making
-    /// panels for them as needed.
+    /// panels for them as needed, and say what it built.
     ///
-    /// A face handed over again, the very canvas, is drawn by the card that showed it, its mesh as it was, wherever it
-    /// now is in the order. Any other is shown by the card drawn where it is in the order last frame, if that card is
-    /// free, which keeps its mesh if the face is the same, rewrites only its frame if that is all that changed, and
-    /// otherwise builds it again; or else by the free card drawn longest ago, or a new one.
+    /// A face handed over again, the very canvas, is drawn by a card that showed it, its mesh as it was, wherever it now
+    /// is in the order, by as many as draw it at once. Any other is shown by the card drawn where it is in the order last
+    /// frame, if that card is free, which keeps its mesh if the face is the same, rewrites only its frame if that is all
+    /// that changed, and otherwise builds it again; or else by the free card drawn longest ago, or a new one.
     pub fn set_cards<'a>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &Renderer,
         sheets: impl IntoIterator<Item = &'a Sheet>,
-    ) {
+    ) -> Uploads {
+        let before = builds(self.cards.iter().map(|card| &card.panel));
         self.frame += 1;
         let frame = self.frame;
-        let before = std::mem::take(&mut self.drawn);
+        let drawn = std::mem::take(&mut self.drawn);
         let sheets: Vec<(&Arc<tomori_scene::canvas::Canvas>, Mat4)> = sheets
             .into_iter()
             .filter_map(|sheet| sheet.canvas.as_ref().zip(sheet.model))
@@ -97,8 +143,12 @@ impl Panels {
         let mut chosen: Vec<Option<usize>> = sheets
             .iter()
             .map(|(canvas, _)| {
-                let card = *self.faces.get(&address(canvas))?;
-                let card = (self.cards[card].shown != frame).then_some(card)?;
+                let card = self
+                    .faces
+                    .get(&address(canvas))?
+                    .iter()
+                    .copied()
+                    .find(|card| self.cards[*card].shown != frame)?;
                 // Built while glyphs it needs waited for the atlas, it is built again until it has them.
                 self.cards[card].panel.show(queue, canvas);
                 self.cards[card].shown = frame;
@@ -109,7 +159,7 @@ impl Panels {
             if chosen[place].is_some() {
                 continue;
             }
-            let card = before
+            let card = drawn
                 .get(place)
                 .map(|(card, _)| *card)
                 .filter(|card| self.cards[*card].shown != frame)
@@ -121,12 +171,14 @@ impl Panels {
                 .unwrap_or_else(|| {
                     self.cards.push(Card {
                         panel: renderer.panel(device, CARD_CAPACITY).growing(CARD_MOST),
+                        face: 0,
                         shown: 0,
                     });
                     self.cards.len() - 1
                 });
-            self.faces.retain(|_, shown| *shown != card);
-            self.faces.insert(address(canvas), card);
+            self.forget(card);
+            self.cards[card].face = address(canvas);
+            self.faces.entry(address(canvas)).or_default().push(card);
             self.cards[card].panel.show(queue, canvas);
             self.cards[card].shown = frame;
             chosen[place] = Some(card);
@@ -136,7 +188,20 @@ impl Panels {
             .zip(&sheets)
             .map(|(card, (_, model))| (card.expect("each sheet has a card"), *model))
             .collect();
+        let uploads = Uploads::since(before, self.cards.iter().map(|card| &card.panel));
         self.spare();
+        uploads
+    }
+
+    /// Forget which face `card` showed, as it is to show another.
+    fn forget(&mut self, card: usize) {
+        let face = self.cards[card].face;
+        if let Some(cards) = self.faces.get_mut(&face) {
+            cards.retain(|shown| *shown != card);
+            if cards.is_empty() {
+                self.faces.remove(&face);
+            }
+        }
     }
 
     /// Free the cards not drawn now beyond [`SPARE_CARDS`], those drawn longest ago, and the faces they showed.
@@ -166,18 +231,18 @@ impl Panels {
             card += 1;
             kept[card - 1].is_some()
         });
-        self.faces = self
-            .faces
-            .drain()
-            .filter_map(|(face, card)| Some((face, kept[card]?)))
-            .collect();
+        self.faces.clear();
+        for (card, kept) in self.cards.iter().enumerate() {
+            self.faces.entry(kept.face).or_default().push(card);
+        }
         for (card, _) in &mut self.drawn {
             *card = kept[*card].expect("a card drawn now is kept");
         }
     }
 
-    /// Upload what each panel shows now, and remember where it is drawn.
-    pub fn set(&mut self, queue: &wgpu::Queue, panels: &scene::Panels) {
+    /// Upload what each panel shows now, remember where it is drawn, and say what it built.
+    pub fn set(&mut self, queue: &wgpu::Queue, panels: &scene::Panels) -> Uploads {
+        let before = builds([&self.pill, &self.card, &self.badge, &self.wrist]);
         let upload = |panel: &mut Panel, sheet: &Sheet| {
             if let Some(canvas) = &sheet.canvas {
                 panel.set(queue, canvas);
@@ -191,6 +256,7 @@ impl Panels {
             upload(&mut self.badge, badge),
             upload(&mut self.wrist, &panels.wrist),
         ];
+        Uploads::since(before, [&self.pill, &self.card, &self.badge, &self.wrist])
     }
 
     /// The panels to draw, each with its model in the eyes' space, which `scene_to_space` takes the scene to: the
@@ -218,14 +284,14 @@ fn address(canvas: &Arc<tomori_scene::canvas::Canvas>) -> usize {
     Arc::as_ptr(canvas) as usize
 }
 
-/// Apply `frame` to `renderer` and `panels`, ready to render.
+/// Apply `frame` to `renderer` and `panels`, ready to render, and say which of the panels' meshes it wrote.
 pub fn draw(
     renderer: &mut Renderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     panels: &mut Panels,
     frame: &Frame,
-) {
+) -> Uploads {
     renderer.set_carriage(frame.carriage);
     renderer.set_scenery(frame.scenery);
     if let Some(drawn) = &frame.environment {
@@ -262,14 +328,15 @@ pub fn draw(
         );
     }
     renderer.update_images(device, queue, &frame.images);
-    panels.set(queue, &frame.panels);
+    let shared = panels.set(queue, &frame.panels);
     // The walls stand farther away than the inbox, beside the swarm, so they go first.
-    panels.set_cards(
-        device,
-        queue,
-        renderer,
-        frame.projection.iter().chain(&frame.cards),
-    );
+    shared
+        + panels.set_cards(
+            device,
+            queue,
+            renderer,
+            frame.projection.iter().chain(&frame.cards),
+        )
 }
 #[cfg(test)]
 mod tests {
@@ -288,6 +355,7 @@ mod tests {
     mod cards;
     mod image_sharpness;
     mod timers;
+    mod turning;
 
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {

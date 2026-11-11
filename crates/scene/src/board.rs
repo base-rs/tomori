@@ -7,6 +7,8 @@
 //!
 //! Where cards are put is the space's, shared by everyone in it, so a card put down is sent to the server, and shown
 //! where it was put until the server's cards say so too. Nothing here reaches GitHub.
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};
@@ -322,7 +324,19 @@ pub struct Board {
     grip: Grip,
     held: Option<Held>,
     pending: Option<Pending>,
+    /// The inbox's face last drawn, by what it says, and each card's, by its identity and what it is drawn from: its
+    /// card wherever it stands, whether it is covered and whether it is highlighted. Each is handed over again while it
+    /// is drawn from the same, so that the renderer keeps its mesh as the cards change their order by distance, and a
+    /// card's is forgotten once it is no longer on the board. See `design/rendering.md`.
+    tray: Option<(TrayKey, Arc<Canvas>)>,
+    faces: HashMap<String, (CardKey, Arc<Canvas>)>,
 }
+
+/// What a card's face is drawn from: its card, wherever it stands, whether it is covered and whether it is highlighted.
+type CardKey = (Card, bool, bool);
+
+/// What the inbox's face says: its source, how many cards are in it, and its status.
+type TrayKey = (String, usize, Option<String>);
 
 impl Board {
     /// Follow `input`, and say what to draw and send.
@@ -332,8 +346,12 @@ impl Board {
         let Some(cards) = input.cards else {
             self.held = None;
             self.pending = None;
+            self.tray = None;
+            self.faces.clear();
             return Output::default();
         };
+        self.faces
+            .retain(|id, _| cards.cards.iter().any(|card| card.id == *id));
         // A card put down shows where it was put until the server agrees, or for a while if it does not.
         if let Some(pending) = &self.pending {
             let confirmed = cards
@@ -431,13 +449,29 @@ impl Board {
         };
         let highlighted = self
             .held()
-            .or(output.pointed.as_ref().map(|(card, _, _)| card.as_str()));
+            .or(output.pointed.as_ref().map(|(card, _, _)| card.as_str()))
+            .map(str::to_owned);
+        let tray = match &self.tray {
+            Some(((source, count, status), face))
+                if *source == cards.source && *count == inboxed && *status == cards.status =>
+            {
+                face.clone()
+            }
+            _ => {
+                let face = crate::frame_timing::drawn(tray(
+                    &cards.source,
+                    inboxed,
+                    cards.status.as_deref(),
+                ));
+                self.tray = Some((
+                    (cards.source.clone(), inboxed, cards.status.clone()),
+                    face.clone(),
+                ));
+                face
+            }
+        };
         output.sheets.push(Sheet {
-            canvas: Some(std::sync::Arc::new(tray(
-                &cards.source,
-                inboxed,
-                cards.status.as_deref(),
-            ))),
+            canvas: Some(tray),
             model: Some(frame),
         });
         // Panels blend over what is drawn before them, and write depth only once drawn, so the cards are drawn farthest
@@ -447,13 +481,23 @@ impl Board {
         order.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
         output.sheets.extend(order.into_iter().map(|index| {
             let (card, (model, covered)) = (&cards.cards[index], &models[index]);
-            let highlighted = highlighted == Some(card.id.as_str());
+            let highlighted = highlighted.as_deref() == Some(card.id.as_str());
+            let covered = *covered && !highlighted;
+            // Compared in place, wherever it stands: the card kept takes this one's placement.
+            let kept = self.faces.get_mut(&card.id).and_then(|(key, face)| {
+                key.0.placement.clone_from(&card.placement);
+                (key.0 == *card && key.1 == covered && key.2 == highlighted).then(|| face.clone())
+            });
+            let canvas = kept.unwrap_or_else(|| {
+                let canvas = crate::frame_timing::drawn(face(card, covered, highlighted));
+                self.faces.insert(
+                    card.id.clone(),
+                    ((card.clone(), covered, highlighted), canvas.clone()),
+                );
+                canvas
+            });
             Sheet {
-                canvas: Some(std::sync::Arc::new(face(
-                    card,
-                    *covered && !highlighted,
-                    highlighted,
-                ))),
+                canvas: Some(canvas),
                 model: Some(*model),
             }
         }));
@@ -913,5 +957,70 @@ mod tests {
             text(output.sheets[0].canvas.as_deref().unwrap())[0].trim_end(),
             "INBOX o/r (2)"
         );
+    }
+
+    #[test]
+    fn faces_are_kept_while_each_card_and_the_inbox_say_the_same_and_forgotten_once_gone() {
+        let mut board = Board::default();
+        let now = Instant::now();
+        let mut shown = cards(3);
+        let addresses = |output: &Output| -> Vec<usize> {
+            output
+                .sheets
+                .iter()
+                .map(|sheet| Arc::as_ptr(sheet.canvas.as_ref().unwrap()) as usize)
+                .collect()
+        };
+        let first = board.update(input(&shown, None, 0.0, now));
+        // Seen from elsewhere, the cards in another order by distance, the same faces.
+        let mut moved = input(&shown, None, 0.0, now);
+        moved.viewer = Some(HOME + Vec3::new(2.0, 0.0, -0.5));
+        let mut again = addresses(&board.update(moved));
+        let mut before = addresses(&first);
+        again.sort();
+        before.sort();
+        assert_eq!(again, before);
+        // Pointed at, a card's face is drawn again, highlighted, and only its.
+        let pointed = board.update(input(
+            &shown,
+            Some(header(sheet(&first, 2).model.unwrap())),
+            0.0,
+            now,
+        ));
+        let kept = |number| {
+            Arc::ptr_eq(
+                sheet(&pointed, number).canvas.as_ref().unwrap(),
+                sheet(&first, number).canvas.as_ref().unwrap(),
+            )
+        };
+        assert!(!kept(2) && kept(3));
+        assert_eq!(
+            **sheet(&pointed, 2).canvas.as_ref().unwrap(),
+            face(&shown.cards[1], false, true)
+        );
+        // A card renamed is drawn again, as is the inbox when its count changes.
+        shown.cards[2].title = "Renamed".into();
+        let renamed = board.update(input(&shown, None, 0.0, now));
+        assert_eq!(
+            text(sheet(&renamed, 3).canvas.as_deref().unwrap())[1].trim(),
+            "Renamed"
+        );
+        assert!(Arc::ptr_eq(
+            &renamed.sheets[0].canvas.clone().unwrap(),
+            &first.sheets[0].canvas.clone().unwrap()
+        ));
+        shown.cards.pop();
+        let fewer = board.update(input(&shown, None, 0.0, now));
+        assert!(!Arc::ptr_eq(
+            &fewer.sheets[0].canvas.clone().unwrap(),
+            &first.sheets[0].canvas.clone().unwrap()
+        ));
+        assert_eq!(board.faces.len(), 2, "a card gone is forgotten");
+        let none = Input {
+            cards: None,
+            ..input(&shown, None, 0.0, now)
+        };
+        board.update(none);
+        assert!(board.faces.is_empty() && board.tray.is_none());
     }
 }

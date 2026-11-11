@@ -212,6 +212,8 @@ struct Allowance {
     budget: Budget,
     spent: Frame,
     waited: u64,
+    /// Every glyph this thread drew, and the time it took, since it started.
+    drawn: (u64, Duration),
 }
 
 thread_local! {
@@ -224,6 +226,7 @@ thread_local! {
                 waiting: 0,
             },
             waited: 0,
+            drawn: (0, Duration::ZERO),
         })
     };
 }
@@ -235,6 +238,12 @@ fn allowance<R>(f: impl FnOnce(&mut Allowance) -> R) -> R {
         cell.set(allowance);
         result
     })
+}
+
+/// How many glyphs this thread has drawn into the atlas since it started, and the time it took, whatever its frames, so
+/// that a frame's timing can tell what drawing glyphs cost it by the difference.
+pub fn drawn() -> (u64, Duration) {
+    allowance(|allowance| allowance.drawn)
 }
 
 /// Set what drawing glyphs may cost this thread in each frame, from now on.
@@ -345,6 +354,8 @@ impl Atlas {
         allowance(|allowance| {
             allowance.spent.drawn += 1;
             allowance.spent.time += time;
+            allowance.drawn.0 += 1;
+            allowance.drawn.1 += time;
         });
         glyph
     }
@@ -714,6 +725,7 @@ mod tests {
             glyphs: 2,
         });
         let before = waited();
+        let total = drawn();
         assert!(atlas.glyph('日').is_some());
         assert!(atlas.glyph('本').is_some());
         // The budget is spent: a glyph not yet drawn waits, and is not remembered as having no outline.
@@ -730,6 +742,10 @@ mod tests {
         // The next frame draws it.
         assert!(atlas.glyph('語').is_some());
         assert_eq!(frame().drawn, 1);
+        // Counted whatever the frames, as drawn since the thread started.
+        let (count, time) = drawn();
+        assert_eq!(count, total.0 + 3);
+        assert!(time > total.1);
         // With no time to spend, nothing new is drawn, but a new atlas still draws its replacement.
         budget(Budget {
             time: Duration::ZERO,

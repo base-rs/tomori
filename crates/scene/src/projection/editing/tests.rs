@@ -1816,7 +1816,9 @@ fn the_bar_stands_clear_of_every_handle_and_its_drawn_face_within_where_it_is_me
                 }
             }
             // Drawn thin, as long as it is, within where the ray meets it.
-            let face = bar_face(&bar, false).size();
+            let (key, scale) = bar_key(&bar, false);
+            let face = bar_face(key).size();
+            let face = (face.0 * scale, face.1 * scale);
             // To within a font pixel, an eighth of its thickness, at either end.
             assert!(
                 (face.0 - 2.0 * bar.half.length()).abs() <= face.1 / 8.0 * 1.01,

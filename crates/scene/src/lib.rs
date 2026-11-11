@@ -29,6 +29,7 @@ pub mod conversation;
 pub mod delegation;
 pub mod dials;
 pub mod environment;
+pub mod frame_timing;
 pub mod glide;
 pub mod hand_menu;
 pub mod hands;

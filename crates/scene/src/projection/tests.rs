@@ -1145,6 +1145,52 @@ fn the_ray_s_label_names_a_panel_with_its_metadata_and_where_it_is() {
 }
 
 #[test]
+fn the_ray_s_label_is_drawn_once_while_it_says_the_same() {
+    let mut kept = KeptLabel::default();
+    let point = Vec3::new(0.0, 1.5, -3.0);
+    let mut shown = panel("1", on(TOMORI_WALL, 0));
+    let sheet = |kept: &mut KeptLabel, shown: &Panel, viewer: Vec3, scrolls| {
+        crate::frame_timing::take();
+        let sheet = kept.sheet(shown, (point, viewer), scrolls, None);
+        (sheet, crate::frame_timing::take().faces)
+    };
+    let (first, drawn) = sheet(&mut kept, &shown, HOME, None);
+    assert_eq!(drawn, 1);
+    assert_eq!(first, label(&shown, point, HOME, None, None));
+    // Seen from elsewhere, it turns, its face kept and not drawn again.
+    let (turned, drawn) = sheet(&mut kept, &shown, HOME + Vec3::X, None);
+    assert_eq!(drawn, 0);
+    assert!(Arc::ptr_eq(
+        turned.canvas.as_ref().unwrap(),
+        first.canvas.as_ref().unwrap()
+    ));
+    assert_ne!(turned.model, first.model);
+    // A few seconds older, its age shows the same; a few minutes, it says so.
+    shown.age += 5;
+    assert_eq!(sheet(&mut kept, &shown, HOME, None).1, 0);
+    shown.age += 600;
+    assert_eq!(sheet(&mut kept, &shown, HOME, None).1, 1);
+    // Saying it scrolls, or another title, it is drawn again.
+    assert_eq!(
+        sheet(&mut kept, &shown, HOME, Some(Controls::Keyboard)).1,
+        1
+    );
+    shown.title = "Renamed".into();
+    assert_eq!(
+        sheet(&mut kept, &shown, HOME, Some(Controls::Keyboard)).1,
+        1
+    );
+    // Untitled, it is named by its body, which a change of it draws again; titled, the body is not looked at.
+    shown.title.clear();
+    assert_eq!(sheet(&mut kept, &shown, HOME, None).1, 1);
+    shown.body = "Another body".into();
+    let (untitled, drawn) = sheet(&mut kept, &shown, HOME, None);
+    assert_eq!(drawn, 1);
+    assert!(untitled.canvas.unwrap().plain().starts_with("Another body"));
+    assert_eq!(sheet(&mut kept, &shown, HOME, None).1, 0);
+}
+
+#[test]
 fn panels_are_drawn_in_their_slots_wall_by_wall_and_floating_ones_where_they_float() {
     let free = Pose::upright_facing([-1.0, 1.4, -1.0], [0.0, 1.6, 0.0]);
     let shown = projection(vec![
