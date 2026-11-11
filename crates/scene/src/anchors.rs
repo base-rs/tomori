@@ -411,9 +411,9 @@ impl Arrangement {
 pub const FLOOR_RING: f32 = 1.25;
 
 /// The ring drawn on the floor at home, the agent's place, which never travels with it: the middle it stands about, in
-/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the floor beneath; its
-/// radius, in metres; and how much of the circle it takes, in radians, centred on `towards`, the way its workers'
-/// anchor faces, about the vertical. Workers standing in a ring about the agent's home stand on it. See
+/// the space's coordinates, at the height of whatever stands there, which the ring is drawn on the space's floor beneath,
+/// however high that is; its radius, in metres; and how much of the circle it takes, in radians, centred on `towards`,
+/// the way its workers' anchor faces, about the vertical. Workers standing in a ring about the agent's home stand on it. See
 /// `design/environments.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeRing {
