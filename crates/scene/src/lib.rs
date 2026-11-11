@@ -8,6 +8,9 @@
 //! Nothing here depends on a rendering, windowing or platform audio crate, as `design/clients.md` requires, so it builds for every client target. A client turns its devices' input into [`scene::Buttons`] and [`scene::Senses`], runs the frame step, and draws the [`scene::Frame`] it returns.
 //!
 //! Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
+/// An environment's ambience, which its client crate declares and registers beside its scenery: `tomori-client`'s. See
+/// `design/environments.md`.
+pub use tomori_client::playback::ambience;
 pub mod anchors;
 pub mod arrival;
 pub mod arrival_motion;

@@ -22,6 +22,10 @@ tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 
+[build-dependencies]
+# The digests of the sounds the build finds in assets/sounds, by which the program's library checks them.
+sha2 = "0.10"
+
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"

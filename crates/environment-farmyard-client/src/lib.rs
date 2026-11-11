@@ -4,8 +4,10 @@
 //! Tomori's farmyard, its client half: the scenery Tomori's clients draw, an evening sky behind the yard and the coop,
 //! built in code and drawn with `tomori-assets`, with the chickens, and the New Zealand backdrop beyond the fence, its
 //! foothills, bush, river, waterfall and ranges; the client side that shows the chickens from what
-//! the farmyard's server side shares; and the teleport profile, which a client registers with [`register`]. What its
-//! server and clients share is `tomori-environment-farmyard`. See `design/farmyard.md`.
+//! the farmyard's server side shares; its ambience, the wind, bush, river, waterfall and birds beyond the fence; and the
+//! teleport profile, which a client registers with [`register`]. What its server and clients share is
+//! `tomori-environment-farmyard`. See `design/farmyard.md`.
+pub mod ambience;
 pub mod client;
 pub mod scenery;
 
@@ -67,6 +69,9 @@ pub(crate) fn registered(
         ))
     });
     sceneries.add_license(LICENSE_TITLE, LICENSE);
+    ambience::bundle();
+    sceneries.set_ambience(ID, ambience::ambience());
+    sceneries.add_license(ambience::LICENSE_TITLE, ambience::LICENSE);
 }
 
 #[cfg(test)]
@@ -102,8 +107,15 @@ mod tests {
         // It carries the chicken's credit and licence, for the build to show with its own.
         assert_eq!(
             sceneries.licenses(),
-            [(super::LICENSE_TITLE, super::LICENSE)]
+            [
+                (super::LICENSE_TITLE, super::LICENSE),
+                (super::ambience::LICENSE_TITLE, super::ambience::LICENSE)
+            ]
         );
+        // Its ambience, at its identity, with every slot.
+        let ambiences = sceneries.ambiences();
+        assert_eq!(ambiences[0].0.id(), super::ID);
+        assert_eq!(ambiences[0].1.slots().count(), super::ambience::SLOTS.len());
         assert!(super::LICENSE.contains("Hinoki Maple Williams"));
         assert!(super::LICENSE.contains("https://creativecommons.org/licenses/by/4.0/"));
     }

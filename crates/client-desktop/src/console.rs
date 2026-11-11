@@ -19,7 +19,7 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), feedback ambience off|low|medium|high (how loud an environment's ambience plays), q (quit).";
 
 /// `delete` says what deleting the joined space does, as the hand menu asks before deleting it; `delete space` deletes it for everyone in it, keeping its agent session, and `delete space and session` deletes its session too, the words themselves asking explicitly, as the menu's second question does. See `design/hand-menu.md`.
 fn delete(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -80,10 +80,13 @@ fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
         }
         ["mono", "on"] => conversation.set_mono(true),
         ["mono", "off"] => conversation.set_mono(false),
+        ["ambience", word] if crate::feedback::Ambience::parse(word).is_some() => {
+            conversation.set_ambience(crate::feedback::Ambience::parse(word).unwrap_or_default())
+        }
         _ => {
             say!(
                 out,
-                "(feedback sounds|vibration full|reduced|off, or feedback mono on|off)"
+                "(feedback sounds|vibration full|reduced|off, feedback mono on|off, or feedback ambience off|low|medium|high)"
             );
             return;
         }
@@ -91,10 +94,11 @@ fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
     let settings = conversation.menu_model().feedback;
     say!(
         out,
-        "  Sounds: {}; vibration: {}; mono audio: {}",
+        "  Sounds: {}; vibration: {}; mono audio: {}; ambience: {}",
         settings.sounds.label(),
         settings.vibration.label(),
-        if settings.mono { "on" } else { "off" }
+        if settings.mono { "on" } else { "off" },
+        settings.ambience.label()
     );
 }
 
@@ -552,21 +556,28 @@ mod tests {
                 "feedback vibration reduced",
                 "feedback mono on",
                 "feedback mono off",
+                "feedback ambience high",
+                "feedback ambience loud",
                 "feedback loud",
             ],
         );
         assert!(
-            out.contains("  Sounds: full; vibration: full; mono audio: off"),
+            out.contains("  Sounds: full; vibration: full; mono audio: off; ambience: low"),
             "{out}"
         );
         assert!(
-            out.contains("  Sounds: off; vibration: full; mono audio: off"),
+            out.contains("  Sounds: off; vibration: full; mono audio: off; ambience: low"),
             "{out}"
         );
-        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: off"));
-        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: on"));
+        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: off; ambience: low"));
+        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: on; ambience: low"));
+        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: off; ambience: high"));
+        assert_eq!(
+            out.matches("(feedback sounds|vibration full|reduced|off, feedback mono on|off, or feedback ambience off|low|medium|high)").count(),
+            2
+        );
         assert!(
-            out.contains("(feedback sounds|vibration full|reduced|off, or feedback mono on|off)")
+            out.contains("(feedback sounds|vibration full|reduced|off, feedback mono on|off, or feedback ambience off|low|medium|high)")
         );
         // A word that only starts with it is not the command.
         let (out, _) = session(&mut conversation, &["feedbacks"]);
