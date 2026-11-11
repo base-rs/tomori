@@ -309,6 +309,36 @@ fn its_sounds_are_where_the_backdrop_has_them_and_leave_voices_for_the_birds() {
 }
 
 #[test]
+fn the_ruru_calls_several_times_in_a_row_and_the_tui_a_phrase_or_two() {
+    let ambience = with(&[]);
+    let [tui, bellbird, kereru, ruru] = &ambience.calls[..] else {
+        panic!("four birds");
+    };
+    // Usually three to six, most often four or five, sometimes one, 1.5 to 2.5 s apart, its runs 120 to 300 s apart.
+    let run = ruru.run.as_ref().unwrap();
+    assert_eq!(run.weights, [15.0, 5.0, 15.0, 25.0, 25.0, 15.0]);
+    let total: f32 = run.weights.iter().sum();
+    assert!(run.weights[2..].iter().sum::<f32>() / total >= 0.8);
+    assert_eq!(run.weights[0] / total, 0.15);
+    assert_eq!(
+        run.gap,
+        [Duration::from_millis(1_500), Duration::from_millis(2_500)]
+    );
+    assert_eq!(run.order, Order::Alternate);
+    assert_eq!(
+        ruru.every,
+        [Duration::from_secs(120), Duration::from_secs(300)]
+    );
+    // A tūī most often sings one phrase, then two, rarely three; the bellbird and kererū call once.
+    let run = tui.run.as_ref().unwrap();
+    assert_eq!(
+        (run.weights.as_slice(), run.order),
+        (&[60.0, 30.0, 10.0][..], Order::Random)
+    );
+    assert_eq!((bellbird.run.as_ref(), kereru.run.as_ref()), (None, None));
+}
+
+#[test]
 fn every_slot_has_its_sound_credited_and_within_the_limits() {
     // Every slot's sound is found, and every sound found is a slot's.
     let mut slots = SLOTS.to_vec();

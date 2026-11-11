@@ -8,7 +8,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use tomori_client::playback::ambience::{Ambience, Bed, Call, Loop, Slot};
+//! use tomori_client::playback::ambience::{Ambience, Bed, Call, Loop, Run, Slot};
 //!
 //! let ambience = Ambience::new()
 //!     .with_bed(Bed::new(Slot::missing("wind")).gain(-6.0))
@@ -18,10 +18,17 @@
 //!             .every(Duration::from_secs(10), Duration::from_secs(40))
 //!             .around(&[[-12.0, 6.0, -20.0]], 6.0)
 //!             .pitch(0.95, 1.05),
+//!     )
+//!     // A ruru, usually four or five calls in a row, 1.5 to 2.5 s apart, sometimes one.
+//!     .with_call(
+//!         Call::new(vec![Slot::missing("ruru-1")])
+//!             .every(Duration::from_secs(120), Duration::from_secs(300))
+//!             .run(Run::weighted(&[15.0, 5.0, 15.0, 25.0, 25.0, 15.0])
+//!                 .gap(Duration::from_millis(1_500), Duration::from_millis(2_500))),
 //!     );
 //! assert_eq!(
 //!     ambience.slots().map(Slot::name).collect::<Vec<_>>(),
-//!     ["wind", "river", "tui-1", "tui-2"]
+//!     ["wind", "river", "tui-1", "tui-2", "ruru-1"]
 //! );
 //! ```
 use std::fmt;
@@ -244,9 +251,69 @@ impl Loop {
     }
 }
 
+/// The most calls a run holds: weights beyond are ignored.
+pub const RUN_CALLS: usize = 16;
+
+/// How a run takes its call's variants after its first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    /// Each the next of them after the last, in turn, so that two alternate.
+    #[default]
+    Alternate,
+    /// Any of them, the last again too.
+    Random,
+}
+
+/// A call heard several times in a row, as a ruru calls "more-pork" four or five times: how likely a run of 1, 2, 3 or
+/// more calls is, by `weights`, the first for one; after each call's end, a gap within `gap` before the next; each from
+/// where the first was, the same bird, its variant by `order`, at the first's pitch, as a factor, and gain, in decibels,
+/// within `vary` of it either side and within the call's own ranges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub weights: Vec<f32>,
+    pub gap: [Duration; 2],
+    pub vary: [f32; 2],
+    pub order: Order,
+}
+
+impl Run {
+    /// A run of 1, 2, 3 and so on calls as likely, each to the others, as `weights` say, up to [`RUN_CALLS`], those
+    /// not finite or below 0 never: 1 to 2 s apart, each within 1% and 1 dB of the first, alternating its variants.
+    pub fn weighted(weights: &[f32]) -> Self {
+        Self {
+            weights: weights.to_vec(),
+            gap: [Duration::from_secs(1), Duration::from_secs(2)],
+            vary: [0.01, 1.0],
+            order: Order::Alternate,
+        }
+    }
+
+    /// This run with `least` to `most` between one call's end and the next's start.
+    pub fn gap(self, least: Duration, most: Duration) -> Self {
+        Self {
+            gap: [least, most.max(least)],
+            ..self
+        }
+    }
+
+    /// This run with each call after the first within `pitch`, as a factor, and `gain` decibels of the first.
+    pub fn vary(self, pitch: f32, gain: f32) -> Self {
+        Self {
+            vary: [pitch.max(0.0), gain.max(0.0)],
+            ..self
+        }
+    }
+
+    /// This run taking its variants by `order`.
+    pub fn order(self, order: Order) -> Self {
+        Self { order, ..self }
+    }
+}
+
 /// A call, such as a bird's song: a mono sound played once now and then, one of its variants, each time at a random
 /// interval within `every`, from somewhere within `spread` metres, across the ground, of one of the points `around`, at
-/// a pitch within `pitch` and a gain within `gain` decibels, so that it never sounds like a loop.
+/// a pitch within `pitch` and a gain within `gain` decibels, so that it never sounds like a loop; or, with a `run`,
+/// several times in a row, its interval counting from the run's end.
 #[derive(Clone, Debug)]
 pub struct Call {
     pub variants: Vec<Slot>,
@@ -255,6 +322,7 @@ pub struct Call {
     pub spread: f32,
     pub pitch: [f32; 2],
     pub gain: [f32; 2],
+    pub run: Option<Run>,
 }
 
 impl Call {
@@ -267,6 +335,15 @@ impl Call {
             spread: 0.0,
             pitch: [1.0, 1.0],
             gain: [0.0, 0.0],
+            run: None,
+        }
+    }
+
+    /// This call heard in runs, as `run` says.
+    pub fn run(self, run: Run) -> Self {
+        Self {
+            run: Some(run),
+            ..self
         }
     }
 

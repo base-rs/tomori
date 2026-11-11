@@ -6,6 +6,7 @@
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lewton::inside_ogg::OggStreamReader;
 
@@ -27,6 +28,34 @@ pub(super) fn guard<T, E: std::fmt::Display>(
 
 fn open(bytes: &Arc<[u8]>) -> Result<Reader, String> {
     guard(|| OggStreamReader::new(Cursor::new(bytes.clone())))
+}
+
+/// The frames `bytes` hold, by the granule position of their last whole Ogg page that has one, which says where the
+/// stream's audio ends, as decoding trims it: none, for bytes whose pages say nothing.
+pub(super) fn frames(bytes: &[u8]) -> u64 {
+    let mut frames = 0;
+    let mut at = 0;
+    while let Some(header) = bytes.get(at..at + 27)
+        && header.starts_with(b"OggS")
+    {
+        let body = at + 27 + usize::from(header[26]);
+        let Some(table) = bytes.get(at + 27..body) else {
+            break;
+        };
+        let end = body + table.iter().map(|&size| usize::from(size)).sum::<usize>();
+        if end > bytes.len() {
+            break;
+        }
+        let mut granule = [0; 8];
+        granule.copy_from_slice(&header[6..14]);
+        // A page on which no packet ends says so with all ones.
+        let granule = u64::from_le_bytes(granule);
+        if granule != u64::MAX {
+            frames = granule;
+        }
+        at = end;
+    }
+    frames
 }
 
 /// One sound being decoded.
@@ -80,6 +109,11 @@ impl Decoder {
     /// Its samples a second.
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    /// How long its sound lasts once through, at its own rate.
+    pub fn length(&self) -> Duration {
+        Duration::from_secs_f64(frames(&self.bytes) as f64 / f64::from(self.rate))
     }
 
     /// Append up to `frames` frames to `out`, in `channels`, one or two, in `i16` units: a mono file heard in both of
