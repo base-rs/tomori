@@ -855,6 +855,8 @@ struct Speaker {
     /// The environment's ambience and the participant's level for it, kept across connections.
     ambience: Option<Arc<crate::playback::ambience::Ambience>>,
     ambience_gain: f32,
+    /// Whether the application had focus when last polled.
+    focused: bool,
 }
 
 impl Speaker {
@@ -871,7 +873,20 @@ impl Speaker {
             probe: false,
             ambience: None,
             ambience_gain: feedback::Ambience::default().gain(),
+            focused: true,
         }
+    }
+
+    /// The application has focus, or not: an open output is opened again as it gains focus, where the platform asks for that, keeping what it has buffered. See `design/spatial-audio.md`.
+    fn focus(&mut self, focused: bool) {
+        let had = std::mem::replace(&mut self.focused, focused);
+        let gained = focused && !had;
+        if !gained || !self.playback.reopens_on_focus() || self.output.take().is_none() {
+            return;
+        }
+        log::info!("Speaker: opening again, as the application gained focus");
+        self.retry_at = None;
+        self.start(false);
     }
 
     /// Play as `route` says: an open output that plays otherwise is closed and opened again at once. See `design/spatial-audio.md`.
@@ -1263,6 +1278,7 @@ impl Connection {
             // cancellation; focus loss must not deliver another live buffer.
             self.voice.recording = None;
         }
+        self.speaker.focus(focused);
         if let Some(error) = self.voice.failure() {
             self.feedback
                 .emit(Feedback::NotSent(Hand::Left), Instant::now());
