@@ -54,7 +54,7 @@ They expect it may be difficult, and it is for later; what is wanted now is a cl
 
 The campsite built the right grip's rung (`precedence::Grab`, `within_reach`, `Input::grab`); this widens it:
 
-- **Both hands.** Once `live-on-stick-click` moves the live microphone to the left stick's click, both grips and both triggers are free, and `Input::grab` names either hand, each holding one object, with `Input::hands` giving the others' left hands too. Their order on each hand, and the triggers', is `two-handed-pointing.md`'s (#354) to declare, its second stage alongside these; this asks only that each grip end, as the right does now, with the environment.
+- **Both hands.** Since `live-on-stick-click` (#355) moved the live microphone to the left stick's click, both grips and both triggers are free, and `Input::grab` names either hand, each holding one object, with `Input::hands` giving the others' left hands too. Their order on each hand, and the triggers', is `two-handed-pointing.md`'s (#354) to declare, its second stage alongside these; this asks only that each grip end, as the right does now, with the environment.
 - **Within reach**, an object's hull within 5 cm of the controller's grip pose, as the campsite's within reach comes after a panel under the ray.
 - **Pulled by the ray**: an object the ray meets within 3 m that takes the grip flies to the hand over a quarter of a second, kinematic, and is held where it arrives, so that a stone at the water's edge can be taken from the beach above it.
 - **The desktop window** grabs with G where the mouse points, within 3 m, carrying along the ray as cards are carried, the wheel pushing and pulling, so that every stage is testable through the shared frame step.
@@ -216,7 +216,7 @@ The campsite's sticks become bodies of the same world, so that one model covers 
 
 - Workspace: glam 0.30 to 0.33, in a pull request of its own first.
 - `tomori-physics` on Rapier, shared: bodies, colliders, the world, holding, snapshots, rests and wakes, its limits; opening with the **harness**: programmatically stacked cairns of 3 to 10 stones, run for ten simulated minutes, required to settle and sleep within seconds and never move after; one more stone dropped on, required to wake the cairn without bursting it; and releases with the poses and speeds a hand gives.
-- Core: the left grip for client sides once `live-on-stick-click` lands, following `two-handed-pointing.md`; the ray's pull; both of the others' hands; `Space::presence()` for server sides; the bound on announcing.
+- Core: the left grip for client sides, free since #355, following `two-handed-pointing.md`; the ray's pull; both of the others' hands; `Space::presence()` for server sides; the bound on announcing.
 - Farmyard: the beach, sloping to the water, its stones and surfaces; grab and release intents checked against presence; the holder's prediction and blend; throwing, and stones returned from the river; clacks and splashes.
 - Costs: Rapier and its dependencies in the server; server CPU, small and only while something moves; about 1,200 triangles; a farmyard version bump.
 - Risks: **stacking stability**, the biggest of the proposal; the grip's order on the left hand; the visible blend at release over a slow link.
