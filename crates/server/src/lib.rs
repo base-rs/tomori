@@ -42,6 +42,7 @@ pub mod places;
 pub mod presence;
 mod process;
 mod projection;
+mod proximity;
 mod queue;
 #[cfg(feature = "speech")]
 mod recognition;

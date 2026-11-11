@@ -7196,6 +7196,8 @@ mod moving;
 mod patches;
 #[path = "hub_tests/placing.rs"]
 mod placing;
+#[path = "hub_tests/proximity.rs"]
+mod proximity;
 #[path = "hub_tests/timers.rs"]
 mod timers;
 #[path = "hub_tests/watching.rs"]

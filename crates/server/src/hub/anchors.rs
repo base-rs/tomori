@@ -539,4 +539,75 @@ impl Hub {
             self.keep();
         }
     }
+    /// Look, at `now`, at who is near the anchors of each space that notify its agent, and tell its agent, through the
+    /// space's event queue, of each participant who came within one, as [`crate::proximity::Proximity`] decides: only
+    /// participants, whose clients report where they are, named by their handle where another in the space shares
+    /// their name, and only while the agent can be told, as its timers are; what happens meanwhile is not told later.
+    /// Called as the hub sweeps. See `design/environments.md`.
+    pub(crate) fn sweep_proximity(&self, now: Instant) {
+        let environments = self.environments();
+        let mut state = self.lock();
+        let ids: Vec<String> = state
+            .spaces
+            .iter()
+            .map(|record| record.model.id.clone())
+            .collect();
+        for space in ids {
+            let record = state.space(&space).expect("listed above");
+            let participants: Vec<(&String, &super::ParticipantRecord)> = record
+                .model
+                .participants
+                .iter()
+                .filter_map(|key| Some((key, state.participants.get(key)?)))
+                .filter(|(_, participant)| {
+                    participant.connection.is_some_and(|connection| {
+                        state.role(connection, Some(&space)).participates()
+                    })
+                })
+                .collect();
+            // Owned, since the space is changed below, each by their key, name and where their head is.
+            let people: Vec<(String, String, [f32; 3])> = participants
+                .iter()
+                .filter_map(|(key, participant)| {
+                    let shared = participants
+                        .iter()
+                        .any(|(other, them)| other != key && them.name == participant.name);
+                    let name = if shared {
+                        crate::presence::handle(&participant.name, participant.tag)
+                    } else {
+                        participant.name.clone()
+                    };
+                    Some((
+                        (*key).clone(),
+                        name,
+                        participant.seen.as_ref()?.head.position,
+                    ))
+                })
+                .collect();
+            if people.is_empty() && record.proximity.is_empty() {
+                continue;
+            }
+            let anchors: Vec<Anchor> = record
+                .clusters(&environments)
+                .into_iter()
+                .filter(|anchor| anchor.notify_within.is_some())
+                .collect();
+            let told =
+                !record.restoring && !record.model.is_closed() && !record.model.is_reconnecting();
+            let people: Vec<crate::proximity::Person<'_>> = people
+                .iter()
+                .map(|(key, name, at)| crate::proximity::Person { key, name, at: *at })
+                .collect();
+            let record = state.space_mut(&space).expect("listed above");
+            let notes = record.proximity.observe(now, &people, &anchors);
+            if !told || notes.is_empty() {
+                continue;
+            }
+            for (key, note) in notes {
+                log::info!("Space {space}: {note}.");
+                record.model.tell_proximity(&key, note);
+            }
+            state.pump(&space);
+        }
+    }
 }

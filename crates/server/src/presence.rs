@@ -1360,13 +1360,15 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
 /// is and the way it faces, the room its cluster takes, whether the environment placed it as it runs, the id the agent
 /// may inspect the object it stands by by, among the objects of `environment`, and what stands there, in the order of
 /// their slots: the workers, by session and title, those gathered into its "+N more" sign saying so, and whoever
-/// `placed_by` says placed each, where a participant did; the panels, by identity; and the agent. See `design/mcp.md`.
+/// `placed_by` says placed each, where a participant did; the panels, by identity; and the agent. One that tells the
+/// agent who comes near says how near, and who `proximity` says is within it. See `design/mcp.md`.
 pub(crate) fn anchors(
     anchors: &[tomori_protocol::cluster::Anchor],
     seating: &crate::seating::Seating,
     workers: &[tomori_protocol::Worker],
     environment: &str,
     placed_by: &dyn Fn(&str) -> Option<String>,
+    proximity: &crate::proximity::Proximity,
 ) -> Value {
     use crate::seating::Member;
     let listed: Vec<Value> = anchors
@@ -1442,6 +1444,10 @@ pub(crate) fn anchors(
             }
             if anchor.placed {
                 listed["placed"] = json!(true);
+            }
+            if let Some(radius) = anchor.notify_within {
+                listed["notify_within"] = json!(round(radius, 1));
+                listed["within"] = json!(proximity.within(&anchor.name));
             }
             if let Some(object) = &anchor.object {
                 listed["object"] = json!(crate::space::inspectable(environment, object));
