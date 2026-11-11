@@ -80,7 +80,7 @@ impl Voice {
                 return Pull::Frame(frame);
             }
             if let Some(block) = self.block.take() {
-                // Room was made for every block, so this frees nothing.
+                // Room was made for every block there is, so this frees nothing while its thread runs.
                 let _ = recycle.try_send(block);
             }
             match self.blocks.try_recv() {

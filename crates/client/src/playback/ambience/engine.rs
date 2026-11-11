@@ -20,6 +20,9 @@ pub(crate) const BLOCK: usize = 1_024;
 pub(crate) const DEPTH: usize = 6;
 /// How often the thread decodes more while it plays, well within what [`DEPTH`] holds.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
+/// The blocks there are, made as the thread starts: as many as every voice holds at most, [`DEPTH`] in its channel,
+/// one the callback plays and one waiting to be sent.
+pub(crate) const BLOCKS: usize = VOICES * (DEPTH + 2);
 
 /// How a voice's sound is heard.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,8 +135,10 @@ pub(crate) fn pair(seed: u64) -> (Feeder, Bus) {
         senders.push(sender);
         receivers.push(receiver);
     }
-    // Room for every block there is, so that the callback never drops one it gives back.
-    let blocks = VOICES * (DEPTH + 1);
+    // As many blocks as every voice can hold at once, those in its channel, the one the callback plays and the one
+    // waiting to be sent, and never more, so that the callback always has room to give back every one it took and so
+    // never frees one.
+    let blocks = BLOCKS;
     let (recycle, recycled) = mpsc::sync_channel(blocks);
     let feeder = Feeder {
         senders,
@@ -315,10 +320,12 @@ impl Feeder {
                             "a voice without a decoder has its end waiting until it is sent"
                         );
                     };
-                    let mut block = self
-                        .pool
-                        .pop()
-                        .unwrap_or_else(|| Vec::with_capacity(BLOCK * 2));
+                    // Never a block more than there are, which the callback could find no room to give back: one
+                    // given back since the thread looked is taken, and with none, as cannot be, it waits.
+                    let Some(mut block) = self.pool.pop().or_else(|| self.recycled.try_recv().ok())
+                    else {
+                        return;
+                    };
                     block.clear();
                     if decoder.read(&mut block, BLOCK, playing.channels) == 0 {
                         self.pool.push(block);

@@ -65,6 +65,83 @@ fn a_loop_begins_again_without_a_gap_and_a_sound_that_ends_ends() {
     assert_eq!(cut.read(&mut out, FRAMES, 1), 0);
 }
 
+/// The CRC of an Ogg page, over it with its own CRC as zero.
+fn ogg_crc(page: &[u8]) -> u32 {
+    page.iter().fold(0u32, |crc, &byte| {
+        (0..8).fold(crc ^ (u32::from(byte) << 24), |crc, _| {
+            if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            }
+        })
+    })
+}
+
+/// `bytes`' Ogg pages, each as where it starts, where its body starts and where it ends.
+fn ogg_pages(bytes: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut pages = Vec::new();
+    let mut at = 0;
+    while at + 27 <= bytes.len() && &bytes[at..at + 4] == b"OggS" {
+        let segments = usize::from(bytes[at + 26]);
+        let body = at + 27 + segments;
+        let length: usize = bytes[at + 27..body]
+            .iter()
+            .map(|&size| usize::from(size))
+            .sum();
+        pages.push((at, body, body + length));
+        at = body + length;
+    }
+    pages
+}
+
+/// `bytes` with every page's CRC made right again, as a file damaged before it was written would be.
+fn ogg_resealed(mut bytes: Vec<u8>) -> Vec<u8> {
+    for (start, _, end) in ogg_pages(&bytes) {
+        bytes[start + 22..start + 26].fill(0);
+        let crc = ogg_crc(&bytes[start..end]);
+        bytes[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn a_malformed_sound_ends_or_is_refused_and_never_takes_the_thread_with_it() {
+    let pages = ogg_pages(MONO);
+    assert!(pages.len() >= 3, "{pages:?}");
+    // At a rate no sound is at, refused: the rate is 12 bytes into the identification header, the first page's body.
+    let mut slow = MONO.to_vec();
+    let rate = pages[0].1 + 12;
+    slow[rate..rate + 4].copy_from_slice(&1u32.to_le_bytes());
+    let error = Decoder::new(Arc::from(ogg_resealed(slow)), false)
+        .err()
+        .unwrap();
+    assert!(error.contains("1 Hz"), "{error}");
+    // Its audio damaged throughout, but its pages whole, so that the decoder itself meets the damage: every sound ends,
+    // a loop too, rather than beginning again for ever, or decodes, and none panics out of the decoder.
+    let (_, audio, end) = *pages.last().unwrap();
+    let mut failed = 0;
+    for (stride, mask) in [(7, 0xff), (13, 0x55), (31, 0x80), (97, 0x0f)] {
+        let mut damaged = MONO.to_vec();
+        for byte in damaged[audio..end].iter_mut().step_by(stride) {
+            *byte ^= mask;
+        }
+        let damaged: Arc<[u8]> = Arc::from(ogg_resealed(damaged));
+        // Its headers are whole.
+        let mut decoder = Decoder::new(damaged, true).unwrap();
+        let mut out = Vec::new();
+        let read = decoder.read(&mut out, FRAMES * 3, 1);
+        assert!(read <= FRAMES * 3);
+        assert_eq!(out.len(), read);
+        assert!(out.iter().all(|sample| sample.is_finite()));
+        failed += usize::from(decoder.failed());
+    }
+    assert!(failed > 0);
+    // A decoder that panics fails as one that refuses.
+    let panicked = super::super::decoder::guard::<(), String>(|| panic!("a malformed file"));
+    assert_eq!(panicked, Err("its decoder failed".to_owned()));
+}
+
 fn ambience(ambience: Ambience) -> Command {
     Command::Ambience(Some(Arc::new(ambience)))
 }
@@ -257,29 +334,60 @@ fn turned_off_every_voice_ends_and_nothing_decodes_until_it_is_heard_again() {
 }
 
 #[test]
-fn blocks_go_round_and_more_are_made_only_if_some_are_lost() {
+fn blocks_go_round_and_are_never_more_than_the_callback_has_room_to_give_back() {
     let (mut feeder, mut bus) = pair(1);
     feeder.apply(Command::Gain(1.0), Duration::ZERO);
     feeder.apply(
         ambience(Ambience::new().with_loop(Loop::at(mono(), [0.0; 3]))),
         Duration::ZERO,
     );
-    let blocks = feeder.pool.len();
+    assert_eq!(feeder.pool.len(), BLOCKS);
     for _ in 0..100 {
         feeder.pump(Duration::ZERO);
         mix(&mut bus, &listener(), 480);
     }
     // Each block came back: those in the channel, the one waiting and the one the callback plays, and the rest.
     feeder.pump(Duration::ZERO);
-    assert_eq!(feeder.pool.len() + DEPTH + 1 + 1, blocks);
-    // Should blocks be lost, as with a mixer made again, more are made.
-    feeder.pool.clear();
-    for _ in 0..10 {
-        mix(&mut bus, &listener(), BLOCK);
+    assert_eq!(feeder.pool.len() + DEPTH + 1 + 1, BLOCKS);
+    // Every voice playing and full holds every block there is, so none is made beyond them, and none is late.
+    let loops = (0..VOICES).fold(Ambience::new(), |ambience, _| {
+        ambience.with_loop(Loop::at(mono(), [0.0; 3]))
+    });
+    feeder.apply(ambience(loops), Duration::ZERO);
+    for _ in 0..200 {
         feeder.pump(Duration::ZERO);
+        assert!(feeder.pool.len() <= BLOCKS);
+        mix(&mut bus, &listener(), 480);
     }
+    assert_eq!(bus.playing(), VOICES);
     assert_eq!(bus.late(), 0);
+    // Turned off, every one comes back, none lost for want of room to give it back.
+    feeder.apply(Command::Gain(0.0), Duration::ZERO);
+    for _ in 0..100 {
+        feeder.pump(Duration::ZERO);
+        mix(&mut bus, &listener(), BLOCK);
+    }
+    feeder.pump(Duration::ZERO);
+    assert_eq!(bus.playing(), 0);
+    assert_eq!(feeder.pool.len(), BLOCKS);
+    // Should blocks be lost, none are made beyond them: its voices wait, late, rather than the callback having no room
+    // to give one back.
+    feeder.pool.clear();
+    feeder.apply(Command::Gain(1.0), Duration::ZERO);
+    feeder.pump(Duration::ZERO);
+    mix(&mut bus, &listener(), 480);
+    feeder.pump(Duration::ZERO);
+    assert!(feeder.pool.is_empty());
+    assert_eq!(bus.late(), VOICES as u64);
     // With its bus gone, nothing hears its voices, which go.
+    let (mut feeder, bus) = pair(2);
+    feeder.apply(Command::Gain(1.0), Duration::ZERO);
+    feeder.apply(
+        ambience(Ambience::new().with_loop(Loop::at(mono(), [0.0; 3]))),
+        Duration::ZERO,
+    );
+    feeder.pump(Duration::ZERO);
+    assert_eq!(feeder.playing(), 1);
     drop(bus);
     feeder.pump(Duration::ZERO);
     assert_eq!(feeder.playing(), 0);
