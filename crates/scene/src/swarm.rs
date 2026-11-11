@@ -25,6 +25,17 @@ const ARRIVED: f32 = 1.5;
 /// How long a flight lasts at most, in seconds, should its agents never all arrive, as while the trigger draws them.
 const LONGEST: f32 = 10.0;
 
+/// How hard its agents brake as they come in from a flight, in metres a second each second: each flies no faster than
+/// it could slow at this to its usual pace by where it goes, so that the flock, whose forces are gentle, comes to rest
+/// where it flew rather than overshooting and circling there; less than its forces can slow it.
+const BRAKE: f32 = 2.5;
+
+/// How far from where it goes its flock's swirl grows, in metres, as it comes in from a flight.
+const SWIRL: f32 = 1.0;
+
+/// How quickly its rings ease back about where it stands once a flight is over, as a time constant in seconds.
+const REGATHER: f32 = 0.25;
+
 #[derive(Clone, Copy)]
 pub struct Agent {
     pub position: Vec3,
@@ -63,6 +74,9 @@ pub struct Swarm {
     flight: Option<Flight>,
     /// How fast its agents may fly at most, coming back down to [`FLIGHT`] after a flight.
     cap: f32,
+    /// How far from where it stands its rings are drawn: about its agents' middle in a flight, so that they travel
+    /// with them, and easing back once it is over; otherwise nothing.
+    astray: Vec3,
 }
 
 impl Default for Swarm {
@@ -90,6 +104,7 @@ impl Default for Swarm {
             size: 1.0,
             flight: None,
             cap: FLIGHT,
+            astray: Vec3::ZERO,
         }
     }
 }
@@ -129,8 +144,8 @@ impl Swarm {
 
     /// How fast its agents fly at most over `dt` seconds: [`FLIGHT`], or a quarter faster than its middle moved, so that
     /// they keep up with it as it streams; or, in a flight, [`crate::glide::STREAM`], coming back down by [`UNWIND`]
-    /// once they have arrived.
-    fn fastest(&mut self, dt: f32) -> f32 {
+    /// once they have arrived. Also, their usual pace, beyond which [`BRAKE`] slows them as they come in.
+    fn fastest(&mut self, dt: f32) -> (f32, f32) {
         let pace = if dt > 0.0 { self.moved / dt } else { 0.0 };
         self.moved = 0.0;
         self.cap = if self.flight.is_some() {
@@ -138,7 +153,8 @@ impl Swarm {
         } else {
             (self.cap - UNWIND * dt).max(FLIGHT)
         };
-        self.cap.max(pace * 1.25)
+        let usual = FLIGHT.max(pace * 1.25);
+        (self.cap.max(usual), usual)
     }
 
     /// Appear at `anchor` from now on: the agents are carried there at once, in the shape they have, turned with it,
@@ -186,6 +202,7 @@ impl Swarm {
             agent.position = carried(agent.position);
             agent.velocity = turn * agent.velocity;
         }
+        self.astray = turn * self.astray;
         let anchor = match &mut self.flight {
             Some(flight) => &mut flight.from,
             None => &mut self.anchor,
@@ -202,9 +219,9 @@ impl Swarm {
     }
 
     /// The point `local`, relative to its middle as it faces home by default, where it stands now, as its rings are
-    /// drawn about it.
+    /// drawn about it: in a flight, about its agents' middle, travelling with them. See [`Self::fly_to`].
     pub fn at(&self, local: Vec3) -> Vec3 {
-        self.anchor.place(local)
+        self.anchor.place(local) + self.astray
     }
 
     pub fn step(&mut self, dt: f32, attractor: Option<Vec3>) {
@@ -218,7 +235,17 @@ impl Swarm {
         if let Some(flight) = &mut self.flight {
             flight.elapsed += dt;
         }
-        let fastest = self.fastest(dt);
+        let (fastest, usual) = self.fastest(dt);
+        // Each agent no faster than it could brake from, at [`BRAKE`], to its usual pace by where it goes: the
+        // fastest, but as it comes in from a flight; and, should where it goes change, as when a flight is turned
+        // back, braked no harder than that.
+        let fastest = move |distance: f32, speed: f32| {
+            fastest.min(
+                (usual * usual + 2.0 * BRAKE * distance)
+                    .sqrt()
+                    .max(speed - BRAKE * dt),
+            )
+        };
         let size = self.size;
         let flight = self.flight;
         // Where the agent `index` stands about: where the swarm stands, or, until it sets off, where it flies from.
@@ -228,7 +255,20 @@ impl Swarm {
             _ => anchor,
         };
         let wander = Vec3::new((self.time * 0.3).sin() * 0.35 * size, 0.0, 0.0);
-        self.step_agents(dt, attractor, fastest, &about, wander);
+        let coming = self.cap > FLIGHT;
+        self.step_agents(dt, attractor, fastest, &about, wander, coming);
+        // Its rings travel with its agents in a flight, and ease back about where it stands once it is over.
+        self.astray = if self.flight.is_some() {
+            self.agents.iter().map(|agent| agent.position).sum::<Vec3>() / AGENT_COUNT as f32
+                - self.anchor.position
+        } else {
+            let astray = self.astray * (-dt / REGATHER).exp();
+            if astray.length() < 1e-4 {
+                Vec3::ZERO
+            } else {
+                astray
+            }
+        };
         // Once every agent has set off and arrived, the flight is over.
         if let Some(flight) = self.flight {
             let arrived = flight.elapsed >= STAGGER
@@ -242,15 +282,17 @@ impl Swarm {
         }
     }
 
-    /// Move its agents on by `dt` seconds at up to `fastest`, each about where `about` says, to `attractor` where it is
-    /// given, or, as a flock, wandering by `wander` about its own place.
+    /// Move its agents on by `dt` seconds, each at up to `fastest` for how far it is from where it goes and how fast it
+    /// flies, each about
+    /// where `about` says, to `attractor` where it is given, or, as a flock, wandering by `wander` about its own place.
     fn step_agents(
         &mut self,
         dt: f32,
         attractor: Option<Vec3>,
-        fastest: f32,
+        fastest: impl Fn(f32, f32) -> f32,
         about: &dyn Fn(usize) -> Anchor,
         wander: Vec3,
+        coming: bool,
     ) {
         let size = self.size;
         let target = |index: usize| attractor.unwrap_or_else(|| about(index).place(wander));
@@ -283,8 +325,11 @@ impl Swarm {
                     ) * size,
                 );
                 let force = (goal - agent.position) * 5.0 - agent.velocity * 3.8;
-                agent.velocity =
-                    (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(fastest);
+                agent.velocity = (agent.velocity + force.clamp_length_max(3.0) * dt)
+                    .clamp_length_max(fastest(
+                        goal.distance(agent.position),
+                        agent.velocity.length(),
+                    ));
                 agent.position += agent.velocity * dt;
             }
             return;
@@ -311,18 +356,28 @@ impl Swarm {
                 }
             }
             let attraction = if attractor.is_some() { 1.5 } else { 0.7 };
-            let mut force =
-                separation * 0.055 + (target - agent.position) * attraction - agent.velocity * 0.45;
+            // Coming in from a flight, its flock is damped harder, so that it settles there rather than circling.
+            let damping = if coming { 1.2 } else { 0.45 };
+            let mut force = separation * 0.055 + (target - agent.position) * attraction
+                - agent.velocity * damping;
             if neighbors > 0.0 {
                 force += (alignment / neighbors - agent.velocity) * 0.55;
                 force += (cohesion / neighbors - agent.position) * 0.22;
             }
+            // Coming in from a flight, far from where it goes, it swirls no harder than it does there, so that it flies
+            // in rather than circling.
             let offset = agent.position - target;
+            let offset = if coming {
+                offset.clamp_length_max(SWIRL)
+            } else {
+                offset
+            };
             force += Vec3::new(-offset.z, (self.time + i as f32).sin() * 0.12, offset.x) * 0.3;
             // Keep agents above the floor even when a controller is lowered.
             force.y += (0.35 - agent.position.y).max(0.0) * 5.0;
-            let velocity =
-                (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(fastest);
+            let velocity = (agent.velocity + force.clamp_length_max(3.0) * dt).clamp_length_max(
+                fastest(target.distance(agent.position), agent.velocity.length()),
+            );
             self.next[i] = Agent {
                 position: agent.position + velocity * dt,
                 velocity,
@@ -563,6 +618,83 @@ mod tests {
             // Flying to where it is already does nothing.
             swarm.fly_to(there);
             assert!(!swarm.flying());
+        }
+    }
+
+    #[test]
+    fn a_long_flight_comes_in_and_rests_where_it_flew_without_overshooting_or_circling() {
+        // As far as the farmyard's workbench from the lobby's spot, and as far as someone the agent follows across a
+        // large space; the flock, as the swarm is in the lobby, and a shape, as in a space.
+        for distance in [4.2, 20.0] {
+            for mode in [Mode::Neutral, Mode::Ready] {
+                let mut swarm = Swarm::default();
+                swarm.set_visual(
+                    Visual {
+                        mode,
+                        ..Default::default()
+                    },
+                    0.0,
+                );
+                for _ in 0..300 {
+                    swarm.step(1.0 / 72.0, None);
+                }
+                let towards = Vec3::new(-1.0, 0.0, 0.3).normalize();
+                let there = Anchor {
+                    position: CENTER + towards * distance,
+                    orientation: glam::Quat::from_rotation_y(1.2),
+                };
+                swarm.fly_to(there);
+                let middle = |swarm: &Swarm| {
+                    swarm
+                        .agents
+                        .iter()
+                        .map(|agent| agent.position)
+                        .sum::<Vec3>()
+                        / AGENT_COUNT as f32
+                };
+                // Its rings set off about its agents' middle, as the flock is in the lobby, where none are drawn, and as a
+                // shape, about where it stood.
+                let mut halo = middle(&swarm);
+                let mut arrived = None;
+                for frame in 0..72 * 12 {
+                    let before: Vec<Vec3> =
+                        swarm.agents.iter().map(|agent| agent.velocity).collect();
+                    swarm.step(1.0 / 72.0, None);
+                    // Never jolted: no agent's speed changes faster than its forces change it.
+                    for (agent, before) in swarm.agents.iter().zip(&before) {
+                        assert!(
+                            agent.velocity.distance(*before) <= 3.0 / 72.0 + 1e-4,
+                            "{mode:?} {distance}"
+                        );
+                    }
+                    let middle = middle(&swarm);
+                    // Its rings travel with its agents, never jumping, and come back about where it stands.
+                    let now = swarm.at(Vec3::ZERO);
+                    assert!(
+                        now.distance(halo) <= crate::glide::STREAM / 72.0 + 1e-4,
+                        "{mode:?} {distance}"
+                    );
+                    halo = now;
+                    if swarm.flying() {
+                        assert!(now.distance(middle) < 1e-4);
+                    }
+                    // It comes in rather than overshooting.
+                    let beyond = (middle - CENTER).dot(towards) - distance;
+                    assert!(beyond < 0.8, "{mode:?} {distance}: {beyond}");
+                    if !swarm.flying() && arrived.is_none() {
+                        arrived = Some(frame as f32 / 72.0);
+                    }
+                    // And, once it has come in, it rests there, as its flock wanders about where it stands, rather than
+                    // circling it.
+                    if frame > 72 * 7 {
+                        let off = middle.distance(there.position);
+                        assert!(off < 0.8, "{mode:?} {distance}: {off}");
+                    }
+                }
+                let arrived = arrived.expect("arrived");
+                assert!(arrived < 6.0, "{mode:?} {distance}: {arrived}");
+                assert_eq!(swarm.at(Vec3::ZERO), there.position);
+            }
         }
     }
 

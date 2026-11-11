@@ -8196,7 +8196,7 @@ mod tests {
         let walked = Vec3::new(2.5 - 132.0 / 72.0, 1.5, 1.0);
         assert!(place.position.distance(walked) < 0.05, "{place:?}");
         assert!(middle.distance(place.position) < 0.1);
-        // Rejoined from scratch, and left a third of a second into the flight: it turns back smoothly, to the lobby.
+        // Rejoined from scratch, and left half a second into the flight: it turns back smoothly, to the lobby.
         conversation.hold_back(None);
         assert!(conversation.hold_back(Some(LEAVE_HOLD)));
         let mut lobby_spot = Vec3::ZERO;
@@ -8210,13 +8210,21 @@ mod tests {
         }));
         conversation.take_actions();
         let home = crate::anchors::Anchor::from_pose(&home).unwrap().position;
+        let setting_off = agents_of(step.coordinator.swarm());
         let mut turned = lobby_spot;
-        for _ in 0..24 {
+        for _ in 0..36 {
             let (_, flying, middle) = frame(&mut step, &mut conversation);
             assert!(flying);
             turned = middle;
         }
-        assert!(turned.distance(lobby_spot) > 0.1, "{turned} {lobby_spot}");
+        // Its first cubes are well on their way, as the last set off.
+        let towards = (home - lobby_spot).normalize();
+        let leading = agents_of(step.coordinator.swarm())
+            .iter()
+            .zip(&setting_off)
+            .map(|(agent, before)| (*agent - *before).dot(towards))
+            .fold(0.0, f32::max);
+        assert!(leading > 0.2, "{leading}");
         conversation.hold_back(None);
         assert!(conversation.hold_back(Some(LEAVE_HOLD)));
         let mut nearest = f32::INFINITY;
@@ -8228,7 +8236,7 @@ mod tests {
         }
         // It turned back, getting little nearer the space's agent than it was as it left, as its way on was spent.
         let left = turned.distance(home);
-        assert!(nearest > left - 1.0, "{nearest} {left}");
+        assert!(nearest > left - 0.4, "{nearest} {left}");
         // Rejoined quickly, as the environment still shrinks away, it flies in again, and arrives.
         assert!(conversation.joined_space().is_none());
         conversation.join_space(SPACE);
