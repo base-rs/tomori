@@ -157,6 +157,40 @@ impl Shapes {
         self.polygon(&corners, color);
     }
 
+    /// A prism: the flat convex polygon `profile`, in order, carried `across`, with both its ends and its sides.
+    pub fn prism(&mut self, profile: &[Vec3], across: Vec3, color: Vec3) {
+        let mut profile = profile.to_vec();
+        if (profile[1] - profile[0])
+            .cross(profile[2] - profile[0])
+            .dot(across)
+            < 0.0
+        {
+            profile.reverse();
+        }
+        let far: Vec<Vec3> = profile.iter().map(|corner| *corner + across).collect();
+        let near: Vec<Vec3> = profile.iter().rev().copied().collect();
+        self.polygon(&near, color);
+        self.polygon(&far, color);
+        for side in 0..profile.len() {
+            let next = (side + 1) % profile.len();
+            self.polygon(&[profile[side], profile[next], far[next], far[side]], color);
+        }
+    }
+
+    /// A slab standing on `outline`, anticlockwise seen from above, up to `top`, a corner of it above each of the
+    /// outline's, smaller for a bevelled edge: its sloping sides and its top, without its base.
+    pub fn slab(&mut self, outline: &[Vec3], top: &[Vec3], color: Vec3) {
+        let sides = outline.len();
+        for side in 0..sides {
+            let next = (side + 1) % sides;
+            self.polygon(
+                &[outline[side], outline[next], top[next], top[side]],
+                color * 0.85,
+            );
+        }
+        self.polygon(top, color);
+    }
+
     /// What has been built, as a primitive drawn with material `material`.
     pub fn primitive(self, material: usize) -> Primitive {
         Primitive::new(self.positions, self.normals, self.indices)
@@ -197,5 +231,36 @@ mod tests {
                 .all(|color| (color.x - 1.0).abs() < 0.15 && color.w == 1.0)
         );
         assert!(primitive.colors.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn prisms_and_slabs_face_outwards_whichever_way_their_outline_runs() {
+        let square = [
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+        let middle = Vec3::new(0.5, 0.5, -0.5);
+        let reversed: Vec<Vec3> = square.iter().rev().copied().collect();
+        for profile in [&square[..], &reversed] {
+            let mut shapes = Shapes::new();
+            shapes.prism(profile, Vec3::Y, Vec3::ONE);
+            let prism = shapes.primitive(0);
+            // Both its ends and its four sides, each facing away from its middle.
+            assert_eq!(prism.indices.len() / 3, 12);
+            for (position, normal) in prism.positions.iter().zip(&prism.normals) {
+                assert!((*position - middle).dot(*normal) > 0.0);
+            }
+        }
+        // A slab's top faces up, and its sides out and up, its top smaller than its outline.
+        let mut shapes = Shapes::new();
+        let top = square
+            .map(|corner| corner + (Vec3::new(0.5, 0.0, -0.5) - corner) * 0.2 + Vec3::Y * 0.1);
+        shapes.slab(&square, &top, Vec3::ONE);
+        let slab = shapes.primitive(0);
+        assert_eq!(slab.indices.len() / 3, 10);
+        assert!(slab.normals.iter().all(|normal| normal.y > 0.0));
+        assert_eq!(*slab.normals.last().unwrap(), Vec3::Y);
     }
 }

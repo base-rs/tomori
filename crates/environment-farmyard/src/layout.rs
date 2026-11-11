@@ -76,8 +76,27 @@ pub const RAMP_FOOT: Vec3 = Vec3::new(-2.8, 0.0, -6.2);
 pub const RAMP_WIDTH: f32 = 0.42;
 /// The window in the coop's side towards the yard, `+X`: its least and greatest corners on that wall, `[z, y]`.
 pub const WINDOW: [[f32; 2]; 2] = [[-9.0, 0.85], [-8.2, 1.35]];
-/// The lantern hanging from the coop's eave, beside its door.
-pub const LANTERN: Vec3 = Vec3::new(-2.15, 1.75, -7.65);
+/// The lantern hanging beside the coop's door, the middle of its glass: from a bracket on the front wall, under the
+/// roof's overhang and clear of it.
+pub const LANTERN: Vec3 = Vec3::new(-2.18, 1.45, -7.67);
+/// The coop's two nest boxes, against its back wall, inside: each box's inside, from its back board to its front lip
+/// and between its sides, on the ground, room enough for a hen to walk in, stop and turn round.
+pub const NESTS: [Footprint; 2] = [
+    Footprint::new([-3.46, -9.315], [-2.98, -8.795]),
+    Footprint::new([-2.62, -9.315], [-2.14, -8.795]),
+];
+/// How thick a nest box's boards are, the top of its bottom, which a hen in it stands on, the top of its low front lip,
+/// and the top of its sides and back.
+pub const NEST_BOARD: f32 = 0.02;
+pub const NEST_FLOOR: f32 = COOP_FLOOR + 0.03;
+pub const NEST_LIP: f32 = NEST_FLOOR + 0.05;
+pub const NEST_WALLS: f32 = COOP_FLOOR + 0.3;
+/// The flat stones of the path from the gate towards the coop: how many, and how far each one's edge is bevelled in from
+/// its outline on the earth to its top.
+pub const STONES: u32 = 9;
+pub const STONE_BEVEL: f32 = 0.02;
+/// The highest a chicken stands while it is on the ground: on a stone of the path, but not up the coop's ramp.
+pub const ON_GROUND: f32 = 0.03;
 /// The lantern on the gate's post.
 pub const GATE_LANTERN: Vec3 = Vec3::new(1.0, 1.25, 1.6);
 
@@ -269,6 +288,123 @@ pub fn ramp() -> Footprint {
     Footprint::new([DOOR.x - half, DOOR.z], [RAMP_FOOT.x + half, RAMP_FOOT.z])
 }
 
+/// The height of the ramp's board where it is `z` along the yard, rising straight from the ground at its foot to the
+/// coop's floor at the door's sill: the ground's before its foot and the floor's beyond its sill.
+pub fn ramp_height(z: f32) -> f32 {
+    let up = (z - RAMP_FOOT.z) / (DOOR.z - RAMP_FOOT.z);
+    COOP_FLOOR * up.clamp(0.0, 1.0)
+}
+
+/// What a chicken's feet stand on at `point`, on the ground: up the ramp, its board; in the coop, its floor, or a nest
+/// box's bottom or front lip; on a stone of the path, its top, sloping down its bevel; and elsewhere, the ground.
+pub fn underfoot(point: Vec2) -> f32 {
+    if let Some(nest) = nest_height(point) {
+        return nest;
+    }
+    if ramp().contains(point) {
+        return ramp_height(point.y);
+    }
+    if COOP.contains(point) {
+        return COOP_FLOOR;
+    }
+    stones()
+        .iter()
+        .map(|stone| stone.height_at(point))
+        .fold(0.0, f32::max)
+}
+
+/// The top of a nest box's front lip or bottom at `point`, if it is over one: the lip along the front of its inside, and
+/// the bottom beneath the boards and the inside.
+pub fn nest_height(point: Vec2) -> Option<f32> {
+    NESTS.iter().find_map(|inside| {
+        let lip = Footprint::new(
+            [inside.low.x - NEST_BOARD, inside.high.y],
+            [inside.high.x + NEST_BOARD, inside.high.y + NEST_BOARD],
+        );
+        if lip.contains(point) {
+            Some(NEST_LIP)
+        } else {
+            inside
+                .grown(NEST_BOARD)
+                .contains(point)
+                .then_some(NEST_FLOOR)
+        }
+    })
+}
+
+/// A flat stone of the path, set in the earth: its outline on the ground, `[x, z]`, anticlockwise seen from above, and
+/// how high its top stands, its edge bevelled [`STONE_BEVEL`] in from its outline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stone {
+    pub outline: Vec<Vec2>,
+    pub height: f32,
+}
+
+impl Stone {
+    /// The middle of its outline.
+    pub fn middle(&self) -> Vec2 {
+        self.outline.iter().sum::<Vec2>() / self.outline.len() as f32
+    }
+
+    /// Its top's outline, [`STONE_BEVEL`] in from its outline towards its middle.
+    pub fn top(&self) -> Vec<Vec2> {
+        let middle = self.middle();
+        self.outline
+            .iter()
+            .map(|corner| *corner - (*corner - middle).normalize() * STONE_BEVEL)
+            .collect()
+    }
+
+    /// How high it stands at `point`: its height on its top, less down its bevel, and nothing beyond its outline.
+    pub fn height_at(&self, point: Vec2) -> f32 {
+        // How far in from its nearest edge `point` is, which is negative outside, as the outline is convex.
+        let inside = self
+            .outline
+            .iter()
+            .zip(self.outline.iter().cycle().skip(1))
+            .map(|(from, to)| {
+                let edge = (*to - *from).normalize();
+                // Anticlockwise seen from above, `[x, z]`, the inside is to the right of each edge.
+                -edge.perp_dot(point - *from)
+            })
+            .fold(f32::INFINITY, f32::min);
+        let bevel = STONE_BEVEL * (std::f32::consts::PI / self.outline.len() as f32).cos();
+        self.height * (inside / bevel).clamp(0.0, 1.0)
+    }
+}
+
+/// The path's stones, from inside the gate towards the coop and the feeder, each of six or seven sides, a little
+/// irregular, turned and set off the path's line a little, standing 8 to 20 mm proud of the earth, the same every time.
+pub fn stones() -> Vec<Stone> {
+    use crate::props::scatter;
+    (0..STONES)
+        .map(|stone| {
+            let seed = stone * 11 + 700;
+            let along = stone as f32;
+            let middle = Vec2::new(
+                -0.2 - along * 0.25 + (scatter(seed) - 0.5) * 0.06,
+                0.8 - along * 0.8 + (scatter(seed + 1) - 0.5) * 0.06,
+            );
+            let sides = 6 + u32::from(scatter(seed + 2) < 0.5);
+            let radius = 0.3 + scatter(seed + 3) * 0.05;
+            let turn = scatter(seed + 4) * std::f32::consts::TAU;
+            let outline = (0..sides)
+                .map(|side| {
+                    let angle = turn
+                        + (side as f32 + (scatter(seed + 5 + side) - 0.5) * 0.2) / sides as f32
+                            * std::f32::consts::TAU;
+                    let reach = radius * (0.9 + scatter(seed + 12 + side) * 0.1);
+                    middle + Vec2::new(angle.cos(), -angle.sin()) * reach
+                })
+                .collect();
+            Stone {
+                outline,
+                height: 0.008 + scatter(seed + 20) * 0.012,
+            }
+        })
+        .collect()
+}
+
 /// Where participants may land in the yard, inside the fence and clear of what stands in it, by a margin: the rectangles
 /// a teleport profile's surfaces are made of, at the ground's height.
 pub const WALKABLE: [Footprint; 6] = [
@@ -425,6 +561,66 @@ mod tests {
                 assert!(!footprint.overlaps(other), "{footprint:?} {other:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_path_s_stones_stand_a_little_proud_of_the_earth_apart_and_bevelled() {
+        let stones = stones();
+        assert_eq!(stones.len(), STONES as usize);
+        assert_eq!(stones, super::stones());
+        let mut heights = Vec::new();
+        for (index, stone) in stones.iter().enumerate() {
+            // Six or seven sides, convex, anticlockwise seen from above, inside the fence and clear of what stands in
+            // the yard.
+            let corners = stone.outline.len();
+            assert!((6..=7).contains(&corners));
+            for corner in 0..corners {
+                let [a, b, c] = [0, 1, 2].map(|step| stone.outline[(corner + step) % corners]);
+                assert!((b - a).perp_dot(c - b) < 0.0, "{index}");
+                assert!(FENCE.grown(-0.3).contains(a));
+                assert!(obstacles().iter().all(|obstacle| !obstacle.contains(a)));
+            }
+            // A centimetre or two proud, its top bevelled in from its edge, and standing on the ground beyond it.
+            assert!((0.008..=0.02).contains(&stone.height), "{}", stone.height);
+            heights.push(stone.height);
+            let middle = stone.middle();
+            assert_eq!(stone.height_at(middle), stone.height);
+            assert_eq!(underfoot(middle), stone.height);
+            let edge = stone.outline[0];
+            assert!(stone.height_at(edge) < 1e-4);
+            let partway = stone.height_at(edge.lerp(middle, 0.03));
+            assert!(partway > 0.0 && partway < stone.height);
+            let beyond = edge + (edge - middle).normalize() * 0.05;
+            assert_eq!(stone.height_at(beyond), 0.0);
+            for (corner, top) in stone.outline.iter().zip(stone.top()) {
+                let inset = corner.distance(middle) - top.distance(middle);
+                assert!((inset - STONE_BEVEL).abs() < 1e-5);
+            }
+            // None reaches another.
+            for other in &stones[index + 1..] {
+                let reach = |stone: &Stone| {
+                    let middle = stone.middle();
+                    stone
+                        .outline
+                        .iter()
+                        .map(|corner| corner.distance(middle))
+                        .fold(0.0, f32::max)
+                };
+                assert!(middle.distance(other.middle()) > reach(stone) + reach(other) + 0.05);
+            }
+        }
+        // Not all alike.
+        heights.sort_by(f32::total_cmp);
+        assert!(
+            heights[heights.len() - 1] - heights[0] > 0.004,
+            "{heights:?}"
+        );
+        // Elsewhere is the ground, and the ramp rises from it to the coop's floor.
+        assert_eq!(underfoot(Vec2::new(2.0, -3.0)), 0.0);
+        assert_eq!(ramp_height(RAMP_FOOT.z + 1.0), 0.0);
+        assert_eq!(ramp_height(DOOR.z - 1.0), COOP_FLOOR);
+        assert!((ramp_height((RAMP_FOOT.z + DOOR.z) * 0.5) - COOP_FLOOR * 0.5).abs() < 1e-6);
+        assert_eq!(underfoot(COOP.centre()), COOP_FLOOR);
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! The farmyard drawn on the shared test device, on lavapipe in CI: from home, looking into the yard at the coop, as a
 //! participant arriving sees it, and growing out of a point. `TOMORI_FARMYARD_PREVIEW`, set to a PNG path, saves the
 //! view from home, from beside the coop's window and of the workbench from the yard before it there, and the chickens
-//! beside it, with `-chickens` added to its name.
+//! beside it, with `-chickens` added to its name; `TOMORI_FARMYARD_COOP_PREVIEW` saves the coop by its ramp and in at its
+//! window, with hens on the ramp and in a nest, as `-1.png`, and the path's stones, as `-2.png`.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -474,6 +475,124 @@ fn the_backdrop_is_seen_from_the_arrival_and_the_workbench_its_water_moving() {
         let running = Farmyard::new(&target, &Coop::Built, Library::shared());
         assert_eq!(running.clock, Clock::Running);
         capture_sized(&device, &queue, &running, 4, arrival, picture());
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// Beside the coop's ramp, looking up it at the door, its lantern and the roof's overhang; in at the coop's window, at
+/// the nest boxes and the perch; and from inside the gate along the path's stones.
+fn coop_views() -> [(Vec3, Vec3); 3] {
+    [
+        (Vec3::new(-1.55, 1.15, -5.5), Vec3::new(-2.8, 0.75, -7.7)),
+        (Vec3::new(-1.4, 1.2, -8.45), Vec3::new(-3.0, 0.75, -8.85)),
+        (Vec3::new(0.4, 1.3, 1.1), Vec3::new(-1.4, 0.0, -3.0)),
+    ]
+}
+
+#[test]
+fn the_coop_s_ramp_nests_and_perch_and_the_path_s_stones_are_drawn() {
+    use tomori_environment_farmyard::behaviour::{Behaviour, Doing};
+    use tomori_environment_farmyard::controller::ChickenController;
+    use tomori_environment_farmyard::flock::{Hen, ROOSTS};
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let mut farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        // A hen halfway up the ramp, one on the second nest's bottom, as one goes in, and one on a stone of the path.
+        let chicken = tomori_environment_farmyard::chicken::Chicken::shared().unwrap();
+        let door = layout::DOOR - Vec3::Z * 0.15;
+        let stone = layout::stones()[5].middle();
+        let hens = [
+            (
+                layout::RAMP_FOOT,
+                std::f32::consts::PI,
+                Doing::Walk {
+                    to: door.to_array(),
+                },
+                false,
+            ),
+            (
+                Vec3::from(ROOSTS[1]),
+                std::f32::consts::PI,
+                Doing::Roost,
+                true,
+            ),
+            (
+                Vec3::new(stone.x, layout::underfoot(stone), stone.y),
+                2.0,
+                Doing::Stand,
+                false,
+            ),
+        ];
+        let walk = Behaviour {
+            since: 0,
+            at: layout::RAMP_FOOT.to_array(),
+            heading: std::f32::consts::PI,
+            doing: hens[0].2,
+        };
+        let halfway = walk.walk(&chicken, 1.0).unwrap();
+        let now = (halfway.walks + halfway.stops) / 2;
+        let chickens = hens
+            .iter()
+            .map(|(at, heading, doing, cone)| {
+                let hen = Hen {
+                    name: "Pip".into(),
+                    cone: *cone,
+                    pace: 1.0,
+                    behaviour: Behaviour {
+                        since: 0,
+                        at: at.to_array(),
+                        heading: *heading,
+                        doing: *doing,
+                    },
+                };
+                let mut controller = ChickenController::new(chicken.clone(), &hen);
+                controller.update(now);
+                controller.instance().clone()
+            })
+            .collect();
+        farmyard.animate(&device, &queue, &crate::client::Drawn { chickens });
+        let [ramp, window, path] =
+            coop_views().map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()));
+        if let Ok(path_to) = std::env::var("TOMORI_FARMYARD_COOP_PREVIEW") {
+            let (width, height) = PICTURE;
+            let mut sheet = image::RgbaImage::new(width, height * 2);
+            for (row, pixels) in [&ramp, &window].into_iter().enumerate() {
+                let view = image::RgbaImage::from_raw(width, height, pixels.clone()).unwrap();
+                image::imageops::replace(&mut sheet, &view, 0, i64::from(row as u32 * height));
+            }
+            sheet.save(path_to.replace(".png", "-1.png")).unwrap();
+            image::RgbaImage::from_raw(width, height, path.clone())
+                .unwrap()
+                .save(path_to.replace(".png", "-2.png"))
+                .unwrap();
+        }
+        // The path's stones stand out paler than the earth between them.
+        let view = coop_views()[2];
+        let stones = layout::stones();
+        for pair in stones[2..6].windows(2) {
+            let (a, b) = (pair[0].middle(), pair[1].middle());
+            let on = seen_at(view, Vec3::new(a.x, pair[0].height, a.y));
+            let between = seen_at(view, Vec3::new((a.x + b.x) * 0.5, 0.0, (a.y + b.y) * 0.5));
+            assert!(
+                about(&path, on) > about(&path, between) * 1.1,
+                "{} {}",
+                about(&path, on),
+                about(&path, between)
+            );
+        }
+        // The door, up the ramp, is lit warmly by the lantern beside it.
+        let lit = seen_at(coop_views()[0], layout::DOOR + Vec3::new(0.25, 0.2, 0.05));
+        assert!(about(&ramp, lit) > 120.0, "{}", about(&ramp, lit));
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

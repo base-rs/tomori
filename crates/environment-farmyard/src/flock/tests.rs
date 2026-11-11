@@ -49,7 +49,7 @@ fn chickens_wander_clear_of_the_yard_and_each_other_and_visit_the_coop_now_and_t
                 let here = flock.position(index, now);
                 roosted |= hen.behaviour.doing == Doing::Roost;
                 walked |= matches!(hen.behaviour.doing, Doing::Walk { .. });
-                if here.y < 0.01 && hen.behaviour.doing != Doing::Roost {
+                if here.y < layout::ON_GROUND && hen.behaviour.doing != Doing::Roost {
                     // On the ground, it is in the yard, clear of what stands there, but at the ramp's foot.
                     let point = Vec2::new(here.x, here.z);
                     assert!(AREA.grown(0.05).contains(point), "{space} {index} {point}");
@@ -63,7 +63,7 @@ fn chickens_wander_clear_of_the_yard_and_each_other_and_visit_the_coop_now_and_t
                     );
                     for other in (0..flock.hens().len()).filter(|other| *other != index) {
                         let there = flock.position(other, now);
-                        if there.y < 0.01 {
+                        if there.y < layout::ON_GROUND {
                             closest = closest.min(point.distance(Vec2::new(there.x, there.z)));
                         }
                     }
@@ -74,6 +74,119 @@ fn chickens_wander_clear_of_the_yard_and_each_other_and_visit_the_coop_now_and_t
         // Chickens pass near each other, but never through.
         assert!(closest > 0.15, "{space} {closest}");
     }
+}
+
+/// Each walk to `points` in turn, from `start`, each begun where the last stopped, as the flock begins them: where the
+/// chicken stops after each.
+fn walked(
+    chicken: &Chicken,
+    start: Behaviour,
+    points: &[[f32; 3]],
+) -> Vec<crate::behaviour::Placed> {
+    let mut behaviour = start;
+    let mut stops = Vec::new();
+    for to in points {
+        behaviour.doing = Doing::Walk { to: *to };
+        let end = behaviour.ends(chicken, 1.0).unwrap();
+        let placed = behaviour.place(chicken, 1.0, end);
+        stops.push(placed);
+        behaviour = Behaviour {
+            since: end,
+            at: placed.position.to_array(),
+            heading: placed.heading,
+            doing: Doing::Stand,
+        };
+    }
+    stops
+}
+
+#[test]
+fn a_hen_nests_inside_her_box_on_its_bottom_and_turns_round_in_it_clear_of_its_boards() {
+    let chicken = chicken();
+    let (start, end) = crate::chicken::seconds(crate::chicken::WALK);
+    let standing = crate::chicken::tests::walking(&chicken, start);
+    let walking: Vec<Vec3> = (0..=36)
+        .flat_map(|frame| {
+            crate::chicken::tests::walking(&chicken, start + (end - start) * frame as f32 / 36.0)
+        })
+        .collect();
+    // `points` of a chicken at `at`, facing `heading`.
+    let posed = |points: &[Vec3], at: Vec3, heading: f32| -> Vec<Vec3> {
+        let turn = glam::Quat::from_rotation_y(heading);
+        points.iter().map(|point| at + turn * *point).collect()
+    };
+    let turns: Vec<f32> = (0..36)
+        .map(|step| step as f32 / 36.0 * std::f32::consts::TAU)
+        .collect();
+    let approach = [
+        layout::RAMP_FOOT.x,
+        0.0,
+        layout::ramp().grown(CLEARANCE).high.y + 0.05,
+    ];
+    let door = (layout::DOOR - Vec3::Z * 0.15).to_array();
+    let board = layout::NEST_BOARD;
+    let mut checked = 0;
+    for (roost, inside) in layout::NESTS.iter().enumerate() {
+        let entry = ENTRIES[roost].unwrap();
+        // From about the yard, facing every way, as she sets off for the coop.
+        for (from, facing) in [
+            (Vec2::new(0.0, -6.0), 0.0),
+            (Vec2::new(-1.0, -4.0), 2.0),
+            (Vec2::new(2.0, -8.5), 4.0),
+            (Vec2::new(-3.6, -5.0), 1.0),
+            (Vec2::new(-1.3, -6.6), 5.0),
+        ] {
+            let start = Behaviour {
+                since: 0,
+                at: [from.x, layout::underfoot(from), from.y],
+                heading: facing,
+                doing: Doing::Stand,
+            };
+            let points = [
+                approach,
+                layout::RAMP_FOOT.to_array(),
+                door,
+                entry,
+                ROOSTS[roost],
+                entry,
+            ];
+            let stops = walked(&chicken, start, &points);
+            let (arrived, nested, left) = (stops[3], stops[4], stops[5]);
+            // On her box's bottom, standing and turning round, and as her last steps in end, she is all inside it,
+            // clear of its sides, back and lip, and above its bottom.
+            assert_eq!(nested.position.y, layout::NEST_FLOOR);
+            let inside_box = inside.grown(-0.005);
+            let mut within = |point: &Vec3| {
+                assert!(
+                    inside_box.contains(Vec2::new(point.x, point.z))
+                        && point.y >= layout::NEST_FLOOR - 0.002,
+                    "{roost} {from} {point} {nested:?}"
+                );
+                checked += 1;
+            };
+            for heading in &turns {
+                posed(&standing, nested.position, *heading)
+                    .iter()
+                    .for_each(&mut within);
+            }
+            posed(&walking, nested.position, nested.heading)
+                .iter()
+                .for_each(&mut within);
+            // In front of it, on the coop's floor, as she turns to walk in and to walk out, she is clear of its lip.
+            for stopped in [arrived, left] {
+                assert_eq!(stopped.position.y, layout::COOP_FLOOR);
+                for heading in &turns {
+                    for point in posed(&standing, stopped.position, *heading) {
+                        assert!(
+                            point.z > inside.high.y + board + 0.005,
+                            "{roost} {from} {point}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100_000, "{checked}");
 }
 
 #[test]
@@ -260,7 +373,7 @@ fn a_chicken_in_the_coop_or_on_its_ramp_cannot_be_pointed_at() {
     while now < 30 * 60_000 {
         flock.update(now);
         for index in 0..flock.hens().len() {
-            let up = flock.position(index, now).y > 0.01
+            let up = flock.position(index, now).y >= layout::ON_GROUND
                 || flock.hens()[index].behaviour.doing == Doing::Roost;
             if up
                 && flock
