@@ -271,6 +271,39 @@ fn five_exercise_stations_stand_beside_the_trail_each_on_its_clearing_with_its_e
         assert!((1.8..2.2).contains(&place.at.y));
     }
     assert!((1.5..=2.0).contains(&STATION_RADIUS));
+    // Nobody is told of as they arrive, come out through the gate or step off a pad: no station's radius reaches where
+    // participants arrive, the way out from the yard's earth to the loop, the gate's posts, or either pad.
+    let [inside, outside] = GATEWAY;
+    let mut untold = vec![Vec2::new(layout::ARRIVAL.x, layout::ARRIVAL.z)];
+    for step in 0..=20 {
+        let along = inside.lerp(outside, step as f32 / 20.0);
+        untold.extend([along - Vec2::X * HALF, along, along + Vec2::X * HALF]);
+    }
+    untold.extend(layout::GATE.map(|x| Vec2::new(x, FENCE.high.y)));
+    let pad = 0.5;
+    for centre in pads().map(|pad| Vec2::new(pad.centre.x, pad.centre.z)) {
+        untold.extend((0..12).map(|step| {
+            let yaw = step as f32 / 12.0 * std::f32::consts::TAU;
+            centre + Vec2::new(yaw.sin(), yaw.cos()) * pad
+        }));
+    }
+    for place in places.iter().filter(|place| place.kind == "station") {
+        assert_eq!(place.notify_within, Some(STATION_RADIUS));
+        let at = Vec2::new(place.at.x, place.at.z);
+        for point in &untold {
+            assert!(
+                at.distance(*point) > STATION_RADIUS + 0.3,
+                "{} {point}",
+                place.name
+            );
+        }
+    }
+    assert!(
+        places
+            .iter()
+            .filter(|place| place.kind == "viewpoint")
+            .all(|place| place.notify_within.is_none())
+    );
     // In order along the trail, spread round it, each at least 7 m from the last, and one by the lookout over the pool.
     let along = |at: usize| -> f32 {
         (0..at)

@@ -114,9 +114,9 @@ pub fn frame(index: usize) -> (Vec2, Vec2, Vec2) {
 const CLEARING_OFFSET: f32 = 1.0;
 pub const CLEARING: f32 = 0.85;
 
-/// How near a participant comes to a station's anchor to be at it: the radius its anchor is to be given, for the agent
-/// to be told as someone arrives, once anchors take one.
-pub const STATION_RADIUS: f32 = 2.0;
+/// How near, across the ground, a participant comes to a station's anchor for the agent to be told they are at it, as
+/// its anchor's `notify_within`: its clearing and the trail beside it, but not the arrival, the gate or a pad.
+pub const STATION_RADIUS: f32 = 1.8;
 
 /// An exercise station beside the trail: its anchor's name and its label, the exercise; the exercise on its plaque, in
 /// a few short lines; where along the trail it stands, as a point of [`centreline`], and on which side of it, outwards
@@ -166,7 +166,7 @@ pub const STATIONS: [Station; 5] = [
         plaque: ["Station 4", "10 lunges", "each side"],
         at: 34,
         side: 1.0,
-        along: -0.6,
+        along: 0.6,
     },
     Station {
         name: "station-5",
@@ -204,7 +204,8 @@ impl Station {
 }
 
 /// A place along the trail that is a named anchor: its name, kind and label, where its point is, and what it faces,
-/// so that whatever gathers there faces whoever stands on the trail.
+/// so that whatever gathers there faces whoever stands on the trail; and how near someone comes for the agent to be
+/// told, if it is told.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Place {
     pub name: &'static str,
@@ -212,6 +213,7 @@ pub struct Place {
     pub label: &'static str,
     pub at: Vec3,
     pub towards: Vec3,
+    pub notify_within: Option<f32>,
 }
 
 /// The room each of the trail's anchors gives what gathers there, as width, height and depth, so that one to eighteen
@@ -231,7 +233,8 @@ pub const VIEWPOINTS: [(&str, &str, usize); 2] = [
 ];
 
 /// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; and its stations,
-/// each beside its clearing, along the trail, opposite its post, facing the clearing, within [`STATION_RADIUS`] of it;
+/// each beside its clearing, along the trail, opposite its post, facing the clearing, telling the agent of whoever
+/// comes within [`STATION_RADIUS`] of it, its clearing and the trail beside it;
 /// the agent may go to any, and workers be placed at one, in its [`ROOM`].
 pub fn places() -> Vec<Place> {
     let raised = |point: Vec2, height: f32| Vec3::new(point.x, HEIGHT + height, point.y);
@@ -246,6 +249,7 @@ pub fn places() -> Vec<Place> {
                 label,
                 at: raised(point + outward * beyond, high),
                 towards: raised(point, high),
+                notify_within: None,
             }
         })
         .collect();
@@ -259,6 +263,7 @@ pub fn places() -> Vec<Place> {
             label: station.label,
             at: raised(clearing - along * station.along.signum() * beside, high),
             towards: raised(clearing, high),
+            notify_within: Some(STATION_RADIUS),
         }
     }));
     places

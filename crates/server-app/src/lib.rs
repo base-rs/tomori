@@ -57,21 +57,26 @@ pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
 /// The farmyard trail's named anchors: its viewpoints, `riverbank` and `pool-lookout`, of kind `viewpoint`, and its
 /// exercise stations, `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent
 /// can suggest a walk, go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
-/// A station's anchor stands beside its clearing, opposite its post, facing the clearing; once anchors take a radius, for the agent to be told as someone arrives, each station's is
-/// `trail::STATION_RADIUS`. See `tomori-environment-farmyard`'s `context/trail.md`.
+/// A station's anchor stands beside its clearing, opposite its post, facing the clearing, and tells the agent of whoever
+/// comes within `trail::STATION_RADIUS` of it, `notify_within`, its clearing and the trail beside it, but not where
+/// participants arrive, the gate or a pad. See `tomori-environment-farmyard`'s `context/trail.md`.
 pub fn farmyard_trail() -> Vec<tomori_protocol::cluster::Anchor> {
     use tomori_environment_farmyard::trail;
     trail::places()
         .into_iter()
         .map(|place| {
-            tomori_protocol::cluster::Anchor::new(
+            let anchor = tomori_protocol::cluster::Anchor::new(
                 place.name,
                 tomori_protocol::Pose::at(place.at.to_array())
                     .facing_towards(place.towards.to_array()),
             )
             .with_extent(trail::ROOM[0], trail::ROOM[1], trail::ROOM[2])
             .with_kind(place.kind)
-            .with_label(place.label)
+            .with_label(place.label);
+            match place.notify_within {
+                Some(metres) => anchor.notify_within(metres),
+                None => anchor,
+            }
         })
         .collect()
 }
@@ -252,6 +257,15 @@ mod tests {
                 ),
             ]
         );
+        // The stations tell the agent of whoever comes within their radius; the viewpoints tell it nothing.
+        let told: Vec<Option<f32>> = farmyard
+            .anchors()
+            .iter()
+            .filter(|anchor| !anchor.is_home())
+            .map(|anchor| anchor.notify_within)
+            .collect();
+        let radius = Some(trail::STATION_RADIUS);
+        assert_eq!(told, [None, None, radius, radius, radius, radius, radius]);
         // Every one is sent to a space: well within reach of home, where participants arrive, on each axis however the
         // arrival turns them, facing level, above the trail.
         let arrival = layout::ARRIVAL;
