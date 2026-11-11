@@ -35,7 +35,10 @@ fn placed(ear: [f32; 3], source: [f32; 3], gain: f32) -> f32 {
         position: ear,
         orientation: [0.0, 0.0, 0.0, 1.0],
     };
-    gain + MONO + decibels(spatial::place(&listener, source, 0.0, 48_000, true).gain[0])
+    gain + MONO
+        + decibels(
+            spatial::place(&listener, source, spatial::Falloff::AMBIENCE, 48_000, true).gain[0],
+        )
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {

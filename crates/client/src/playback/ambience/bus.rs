@@ -146,7 +146,8 @@ impl Voice {
         let mono = scene.mono || layout == Layout::Mono;
         let place = |position| match scene.listener {
             Some(listener) => {
-                let placed = spatial::place(&listener, position, 0.0, rate, mono);
+                let placed =
+                    spatial::place(&listener, position, spatial::Falloff::AMBIENCE, rate, mono);
                 let offset = std::array::from_fn::<f32, 3, _>(|axis| {
                     position[axis] - listener.position[axis]
                 });
