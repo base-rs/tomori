@@ -911,13 +911,31 @@ pub fn clusters() -> Vec<tomori_protocol::cluster::Cluster> {
         .collect()
 }
 
+/// The box within which a solid may stand in the way of `cluster`'s workers, one to eighteen of them: about every place
+/// each takes, clear by [`tomori_environment::sightlines::CLEAR`], and the eyes of whoever watches them; a solid beyond
+/// it neither stands within their clearance nor between them and those eyes.
+fn room(cluster: &tomori_protocol::cluster::Cluster) -> Solid {
+    use tomori_environment::sightlines::{CLEAR, MEMBERS};
+    let eyes = Vec3::from_array(cluster.audience());
+    let (low, high) = (1..=MEMBERS)
+        .flat_map(|count| cluster.slots(count))
+        .map(|slot| cluster.reach(&slot))
+        .fold((eyes, eyes), |(low, high), (least, most)| {
+            (
+                low.min(Vec3::from_array(least) - CLEAR),
+                high.max(Vec3::from_array(most) + CLEAR),
+            )
+        });
+    Solid::new(low.to_array(), high.to_array())
+}
+
 /// What a fern placed keeps apart from or clear of: what already stands there, the backdrop's plants, the pines, the
 /// river's stones, and the solids of the trail and the campsite, each as its footprint's middle and reach on the
 /// ground; the sightlines kept open; and the clusters of workers at the anchors, by their points.
 struct Context {
     there: Vec<(Vec2, f32)>,
     sights: Vec<([f32; 3], [f32; 3])>,
-    clusters: Vec<(Vec3, tomori_protocol::cluster::Cluster)>,
+    clusters: Vec<(Vec3, tomori_protocol::cluster::Cluster, Solid)>,
     /// Where anyone stands along the trail, and which of the ways round them the agent's spot beside them is taken by
     /// what stands there, and the tree ferns placed so far.
     standing: Vec<(Vec2, u64)>,
@@ -963,6 +981,10 @@ impl Context {
                 .chain([campsite::place()])
                 .map(|place| place.at)
                 .zip(clusters())
+                .map(|(at, cluster)| {
+                    let room = room(&cluster);
+                    (at, cluster, room)
+                })
                 .collect(),
         }
     }
@@ -1032,33 +1054,54 @@ pub fn taken(at: Vec2, solids: &[Solid]) -> u64 {
         })
         .collect();
     let mut taken = 0;
+    if near.is_empty() {
+        return taken;
+    }
     for way in 0..WAYS {
         let yaw = way as f32 / WAYS as f32 * TAU;
         let spot = at + Vec2::new(yaw.sin(), -yaw.cos()) * 2.0;
         let middle = Vec3::new(spot.x, eyes.y + 0.1, spot.y);
         let ahead = ((eyes - middle) * Vec3::new(1.0, 0.0, 1.0)).normalize();
         let across = Vec3::new(ahead.z, 0.0, -ahead.x);
-        let corners: Vec<Vec3> = (0..8)
-            .map(|index| {
-                let side = |bit: usize| if index & bit == 0 { -1.0 } else { 1.0 };
-                middle
-                    + across * half.x * side(1)
-                    + Vec3::Y * half.y * side(2)
-                    + ahead * half.z * side(4)
-            })
-            .collect();
-        let mut lines: Vec<(Vec3, Vec3)> = (0..8usize)
-            .flat_map(|from| [1, 2, 4].map(|bit| (from, from | bit)))
-            .filter(|(from, to)| from != to)
-            .map(|(from, to)| (corners[from], corners[to]))
-            .collect();
-        lines.extend((0..4).map(|from| (corners[from], corners[7 - from])));
-        lines.push((eyes, middle));
+        let corners: [Vec3; 8] = std::array::from_fn(|index| {
+            let side = |bit: usize| if index & bit == 0 { -1.0 } else { 1.0 };
+            middle
+                + across * half.x * side(1)
+                + Vec3::Y * half.y * side(2)
+                + ahead * half.z * side(4)
+        });
+        // Its box's twelve edges, its four diagonals and the sight of it from their eyes, all within the box about them,
+        // which a solid that meets any of them overlaps.
+        let edges = [
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 3),
+            (2, 6),
+            (3, 7),
+            (4, 5),
+            (4, 6),
+            (5, 7),
+            (6, 7),
+        ];
+        let lines: [(Vec3, Vec3); 17] = std::array::from_fn(|index| match index {
+            0..12 => (corners[edges[index].0], corners[edges[index].1]),
+            12..16 => (corners[index - 12], corners[7 - (index - 12)]),
+            _ => (eyes, middle),
+        });
+        let (low, high) = corners.iter().fold((eyes, eyes), |(low, high), corner| {
+            (low.min(*corner), high.max(*corner))
+        });
         let meets = |solid: &&Solid| {
-            solid.contains(middle.to_array())
-                || lines
-                    .iter()
-                    .any(|(from, to)| solid.blocks(from.to_array(), to.to_array()))
+            let overlaps =
+                (0..3).all(|axis| solid.low[axis] <= high[axis] && low[axis] <= solid.high[axis]);
+            overlaps
+                && (solid.contains(middle.to_array())
+                    || lines
+                        .iter()
+                        .any(|(from, to)| solid.blocks(from.to_array(), to.to_array())))
         };
         if near.iter().any(meets) {
             taken |= 1 << way;
@@ -1177,19 +1220,19 @@ fn judged(
     {
         return Err("sights");
     }
-    let rooms = context
-        .clusters
-        .iter()
-        .filter(|(at, _)| Vec2::new(at.x, at.z).distance(point) < 10.0);
-    if tree
-        && rooms.into_iter().any(|(_, cluster)| {
-            tomori_environment::sightlines::fits(cluster, trail::HEIGHT, &solids).is_err()
-        })
-    {
+    // Out of the anchors' rooms, for those it reaches into.
+    let overlaps = |solid: &Solid, room: &Solid| {
+        (0..3).all(|axis| solid.low[axis] <= room.high[axis] && room.low[axis] <= solid.high[axis])
+    };
+    let crowds = |(_, cluster, room): &(Vec3, tomori_protocol::cluster::Cluster, Solid)| {
+        solids.iter().any(|solid| overlaps(solid, room))
+            && tomori_environment::sightlines::fits(cluster, trail::HEIGHT, &solids).is_err()
+    };
+    if tree && context.clusters.iter().any(crowds) {
         return Err("rooms");
     }
     // Clear of every anchor's point by 0.4 m on the ground, or a metre below it, as the trail's posts and seat are.
-    let by_anchor = context.clusters.iter().any(|(at, _)| {
+    let by_anchor = context.clusters.iter().any(|(at, ..)| {
         let flat = Vec2::new(at.x, at.z);
         solids.iter().any(|solid| {
             let (low, high) = (
