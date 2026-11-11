@@ -426,37 +426,54 @@ pub const BACKDROP_CENTRE: Vec2 = Vec2::new(0.0, -4.0);
 /// The way the waterfall lies from [`BACKDROP_CENTRE`], as a yaw from −Z towards +X: behind the coop, a little to
 /// its right as participants arrive, so that they see it over the back fence as they come in.
 pub const WATERFALL_AZIMUTH: f32 = -7.5 * std::f32::consts::PI / 180.0;
-/// How far from [`BACKDROP_CENTRE`] the waterfall's cliff rises, from its foot to its lip, and how high its top
-/// stands.
-pub const CLIFF: [f32; 2] = [23.5, 25.0];
+/// How far from [`BACKDROP_CENTRE`] the waterfall's cliff rises, from its foot to its lip, two of the foothills' rings,
+/// and how high its top stands.
+pub const CLIFF: [f32; 2] = [22.0, 23.5];
 pub const CLIFF_TOP: f32 = 6.5;
 /// Where the waterfall's water leaves the lip of its cliff, and where it meets its pool.
-pub const WATERFALL_LIP: Vec3 = Vec3::new(-3.263, CLIFF_TOP, -28.786);
-pub const WATERFALL_FOOT: Vec3 = Vec3::new(-3.067, POOL.y, -27.299);
+pub const WATERFALL_LIP: Vec3 = Vec3::new(-3.067, CLIFF_TOP, -27.299);
+pub const WATERFALL_FOOT: Vec3 = Vec3::new(-2.872, POOL.y, -25.812);
 /// The middle of the waterfall's fall, where a sound of it would come from.
-pub const WATERFALL: Vec3 = Vec3::new(-3.165, (CLIFF_TOP + POOL.y) * 0.5, -28.04);
-/// The middle of the pool at the waterfall's foot, at its water's level, and how wide it is to its shore: low enough that
-/// its banks rise above it all round, as the pasture between it and the yard does.
-pub const POOL: Vec3 = Vec3::new(-2.741, 0.6, -24.821);
+pub const WATERFALL: Vec3 = Vec3::new(-2.9695, (CLIFF_TOP + POOL.y) * 0.5, -26.5555);
+/// The middle of the pool at the waterfall's foot, at its water's level, and how wide it is to its shore: sunk below the
+/// land all round it, and below the trail, in a hollow at the cliff's foot.
+pub const POOL: Vec3 = Vec3::new(-2.545, -0.3, -23.333);
 pub const POOL_RADIUS: f32 = 4.0;
 /// The river, from the pool downstream, its middle at its water's level: out over the pool's lip towards the yard, then
-/// round its right side, 11 m beyond the fence, and away into the foothills to the front right, behind a spur.
+/// round its right side, 11 m beyond the fence, and away into the foothills to the front right, behind a spur; running
+/// downhill all the way in its channel, below the trail and the land either side.
 pub const RIVER: [Vec3; 13] = [
     POOL,
     // Where it leaves the pool, beyond the pool's water, a little below it, and down a short run to the next.
-    Vec3::new(-0.084, 0.58, -20.824),
-    Vec3::new(2.6, 0.3, -19.6),
-    Vec3::new(6.6, 0.26, -18.8),
-    Vec3::new(10.4, 0.23, -16.6),
-    Vec3::new(13.6, 0.21, -12.8),
-    Vec3::new(15.4, 0.19, -7.8),
-    Vec3::new(16.0, 0.17, -2.8),
-    Vec3::new(15.3, 0.16, 2.2),
-    Vec3::new(15.9, 0.15, 7.0),
-    Vec3::new(18.4, 0.14, 11.6),
-    Vec3::new(23.5, 0.13, 12.5),
-    Vec3::new(28.5, 0.12, 10.0),
+    Vec3::new(0.112, -0.32, -19.337),
+    Vec3::new(2.6, -0.42, -19.6),
+    Vec3::new(6.6, -0.47, -18.8),
+    Vec3::new(10.4, -0.51, -16.6),
+    Vec3::new(13.6, -0.55, -12.8),
+    Vec3::new(15.4, -0.58, -7.8),
+    Vec3::new(16.0, -0.61, -2.8),
+    Vec3::new(15.3, -0.64, 2.2),
+    Vec3::new(15.9, -0.67, 7.0),
+    Vec3::new(18.4, -0.7, 11.6),
+    Vec3::new(23.5, -0.73, 12.5),
+    Vec3::new(28.5, -0.76, 10.0),
 ];
+/// The waterfall rock: a boulder in the pool in front of the waterfall, a little to its right as one faces it from the
+/// yard, close enough to feel its spray and clear of its fall and its mist: the middle of its flat top, where one
+/// stands, half a metre above the water; how far its top reaches from there, and how far its sides at their widest,
+/// at the water; and how far below the water its foot stands, on the pool's basin.
+pub const WATERFALL_ROCK: Vec3 = Vec3::new(-1.045, POOL.y + 0.5, -23.43);
+pub const ROCK_TOP: f32 = 0.6;
+pub const ROCK_REACH: f32 = 0.9;
+pub const ROCK_FOOT: f32 = POOL.y - 0.3;
+
+/// The river's far bank seen from `from`, by its point `point`: 2 m beyond its middle, away from `from`, 0.3 m above its
+/// water, on the far shore rising out of it, which is what is seen of a river in its channel from afar.
+pub fn far_bank(point: Vec3, from: Vec2) -> Vec3 {
+    let away = (Vec2::new(point.x, point.z) - from).normalize() * 2.0;
+    Vec3::new(point.x + away.x, point.y + 0.3, point.z + away.y)
+}
+
 /// How far the river's water reaches either side of its middle, to its shingle.
 pub const RIVER_HALF_WIDTH: f32 = 1.2;
 /// The patches of native bush beyond the fence, `(middle, radius)` on the ground: in the gully by the waterfall, behind

@@ -30,6 +30,20 @@ fn eyes() -> Vec<Vec3> {
         .collect()
 }
 
+/// From the eyes of one standing on the waterfall rock, which is 8 m beyond the trail's reach of the backdrop's middle,
+/// `position` is within the far plane, or else one of the foothills' outer rings across the yard from it, which the
+/// far plane cuts off, 46 m and more away, deep in the haze.
+fn beyond_from_the_rock(position: Vec3) {
+    let rock = layout::WATERFALL_ROCK + Vec3::Y * tomori_environment::sightlines::EYES;
+    let distance = rock.distance(position);
+    if distance >= FAR - 2.0 {
+        let at = Vec2::new(position.x, position.z) - BACKDROP_CENTRE;
+        let towards = Vec2::new(rock.x, rock.z) - BACKDROP_CENTRE;
+        assert!(at.length() > 26.0 && at.dot(towards) < 0.0, "{position}");
+        assert!(distance > 46.0);
+    }
+}
+
 /// How far `point` is from the trail's middle, on the ground.
 fn from_trail(point: Vec2) -> f32 {
     let line = trail::centreline();
@@ -67,14 +81,42 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
             beyond_fence(Vec2::new(position.x, position.z)) > 2.5,
             "{position}"
         );
-        let radius = Vec2::new(position.x, position.z).distance(BACKDROP_CENTRE);
+        let at = Vec2::new(position.x, position.z);
+        let radius = at.distance(BACKDROP_CENTRE);
         if radius < RINGS[0] + 0.01 {
-            assert_eq!(position.y, 0.0);
+            assert_eq!(position.y, MEADOW);
         }
-        assert!(position.y >= 0.0, "{position}");
+        // Below the meadow only in the river's valley and the pool's hollow.
+        if position.y < MEADOW {
+            assert!(
+                layout::nearest_river(at).1 < 8.0
+                    || at.distance(Vec2::new(POOL.x, POOL.z)) < RIM[3],
+                "{position}"
+            );
+        }
         for eye in &eyes {
             assert!(eye.distance(*position) < FAR - 2.0, "{eye} {position}");
         }
+        beyond_from_the_rock(*position);
+    }
+    // The yard's meadow, a flat polygon, reaches the foothills' first ring, corner for corner, so that the two meet
+    // without a step or a gap, and goes no further, so that it never covers the river's channel.
+    let yard = props::model();
+    let positions: Vec<Vec3> = yard
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .flat_map(|primitive| primitive.positions.iter().copied())
+        .collect();
+    for corner in meadow() {
+        assert!(
+            ground.positions.contains(&corner) && positions.contains(&corner),
+            "{corner}"
+        );
+        assert_eq!(corner.y, MEADOW);
+    }
+    for position in positions.iter().filter(|position| position.y == MEADOW) {
+        assert!(Vec2::new(position.x, position.z).distance(BACKDROP_CENTRE) < RINGS[0] + 1e-3);
     }
     // Inside the first ring is the meadow, level.
     assert_eq!(super::ground(BACKDROP_CENTRE), 0.0);
@@ -94,6 +136,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
                 "{plant:?}"
             );
         }
+        beyond_from_the_rock(plant.at + Vec3::Y * height);
         // Nor on the trail, beyond the fence, where participants walk.
         assert!(from_trail(at) > reach + trail::HALF, "{plant:?}");
         for walkable in layout::WALKABLE {
@@ -136,7 +179,7 @@ fn the_waterfall_the_pool_and_the_river_are_seen_from_where_participants_arrive_
         .collect();
     let plants = plants();
     let views = views();
-    assert_eq!(views.len(), 9);
+    assert_eq!(views.len(), 12);
     for (from, to) in &views {
         let (from, to) = (Vec3::from_array(*from), Vec3::from_array(*to));
         // Nothing in the yard, no plant and no pine stands in the way.
@@ -174,7 +217,7 @@ fn the_waterfall_the_pool_and_the_river_are_seen_from_where_participants_arrive_
         }
     }
     // Something standing in a view, beyond the fence, would block it, so that nothing may stand there.
-    let within = Vec3::from_array(views[4].0).lerp(Vec3::from_array(views[4].1), 0.75);
+    let within = Vec3::from_array(views[3].0).lerp(Vec3::from_array(views[3].1), 0.75);
     let within = Vec2::new(within.x, within.z);
     assert!(!layout::FENCE.grown(3.0).contains(within));
     assert!(!open(within, 0.5, 4.0));
@@ -201,8 +244,10 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
             super::ground(Vec2::new(between.x, between.z)) < between.y - 0.05,
             "{between}"
         );
-        assert!(pair[1].y > 0.05);
+        // Below the trail and the yard, in its channel.
+        assert!(pair[1].y < trail::HEIGHT - 0.3, "{pair:?}");
     }
+    const { assert!(POOL.y < trail::HEIGHT - 0.25) };
     // Its banks rise out of it either side within its water's spread.
     for point in &RIVER[2..] {
         let (nearest, distance) = layout::nearest_river(Vec2::new(point.x, point.z));
@@ -256,7 +301,8 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
         assert!(by_waterfall(at).0 < layout::CLIFF[1] - 0.25);
     }
     for point in water.iter().filter(|point| point.kind == SURFACE) {
-        assert!(point.position.y <= POOL.y + 0.03 && point.position.y > 0.05);
+        // At the pool's level or below, in the channel below the trail.
+        assert!(point.position.y <= POOL.y + 0.03);
         assert!(point.flow.y >= 0.0);
     }
 }
@@ -404,9 +450,9 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 21 thousand triangles, which the scenery draws in ten draws: the foothills, one for each
-    // kind of plant with all its instances, the river's stones, all instances of one, the trail, the water and the
-    // ranges; and the stations' plaques, five small draws of text.
+    // Under the budget, about 21 thousand triangles, which the scenery draws in eleven draws: the foothills, one for each
+    // kind of plant with all its instances, the river's stones, all instances of one, the waterfall rock, the trail, the
+    // water and the ranges; and the stations' plaques, five small draws of text.
     let triangles = Triangles::counted();
     assert_eq!(
         triangles,
@@ -415,13 +461,14 @@ fn the_backdrop_is_modest_for_the_quest() {
             plants: 15_222,
             ranges: 1184,
             water: 197,
-            stones: 810,
+            stones: 765,
+            rock: 40,
             trail: 1144,
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 21_437);
-    assert_eq!(stones().len(), 54);
+    assert_eq!(triangles.total(), 21_432);
+    assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances.
     for (kind, count) in [
@@ -649,5 +696,169 @@ fn the_river_s_stones_lie_along_its_banks_in_its_shallows_and_about_the_pool_the
             (-STONE_BOTTOM - 1e-4..=STONE_TOP + 1e-4).contains(&position.y),
             "{position}"
         );
+    }
+}
+
+#[test]
+fn the_river_and_the_pool_lie_in_a_channel_below_their_banks_the_trail_and_the_yard() {
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let spread = RIVER_HALF_WIDTH + SPREAD;
+    // The water nearest `at`: the river's, or the pool's about its rim.
+    let water = |at: Vec2| {
+        let (nearest, _) = layout::nearest_river(at);
+        if at.distance(pool) < RIM[3] + 2.0 {
+            nearest.y.max(POOL.y)
+        } else {
+            nearest.y
+        }
+    };
+    // Everywhere beyond the water's spread, the ground as it is drawn stands at least 0.25 m above the water nearest it,
+    // a quarter of a metre apart over the whole backdrop, so that the water lies in its channel and its hollow, and
+    // would stay there.
+    let mut sampled = 0;
+    for x in -160..160 {
+        for z in -180..140 {
+            let at = Vec2::new(x as f32 * 0.25, z as f32 * 0.25);
+            let Some(drawn) = drawn_ground(at) else {
+                continue;
+            };
+            if layout::nearest_river(at).1 < spread || at.distance(pool) < POOL_RADIUS + 0.6 {
+                continue;
+            }
+            sampled += 1;
+            assert!(drawn > water(at) + 0.25, "{at} {drawn}");
+        }
+    }
+    assert!(sampled > 40_000, "{sampled}");
+    // Its banks' tops, either side of the river beyond the pool where its water's spread ends, stand from 0.3 m to a
+    // metre above it, varying along it; and its bed lies below it.
+    let line = layout::river_line(8);
+    let mut tops = Vec::new();
+    for (index, middle) in line.iter().enumerate() {
+        let at = Vec2::new(middle.x, middle.z);
+        if at.distance(pool) < RIM[2] {
+            continue;
+        }
+        assert!(drawn_ground(at).unwrap() < middle.y - 0.05, "{middle}");
+        let before = line[index.saturating_sub(1)];
+        let after = line[(index + 1).min(line.len() - 1)];
+        let across = Vec2::new(after.x - before.x, after.z - before.z)
+            .normalize()
+            .perp();
+        for side in [-1.0, 1.0] {
+            let edge = at + across * side * spread;
+            // Where a bend brings another reach nearer, that reach's.
+            if layout::nearest_river(edge).1 < spread - 0.05 {
+                continue;
+            }
+            let top = drawn_ground(edge).unwrap() - middle.y;
+            assert!((0.3..1.0).contains(&top), "{edge} {top}");
+            tops.push(top);
+        }
+    }
+    assert!(tops.len() > 120, "{}", tops.len());
+    let least = tops.iter().copied().fold(f32::INFINITY, f32::min);
+    let most = tops.iter().copied().fold(0.0, f32::max);
+    assert!(most - least > 0.25, "{least} {most}");
+    const { assert!(LIP >= 0.4 && LIP + RISE <= 0.8) };
+    // The pool's rim stands above its water all round, but where the river leaves it.
+    for step in 0..96 {
+        let yaw = step as f32 / 96.0 * TAU;
+        let rim = pool + Vec2::new(yaw.sin(), yaw.cos()) * (POOL_RADIUS + 0.6);
+        if layout::nearest_river(rim).1 > BANKS[2] {
+            assert!(drawn_ground(rim).unwrap() > POOL.y + 0.3, "{rim}");
+        }
+    }
+    // The trail and the yard stand above the water, 0.3 m and more wherever the trail passes the river, by the pool's
+    // lip, and 0.4 m and more beside the river beyond it, so that it walks the higher ground beside it.
+    for point in trail::centreline() {
+        let (nearest, distance) = layout::nearest_river(point);
+        if distance < 10.0 {
+            assert!(trail::HEIGHT - nearest.y > 0.3, "{point} {nearest}");
+        }
+        if distance < 10.0 && nearest.y < RIVER[2].y {
+            assert!(trail::HEIGHT - nearest.y > 0.4, "{point} {nearest}");
+        }
+    }
+    assert!(RIVER.iter().all(|point| point.y < trail::HEIGHT - 0.25));
+}
+
+#[test]
+fn the_waterfall_rock_stands_in_the_pool_before_the_fall_flat_topped_out_of_the_water_and_the_spray()
+ {
+    let rock = rock();
+    let primitive = &rock.meshes[0].primitives[0];
+    let middle = layout::WATERFALL_ROCK;
+    let flat = |at: Vec3| Vec2::new(at.x, at.z);
+    // Every corner within its reach of its middle, none above its top, its foot below the water, which hides the rest.
+    for position in &primitive.positions {
+        assert!(flat(*position).distance(flat(middle)) <= layout::ROCK_REACH + 1e-4);
+        assert!(position.y <= middle.y + 1e-6 && position.y > layout::ROCK_FOOT);
+    }
+    let lowest = primitive
+        .positions
+        .iter()
+        .map(|position| position.y)
+        .fold(f32::INFINITY, f32::min);
+    assert!(lowest < POOL.y - 0.05, "{lowest}");
+    // Its top flat at its height, facing up, from its middle out to at least half a metre all round, where one stands.
+    let top: Vec<[Vec3; 3]> = primitive
+        .indices
+        .chunks(3)
+        .map(|triangle| {
+            triangle
+                .iter()
+                .map(|index| primitive.positions[*index as usize])
+        })
+        .map(|mut corners| [(); 3].map(|_| corners.next().unwrap()))
+        .filter(|corners| {
+            corners
+                .iter()
+                .all(|corner| (corner.y - middle.y).abs() < 1e-6)
+        })
+        .collect();
+    assert_eq!(top.len(), ROCK_SIDES);
+    for corners in &top {
+        let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+        assert!(normal.y > 0.0);
+        for corner in corners {
+            let reach = flat(*corner).distance(flat(middle));
+            assert!(reach < 1e-6 || reach > 0.5, "{corner}");
+        }
+    }
+    assert_eq!(primitive.indices.len() / 3, 40);
+    // Half a metre above the pool, in its water, on its basin, clear of its shore.
+    assert!((middle.y - POOL.y - 0.5).abs() < 1e-6);
+    let pool = Vec2::new(POOL.x, POOL.z);
+    assert!(flat(middle).distance(pool) + layout::ROCK_REACH < POOL_RADIUS - 1.0);
+    assert!(super::ground(flat(middle)) < layout::ROCK_FOOT + 0.06);
+    // In front of the fall, within 3.2 m of its foot, close enough to feel its spray, and clear of its water by half a
+    // metre and its mist by 30 cm.
+    let foot = flat(layout::WATERFALL_FOOT);
+    assert!(flat(middle).distance(foot) < 3.2);
+    let (along, across) = by_waterfall(flat(middle));
+    assert!(
+        along < layout::CLIFF[0] - 2.0 && across > 1.0,
+        "{along} {across}"
+    );
+    for point in water() {
+        let at = flat(point.position);
+        let clear = match point.kind {
+            FALLING => 0.5,
+            MIST => 0.3,
+            _ => continue,
+        };
+        assert!(
+            at.distance(flat(middle)) > layout::ROCK_REACH + clear,
+            "{point:?}"
+        );
+    }
+    // Out of every view the backdrop keeps open, but the lookout's of it.
+    let solid = Solid::new(
+        [middle.x - 0.9, layout::ROCK_FOOT, middle.z - 0.9],
+        [middle.x + 0.9, middle.y, middle.z + 0.9],
+    );
+    for (from, to) in views() {
+        assert!(!solid.blocks(from, to), "{to:?}");
     }
 }

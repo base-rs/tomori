@@ -29,7 +29,7 @@ fn help_and_unknown_arguments_fail_with_the_usage() {
         // It lists the environments Tomori's own server registers, in the order it offers them.
         assert!(
             error.ends_with(
-                "\n\nEnvironments, offered in this order, the first by default:\n  sky                  Sky, version 1.\n  minimal              Grid, version 1.\n  farmyard             Farmyard, version 5.\n"
+                "\n\nEnvironments, offered in this order, the first by default:\n  sky                  Sky, version 1.\n  minimal              Grid, version 1.\n  farmyard             Farmyard, version 6.\n"
             ),
             "{error}"
         );
@@ -114,7 +114,7 @@ fn sigterm_shuts_the_server_down_in_order() {
         [
             ("sky".to_owned(), "Sky".to_owned(), 1),
             ("minimal".to_owned(), "Grid".to_owned(), 1),
-            ("farmyard".to_owned(), "Farmyard".to_owned(), 5)
+            ("farmyard".to_owned(), "Farmyard".to_owned(), 6)
         ]
     );
     drop(client);

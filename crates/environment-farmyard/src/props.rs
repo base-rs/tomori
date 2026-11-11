@@ -413,8 +413,14 @@ fn noticeboard(shapes: &mut Shapes) {
 pub fn model() -> Model {
     let mut shapes = Shapes::new();
     let mut glass = Shapes::new();
-    // The meadow, reaching to the trees and beyond, and the packed earth inside the fence, a little above it.
-    shapes.disc(Vec3::new(0.0, -0.01, -4.0), 70.0, 28, palette::GRASS);
+    // The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
+    // open, and the packed earth inside the fence, a little above it.
+    crate::backdrop::facing(
+        &mut shapes,
+        &crate::backdrop::meadow(),
+        Vec3::Y,
+        palette::GRASS,
+    );
     let fence = layout::FENCE;
     shapes.polygon(
         &[

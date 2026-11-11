@@ -304,6 +304,8 @@ fn five_exercise_stations_stand_beside_the_trail_each_on_its_clearing_with_its_e
             centre + Vec2::new(yaw.sin(), yaw.cos()) * pad
         }));
     }
+    // Nor arriving on the waterfall rock or back at the lookout from it.
+    untold.extend(targets().map(|target| Vec2::new(target.arrival.x, target.arrival.z)));
     for place in places.iter().filter(|place| place.kind == "station") {
         assert_eq!(place.notify_within, Some(STATION_RADIUS));
         let at = Vec2::new(place.at.x, place.at.z);
@@ -372,6 +374,7 @@ fn its_posts_and_seat_keep_the_backdrop_s_views_open_and_its_places_have_room() 
         [
             "riverbank",
             "pool-lookout",
+            "waterfall-rock",
             "station-1",
             "station-2",
             "station-3",
@@ -589,4 +592,60 @@ fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_t
     }
     // Some ways would stand it in a tree fern or a pine, but for these.
     assert!(met > 0);
+}
+
+#[test]
+fn pointing_at_the_waterfall_rock_or_the_lookout_s_seat_takes_one_onto_it_facing_the_fall_or_back_facing_the_pool()
+ {
+    let flat = |at: Vec3| Vec2::new(at.x, at.z);
+    let level = |at: Vec3| Vec3::new(at.x, 0.0, at.z).normalize();
+    let [rock, back] = targets();
+    let top = layout::WATERFALL_ROCK;
+    // The rock: pointed at within its reach, from its foot on the pool's basin to its top, which one arrives on the
+    // middle of, facing the waterfall.
+    assert_eq!(
+        (rock.name, rock.arrival, rock.radius),
+        ("Waterfall rock", top, layout::ROCK_REACH)
+    );
+    assert_eq!(flat(rock.foot), flat(top));
+    assert!((rock.foot.y + rock.height - top.y).abs() < 1e-6);
+    assert!(rock.foot.y < POOL.y && rock.height < 1.0);
+    assert!(rock.facing.y == 0.0 && level(rock.facing).dot(level(layout::WATERFALL - top)) > 0.999);
+    // The way back: the lookout's seat, pointed at about the whole log, one arriving on the trail before it, beyond its
+    // reach, facing the pool.
+    let (middle, along, length, radius) = seat();
+    assert_eq!((back.name, back.foot), ("Pool lookout", middle));
+    for end in [-0.5, 0.5] {
+        let at = flat(middle) + along * length * end;
+        assert!(at.distance(flat(middle)) + 0.04 < back.radius);
+    }
+    assert!(back.height > radius * 2.0 + 0.05);
+    let arrival = flat(back.arrival);
+    assert!(arrival.distance(flat(middle)) > back.radius + 0.2);
+    assert_eq!(back.arrival.y, HEIGHT);
+    let line = centreline();
+    let on = (0..line.len()).any(|index| {
+        let (from, to) = (line[index], line[(index + 1) % line.len()]);
+        let t = ((arrival - from).dot(to - from) / (to - from).length_squared()).clamp(0.0, 1.0);
+        arrival.distance(from.lerp(to, t)) < 0.1
+    });
+    assert!(on, "{arrival}");
+    assert!(back.facing.y == 0.0 && level(back.facing).dot(level(POOL - back.arrival)) > 0.999);
+    // The rock's anchor stands beside it towards the lookout, behind one standing on it facing the fall, a little above
+    // their head, facing the rock.
+    let places = places();
+    let place = places
+        .iter()
+        .find(|place| place.name == "waterfall-rock")
+        .unwrap();
+    assert_eq!(
+        (place.kind, place.label),
+        ("viewpoint", "The waterfall rock")
+    );
+    let away = flat(place.at) - flat(top);
+    assert!((away.length() - 1.6).abs() < 1e-4);
+    assert!(away.normalize().dot(flat(level(layout::WATERFALL - top))) < -0.5);
+    assert!((place.at.y - top.y - 1.8).abs() < 1e-5);
+    assert_eq!(place.towards, top + Vec3::Y * 1.8);
+    assert_eq!(place.notify_within, None);
 }

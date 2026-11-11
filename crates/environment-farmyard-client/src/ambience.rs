@@ -112,8 +112,9 @@ fn with(found: &[(&str, &str)]) -> Ambience {
             .filter(move |(sound, _)| *sound == name)
             .map(|(_, place)| place.to_array())
     };
-    // The river runs from the pool at the waterfall's foot, round the yard's right side.
-    let river: Vec<[f32; 3]> = at("pool").chain(at("river")).collect();
+    // The river runs from where it leaves the pool, over its lip, round the yard's right side; the pool itself is still,
+    // and the waterfall is what is heard there.
+    let river: Vec<[f32; 3]> = at("river").collect();
     let canopy: Vec<[f32; 3]> = at("bush").map(|[x, y, z]| [x, y + CANOPY, z]).collect();
     let birds = |names: &[&str], every: [u64; 2]| {
         Call::new(names.iter().map(|name| slot(name)).collect())

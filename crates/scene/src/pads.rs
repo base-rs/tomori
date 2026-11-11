@@ -1,16 +1,17 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Teleport pads, as a profile declares them in pairs (see [`crate::locomotion::Pad`]): stepping onto one, which
+//! Teleport pads, as a profile declares them in pairs (see [`crate::locomotion::Pad`]), and teleport targets, objects
+//! that take a participant who points at them there (see [`crate::locomotion::Target`]): stepping onto a pad, which
 //! counts once the participant has stood on it for [`DWELL`] and disarms the pad they arrive on until they step off
-//! it; pointing at one, which the frame step lets the trigger or A choose; the label naming where it goes; and what the
+//! it; pointing at either, which the frame step lets the trigger or A choose; the label naming where it goes; and what the
 //! renderer draws of each. Pure, so that it is tested without a device; [`crate::locomotion::Travel`] moves the rig.
 //! See `design/locomotion.md`.
 use glam::{Vec2, Vec3};
 
 use crate::{
     controller_ui::Sheet,
-    locomotion::{Locomotion, Pad, REACH},
+    locomotion::{Locomotion, Pad, REACH, Target},
     pointing::Ray,
     projection::Controls,
 };
@@ -44,6 +45,29 @@ impl Key {
             pair: self.pair,
             end: self.end ^ 1,
         }
+    }
+}
+
+/// What the ray may choose to travel by: a pad among a profile's pairs, which takes a participant to its partner, or a
+/// target, by its index among [`Locomotion::targets`], which takes them to itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Way {
+    Pad(Key),
+    Target(usize),
+}
+
+/// Where `way` takes a participant among `locomotion`'s pads and targets, the room's floor at its height, and which way
+/// they face there, if it says; `None` for a way that is not among them.
+pub(crate) fn destination(locomotion: &Locomotion, way: Way) -> Option<(Vec3, Option<f32>)> {
+    match way {
+        Way::Pad(key) => {
+            let pairs: Vec<&[Pad; 2]> = locomotion.pads().collect();
+            lookup(&pairs, key.partner()).map(|partner| (partner.centre(), partner.yaw()))
+        }
+        Way::Target(index) => locomotion
+            .targets()
+            .nth(index)
+            .map(|target| (target.arrival(), target.yaw())),
     }
 }
 
@@ -155,6 +179,48 @@ pub(crate) fn pick(locomotion: &Locomotion, ray: &Ray) -> Option<(Key, f32, Vec3
     (!locomotion.surface_crossed(ray, distance - 0.01)).then(|| (key, distance, ray.at(distance)))
 }
 
+/// The pad or target `ray` points at among `locomotion`'s, how far along it and where: the nearest, as [`pick`] finds
+/// a pad and a target's upright cylinder is met from outside it, within [`REACH`] of the ray's origin horizontally,
+/// unless a declared surface crosses the ray first. A target the ray starts over, as one stands on, is not pointed at,
+/// since it would take them nowhere.
+pub(crate) fn point(locomotion: &Locomotion, ray: &Ray) -> Option<(Way, f32, Vec3)> {
+    let pad = pick(locomotion, ray).map(|(key, distance, at)| (Way::Pad(key), distance, at));
+    let target = locomotion
+        .targets()
+        .enumerate()
+        .filter(|(_, target)| !target.over(ray.origin))
+        .filter_map(|(index, target)| aimed(target, ray).map(|distance| (index, distance)))
+        .filter(|(_, distance)| {
+            let point = ray.at(*distance);
+            Vec2::new(point.x - ray.origin.x, point.z - ray.origin.z).length() <= REACH
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .filter(|(_, distance)| !locomotion.surface_crossed(ray, distance - 0.01))
+        .map(|(index, distance)| (Way::Target(index), distance, ray.at(distance)));
+    [pad, target]
+        .into_iter()
+        .flatten()
+        .min_by(|(_, a, _), (_, b, _)| a.total_cmp(b))
+}
+
+/// How far along `ray` it meets `target`'s upright cylinder, from outside it: its side, or its top from above.
+fn aimed(target: &Target, ray: &Ray) -> Option<f32> {
+    let (foot, radius) = (target.foot(), target.radius());
+    let (bottom, top) = (foot.y, foot.y + target.height());
+    let offset = Vec2::new(ray.origin.x - foot.x, ray.origin.z - foot.z);
+    let across = Vec2::new(ray.direction.x, ray.direction.z);
+    let a = across.length_squared();
+    let b = offset.dot(across);
+    let c = offset.length_squared() - radius * radius;
+    let side = (a > f32::EPSILON && c > 0.0 && b * b - a * c >= 0.0)
+        .then(|| (-b - (b * b - a * c).sqrt()) / a)
+        .filter(|distance| *distance >= 0.0 && (bottom..=top).contains(&ray.at(*distance).y));
+    let onto = (ray.origin.y > top && ray.direction.y < 0.0)
+        .then(|| (top - ray.origin.y) / ray.direction.y)
+        .filter(|distance| target.over(ray.at(*distance)));
+    side.or(onto)
+}
+
 /// How far along `ray` it meets `pad`'s column, from outside it, or its disc, from within the column above it.
 fn meets(pad: &Pad, ray: &Ray) -> Option<f32> {
     let (centre, radius) = (pad.centre(), pad.radius());
@@ -190,9 +256,7 @@ pub(crate) fn label(
     viewer: Vec3,
     controls: Controls,
 ) -> Option<Sheet> {
-    use crate::projection::{HIGHLIGHT, LABEL_COLUMNS, LABEL_PIXEL};
-    use crate::transcript::{BRIGHT, TEXT};
-    use crate::ui_text::{Row, Span, Style, cut};
+    use crate::projection::LABEL_COLUMNS;
     let pair = pairs.get(key.pair)?;
     // A pad of the pair, `end` 0 or 1, has the other as its partner.
     let (from, to) = (pair.get(key.end)?, &pair[key.end ^ 1]);
@@ -206,6 +270,43 @@ pub(crate) fn label(
         ),
         None => crate::ui_text::clip(name, LABEL_COLUMNS),
     };
+    Some(sheet(destination, at, viewer, controls))
+}
+
+/// The label beside whatever `way` names among `locomotion`'s, pointed at `at`, facing `viewer`: a pad's, as [`label`]
+/// gives it, or a target's, which names it, or Teleport, and how to go with `controls`.
+pub(crate) fn label_for(
+    locomotion: &Locomotion,
+    way: Way,
+    at: Vec3,
+    viewer: Vec3,
+    controls: Controls,
+) -> Option<Sheet> {
+    match way {
+        Way::Pad(key) => {
+            let pairs: Vec<&[Pad; 2]> = locomotion.pads().collect();
+            label(&pairs, key, at, viewer, controls)
+        }
+        Way::Target(index) => {
+            let target = locomotion.targets().nth(index)?;
+            Some(sheet(
+                crate::ui_text::clip(
+                    target.name().unwrap_or("Teleport"),
+                    crate::projection::LABEL_COLUMNS,
+                ),
+                at,
+                viewer,
+                controls,
+            ))
+        }
+    }
+}
+
+/// A label saying `destination` and how to go with `controls`, beside `at`, facing `viewer`.
+fn sheet(destination: String, at: Vec3, viewer: Vec3, controls: Controls) -> Sheet {
+    use crate::projection::{HIGHLIGHT, LABEL_COLUMNS, LABEL_PIXEL};
+    use crate::transcript::{BRIGHT, TEXT};
+    use crate::ui_text::{Row, Span, Style, cut};
     let control = match controls {
         Controls::Controllers => "Trigger",
         Controls::Keyboard => "Click",
@@ -225,14 +326,23 @@ pub(crate) fn label(
     ];
     let towards = (viewer - at).try_normalize().unwrap_or(Vec3::Z);
     let (_, height) = canvas.size();
-    Some(Sheet {
+    Sheet {
         model: Some(crate::recording::facing(
             at + towards * 0.08 + Vec3::Y * (height / 2.0 + 0.03),
             viewer,
             1.0,
         )),
         canvas: Some(crate::frame_timing::drawn(canvas)),
-    })
+    }
+}
+
+/// Where a ring is drawn while `way` is pointed at: where a target takes the participant, as the ring where a teleport
+/// would land is; nothing for a pad, which is drawn itself.
+pub(crate) fn ring(locomotion: &Locomotion, way: Option<Way>) -> Option<Vec3> {
+    match way? {
+        Way::Pad(_) => None,
+        target @ Way::Target(_) => destination(locomotion, target).map(|(arrival, _)| arrival),
+    }
 }
 
 /// Whether `to` stands a storey above `from`, `Some(true)`, below it, `Some(false)`, or about level with it.
@@ -269,8 +379,13 @@ impl Shown {
     }
 }
 
-/// Every pad of `locomotion`'s that a participant may use, as drawn, with `highlighted` pointed at.
-pub(crate) fn shown(locomotion: &Locomotion, highlighted: Option<Key>) -> Vec<Shown> {
+/// Every pad of `locomotion`'s that a participant may use, as drawn, with the one `pointed` names highlighted. Targets
+/// are the environment's to draw.
+pub(crate) fn shown(locomotion: &Locomotion, pointed: Option<Way>) -> Vec<Shown> {
+    let highlighted = match pointed {
+        Some(Way::Pad(key)) => Some(key),
+        _ => None,
+    };
     let pairs: Vec<&[Pad; 2]> = locomotion.pads().collect();
     keyed(&pairs)
         .map(|(key, pad)| Shown {
@@ -531,7 +646,7 @@ mod tests {
 
     #[test]
     fn every_pad_is_shown_with_which_way_it_goes_and_the_one_pointed_at_highlighted() {
-        let shown = shown(&storeys(), Some(RACKS));
+        let shown = shown(&storeys(), Some(Way::Pad(RACKS)));
         assert_eq!(shown.len(), 4);
         assert_eq!(
             shown[0],
@@ -623,6 +738,126 @@ mod tests {
         assert_eq!(pick(&storeys, &below), None);
         let above = ray(Vec3::new(0.0, 7.0, -3.0), deck + Vec3::Y * 0.3);
         assert_eq!(pick(&storeys, &above).unwrap().0, DECK);
+    }
+
+    /// The floor of [`storeys`], its pads, and a rock standing in a pool sunk into it, 6 m ahead, its top 0.4 m above the
+    /// floor, and a stone just behind the floor's pad that takes a participant back onto the floor beside it.
+    fn pool() -> Locomotion {
+        storeys().with_targets([
+            Target::object(Vec3::new(0.0, -0.6, -6.0), 0.8, 1.0).named("Rock"),
+            Target::object(Vec3::new(0.0, 0.0, 1.2), 0.25, 1.0).arriving(Vec3::new(1.0, 0.0, 1.2)),
+        ])
+    }
+
+    #[test]
+    fn the_ray_points_at_a_target_s_side_or_top_from_outside_it_and_the_nearer_of_a_target_and_a_pad()
+     {
+        let pool = pool();
+        let eye = Vec3::new(0.0, 1.6, 0.5);
+        // Its side, between its foot and its top, as the ray meets it first.
+        let (way, distance, at) = point(&pool, &ray(eye, Vec3::new(0.0, 0.0, -5.2))).unwrap();
+        assert_eq!(way, Way::Target(0));
+        assert!((at.z + 5.2).abs() < 1e-4 && (distance - eye.distance(at)).abs() < 1e-4);
+        // Its top, from above, over it; past its top, beside it, or from below its foot, nothing.
+        let (way, _, at) = point(&pool, &ray(eye, Vec3::new(0.3, 0.4, -6.2))).unwrap();
+        assert_eq!(way, Way::Target(0));
+        assert!((at.y - 0.4).abs() < 1e-4, "{at}");
+        let up = Ray::new(Vec3::new(0.0, -3.0, -1.0), Vec3::new(0.0, 0.5, -1.0)).unwrap();
+        for nothing in [
+            ray(eye, Vec3::new(0.0, 0.5, -8.0)),
+            ray(eye, Vec3::new(2.0, 0.0, -6.0)),
+            Ray::new(Vec3::new(0.0, 2.0, -3.0), Vec3::Y).unwrap(),
+            up,
+        ] {
+            assert_eq!(point(&pool, &nothing), None, "{nothing:?}");
+        }
+        // From over it, as one standing on it points, nothing of it, at its top or its side.
+        let standing = Vec3::new(0.2, 1.9, -6.0);
+        assert_eq!(
+            point(&pool, &ray(standing, Vec3::new(0.0, 0.4, -6.0))),
+            None
+        );
+        // The nearer of a pad and a target, either way round.
+        let towards = ray(Vec3::new(0.0, 0.5, -1.5), Vec3::new(0.0, 0.4, 0.0));
+        assert_eq!(point(&pool, &towards).unwrap().0, Way::Pad(FLOOR));
+        let from = ray(Vec3::new(0.0, 0.8, 3.0), Vec3::new(0.0, 0.3, 0.0));
+        assert_eq!(point(&pool, &from).unwrap().0, Way::Target(1));
+        // Beyond 15 m horizontally, or behind a surface it crosses first, nothing.
+        let far = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 40.0)])
+            .with_targets([Target::object(Vec3::new(0.0, 0.0, -18.0), 1.0, 2.0)]);
+        assert_eq!(
+            point(
+                &far,
+                &ray(Vec3::new(0.0, 1.5, 0.0), Vec3::new(0.0, 1.0, -17.0))
+            ),
+            None
+        );
+        let under = Locomotion::teleport(vec![
+            Surface::disc(Vec3::ZERO, 40.0),
+            Surface::rectangle(Vec3::new(0.0, 1.0, -4.0), Vec2::new(4.0, 4.0)),
+        ])
+        .with_targets([Target::object(Vec3::new(0.0, 0.0, -4.0), 0.5, 0.5)]);
+        assert_eq!(
+            point(
+                &under,
+                &ray(Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, 0.4, -4.0))
+            ),
+            None
+        );
+        assert_eq!(point(&Locomotion::None, &ray(eye, Vec3::ZERO)), None);
+    }
+
+    #[test]
+    fn a_target_s_label_names_it_and_its_ring_stands_where_it_takes_the_participant() {
+        let pool = pool();
+        let viewer = Vec3::new(0.0, 1.6, 3.0);
+        let text = |way: Way, controls: Controls| {
+            label_for(&pool, way, Vec3::new(0.0, 0.4, -5.2), viewer, controls)
+                .map(|sheet| sheet.canvas.unwrap().plain())
+        };
+        assert!(
+            text(Way::Target(0), Controls::Controllers)
+                .unwrap()
+                .starts_with("Rock\n")
+        );
+        assert!(
+            text(Way::Target(0), Controls::Keyboard)
+                .unwrap()
+                .contains("Click  go")
+        );
+        assert!(
+            text(Way::Target(1), Controls::Controllers)
+                .unwrap()
+                .starts_with("Teleport\n")
+        );
+        assert!(
+            text(Way::Pad(FLOOR), Controls::Controllers)
+                .unwrap()
+                .starts_with("Racks ↓")
+        );
+        assert_eq!(text(Way::Target(2), Controls::Controllers), None);
+        // Its ring, where it takes them; a pad's is itself, and nothing pointed at, nothing.
+        let top = Vec3::new(0.0, 0.4, -6.0);
+        assert!(ring(&pool, Some(Way::Target(0))).unwrap().distance(top) < 1e-5);
+        assert_eq!(
+            ring(&pool, Some(Way::Target(1))),
+            Some(Vec3::new(1.0, 0.0, 1.2))
+        );
+        assert_eq!(ring(&pool, Some(Way::Pad(FLOOR))), None);
+        assert_eq!(ring(&pool, None), None);
+        assert_eq!(ring(&pool, Some(Way::Target(5))), None);
+        // Where each goes, and the pads drawn, the target pointed at highlighting none.
+        assert_eq!(
+            destination(&pool, Way::Pad(FLOOR)).unwrap().0,
+            Vec3::new(4.0, -4.5, 0.0)
+        );
+        let (arrival, yaw) = destination(&pool, Way::Target(0)).unwrap();
+        assert!(arrival.distance(top) < 1e-5 && yaw.is_none());
+        assert!(
+            shown(&pool, Some(Way::Target(0)))
+                .iter()
+                .all(|pad| !pad.highlighted)
+        );
     }
 
     #[test]

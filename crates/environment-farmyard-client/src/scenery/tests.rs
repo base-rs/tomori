@@ -727,3 +727,111 @@ fn the_trail_is_drawn_round_the_fence_by_the_river_its_plaques_read() {
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }
+
+/// Where the river and the waterfall rock are seen from, as `(eye, target)`: on the trail at the riverbank, looking
+/// down into the river's channel beyond its bank; and at the lookout, looking over the pool at the rock before the
+/// waterfall.
+fn river_rock_views() -> [(Vec3, Vec3); 2] {
+    let (riverbank, _, _) = trail::frame(trail::VIEWPOINTS[0].2);
+    let (lookout, _, _) = trail::frame(trail::VIEWPOINTS[1].2);
+    [
+        (
+            Vec3::new(riverbank.x, 1.6, riverbank.y),
+            layout::RIVER[6].lerp(layout::RIVER[7], 0.3),
+        ),
+        (
+            Vec3::new(lookout.x, 1.6, lookout.y),
+            layout::WATERFALL_ROCK + Vec3::Y * 0.6,
+        ),
+    ]
+}
+
+#[test]
+fn the_river_lies_in_its_channel_below_the_trail_and_the_waterfall_rock_stands_in_the_pool_before_the_fall()
+ {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        let views = river_rock_views();
+        let pictures: Vec<Vec<u8>> = views
+            .into_iter()
+            .map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()))
+            .collect();
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_RIVER_ROCK_PREVIEW") {
+            for (index, pixels) in pictures.iter().enumerate() {
+                let picture =
+                    image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone()).unwrap();
+                picture
+                    .save(path.replace(".png", &format!("-{}.png", index + 1)))
+                    .unwrap();
+            }
+        }
+        let within = |at: (f32, f32)| {
+            assert!(
+                (0.05..0.95).contains(&at.0) && (0.05..0.95).contains(&at.1),
+                "{at:?}"
+            );
+            at
+        };
+        // The average colour about `at` in `pixels`, red, green and blue.
+        let tint = |pixels: &[u8], at: (f32, f32)| {
+            let (x, y) = (
+                (at.0 * PICTURE.0 as f32) as i32,
+                (at.1 * PICTURE.1 as f32) as i32,
+            );
+            let mut sum = Vec3::ZERO;
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    let index = (((y + dy) as u32 * PICTURE.0 + (x + dx) as u32) * 4) as usize;
+                    sum += Vec3::new(
+                        f32::from(pixels[index]),
+                        f32::from(pixels[index + 1]),
+                        f32::from(pixels[index + 2]),
+                    );
+                }
+            }
+            sum / 25.0
+        };
+        // From the trail, the river's water is drawn in its channel, blue, between the grey shingle of its banks,
+        // below the green meadow the trail is on.
+        let water = layout::RIVER[6].lerp(layout::RIVER[7], 0.3);
+        let (from, _) = views[0];
+        let away = ((water - from) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+        let flat = |at: Vec3| glam::Vec2::new(at.x, at.z);
+        let on = |at: Vec3| {
+            let ground =
+                tomori_environment_farmyard::backdrop::drawn_ground(flat(at)).unwrap_or(0.0);
+            Vec3::new(at.x, ground, at.z)
+        };
+        let river = tint(&pictures[0], within(seen_at(views[0], water)));
+        let banks = [water - away * 2.6, water + away * 2.6]
+            .map(|bank| tint(&pictures[0], within(seen_at(views[0], on(bank)))));
+        let meadow = tint(
+            &pictures[0],
+            within(seen_at(views[0], on(water - away * 4.6))),
+        );
+        assert!(river.z > river.x + 18.0, "{river}");
+        for bank in banks {
+            assert!(bank.z < bank.x + 18.0 && bank.y < bank.x + 8.0, "{bank}");
+        }
+        assert!(meadow.y > meadow.x + 10.0, "{meadow}");
+        // From the lookout, the rock is drawn in the pool, its flat top paler than the pool's water beside it.
+        let rock = layout::WATERFALL_ROCK;
+        let top = tint(&pictures[1], within(seen_at(views[1], rock)));
+        let beside = rock + Vec3::new(-1.6, -0.5, 0.4);
+        let pool = tint(&pictures[1], within(seen_at(views[1], beside)));
+        assert!(pool.z > pool.x + 18.0 && pool.y > pool.x + 12.0, "{pool}");
+        assert!(top.x > pool.x * 1.5 && top.y < top.x + 10.0, "{top} {pool}");
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}

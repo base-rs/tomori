@@ -17,7 +17,7 @@
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 5, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 6, "Farmyard"));
 //! ```
 pub mod backdrop;
 pub mod behaviour;
@@ -41,8 +41,10 @@ pub const ID: &str = "farmyard";
 /// gained an arrival of its own, 3 when its wall moved onto the notice board, which an earlier client does not draw, 4
 /// when the agent's home moved to the workbench, which an earlier client does not draw either, and 5 when it gained the
 /// trail round the outside of the fence, whose stations and viewpoints are anchors the agent and its workers may go to,
-/// which an earlier client neither draws nor lets anyone walk.
-pub const VERSION: u32 = 5;
+/// which an earlier client neither draws nor lets anyone walk, and 6 when the river and the pool sank into a channel and
+/// the waterfall came 1.5 m nearer, with a rock in its pool and an anchor beside it, which an earlier client would show
+/// over its pool where it no longer is.
+pub const VERSION: u32 = 6;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

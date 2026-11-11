@@ -509,7 +509,7 @@ pub struct Step {
     /// The pulls of the trigger on teleport pads, with the thresholds that choose an arrival object, and the pad the ray
     /// pointed at last frame, which a pull begun on it, or A, chooses. See `design/locomotion.md`.
     pad_selector: crate::client_side::Selector,
-    pointed_pad: Option<crate::pads::Key>,
+    pointed_pad: Option<crate::pads::Way>,
     /// The pulls of the trigger on choosable rows of an environment's lists, with the same thresholds, a pull begun on
     /// one choosing it once pressed there. See `design/panel-actions.md`.
     row_selector: crate::client_side::Selector,
@@ -1254,7 +1254,10 @@ impl Step {
         let pad_name = self
             .pointed_pad
             .filter(|_| rung == precedence::Trigger::Pad)
-            .map(|key| format!("{}/{}", key.pair, key.end));
+            .map(|way| match way {
+                crate::pads::Way::Pad(key) => format!("{}/{}", key.pair, key.end),
+                crate::pads::Way::Target(index) => format!("target/{index}"),
+            });
         let others = self.selector.holds() || self.row_selector.holds();
         let pulled = matches!(
             self.pad_selector.update_beside(
@@ -1419,7 +1422,7 @@ impl Step {
         let pad_met = senses
             .ray
             .filter(|_| travel_active && !travel.aiming && !self.projector.carrying())
-            .and_then(|ray| crate::pads::pick(&locomotion, &ray));
+            .and_then(|ray| crate::pads::point(&locomotion, &ray));
         // A list's choosable row pointed at last frame is marked where A or the trigger would choose it for this
         // participant, and the row just chosen for as long as the label says so.
         self.projector.mark_rows(crate::projection::RowMarks {
@@ -1795,12 +1798,11 @@ impl Step {
         }
         // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
         self.pointed_panel = panel.clone().filter(|_| self.projector.held().is_none());
-        // The label beside a teleport pad pointed at says where it goes.
-        let pairs: Vec<_> = locomotion.pads().collect();
-        projection.extend(pad.and_then(|(key, _, point)| {
-            crate::pads::label(
-                &pairs,
-                key,
+        // The label beside a teleport pad or target pointed at says where it goes.
+        projection.extend(pad.and_then(|(way, _, point)| {
+            crate::pads::label_for(
+                &locomotion,
+                way,
                 point,
                 senses.viewer.unwrap_or(arrival::HOME),
                 self.controls,
@@ -2043,7 +2045,9 @@ impl Step {
             cards: board.sheets,
             projection,
             images,
-            landing: travel.landing,
+            landing: travel.landing.or_else(|| {
+                crate::pads::ring(&locomotion, self.pointed_pad).filter(|_| in_space_shown && grown)
+            }),
             blink: travel.blink,
             pads: if in_space_shown && grown {
                 crate::pads::shown(&locomotion, self.pointed_pad)
@@ -4635,6 +4639,110 @@ mod tests {
         );
         step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
         assert_eq!(step.rig(&conversation), rig);
+    }
+
+    #[test]
+    fn a_target_pointed_at_shows_where_it_takes_the_participant_and_the_trigger_or_a_takes_them_there()
+     {
+        use crate::locomotion::{Locomotion, Surface, Target};
+        let profile = Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))])
+            .with_targets([
+                Target::object(Vec3::new(0.0, -0.6, -6.0), 0.8, 1.0)
+                    .named("Rock")
+                    .facing(Vec3::X),
+                Target::object(Vec3::new(2.0, 0.0, -1.0), 0.3, 1.0)
+                    .arriving(Vec3::new(1.0, 0.0, -1.0))
+                    .named("Shore"),
+            ]);
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(crate::test_support::SKY, profile)]);
+        conversation.apply(space(|_| {}));
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let rock = Vec3::new(0.0, 0.2, -5.2);
+        // Before the scenery has grown in, nothing is pointed at and no ring is drawn.
+        let senses = on_pads(&mut step, &conversation, rock, 0.0);
+        let growing = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(growing.landing, None);
+        let away = on_pads(&mut step, &conversation, Vec3::new(5.0, 1.6, -2.0), 0.0);
+        for _ in 0..400 {
+            step.update(&away, &mut conversation, &mut feedback, now, FRAME);
+        }
+        // Pointed at, the ring stands on its top, where it takes them, the label names it, the ray ends on it and it
+        // ticks; Tomori draws no pad for it.
+        let later = now + Duration::from_secs(5);
+        felt_on(&mut feedback, Side::Right, later);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, later, FRAME);
+        assert!(frame.pads.is_empty());
+        assert!(frame.landing.unwrap().distance(Vec3::new(0.0, 0.4, -6.0)) < 1e-5);
+        let labels: Vec<String> = frame
+            .projection
+            .iter()
+            .map(|sheet| sheet.canvas.as_deref().unwrap().plain())
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.starts_with("Rock\n") && label.contains("Trigger  go")),
+            "{labels:?}"
+        );
+        let beam = frame
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.hit && (beam.end.z + 5.2).abs() < 1e-3, "{}", beam.end);
+        assert!(
+            !felt_on(&mut feedback, Side::Right, later).is_empty(),
+            "it ticks"
+        );
+        earcons(&mut feedback);
+        // The trigger takes them onto its top, blinking and clicking, facing the way it says, without attracting.
+        let senses = on_pads(&mut step, &conversation, rock, 1.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(!frame.attracting);
+        assert_eq!(frame.blink, 1.0);
+        assert_eq!(earcons(&mut feedback), [Earcon::Choose]);
+        let rig = step.rig(&conversation);
+        assert!((rig.floor() - 0.4).abs() < 1e-5);
+        let head = rig.matrix().transform_point3(arrival::HOME);
+        assert!(head.distance(Vec3::new(0.0, 2.0, -6.0)) < 1e-4, "{head}");
+        let facing = rig.matrix().transform_vector3(Vec3::NEG_Z);
+        assert!(facing.distance(Vec3::X) < 1e-4, "{facing}");
+        // Standing on it, pointing down at it points at nothing: it would take them nowhere.
+        for _ in 0..3 {
+            let senses = on_pads(&mut step, &conversation, Vec3::new(0.0, 0.0, -0.3), 0.0);
+            let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            assert_eq!(frame.landing, None);
+        }
+        // A, pointing at the shore's stone, takes them back to the floor beside it, facing as they faced.
+        let stone = rig
+            .matrix()
+            .inverse()
+            .transform_point3(Vec3::new(2.0, 0.5, -1.0));
+        let senses = on_pads(&mut step, &conversation, stone, 0.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(frame.landing, Some(Vec3::new(1.0, 0.0, -1.0)));
+        step.buttons(
+            &press(|buttons| buttons.a = true),
+            true,
+            &mut conversation,
+            &mut feedback,
+            now,
+        );
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(frame.blink, 1.0);
+        let rig = step.rig(&conversation);
+        assert_eq!(rig.floor(), 0.0);
+        let head = rig.matrix().transform_point3(arrival::HOME);
+        assert!(head.distance(Vec3::new(1.0, 1.6, -1.0)) < 1e-4, "{head}");
+        assert!(
+            rig.matrix()
+                .transform_vector3(Vec3::NEG_Z)
+                .distance(Vec3::X)
+                < 1e-4
+        );
     }
 
     #[test]
