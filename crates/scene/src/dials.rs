@@ -431,9 +431,11 @@ fn centred(count: usize, room: &Room, above: bool, per_row: usize, size: f32) ->
 type Places = Vec<(Vec3, f32)>;
 
 /// A dial shown, by its timer's name: the timer as last sent, where it is placed and stands now, how large it is drawn,
-/// how long it has stood and has been leaving, how long it has pulsed for, and the whole seconds its pill last counted.
+/// how long it has stood and has been leaving, how long it has pulsed for, the whole seconds its pill last counted, and
+/// whether its face counts a minute, as for a firing within a minute of when the dial first saw it.
 struct Shown {
     timer: Timer,
+    minute: bool,
     place: Vec3,
     at: Vec3,
     scale: f32,
@@ -581,6 +583,9 @@ impl Dials {
                     shown.place = place;
                     shown.scale = scale;
                     if !same(&shown.timer, timer) {
+                        if shown.timer.next != timer.next {
+                            shown.minute = within_a_minute(timer.next, now);
+                        }
                         shown.timer = timer.clone();
                         shown.timer.name = name.to_owned();
                         shown.counted = None;
@@ -591,6 +596,7 @@ impl Dials {
                     timer.name = name.to_owned();
                     self.shown.push(Shown {
                         pulse: None,
+                        minute: within_a_minute(timer.next, now),
                         timer,
                         place,
                         at: place,
@@ -706,10 +712,19 @@ fn same(shown: &Timer, timer: &Timer) -> bool {
 }
 
 /// How much of a dial's face its sector fills at `now` for a firing at `next`: the minutes left of an hour, full from an
-/// hour on, or with nothing to count down to, so that it fills smoothly across the hour.
-pub fn fill(next: Option<u64>, now: f64) -> f32 {
+/// hour on, or with nothing to count down to, so that it fills smoothly across the hour; or, where its face counts a
+/// `minute`, the seconds left of a minute, so that a timer set seconds ahead drains across the whole face.
+pub fn fill(next: Option<u64>, now: f64, minute: bool) -> f32 {
     let Some(next) = next else { return 1.0 };
-    ((next as f64 - now).max(0.0) / 3600.0).min(1.0) as f32
+    let span = if minute { 60.0 } else { 3600.0 };
+    ((next as f64 - now).max(0.0) / span).min(1.0) as f32
+}
+
+/// Whether a firing at `next` is within a minute of `now`, so that a dial first seeing it so counts a minute on its
+/// face, as for a timer set seconds ahead, rather than the sliver of an hour it would be. A dial seeing a longer one
+/// keeps counting the hour, so that its face never jumps as the last minute begins.
+pub fn within_a_minute(next: Option<u64>, now: f64) -> bool {
+    next.is_some_and(|next| next as f64 - now <= 60.0)
 }
 
 fn smooth(t: f32) -> f32 {
@@ -730,7 +745,7 @@ fn swell(elapsed: f32) -> f32 {
 /// Draw `shown`'s dial into `cubes`, facing `audience`, at `now`, `opacity` grown in, paler and larger if `pointed`: a
 /// dark plate behind sixty marks round its face, every fifth longer, those of its sector lit in its state's colour and
 /// the rest dim; a hand from its hub to the end of its sector; while it waits, a mote going round its rim once a minute
-/// as the seconds count down; while paused, two bars across its hub and no hand; while it waits for an arrival, its hub
+/// as the seconds count down, unless its face counts a minute, its hand counting them; while paused, two bars across its hub and no hand; while it waits for an arrival, its hub
 /// breathing and no hand; and just fired, the whole face lit, swelling once.
 fn draw(
     shown: &Shown,
@@ -786,7 +801,7 @@ fn draw(
     }
     let fill = match state {
         TimerState::Fired | TimerState::Awaiting => 1.0,
-        _ => fill(shown.timer.next, now),
+        _ => fill(shown.timer.next, now, shown.minute),
     };
     let marks = fill * SEGMENTS as f32;
     for index in 0..SEGMENTS {
@@ -843,7 +858,9 @@ fn draw(
                 lit,
                 facing * Quat::from_rotation_z(-angle),
             );
+            // A face counting a minute has its hand count the seconds, without a mote.
             if matches!(state, TimerState::Waiting | TimerState::Unknown)
+                && !shown.minute
                 && let Some(next) = shown.timer.next
             {
                 let seconds = (next as f64 - now).max(0.0).rem_euclid(60.0) as f32;

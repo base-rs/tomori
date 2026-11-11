@@ -112,15 +112,37 @@ fn the_pill_says_the_countdown_or_how_the_timer_stands() {
 
 #[test]
 fn the_sector_fills_with_the_minutes_of_an_hour_smoothly_across_the_hour() {
-    assert_eq!(fill(None, NOW), 1.0);
-    assert_eq!(fill(Some(NOW as u64), NOW), 0.0);
-    assert_eq!(fill(Some(NOW as u64 - 10), NOW), 0.0);
-    assert!((fill(Some(NOW as u64 + 900), NOW) - 0.25).abs() < 1e-6);
+    assert_eq!(fill(None, NOW, false), 1.0);
+    assert_eq!(fill(Some(NOW as u64), NOW, false), 0.0);
+    assert_eq!(fill(Some(NOW as u64 - 10), NOW, false), 0.0);
+    assert!((fill(Some(NOW as u64 + 900), NOW, false) - 0.25).abs() < 1e-6);
     // Either side of the hour, nearly the same.
-    let before = fill(Some(NOW as u64 + 3599), NOW);
-    let after = fill(Some(NOW as u64 + 3601), NOW);
+    let before = fill(Some(NOW as u64 + 3599), NOW, false);
+    let after = fill(Some(NOW as u64 + 3601), NOW, false);
     assert!(after - before < 0.001);
-    assert_eq!(fill(Some(NOW as u64 + 13 * 3600), NOW), 1.0);
+    assert_eq!(fill(Some(NOW as u64 + 13 * 3600), NOW, false), 1.0);
+}
+
+#[test]
+fn a_timer_set_seconds_ahead_counts_its_seconds_on_the_whole_face_and_its_pill() {
+    // Its pill counts minutes and seconds, as 0:27, rounded up, never 0:00 before it is due.
+    let next = NOW as u64 + 30;
+    assert_eq!(countdown(Some(next), NOW).unwrap(), "0:30");
+    assert_eq!(countdown(Some(next), NOW + 2.5).unwrap(), "0:28");
+    assert_eq!(countdown(Some(next), NOW + 3.0).unwrap(), "0:27");
+    assert_eq!(countdown(Some(next), NOW + 29.9).unwrap(), "0:01");
+    assert_eq!(countdown(Some(next), NOW + 30.0).unwrap(), "due now");
+    // First seen within a minute of its firing, its face counts a minute: half of it for 30 s, draining as they pass.
+    assert!(within_a_minute(Some(next), NOW));
+    assert!(within_a_minute(Some(NOW as u64 + 60), NOW));
+    assert!(!within_a_minute(Some(NOW as u64 + 61), NOW));
+    assert!(!within_a_minute(None, NOW));
+    assert!((fill(Some(next), NOW, true) - 0.5).abs() < 1e-6);
+    assert!((fill(Some(next), NOW + 15.0, true) - 0.25).abs() < 1e-6);
+    assert_eq!(fill(Some(next), NOW + 30.0, true), 0.0);
+    assert_eq!(fill(Some(NOW as u64 + 90), NOW, true), 1.0);
+    // Otherwise the sliver of an hour.
+    assert!(fill(Some(next), NOW, false) < 0.01);
 }
 
 #[test]
@@ -451,6 +473,19 @@ fn each_state_has_a_face_of_its_own_and_the_seconds_go_round_smoothly() {
         Vec3::from_array(two.last().unwrap().position),
     );
     assert!(a.distance(b) > 0.0 && a.distance(b) < 0.01);
+    // First seen 30 s from its firing, its face counts a minute: half of it lit after the second it ran, its hand
+    // counting the seconds, no mote.
+    let mut short = Dials::default();
+    let thirty = [timer("plank", TimerState::Waiting, Some(31.0))];
+    let seconds = run(&mut short, &thirty, 1.0);
+    assert_eq!(seconds.len(), 9 + 60 + 2);
+    let marks = &seconds[9..69];
+    assert!(marks[..29].iter().all(|mark| near(mark.color, lit)));
+    assert!(marks[31..].iter().all(|mark| !near(mark.color, lit)));
+    // Set again for longer, it counts the hour again, with its mote; and set again seconds ahead, a minute once more.
+    let longer = [timer("plank", TimerState::Waiting, Some(600.0))];
+    assert_eq!(run(&mut short, &longer, 0.05).len(), 9 + 60 + 3);
+    assert_eq!(run(&mut short, &thirty, 0.05).len(), 9 + 60 + 2);
     // A full scene of cubes leaves the dials out rather than overflowing.
     let mut full = vec![waiting[0]; crate::delegation::MAX_CUBES];
     dials.update(&timers, true, &open(), NOW, 0.05, &mut full);

@@ -3,7 +3,7 @@
 
 //! The scheduler over every form, daylight saving and month ends, the conditions with first arrival and grace,
 //! coalescing, limits and what is kept, with the time and zone given. See `design/timers.md`.
-use super::schedule::{Cron, Days, Schedule, time_of_day};
+use super::schedule::{Cron, Days, Schedule, time_of_day, time_of_day_to_second};
 use super::*;
 
 const LONDON: &str = "Europe/London";
@@ -390,11 +390,40 @@ fn days_cron_and_times_of_day_are_read_or_refused() {
         schedule::instant(i64::MIN).as_second(),
         Timestamp::MIN.as_second()
     );
+    // HH:MM:SS, to the second, where a one-off or an end may be; HH:MM as before.
+    for (text, time) in [
+        ("09:17:45", Some((9, 17, 45))),
+        (" 9:05:00 ", Some((9, 5, 0))),
+        ("23:59:59", Some((23, 59, 59))),
+        ("09:17", Some((9, 17, 0))),
+        ("09:17:60", None),
+        ("09:17:5", None),
+        ("09:17:5a", None),
+        ("09:60:00", None),
+        ("24:00:00", None),
+        ("09:17:", None),
+    ] {
+        assert_eq!(
+            time_of_day_to_second(text).map(|time| (time.hour(), time.minute(), time.second())),
+            time,
+            "{text}"
+        );
+    }
+    // Gaps are in seconds.
     assert_eq!(
         Schedule::every(60, local("2026-11-11 09:00")).least_gap(),
-        Some(60)
+        Some(3600)
     );
-    assert_eq!(daily("09:00", Days::EVERY).least_gap(), Some(1440));
+    assert_eq!(
+        Schedule::EverySeconds {
+            seconds: 90,
+            from: 0
+        }
+        .least_gap(),
+        Some(90)
+    );
+    assert_eq!(cron("*/5 * * * *").least_gap(), Some(300));
+    assert_eq!(daily("09:00", Days::EVERY).least_gap(), Some(86_400));
     assert_eq!(Schedule::Once { at: 0 }.least_gap(), None);
 }
 
@@ -411,6 +440,26 @@ fn every(minutes: u32) -> Request {
         every_minutes: Some(minutes),
         ..request("Give a status update")
     }
+}
+
+fn every_seconds(seconds: u32) -> Request {
+    Request {
+        every_seconds: Some(seconds),
+        ..request("Next exercise")
+    }
+}
+
+fn in_seconds(seconds: u32) -> Request {
+    Request {
+        name: Some("plank".into()),
+        in_seconds: Some(seconds),
+        ..request("Thirty seconds of plank are up")
+    }
+}
+
+/// `at` and `milliseconds` more.
+fn later(at: Timestamp, milliseconds: i64) -> Timestamp {
+    at + jiff::SignedDuration::from_millis(milliseconds)
 }
 
 #[test]
@@ -461,9 +510,70 @@ fn a_timer_is_set_only_as_its_rules_allow() {
             },
             "Give exactly one schedule",
         ),
-        (every(0), "every_minutes is from 5 to 10080"),
-        (every(10081), "every_minutes is from 5 to 10080"),
-        (every(4), "fires when present fires at most every 5 minutes"),
+        (every(0), "every_minutes is from 1 to 10080"),
+        (every(10081), "every_minutes is from 1 to 10080"),
+        // A repeating timer fires at most every minute, whatever its form.
+        (
+            every_seconds(59),
+            "fires when present fires at most every minute, its occurrences at least 60 seconds apart",
+        ),
+        (
+            every_seconds(0),
+            "every_seconds is from 60 to 604800, a week.",
+        ),
+        (
+            every_seconds(604_801),
+            "every_seconds is from 60 to 604800, a week.",
+        ),
+        (
+            Request {
+                condition: Some(Condition::PresentOrArrival),
+                ..every_seconds(30)
+            },
+            "fires when present or on arrival fires at most every minute",
+        ),
+        (
+            Request {
+                condition: Some(Condition::Always),
+                ..every_seconds(600)
+            },
+            "fires always fires at most every 15 minutes",
+        ),
+        (
+            Request {
+                in_seconds: Some(30),
+                ..every_seconds(60)
+            },
+            "Give exactly one schedule: every_minutes, every_seconds, daily_at (with days), once_at, in_minutes, in_seconds or cron.",
+        ),
+        (
+            Request {
+                in_seconds: Some(0),
+                ..request("x")
+            },
+            "in_seconds is from 1 to 31622400.",
+        ),
+        (
+            Request {
+                in_seconds: Some(31_622_401),
+                ..request("x")
+            },
+            "in_seconds is from 1 to 31622400.",
+        ),
+        (
+            Request {
+                once_at: Some("09:30:60".into()),
+                ..request("x")
+            },
+            "once_at is a time of day, HH:MM or HH:MM:SS",
+        ),
+        (
+            Request {
+                once_at: Some("2026-11-11 09:16:59".into()),
+                ..request("x")
+            },
+            "once_at is after now",
+        ),
         (
             Request {
                 condition: Some(Condition::Always),
@@ -545,9 +655,10 @@ fn a_timer_is_set_only_as_its_rules_allow() {
         (
             Request {
                 cron: Some("*/2 * * * *".into()),
+                condition: Some(Condition::Always),
                 ..request("x")
             },
-            "at most every 5 minutes",
+            "at most every 15 minutes",
         ),
         (
             Request {
@@ -999,7 +1110,10 @@ fn how_a_timer_looks_and_is_described_as_it_is_pointed_at() {
     space.tick(local("2026-11-11 09:49"), &names(SAMUEL));
     assert_eq!(space.views()[0].state, tomori_protocol::TimerState::Waiting);
     for (seconds, said) in [
-        (30, "under a minute"),
+        (0, "0 s"),
+        (30, "30 s"),
+        (60, "1 min"),
+        (125, "2 min 5 s"),
         (600, "10 min"),
         (10_800, "3 h"),
         (300_000, "3 days"),
@@ -1010,6 +1124,10 @@ fn how_a_timer_looks_and_is_described_as_it_is_pointed_at() {
             said
         );
     }
+    // Rounded up, so that it says nothing is left only once it is due.
+    let now = local("2026-11-11 09:00");
+    assert_eq!(until(later(now, 26_200), now), "27 s");
+    assert_eq!(until(later(now, 400), now), "1 s");
 }
 
 #[test]
@@ -1054,7 +1172,7 @@ fn timers_are_named_replaced_bounded_and_cancelled() {
     assert_eq!(space.cancel(" t3 ").unwrap().name, "t3");
     assert_eq!(space.cancel("t3"), None);
     // A refused timer changes nothing.
-    assert!(space.set(every(1), now, LONDON).is_err());
+    assert!(space.set(every_seconds(30), now, LONDON).is_err());
     assert_eq!(space.list().len(), MOST - 1);
 }
 
@@ -1445,4 +1563,149 @@ fn firings_later_than_now_as_after_the_clock_went_back_count_toward_no_limit() {
     // The clock is set back a day: the firing it remembers is in the future, and forgotten.
     space.tick(local("2026-11-10 10:30"), &names(SAMUEL));
     assert!(space.kept().get("fired").is_none());
+}
+
+#[test]
+fn a_timer_set_in_seconds_fires_at_its_second() {
+    // Set 400 ms into 09:17, it counts from the nearest second, so that it fires within half a second of 30 s from now.
+    let set = later(local("2026-11-11 09:17"), 400);
+    let mut space = timers(in_seconds(30), set);
+    let timer = &space.list()[0];
+    assert_eq!(timer.next, Some(local("2026-11-11 09:17").as_second() + 30));
+    assert_eq!(timer.describe(), "once at 09:17:30, when present");
+    assert_eq!(space.next_due(), timer.next);
+    // A moment before, nothing; at its second, it fires, its times said to the second, and it is done.
+    assert!(space.tick(later(set, 29_500), &names(SAMUEL)).is_empty());
+    assert_eq!(
+        space.describe("plank").unwrap(),
+        "timer \"plank\" (once at 09:17:30, when present; next in 1 s)"
+    );
+    assert_eq!(
+        texts(space.tick(later(set, 29_600), &names(SAMUEL))),
+        [
+            "Timer \"plank\" (once at 09:17:30, when present): fired 09:17:30; present: Samuel; its last firing; note: \"Thirty seconds of plank are up\""
+        ]
+    );
+    assert!(space.list().is_empty());
+    assert_eq!(space.next_due(), None);
+    // Set 600 ms into 09:17, it counts from 09:17:01; a single firing may be a second away.
+    let space = timers(in_seconds(1), later(local("2026-11-11 09:17"), 600));
+    assert_eq!(
+        space.list()[0].next,
+        Some(local("2026-11-11 09:17").as_second() + 2)
+    );
+}
+
+#[test]
+fn once_at_takes_a_time_to_the_second() {
+    let now = local("2026-11-11 09:17");
+    let at = |text: &str| {
+        Timer::new(
+            Request {
+                once_at: Some(text.into()),
+                ..request("Stretch")
+            },
+            now,
+            LONDON,
+            1,
+        )
+        .unwrap()
+    };
+    // Later today, tomorrow once it has passed, or on a date.
+    let today = at("09:17:45");
+    assert_eq!(today.next, Some(now.as_second() + 45));
+    assert_eq!(today.describe(), "once at 09:17:45, when present");
+    assert_eq!(
+        at("09:16:59").next,
+        Some(local("2026-11-12 09:16").as_second() + 59)
+    );
+    assert_eq!(
+        at("2026-11-12 08:00:30").next,
+        Some(local("2026-11-12 08:00").as_second() + 30)
+    );
+    // On a minute, it reads as HH:MM, as before.
+    assert_eq!(at("10:00:00").describe(), "once at 10:00, when present");
+    // An end may be to the second too.
+    let ends = Timer::new(
+        Request {
+            until: Some("09:20:30".into()),
+            ..every_seconds(60)
+        },
+        now,
+        LONDON,
+        1,
+    )
+    .unwrap();
+    assert_eq!(ends.until, Some(local("2026-11-11 09:20").as_second() + 30));
+}
+
+#[test]
+fn every_so_many_seconds_counts_from_when_it_was_set() {
+    let set = later(local("2026-11-11 09:17"), 300);
+    let mut space = timers(
+        Request {
+            name: Some("intervals".into()),
+            count: Some(3),
+            ..every_seconds(90)
+        },
+        set,
+    );
+    let start = local("2026-11-11 09:17").as_second();
+    assert_eq!(space.list()[0].next, Some(start + 90));
+    assert_eq!(space.list()[0].describe(), "every 90 s, when present");
+    let present = names(SAMUEL);
+    assert_eq!(
+        texts(space.tick(instant(start + 90), &present)),
+        [
+            "Timer \"intervals\" (every 90 s, when present): fired 09:18:30; present: Samuel; note: \"Next exercise\""
+        ]
+    );
+    // It looks just fired for half its interval, rather than a minute, so that it counts down again before the next.
+    assert_eq!(space.views()[0].state, tomori_protocol::TimerState::Fired);
+    space.tick(instant(start + 134), &present);
+    assert_eq!(space.views()[0].state, tomori_protocol::TimerState::Fired);
+    space.tick(instant(start + 135), &present);
+    assert_eq!(space.views()[0].state, tomori_protocol::TimerState::Waiting);
+    assert_eq!(space.views()[0].next, Some((start + 180) as u64));
+    assert_eq!(
+        texts(space.tick(instant(start + 180), &present)),
+        [
+            "Timer \"intervals\" (every 90 s, when present): fired 09:20:00; last fired 09:18:30; present: Samuel; note: \"Next exercise\""
+        ]
+    );
+    // Its third firing is its last.
+    assert!(texts(space.tick(instant(start + 270), &present))[0].contains("its last firing"));
+    assert!(space.list().is_empty());
+    // Every 60 s is the least, said in minutes; a timer every so many minutes may now be every minute.
+    let every_minute = timers(every_seconds(60), set);
+    assert_eq!(
+        every_minute.list()[0].describe(),
+        "every 1 min, when present"
+    );
+    assert_eq!(every_minute.list()[0].next, Some(start + 60));
+    let mut aligned = timers(every(1), set);
+    assert_eq!(aligned.list()[0].next, Some(start + 60));
+    assert_eq!(aligned.tick(instant(start + 60), &present).len(), 1);
+    // An hourly timer still looks just fired for a minute.
+    let mut hourly = timers(every(60), set);
+    hourly.tick(local("2026-11-11 10:00"), &present);
+    hourly.tick(later(local("2026-11-11 10:00"), 59_000), &present);
+    assert_eq!(hourly.views()[0].state, tomori_protocol::TimerState::Fired);
+    // A kept record of none, as edited by hand, is every second rather than a division by zero.
+    let none = Schedule::EverySeconds {
+        seconds: 0,
+        from: start,
+    };
+    assert_eq!(
+        none.next_after(instant(start), &london()),
+        Some(instant(start + 1))
+    );
+    // It is kept and read again.
+    let kept = timers(every_seconds(90), set).kept();
+    assert_eq!(kept["timers"][0]["schedule"]["kind"], "every_seconds");
+    let restored = Timers::restore(&kept, "space");
+    assert_eq!(
+        restored.list()[0].schedule,
+        timers(every_seconds(90), set).list()[0].schedule
+    );
 }

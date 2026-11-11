@@ -1,8 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! When a timer's occurrences fall: every so many minutes, daily or on chosen weekdays at a time, once, or as a small
-//! cron subset, each in the timer's time zone, with daylight saving's gaps and overlaps defined. Pure: the time and
+//! When a timer's occurrences fall: every so many minutes or seconds, daily or on chosen weekdays at a time, once, to the
+//! second, or as a small cron subset, each in the timer's time zone, with daylight saving's gaps and overlaps defined. Pure: the time and
 //! zone are given. See `design/timers.md`.
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::TimeZone;
@@ -233,6 +233,9 @@ pub enum Schedule {
     /// Every `minutes`: where they divide a day, at each multiple of them after the zone's midnight, by its clock, and
     /// otherwise counted in elapsed time from `from`, in seconds since the Unix epoch, when it was set.
     Every { minutes: u32, from: i64 },
+    /// Every `seconds`, counted in elapsed time from `from`, in seconds since the Unix epoch, when it was set, never on
+    /// the clock, as for intervals in a workout.
+    EverySeconds { seconds: u32, from: i64 },
     /// At `at`, `HH:MM`, on `days`.
     Daily { at: String, days: Days },
     /// Once, at `at`, in seconds since the Unix epoch.
@@ -256,6 +259,23 @@ pub fn time_of_day(text: &str) -> Option<Time> {
         minute.parse::<i8>().unwrap_or(-1),
     );
     ((0..24).contains(&hour) && minute < 60).then(|| Time::constant(hour, minute, 0, 0))
+}
+
+/// `HH:MM`, as [`time_of_day`] reads it, or `HH:MM:SS`, to the second, as a time of day, or `None`.
+pub fn time_of_day_to_second(text: &str) -> Option<Time> {
+    let text = text.trim();
+    let Some((minutes, second)) = text
+        .rsplit_once(':')
+        .filter(|(minutes, _)| minutes.contains(':'))
+    else {
+        return time_of_day(text);
+    };
+    if second.len() != 2 || !second.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let second = second.parse::<i8>().ok().filter(|second| *second < 60)?;
+    let time = time_of_day(minutes)?;
+    Some(Time::constant(time.hour(), time.minute(), second, 0))
 }
 
 /// The instant the civil time `at` names in `zone`: in a gap, as when clocks go forward, as far past the gap's start as
@@ -291,11 +311,10 @@ impl Schedule {
                 };
                 next_on_days(after, zone, |_| true, times)
             }
-            Self::Every { minutes, from } => {
-                let period = i64::from(*minutes) * 60;
-                let elapsed = after.as_second() - from;
-                let periods = if elapsed < 0 { 0 } else { elapsed / period + 1 };
-                Some(instant(from + periods * period))
+            Self::Every { minutes, from } => Some(elapsed(i64::from(*minutes) * 60, *from, after)),
+            // A kept record of none, as edited by hand, is every second rather than a division by zero.
+            Self::EverySeconds { seconds, from } => {
+                Some(elapsed(i64::from(*seconds).max(1), *from, after))
             }
             Self::Once { at } => Some(instant(*at)).filter(|at| *at > after),
             Self::Daily { at, days } => {
@@ -335,24 +354,51 @@ impl Schedule {
                 format!("every {} hours", minutes / 60)
             }
             Self::Every { minutes, .. } => format!("every {minutes} min"),
+            Self::EverySeconds { seconds, .. } if seconds % 60 == 0 => {
+                format!("every {} min", seconds / 60)
+            }
+            Self::EverySeconds { seconds, .. } => format!("every {seconds} s"),
             Self::Daily { at, days } => format!("{} at {at}", days.describe()),
             Self::Once { at } => format!(
                 "once at {}",
-                zone.to_datetime(instant(*at)).strftime("%H:%M")
+                zone.to_datetime(instant(*at))
+                    .strftime(if self.to_the_second(zone) {
+                        "%H:%M:%S"
+                    } else {
+                        "%H:%M"
+                    })
             ),
             Self::Cron { cron } => format!("cron {}", cron.text()),
         }
     }
 
-    /// The fewest minutes between two of its occurrences, as far as its form says: `None` for a single occurrence.
+    /// The fewest seconds between two of its occurrences, as far as its form says: `None` for a single occurrence.
     pub fn least_gap(&self) -> Option<u32> {
         match self {
-            Self::Every { minutes, .. } => Some(*minutes),
-            Self::Daily { .. } => Some(1440),
+            Self::Every { minutes, .. } => Some(minutes.saturating_mul(60)),
+            Self::EverySeconds { seconds, .. } => Some(*seconds),
+            Self::Daily { .. } => Some(86_400),
             Self::Once { .. } => None,
-            Self::Cron { cron } => Some(cron.least_gap()),
+            Self::Cron { cron } => Some(cron.least_gap() * 60),
         }
     }
+
+    /// Whether its times are said to the second, in `zone`: those of a schedule every so many seconds, and of a single
+    /// occurrence that does not fall on a minute, as one set some seconds from now; the rest fall on minutes.
+    pub fn to_the_second(&self, zone: &TimeZone) -> bool {
+        match self {
+            Self::EverySeconds { .. } => true,
+            Self::Once { at } => zone.to_datetime(instant(*at)).second() != 0,
+            _ => false,
+        }
+    }
+}
+
+/// The first of the occurrences every `period` seconds from `from` strictly after `after`.
+fn elapsed(period: i64, from: i64, after: Timestamp) -> Timestamp {
+    let elapsed = after.as_second() - from;
+    let periods = if elapsed < 0 { 0 } else { elapsed / period + 1 };
+    instant(from.saturating_add(periods.saturating_mul(period)))
 }
 
 /// The first instant strictly after `after` at one of `times` on a day `day` accepts, in `zone`. Each day's times are
