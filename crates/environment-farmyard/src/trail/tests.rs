@@ -240,10 +240,10 @@ fn five_exercise_stations_stand_beside_the_trail_each_on_its_clearing_with_its_e
         labels,
         [
             "10 squats",
-            "Shoulder and neck stretches, 30 seconds",
+            "10 shoulder rolls and 10 neck tilts, 5 each side",
             "20 calf raises",
             "10 lunges each side",
-            "Arm circles and a deep breath, 30 seconds",
+            "30 arm circles and 3 deep breaths, 15 circles each way",
         ]
     );
     let places = places();
@@ -251,16 +251,14 @@ fn five_exercise_stations_stand_beside_the_trail_each_on_its_clearing_with_its_e
         assert_eq!(station.name, format!("station-{}", index + 1));
         // Nothing on the floor, where a headset makes it awkward, nor leaning on anything, which is not there.
         assert!(!station.label.contains("push"));
+        // A count of the exercise, never a time, which nobody wearing a headset can easily keep.
+        assert!(station.label.starts_with(|c: char| c.is_ascii_digit()));
+        assert!(!station.label.contains("second"), "{}", station.label);
         // Its plaque names it, then says its exercise in a few short lines.
         assert_eq!(station.plaque[0], format!("Station {}", index + 1));
         assert!(station.plaque.iter().all(|line| line.chars().count() <= 18));
         let words: String = station.plaque[1..].join(" ");
-        assert!(
-            station
-                .label
-                .starts_with(words.trim().trim_end_matches(" s")),
-            "{words}"
-        );
+        assert!(station.label.starts_with(words.trim()), "{words}");
         // Its clearing joins the trail beside it, and its post stands at the clearing's edge, off the trail, facing it.
         let (point, _, outward) = frame(station.at);
         let clearing = station.clearing();

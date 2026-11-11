@@ -249,14 +249,14 @@ mod tests {
                 (
                     "station-2",
                     Some("station"),
-                    Some("Shoulder and neck stretches, 30 seconds")
+                    Some("10 shoulder rolls and 10 neck tilts, 5 each side")
                 ),
                 ("station-3", Some("station"), Some("20 calf raises")),
                 ("station-4", Some("station"), Some("10 lunges each side")),
                 (
                     "station-5",
                     Some("station"),
-                    Some("Arm circles and a deep breath, 30 seconds")
+                    Some("30 arm circles and 3 deep breaths, 15 circles each way")
                 ),
             ]
         );
