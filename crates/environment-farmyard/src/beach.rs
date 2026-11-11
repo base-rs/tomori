@@ -52,6 +52,17 @@ pub fn at(out: f32, along: f32) -> Vec2 {
     point + outward * out + way * (along + SHIFT)
 }
 
+/// How far `point`, on the ground, is outside the beach's outline, or, inside it, how far within it, less than none.
+pub fn from_beach(point: Vec2) -> f32 {
+    let (middle, way, outward) = frame();
+    let offset = point - middle;
+    let across = Vec2::new(
+        (offset.dot(way) - SHIFT).abs() - HALF_WIDTH,
+        (offset.dot(outward) - (NEAR + FAR) * 0.5).abs() - (FAR - NEAR) * 0.5,
+    );
+    across.max(Vec2::ZERO).length() + across.max_element().min(0.0)
+}
+
 /// The beach's outline on the ground, its four corners.
 pub fn outline() -> Vec<Vec2> {
     vec![

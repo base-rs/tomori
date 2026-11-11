@@ -851,8 +851,8 @@ fn beyond_fence(point: Vec2) -> f32 {
 }
 
 /// How far `point` is, on the ground, from anywhere participants stand or walk outside the yard: the trail's band and its
-/// edges, the way out through the gate, the clearings beside it, the campsite's clearing and the waterfall rock's top;
-/// and, with the yard, from the fence.
+/// edges, the way out through the gate, the clearings beside it, the campsite's clearing, the beach's shingle and the
+/// waterfall rock's top; and, with the yard, from the fence.
 pub fn from_standing(point: Vec2) -> f32 {
     let band = trail::from_middle(point) - trail::HALF - 0.16;
     let [inside, outside] = trail::GATEWAY;
@@ -875,6 +875,7 @@ pub fn from_standing(point: Vec2) -> f32 {
         gateway,
         clearings,
         campsite,
+        crate::beach::from_beach(point),
         rock,
         beyond_fence(point),
     ]

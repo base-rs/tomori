@@ -19,6 +19,10 @@ fn the_beach_lies_beside_the_riverbank_viewpoint_from_the_trail_s_edge_into_the_
     assert_eq!(outline().len(), 4);
     assert!(tomori_physics::body::within(&outline(), middle));
     assert_eq!(height(at(FAR + 0.5, 0.0)), None);
+    // How far from it a point is, within it less than none, as the ferns keep off it.
+    assert!((from_beach(middle) + HALF_WIDTH).abs() < 1e-4);
+    assert!((from_beach(at(FAR + 0.5, 0.0)) - 0.5).abs() < 1e-4);
+    assert!((from_beach(at(FAR + 0.3, HALF_WIDTH + 0.4)) - 0.5).abs() < 1e-4);
 }
 
 #[test]
