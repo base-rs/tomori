@@ -472,8 +472,32 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "cancel_timer"
         ]
     );
+    // Every tool takes only the arguments it declares, and so does every object within them that declares its own.
+    fn strict(schema: &Value, at: &str) {
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            assert_eq!(schema["additionalProperties"], false, "{at}");
+            for (name, property) in properties {
+                strict(property, &format!("{at}.{name}"));
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            strict(items, &format!("{at}[]"));
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for choice in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                strict(choice, &format!("{at}.{key}"));
+            }
+        }
+    }
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
+        strict(&tool["inputSchema"], tool["name"].as_str().unwrap());
     }
 
     // What it does not answer is refused as JSON-RPC asks.
@@ -507,6 +531,110 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
     );
     assert_eq!(garbled.status, 400);
     assert_eq!(code(&garbled.json()), -32700);
+}
+
+#[test]
+fn every_tool_refuses_an_argument_it_does_not_declare_naming_it_and_changes_nothing() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    let space = create(&mut ada, "Strict");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let caller = id(&backend.started()[0]);
+    let caller = Some(caller.as_str());
+    let tool = |name: &str, arguments: Value| call(&server, &token, caller, name, arguments);
+    let walls = || {
+        tool("presence", json!({}))["structuredContent"]["walls"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let before = walls();
+
+    for (name, arguments, said) in [
+        (
+            "set_speech",
+            json!({"speech": "brief", "quietly": true}),
+            "quietly is not an argument of set_speech; it takes: speech.",
+        ),
+        (
+            "rename_space",
+            json!({"title": "Renamed", "for": "everyone", "now": true}),
+            "for and now are not arguments of rename_space; it takes: title.",
+        ),
+        (
+            "add_wall",
+            json!({"place": "front Ada", "colums": 4}),
+            "colums is not an argument of add_wall; it takes: aspect, columns, place, radius, rows, scale, slot_height, slot_width, tilt.",
+        ),
+        (
+            "create_layout",
+            json!({"walls": [{"id": "a"}, {"id": "b", "attach": {"to": "a", "edge": "right", "gap": 1}}]}),
+            "gap is not an argument of create_layout's walls[1].attach; it takes: align, edge, to.",
+        ),
+        (
+            "set_wall",
+            json!({"wall": "status wall", "revision": 1}),
+            "revision is not an argument of set_wall; it takes: aspect, attach, columns, content_scale, detach, locked, place, radius, requested_by, reset, rows, scale, slot_height, slot_width, tilt, version, wall, width.",
+        ),
+    ] {
+        assert_eq!(failure(&tool(name, arguments.clone())), said, "{arguments}");
+    }
+    // A global tool, and a call naming no session, are checked alike, before anything else.
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            None,
+            "server",
+            json!({"verbose": true})
+        )),
+        "verbose is not an argument of server; it takes: none."
+    );
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            None,
+            "set_speech",
+            json!({"speech": "brief", "x": 1})
+        )),
+        "x is not an argument of set_speech; it takes: speech."
+    );
+    assert_eq!(
+        failure(&tool("set_speech", json!(["brief"]))),
+        "The arguments of set_speech are an object, of each argument by its name."
+    );
+
+    // Nothing was changed.
+    let space_state = tool("space", json!({}))["structuredContent"].clone();
+    assert_eq!(space_state["speech"], "full", "{space_state}");
+    assert_eq!(space_state["title"], "Strict", "{space_state}");
+    assert_eq!(walls(), before);
+
+    // What each declares is still taken.
+    let set = tool("set_speech", json!({"speech": "brief"}));
+    assert_eq!(set["structuredContent"]["space"], space);
+    assert_eq!(set["structuredContent"]["changed"], true);
+    let renamed = tool("rename_space", json!({"title": "Renamed"}));
+    assert_eq!(
+        renamed["structuredContent"]["title"], "Renamed",
+        "{renamed}"
+    );
+}
+
+/// Arguments each space tool takes, for a call that is refused before they are read.
+fn arguments_of(tool: &str) -> Value {
+    match tool {
+        "panels" => json!({"panel": "panel-1"}),
+        "update_panel" => json!({"panel": "panel-1", "title": "Elsewhere"}),
+        "move_panel" => json!({"panel": "panel-1", "place": "nearest"}),
+        "move_agent" => json!({"place": "nearest"}),
+        "set_speech" => json!({"speech": "brief"}),
+        "set_environment" => json!({"environment": "minimal"}),
+        "rename_space" => json!({"title": "Elsewhere"}),
+        _ => json!({}),
+    }
 }
 
 #[test]
@@ -567,7 +695,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         "set_environment",
         "rename_space",
     ] {
-        let arguments = json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest", "title": "Elsewhere"});
+        let arguments = arguments_of(tool);
         assert_eq!(
             failure(&call(&server, &token, None, tool, arguments.clone())),
             "Tomori's space tools act on the space of the agent session that calls them, and this call names no session.",
@@ -662,13 +790,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         "rename_space",
     ] {
         assert_eq!(
-            failure(&call(
-                &server,
-                &token,
-                Some(&one),
-                tool,
-                json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest", "title": "Elsewhere"})
-            )),
+            failure(&call(&server, &token, Some(&one), tool, arguments_of(tool))),
             "This session is bound to more than one open Tomori space, so Tomori cannot tell which one to act on.",
             "{tool}"
         );
@@ -2680,7 +2802,7 @@ fn the_agent_gives_a_wall_slots_of_any_shape_by_their_aspect_or_their_size_in_me
         (
             "add_wall",
             json!({"place": "front Ada", "width": 3}),
-            "Give a new wall its slots' size, not its width.",
+            "width is not an argument of add_wall; it takes: aspect, columns, place, radius, rows, scale, slot_height, slot_width, tilt.",
         ),
         (
             "add_wall",
@@ -2793,21 +2915,18 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
             .then_some(())
     });
     // A session bound to no space changes no wall.
-    for name in [
-        "set_wall",
-        "add_wall",
-        "remove_wall",
-        "create_layout",
-        "remove_layout",
+    for (name, arguments) in [
+        ("set_wall", json!({"wall": "Tomori wall"})),
+        ("add_wall", json!({})),
+        ("remove_wall", json!({"wall": "Tomori wall"})),
+        ("create_layout", json!({"walls": [{"id": "a"}]})),
+        ("remove_layout", json!({"group": "Tomori wall"})),
     ] {
-        let result = call(
-            &server,
-            &token,
-            Some("ses_nobody"),
-            name,
-            json!({"wall": "Tomori wall", "group": "Tomori wall", "walls": [{"id": "a"}]}),
+        let result = call(&server, &token, Some("ses_nobody"), name, arguments);
+        assert!(
+            failure(&result).starts_with("This session is not bound to a Tomori space"),
+            "{name}: {result}"
         );
-        assert_eq!(result["isError"], true, "{name}: {result}");
     }
     // Arguments of the wrong kind or size are refused, saying which.
     let long = "x".repeat(2_000);
@@ -3058,4 +3177,18 @@ fn the_agent_tilts_a_wall_someone_looks_at_and_makes_a_big_wall_stand_as_far_as_
         failure(&result),
         "A wall's slots are from half to five times a standard slot's size."
     );
+    // A layout's wall may be tilted as it is built.
+    let built = tool(
+        "create_layout",
+        json!({"place": "front Ada", "walls": [{"id": "tilted", "columns": 1, "rows": 1, "tilt": 12}]}),
+    );
+    assert_ne!(built["isError"], true, "{built}");
+    let tilted: Vec<Value> = walls()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|listed| listed["tilt"] == 12.0)
+        .cloned()
+        .collect();
+    assert_eq!(tilted.len(), 1, "{tilted:?}");
 }

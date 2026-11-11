@@ -5,7 +5,7 @@
 //!
 //! Only what Tomori's tools need is implemented: each `POST` carries one JSON-RPC message and is answered with one JSON response, or `202 Accepted` for a notification. The server opens no event stream, so `GET` and `DELETE` are refused, and it keeps no MCP session, so every request stands alone. The official Rust SDK, `rmcp`, serves this transport only on Tokio, which the server does not run.
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use base_http::body::{BodyFrame, ReadableBody};
 use base_http::{Fields, InterimHandler, InterimResponses, Method, Request, Response, Status};
@@ -19,6 +19,10 @@ use crate::hub::agent_panels::{self, Update};
 use crate::hub::agent_workers::{Outcome, REMOVAL_LIMIT, Removal};
 use crate::hub::tools::Changed;
 use crate::hub::{Decision, Hub};
+
+mod arguments;
+
+use arguments::Arguments;
 
 /// The path of the MCP endpoint.
 pub const PATH: &str = "/mcp";
@@ -281,11 +285,20 @@ pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
             })
         }
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": &*TOOLS }),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-            match call(hub, name, &arguments, caller(&params)).await {
+            // Checked against the tool's own schema before any tool runs, so that a refused call changes nothing.
+            let schema = tool_named(name).map_or(&Value::Null, |tool| &tool["inputSchema"]);
+            let called = match arguments::check(name, schema, &arguments) {
+                Err(message) => Some(Err(message)),
+                Ok(()) => {
+                    let arguments = Arguments::new(schema, &arguments);
+                    call(hub, name, arguments, caller(&params)).await
+                }
+            };
+            match called {
                 Some(Ok(result)) => result,
                 Some(Err(message)) => json!({
                     "content": [{ "type": "text", "text": message }],
@@ -406,7 +419,19 @@ fn act_tool() -> Value {
     })
 }
 
-/// Every tool, as `tools/list` describes it.
+/// Every tool, as `tools/list` describes it, made once.
+static TOOLS: LazyLock<Value> = LazyLock::new(tools);
+
+/// The tool named `name`, as `tools/list` describes it.
+fn tool_named(name: &str) -> Option<&'static Value> {
+    TOOLS
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|tool| tool["name"] == name)
+}
+
+/// Every tool, each taking only the arguments its schema declares.
 fn tools() -> Value {
     let read = json!({ "readOnlyHint": true, "openWorldHint": false });
     let change = json!({
@@ -499,6 +524,7 @@ fn tools() -> Value {
                         "minimum": 0,
                         "description": "The panel's version you last read, as panels gives it; refused if it has changed since.",
                     },
+                    "revision": { "type": "integer", "minimum": 0, "description": "The name version had before; give version instead." },
                 },
                 "required": ["panel"],
             },
@@ -706,6 +732,9 @@ fn tools() -> Value {
         .position(|tool| tool["name"] == "rename_space")
         .expect("rename_space is listed");
     list.insert(after + 1, set_my_name);
+    for tool in list.iter_mut() {
+        arguments::strict(&mut tool["inputSchema"]);
+    }
     tools
 }
 
@@ -795,7 +824,7 @@ const CRON_BYTES: usize = 100;
 const COUNT_MOST: u32 = 10_000;
 
 /// The `set_timer` tool's arguments, read and bounded; [`crate::timers::Timer::new`] checks what they mean.
-fn timer_request(arguments: &Value) -> Result<crate::timers::Request, String> {
+fn timer_request(arguments: Arguments<'_>) -> Result<crate::timers::Request, String> {
     use crate::timers;
     let note = text(arguments, "note")?;
     crate::limits::check(note, timers::NOTE_CHARS * 4, "note")?;
@@ -858,7 +887,7 @@ fn layout_tools(change: &Value) -> [Value; 2] {
     [
         json!({
             "name": "create_layout",
-            "description": "Build a layout of walls in one step, for everyone in your space, when someone asks you to visualise or lay out information: walls, from 1 to 6, each with your own id for it, a short name of letters, digits, - and _, and columns, rows, scale or width, aspect or slot_width and slot_height, and radius, as add_wall takes them; every wall after the first has attach, { to, edge, align }, to an earlier wall by your id, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, and without a size of its own fills that edge, so that a 1 by 1 beside a 2 by 2 is as tall as it. They snap together as one group, reading as one board, curved as the first unless they say otherwise. place, looking, near or front, with a name or for whoever asked, by default looking, stands it where that person is looking or in front of them, as near as it takes to read every slot. Refused whole if any of it cannot be built, such as beyond the walls or slots an environment takes. It returns each wall's name and slots: fill each slot it should hold with a panel block's place: wall NAME slot N, a code block's place=\"wall NAME slot N\" or show_image's place, then tell everyone what you built. Use as few walls as the information needs.",
+            "description": "Build a layout of walls in one step, for everyone in your space, when someone asks you to visualise or lay out information: walls, from 1 to 6, each with your own id for it, a short name of letters, digits, - and _, and columns, rows, scale or width, aspect or slot_width and slot_height, radius and tilt, as add_wall takes them; every wall after the first has attach, { to, edge, align }, to an earlier wall by your id, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, and without a size of its own fills that edge, so that a 1 by 1 beside a 2 by 2 is as tall as it. They snap together as one group, reading as one board, curved as the first unless they say otherwise. place, looking, near or front, with a name or for whoever asked, by default looking, stands it where that person is looking or in front of them, as near as it takes to read every slot. Refused whole if any of it cannot be built, such as beyond the walls or slots an environment takes. It returns each wall's name and slots: fill each slot it should hold with a panel block's place: wall NAME slot N, a code block's place=\"wall NAME slot N\" or show_image's place, then tell everyone what you built. Use as few walls as the information needs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -879,6 +908,7 @@ fn layout_tools(change: &Value) -> [Value; 2] {
                                 "slot_width": { "type": "number", "exclusiveMinimum": 0 },
                                 "slot_height": { "type": "number", "exclusiveMinimum": 0 },
                                 "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
+                                "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
                                 "attach": attach_schema(),
                             },
                             "required": ["id"],
@@ -907,7 +937,7 @@ fn layout_tools(change: &Value) -> [Value; 2] {
 /// The wall `attach`, `{ to, edge, align }`, names, the edge of it, `left`, `right`, `top` or `bottom`, and the
 /// alignment along it, `start`, `middle` or `end`, by default `start`.
 fn attachment(
-    attach: &Value,
+    attach: Arguments<'_>,
 ) -> Result<(String, tomori_protocol::Edge, tomori_protocol::Align), String> {
     let to = text(attach, "to")?;
     crate::limits::check(to, crate::limits::IDENTIFIER_BYTES, "to")?;
@@ -940,7 +970,7 @@ fn attach_schema() -> Value {
 }
 
 /// The text argument `name` of `arguments`.
-fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+fn text<'a>(arguments: Arguments<'a>, name: &str) -> Result<&'a str, String> {
     arguments
         .get(name)
         .and_then(Value::as_str)
@@ -951,7 +981,7 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
 async fn call(
     hub: &Hub,
     name: &str,
-    arguments: &Value,
+    arguments: Arguments<'_>,
     session: Result<&str, String>,
 ) -> Option<Result<Value, String>> {
     let result = match name {
@@ -1026,7 +1056,7 @@ fn changed(changed: Changed, setting: (&str, &str), announcement: String) -> Val
 }
 
 /// The `panels` tool: every panel listed briefly, or, with `panel`, that one read whole.
-fn panels(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn panels(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let panel = optional_identifier(arguments, "panel")?;
     let offset = match arguments.get("offset") {
         None | Some(Value::Null) => 0,
@@ -1036,7 +1066,7 @@ fn panels(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> 
 }
 
 /// The `move_panel` tool.
-fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn move_panel(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let panel = text(arguments, "panel")?;
     let place = text(arguments, "place")?;
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
@@ -1045,7 +1075,7 @@ fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
 }
 
 /// The `place_worker` tool.
-fn place_worker(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn place_worker(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let worker = text(arguments, "worker")?;
     let place = text(arguments, "place")?;
     crate::limits::check(worker, crate::limits::IDENTIFIER_BYTES, "worker")?;
@@ -1055,7 +1085,7 @@ fn place_worker(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
 }
 
 /// The `move_agent` tool.
-fn move_agent(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn move_agent(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let place = text(arguments, "place")?;
     crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
     hub.agent_move_agent(session, place, requested_by(arguments)?)
@@ -1063,7 +1093,11 @@ fn move_agent(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
 }
 
 /// The optional text argument `name` of `arguments`, of at most `limit` bytes.
-fn optional_text(arguments: &Value, name: &str, limit: usize) -> Result<Option<String>, String> {
+fn optional_text(
+    arguments: Arguments<'_>,
+    name: &str,
+    limit: usize,
+) -> Result<Option<String>, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => {
@@ -1075,7 +1109,7 @@ fn optional_text(arguments: &Value, name: &str, limit: usize) -> Result<Option<S
 }
 
 /// The list of items `name` of `arguments`, each by its number from 1 or by its text, empty when it is not given.
-fn items(arguments: &Value, name: &str) -> Result<Vec<agent_panels::Item>, String> {
+fn items(arguments: Arguments<'_>, name: &str) -> Result<Vec<agent_panels::Item>, String> {
     let given = match arguments.get(name) {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(given)) if given.len() <= agent_panels::ITEMS => given,
@@ -1104,7 +1138,7 @@ fn items(arguments: &Value, name: &str) -> Result<Vec<agent_panels::Item>, Strin
 }
 
 /// The `update_panel` tool.
-fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn update_panel(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let panel = text(arguments, "panel")?;
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
     let update = Update {
@@ -1114,13 +1148,23 @@ fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
         check: items(arguments, "check")?,
         uncheck: items(arguments, "uncheck")?,
         place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
-        version: version(arguments, "panel")?,
+        // As `update_panel` named it before versions.
+        version: version(
+            arguments
+                .get("version")
+                .filter(|given| !given.is_null())
+                .or_else(|| arguments.get("revision")),
+            "panel",
+        )?,
     };
     hub.agent_update_panel(session, update).map(structured)
 }
 
 /// The optional text `name` of `arguments`, bounded as an identifier.
-fn optional_identifier<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+fn optional_identifier<'a>(
+    arguments: Arguments<'a>,
+    name: &str,
+) -> Result<Option<&'a str>, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
@@ -1132,7 +1176,7 @@ fn optional_identifier<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'
 }
 
 /// The optional number `name` of `arguments`.
-fn optional_number(arguments: &Value, name: &str) -> Result<Option<f32>, String> {
+fn optional_number(arguments: Arguments<'_>, name: &str) -> Result<Option<f32>, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
@@ -1144,7 +1188,7 @@ fn optional_number(arguments: &Value, name: &str) -> Result<Option<f32>, String>
 
 /// The shape of slots `arguments` ask for as `aspect`, their width over their height: a number, or a ratio such as
 /// `9:16`, and 0 or `standard` for a standard slot's, as `Some(None)`; left out, `None`.
-fn optional_aspect(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+fn optional_aspect(arguments: Arguments<'_>) -> Result<Option<Option<f32>>, String> {
     let refused = || {
         "aspect is the slots' width over their height: a number, or a ratio such as 9:16 or 16:9, or standard.".to_owned()
     };
@@ -1173,7 +1217,7 @@ fn optional_aspect(arguments: &Value) -> Result<Option<Option<f32>>, String> {
 
 /// How far `arguments` ask a wall to tilt, as `tilt`, in degrees: 0 for upright, as `Some(None)`; left out, `None`. Its
 /// bounds are the stage's to refuse, saying why.
-fn optional_tilt(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+fn optional_tilt(arguments: Arguments<'_>) -> Result<Option<Option<f32>>, String> {
     let tilt = optional_number(arguments, "tilt")?;
     if tilt.is_some_and(|tilt| !tilt.is_finite()) {
         return Err("tilt is a number of degrees, from -45 to 45.".to_owned());
@@ -1183,7 +1227,7 @@ fn optional_tilt(arguments: &Value) -> Result<Option<Option<f32>>, String> {
 
 /// How large `arguments` ask a wall's panels' content to be drawn within its slots, as `content_scale`: 1 for as large
 /// as its slots give it, as `Some(None)`; left out, `None`. Its bounds are the stage's to refuse, saying why.
-fn optional_content_scale(arguments: &Value) -> Result<Option<Option<f32>>, String> {
+fn optional_content_scale(arguments: Arguments<'_>) -> Result<Option<Option<f32>>, String> {
     let scale = optional_number(arguments, "content_scale")?;
     if scale.is_some_and(|scale| !scale.is_finite()) {
         return Err("content_scale is a number, from 0.5 to 2.".to_owned());
@@ -1191,10 +1235,15 @@ fn optional_content_scale(arguments: &Value) -> Result<Option<Option<f32>>, Stri
     Ok(scale.map(|scale| (scale != 1.0).then_some(scale)))
 }
 
-/// The sizes in metres `arguments` ask for: the wall's `width`, and its slots' `slot_width` and `slot_height`.
-fn metres(arguments: &Value) -> Result<crate::hub::tools::Metres, String> {
+/// The sizes in metres `arguments` ask for: the wall's `width`, where it `widths` takes one, and its slots'
+/// `slot_width` and `slot_height`.
+fn metres(arguments: Arguments<'_>, widths: bool) -> Result<crate::hub::tools::Metres, String> {
     Ok(crate::hub::tools::Metres {
-        width: optional_number(arguments, "width")?,
+        width: if widths {
+            optional_number(arguments, "width")?
+        } else {
+            None
+        },
         slot_width: optional_number(arguments, "slot_width")?,
         slot_height: optional_number(arguments, "slot_height")?,
     })
@@ -1203,7 +1252,7 @@ fn metres(arguments: &Value) -> Result<crate::hub::tools::Metres, String> {
 /// The columns, rows, scale and curve `arguments` ask for: each left out, `None`; a radius of 0, flat.
 #[allow(clippy::type_complexity)]
 fn wall_layout(
-    arguments: &Value,
+    arguments: Arguments<'_>,
 ) -> Result<((Option<u32>, Option<u32>), Option<f32>, Option<Option<f32>>), String> {
     let count = |name: &str| -> Result<Option<u32>, String> {
         match arguments.get(name) {
@@ -1222,7 +1271,7 @@ fn wall_layout(
 }
 
 /// The `set_wall` tool.
-fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let wall = text(arguments, "wall")?;
     crate::limits::check(wall, crate::limits::IDENTIFIER_BYTES, "wall")?;
     let place = optional_identifier(arguments, "place")?;
@@ -1253,23 +1302,19 @@ fn set_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String
         wall,
         change,
         grid,
-        metres(arguments)?,
+        metres(arguments, true)?,
         place,
         joining,
         lock,
-        version(arguments, "wall")?,
+        version(arguments.get("version"), "wall")?,
     )
     .map(structured)
 }
 
-/// The `version` of a wall or panel, `what`, that `arguments` say the agent last read, if they say one: or, for a
-/// panel, its `revision`, as `update_panel` named it before versions.
-fn version(arguments: &Value, what: &str) -> Result<Option<u64>, String> {
-    let given = match arguments.get("version") {
-        None | Some(Value::Null) => arguments.get("revision").filter(|value| !value.is_null()),
-        given => given,
-    };
+/// The version of a wall or panel, `what`, the agent says it last read, `given`, if it says one.
+fn version(given: Option<&Value>, what: &str) -> Result<Option<u64>, String> {
     given
+        .filter(|value| !value.is_null())
         .map(|value| {
             value.as_u64().ok_or_else(|| {
                 format!("version is the {what}'s version, a whole number, as you last read it.")
@@ -1280,13 +1325,13 @@ fn version(arguments: &Value, what: &str) -> Result<Option<u64>, String> {
 
 /// What `arguments` ask of a wall's group: `attach`, `{ to, edge, align }`, its edge `left`, `right`, `top` or `bottom`
 /// and its alignment `start`, `middle` or `end`, by default `start`; or `detach`, to take it out of its group.
-fn joining(arguments: &Value) -> Result<Option<crate::hub::tools::Joining>, String> {
+fn joining(arguments: Arguments<'_>) -> Result<Option<crate::hub::tools::Joining>, String> {
     let detach = arguments
         .get("detach")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let attach = match arguments.get("attach") {
-        None | Some(Value::Null) => None,
+    let attach = match arguments.object("attach") {
+        None => None,
         Some(attach) => {
             let (to, edge, align) = attachment(attach)?;
             Some(crate::hub::tools::Joining::Attach { to, edge, align })
@@ -1301,25 +1346,26 @@ fn joining(arguments: &Value) -> Result<Option<crate::hub::tools::Joining>, Stri
 }
 
 /// The `add_wall` tool.
-fn add_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn add_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let place = optional_identifier(arguments, "place")?;
-    if metres(arguments)?.width.is_some() {
-        return Err("Give a new wall its slots' size, not its width.".to_owned());
-    }
-    let (layout, ..) = new_layout(arguments)?;
+    let (layout, ..) = new_layout(arguments, false)?;
     hub.agent_add_wall(session, place, layout).map(structured)
 }
 
 /// The layout a new wall's `arguments` ask for, as `add_wall` and each wall of `create_layout` take them, by default three
 /// columns of two rows of standard slots, flat; with the width in metres they ask it to be, and whether they say its
-/// slots' size, by scale, width or slot_width and slot_height.
-fn new_layout(arguments: &Value) -> Result<(crate::stage::Layout, Option<f32>, bool), String> {
+/// slots' size, by scale, width or slot_width and slot_height. Only where it `widths` takes a width, as
+/// `create_layout`'s walls do and `add_wall` does not.
+fn new_layout(
+    arguments: Arguments<'_>,
+    widths: bool,
+) -> Result<(crate::stage::Layout, Option<f32>, bool), String> {
     let flat = crate::stage::Layout::FLAT;
     let ((columns, rows), scale, radius) = wall_layout(arguments)?;
     let mut aspect = optional_aspect(arguments)?.flatten();
     let sized = scale.is_some();
     let mut scale = scale.unwrap_or(flat.scale);
-    let metres = metres(arguments)?;
+    let metres = metres(arguments, widths)?;
     if metres.width.is_some() && sized {
         return Err("Say either scale or width, not both.".to_owned());
     }
@@ -1352,7 +1398,7 @@ fn new_layout(arguments: &Value) -> Result<(crate::stage::Layout, Option<f32>, b
 
 /// The `create_layout` tool: its walls, each with the agent's own id for it, laid out as `add_wall`'s are, and each
 /// after the first attached to an earlier one by that id, curved as the first is unless it says otherwise.
-fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn create_layout(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let place = optional_identifier(arguments, "place")?;
     let walls = arguments
         .get("walls")
@@ -1366,6 +1412,7 @@ fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, S
         })?;
     let mut planned = Vec::with_capacity(walls.len());
     for wall in walls {
+        let wall = arguments.item("walls", wall);
         let id = text(wall, "id")?;
         let id = crate::stage::slug(id).ok_or_else(|| {
             format!(
@@ -1373,7 +1420,7 @@ fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, S
                 crate::space::one_line(id, 40)
             )
         })?;
-        let (mut layout, width, sized) = new_layout(wall)?;
+        let (mut layout, width, sized) = new_layout(wall, true)?;
         // Curved as the first is, unless it says otherwise.
         if let Some(first) = planned
             .first()
@@ -1382,8 +1429,8 @@ fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, S
         {
             layout.radius = first.radius;
         }
-        let attach = match wall.get("attach") {
-            None | Some(Value::Null) => None,
+        let attach = match wall.object("attach") {
+            None => None,
             Some(attach) => {
                 let (to, edge, align) = attachment(attach)?;
                 let to = crate::stage::slug(&to).unwrap_or(to);
@@ -1403,21 +1450,21 @@ fn create_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, S
 }
 
 /// The `remove_layout` tool.
-fn remove_layout(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn remove_layout(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let group = text(arguments, "group")?;
     crate::limits::check(group, crate::limits::IDENTIFIER_BYTES, "group")?;
     hub.agent_remove_layout(session, group).map(structured)
 }
 
 /// The `remove_wall` tool.
-fn remove_wall(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn remove_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let wall = text(arguments, "wall")?;
     crate::limits::check(wall, crate::limits::IDENTIFIER_BYTES, "wall")?;
     hub.agent_remove_wall(session, wall).map(structured)
 }
 
 /// The `set_speech` tool.
-fn set_speech(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn set_speech(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let (speech, name, announcement) = match text(arguments, "speech")? {
         "full" => (
             SpeechSetting::Full,
@@ -1436,7 +1483,7 @@ fn set_speech(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
 }
 
 /// The `set_environment` tool.
-fn set_environment(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn set_environment(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let environment = text(arguments, "environment")?;
     let result = hub.agent_set_environment(session, environment)?;
     Ok(changed(
@@ -1447,7 +1494,7 @@ fn set_environment(hub: &Hub, session: &str, arguments: &Value) -> Result<Value,
 }
 
 /// The `rename_space` tool.
-fn rename_space(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn rename_space(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let asked = text(arguments, "title")?;
     let result = hub.agent_rename_space(session, asked)?;
     let title = hub.space_title(&result.space).unwrap_or_default();
@@ -1460,7 +1507,7 @@ fn rename_space(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, St
 }
 
 /// The `set_my_name` tool: whoever spoke, renamed on their own device, and what the agent is to say. See `design/security.md`.
-fn set_my_name(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn set_my_name(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let name = text(arguments, "name")?;
     crate::limits::check(name, crate::limits::NAME_BYTES, "name")?;
     let renamed = hub.agent_set_my_name(session, name, requested_by(arguments)?)?;
@@ -1493,7 +1540,7 @@ fn set_my_name(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Str
 }
 
 /// The flag `name` of `arguments`, if it is given.
-fn optional_flag(arguments: &Value, name: &str) -> Result<Option<bool>, String> {
+fn optional_flag(arguments: Arguments<'_>, name: &str) -> Result<Option<bool>, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(flag)) => Ok(Some(*flag)),
@@ -1502,7 +1549,7 @@ fn optional_flag(arguments: &Value, name: &str) -> Result<Option<bool>, String> 
 }
 
 /// The `requested_by` argument of `arguments`, the participant whose words asked for a sensitive tool, if it is given, which the hub checks, and requires where the tool needs it. See `design/security.md`.
-fn requested_by(arguments: &Value) -> Result<Option<&str>, String> {
+fn requested_by(arguments: Arguments<'_>) -> Result<Option<&str>, String> {
     match arguments.get("requested_by") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(name)) => Ok(Some(name)),
@@ -1511,7 +1558,7 @@ fn requested_by(arguments: &Value) -> Result<Option<&str>, String> {
 }
 
 /// The optional text argument `name` of `arguments`, empty when it is not given.
-fn shown_text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+fn shown_text<'a>(arguments: Arguments<'a>, name: &str) -> Result<&'a str, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(""),
         Some(Value::String(text)) if text.len() <= SHOWN_TEXT_BYTES => Ok(text),
@@ -1522,7 +1569,7 @@ fn shown_text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
 
 /// The `inspect` tool: the side is asked on a thread of its own, within the inspection time-out, so that neither the
 /// hub's lock nor the scheduler waits for it. See `design/environments.md`.
-async fn inspect(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+async fn inspect(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let id = text(arguments, "id")?;
     let action = match arguments.get("action") {
         None | Some(Value::Null) => None,
@@ -1535,7 +1582,7 @@ async fn inspect(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, S
 
 /// The `act` tool: checked and handed to the side under the hub's lock, and its answer waited for on a thread of its
 /// own, within the action time-out. See `design/environment-actions.md`.
-async fn act(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+async fn act(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let id = text(arguments, "id")?;
     let action = text(arguments, "action")?;
     let parameters = arguments.get("parameters").unwrap_or(&Value::Null);
@@ -1546,7 +1593,7 @@ async fn act(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Strin
 /// The `show_image` tool: the file is read, decoded and made into the image clients are sent on a thread of its own,
 /// one at a time, and kept, before its panel is projected, so that neither the hub's lock nor the scheduler waits for
 /// it. See `design/projection.md`.
-async fn show_image(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+async fn show_image(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let path = text(arguments, "path")?.to_owned();
     let title = shown_text(arguments, "title")?;
     let caption = shown_text(arguments, "caption")?;
@@ -1591,7 +1638,7 @@ async fn show_image(hub: &Hub, session: &str, arguments: &Value) -> Result<Value
 }
 
 /// The `confirm_pairing` tool.
-fn confirm_pairing(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+fn confirm_pairing(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let code = text(arguments, "code")?;
     if code.len() > CODE_BYTES {
         return Err("A pairing code is the six digits the device shows.".to_owned());
@@ -1624,7 +1671,7 @@ fn decide_pairing(
 }
 
 /// The boolean argument `name` of `arguments`, false when it is not given.
-fn flag(arguments: &Value, name: &str) -> Result<bool, String> {
+fn flag(arguments: Arguments<'_>, name: &str) -> Result<bool, String> {
     match arguments.get(name) {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
@@ -1633,7 +1680,11 @@ fn flag(arguments: &Value, name: &str) -> Result<bool, String> {
 }
 
 /// The `remove_workers` tool.
-async fn remove_workers(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+async fn remove_workers(
+    hub: &Hub,
+    session: &str,
+    arguments: Arguments<'_>,
+) -> Result<Value, String> {
     let sessions = match arguments.get("sessions") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(sessions)) if sessions.len() <= REMOVAL_LIMIT => sessions

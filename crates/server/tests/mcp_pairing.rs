@@ -282,9 +282,15 @@ fn the_agent_lists_the_pairing_waiting_but_never_its_code() {
         failure(&studio.call("decline_pairing", json!({}))).starts_with("No pairing is waiting.")
     );
     // Who asked is a name, as text.
-    for tool in ["confirm_pairing", "decline_pairing"] {
+    for (tool, arguments) in [
+        (
+            "confirm_pairing",
+            json!({"code": "123 456", "requested_by": 1}),
+        ),
+        ("decline_pairing", json!({"requested_by": 1})),
+    ] {
         assert_eq!(
-            failure(&studio.call(tool, json!({"code": "123 456", "requested_by": 1}))),
+            failure(&studio.call(tool, arguments)),
             "requested_by is a participant's name, as text.",
             "{tool}"
         );
@@ -550,7 +556,11 @@ fn only_a_session_bound_to_a_space_may_decide_and_only_as_an_owner_there_asked()
     let shown = pair(&mut quest);
     // A call naming no session, or a session bound to no space, such as a sub-agent's, does nothing, and the operator is told.
     for tool in ["pairing", "confirm_pairing", "decline_pairing"] {
-        let arguments = json!({ "code": display(&shown) });
+        let arguments = if tool == "confirm_pairing" {
+            json!({ "code": display(&shown) })
+        } else {
+            json!({})
+        };
         assert!(
             failure(&studio.call_as(None, tool, arguments.clone()))
                 .ends_with("this call names no session."),
@@ -793,7 +803,7 @@ fn an_open_server_does_not_pair_and_the_tools_say_so() {
     for tool in ["pairing", "confirm_pairing", "decline_pairing"] {
         let params = json!({
             "name": tool,
-            "arguments": {"code": "123 456"},
+            "arguments": if tool == "confirm_pairing" { json!({"code": "123 456"}) } else { json!({}) },
             "_meta": {"ai.opencode/sessionID": session},
         });
         assert!(

@@ -208,3 +208,41 @@ fn someone_wearing_an_owner_s_headset_says_their_name_and_keeps_it() {
             .any(|participant| participant.name == "Ayoko")
     });
 }
+
+#[test]
+fn a_rename_refused_for_an_argument_set_my_name_does_not_take_uses_neither_the_limit_nor_the_words()
+{
+    let server = TestServer::with_tokens_and_tools(true, |server| {
+        server.with_tokens_over_plain_http_for_tests()
+    });
+    let (_, owner) = server.issue("Samuel", tomori_security::Grant::Owner);
+    let mut quest = server.connect_with_token("quest", "Quest 3", &owner);
+    quest.create_space("Kitchen");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&server.backend.started()[0]);
+    let rename = |arguments: Value| call(&server, &token, &session, "set_my_name", arguments);
+
+    say(&mut quest, "hello", "Call me Ayoko.");
+    // Refused before who asked is checked or a rename counted, more times than the limit allows renames.
+    for _ in 0..4 {
+        assert_eq!(
+            failure(&rename(
+                json!({ "name": "Ayoko", "requested_by": "Samuel", "everywhere": true })
+            )),
+            "everywhere is not an argument of set_my_name; it takes: name, requested_by."
+        );
+    }
+    // The same words still stand behind each of the three renames a minute allows, and only then is one refused.
+    for name in ["Ayoko", "Aiko", "Ayo"] {
+        let renamed = rename(json!({ "name": name, "requested_by": "Samuel" }));
+        assert_eq!(renamed["structuredContent"]["changed"], true, "{renamed}");
+        assert_eq!(renamed["structuredContent"]["name"], name, "{renamed}");
+    }
+    let limited = failure(&rename(
+        json!({ "name": "Ayoko", "requested_by": "Samuel" }),
+    ));
+    assert!(
+        limited.contains("renamed 3 times in the last minute"),
+        "{limited}"
+    );
+}
