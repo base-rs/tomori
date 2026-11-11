@@ -42,10 +42,14 @@ pub fn frame() -> (Vec2, Vec2, Vec2) {
     trail::frame(AT)
 }
 
-/// The point on the ground `out` towards the river from the trail's middle and `along` it.
+/// How far along the trail the beach's middle is from [`AT`]'s point, so that it keeps clear of the exercise station's
+/// clearing beside it.
+const SHIFT: f32 = 0.4;
+
+/// The point on the ground `out` towards the river from the trail's middle and `along` it from the beach's middle.
 pub fn at(out: f32, along: f32) -> Vec2 {
     let (point, way, outward) = frame();
-    point + outward * out + way * along
+    point + outward * out + way * (along + SHIFT)
 }
 
 /// The beach's outline on the ground, its four corners.
@@ -159,49 +163,55 @@ pub fn water_level() -> f32 {
     layout::nearest_river(at(FAR, 0.0)).0.y
 }
 
-/// Where participants may stand on the beach, as flat cells over its slope, each at the height of its middle, so that
-/// none stands more than a few centimetres from the shingle: down the gentle slope to where its steep bank falls to the
-/// water, short of where the river's water may spread, as everywhere in the farmyard, so that nobody lands in it; its
-/// stones below are reached by pulling them along the ray. See `locomotion.md`; walkable ground derived from what is
-/// drawn would replace them.
-pub fn walkable() -> Vec<(Vec<Vec2>, f32)> {
-    const OUT: usize = 8;
-    const ALONG: usize = 5;
-    let width = HALF_WIDTH - 0.05;
+/// The beach's shingle as ground participants walk on, which the farmyard's `walkable` derives its walkable ground from:
+/// its triangles as they are drawn, from just beyond the trail's edge, which is the trail's to stand on, only where the
+/// whole backdrop is within the far plane from the eyes of one standing there, which is its flat shingle beside the
+/// trail, and short of where the river's water may spread, as everywhere in the farmyard, so that nobody lands in it.
+/// Its stones down its slope are reached by pulling them along the ray, which reaches the water's edge from there.
+pub fn ground() -> Vec<[Vec3; 3]> {
+    let (corners, triangles) = made();
     let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD + 0.1;
-    let edge = (0..=80)
-        .map(|step| NEAR + (FAR - NEAR) * step as f32 / 80.0)
-        .take_while(|out| {
-            [-width, 0.0, width]
-                .iter()
-                .all(|along| layout::nearest_river(at(*out, *along)).1 > spread)
+    let walked = |corner: &Vec3| {
+        let point = Vec2::new(corner.x, corner.z);
+        trail::from_middle(point) >= trail::HALF + 0.02
+            && in_view(point)
+            && layout::nearest_river(point).1 > spread
+    };
+    triangles
+        .iter()
+        .map(|triangle| triangle.map(|corner| corners[corner as usize]))
+        .filter(|triangle| triangle.iter().all(walked))
+        .collect()
+}
+
+/// How far away, at most, the backdrop may be from the eyes of one standing on the beach: two metres within the
+/// headset's far plane of 50 m, and a little more to spare.
+pub const VIEW: f32 = 47.5;
+
+/// Whether the whole of the foothills' ground, as the backdrop draws it, is within [`VIEW`] of the eyes of one standing
+/// at `point`.
+fn in_view(point: Vec2) -> bool {
+    static FOOTHILLS: std::sync::OnceLock<Vec<Vec3>> = std::sync::OnceLock::new();
+    let foothills =
+        FOOTHILLS.get_or_init(|| backdrop::model().meshes[0].primitives[0].positions.clone());
+    let eyes = Vec3::new(point.x, tomori_environment::sightlines::EYES, point.y);
+    foothills.iter().all(|corner| corner.distance(eyes) < VIEW)
+}
+
+/// The river's stones on and beside the beach, which participants keep clear of, as `(least, greatest)` corners.
+pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
+    boulders()
+        .iter()
+        .map(|boulder| {
+            let solid = boulder.solid();
+            (solid.low, solid.high)
         })
-        .last()
-        .unwrap_or(NEAR);
-    let width = HALF_WIDTH - 0.05;
-    let mut cells = Vec::with_capacity(OUT * ALONG);
-    for band in 0..OUT {
-        let (from, to) = (
-            NEAR + (edge - NEAR) * band as f32 / OUT as f32,
-            NEAR + (edge - NEAR) * (band + 1) as f32 / OUT as f32,
-        );
-        for strip in 0..ALONG {
-            let (left, right) = (
-                -width + 2.0 * width * strip as f32 / ALONG as f32,
-                -width + 2.0 * width * (strip + 1) as f32 / ALONG as f32,
-            );
-            let middle = height(at((from + to) * 0.5, (left + right) * 0.5)).expect("on the beach");
-            cells.push((
-                vec![at(from, left), at(to, left), at(to, right), at(from, right)],
-                middle,
-            ));
-        }
-    }
-    cells
+        .collect()
 }
 
 /// How many stones lie on the beach.
 pub const STONES: usize = 28;
+
 /// How many corners a stone's middle ring has, and its bottom's and top's: four, since Rapier rests a face of more than
 /// four corners on another unsteadily, so that a stone of them shakes off the one put on it. And so how many points its
 /// hull has.

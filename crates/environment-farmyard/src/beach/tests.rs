@@ -12,7 +12,7 @@ fn the_beach_lies_beside_the_riverbank_viewpoint_from_the_trail_s_edge_into_the_
     let middle = at((NEAR + FAR) * 0.5, 0.0);
     assert!(Vec2::new(riverbank.at.x, riverbank.at.z).distance(middle) < 1.5);
     // Its top meets the trail's edge, and its foot is in the river's water.
-    assert!(trail::from_middle(at(NEAR, 0.0)) <= trail::HALF + 1e-3);
+    assert!((trail::from_middle(at(NEAR, 0.0)) - trail::HALF).abs() < 0.05);
     let level = water_level();
     assert!(height(at(NEAR + 0.01, 0.0)).unwrap() > level + 0.4);
     assert!(height(at(FAR - 0.01, 0.0)).unwrap() < level);
@@ -50,30 +50,28 @@ fn the_shingle_is_drawn_above_the_ground_everywhere_and_slopes_gently() {
 }
 
 #[test]
-fn participants_stand_on_the_beach_in_cells_down_its_slope_short_of_the_river_s_spread() {
-    let bands = walkable();
-    assert_eq!(bands.len(), 40);
+fn participants_walk_the_flat_shingle_where_the_backdrop_is_in_view_short_of_the_river_clear_of_its_stones()
+ {
+    let ground = ground();
+    let (_, all) = surface();
+    // A fifth of it or so, its flat shingle beside the trail, where the whole backdrop is within the far plane.
+    let walked = ground.len();
+    assert!(walked > all.len() / 6 && walked < all.len() / 2, "{walked}");
     let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD;
-    let lowest = bands
+    let lowest = ground
         .iter()
-        .map(|(_, height)| *height)
+        .flatten()
+        .map(|corner| corner.y)
         .fold(f32::INFINITY, f32::min);
-    assert!(lowest < 0.0, "{lowest}");
-    for (outline, at_height) in &bands {
-        let middle = outline.iter().copied().sum::<Vec2>() / 4.0;
-        let shingle = height(middle).unwrap();
-        assert!((shingle - at_height).abs() < 0.03, "{shingle} {at_height}");
-        assert!(*at_height > water_level());
-        for corner in outline {
-            assert!(layout::nearest_river(*corner).1 > spread, "{corner}");
-            let below = height(*corner).unwrap();
-            // Where the bank steepens towards the channel, a cell's corner may be a hand's breadth off.
-            assert!(
-                (below - at_height).abs() < 0.1,
-                "{corner}: {below} {at_height}"
-            );
-        }
+    assert!((0.0..0.02).contains(&lowest), "{lowest}");
+    for corner in ground.iter().flatten() {
+        assert!(
+            layout::nearest_river(Vec2::new(corner.x, corner.z)).1 > spread,
+            "{corner}"
+        );
+        assert!(corner.y > water_level());
     }
+    assert_eq!(solids().len(), boulders().len());
 }
 
 #[test]

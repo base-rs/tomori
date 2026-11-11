@@ -4160,7 +4160,7 @@ name = "tomori-environment"
 version = "0.2.0"
 dependencies = [
  "base-scheduler",
- "glam",
+ "glam 0.33.12",
  "tomori-protocol",
 ]
 

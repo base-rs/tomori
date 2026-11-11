@@ -171,8 +171,13 @@ mod tests {
         for surface in surfaces {
             match surface.navmesh() {
                 Some(mesh) => {
+                    // But the beach's shingle, which slopes down towards the river, as high as it is drawn.
                     assert!(mesh.triangles().iter().flatten().all(|corner| {
+                        let shingle = tomori_environment_farmyard::beach::height(Vec2::new(
+                            corner.x, corner.z,
+                        ));
                         (-1e-6..=trail::LIFT + trail::EDGE + 1e-6).contains(&corner.y)
+                            || shingle.is_some_and(|shingle| (shingle - corner.y).abs() < 1e-3)
                     }))
                 }
                 None => assert!((0.0..0.009).contains(&surface.height())),
@@ -436,6 +441,13 @@ mod tests {
                         "lost: undrawn clearing",
                         lost && kept_by.is_none() && !drawn_clearing && middle > trail::HALF,
                     ),
+                    (
+                        "gained: the beach's shingle",
+                        old.is_none()
+                            && tomori_environment_farmyard::beach::height(point)
+                                .zip(new)
+                                .is_some_and(|(shingle, new)| (shingle - new).abs() < 1e-3),
+                    ),
                 ]
                 .into_iter()
                 .find(|(_, is)| *is)
@@ -455,14 +467,16 @@ mod tests {
         // The yard is as it was, and so is the rest of the trail, but three kinds of ground, each better: up the
         // track's edges, towards their crests, where the ring had been drawn beneath the edge, now on it; within the
         // clearance of a station's post and plaque, which participants had landed in, or on; and beyond what a
-        // clearing draws, its nine sides within the disc it had been declared as. Nowhere is walkable that was not.
+        // clearing draws, its nine sides within the disc it had been declared as. Nowhere is walkable that was not, but
+        // the beach's shingle, as high as it is drawn.
         assert!(both > 16000, "{both}");
         let kinds: Vec<&str> = differences.keys().copied().collect();
         assert!(
             kinds.iter().all(|kind| [
                 "higher: up the track's edge",
                 "lost: trail's posts, seat and rock",
-                "lost: undrawn clearing"
+                "lost: undrawn clearing",
+                "gained: the beach's shingle"
             ]
             .contains(kind)),
             "{kinds:?}"

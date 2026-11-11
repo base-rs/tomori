@@ -10,13 +10,15 @@
 use glam::{Vec2, Vec3};
 use tomori_environment::navmesh::{Navmesh, Obstacle};
 
-use crate::{campsite, layout, props, trail};
+use crate::{beach, campsite, layout, props, trail};
 
-/// What the farmyard draws as ground, which participants walk on: the yard's packed earth ([`props::ground`]), and the
-/// trail's track from crest to crest and its clearings ([`trail::ground`]).
+/// What the farmyard draws as ground, which participants walk on: the yard's packed earth ([`props::ground`]), the
+/// trail's track from crest to crest and its clearings ([`trail::ground`]), and the beach's shingle down towards the
+/// river ([`beach::ground`]).
 pub fn ground() -> Vec<[Vec3; 3]> {
     let mut ground = props::ground();
     ground.extend(trail::ground());
+    ground.extend(beach::ground());
     ground
 }
 
@@ -24,9 +26,9 @@ pub fn ground() -> Vec<[Vec3; 3]> {
 /// the trough, the feeder, the hay, the notice board and the workbench, by [`layout::CLEARANCE`]; the fence, along its
 /// posts, so that the earth stops [`layout::FENCE_CLEARANCE`] short of its line, and the gate's posts; and, beside the
 /// trail, its stations' posts with their plaques, the lookout's seat and the waterfall rock, the plants, pines and tree
-/// ferns' trunks and crowns beside it ([`trail::beside`], [`crate::ferns::solids`]) and the campsite's fire and seat,
-/// each as tall as it stands, by [`layout::CLEARANCE`]. The ground ferns, decoration, are not among them, standing off
-/// the ground by more than the clearance.
+/// ferns' trunks and crowns beside it ([`trail::beside`], [`crate::ferns::solids`]), the campsite's fire and seat, and
+/// the river's stones on the beach, each as tall as it stands, by [`layout::CLEARANCE`]. The ground ferns, decoration,
+/// are not among them, standing off the ground by more than the clearance.
 pub fn obstacles() -> Vec<Obstacle> {
     let cuboid =
         |low: Vec3, high: Vec3| Obstacle::cuboid(low, high).with_clearance(layout::CLEARANCE);
@@ -90,6 +92,7 @@ pub fn obstacles() -> Vec<Obstacle> {
             .into_iter()
             .chain(trail::beside())
             .chain(campsite::solids())
+            .chain(beach::solids())
             .map(|(low, high)| cuboid(Vec3::from(low), Vec3::from(high))),
     );
     obstacles
@@ -117,10 +120,11 @@ mod tests {
         // The yard's earth, two triangles, and the trail's track from crest to crest, three strips of two each between
         // each of its points, round the loop and out through the gate, and its clearings, each of nine sides.
         let line = trail::centreline().len();
-        assert_eq!(ground.len(), 2 + 3 * 2 * (line + 2) + 6 * 7);
+        let shingle = beach::ground();
+        assert_eq!(ground.len(), 2 + 3 * 2 * (line + 2) + 6 * 7 + shingle.len());
         // None of it slopes more than the edges' crests, which rise 35 mm over 80 mm, and all of it is within the
-        // crests' height of the earth.
-        for [a, b, c] in &ground {
+        // crests' height of the earth, but the beach's shingle, which slopes down towards the river.
+        for [a, b, c] in &ground[..ground.len() - shingle.len()] {
             let normal = (*b - *a).cross(*c - *a).normalize();
             assert!(normal.y.abs() > 0.9, "{a} {b} {c}");
             for corner in [a, b, c] {
@@ -160,6 +164,14 @@ mod tests {
                 + trail::solids().len()
                 + trail::beside().len()
                 + campsite::solids().len()
+                + beach::solids().len()
+        );
+        // The beach is walked on its shingle, as high as it is drawn.
+        let on = beach::at(beach::NEAR + 1.0, 0.3);
+        let walked = height_at(on).unwrap();
+        assert!(
+            (walked - beach::height(on).unwrap()).abs() < 1e-3,
+            "{walked}"
         );
     }
 }
