@@ -42,8 +42,8 @@ pub(crate) const EMPTY: Duration = Duration::from_secs(30 * 60);
 /// How often, while it is away from home, whether to go home is checked.
 pub(crate) const POLL: Duration = Duration::from_secs(1);
 
-/// How fast it glides, in metres a second, at most, as the swarm's agents do.
-pub(crate) const GLIDE: f32 = 0.85;
+/// How fast it glides, in metres a second, at most, as clients glide it (`tomori-scene`'s `glide::SPEED`).
+pub(crate) const GLIDE: f32 = 1.0625;
 
 /// How fast it streams, in metres a second, at most, as a worker's flock flies.
 pub(crate) const STREAMING: f32 = 6.0;
@@ -558,9 +558,9 @@ impl Hub {
     }
 
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
-    /// does: at their conversation spot, as following stands it, or, with nowhere clear there, in front of them, as a summons stood it,
-    /// its status wall and workers staying home. Refused where the space keeps it home, or before they report where
-    /// they are.
+    /// does: at their conversation spot, as following stands it, or, with nowhere clear there, in front of them, as a
+    /// summons stood it, its status wall and workers staying home. Refused where the space keeps it home, or before they
+    /// report where they are.
     pub(super) fn call_agent(
         &self,
         state: &mut HubState,

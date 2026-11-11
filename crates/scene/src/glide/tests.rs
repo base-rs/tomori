@@ -120,14 +120,47 @@ fn it_eases_in_cruises_at_its_speed_and_settles_without_overshooting() {
     moving.extend(velocities(&frames, FRAME));
     moving.push(Vec3::ZERO);
     let pushes = velocities_of(&moving);
-    assert!(most_change(&moving, Vec3::distance) < 2.0);
-    assert!(most_change(&pushes, Vec3::distance) < 30.0);
+    // At most about 2.4 m/s², its spring's `SPEED × FOLLOW / e`.
+    assert!(most_change(&moving, Vec3::distance) < 2.5);
+    assert!(most_change(&pushes, Vec3::distance) < 40.0);
     assert_eq!(frames.last().unwrap().position, there.position);
     // A stream is faster.
     let mut glide = standing(home);
     let far = at(Vec3::new(9.0, 1.4, -2.3));
     let streamed = frames_until(&mut glide, far, None, true);
     assert!(streamed < 3.0, "{streamed}");
+}
+
+/// How long `glide` takes, frame by frame, to come within `near` of `target`, in seconds.
+fn seconds_within(glide: &mut Glide, target: Anchor, near: f32) -> f32 {
+    let mut seconds = 0.0;
+    while glide
+        .step(target, None, false, false, FRAME)
+        .position
+        .distance(target.position)
+        > near
+    {
+        seconds += FRAME;
+        assert!(seconds < 60.0, "never arrived");
+    }
+    seconds + FRAME
+}
+
+#[test]
+fn it_catches_up_a_step_or_two_within_its_times() {
+    // Coming straight towards someone 2 m and 4 m further away, as it follows them on: within 5 cm, and exactly there,
+    // a quarter sooner than at 0.85 m/s, 2.9 s and 5.3 s within 5 cm.
+    for (distance, near, there) in [(2.0, 2.4, 3.8), (4.0, 4.3, 5.7)] {
+        let home = at(Vec3::new(0.0, 1.4, -2.3));
+        let target = at(Vec3::new(0.0, 1.4, -2.3 - distance));
+        let mut glide = standing(home);
+        let close = seconds_within(&mut glide, target, 0.05);
+        let mut glide = standing(home);
+        let exact = frames_until(&mut glide, target, None, false);
+        eprintln!("{distance} m: within 5 cm in {close:.2} s, exactly there in {exact:.2} s");
+        assert!(close < near, "{distance} m: {close}");
+        assert!(exact < there, "{distance} m: {exact}");
+    }
 }
 
 /// How fast each of `velocities`, a frame apart, changes.
@@ -197,7 +230,7 @@ fn a_new_place_to_go_on_its_way_carries_on_from_how_it_moves() {
     let velocities = velocities(&path, FRAME);
     let streaming = (4.4 / FRAME) as usize;
     let gliding = &velocities[..streaming];
-    assert!(most_change(gliding, Vec3::distance) < 4.0);
+    assert!(most_change(gliding, Vec3::distance) < 5.0);
     assert!(most_change(&velocities_of(gliding), Vec3::distance) < 60.0);
     assert!(most_change(&velocities, Vec3::distance) < 32.0);
     // Going back after streaming, it never goes faster than it streamed.

@@ -8,7 +8,7 @@
 //! stays where it is pinned. See `design/environments.md`.
 use super::*;
 use crate::follow::CONVERSATION;
-use crate::hub::following::{COMMIT, DWELL, EMPTY, GLANCE, LEFT};
+use crate::hub::following::{COMMIT, DWELL, EMPTY, GLANCE, GLIDE, LEFT};
 use tomori_protocol::{AgentMovement, Movement};
 
 /// What the agent of `space` does: where it is summoned to, where it faces, and whether it is pinned.
@@ -455,7 +455,7 @@ fn a_move_for_words_that_came_to_nothing_stops_where_it_has_reached() {
         utterance: "u1".to_owned(),
     });
     assert_eq!(agent(&hub, &space).0, None);
-    // Cancelled a second along its way, it stops there, 0.85 m from home.
+    // Cancelled a second along its way, it stops there, a second's glide, 1.06 m, from home.
     press(&ada, "u2");
     hub.flush_snapshots(Instant::now() + COMMIT);
     hub.lock()
@@ -472,7 +472,7 @@ fn a_move_for_words_that_came_to_nothing_stops_where_it_has_reached() {
         .map(|axis| (stopped.position[axis] - home[axis]).powi(2))
         .sum::<f32>()
         .sqrt();
-    assert!((0.8..1.3).contains(&gone), "{gone}");
+    assert!((GLIDE - 0.05..GLIDE + 0.45).contains(&gone), "{gone}");
     assert_eq!(last_state(&ada).expect("told").via, None);
     // Words with no speech in them stop it too; and the same said for someone else changes nothing.
     press(&ada, "u3");

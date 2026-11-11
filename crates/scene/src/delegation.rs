@@ -1921,7 +1921,7 @@ fn stable_hash(id: &str) -> u64 {
 }
 
 /// How quickly a worker placed elsewhere glides there: the rate its distance shrinks at, and its greatest speed, in
-/// metres a second, a little faster than the agent's 0.85 m/s, since its arc about whoever the agent faces is wider.
+/// metres a second, faster than the agent's 1.06 m/s, since its arc about whoever the agent faces is wider.
 const GLIDE_RATE: f32 = 2.5;
 const GLIDE_SPEED: f32 = 2.0;
 

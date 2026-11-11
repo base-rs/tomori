@@ -375,8 +375,7 @@ pub(crate) fn beyond(wall: &Wall, eyes: Option<[f32; 3]>) -> Pose {
 const RIGHT_OF: f32 = 1.5;
 
 /// Where a worker placed beside someone whose head is at `head` stands: [`RIGHT_OF`] to their right of the way they
-/// face, a little below their eyes, facing them; placed from their head once, never
-/// chasing it.
+/// face, a little below their eyes, facing them; placed from their head once, never chasing it.
 pub(crate) fn right_of(head: &Pose) -> Pose {
     let ahead = forward(head);
     let (x, z) = match ahead[0].hypot(ahead[2]) {

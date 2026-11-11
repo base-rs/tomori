@@ -8024,6 +8024,40 @@ mod tests {
         assert_eq!((arrangement.via, arrangement.stream), (None, true));
     }
 
+    #[test]
+    fn the_swarm_s_agents_keep_up_with_the_agent_as_it_glides() {
+        let now = Instant::now();
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.movement = Some(tomori_protocol::AgentMovement::default());
+        }));
+        let mut step = Step::default();
+        for _ in 0..(3.0 / FRAME) as usize {
+            step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        }
+        let rest = {
+            let swarm = step.coordinator.swarm();
+            middle_of(&agents_of(swarm)).distance(swarm.anchor().position)
+        };
+        // It comes 4 m straight towards whoever it goes to, its agents, flying a quarter faster than it moves, trailing its
+        // middle by no more than they trailed at 0.85 m/s for as long, 0.75 s, and gathering about it once there.
+        let to = tomori_protocol::Pose::at([0.0, 1.4, 1.7]).facing_towards([0.0, 1.6, 3.7]);
+        conversation.apply(space(|state| {
+            state.movement = Some(tomori_protocol::AgentMovement::default());
+            state.summoned = Some(to);
+        }));
+        let mut astray = 0.0f32;
+        for _ in 0..(8.0 / FRAME) as usize {
+            let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+            let middle = middle_of(&agents_of(frame.swarm));
+            astray = astray.max(middle.distance(frame.swarm.anchor().position));
+        }
+        let swarm = step.coordinator.swarm();
+        let there = middle_of(&agents_of(swarm)).distance(swarm.anchor().position);
+        assert!(astray < crate::glide::SPEED * 0.75 + 0.01, "{astray}");
+        assert!(there < rest + 0.05, "{there}");
+    }
+
     /// The swarm's agents where `swarm` draws them.
     fn agents_of(swarm: &crate::swarm::Swarm) -> Vec<Vec3> {
         swarm.agents.iter().map(|agent| agent.position).collect()

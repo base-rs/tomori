@@ -17,15 +17,17 @@ use glam::{Quat, Vec3};
 
 use crate::anchors::Anchor;
 
-/// How fast the agent glides, at most, in metres a second: as fast as the swarm's agents fly.
-pub const SPEED: f32 = 0.85;
+/// How fast the agent glides, at most, in metres a second: a quarter faster than the swarm's agents fly at rest, 0.85 m/s,
+/// so that following someone a step or two it keeps up; its agents fly a quarter faster than it moves.
+pub const SPEED: f32 = 1.0625;
 
 /// How fast the agent streams, at most, in metres a second: as fast as a worker's flock flies.
 pub const STREAM: f32 = 6.0;
 
-/// How closely the agent's place follows its lead as it glides: a critically damped spring's rate, per second, so
-/// that it reaches nine tenths of its speed in about 0.8 s and trails its lead by `2 × SPEED / FOLLOW`, 0.34 m.
-pub const FOLLOW: f32 = 5.0;
+/// How closely the agent's place follows its lead as it glides: a critically damped spring's rate, per second, a quarter
+/// faster with [`SPEED`], so that the whole glide is a quarter quicker: it reaches nine tenths of its speed in about
+/// 0.6 s, at most at 2.4 m/s², and trails its lead by `2 × SPEED / FOLLOW`, 0.34 m, or 0.32 s.
+pub const FOLLOW: f32 = 6.25;
 
 /// How closely it follows its lead as it streams, faster, so that it trails a fast lead by no more than 1.2 m.
 pub const STREAM_FOLLOW: f32 = 10.0;
