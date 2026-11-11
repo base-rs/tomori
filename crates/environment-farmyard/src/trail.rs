@@ -8,7 +8,8 @@
 //! yard's, raised a little above the meadow, with raised edges and a few stones along them, low-poly as the yard is.
 //!
 //! Participants walk it as they walk the yard: its band ([`outlines`]) and the clearings beside it ([`clearings`]) are
-//! walkable at the yard's height, joined to the yard's earth through the gate ([`GATEWAY`]), and a pair of teleport pads
+//! walkable at the height each is drawn, within a centimetre of the yard's earth, joined to it through the gate
+//! ([`GATEWAY`]), and a pair of teleport pads
 //! ([`PADS`]) takes them between the yard and the lookout. Its stations and viewpoints are named anchors ([`places`]),
 //! and its posts and its seat are solids ([`solids`]). It stays within [`REACH`] of the backdrop's middle, so that the
 //! whole backdrop stands within the headset's far plane from it, and clear of the river's banks, the pool's rim, the
@@ -26,12 +27,18 @@ use crate::shapes::Shapes;
 /// How wide the trail's track is, from the crest of one edge to the other, all of it walkable, and half that.
 pub const WIDTH: f32 = 1.2;
 pub const HALF: f32 = WIDTH / 2.0;
-/// The height participants stand at on it: the yard's earth's, so that nothing steps at the gate.
-pub const HEIGHT: f32 = 0.0;
-/// How far its track is drawn above the meadow, and its edges' crests above the track, clear of the meadow and the
-/// yard's earth so that nothing fights them.
-pub const LIFT: f32 = 0.03;
+/// How high its track is drawn, above the yard's earth's level and so 18 mm above the meadow, which lies 10 mm below
+/// it, clear of the meadow so that nothing fights it, and its edges' crests above the track.
+pub const LIFT: f32 = 0.008;
 pub const EDGE: f32 = 0.035;
+/// The height participants stand at on its track: the top of the track as drawn, so that their feet and the ring where a
+/// teleport lands are on it, not beneath it; [`LIFT`] above the yard's earth, less than the centimetre a backstep goes
+/// up or down, so that nothing stops at the gate.
+pub const HEIGHT: f32 = LIFT;
+/// The height of its clearings, drawn a little below the track where they meet it, and stood on as drawn.
+pub const CLEARING_HEIGHT: f32 = LIFT - 0.006;
+/// The height of the yard's earth, which the way out begins on inside the gate.
+pub const EARTH: f32 = 0.0;
 /// How far from the backdrop's middle every part of the trail stays, so that everything of the backdrop stands within the
 /// headset's far plane, 2 m short of it, from anywhere on it, as from the yard.
 pub const REACH: f32 = 11.5;
@@ -239,7 +246,7 @@ pub const VIEWPOINTS: [(&str, &str, usize, f32); 2] = [
 /// comes within [`STATION_RADIUS`] of it, its clearing and the trail beside it;
 /// the agent may go to any, and workers be placed at one, in its [`ROOM`].
 pub fn places() -> Vec<Place> {
-    let raised = |point: Vec2, height: f32| Vec3::new(point.x, HEIGHT + height, point.y);
+    let raised = |point: Vec2, height: f32| Vec3::new(point.x, EARTH + height, point.y);
     let high = VIEWPOINT_HEIGHT;
     let mut places: Vec<Place> = VIEWPOINTS
         .iter()
@@ -295,12 +302,12 @@ pub fn pads() -> [PadPlace; 2] {
     let bay = bay();
     [
         PadPlace {
-            centre: Vec3::new(3.0, HEIGHT, 0.3),
+            centre: Vec3::new(3.0, EARTH, 0.3),
             name: "Farmyard",
             facing: Vec3::new(-1.0, 0.0, -1.6),
         },
         PadPlace {
-            centre: Vec3::new(bay.x, HEIGHT, bay.y),
+            centre: Vec3::new(bay.x, CLEARING_HEIGHT, bay.y),
             name: "Pool lookout",
             facing: Vec3::new(layout::POOL.x - bay.x, 0.0, layout::POOL.z - bay.y),
         },
@@ -322,11 +329,12 @@ pub fn clearings() -> Vec<(Vec2, f32)> {
 /// outline cannot have the hole the loop goes round.
 pub const STRETCHES: usize = 4;
 
-/// The walkable outlines of the trail, corners in order on the ground at [`HEIGHT`]: the loop's band, [`WIDTH`] wide,
-/// in [`STRETCHES`], each overlapping the next, and the way out through the gate, from the yard's earth to the loop.
-pub fn outlines() -> Vec<Vec<Vec2>> {
+/// The walkable outlines of the trail, each its corners in order on the ground and its height, as drawn there: the
+/// loop's band, [`WIDTH`] wide, in [`STRETCHES`], each overlapping the next, at [`HEIGHT`]; and the way out through the
+/// gate, from the yard's earth to the fence at [`EARTH`], and from there to the loop on its track at [`HEIGHT`].
+pub fn outlines() -> Vec<(Vec<Vec2>, f32)> {
     let count = centreline().len();
-    let mut outlines: Vec<Vec<Vec2>> = (0..STRETCHES)
+    let mut outlines: Vec<(Vec<Vec2>, f32)> = (0..STRETCHES)
         .map(|stretch| {
             let (from, to) = (
                 stretch * count / STRETCHES,
@@ -338,20 +346,26 @@ pub fn outlines() -> Vec<Vec<Vec2>> {
                     (point + outward * HALF, point - outward * HALF)
                 })
                 .collect();
-            sides
+            let outline = sides
                 .iter()
                 .map(|(outer, _)| *outer)
                 .chain(sides.iter().rev().map(|(_, inner)| *inner))
-                .collect()
+                .collect();
+            (outline, HEIGHT)
         })
         .collect();
     let [inside, loop_] = GATEWAY;
-    outlines.push(vec![
-        Vec2::new(inside.x - HALF, inside.y),
-        Vec2::new(inside.x + HALF, inside.y),
-        Vec2::new(loop_.x + HALF, loop_.y),
-        Vec2::new(loop_.x - HALF, loop_.y),
-    ]);
+    let across = |from: f32, to: f32| {
+        vec![
+            Vec2::new(inside.x - HALF, from),
+            Vec2::new(inside.x + HALF, from),
+            Vec2::new(loop_.x + HALF, to),
+            Vec2::new(loop_.x - HALF, to),
+        ]
+    };
+    let fence = layout::FENCE.high.y;
+    outlines.push((across(inside.y, fence), EARTH));
+    outlines.push((across(fence, loop_.y), HEIGHT));
     outlines
 }
 
@@ -641,7 +655,7 @@ pub fn model() -> Model {
     // The clearings, a little below the track where they meet it.
     for (middle, radius) in clearings() {
         shapes.disc(
-            Vec3::new(middle.x, LIFT - 0.006, middle.y),
+            Vec3::new(middle.x, CLEARING_HEIGHT, middle.y),
             radius,
             9,
             colors::CLEARING,
