@@ -113,15 +113,16 @@ pub(super) fn labelled(wall: &Wall, walls: &[&Wall]) -> bool {
     chosen(wall, walls, true)
 }
 
-/// Whether `wall` shows its group's one grab bar: its group's top left wall, whose slots reach highest, so that the bar,
-/// above its top edge, stands above every wall of its group and over none of their slots, whatever their shapes. See
-/// `design/projection.md`.
+/// Whether `wall` shows its group's one grab bar: its group's bottom left wall, whose slots reach lowest, so that the
+/// bar, below its bottom edge, stands below every wall of its group and over none of their slots, whatever their
+/// shapes. See `design/projection.md`.
 pub(super) fn bears_bar(wall: &Wall, walls: &[&Wall]) -> bool {
     chosen(wall, walls, false)
 }
 
-/// Whether `wall` is its group's top left wall among `walls`, or, for its `label` where the group is curved, its bottom
-/// left, as they stand on the surface of its group's first wall: a wall alone is.
+/// Whether `wall` is its group's bottom left wall among `walls`, which bears its bar, or, for its `label`, its top left,
+/// or, where the group is curved, its bottom left, as they stand on the surface of its group's first wall: a wall alone
+/// is.
 fn chosen(wall: &Wall, walls: &[&Wall], label: bool) -> bool {
     let mut group: Vec<&Wall> = members(wall, walls);
     if group.is_empty() {
@@ -133,12 +134,12 @@ fn chosen(wall: &Wall, walls: &[&Wall], label: bool) -> bool {
         .find(|other| Some(&other.id) == wall.group.as_ref())
         .copied()
         .unwrap_or(wall);
-    let low = label && first.radius().is_some();
+    let low = !label || first.radius().is_some();
     let place = |other: &Wall| {
         let (u, y, _, _) = group::on_surface(&first.pose, first.radius(), &other.pose);
         let slots = other.extent().shifted(u, y);
         let height = if low { -slots.bottom } else { slots.top };
-        // Highest first, by a centimetre, then leftmost.
+        // Highest, or lowest, first, by a centimetre, then leftmost.
         (-(height * 100.0).round(), slots.left)
     };
     group

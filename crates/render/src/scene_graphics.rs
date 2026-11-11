@@ -1749,7 +1749,7 @@ mod tests {
                 )
             })
             .collect();
-        let point = |handle: Handle| handle_point(&wall, frame, handle, arrival::HOME).0;
+        let point = |handle: Handle| handle_point(&wall, frame, handle).0;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1931,7 +1931,7 @@ mod tests {
             padlock: true,
             reset: false,
         };
-        let (points, _) = handle_points_with(&wall, frame, arrival::HOME, lock);
+        let (points, _) = handle_points_with(&wall, frame, lock);
         assert_eq!(points.len(), 1);
         let padlock = points[0].1;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
@@ -2013,7 +2013,6 @@ mod tests {
             let unlocked_points = handle_points_with(
                 &wall.clone().with_locked(false),
                 frame,
-                arrival::HOME,
                 LockControls {
                     padlock: true,
                     reset: true,
@@ -2200,7 +2199,7 @@ mod tests {
                 let board = centre + Vec3::Y * (board_height / 2.0 - 0.01);
                 capture(&mut step, &mut conversation, &senses(board, 1.0), centre);
                 capture(&mut step, &mut conversation, &senses(board, 0.0), centre);
-                let (points, _) = handle_points(&wall, frame_of(&wall), arrival::HOME);
+                let (points, _) = handle_points(&wall, frame_of(&wall));
                 let point =
                     |handle: Handle| points.iter().find(|(shown, _)| *shown == handle).unwrap().1;
                 let more = point(Handle::Step(
@@ -2218,6 +2217,145 @@ mod tests {
             image::imageops::replace(&mut sheet, &pictures[0], 0, 0);
             image::imageops::replace(&mut sheet, &pictures[1], 0, HEIGHT.into());
             crate::test_support::preview("TOMORI_WALL_STEPPERS_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_WALL_HANDLES_LAYOUT_PREVIEW` to a PNG path to save what this renders: four walls, each taken hold of,
+    /// its handles where its own frame puts them: a flat wall of three by two, a curved wall of four, a wall above tilted
+    /// down towards the participant, and a small wall, one slot at half size, whose frame is as large as its handles need.
+    #[test]
+    fn walls_taken_hold_of_draw_every_handle_where_their_frame_puts_it() {
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        use tomori_protocol::{Grid, Wall, WallKind, WallShape};
+        use tomori_scene::projection::editing::handle_points;
+        let wall_at = |at: Vec3| {
+            Wall::new(
+                "wall-1",
+                WallKind::Added,
+                tomori_protocol::Pose::upright_facing(at.to_array(), [at.x, at.y, 0.0]),
+            )
+        };
+        let walls = [
+            wall_at(Vec3::new(0.0, 1.5, -2.6)),
+            wall_at(Vec3::new(0.0, 1.5, -2.4))
+                .with_grid(Grid::new(4, 1).unwrap())
+                .with_scale(0.8)
+                .with_shape(WallShape::Arc { radius: 2.0 }),
+            wall_at(Vec3::new(0.0, 2.3, -2.4)).with_tilt(Some(25.0)),
+            wall_at(Vec3::new(0.0, 1.5, -1.3))
+                .with_grid(Grid::new(1, 1).unwrap())
+                .with_scale(0.5),
+        ];
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wall handles layout test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses,
+                               looking: Vec3| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y)],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+            for (index, wall) in walls.iter().enumerate() {
+                let mut conversation = joined();
+                show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+                let mut step = Step::default();
+                let pose = wall.frame();
+                let frame = Mat4::from_rotation_translation(
+                    glam::Quat::from_array(pose.orientation),
+                    Vec3::from_array(pose.position),
+                );
+                let centre = frame.transform_point3(Vec3::ZERO);
+                // Taken hold of by its first slot, empty, the ray then at the sky.
+                let slot = tomori_scene::projection::slot_frames(wall, frame)[0]
+                    .transform_point3(Vec3::ZERO);
+                let sky = arrival::HOME + Vec3::new(0.0, 3.0, 0.5);
+                let before = capture(&mut step, &mut conversation, &senses(sky, 0.0), centre);
+                capture(&mut step, &mut conversation, &senses(slot, 1.0), centre);
+                capture(&mut step, &mut conversation, &senses(slot, 0.0), centre);
+                let held = capture(&mut step, &mut conversation, &senses(sky, 0.0), centre);
+                // Every handle is drawn where its point is: what it draws over the wall, within most of a handle of
+                // its middle, as seen, is centred on its middle.
+                let (points, size) = handle_points(wall, frame);
+                assert!(points.len() >= 12);
+                let eye = lens * Mat4::look_at_rh(arrival::HOME, centre, Vec3::Y);
+                let focal = HEIGHT as f32 / 2.0 / (1.2f32 / 2.0).tan();
+                for (handle, at) in &points {
+                    let clip = eye * at.extend(1.0);
+                    let (x, y) = (
+                        (clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32,
+                        (1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32,
+                    );
+                    let reach = 0.7 * size / at.distance(arrival::HOME) * focal;
+                    let (mut sum, mut count) = (glam::Vec2::ZERO, 0.0);
+                    for px in (x - reach).max(0.0) as u32..((x + reach) as u32).min(WIDTH) {
+                        for py in (y - reach).max(0.0) as u32..((y + reach) as u32).min(HEIGHT) {
+                            if held.get_pixel(px, py) != before.get_pixel(px, py) {
+                                sum += glam::Vec2::new(px as f32 + 0.5, py as f32 + 0.5);
+                                count += 1.0;
+                            }
+                        }
+                    }
+                    assert!(count > reach * reach, "{handle:?} of wall {index} drawn");
+                    let middle = sum / count;
+                    assert!(
+                        middle.distance(glam::Vec2::new(x, y)) < (0.15 * reach).max(1.5),
+                        "{handle:?} of wall {index} drawn at {middle}, not {x} {y}"
+                    );
+                }
+                image::imageops::replace(
+                    &mut sheet,
+                    &held,
+                    (index as u32 % 2 * WIDTH).into(),
+                    (index as u32 / 2 * HEIGHT).into(),
+                );
+            }
+            crate::test_support::preview("TOMORI_WALL_HANDLES_LAYOUT_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
@@ -2567,8 +2705,8 @@ mod tests {
                 Vec3::from_array(wall.pose.position),
             )
         };
-        let above = bar(&wall, frame_of(&wall), arrival::HOME);
-        let below = bar(&tomori, frame_of(&tomori), arrival::HOME);
+        let curved = bar(&wall, frame_of(&wall));
+        let below = bar(&tomori, frame_of(&tomori));
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -2655,28 +2793,31 @@ mod tests {
             let mut step = Step::default();
             let plain = capture(&mut step, &mut conversation, &senses(aside, 0.0), looking);
             assert_ne!(
-                around(&plain, above.middle),
-                around(&visitor, above.middle),
+                around(&plain, curved.middle),
+                around(&visitor, curved.middle),
                 "the bar is drawn"
             );
             let hovered = capture(
                 &mut step,
                 &mut conversation,
-                &senses(above.middle, 0.0),
+                &senses(curved.middle, 0.0),
                 looking,
             );
-            assert_ne!(around(&hovered, above.middle), around(&plain, above.middle));
+            assert_ne!(
+                around(&hovered, curved.middle),
+                around(&plain, curved.middle)
+            );
             // Squeezed, the wall is carried; let go where it was, it is held, its handles shown.
             capture(
                 &mut step,
                 &mut conversation,
-                &senses(above.middle, 1.0),
+                &senses(curved.middle, 1.0),
                 looking,
             );
             capture(
                 &mut step,
                 &mut conversation,
-                &senses(above.middle, 0.0),
+                &senses(curved.middle, 0.0),
                 looking,
             );
             let held = capture(&mut step, &mut conversation, &senses(aside, 0.0), looking);
@@ -4058,7 +4199,7 @@ mod tests {
                 Vec3::from_array(frame.position),
             )
         };
-        let hinge = handle_point(&upright, frame_of(&upright), Handle::Tilt, arrival::HOME).0;
+        let hinge = handle_point(&upright, frame_of(&upright), Handle::Tilt).0;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -4235,7 +4376,7 @@ mod tests {
             slot.transform_point3(-Vec3::X * half),
             slot.transform_point3(Vec3::X * half),
         );
-        let point = |handle: Handle| handle_point(&wall, frame, handle, arrival::HOME).0;
+        let point = |handle: Handle| handle_point(&wall, frame, handle).0;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
