@@ -133,7 +133,8 @@ pub enum SeriesStyle {
     Unknown,
 }
 
-/// How a note reads: neutral, good, a warning or bad. `Neutral` stands for a tone a newer server sends too.
+/// How a note, or a row of a list panel ([`crate::ListRow::tone`]), reads: neutral, good, a warning or bad, named for
+/// what it means rather than a colour. `Neutral` stands for a tone a newer server sends too.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

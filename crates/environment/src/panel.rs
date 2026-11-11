@@ -3,7 +3,7 @@
 
 //! Panels a server side publishes onto its environment's own walls, for everyone in its space: see [`Panel`] and
 //! [`crate::Space::publish`].
-use tomori_protocol::Chart;
+use tomori_protocol::{Chart, chart::Tone};
 
 use crate::{REFERENCE_BYTES, valid_reference};
 
@@ -62,36 +62,45 @@ pub fn valid_row_id(id: &str) -> bool {
 
 /// A row of a list panel, [`Panel::list`]: an id the side chooses, unique among the panel's rows, by which it
 /// highlights the row, its text, a line of Markdown-lite, drawn as text and never as HTML, and, optionally, a reference
-/// the space's agent may inspect the row by, as an [`crate::Object`]'s, and whether a participant may choose it, with A
-/// or the trigger, the choice reaching the side as an [`crate::Intent`] whose [`crate::Intent::chosen`] names it. See
-/// `design/panel-actions.md`.
+/// the space's agent may inspect the row by, as an [`crate::Object`]'s, whether a participant may choose it, with A
+/// or the trigger, the choice reaching the side as an [`crate::Intent`] whose [`crate::Intent::chosen`] names it, a
+/// tone, [`Row::with_tone`], and a value against a limit, [`Row::with_value`], which a client that draws rows shows
+/// as a strip and a mark at its start and a thin bar under its text. See `design/panel-actions.md`.
 ///
 /// ```
-/// use tomori_environment::Row;
+/// use tomori_environment::{Row, chart::Tone};
 ///
 /// let row = Row::new("pod112", "pod112 · 41 waiting").with_reference("pod/112").choosable();
 /// assert_eq!((row.id(), row.text(), row.reference()), ("pod112", "pod112 · 41 waiting", Some("pod/112")));
 /// assert!(row.is_choosable());
 /// assert_eq!(Row::new("pod7", "pod7").reference(), None);
 /// assert!(!Row::new("pod7", "pod7").is_choosable());
+/// // A row is neutral, without a value, unless it says: 9 waiting of 20 is a warning, nearly half full.
+/// assert_eq!((row.tone(), row.value()), (Tone::Neutral, None));
+/// let waiting = Row::new("pod9", "pod9 · 9 waiting").with_tone(Tone::Warn).with_value(9.0 / 20.0);
+/// assert_eq!((waiting.tone(), waiting.value()), (Tone::Warn, Some(0.45)));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Row {
     id: String,
     text: String,
     reference: Option<String>,
     choosable: bool,
+    tone: Tone,
+    value: Option<f32>,
 }
 
 impl Row {
-    /// The row `id`, showing `text`, which nobody chooses.
+    /// The row `id`, showing `text`, which nobody chooses, neutral and without a value.
     pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             text: text.into(),
             reference: None,
             choosable: false,
+            tone: Tone::Neutral,
+            value: None,
         }
     }
 
@@ -116,6 +125,24 @@ impl Row {
         self
     }
 
+    /// The row, in `tone`: how it reads, good, a warning or bad, named for what it means, never a colour, which
+    /// Tomori draws from its own palette as a strip at the row's start and a mark in place of its bullet, a tick, an
+    /// exclamation mark or a cross, so that it reads without telling colours apart. A client that draws no rows shows
+    /// nothing of it, and the agent is told it in words, so the row's text should say what matters of it too.
+    pub fn with_tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// The row, with a value against its limit, `fraction`, from 0 for none of it to 1 for all, such as 0.45 for 9
+    /// waiting of 20, drawn as a thin bar under the row's text, in its tone: held within 0 to 1, and left out where it
+    /// is not finite, as a division by a limit of zero is. A client that draws no rows shows nothing of it, so the
+    /// row's text should say the number too.
+    pub fn with_value(mut self, fraction: f32) -> Self {
+        self.value = tomori_protocol::row_value(fraction);
+        self
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -127,6 +154,16 @@ impl Row {
     /// The reference the agent can inspect it by, if it has one.
     pub fn reference(&self) -> Option<&str> {
         self.reference.as_deref()
+    }
+
+    /// How it reads: neutral unless it says.
+    pub fn tone(&self) -> Tone {
+        self.tone
+    }
+
+    /// Its value against its limit, from 0 to 1, if it has one.
+    pub fn value(&self) -> Option<f32> {
+        self.value
     }
 }
 
@@ -350,6 +387,24 @@ mod tests {
         assert!(valid_row_id(&"a".repeat(ROW_ID_BYTES)));
         assert!(!valid_row_id(&"a".repeat(ROW_ID_BYTES + 1)));
         assert_eq!((ROW_LIMIT, ROW_ID_BYTES, ROW_CHARS), (30, 64, 80));
+    }
+
+    #[test]
+    fn a_row_s_tone_and_value_are_what_it_was_given_its_value_held_within_its_limit() {
+        let plain = Row::new("a", "A");
+        assert_eq!((plain.tone(), plain.value()), (Tone::Neutral, None));
+        let row = Row::new("a", "A").with_tone(Tone::Bad).with_value(0.25);
+        assert_eq!((row.tone(), row.value()), (Tone::Bad, Some(0.25)));
+        let value = |fraction: f32| Row::new("a", "A").with_value(fraction).value();
+        assert_eq!(
+            [
+                value(-1.0),
+                value(3.0),
+                value(f32::NAN),
+                value(f32::INFINITY)
+            ],
+            [Some(0.0), Some(1.0), None, None]
+        );
     }
 
     #[test]

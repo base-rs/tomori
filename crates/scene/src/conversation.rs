@@ -3864,9 +3864,16 @@ impl Conversation {
     /// Whether this participant chose the row `row` of the panel `panel` within [`CHOSEN_SHOWN`], which the label on the
     /// ray says.
     pub fn just_chose(&self, panel: &str, row: &str) -> bool {
-        self.chosen_row.as_ref().is_some_and(|(chosen, id, at)| {
-            chosen == panel && id == row && at.elapsed() < CHOSEN_SHOWN
-        })
+        self.chosen_row()
+            .is_some_and(|(chosen, id)| chosen == panel && id == row)
+    }
+
+    /// The row this participant chose within [`CHOSEN_SHOWN`], by its panel and its id, which its list draws chosen.
+    pub fn chosen_row(&self) -> Option<(&str, &str)> {
+        self.chosen_row
+            .as_ref()
+            .filter(|(.., at)| at.elapsed() < CHOSEN_SHOWN)
+            .map(|(panel, row, _)| (panel.as_str(), row.as_str()))
     }
 
     /// Whether A would tick or untick a checklist item for this participant: one who takes part, as visitors only watch.

@@ -114,10 +114,14 @@ impl ServerSide for Queue {
             let rows = vec![
                 Row::new("pod7", "pod7 · 3 waiting")
                     .with_reference("pod/7")
-                    .choosable(),
+                    .choosable()
+                    .with_tone(Tone::Good)
+                    .with_value(3.0 / 50.0),
                 Row::new("pod112", "pod112 · 41 waiting")
                     .with_reference("pod/112")
-                    .choosable(),
+                    .choosable()
+                    .with_tone(Tone::Bad)
+                    .with_value(41.0 / 50.0),
                 Row::new("pod9", "pod9 · 1 waiting"),
             ];
             Panel::list("queue", "Queue", rows).highlighting(highlighted)
@@ -488,11 +492,11 @@ fn an_environment_s_list_highlights_a_row_and_the_agent_inspects_a_row() {
         read["panels"][0]["rows"],
         json!([
             {"id": "pod7", "inspect_id": "queue:pod/7", "highlighted": false, "choosable": true,
-                "text": "pod7 · 3 waiting"},
+                "tone": "good", "value": 0.06, "text": "pod7 · 3 waiting"},
             {"id": "pod112", "inspect_id": "queue:pod/112", "highlighted": true, "choosable": true,
-                "text": "pod112 · 41 waiting"},
+                "tone": "bad", "value": 0.82, "text": "pod112 · 41 waiting"},
             {"id": "pod9", "inspect_id": null, "highlighted": false, "choosable": false,
-                "text": "pod9 · 1 waiting"},
+                "tone": "neutral", "value": null, "text": "pod9 · 1 waiting"},
         ])
     );
     assert!(read["panels"][0].get("body").is_none());
@@ -667,8 +671,13 @@ fn choosing_a_row_of_an_environment_s_list_reaches_its_side_which_highlights_it(
     assert_eq!(
         list.rows,
         [
-            tomori_protocol::ListRow::new("pod7", true),
-            tomori_protocol::ListRow::new("pod112", true),
+            tomori_protocol::ListRow::new("pod7", true)
+                .with_tone(Tone::Good)
+                .with_value(0.06),
+            tomori_protocol::ListRow::new("pod112", true)
+                .with_highlight(true)
+                .with_tone(Tone::Bad)
+                .with_value(0.82),
             tomori_protocol::ListRow::new("pod9", false),
         ]
     );

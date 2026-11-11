@@ -5,7 +5,7 @@
 //! kept with the space in that environment as the agent's panels are, moved, pointed at and dismissed as they are, but
 //! updated only by their environment. See `design/projection.md` and `design/environments.md`.
 use serde::{Deserialize, Serialize};
-use tomori_protocol::Chart;
+use tomori_protocol::{Chart, chart::Tone};
 
 use super::{Content, DECLARED_WALLS, Kept, Placed, Pose, Stage, Walls, blocks};
 
@@ -35,8 +35,9 @@ pub(super) struct Published {
 }
 
 /// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
-/// id for it, its text, cleaned and cut, the reference the agent can inspect it by, if it has one, and whether a
-/// participant may choose it. See `design/panel-actions.md`.
+/// id for it, its text, cleaned and cut, the reference the agent can inspect it by, if it has one, whether a
+/// participant may choose it, its tone, and its value against its limit, from 0 to 1, if it has one, which only a
+/// client that draws rows shows. See `design/panel-actions.md`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Row {
     pub(crate) id: String,
@@ -45,6 +46,34 @@ pub(crate) struct Row {
     pub(crate) reference: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) choosable: bool,
+    #[serde(default)]
+    pub(crate) tone: Tone,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) value: Option<f32>,
+}
+
+impl Row {
+    /// How its tone is told to the agent, in a word: nothing for a neutral row, and for a tone this server does not
+    /// name.
+    pub(crate) fn tone_word(&self) -> Option<&'static str> {
+        match self.tone {
+            Tone::Good => Some("good"),
+            Tone::Warn => Some("warning"),
+            Tone::Bad => Some("bad"),
+            _ => None,
+        }
+    }
+
+    /// Its value as a whole percentage of its limit, as the agent is told it.
+    pub(crate) fn percent(&self) -> Option<u32> {
+        self.value.map(|value| (value * 100.0).round() as u32)
+    }
+}
+
+/// A row's value as it is kept and sent: within 0 to 1, to the nearest thousandth, finer than a bar on a panel shows,
+/// so that it is a few characters on the wire; none where it is not finite.
+fn value(value: f32) -> Option<f32> {
+    tomori_protocol::row_value(value).map(|value| (value * 1000.0).round() / 1000.0)
 }
 
 /// The pointer before the row a list panel highlights, bold, which every client draws as it draws any list.
@@ -56,7 +85,9 @@ const POINTER: &str = "**▸** ";
 /// text is cleaned onto one line and cut to [`tomori_environment::ROW_CHARS`], its id where that leaves nothing, and
 /// rows past a body's lines or characters left out whole; a reference refused, or an earlier row's, is left out. A
 /// text that begins with a checkbox, as `[ ] ` or `[x]`, has its brackets made parentheses, so that no row is ever a
-/// checklist item, which A would offer to tick.
+/// checklist item, which A would offer to tick. A row's tone and value add nothing to the body, so that it is the list
+/// every client drew before them, within the same bounds: they are kept with the row, its value to the nearest
+/// thousandth, for the clients that draw rows and for the agent.
 #[allow(clippy::type_complexity)]
 fn list(
     rows: &[tomori_environment::Row],
@@ -128,6 +159,8 @@ fn list(
             text,
             reference: reference.map(str::to_owned),
             choosable: row.is_choosable(),
+            tone: row.tone(),
+            value: row.value().and_then(value),
         });
     }
     let highlighted =

@@ -801,24 +801,24 @@ fn a_panel_waiting_its_turn_points_at_no_item() {
     assert_eq!(item(&mut faces), Some(0));
     // The server changed it, and its turn has not come: it shows what it showed, and points at nothing.
     let changed = lists(6).panels.remove(0);
-    assert!(!faces.follow(&changed, false));
+    assert!(!faces.follow(&changed, false, 0.0));
     assert_eq!(item(&mut faces), None);
     assert!(
         faces
-            .face(Fit::SLOT, 0, FRAME)
+            .face(Fit::SLOT, (0, &Default::default()), FRAME)
             .plain()
             .contains("first at 5")
     );
     // Its turn come, it shows the panel as it is, and points at its items again.
-    assert!(faces.follow(&changed, true));
+    assert!(faces.follow(&changed, true, 0.0));
     assert_eq!(item(&mut faces), Some(0));
     assert!(
         faces
-            .face(Fit::SLOT, 0, FRAME)
+            .face(Fit::SLOT, (0, &Default::default()), FRAME)
             .plain()
             .contains("first at 6")
     );
-    assert!(!faces.follow(&changed, false));
+    assert!(!faces.follow(&changed, false, 0.0));
     assert_eq!(item(&mut faces), Some(0));
 }
 

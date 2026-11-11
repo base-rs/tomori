@@ -820,6 +820,99 @@ mod tests {
         (added, most as f32 / least as f32)
     }
 
+    /// Set `TOMORI_LIST_PREVIEW` to a PNG path to save what this renders: an environment's queue on a panel in a wall's
+    /// slot, face on, its rows drawn as rows: one highlighted on its bar and just chosen, one pointed at, each in a tone,
+    /// with its strip and mark, some with a value's thin bar, and, longer than its face, which of its rows show.
+    #[test]
+    fn a_list_s_rows_are_drawn_with_their_highlight_tones_and_values() {
+        use tomori_protocol::{ListRow, chart::Tone};
+        crate::test_gpu::with(|gpu| {
+            let rows: [(&str, &str, Tone, Option<f32>); 16] = [
+                (
+                    "pod112",
+                    "pod112 · 41 waiting · scaling",
+                    Tone::Bad,
+                    Some(0.82),
+                ),
+                ("pod9", "pod9 · 23 waiting", Tone::Warn, Some(0.46)),
+                ("pod7", "pod7 · 12 waiting", Tone::Warn, Some(0.24)),
+                ("pod31", "pod31 · 3 waiting", Tone::Good, Some(0.06)),
+                ("pod4", "pod4 · idle", Tone::Good, Some(0.0)),
+                (
+                    "pod12",
+                    "pod12 · draining, its last jobs moving to pod31 and pod4",
+                    Tone::Neutral,
+                    None,
+                ),
+                ("pod5", "pod5 · 2 waiting", Tone::Neutral, Some(0.04)),
+                ("pod6", "pod6 · offline", Tone::Bad, None),
+                ("pod8", "pod8 · 1 waiting", Tone::Good, Some(0.02)),
+                ("pod10", "pod10 · 9 waiting", Tone::Neutral, Some(0.18)),
+                ("pod11", "pod11 · 5 waiting", Tone::Good, Some(0.1)),
+                ("pod13", "pod13 · 7 waiting", Tone::Warn, Some(0.14)),
+                ("pod14", "pod14 · idle", Tone::Good, Some(0.0)),
+                ("pod15", "pod15 · 2 waiting", Tone::Neutral, Some(0.04)),
+                ("pod16", "pod16 · 4 waiting", Tone::Neutral, Some(0.08)),
+                ("pod17", "pod17 · 1 waiting", Tone::Good, Some(0.02)),
+            ];
+            let body = rows
+                .iter()
+                .enumerate()
+                .map(|(index, (_, text, ..))| {
+                    let pointer = if index == 1 { "**▸** " } else { "" };
+                    format!("- {pointer}{text}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let panel = tomori_protocol::Panel::new(
+                "panel-1",
+                "Attention",
+                body,
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: 0,
+                },
+            )
+            .with_rows(
+                rows.iter()
+                    .enumerate()
+                    .map(|(index, (id, _, tone, value))| {
+                        let row = ListRow::new(*id, true)
+                            .with_highlight(index == 1)
+                            .with_tone(*tone);
+                        match value {
+                            Some(value) => row.with_value(*value),
+                            None => row,
+                        }
+                    })
+                    .collect(),
+            );
+            let canvas = tomori_scene::projection::list_face(
+                &panel,
+                tomori_scene::projection::Fit::SLOT,
+                0,
+                (Some("pod31"), Some("pod9")),
+            );
+            let about: String = canvas.rows[1].cells.iter().map(|(ch, _)| *ch).collect();
+            assert!(about.starts_with("rows 1–"), "{about}");
+            let (image, _) = drawn_face_on(&gpu, &canvas, 2.3, 0.37);
+            crate::test_support::preview("TOMORI_LIST_PREVIEW", &image);
+            // Each tone's colour shows, in its strips, marks and values.
+            let near = |color: [f32; 4]| {
+                let target = color.map(|channel| (channel.powf(1.0 / 2.2) * 255.0) as i32);
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        (0..3).all(|at| (i32::from(pixel.0[at]) - target[at]).abs() < 40)
+                    })
+                    .count()
+            };
+            let shown = [Tone::Good, Tone::Warn, Tone::Bad]
+                .map(|tone| near(tomori_scene::chart::tone(tone)) > 50);
+            assert_eq!(shown, [true; 3]);
+        });
+    }
+
     /// Set `TOMORI_TABLE_RULE_PREVIEW` to a PNG path to save what this renders: a table on a panel in a wall's slot, face
     /// on, at about the headset's resolution, its pixels off the screen's grid.
     #[test]

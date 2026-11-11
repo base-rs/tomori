@@ -257,6 +257,10 @@ pub fn panel_size() -> (f32, f32) {
 /// A panel's body, as the rows its face shows at `columns`, styled as the transcript styles a message. The one place a
 /// panel's content becomes rows, so that every kind of content sizes alike.
 fn body_lines(panel: &Panel, columns: usize) -> Vec<Line> {
+    // A list its environment published with its rows, drawn as rows.
+    if !panel.rows.is_empty() {
+        return list::lines(panel, columns);
+    }
     crate::transcript::markdown_lines(&panel.body, columns)
 }
 
@@ -509,6 +513,29 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas 
     scrolled_face(panel, highlighted, newest, fit, 0, layout.as_ref())
 }
 
+/// A list panel's face, as [`face`] draws it, scrolled `scroll` rows down, with the row whose id is `hovered` drawn as
+/// this participant's ray points at it and the row `chosen` as they just chose it, as the headset draws them: for a
+/// still picture of a list, such as a test's. It draws a text panel only, as a list is.
+pub fn list_face(
+    panel: &Panel,
+    fit: Fit,
+    scroll: usize,
+    (hovered, chosen): (Option<&str>, Option<&str>),
+) -> Canvas {
+    let marks = list::RowMarks {
+        hovered: hovered.map(|row| (panel.id.clone(), row.to_owned())),
+        chosen: chosen.map(|row| (panel.id.clone(), row.to_owned())),
+    };
+    let (columns, body_count, lines) = fitted(panel, fit);
+    text_face(
+        panel,
+        (columns, body_count),
+        &lines,
+        (scroll, marks.of(panel)),
+        Some(frame(false, false)),
+    )
+}
+
 /// What a panel's face shows, as [`face`] says, its body scrolled `scroll` rows down, as far as it goes, its code laid
 /// out as `layout`. A body longer than its face has a slim bar at its right edge, showing how far down it is scrolled
 /// and how much of it shows.
@@ -533,7 +560,13 @@ fn scrolled_face(
         return image::face(panel, image, fit, border);
     }
     let (columns, body_count, lines) = fitted(panel, fit);
-    text_face(panel, (columns, body_count), &lines, scroll, border)
+    text_face(
+        panel,
+        (columns, body_count),
+        &lines,
+        (scroll, list::Marked::default()),
+        border,
+    )
 }
 
 /// The colour a panel's face is framed in: brightly where it is `highlighted`, pointed at or carried, in blue where it
@@ -549,25 +582,30 @@ fn frame(highlighted: bool, newest: bool) -> [f32; 4] {
 }
 
 /// A text panel's face, as [`scrolled_face`] says, of `columns` and `body_count` rows of body, its body laid out as
-/// `lines`, scrolled `scroll` rows down and framed by `border`.
+/// `lines`, scrolled `scroll` rows down and framed by `border`; a list's rows drawn as rows, those `marked` as this
+/// participant marks them, and, where it is longer than its face, which of its rows show, after its metadata.
 fn text_face(
     panel: &Panel,
     (columns, body_count): (usize, usize),
     lines: &[Line],
-    scroll: usize,
+    (scroll, marked): (usize, list::Marked),
     border: Option<[f32; 4]>,
 ) -> Canvas {
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
     canvas.background = [0.02, 0.035, 0.06, 0.94];
     canvas.border = border;
-    let mut rows = vec![
-        Row::text(&panel.title, Style::bold(BRIGHT), columns),
-        Row::text(&about(panel), Style::plain(DIM), columns),
-        Mark::Rule.row(columns, Style::plain(DIM)),
-    ];
     let total = lines.len();
     let scroll = scroll.min(total.saturating_sub(body_count));
+    let mut about = about(panel);
+    if let Some(position) = list::position(&panel.rows, lines, (scroll, body_count)) {
+        about = format!("{position} · {about}");
+    }
+    let mut rows = vec![
+        Row::text(&panel.title, Style::bold(BRIGHT), columns),
+        Row::text(&about, Style::plain(DIM), columns),
+        Mark::Rule.row(columns, Style::plain(DIM)),
+    ];
     let mut body = shown(lines, scroll, body_count);
     if total > scroll + body_count
         && let Some(last) = body.last_mut()
@@ -579,7 +617,10 @@ fn text_face(
     body.resize_with(body_count, Default::default);
     rows.extend(body.into_iter().map(|line| Row::new(line.cells)));
     canvas.rows = rows;
-    canvas.shapes = scroll_bar(columns, body_count, total, scroll);
+    canvas.shapes = list::shapes(&panel.rows, lines, (scroll, body_count), columns, marked);
+    canvas
+        .shapes
+        .extend(scroll_bar(columns, body_count, total, scroll));
     canvas
 }
 
@@ -1498,6 +1539,8 @@ pub struct Projector {
     /// The Tomori wall travelling with the agent, and how far folded it is this frame, from 0, unfolded, to 1.
     travel: travel::Travel,
     fold: f32,
+    /// What this participant marks of the space's lists: the choosable row the ray points at, and the one just chosen.
+    marks: list::RowMarks,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -1850,8 +1893,9 @@ impl Projector {
     }
 
     /// The face of each of `standing`'s panels this frame, as it is laid out, sized and scrolled: framed brightly where it
-    /// is carried or `pointed` at, and in blue where it is the newest on its wall. Each is the face drawn last frame
-    /// unless one of those changed, or what the panel shows did.
+    /// is carried or `pointed` at, and in blue where it is the newest on its wall, a list's rows marked as
+    /// [`Self::mark_rows`] says. Each is the face drawn last frame unless one of those changed, or what the panel shows
+    /// did.
     fn faces_of(
         &mut self,
         projection: &Projection,
@@ -1860,6 +1904,7 @@ impl Projector {
     ) -> Vec<Arc<Canvas>> {
         let highlighted = self.held().or(pointed).map(str::to_owned);
         let newest = newest(projection);
+        let marks = self.marks.clone();
         standing
             .iter()
             .map(|(panel, _, fit)| {
@@ -1871,7 +1916,7 @@ impl Projector {
                 };
                 let border = frame(highlighted.as_deref() == Some(panel.id.as_str()), newest);
                 let scroll = self.scroll(&panel.id);
-                self.faces_for(panel).face(*fit, scroll, border)
+                self.faces_for(panel).face(*fit, (scroll, &marks), border)
             })
             .collect()
     }
@@ -2047,6 +2092,12 @@ impl Projector {
         self.travel.travelling()
     }
 
+    /// Mark the rows of the space's lists as `marks` says, from this frame: the choosable row this participant points
+    /// at, as A or the trigger would choose it, and the row they just chose. See `design/panel-actions.md`.
+    pub(crate) fn mark_rows(&mut self, marks: list::RowMarks) {
+        self.marks = marks;
+    }
+
     /// The panel being carried, by identity.
     pub fn held(&self) -> Option<&str> {
         self.held.as_ref().map(|held| held.panel.as_str())
@@ -2075,11 +2126,18 @@ impl Projector {
         standing
             .iter()
             .map(|(panel, _, fit)| {
-                let faces = self.faces_for(panel);
+                let faces = self
+                    .faces
+                    .get_mut(&panel.id)
+                    .expect("a panel that stands has its faces");
                 let layout = faces.at(*fit);
                 let (size, most) = (layout.size, layout.most_scroll);
                 if limits {
                     faces.limit = Some(most);
+                }
+                // A list laid out again is scrolled to the row that stood at the top of its face.
+                if let Some(scroll) = faces.anchored(*fit, most) {
+                    self.scrolls.insert(panel.id.clone(), scroll);
                 }
                 size
             })
@@ -2113,9 +2171,10 @@ impl Projector {
         for offset in 0..count {
             let index = (from + offset) % count;
             let panel = &projection.panels[index];
+            let scroll = self.scrolls.get(&panel.id).copied().unwrap_or_default();
             let took = match self.faces.get_mut(&panel.id) {
                 Some(faces) => {
-                    let took = faces.follow(panel, turns > 0);
+                    let took = faces.follow(panel, turns > 0, scroll);
                     turns -= usize::from(took);
                     took
                 }
@@ -2204,6 +2263,8 @@ mod chart;
 pub mod editing;
 mod faces;
 mod image;
+mod list;
+pub(crate) use list::RowMarks;
 pub mod travel;
 
 #[cfg(test)]

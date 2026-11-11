@@ -1,6 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use tomori_environment::chart::Tone;
 use tomori_environment::chart::{
     AxisLabel, Chart, Colour, Edge, Reference, Series, SeriesStyle, Shade,
 };
@@ -71,7 +72,7 @@ fn roomy() -> Vec<crate::EnvironmentWall> {
 /// after every point, with every label, reference line and shaded region, a unit, a badge and a status line, each as
 /// long as it may be in characters of four bytes.
 fn largest_chart() -> Chart {
-    use tomori_environment::chart::{Note, Tone, ValueAxis};
+    use tomori_environment::chart::{Note, ValueAxis};
     use tomori_protocol::chart::{
         CHART_LABELS, CHART_NAME_CHARS, CHART_POINTS, CHART_REFERENCES, CHART_SERIES, CHART_SHADES,
         CHART_STATUS_CHARS,
@@ -1712,6 +1713,126 @@ fn pointing_at_a_row_of_a_list_panel_describes_the_row() {
         "panel \"Queue\" (on a wall, published just now; the yard environment's)"
     );
     assert_eq!(describe(None), describe(Some(3)));
+}
+
+#[test]
+fn a_row_s_tone_and_value_reach_clients_beside_its_body_and_the_agent_in_words() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let mut rows = queue(5);
+    rows[0] = rows[0].clone().with_tone(Tone::Good);
+    rows[1] = rows[1].clone().with_tone(Tone::Bad).with_value(0.8234);
+    rows[2] = rows[2].clone().with_tone(Tone::Warn).with_value(f32::NAN);
+    rows[3] = rows[3].clone().with_value(7.0);
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("queue", "Queue", rows).highlighting("pod1")),
+            0,
+        )
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    // The body is the list an older client drew, its tones and values nowhere in it.
+    assert_eq!(
+        panel.body,
+        "- pod0 · 0 waiting\n- **▸** pod1 · 1 waiting\n- pod2 · 2 waiting\n- pod3 · 3 waiting\n- pod4 · 4 waiting"
+    );
+    // A client that draws rows is sent the highlight, each tone and each value, to the nearest thousandth, held within
+    // 0 to 1, and none where it was not finite.
+    assert_eq!(
+        panel.rows,
+        [
+            tomori_protocol::ListRow::new("pod0", false).with_tone(Tone::Good),
+            tomori_protocol::ListRow::new("pod1", false)
+                .with_highlight(true)
+                .with_tone(Tone::Bad)
+                .with_value(0.823),
+            tomori_protocol::ListRow::new("pod2", false).with_tone(Tone::Warn),
+            tomori_protocol::ListRow::new("pod3", false).with_value(1.0),
+            tomori_protocol::ListRow::new("pod4", false),
+        ]
+    );
+    // Pointing at a row tells the agent its tone and value in words, and nothing of a neutral row's tone.
+    let describe = |line: u32| stage.describe(&walls, &panel.id, Some(line), 0).unwrap();
+    assert!(
+        describe(1).ends_with(
+            "; row 2 of 5, highlighted, tone bad, at 82% of its limit, id yard:pod/1: \"pod1 · 1 waiting\")"
+        ),
+        "{}",
+        describe(1)
+    );
+    assert!(describe(0).contains("; row 1 of 5, tone good, id"));
+    assert!(describe(2).contains("; row 3 of 5, tone warning, id"));
+    assert!(describe(3).contains("; row 4 of 5, at 100% of its limit, id"));
+    assert!(describe(4).contains("; row 5 of 5, id"));
+    // Changing only a tone or a value updates the panel in place; the same again changes nothing.
+    let mut rows = queue(5);
+    rows[0] = rows[0].clone().with_tone(Tone::Bad);
+    let changed = stage.publish(
+        &walls,
+        publishing(Panel::list("queue", "Queue", rows.clone()).highlighting("pod1")),
+        0,
+    );
+    assert_eq!(changed, Ok(Change::Updated));
+    let after = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(
+        (after.id.as_str(), after.rows[0].tone),
+        (panel.id.as_str(), Tone::Bad)
+    );
+    let again = stage.publish(
+        &walls,
+        publishing(Panel::list("queue", "Queue", rows).highlighting("pod1")),
+        0,
+    );
+    assert_eq!(again, Ok(Change::Unchanged));
+}
+
+#[test]
+fn a_row_s_tone_is_told_in_a_word_and_its_value_as_a_percentage() {
+    let row = |tone: Tone, value: Option<f32>| super::Row {
+        id: "pod".into(),
+        text: "pod".into(),
+        reference: None,
+        choosable: false,
+        tone,
+        value,
+    };
+    let words =
+        [Tone::Neutral, Tone::Good, Tone::Warn, Tone::Bad].map(|tone| row(tone, None).tone_word());
+    assert_eq!(words, [None, Some("good"), Some("warning"), Some("bad")]);
+    assert_eq!(row(Tone::Neutral, Some(0.456)).percent(), Some(46));
+    assert_eq!(row(Tone::Neutral, None).percent(), None);
+    // Kept with the space, a row from before tones and values reads as neutral, without one.
+    let older: super::Row = serde_json::from_str(r#"{"id": "pod", "text": "pod"}"#).unwrap();
+    assert_eq!(older, row(Tone::Neutral, None));
+}
+
+/// The rows of a list as large as a list can be, of the longest ids, each in a tone with a value of three decimals and
+/// one highlighted, as a client is sent them: within 4 KiB, so that 32 of them add 128 KiB at most to a projection.
+#[test]
+fn the_largest_list_s_rows_with_tones_and_values_are_within_their_bound() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let rows = (0..tomori_environment::ROW_LIMIT)
+        .map(|index| {
+            Row::new(format!("{index:02}{}", "r".repeat(62)), "x")
+                .choosable()
+                .with_tone(Tone::Warn)
+                .with_value(0.123)
+        })
+        .collect::<Vec<_>>();
+    let highlighted = rows[7].id().to_owned();
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("queue", "Queue", rows).highlighting(&highlighted)),
+            0,
+        )
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(panel.rows.len(), tomori_environment::ROW_LIMIT);
+    let bytes = serde_json::to_vec(&panel.rows).unwrap().len();
+    assert!(bytes <= 4096, "{bytes} bytes");
 }
 
 #[test]
