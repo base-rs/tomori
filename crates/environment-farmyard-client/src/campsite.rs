@@ -25,7 +25,8 @@ pub const REACH: f32 = 0.1;
 /// the intents' rate, with room for taking and letting go.
 const TOAST_EVERY: Duration = Duration::from_millis(500);
 const TOAST_STEP: f32 = 0.005;
-/// How long a grab waits for the server side to agree before it is given up, as when it was dropped.
+/// How long a grab waits for the server side to agree before it is given up, as when it was dropped, and a letting go
+/// before it is asked again, or given up where the server side never had the stick held, as when the grab was dropped.
 const UNAGREED: Duration = Duration::from_millis(1500);
 
 /// The stick this participant holds: which, the epoch their grab makes it, how toasted it is as they hold it, where
@@ -42,12 +43,15 @@ struct Holding {
     agreed: bool,
 }
 
-/// A stick this participant let go, foreseen where the server side will rest it, until the server side says it has.
-#[derive(Clone, Copy, Debug)]
+/// A stick this participant let go, foreseen where the server side will rest it, until the server side says it has:
+/// with what it asked, and when, so that a letting go the intents' rate dropped is asked again.
+#[derive(Clone, Debug)]
 struct Letting {
     epoch: u32,
     lying: Option<Lying>,
     toast: f32,
+    asked: Intent,
+    sent: Instant,
 }
 
 /// A stick as it is drawn this frame: where, the shade of its marshmallow and whether it burns.
@@ -120,7 +124,12 @@ impl Sticks {
                 self.holding = None;
             }
         }
-        if self.letting[index].is_some_and(|letting| stick.epoch >= letting.epoch) {
+        // Rested, or another holds it, as when this participant let go of a grab another won before hearing so.
+        let other = stick.held.is_some() && stick.held != self.me;
+        if self.letting[index]
+            .as_ref()
+            .is_some_and(|letting| other || stick.epoch >= letting.epoch)
+        {
             self.letting[index] = None;
         }
     }
@@ -137,7 +146,7 @@ impl Sticks {
 
     /// Where stick `index` rests, as the server side says or this client foresees, and how toasted it is.
     fn resting(&self, index: usize) -> (Pose, f32) {
-        match self.letting[index] {
+        match &self.letting[index] {
             Some(letting) => (
                 match &letting.lying {
                     Some(lying) => Pose::lying(lying),
@@ -207,6 +216,26 @@ impl Sticks {
         }) {
             self.holding = None;
         }
+        // A letting go the server side has not taken for a while is asked again while it still says this participant
+        // holds the stick, and otherwise, as when it never had their grab, given up.
+        for index in 0..self.letting.len() {
+            let Some(letting) = self.letting[index]
+                .as_mut()
+                .filter(|letting| now.saturating_duration_since(letting.sent) >= UNAGREED)
+            else {
+                continue;
+            };
+            let stick = &self.shared[index];
+            if stick.held.is_some()
+                && stick.held == participant
+                && stick.epoch.wrapping_add(1) == letting.epoch
+            {
+                letting.sent = now;
+                intents.push(letting.asked.clone());
+            } else {
+                self.letting[index] = None;
+            }
+        }
         let Some(grab) = grab else {
             return intents;
         };
@@ -269,17 +298,20 @@ impl Sticks {
                 };
                 let (at, yaw) = (pose.middle(), pose.yaw());
                 let lying = campsite::rest(at.to_array(), yaw);
-                intents.push(Intent::Release {
+                let asked = Intent::Release {
                     release: index,
                     epoch: holding.epoch,
                     level: holding.toast,
                     at: at.to_array(),
                     yaw,
-                });
+                };
+                intents.push(asked.clone());
                 self.letting[index] = Some(Letting {
                     epoch: holding.epoch.wrapping_add(1),
                     lying,
                     toast: if lying.is_some() { holding.toast } else { 0.0 },
+                    asked,
+                    sent: now,
                 });
             }
             _ => {}

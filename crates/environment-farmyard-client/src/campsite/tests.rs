@@ -172,7 +172,7 @@ fn a_stick_taken_is_held_in_the_hand_toasted_over_the_fire_and_let_go_where_the_
     else {
         panic!("{intents:?}");
     };
-    assert!((level - sticks.letting[2].unwrap().toast).abs() < 1e-6);
+    assert!((level - sticks.letting[2].as_ref().unwrap().toast).abs() < 1e-6);
     assert_eq!((at, yaw), (pose.middle().to_array(), pose.yaw()));
     let lying = campsite::rest(at, yaw).unwrap();
     assert_eq!(
@@ -334,4 +334,74 @@ fn a_grab_the_server_side_never_agrees_to_is_given_up_and_a_visitor_takes_nothin
     });
     assert!(sticks.holding.is_none());
     assert_eq!(sticks.shown(&[]).len(), 2);
+}
+
+#[test]
+fn a_letting_go_the_server_side_never_took_is_asked_again_or_given_up() {
+    let mut sticks = Sticks::new();
+    sticks.share(shared(|_| {}));
+    let start = Instant::now();
+    let me = Some(4);
+    let grab = |hand: Hand, phase| Grab::new("stick-1", hand, phase);
+    let earth = Hand::new(
+        campsite::FIRE + Vec3::new(0.6, 1.0, 0.9),
+        Quat::from_rotation_y(0.5),
+    );
+    // Taken and agreed, then let go, its letting go dropped by the intents' rate: the server side still says it is held.
+    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
+    let held = |sticks: &mut Vec<Stick>| {
+        sticks[1].epoch = 1;
+        sticks[1].held = Some(4);
+    };
+    sticks.share(shared(held));
+    let released = sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
+    assert_eq!(released.len(), 1);
+    assert!(
+        sticks
+            .update(None, me, start + Duration::from_millis(1400))
+            .is_empty()
+    );
+    // After a moment it is asked again, the same, and then not again for another moment.
+    let later = start + Duration::from_millis(1600);
+    assert_eq!(sticks.update(None, me, later), released);
+    assert!(sticks.update(None, me, later).is_empty());
+    sticks.share(shared(held));
+    assert_eq!(
+        sticks.update(None, me, later + Duration::from_millis(1600)),
+        released
+    );
+    // Taken, it rests where it was foreseen.
+    let Intent::Release { at, yaw, .. } = released[0] else {
+        panic!("{released:?}");
+    };
+    let lying = campsite::rest(at, yaw).unwrap();
+    sticks.share(shared(|sticks| {
+        sticks[1].epoch = 2;
+        sticks[1].lying = Some(lying);
+    }));
+    assert!(sticks.letting[1].is_none());
+    // Its grab dropped and let go, the server side never had it held: after a moment it is given up, back where it was.
+    let mut sticks = Sticks::new();
+    sticks.share(shared(|_| {}));
+    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
+    sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
+    assert_ne!(sticks.shown(&[])[1].transform, Pose::racked(1).transform());
+    assert!(sticks.update(None, me, later).is_empty());
+    assert!(sticks.letting[1].is_none());
+    assert_eq!(sticks.shown(&[])[1].transform, Pose::racked(1).transform());
+    // Let go before hearing that another took it first, it is drawn in their hand as soon as the server side says so.
+    let mut sticks = Sticks::new();
+    sticks.share(shared(|_| {}));
+    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
+    sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
+    sticks.share(shared(|sticks| {
+        sticks[1].epoch = 1;
+        sticks[1].held = Some(7);
+    }));
+    assert!(sticks.letting[1].is_none());
+    let theirs = over_the_fire();
+    assert_eq!(
+        sticks.shown(&[(7, theirs)])[1].transform,
+        Pose::held(theirs.position, theirs.orientation).transform()
+    );
 }
