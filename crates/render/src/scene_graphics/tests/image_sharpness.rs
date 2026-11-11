@@ -20,7 +20,12 @@ const SAMPLES: u32 = crate::graphics::SAMPLES;
 fn lens() -> Mat4 {
     let per_radian = PER_DEGREE * 180.0 / std::f32::consts::PI;
     let half = (EYE.1 as f32 / 2.0 / per_radian).atan();
-    Mat4::perspective_rh(2.0 * half, EYE.0 as f32 / EYE.1 as f32, 0.05, 50.0)
+    glam::camera::rh::proj::directx::perspective(
+        2.0 * half,
+        EYE.0 as f32 / EYE.1 as f32,
+        0.05,
+        50.0,
+    )
 }
 
 /// A 1×1 wall at scale 1.6, 1.5 m in front of home, facing it, as the maintainer's was.
@@ -173,7 +178,7 @@ fn see(
         Seen::InSlot => arrival::HOME,
         Seen::Floating(distance) => middle + facing * distance,
     };
-    let matrix = lens() * Mat4::look_at_rh(from, middle, up);
+    let matrix = lens() * glam::camera::rh::view::look_at_mat4(from, middle, up);
     renderer.render(
         device,
         queue,

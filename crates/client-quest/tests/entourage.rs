@@ -287,7 +287,7 @@ fn run<'a>(
 
 /// The senses of someone standing at `eyes`, looking along `towards`.
 fn senses(eyes: Vec3, towards: Vec3) -> Senses {
-    let head = Mat4::look_to_rh(eyes, towards, Vec3::Y).inverse();
+    let head = glam::camera::rh::view::look_to_mat4(eyes, towards, Vec3::Y).inverse();
     Senses {
         focused: true,
         head: Some(head),
@@ -360,8 +360,12 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
             let mut panels = Panels::new(&device, &renderer);
             draw(&mut renderer, &device, &queue, &mut panels, frame);
             // Wide, to see the arc either side of the agent.
-            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-                * Mat4::look_to_rh(eyes, towards, Vec3::Y);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                fov,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_to_mat4(eyes, towards, Vec3::Y);
             renderer.render(
                 &device,
                 &queue,
@@ -666,8 +670,9 @@ fn render(
     let mut renderer = Renderer::with_sceneries(device, queue, format, WIDTH, HEIGHT, 1, sceneries);
     let mut panels = Panels::new(device, &renderer);
     draw(&mut renderer, device, queue, &mut panels, frame);
-    let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-        * Mat4::look_to_rh(eyes, towards, Vec3::Y);
+    let matrix =
+        glam::camera::rh::proj::directx::perspective(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
+            * glam::camera::rh::view::look_to_mat4(eyes, towards, Vec3::Y);
     renderer.render(
         device,
         queue,
@@ -815,7 +820,7 @@ fn check_stack(frame: &Frame, wall: &Wall, eyes: Vec3, towards: Vec3, label: &st
         }
     }
     // On the screen, from the eyes, the camera level, looking towards the agent.
-    let view = Mat4::look_to_rh(eyes, towards.with_y(0.0).normalize(), Vec3::Y);
+    let view = glam::camera::rh::view::look_to_mat4(eyes, towards.with_y(0.0).normalize(), Vec3::Y);
     let screen = |point: Vec3| {
         let at = view.transform_point3(point);
         assert!(at.z < -0.05, "{label}: {point} is behind the eyes");
@@ -1096,8 +1101,12 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
         for (row, (from, looking, fov)) in views.into_iter().enumerate() {
             let drawn = render(&device, &queue, &sceneries, &frame, from, looking, fov);
             // The bench's wood, lit warmly by its lantern, below the swarm: redder than it is blue.
-            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-                * Mat4::look_to_rh(from, looking, Vec3::Y);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                fov,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_to_mat4(from, looking, Vec3::Y);
             let top = layout::on_workbench(layout::WORKBENCH_TOP[1] - 0.15, 0.25);
             let top = carriage
                 .carry(&Pose::at([top.x, layout::WORKBENCH_HEIGHT + 0.01, top.y]))
@@ -1192,8 +1201,12 @@ fn a_home_floating_high_with_its_ring_under_it_has_its_ring_at_the_swarm_s_foot_
             let drawn = render(&device, &queue, &sceneries, &frame, eyes, towards, fov);
             // Where the ring's cubes would lie under the swarm, 1.25 m about it at 3.9 m up, against the sky: the ring's
             // blue only where it is asked to lie there.
-            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-                * Mat4::look_to_rh(eyes, towards, Vec3::Y);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                fov,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_to_mat4(eyes, towards, Vec3::Y);
             let ringed = (0..40)
                 .map(|n| n as f32 * std::f32::consts::TAU / 40.0)
                 .map(|angle| {

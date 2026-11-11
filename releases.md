@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- For clients and environments: **glam 0.33.** Every crate that speaks glam now uses glam 0.33 rather than 0.30, as the physics engine the farmyard's stones will use needs (`docs/proposals/physics-and-stacking.md`), and its deprecated `Mat4` camera constructors give way to `glam::camera`'s. **Breaking** for code that passes glam 0.30's types to Tomori's crates.
+
 - **Locked walls stay out of the way.** A locked wall, such as the farmyard's notice board or a console's wall, no longer shows a grab bar or any handle, and squeezing it takes nothing. Only an owner, who can unlock it, sees its padlock, and only within about 3 m of it, so that walls far away show nothing; squeeze it to unlock the wall and take hold of it, and squeeze the padlock again to lock it and let go. Pointing at a locked wall says faintly that it is locked, and, to an owner too far away, to come closer to unlock it. A group with a locked wall at its bottom left keeps its grab bar, on its lowest left wall that is unlocked.
 
 - For clients: `tomori-scene`'s `projection::editing` gains `PADLOCK_NEAR`; `group_bar` gives no bar for a locked wall, `hint_for` no longer describes a locked wall, and `bar_label_for` says `unlock this wall` for one; `locked_label` is new.

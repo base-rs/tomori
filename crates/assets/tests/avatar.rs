@@ -290,8 +290,12 @@ fn a_downstream_avatar_built_on_these_models_stands_in_for_the_swarm() {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        let camera = Mat4::perspective_rh(1.0, 1.0, 0.1, 20.0)
-            * Mat4::look_at_rh(Vec3::new(1.0, 1.6, 0.0), Vec3::new(1.0, 1.0, -3.0), Vec3::Y);
+        let camera = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.1, 20.0)
+            * glam::camera::rh::view::look_at_mat4(
+                Vec3::new(1.0, 1.6, 0.0),
+                Vec3::new(1.0, 1.0, -3.0),
+                Vec3::Y,
+            );
         renderer.render(
             &device,
             &queue,

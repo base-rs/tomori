@@ -14,7 +14,7 @@ keywords = ["tomori", "environment", "xr", "farmyard"]
 categories = ["game-development"]
 
 [dependencies]
-glam = "0.30"
+glam = "0.33"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

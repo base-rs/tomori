@@ -13,5 +13,5 @@ categories = ["development-tools"]
 [dependencies]
 base-scheduler = "0.5.0"
 # The walkable ground derived from what an environment draws, in its scenery's coordinates.
-glam = "0.30"
+glam = "0.33"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }

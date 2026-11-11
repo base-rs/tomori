@@ -25,7 +25,12 @@ pub(crate) fn capture(
     samples: u32,
     view: (Vec3, Vec3),
 ) -> Vec<u8> {
-    let projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 200.0);
+    let projection = glam::camera::rh::proj::directx::perspective(
+        1.2,
+        WIDTH as f32 / HEIGHT as f32,
+        0.05,
+        200.0,
+    );
     capture_sized(
         device,
         queue,
@@ -45,7 +50,7 @@ fn capture_sized(
     (eye, target): (Vec3, Vec3),
     (width, height, projection): (u32, u32, Mat4),
 ) -> Vec<u8> {
-    let view_projection = projection * Mat4::look_at_rh(eye, target, Vec3::Y);
+    let view_projection = projection * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
     let texture = |format, samples, usage| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Farmyard test target"),
@@ -220,8 +225,8 @@ fn every_shader_is_valid_wgsl() {
 
 #[test]
 fn the_eye_is_where_every_ray_of_its_view_begins() {
-    let view = Mat4::perspective_rh(1.0, 1.0, 0.1, 10.0)
-        * Mat4::look_at_rh(Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO, Vec3::Y);
+    let view = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.1, 10.0)
+        * glam::camera::rh::view::look_at_mat4(Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO, Vec3::Y);
     assert!(eye(view).distance(Vec3::new(1.0, 2.0, 3.0)) < 1e-3);
     // A view without a point of view, such as an orthographic one, is taken as from the origin.
     assert_eq!(eye(Mat4::IDENTITY), Vec3::ZERO);
@@ -375,13 +380,15 @@ fn picture() -> (u32, u32, Mat4) {
     (
         width,
         height,
-        Mat4::perspective_rh(1.3, width as f32 / height as f32, 0.05, 50.0),
+        glam::camera::rh::proj::directx::perspective(1.3, width as f32 / height as f32, 0.05, 50.0),
     )
 }
 
 /// Where `point` is drawn in a picture from `view`, as fractions across and down.
 fn seen_at((eye, target): (Vec3, Vec3), point: Vec3) -> (f32, f32) {
-    let clip = picture().2 * Mat4::look_at_rh(eye, target, Vec3::Y) * point.extend(1.0);
+    let clip = picture().2
+        * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y)
+        * point.extend(1.0);
     (clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5)
 }
 

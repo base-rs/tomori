@@ -11,8 +11,12 @@ pub(super) const MOON_DIRECTION: Vec3 = Vec3::new(0.48, 0.53, -0.8);
 
 fn light_matrix() -> Mat4 {
     let center = Vec3::new(0.0, 1.0, -2.5);
-    Mat4::orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0)
-        * Mat4::look_at_rh(center + MOON_DIRECTION.normalize() * 20.0, center, Vec3::Y)
+    glam::camera::rh::proj::directx::orthographic(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0)
+        * glam::camera::rh::view::look_at_mat4(
+            center + MOON_DIRECTION.normalize() * 20.0,
+            center,
+            Vec3::Y,
+        )
 }
 
 #[repr(C)]

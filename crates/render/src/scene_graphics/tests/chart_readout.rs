@@ -107,9 +107,13 @@ fn pointing_at_a_chart_s_plot_draws_its_readout_over_its_face() {
             .expect("the chart is drawn");
         let (width, height) = face.size();
         let on_plot = model.transform_point3(Vec3::new(width * 0.1, -height * 0.16, 0.0));
-        let lens =
-            Mat4::perspective_rh(46_f32.to_radians(), EYE.0 as f32 / EYE.1 as f32, 0.05, 50.0);
-        let matrix = lens * Mat4::look_at_rh(arrival::HOME, AHEAD, Vec3::Y);
+        let lens = glam::camera::rh::proj::directx::perspective(
+            46_f32.to_radians(),
+            EYE.0 as f32 / EYE.1 as f32,
+            0.05,
+            50.0,
+        );
+        let matrix = lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, AHEAD, Vec3::Y);
         let see = |renderer: &mut Renderer, panels: &Panels| {
             renderer.render(
                 &device,

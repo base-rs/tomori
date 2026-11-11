@@ -614,8 +614,16 @@ mod tests {
             let now = Instant::now();
             let capture = |renderer: &Renderer, panels: &Panels| {
                 // About the field of view the headset gives the inbox, to judge its text at the headset's resolution.
-                let matrix = Mat4::perspective_rh(0.45, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                    * Mat4::look_at_rh(arrival::HOME, inbox + Vec3::new(0.1, 0.0, 0.0), Vec3::Y);
+                let matrix = glam::camera::rh::proj::directx::perspective(
+                    0.45,
+                    WIDTH as f32 / HEIGHT as f32,
+                    0.05,
+                    50.0,
+                ) * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    inbox + Vec3::new(0.1, 0.0, 0.0),
+                    Vec3::Y,
+                );
                 renderer.render(
                     &device,
                     &queue,
@@ -833,11 +841,18 @@ mod tests {
             let mut step = Step::default();
             let now = Instant::now();
             // About the field of view the headset gives the wall, to judge its text at the headset's resolution.
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let from_home =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, looking, Vec3::Y);
             // Close up: the Rust code panel, in the third slot of the curved wall, from 0.8 m in front of it.
             let facing = slots[2].transform_vector3(Vec3::Z).normalize();
-            let close = lens * Mat4::look_at_rh(slot(2) + facing * 0.8, slot(2), Vec3::Y);
+            let close = lens
+                * glam::camera::rh::view::look_at_mat4(slot(2) + facing * 0.8, slot(2), Vec3::Y);
             let capture_from = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
@@ -1038,14 +1053,27 @@ mod tests {
             };
             let mut step = Step::default();
             let now = Instant::now();
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let at_wall =
-                lens * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.0, 0.7, -2.3), Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let at_wall = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    Vec3::new(0.0, 0.7, -2.3),
+                    Vec3::Y,
+                );
             // From 0.7 m in front of the floating panel, square on.
             let floating_at = Vec3::from_array(floating.position);
             let facing = glam::Quat::from_array(floating.orientation) * Vec3::Z;
-            let at_floating =
-                lens * Mat4::look_at_rh(floating_at + facing * 0.7, floating_at, Vec3::Y);
+            let at_floating = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    floating_at + facing * 0.7,
+                    floating_at,
+                    Vec3::Y,
+                );
             let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
@@ -1221,8 +1249,12 @@ mod tests {
         let aspect = eye_width as f32 / eye_height as f32;
         let distance = (shown_width / aspect).max(shown_height) / (2.0 * (fov / 2.0).tan()) / 0.75;
         let facing = model.z_axis.truncate().normalize();
-        let matrix = Mat4::perspective_rh(fov, aspect, 0.05, 50.0)
-            * Mat4::look_at_rh(middle + facing * distance, middle, up.normalize());
+        let matrix = glam::camera::rh::proj::directx::perspective(fov, aspect, 0.05, 50.0)
+            * glam::camera::rh::view::look_at_mat4(
+                middle + facing * distance,
+                middle,
+                up.normalize(),
+            );
         renderer.render(
             device,
             queue,
@@ -1483,9 +1515,19 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let at_wall = lens * Mat4::look_at_rh(arrival::HOME, at, Vec3::Y);
-            let ahead = lens * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.0, 1.0, -2.3), Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let at_wall = lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, at, Vec3::Y);
+            let ahead = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    Vec3::new(0.0, 1.0, -2.3),
+                    Vec3::Y,
+                );
             let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
@@ -1618,11 +1660,19 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let at_wide = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
-            let at_curved = lens * Mat4::look_at_rh(arrival::HOME, right, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.3,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let at_wide =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, ahead, Vec3::Y);
+            let at_curved =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, right, Vec3::Y);
             // From beside it, to see it curve.
-            let beside = lens * Mat4::look_at_rh(Vec3::new(0.6, 2.4, 1.6), right, Vec3::Y);
+            let beside = lens
+                * glam::camera::rh::view::look_at_mat4(Vec3::new(0.6, 2.4, 1.6), right, Vec3::Y);
             let head = Mat4::from_translation(arrival::HOME);
             let senses = Senses {
                 focused: true,
@@ -1772,9 +1822,18 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let view_matrix =
-                lens * Mat4::look_at_rh(arrival::HOME, middle - Vec3::Y * 0.25, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let view_matrix = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    middle - Vec3::Y * 0.25,
+                    Vec3::Y,
+                );
             let head = Mat4::from_translation(arrival::HOME);
             let from = |hand: Vec3, aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -1957,9 +2016,18 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let view_matrix =
-                lens * Mat4::look_at_rh(arrival::HOME, middle - Vec3::Y * 0.1, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let view_matrix = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    middle - Vec3::Y * 0.1,
+                    Vec3::Y,
+                );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -2112,7 +2180,12 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.3,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -2137,7 +2210,13 @@ mod tests {
                     &device,
                     &queue,
                     std::slice::from_ref(&view),
-                    &[lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y)],
+                    &[
+                        lens * glam::camera::rh::view::look_at_mat4(
+                            arrival::HOME,
+                            looking,
+                            Vec3::Y,
+                        ),
+                    ],
                     Mat4::IDENTITY,
                     &drawn_panels.list(Mat4::IDENTITY),
                 );
@@ -2163,7 +2242,9 @@ mod tests {
             let slot = tomori_scene::projection::slot_frames(&tall, frame_of(&tall))[0];
             let (_, height) = tall.slot_size();
             let low = slot.transform_point3(Vec3::new(0.0, -(height / 2.0 - 0.08), 0.0));
-            let clip = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y) * low.extend(1.0);
+            let clip = lens
+                * glam::camera::rh::view::look_at_mat4(arrival::HOME, middle, Vec3::Y)
+                * low.extend(1.0);
             let (x, y) = (
                 ((clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32) as u32,
                 ((1.0 - clip.y / clip.w) / 2.0 * HEIGHT as f32) as u32,
@@ -2267,7 +2348,12 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -2292,7 +2378,13 @@ mod tests {
                     &device,
                     &queue,
                     std::slice::from_ref(&view),
-                    &[lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y)],
+                    &[
+                        lens * glam::camera::rh::view::look_at_mat4(
+                            arrival::HOME,
+                            looking,
+                            Vec3::Y,
+                        ),
+                    ],
                     Mat4::IDENTITY,
                     &drawn_panels.list(Mat4::IDENTITY),
                 );
@@ -2321,7 +2413,8 @@ mod tests {
                 // its middle, as seen, is centred on its middle.
                 let (points, size) = handle_points(wall, frame);
                 assert!(points.len() >= 12);
-                let eye = lens * Mat4::look_at_rh(arrival::HOME, centre, Vec3::Y);
+                let eye =
+                    lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, centre, Vec3::Y);
                 let focal = HEIGHT as f32 / 2.0 / (1.2f32 / 2.0).tan();
                 for (handle, at) in &points {
                     let clip = eye * at.extend(1.0);
@@ -2464,11 +2557,21 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
             let middle = Vec3::new(0.05, 1.45, -2.6);
-            let at_group = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
-            let at_curved =
-                lens * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.3, 1.45, -2.4), Vec3::Y);
+            let at_group =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, middle, Vec3::Y);
+            let at_curved = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    Vec3::new(0.3, 1.45, -2.4),
+                    Vec3::Y,
+                );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -2611,7 +2714,7 @@ mod tests {
                 stacked_panels.extend(filling("wall-7", 1, 1));
                 stacked_panels.extend(filling("wall-8", 1, 2));
                 let looking = lens
-                    * Mat4::look_at_rh(
+                    * glam::camera::rh::view::look_at_mat4(
                         arrival::HOME,
                         Vec3::new(0.0, 1.0 + 0.1 * distance, -distance),
                         Vec3::Y,
@@ -2726,7 +2829,12 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -2747,7 +2855,8 @@ mod tests {
                                looking: Vec3| {
                 let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
                 draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
-                let eye = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+                let eye =
+                    lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, looking, Vec3::Y);
                 renderer.render(
                     &device,
                     &queue,
@@ -2954,7 +3063,12 @@ mod tests {
             let mut step = Step::default();
             let now = Instant::now();
             // About the headset's field of view and resolution, to judge the text as it would be read.
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
             let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
@@ -2995,7 +3109,8 @@ mod tests {
             assert!(hint_at.y < ahead.y);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let looking = ahead - Vec3::Y * 0.2;
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+            let from_home =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, looking, Vec3::Y);
             let hinted = capture(&renderer, &panels, from_home);
             // Without its hint, the same frame differs: the hint draws, and its warm row with it.
             let mut bare = frame.projection.clone();
@@ -3052,7 +3167,12 @@ mod tests {
             let said = text(hint);
             assert!(said.ends_with("swap with that one"), "{said}");
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let toward = lens * Mat4::look_at_rh(arrival::HOME, slot(2) + Vec3::Y * 0.25, Vec3::Y);
+            let toward = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    slot(2) + Vec3::Y * 0.25,
+                    Vec3::Y,
+                );
             let swapping = capture(&renderer, &panels, toward);
             // The code panel on its own, close up, from 0.5 m, and from home.
             let mut code_only = joined();
@@ -3065,10 +3185,15 @@ mod tests {
             let frame = code_step.update(&away, &mut code_only, &mut felt(), now, 0.01);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let facing = slots[2].transform_vector3(Vec3::Z).normalize();
-            let close = lens * Mat4::look_at_rh(slot(2) + facing * 0.5, slot(2), Vec3::Y);
+            let close = lens
+                * glam::camera::rh::view::look_at_mat4(slot(2) + facing * 0.5, slot(2), Vec3::Y);
             let wrapped = capture(&renderer, &panels, close);
-            let from_home =
-                lens * Mat4::look_at_rh(arrival::HOME, slot(2) + Vec3::Y * 0.1, Vec3::Y);
+            let from_home = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    slot(2) + Vec3::Y * 0.1,
+                    Vec3::Y,
+                );
             let wrapped_from_home = capture(&renderer, &panels, from_home);
             // The string's green carries onto the row its line wraps onto.
             let green = |image: &image::RgbaImage| {
@@ -3152,9 +3277,20 @@ mod tests {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
                 ..Default::default()
             };
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, slot + Vec3::Y * 0.1, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let close =
+                lens * glam::camera::rh::view::look_at_mat4(slot + facing * 0.6, slot, Vec3::Y);
+            let from_home = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    slot + Vec3::Y * 0.1,
+                    Vec3::Y,
+                );
             let mut capture = |body: &str, matrix: Mat4| {
                 let mut conversation = joined();
                 show_projection(&mut conversation, Vec::new(), vec![panel(body)]);
@@ -3336,9 +3472,20 @@ mod tests {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
                 ..Default::default()
             };
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let close = lens * Mat4::look_at_rh(slot + facing * 0.5, slot, Vec3::Y);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, slot + Vec3::Y * 0.1, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let close =
+                lens * glam::camera::rh::view::look_at_mat4(slot + facing * 0.5, slot, Vec3::Y);
+            let from_home = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    slot + Vec3::Y * 0.1,
+                    Vec3::Y,
+                );
             let mut capture = |body: String, matrix: Mat4| {
                 let mut conversation = joined();
                 show_projection(&mut conversation, Vec::new(), vec![panel(body)]);
@@ -3506,10 +3653,17 @@ mod tests {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, at - arrival::HOME),
                 ..Default::default()
             };
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let close =
+                lens * glam::camera::rh::view::look_at_mat4(slot + facing * 0.6, slot, Vec3::Y);
             let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -1.2);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
+            let from_home =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, ahead, Vec3::Y);
             // What the participant sees of the panel at `place`, pointed at, after the wheel scrolls it `rows` rows.
             let mut capture = |place: tomori_protocol::Place, at: Vec3, rows: f32, matrix: Mat4| {
                 let mut conversation = joined();
@@ -3649,10 +3803,17 @@ mod tests {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, at - arrival::HOME),
                 ..Default::default()
             };
-            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.1,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let close =
+                lens * glam::camera::rh::view::look_at_mat4(slot + facing * 0.6, slot, Vec3::Y);
             let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -1.2);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
+            let from_home =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, ahead, Vec3::Y);
             // What the participant sees of the panel at `place`, pointed at, after the wheel scrolls it `rows` rows.
             let mut capture = |place: tomori_protocol::Place, at: Vec3, rows: f32, matrix: Mat4| {
                 let mut conversation = joined();
@@ -3842,10 +4003,10 @@ mod tests {
             });
             // Both eyes, 64 mm apart, looking at `target`.
             let eyes = |target: Vec3| {
-                let lens = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
+                let lens = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 50.0);
                 [-0.032, 0.032].map(|x| {
                     let eye = arrival::HOME + Vec3::X * x;
-                    lens * Mat4::look_at_rh(eye, target + Vec3::X * x, Vec3::Y)
+                    lens * glam::camera::rh::view::look_at_mat4(eye, target + Vec3::X * x, Vec3::Y)
                 })
             };
             // Each eye's image of the frame with the panel at `at`, the menu, as `menu` says, and the pill where it shows, as
@@ -4205,8 +4366,14 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let view_matrix = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.3,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let view_matrix =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, middle, Vec3::Y);
             let head = Mat4::from_translation(arrival::HOME);
             let from = |hand: Vec3, aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -4382,8 +4549,14 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let view_matrix = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            );
+            let view_matrix =
+                lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, middle, Vec3::Y);
             let head = Mat4::from_translation(arrival::HOME);
             let senses = |aim: Vec3, grip: f32| Senses {
                 focused: true,
@@ -4504,9 +4677,18 @@ mod tests {
             let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
             renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
             let mut drawn_panels = Panels::new(&device, &renderer);
-            let lens = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 60.0);
-            let view_matrix =
-                lens * Mat4::look_at_rh(arrival::HOME, arrival::HOME + ahead, Vec3::Y);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.0,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                60.0,
+            );
+            let view_matrix = lens
+                * glam::camera::rh::view::look_at_mat4(
+                    arrival::HOME,
+                    arrival::HOME + ahead,
+                    Vec3::Y,
+                );
             let head = Mat4::from_translation(arrival::HOME);
             let senses = Senses {
                 focused: true,

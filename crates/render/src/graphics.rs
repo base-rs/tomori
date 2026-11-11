@@ -1474,8 +1474,9 @@ mod tests {
                     512,
                     384,
                 );
-                let camera = Mat4::perspective_rh(1.1, 512.0 / 384.0, 0.05, 50.0)
-                    * Mat4::from_translation(glam::Vec3::new(0.0, -1.6, 0.0));
+                let camera =
+                    glam::camera::rh::proj::directx::perspective(1.1, 512.0 / 384.0, 0.05, 50.0)
+                        * Mat4::from_translation(glam::Vec3::new(0.0, -1.6, 0.0));
                 let mut images = Vec::new();
                 for mode in [
                     Mode::Working,
@@ -1800,13 +1801,14 @@ mod tests {
                 let mut swarm = Swarm::default();
                 swarm.agents.clear();
                 renderer.update(&queue, &swarm, None, false);
-                let projection = Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
+                let projection = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.05, 50.0);
                 let direction = (glam::Vec3::new(-3.5, 2.4, -3.35)
                     - glam::Vec3::new(0.0, 1.6, 0.0))
                 .normalize();
                 let matrices = [-0.032, 0.032].map(|x| {
                     let eye = glam::Vec3::new(x, 1.6, 0.0);
-                    projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
+                    projection
+                        * glam::camera::rh::view::look_at_mat4(eye, eye + direction, glam::Vec3::Y)
                 });
                 let capture = |renderer: &Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
                     renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
@@ -1987,7 +1989,8 @@ mod tests {
                 let direction = (label_target - glam::Vec3::new(0.0, 1.6, 0.0)).normalize();
                 let label_matrices = [-0.032, 0.032].map(|x| {
                     let eye = glam::Vec3::new(x, 1.6, 0.0);
-                    projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
+                    projection
+                        * glam::camera::rh::view::look_at_mat4(eye, eye + direction, glam::Vec3::Y)
                 });
                 let without_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
                 renderer.update_workspace(
@@ -2035,10 +2038,14 @@ mod tests {
                     let mut scene = crate::delegation::Scene::new();
                     scene.update(Some("root"), &workspace, 0.0);
                     let anchor = glam::Vec3::from_array(scene.stations()[0].position);
-                    let focus = Mat4::perspective_rh(0.22, 1.0, 0.05, 50.0);
+                    let focus = glam::camera::rh::proj::directx::perspective(0.22, 1.0, 0.05, 50.0);
                     let matrices = [-0.032, 0.032].map(|x| {
                         focus
-                            * Mat4::look_at_rh(glam::Vec3::new(x, 1.6, 0.0), anchor, glam::Vec3::Y)
+                            * glam::camera::rh::view::look_at_mat4(
+                                glam::Vec3::new(x, 1.6, 0.0),
+                                anchor,
+                                glam::Vec3::Y,
+                            )
                     });
                     let mut previous = None;
                     for column in 0..3 {
@@ -2153,8 +2160,8 @@ mod tests {
             };
             let eye = glam::Vec3::new(0.0, 1.6, 0.0);
             let look = |target: glam::Vec3, fov: f32| {
-                Mat4::perspective_rh(fov, 1.0, 0.05, 50.0)
-                    * Mat4::look_at_rh(eye, target, glam::Vec3::Y)
+                glam::camera::rh::proj::directx::perspective(fov, 1.0, 0.05, 50.0)
+                    * glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y)
             };
             let workspace = crate::delegation::Workspace {
                 nodes: vec![crate::delegation::Node {
@@ -2238,11 +2245,27 @@ mod tests {
                 renderer.set_environment(Environment::MINIMAL);
                 let swarm = Swarm::default();
                 let eye = glam::Vec3::new(0.0, 1.6, 0.0);
-                let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                    * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
+                let matrix = glam::camera::rh::proj::directx::perspective(
+                    1.4,
+                    WIDTH as f32 / HEIGHT as f32,
+                    0.05,
+                    50.0,
+                ) * glam::camera::rh::view::look_at_mat4(
+                    eye,
+                    crate::arrival::CENTRE,
+                    glam::Vec3::Y,
+                );
                 // A closer look at the rings, as the headset's resolution would show them.
-                let close = Mat4::perspective_rh(0.75, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                    * Mat4::look_at_rh(eye, crate::arrival::CREATE, glam::Vec3::Y);
+                let close = glam::camera::rh::proj::directx::perspective(
+                    0.75,
+                    WIDTH as f32 / HEIGHT as f32,
+                    0.05,
+                    50.0,
+                ) * glam::camera::rh::view::look_at_mat4(
+                    eye,
+                    crate::arrival::CREATE,
+                    glam::Vec3::Y,
+                );
                 let capture = |renderer: &Renderer, matrix: Mat4| {
                     renderer.render(
                         &device,
@@ -2411,8 +2434,16 @@ mod tests {
                 });
                 let view = texture.create_view(&Default::default());
                 let eye = glam::Vec3::new(0.0, 1.6, 0.0);
-                let matrix = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                    * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
+                let matrix = glam::camera::rh::proj::directx::perspective(
+                    1.0,
+                    WIDTH as f32 / HEIGHT as f32,
+                    0.05,
+                    50.0,
+                ) * glam::camera::rh::view::look_at_mat4(
+                    eye,
+                    crate::arrival::CENTRE,
+                    glam::Vec3::Y,
+                );
                 let scene = Scene::layout(&View {
                     heading: "Spaces on studio.local".into(),
                     items: vec![Item {
@@ -2603,11 +2634,20 @@ mod tests {
                             ..Default::default()
                         })
                     });
-                    let projection =
-                        Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+                    let projection = glam::camera::rh::proj::directx::perspective(
+                        1.4,
+                        WIDTH as f32 / HEIGHT as f32,
+                        0.05,
+                        50.0,
+                    );
                     let matrices = [-0.032, 0.032].map(|x| {
                         let eye = glam::Vec3::new(x, 1.6, 0.0);
-                        projection * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y)
+                        projection
+                            * glam::camera::rh::view::look_at_mat4(
+                                eye,
+                                crate::arrival::CENTRE,
+                                glam::Vec3::Y,
+                            )
                     });
                     let arrival = Scene::layout(&View {
                         heading: "Spaces on studio.local".into(),
@@ -2857,7 +2897,7 @@ mod tests {
                     ],
                     [None, None],
                 );
-                let projection = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
+                let projection = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 50.0);
                 let matrices = [-0.032, 0.032]
                     .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
                 let mut pill = renderer.panel(&device, 24_000);
@@ -3084,9 +3124,12 @@ mod tests {
                 |renderer: &mut Renderer, eye: glam::Vec3, at: glam::Vec3, shown: &[Shown]| {
                     renderer.set_pads(shown);
                     renderer.update(&queue, &Swarm::default(), None, false);
-                    let matrix =
-                        Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                            * Mat4::look_at_rh(eye, at, glam::Vec3::Y);
+                    let matrix = glam::camera::rh::proj::directx::perspective(
+                        1.0,
+                        WIDTH as f32 / HEIGHT as f32,
+                        0.05,
+                        50.0,
+                    ) * glam::camera::rh::view::look_at_mat4(eye, at, glam::Vec3::Y);
                     renderer.render(
                         &device,
                         &queue,
@@ -3398,8 +3441,8 @@ mod tests {
             });
             let view = texture.create_view(&Default::default());
             // From standing height at home, looking at the swarm's ring on the grid.
-            let matrix = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0)
-                * Mat4::look_at_rh(
+            let matrix = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 50.0)
+                * glam::camera::rh::view::look_at_mat4(
                     glam::Vec3::new(0.0, 1.6, 1.0),
                     crate::swarm::CENTER,
                     glam::Vec3::Y,

@@ -139,7 +139,8 @@ fn a_transparent_corner_margin_or_outside_never_hides_a_translucent_wall_drawn_a
         let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(
-                &glam::Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, 0.05, 50.0).to_cols_array(),
+                &glam::camera::rh::proj::directx::orthographic(-1.0, 1.0, -1.0, 1.0, 0.05, 50.0)
+                    .to_cols_array(),
             ),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -384,8 +385,8 @@ fn a_sign_before_a_translucent_wall_shows_the_wall_about_its_corners_and_blends_
                 + glam::Vec3::Y * (-y * panel.pixel)
                 + normal * (SIGN_PLATE + SIGN_BOW * ((across - mid) / reach).powi(2))
         };
-        let matrix = glam::Mat4::perspective_rh(0.03, 1.0, 0.05, 50.0)
-            * glam::Mat4::look_at_rh(eye, at(3.0, 3.0), glam::Vec3::Y);
+        let matrix = glam::camera::rh::proj::directx::perspective(0.03, 1.0, 0.05, 50.0)
+            * glam::camera::rh::view::look_at_mat4(eye, at(3.0, 3.0), glam::Vec3::Y);
         let pixel_at = |image: &image::RgbaImage, point: glam::Vec3| {
             let clip = matrix * point.extend(1.0);
             let ndc = clip.truncate() / clip.w;

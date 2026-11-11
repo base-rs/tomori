@@ -44,8 +44,12 @@ fn bottom_centre(gpu: &test_gpu::Gpu, renderer: &Renderer) -> [u8; 4] {
     });
     let view = texture.create_view(&Default::default());
     let eye = Vec3::new(0.0, 1.6, 0.0);
-    let matrix = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 100.0)
-        * Mat4::look_at_rh(eye, Vec3::new(0.0, 0.4, -2.0), Vec3::Y);
+    let matrix = glam::camera::rh::proj::directx::perspective(
+        1.2,
+        WIDTH as f32 / HEIGHT as f32,
+        0.05,
+        100.0,
+    ) * glam::camera::rh::view::look_at_mat4(eye, Vec3::new(0.0, 0.4, -2.0), Vec3::Y);
     renderer.render(
         &gpu.device,
         &gpu.queue,

@@ -28,7 +28,7 @@ app = ["dep:tomori-environment-farmyard-client", "dep:tomori-environment-github-
 anyhow = "1"
 ash = "0.38"
 tomori-client = { version = "0.2.0", path = "../client" }
-glam = "0.30"
+glam = "0.33"
 log = "0.4"
 openxr = "0.22"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
