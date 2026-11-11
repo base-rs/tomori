@@ -231,6 +231,30 @@ fn every_stone_of_the_beach_stands_on_a_big_slab_and_a_cobble_tops_a_cairn() {
     standing(&placed, &rested);
 }
 
+#[test]
+fn the_heaviest_stones_put_on_the_lightest_settle_and_never_move_asleep() {
+    // Stacked the wrong way up, as a participant may, thirty times the mass on top: each settles, standing or fallen,
+    // within the seconds the others do, and then costs nothing.
+    let mass = |index: usize| beach::volume(index);
+    let mut light: Vec<usize> = (0..beach::STONES).collect();
+    light.sort_by(|a, b| mass(*a).total_cmp(&mass(*b)));
+    let heaviest = *light.last().unwrap();
+    for below in light.iter().take(4) {
+        cairn(&[*below, heaviest]);
+    }
+    let slabs: Vec<usize> = light
+        .iter()
+        .copied()
+        .filter(|index| beach::kind(*index) == beach::Kind::Slab)
+        .collect();
+    cairn(&[
+        slabs[0],
+        slabs[slabs.len() - 1],
+        slabs[1],
+        slabs[slabs.len() - 2],
+    ]);
+}
+
 /// Each stone in turn of `rested` on the one below it, as `placed`, leaning only as their tilted tops lean it, and none
 /// fallen, sunk no more than the gaps it was placed with.
 fn standing(placed: &[Placement], rested: &[Placement]) {
