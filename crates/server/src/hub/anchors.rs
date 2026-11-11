@@ -608,10 +608,7 @@ impl Hub {
                 continue;
             }
             // Who came near where is not logged, as nothing of presence is. See `design/mcp.md`.
-            log::debug!(
-                "Space {space} tells its agent of {} coming near its anchors.",
-                notes.len()
-            );
+            log::debug!("Space {space} tells its agent of someone coming near its anchors.");
             for (key, note) in notes {
                 record.model.tell_proximity(&key, note);
             }

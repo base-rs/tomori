@@ -224,14 +224,12 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
         .map(|handle| handle.as_str().unwrap())
         .collect();
     assert_eq!(handles.len(), 2);
+    let text = &prompts[0].text;
     for handle in &handles {
         assert!(handle.starts_with("ada#"), "{handle}");
         assert!(
-            prompts[0]
-                .text
-                .contains(&format!("[{handle} came within 2 m of station-1")),
-            "{}",
-            prompts[0].text
+            text.contains(&format!("[{handle} came within 2 m of station-1")),
+            "{text}"
         );
     }
     take(&hub, &space, &prompts[0]);
