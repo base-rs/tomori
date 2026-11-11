@@ -342,6 +342,27 @@ pub const STATUS_SLOTS: u32 = 2;
 
 /// `anchor`, its label cleaned onto one line and cut after `tomori_environment::ANCHOR_LABEL_LIMIT` characters, as an
 /// object's description is, and not said to be placed at run time, whatever it says.
+/// `pose`, in a space's coordinates, in those of the environment whose upright `carriage` carries them there: the
+/// carriage undone, its turn about the vertical taken off the pose's own, whatever its pitch and roll.
+pub(crate) fn uncarried(
+    carriage: &tomori_protocol::Pose,
+    pose: &tomori_protocol::Pose,
+) -> tomori_protocol::Pose {
+    let yaw = carriage.yaw();
+    let (sin, cos) = yaw.sin_cos();
+    let [dx, dy, dz] = [
+        pose.position[0] - carriage.position[0],
+        pose.position[1] - carriage.position[1],
+        pose.position[2] - carriage.position[2],
+    ];
+    let (s, c) = (-yaw / 2.0).sin_cos();
+    let [x, y, z, w] = pose.orientation;
+    tomori_protocol::Pose {
+        position: [dx * cos - dz * sin, dy, dx * sin + dz * cos],
+        orientation: [c * x + s * z, c * y + s * w, c * z - s * x, c * w - s * y],
+    }
+}
+
 pub(crate) fn cleaned(
     mut anchor: tomori_protocol::cluster::Anchor,
 ) -> tomori_protocol::cluster::Anchor {
@@ -1076,6 +1097,20 @@ impl Environments {
         pose: &tomori_protocol::Pose,
     ) -> Option<tomori_protocol::Pose> {
         self.get(id)?.carried(Some(pose))
+    }
+
+    /// `pose`, in a space's coordinates, in the environment `id`'s own: carried back by its carriage, turned and all, as
+    /// a participant's head and hands are for its server side; or none, as for one it does not offer.
+    pub(crate) fn uncarry(
+        &self,
+        id: &str,
+        pose: &tomori_protocol::Pose,
+    ) -> Option<tomori_protocol::Pose> {
+        let environment = self.get(id)?;
+        Some(match environment.carriage() {
+            None => *pose,
+            Some(carriage) => uncarried(&carriage, pose),
+        })
     }
 
     /// The names of the cluster anchors the environment `id` declares, `home` always among them, since the place is
@@ -2000,6 +2035,27 @@ mod tests {
             Environments::new([]).choose_for(None, Some(&[])),
             Err("The server offers no environments.".to_owned())
         );
+    }
+
+    #[test]
+    fn a_pose_in_a_space_is_carried_back_into_its_environment_s_coordinates() {
+        let arrival = tomori_protocol::Pose::at([5.0, 0.0, 2.0]).facing_towards([6.0, 0.0, 2.0]);
+        let environments = Environments::new([
+            Environment::new("grid", "Grid"),
+            Environment::new("yard", "Yard").with_arrival(arrival),
+        ]);
+        let pose = tomori_protocol::Pose {
+            position: [1.0, 1.5, -2.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        // An environment that gives no arrival leaves it where it is; one not offered has none.
+        assert_eq!(environments.uncarry("grid", &pose), Some(pose));
+        assert_eq!(environments.uncarry("moon", &pose), None);
+        // Carried back, it is carried forth to where it was.
+        let back = environments.uncarry("yard", &pose).unwrap();
+        let forth = environments.carry("yard", &back).unwrap();
+        assert!((0..3).all(|axis| (forth.position[axis] - pose.position[axis]).abs() < 1e-4));
+        assert!((forth.yaw() - pose.yaw()).abs() < 1e-4);
     }
 
     #[test]

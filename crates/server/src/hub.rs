@@ -2436,6 +2436,12 @@ impl Hub {
         let Some(record) = self.current_channel(&mut state, outlet) else {
             return Ok(());
         };
+        // Held to the rate of updates a side may send, states and events alike. See `design/environments.md`.
+        let now = Instant::now();
+        record
+            .updates
+            .get_or_insert_with(|| crate::channel::Updates::new(now))
+            .take(now)?;
         // Clients ignore an event until they have a state, so the first update of a binding is sent as its state, which already includes any event that goes with it.
         let first = record.state.replace(kept.clone()).is_none();
         let message = match event.filter(|_| !first) {
@@ -4382,6 +4388,23 @@ impl Hub {
                     .as_ref()
                     .is_some_and(crate::presence::Seen::tracks_hands);
                 record.seen = seen;
+                // Where a participant, never a visitor, is, for the environment's server side, in its own coordinates.
+                if state.role(connection, Some(id)).participates() {
+                    let environment = &state.space(id).expect("found above").model.environment;
+                    let environments = self.environments();
+                    let uncarry =
+                        |pose: &tomori_protocol::Pose| environments.uncarry(environment, pose);
+                    if let Some(at) = uncarry(&head) {
+                        let presence = tomori_environment::Presence::new(
+                            source,
+                            at,
+                            left.as_ref().and_then(uncarry),
+                            right.as_ref().and_then(uncarry),
+                            Instant::now(),
+                        );
+                        self.server_sides.presence(id, presence);
+                    }
+                }
                 // A following agent keeps with whoever it talks with as they move. See `design/environments.md`.
                 self.agent_seen(state, id, participant, Instant::now());
             }

@@ -186,6 +186,15 @@ impl ServerSides {
         }
     }
 
+    /// Tell the side running for `space`, if one does, where a participant is, `presence`, as their client reported it
+    /// and the hub carried it into the environment's coordinates; at most 20 times a second for each, as the side's inbox
+    /// takes it. See `tomori_environment::Space::presence`.
+    pub(crate) fn presence(&self, space: &str, presence: tomori_environment::Presence) {
+        if let Some(running) = self.running.lock().expect("never left poisoned").get(space) {
+            running.inbox.set_presence(presence);
+        }
+    }
+
     /// The inspector the side running for `space` gave, with the inspection counted until it is dropped, or why there is
     /// none to ask.
     pub(crate) fn inspector(

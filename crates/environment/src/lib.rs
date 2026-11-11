@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base_scheduler::Cancellation;
 
@@ -418,6 +418,16 @@ pub const STATE_LIMIT: usize = 64 * 1024;
 /// protocol carries.
 pub const EVENT_LIMIT: usize = 4 * 1024;
 
+/// How many updates, states it shares and events it announces, a side may make each second in its space, after a burst
+/// of [`UPDATE_BURST`]: the server refuses those beyond, saying so, as it does panels published too fast. Enough for a
+/// side that says where what moves is 20 times a second, with room for what else changes.
+pub const UPDATES_PER_SECOND: u32 = 30;
+pub const UPDATE_BURST: u32 = 60;
+
+/// How often, at most, the server tells a side where a participant is, [`Space::presence`]: 20 times a second, however
+/// often their client reports it.
+pub const PRESENCE_INTERVAL: Duration = Duration::from_millis(50);
+
 /// The most objects a side describes with [`Space::describe`] that the server keeps: those after are left out.
 pub const OBJECT_LIMIT: usize = 32;
 
@@ -569,6 +579,40 @@ where
     }
 }
 
+/// Where a participant is, as their presence last said and the server last told the side: their head, and each
+/// controller's grip pose, its −Z forward through the fist, if their presence says it, as the desktop's does not; all in
+/// the environment's own coordinates, as the server carries them from the space's; and when the server told the side.
+/// See [`Space::presence`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Presence {
+    pub participant: u32,
+    pub head: tomori_protocol::Pose,
+    pub left: Option<tomori_protocol::Pose>,
+    pub right: Option<tomori_protocol::Pose>,
+    pub at: Instant,
+}
+
+impl Presence {
+    /// Participant `participant`'s presence, their head at `head` and their controllers at `left` and `right`, if their
+    /// presence says them, at `at`.
+    pub fn new(
+        participant: u32,
+        head: tomori_protocol::Pose,
+        left: Option<tomori_protocol::Pose>,
+        right: Option<tomori_protocol::Pose>,
+        at: Instant,
+    ) -> Self {
+        Self {
+            participant,
+            head,
+            left,
+            right,
+            at,
+        }
+    }
+}
+
 /// Where a server side's state, events and descriptions go: the server, which sends them to the clients in the space
 /// that present the environment, or nowhere, for a space made without one, as in a side's own tests. See
 /// [`Space::with_outlet`].
@@ -641,6 +685,8 @@ struct Waiting {
     answered: Condvar,
     /// The participants in the space, by their numbers, as the server last said, or nothing until it has.
     present: Mutex<Option<Vec<u32>>>,
+    /// Where each participant is, by their number, as the server last told the side.
+    presence: Mutex<HashMap<u32, Presence>>,
 }
 
 /// The actions handed on to a side that wait for its answer, and the answers it gave that the server has not yet taken.
@@ -733,11 +779,50 @@ impl Inbox {
     pub fn set_present(&self, mut participants: Vec<u32>) {
         participants.sort_unstable();
         participants.dedup();
+        // Nobody who has gone is anywhere.
+        self.0
+            .presence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|participant, _| participants.binary_search(participant).is_ok());
         *self
             .0
             .present
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(participants);
+    }
+
+    /// Say where a participant is now, `presence`, as their client reported it, which [`Space::presence`] reads: only
+    /// once [`PRESENCE_INTERVAL`] has passed since the last it took for them, by its [`Presence::at`], so that a side is
+    /// told at most 20 times a second however often a headset reports. Says whether it took it. The server says it of
+    /// participants only, never visitors.
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    /// use tomori_environment::{Presence, Space};
+    /// use tomori_protocol::Pose;
+    ///
+    /// let space = Space::new("space-1-1", "Yard", "/");
+    /// let now = Instant::now();
+    /// let head = Pose::at([0.0, 1.6, 0.0]);
+    /// assert!(space.inbox().set_presence(Presence::new(3, head, None, None, now)));
+    /// assert!(!space.inbox().set_presence(Presence::new(3, head, None, None, now + Duration::from_millis(10))));
+    /// assert_eq!(space.presence().len(), 1);
+    /// ```
+    pub fn set_presence(&self, presence: Presence) -> bool {
+        let mut known = self
+            .0
+            .presence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let soon = known
+            .get(&presence.participant)
+            .is_some_and(|last| presence.at.saturating_duration_since(last.at) < PRESENCE_INTERVAL);
+        if soon {
+            return false;
+        }
+        known.insert(presence.participant, presence);
+        true
     }
 
     /// The inspector the side last gave with [`Space::inspect_with`], if it gave one.
@@ -865,7 +950,9 @@ impl Space {
     /// Send `event`, the environment's own JSON text, to everyone in the space now who presents the environment at its
     /// version, and keep `state`, which already includes the event, for whoever joins later, at once, so that nobody
     /// misses the event or sees it twice. The server refuses an event larger than [`EVENT_LIMIT`], 4 KiB, or a state
-    /// larger than [`STATE_LIMIT`], saying why.
+    /// larger than [`STATE_LIMIT`], saying why; and, as it does states shared, more than [`UPDATES_PER_SECOND`], 30, a
+    /// second, after a burst of [`UPDATE_BURST`], 60, saying so, so that a side gathers what changed into one event
+    /// rather than announcing each change on its own.
     pub fn announce(&self, event: impl Into<String>, state: impl Into<String>) -> Result<()> {
         self.outlet.announce(event.into(), state.into())
     }
@@ -1044,6 +1131,25 @@ impl Space {
             .clone()
     }
 
+    /// Where each participant in the space is, by their numbers, in order, as the server last told the side, at most 20
+    /// times a second ([`PRESENCE_INTERVAL`]), in the environment's own coordinates: so that a side can check that what a
+    /// participant asks for is within their reach, and know where their hand holds what they hold. Participants only,
+    /// never visitors, and only while they are present, as [`Space::present`] says; one whose presence the server has
+    /// not been told, as a client that reports none, is not among them. Each says when it was told, so that a side can
+    /// tell someone whose presence has gone quiet.
+    pub fn presence(&self) -> Vec<Presence> {
+        let mut presence: Vec<Presence> = self
+            .waiting
+            .presence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .copied()
+            .collect();
+        presence.sort_by_key(|presence| presence.participant);
+        presence
+    }
+
     /// Where the server hands on intents for this side, and finds its inspector.
     pub fn inbox(&self) -> Inbox {
         Inbox(self.waiting.clone())
@@ -1114,6 +1220,42 @@ mod tests {
         assert_eq!(space.id(), "space-1-2");
         assert_eq!(space.title(), "Fleet");
         assert_eq!(space.directory(), "/srv/fleet");
+    }
+
+    #[test]
+    fn a_side_is_told_where_each_participant_is_at_most_twenty_times_a_second_while_they_are_present()
+     {
+        let space = Space::new("space-1-2", "Yard", "/");
+        assert!(space.presence().is_empty());
+        let now = Instant::now();
+        let head = tomori_protocol::Pose::at([1.0, 1.6, 0.0]);
+        let hand = tomori_protocol::Pose::at([1.2, 1.1, -0.3]);
+        let inbox = space.inbox();
+        assert!(inbox.set_presence(Presence::new(7, head, None, Some(hand), now)));
+        assert!(inbox.set_presence(Presence::new(2, head, Some(hand), None, now)));
+        // Too soon after the last, it is not taken; once the interval has passed, it is.
+        let soon = now + PRESENCE_INTERVAL / 2;
+        assert!(!inbox.set_presence(Presence::new(7, hand, None, None, soon)));
+        let later = now + PRESENCE_INTERVAL;
+        assert!(inbox.set_presence(Presence::new(7, hand, None, None, later)));
+        let presence = space.presence();
+        assert_eq!(
+            presence
+                .iter()
+                .map(|presence| presence.participant)
+                .collect::<Vec<_>>(),
+            [2, 7]
+        );
+        assert_eq!(
+            (presence[1].head, presence[1].right, presence[1].at),
+            (hand, None, later)
+        );
+        assert_eq!(presence[0].left, Some(hand));
+        // Gone from the space, they are nowhere.
+        inbox.set_present(vec![7]);
+        assert_eq!(space.presence().len(), 1);
+        assert_eq!(space.presence()[0].participant, 7);
+        assert!(UPDATES_PER_SECOND <= UPDATE_BURST);
     }
 
     #[test]
