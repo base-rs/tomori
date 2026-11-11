@@ -405,21 +405,75 @@ pub fn stones() -> Vec<Stone> {
         .collect()
 }
 
-/// Where participants may land in the yard, inside the fence and clear of what stands in it, by a margin: the rectangles
-/// a teleport profile's surfaces are made of, at the ground's height.
-pub const WALKABLE: [Footprint; 6] = [
-    // In front of everything, from the ramp's foot, short of the notice board, to short of the workbench.
-    Footprint::new([-4.6, -5.9], [4.35, -2.0]),
-    // From there to the gate, beside the workbench, the agent's home and the ring about it included.
-    Footprint::new([-2.65, -2.0], [4.35, 1.2]),
-    // Within the workbench's curve, before its left half.
-    Footprint::new([-3.7, -2.0], [-2.65, -0.6]),
-    // Between the coop and the trough and hay, past the feeder, to the back fence, and beside the coop's window.
-    Footprint::new([-1.4, -10.6], [0.3, -5.9]),
-    Footprint::new([1.3, -10.6], [2.6, -5.9]),
-    // Beside the trough, towards the fence.
-    Footprint::new([2.6, -7.7], [4.6, -5.9]),
-];
+/// How far the earth participants land on in the yard stops short of each of what stands in it, [`obstacles`], clear
+/// of the coop's roof, which overhangs its walls by 0.18 m; and how far short of the fence.
+pub const CLEARANCE: f32 = 0.25;
+pub const FENCE_CLEARANCE: f32 = 0.4;
+
+/// Where participants may land in the yard: everywhere inside the fence, by [`FENCE_CLEARANCE`], but within
+/// [`CLEARANCE`] of what stands in it ([`obstacles`]), as rectangles a teleport profile's surfaces are made of, at the
+/// ground's height, none overlapping another. They are cut from the yard along every edge of what stands in it, so
+/// that the open ground between things, such as beside the feeder or between the trough and the hay, is never left
+/// out, as it was when the rectangles were laid by hand.
+pub fn open_ground() -> Vec<Footprint> {
+    let yard = FENCE.grown(-FENCE_CLEARANCE);
+    let kept: Vec<Footprint> = obstacles()
+        .iter()
+        .map(|obstacle| obstacle.grown(CLEARANCE))
+        .collect();
+    // Every edge of the yard and of what stands in it, within the yard, along `axis`, in order.
+    let cuts = |axis: usize| {
+        let mut cuts: Vec<f32> = [yard.low, yard.high]
+            .into_iter()
+            .chain(
+                kept.iter()
+                    .flat_map(|footprint| [footprint.low, footprint.high]),
+            )
+            .map(|corner| corner[axis].clamp(yard.low[axis], yard.high[axis]))
+            .collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup();
+        cuts
+    };
+    let (across, along) = (cuts(0), cuts(1));
+    let mut ground: Vec<Footprint> = Vec::new();
+    // Those still growing along Z, as indices into `ground`.
+    let mut growing: Vec<usize> = Vec::new();
+    for band in along.windows(2) {
+        // The runs of open cells across this band, each cell entirely within or beyond each kept footprint.
+        let mut runs: Vec<[f32; 2]> = Vec::new();
+        for cell in across.windows(2) {
+            let middle = Vec2::new((cell[0] + cell[1]) * 0.5, (band[0] + band[1]) * 0.5);
+            if kept.iter().any(|footprint| footprint.contains(middle)) {
+                continue;
+            }
+            match runs.last_mut() {
+                Some(run) if run[1] == cell[0] => run[1] = cell[1],
+                _ => runs.push([cell[0], cell[1]]),
+            }
+        }
+        // A run as wide as one in the band before carries it on; any other begins a rectangle of its own.
+        let mut next = Vec::new();
+        for run in runs {
+            let carried = growing.iter().copied().find(|&index| {
+                let footprint = ground[index];
+                footprint.low.x == run[0] && footprint.high.x == run[1]
+            });
+            match carried {
+                Some(index) => {
+                    ground[index].high.y = band[1];
+                    next.push(index);
+                }
+                None => {
+                    next.push(ground.len());
+                    ground.push(Footprint::new([run[0], band[0]], [run[1], band[1]]));
+                }
+            }
+        }
+        growing = next;
+    }
+    ground
+}
 
 /// The middle of the land beyond the fence, about which the backdrop's foothills ring the yard: the yard's middle.
 pub const BACKDROP_CENTRE: Vec2 = Vec2::new(0.0, -4.0);
@@ -547,9 +601,9 @@ pub fn nearest_river(point: Vec2) -> (Vec3, f32) {
         .expect("the river has reaches")
 }
 
-/// [`WALKABLE`]'s rectangles, as `(centre, size)` on the ground, for a teleport profile.
+/// [`open_ground`]'s rectangles, as `(centre, size)` on the ground, for a teleport profile.
 pub fn walkable() -> Vec<(Vec3, Vec2)> {
-    WALKABLE
+    open_ground()
         .iter()
         .map(|footprint| {
             let centre = footprint.centre();
@@ -565,7 +619,8 @@ mod tests {
     #[test]
     fn nobody_lands_on_anything_and_everything_is_inside_the_fence() {
         let inside = FENCE.grown(-0.3);
-        for footprint in WALKABLE {
+        let ground = open_ground();
+        for footprint in &ground {
             assert!(inside.contains(footprint.low) && inside.contains(footprint.high));
             for obstacle in obstacles() {
                 assert!(
@@ -589,28 +644,79 @@ mod tests {
         }
         // Where participants arrive is walkable, and so is the spot to peek in at the coop's window from, and the ground
         // beneath the agent's home.
-        assert!(WALKABLE[0].contains(Vec2::new(ARRIVAL.x, ARRIVAL.z)));
-        let window = Vec2::new(COOP.high.x + 0.6, (WINDOW[0][0] + WINDOW[1][0]) * 0.5);
-        assert!(WALKABLE.iter().any(|footprint| footprint.contains(window)));
-        assert!(
-            WALKABLE
-                .iter()
-                .any(|footprint| footprint.contains(WORKBENCH))
-        );
+        let on = |point: Vec2| ground.iter().any(|footprint| footprint.contains(point));
+        assert!(on(Vec2::new(ARRIVAL.x, ARRIVAL.z)));
+        assert!(on(Vec2::new(
+            COOP.high.x + 0.6,
+            (WINDOW[0][0] + WINDOW[1][0]) * 0.5
+        )));
+        assert!(on(WORKBENCH));
         // The door is in the coop's front wall, and the ramp leads from it to the ground in front.
         assert_eq!(DOOR.z, COOP.high.y);
         assert!(COOP.contains(Vec2::new(DOOR.x, DOOR.z)));
         assert!(ramp().high.y > COOP.high.y);
-        let (centre, size) = walkable()[0];
-        assert!(
-            centre.distance(Vec3::new(-0.125, 0.0, -3.95)) < 1e-5
-                && size.distance(Vec2::new(8.95, 3.9)) < 1e-5
-        );
-        // No two of the rectangles overlap.
-        for (index, footprint) in WALKABLE.iter().enumerate() {
-            for other in &WALKABLE[index + 1..] {
+        // The teleport profile's rectangles are these, on the ground; and no two of them overlap.
+        let declared = walkable();
+        assert_eq!(declared.len(), ground.len());
+        for ((centre, size), footprint) in declared.iter().zip(&ground) {
+            assert_eq!(centre.y, 0.0);
+            assert!(
+                (Vec2::new(centre.x, centre.z) - footprint.centre()).length() < 1e-6
+                    && *size == footprint.size()
+            );
+        }
+        for (index, footprint) in ground.iter().enumerate() {
+            for other in &ground[index + 1..] {
                 assert!(!footprint.overlaps(other), "{footprint:?} {other:?}");
             }
+        }
+    }
+
+    #[test]
+    fn all_of_the_yard_s_open_ground_is_walkable_and_nothing_that_stands_in_it() {
+        // Every 10 cm over the yard, a point more than a centimetre inside the fence's clearance and beyond every
+        // obstacle's is walkable, and one more than a centimetre within an obstacle's clearance is not, so that no
+        // change to the layout leaves a patch of open ground out, as the strip beside the feeder once was, from the
+        // ramp's foot to the back fence, nor lets anyone land on the coop, its ramp, the trough, the feeder, the hay, the
+        // notice board or the workbench.
+        const { assert!(CLEARANCE >= 0.2 && CLEARANCE <= 0.3) };
+        let ground = open_ground();
+        let on = |point: Vec2| ground.iter().any(|footprint| footprint.contains(point));
+        let kept: Vec<Footprint> = obstacles()
+            .iter()
+            .map(|obstacle| obstacle.grown(CLEARANCE))
+            .collect();
+        let yard = FENCE.grown(-FENCE_CLEARANCE);
+        let (mut open, mut closed) = (0, 0);
+        for column in 0..=(FENCE.size().x * 10.0).round() as u32 {
+            for row in 0..=(FENCE.size().y * 10.0).round() as u32 {
+                let point = FENCE.low + Vec2::new(column as f32, row as f32) * 0.1;
+                if kept
+                    .iter()
+                    .any(|footprint| footprint.grown(-0.01).contains(point))
+                {
+                    assert!(!on(point), "{point}");
+                    closed += 1;
+                } else if yard.grown(-0.01).contains(point)
+                    && kept
+                        .iter()
+                        .all(|footprint| !footprint.grown(0.01).contains(point))
+                {
+                    assert!(on(point), "{point}");
+                    open += 1;
+                }
+            }
+        }
+        assert!(open > 7000 && closed > 1000, "{open} {closed}");
+        // Beside the feeder, where the ground had been left out, from the ramp's foot to the back fence, and between the
+        // trough and the hay.
+        for z in [-6.0, -7.5, -8.5, -10.0] {
+            assert!(on(Vec2::new(FEEDER.x, z)), "{z}");
+        }
+        assert!(on(Vec2::new(3.7, (TROUGH.low.y + HAY.high.y) * 0.5)));
+        // And beyond the fence's clearance, nowhere.
+        for footprint in &ground {
+            assert!(yard.contains(footprint.low) && yard.contains(footprint.high));
         }
     }
 
@@ -948,7 +1054,7 @@ mod tests {
         // side of the yard; and the arrival's sightlines to the Tomori wall and the agent stay clear of it.
         let before = Vec3::new(NOTICEBOARD.x - 2.0, 0.0, NOTICEBOARD.z + 0.4);
         assert!(
-            WALKABLE
+            open_ground()
                 .iter()
                 .any(|footprint| footprint.contains(Vec2::new(before.x, before.z)))
         );

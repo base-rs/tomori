@@ -148,7 +148,7 @@ fn the_way_out_goes_from_the_yard_s_earth_between_the_gate_s_posts_to_the_loop()
     // It begins on the yard's earth, where participants land, its whole width.
     for corner in [inside - Vec2::X * HALF, inside + Vec2::X * HALF] {
         assert!(
-            layout::WALKABLE
+            layout::open_ground()
                 .iter()
                 .any(|walkable| walkable.contains(corner)),
             "{corner}"
@@ -416,7 +416,7 @@ fn a_pair_of_pads_joins_the_yard_and_the_lookout_off_the_way() {
     ] {
         let at = Vec2::new(yard.centre.x, yard.centre.z) + corner;
         assert!(
-            layout::WALKABLE
+            layout::open_ground()
                 .iter()
                 .any(|walkable| walkable.contains(at)),
             "{at}"

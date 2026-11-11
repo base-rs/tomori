@@ -7,7 +7,7 @@ use crate::trail;
 /// Where the eyes may be: above every corner of the ground participants land on, in the yard and along the trail, its
 /// band's corners and round its clearings.
 fn eyes() -> Vec<Vec3> {
-    let yard = layout::WALKABLE.iter().flat_map(|footprint| {
+    let yard = layout::open_ground().into_iter().flat_map(|footprint| {
         [
             Vec2::new(footprint.low.x, footprint.low.y),
             Vec2::new(footprint.low.x, footprint.high.y),
@@ -167,7 +167,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
         beyond_from_the_rock(plant.at + Vec3::Y * height);
         // Nor on the trail, beyond the fence, where participants walk.
         assert!(from_trail(at) > reach + trail::HALF, "{plant:?}");
-        for walkable in layout::WALKABLE {
+        for walkable in layout::open_ground() {
             let solid = plant.solid();
             let (low, high) = (solid.low, solid.high);
             assert!(!walkable.overlaps(&layout::Footprint::new(

@@ -169,7 +169,7 @@ mod tests {
         // backstep goes up or down of the yard's earth.
         assert_eq!(
             surfaces.len(),
-            layout::WALKABLE.len()
+            layout::open_ground().len()
                 + trail::outlines().len()
                 + trail::clearings().len()
                 + tomori_environment_farmyard::campsite::standing().len()
@@ -254,6 +254,58 @@ mod tests {
         );
         // And the pads, the yard's and the lookout's, each stand on what is declared, so that both may be used.
         assert_eq!(profile.pads().count(), 1);
+    }
+
+    #[test]
+    fn pointing_at_the_yard_s_open_ground_lands_there_beside_the_feeder_too() {
+        use glam::{Vec2, Vec3};
+        use tomori_scene::pointing::Ray;
+
+        use super::layout;
+        let profile = super::locomotion();
+        // Every 10 cm of the yard's open ground, clear of what stands in it and of the fence, a teleport straight down
+        // lands on its earth, where it is aimed.
+        let kept: Vec<_> = layout::obstacles()
+            .iter()
+            .map(|obstacle| obstacle.grown(layout::CLEARANCE + 0.01))
+            .collect();
+        let yard = layout::FENCE.grown(-layout::FENCE_CLEARANCE - 0.01);
+        let mut landed = 0;
+        for column in 0..=(yard.size().x * 10.0) as u32 {
+            for row in 0..=(yard.size().y * 10.0) as u32 {
+                let point = yard.low + Vec2::new(column as f32, row as f32) * 0.1;
+                if kept.iter().any(|footprint| footprint.contains(point)) {
+                    continue;
+                }
+                let ray = Ray::new(Vec3::new(point.x, 1.6, point.y), -Vec3::Y).unwrap();
+                let landing = profile.landing(&ray).expect("open ground is walkable");
+                assert!(
+                    landing.y < 0.009 && Vec2::new(landing.x, landing.z).distance(point) < 1e-4,
+                    "{point}: {landing}"
+                );
+                landed += 1;
+            }
+        }
+        assert!(landed > 7000, "{landed}");
+        // Where the maintainer stood in a farmyard space, beside the feeder, pointing at the ground a metre or two
+        // ahead, which had been left out of the yard's earth, lands there.
+        let arrival = tomori_protocol::Pose::at(layout::ARRIVAL.to_array())
+            .facing_towards(layout::ARRIVAL_FACING.to_array());
+        let carriage = tomori_scene::anchors::Anchor::carriage(&arrival).unwrap();
+        let carried = profile.carried(&carriage);
+        let head = Vec3::new(3.97, 1.32, -4.82);
+        let yaw = (-63f32).to_radians();
+        let ahead = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
+        for distance in [1.0, 1.5, 2.0] {
+            let aim = head.with_y(0.0) + ahead * distance;
+            let landing = carried.landing(&Ray::new(head, aim - head).unwrap());
+            assert!(
+                landing.is_some_and(|landing| landing.distance(aim) < 1e-3),
+                "{distance}: {landing:?}"
+            );
+        }
+        let beside = carriage.unplace(head.with_y(0.0) + ahead);
+        assert!((beside.x - layout::FEEDER.x).abs() < 0.5 && beside.z < layout::FEEDER.y - 1.0);
     }
 
     /// How high the top of what `models` draw low down at `point` is, on the ground: the highest of their faces that
