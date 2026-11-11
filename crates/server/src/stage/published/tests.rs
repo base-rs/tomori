@@ -883,7 +883,8 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
 }
 
 /// The projection whole, as JSON, of a space at every limit whose environment publishes as many panels of `chart` as
-/// it may, on its own walls, of 4 by 2 slots so that they hold them, every other slot and floating place holding
+/// it may, on the first of its sixteen walls, of 4 by 2 slots so that they hold them, within the slots an older client
+/// is sent, every other slot and floating place holding
 /// `largest`: as the server holds it, and as an older client is sent it, each as it is sent, in a message, its walls and
 /// panels at the longest versions and its charts at the longest data seqs there can be, with how many of them it shows
 /// as charts, every one of them sent to both.
@@ -902,7 +903,7 @@ fn at_every_limit(chart: &Chart, largest: &crate::stage::Content) -> [(usize, us
     for index in 0..PUBLISHED {
         let title = "\u{1F600}".repeat(blocks::TITLE_CHARS);
         let panel = Panel::chart(format!("chart-{index}"), title, chart.clone())
-            .on_wall((index % DECLARED_WALLS) as u32, None);
+            .on_wall((index / 8) as u32, None);
         stage.publish(&walls, publishing(panel), 0).unwrap();
     }
     let published: Vec<String> = stage

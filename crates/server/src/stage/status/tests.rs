@@ -698,3 +698,44 @@ fn of_two_status_panels_in_one_slot_the_older_waits() {
     stage.dismiss(&walls, "panel-3").unwrap();
     assert!(stage.waiting(&walls).is_empty());
 }
+
+#[test]
+fn a_client_of_fewer_walls_or_slots_is_always_sent_the_status_wall_first_and_its_notices() {
+    // Sixteen walls, the last the status wall: of three by two, then of eight by three.
+    let declare = |columns: u32, rows: u32| -> Vec<EnvironmentWall> {
+        (0..DECLARED_WALLS)
+            .map(|index| {
+                EnvironmentWall::new(pose(index as f32 * 2.5 - 20.0, -5.0))
+                    .with_grid(Grid::from((columns, rows)))
+            })
+            .collect()
+    };
+    let headset = tomori_protocol::Limits::TODAY
+        .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
+        .with_projection(23, 138, 12, 90);
+    for (declared, limits, sent) in [
+        // An older client takes thirteen walls of 78 slots: the status wall and the first twelve others.
+        (declare(3, 2), tomori_protocol::Limits::TODAY, 13),
+        // The headset, of 138 slots, where the earlier walls are large: the status wall and the first four others.
+        (declare(8, 3), headset, 5),
+    ] {
+        let walls = Walls {
+            environment: "deck",
+            tomori: default_stage(),
+            declared: &declared,
+            status: Status::Own(15),
+        };
+        let mut stage = Stage::default();
+        let notice = stage.project_notice(&walls, "pairing", content("Paired"), 0);
+        let view = stage.view_within("s", &walls, 0, &limits);
+        let ids: Vec<&str> = view.walls.iter().map(|wall| wall.id.as_str()).collect();
+        let mut expected: Vec<String> = (0..sent - 1)
+            .map(|index| format!("environment-{index}"))
+            .collect();
+        expected.push("environment-15".into());
+        assert_eq!(ids, expected);
+        assert!(view.walls.last().unwrap().status);
+        let paired = view.panel(&notice).expect("the notice is sent");
+        assert_eq!(paired.place, on("environment-15", 0));
+    }
+}
