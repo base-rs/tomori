@@ -60,7 +60,7 @@ What each control does in each situation, as the frame before found it, before #
 | Left stick (arrows) | travel's, inactive | travel's, inactive | travel, the panel along | travel where it travels, else nothing | travel where it travels, else nothing | travel where it travels, else `left_stick` to the client side | travel where it travels, else `left_stick` to the client side |
 | Right grip (G) | — | detaches or reattaches it | carrying | pulls it off | takes the card, or takes hold of the wall | never the environment's; since the campsite, takes it if it takes the grip | nothing; since the campsite, an object within reach of the hand that takes it |
 | Wheel (desktop) | — | nothing | nothing | scrolls it | nothing | nothing | nothing |
-| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at; since, the left stick click toggles the live microphone, muting is the hand menu's and the left grip does nothing (`interaction.md`) |  |  |  |  |  |  |
+| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at; since #355, the left stick click toggles the live microphone, muting is the hand menu's and the left grip does nothing (`interaction.md`) |  |  |  |  |  |  |
 
 Hold B for a second to leave is not a rung: every press but one on a panel or wall carried starts it, whichever rung took the press (`interaction.md`; `Step::buttons`).
 
@@ -164,7 +164,7 @@ Three ideas recur in all of them: **focus** (a modal thing if one is up, otherwi
 - **Carrying is modal and spans controls.** A panel carried takes the right stick, its click and B, and leaves the left stick to travel and the trigger to the swarm; a wall carried also takes the trigger.
 - **The transcript is wrist-anchored, not pointed at.** While it shows, the ray is hidden and points at nothing (`scene.rs`); its focus is moved by the stick, not by pointing.
 - **Holding B to leave watches every press**, whoever took it; it is not something any responder handles.
-- **X, Y, the left stick's click and the left grip** mean the same wherever the participant points (`interaction.md`): global commands, not routed.
+- **X, Y and the left stick's click** mean the same wherever the participant points (`interaction.md`): global commands, not routed. The left grip does nothing, kept for taking hold of things (#354).
 
 ## Proposal: a responder chain for Tomori
 
@@ -182,7 +182,7 @@ Map the physical controls once, per device, to abstract actions, and route actio
 | `Grab` | hold | right grip | G | — | the transcript (detach) |
 | `Square` | press | right stick click | R | — | a panel or wall carried |
 
-`Scroll` borrows AppKit's `scrollWheel:`, which goes to the view under the pointer rather than to the first responder, as Tomori's stick does; a panel reads it as scrolling, a panel carried as pushing, pulling and turning, a globe as turning. Not actions, and never routed: talking (X), pinning the menu (Y), muting (left stick click, since the hand menu's), the live microphone (left grip, since the left stick click) and holding B to leave, which observes every `Back` press.
+`Scroll` borrows AppKit's `scrollWheel:`, which goes to the view under the pointer rather than to the first responder, as Tomori's stick does; a panel reads it as scrolling, a panel carried as pushing, pulling and turning, a globe as turning. Not actions, and never routed: talking (X), pinning the menu (Y), the live microphone (left stick click) and holding B to leave; muting is the hand menu's row, which observes every `Back` press.
 
 ### Responders
 
@@ -320,7 +320,7 @@ Each increment keeps every existing test passing, changes no documented behaviou
 4. **Responders for what is pointed at.** One `Pointed` value per frame (a panel, a wall part, a card, a worker, an environment object, or nothing), each with `handles(Action)`, replacing the parallel `card`, `worker`, `object` and `panel` options and `Aim`; the pointed slots of every order ask it. The equivalence test of increment 3 stays and must still pass.
 5. **More for environments**, each its own decision for the maintainer: `Move` to an object that takes it where there is no travel; `Confirm` (A) for an object that takes the stick without being selectable, since A reaches only selectable objects (#291); the ray during a `Choose` pull, for dragging; a hint on the ray naming what an environment object takes, as `Stick ↕  scroll` does for panels; and `Grab` for environment objects, built in its first form for the farmyard's campsite, an object within reach of the hand or pointed at, held in the hand (`Actions::GRAB`, `ClientSide::within_reach`, `Input::grab`), though not yet carried along the ray as the GitHub cards are.
 
-Not worth generalising: holding B to leave, which is a watch over every press rather than an action; X, Y, the left stick's click and the left grip, which mean the same everywhere; the console, whose letters are commands, not pointing; and the transcript's own focus model, which is a list moved by the stick rather than pointed at. A retained-mode widget tree is not needed: what is pointed at is already resolved once a frame.
+Not worth generalising: holding B to leave, which is a watch over every press rather than an action; X, Y and the left stick's click, which mean the same everywhere; the console, whose letters are commands, not pointing; and the transcript's own focus model, which is a list moved by the stick rather than pointed at. A retained-mode widget tree is not needed: what is pointed at is already resolved once a frame.
 
 ### Costs and risks
 
