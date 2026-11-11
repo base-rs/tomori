@@ -70,6 +70,7 @@ fn frame<'a>(
         controls: Controls::Controllers,
         scroll: None,
         rights,
+        surfaces: None,
         left: crate::projection::Hold::default(),
         now,
         dt: 1.0 / 72.0,
@@ -2597,6 +2598,283 @@ fn a_locked_wall_shows_no_bar_nor_handles_and_only_an_owner_near_it_its_padlock_
     assert!(carried(&older, LOCKS));
     assert!(!carried(&wall, LOCKER));
     assert!(carried(&added(), OWNER) && !carried(&added().with_locked(true), LOCKER));
+}
+
+/// A deck at `height`, 8 m square about the notice board, with the main floor beneath it, as an environment declares
+/// them.
+fn deck_over_the_board(height: f32) -> crate::locomotion::Locomotion {
+    use crate::locomotion::{Locomotion, Surface};
+    Locomotion::teleport(vec![
+        Surface::disc(Vec3::ZERO, 20.0),
+        Surface::rectangle(Vec3::new(0.0, height, -2.5), Vec2::splat(8.0)),
+    ])
+}
+
+#[test]
+fn a_locked_wall_s_padlock_beneath_a_deck_is_neither_shown_to_nor_taken_by_an_owner_on_it_however_near()
+ {
+    let wall = notice_board();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let lock = LockControls::of(&wall, LOCKER);
+    let padlock = handle_points_with(&wall, model(&wall.pose).unwrap(), lock).0[0].1;
+    // An owner on a deck 25 cm above the padlock, standing over the wall a metre out from it, within reach of it.
+    let deck = deck_over_the_board(padlock.y + 0.25);
+    let eye = Vec3::new(padlock.x, padlock.y + 0.25 + 1.6, padlock.z + 1.0);
+    assert!(eye.distance(padlock) < PADLOCK_NEAR);
+    let above = |ray: Option<Ray>, grip: f32, surfaces| Frame {
+        viewer: Some(eye),
+        surfaces,
+        ..frame(&projection, ray, grip, LOCKER, now)
+    };
+    let towards = Ray::new(eye, padlock - eye);
+    // Where nothing is declared, as before, the padlock within 3 m shows through the deck's floor and is taken.
+    let mut projector = Projector::default();
+    let output = projector.update(above(None, 0.0, None));
+    assert_eq!(beside(&output, &wall).len(), 1);
+    let output = projector.update(above(towards, 0.0, None));
+    assert!(output.end.is_some() && output.wall_ticked);
+    // With the deck declared, its floor hides the padlock: it is not drawn, the ray at it ends nowhere, says nothing and
+    // a squeeze there unlocks nothing.
+    let mut projector = Projector::default();
+    let output = projector.update(above(None, 0.0, Some(&deck)));
+    assert!(beside(&output, &wall).is_empty());
+    let output = projector.update(above(towards, 0.0, Some(&deck)));
+    assert!(output.end.is_none() && !output.wall_ticked);
+    assert!(
+        !output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
+            .any(|text| text.contains("unlock") || text.contains("Locked")),
+    );
+    let output = projector.update(above(towards, 1.0, Some(&deck)));
+    assert!(output.lock.is_none());
+    assert_eq!(projector.editing_wall(), None);
+    // A deck just below the padlock, the padlock poking up through it, still hides it, as the wall it locks is beneath.
+    let low = deck_over_the_board(padlock.y - 0.05);
+    let eye_low = Vec3::new(padlock.x, padlock.y - 0.05 + 1.6, padlock.z + 1.0);
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(eye_low),
+        surfaces: Some(&low),
+        ..frame(&projection, None, 0.0, LOCKER, now)
+    });
+    assert!(beside(&output, &wall).is_empty());
+    // From the main floor, in clear view within 3 m, the floor beneath and the deck above hide nothing: it is drawn and
+    // taken as ever.
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        surfaces: Some(&deck),
+        ..frame(&projection, None, 0.0, LOCKER, now)
+    });
+    let drawn = beside(&output, &wall);
+    assert!(
+        drawn.len() == 1 && drawn[0].distance(padlock) < 1e-4,
+        "{drawn:?}"
+    );
+    let output = projector.update(Frame {
+        surfaces: Some(&deck),
+        ..frame(&projection, at(padlock), 1.0, LOCKER, now)
+    });
+    assert!(output.lock.is_some_and(|lock| !lock.locked));
+}
+
+#[test]
+fn the_ray_takes_no_padlock_nor_says_locked_beyond_a_floor_the_eyes_see_past() {
+    let wall = notice_board();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let padlock = handle_points_with(&wall, frame_of, LockControls::of(&wall, LOCKER)).0[0].1;
+    let board = on(&wall, 0.0, 0.2);
+    // A hand low and to the right, and a plate 20 cm across halfway along its ray to each point, below the eyes' lines
+    // to the padlock and the wall, so that the eyes see both and only the ray crosses a floor.
+    let hand = |point: Vec3| point + Vec3::new(1.5, -1.0, 0.5);
+    let plate = |point: Vec3| {
+        let middle = (hand(point) + point) * 0.5;
+        crate::locomotion::Locomotion::teleport(vec![crate::locomotion::Surface::rectangle(
+            middle,
+            Vec2::splat(0.2),
+        )])
+    };
+    let (over_padlock, over_board) = (plate(padlock), plate(board));
+    for plate in [&over_padlock, &over_board] {
+        assert!(!hidden(Some(plate), HOME, padlock));
+        assert!(!hidden(
+            Some(plate),
+            HOME,
+            Vec3::from_array(wall.pose.position)
+        ));
+    }
+    let through = |point: Vec3, surfaces, rights, grip| Frame {
+        surfaces,
+        ..frame(
+            &projection,
+            Ray::new(hand(point), point - hand(point)),
+            grip,
+            rights,
+            now,
+        )
+    };
+    let said = |output: &crate::projection::Output| {
+        output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
+            .find(|text| text.contains("Locked"))
+    };
+    // The padlock shows, as the eyes see it, and the ray at it from the hand takes it, but not across the plate.
+    let mut projector = Projector::default();
+    let output = projector.update(through(padlock, None, LOCKER, 0.0));
+    assert!(output.end.is_some() && output.wall_ticked);
+    let mut projector = Projector::default();
+    let output = projector.update(through(padlock, Some(&over_padlock), LOCKER, 0.0));
+    assert_eq!(beside(&output, &wall).len(), 1);
+    assert!(output.end.is_none() && !output.wall_ticked);
+    let output = projector.update(through(padlock, Some(&over_padlock), LOCKER, 1.0));
+    assert!(output.lock.is_none());
+    // Its board says `Locked` to a collaborator at the end of the ray, but not across the plate.
+    let mut projector = Projector::default();
+    let output = projector.update(through(board, None, LOCKS, 0.0));
+    assert!(said(&output).is_some());
+    let mut projector = Projector::default();
+    let output = projector.update(through(board, Some(&over_board), LOCKS, 0.0));
+    assert_eq!(said(&output), None);
+    assert!(output.end.is_none());
+}
+
+#[test]
+fn an_owner_whose_view_of_a_padlock_a_deck_hides_is_told_only_that_its_wall_is_locked() {
+    let wall = notice_board();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let padlock = handle_points_with(
+        &wall,
+        model(&wall.pose).unwrap(),
+        LockControls::of(&wall, LOCKER),
+    )
+    .0[0]
+        .1;
+    let said = |output: &crate::projection::Output| {
+        output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
+            .find(|text| text.contains("Locked"))
+            .map(|text| text.trim().to_owned())
+    };
+    // The eyes on a deck over the wall, the ray from a hand beneath it at the board: coming closer would not show the
+    // padlock, so it says only `Locked`.
+    let deck = deck_over_the_board(padlock.y + 0.25);
+    let eye = Vec3::new(padlock.x, padlock.y + 0.25 + 1.6, padlock.z + 1.0);
+    let board = at(on(&wall, 0.0, 0.2));
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(eye),
+        surfaces: Some(&deck),
+        ..frame(&projection, board, 0.0, LOCKER, now)
+    });
+    assert!(
+        beside(&output, &wall)
+            .iter()
+            .all(|at| at.distance(padlock) > 1e-3)
+    );
+    assert_eq!(said(&output).as_deref(), Some("Locked"));
+    // Far from it on the floor, in clear view, it says to come closer.
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(HOME + Vec3::Z * 3.0),
+        surfaces: Some(&deck),
+        ..frame(&projection, board, 0.0, LOCKER, now)
+    });
+    assert_eq!(
+        said(&output).as_deref(),
+        Some("Locked: come closer to unlock")
+    );
+}
+
+#[test]
+fn the_ray_takes_no_panel_on_a_wall_beyond_a_floor() {
+    let wall = added().with_grid(Grid::new(1, 1).unwrap());
+    let panel = Panel::new(
+        "panel-0",
+        "Notes",
+        "A note.",
+        Place::Wall {
+            wall: "wall-1".into(),
+            slot: 0,
+        },
+    );
+    let projection = shown(vec![wall.clone()], vec![panel]);
+    let now = Instant::now();
+    let top = wall.pose.position[1] + wall.board().unwrap().1 * 0.5;
+    let deck = deck_over_the_board(top + 0.6);
+    let eye = Vec3::new(0.0, top + 0.6 + 1.6, -1.0);
+    let point = on(&wall, 0.0, 0.0);
+    for (surfaces, pointed) in [(None, true), (Some(&deck), false)] {
+        let mut projector = Projector::default();
+        let output = projector.update(Frame {
+            viewer: Some(eye),
+            surfaces,
+            ..frame(&projection, Ray::new(eye, point - eye), 0.0, OWNER, now)
+        });
+        assert_eq!(
+            output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+            pointed.then_some("panel-0"),
+            "{surfaces:?}"
+        );
+    }
+}
+
+#[test]
+fn the_ray_takes_no_wall_bar_nor_handle_beyond_a_floor() {
+    let wall = added();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    // A deck well above the wall's top and every handle it shows, an owner on it a metre and a half out from the wall.
+    let top = wall.pose.position[1] + wall.board().unwrap().1 * 0.5;
+    let deck = deck_over_the_board(top + 0.6);
+    let eye = Vec3::new(0.0, top + 0.6 + 1.6, -1.0);
+    let board = on(&wall, 0.0, 0.2);
+    let bar = group_bar(&wall, model(&wall.frame()).unwrap(), &[&wall]).unwrap();
+    for (point, surfaces, taken) in [
+        (board, None, true),
+        (board, Some(&deck), false),
+        (bar.middle, None, true),
+        (bar.middle, Some(&deck), false),
+    ] {
+        let mut projector = Projector::default();
+        let output = projector.update(Frame {
+            viewer: Some(eye),
+            surfaces,
+            ..frame(&projection, Ray::new(eye, point - eye), 1.0, OWNER, now)
+        });
+        assert_eq!(output.end.is_some(), taken, "{point} {surfaces:?}");
+        assert_eq!(
+            projector.editing_wall().is_some(),
+            taken,
+            "{point} {surfaces:?}"
+        );
+    }
+    // Held, its handles beneath the deck are not taken from on it, though one in clear view is from the floor.
+    let mut projector = holding(&projection, &wall, OWNER, now);
+    let (points, _) = handle_points(&wall, model(&wall.frame()).unwrap());
+    let (handle, point) = points
+        .into_iter()
+        .min_by(|a, b| a.1.y.total_cmp(&b.1.y))
+        .unwrap();
+    let output = projector.update(Frame {
+        viewer: Some(eye),
+        surfaces: Some(&deck),
+        ..frame(&projection, Ray::new(eye, point - eye), 0.0, OWNER, now)
+    });
+    assert!(output.end.is_none() && !output.wall_ticked, "{handle:?}");
+    let output = projector.update(Frame {
+        surfaces: Some(&deck),
+        ..frame(&projection, at(point), 0.0, OWNER, now)
+    });
+    assert!(output.end.is_some() && output.wall_ticked, "{handle:?}");
 }
 
 #[test]

@@ -154,6 +154,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         controls: Controls::Controllers,
         scroll: None,
         rights: editing::Rights::default(),
+        surfaces: None,
         left: crate::projection::Hold::default(),
         now,
         dt: 1.0 / 72.0,

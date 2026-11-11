@@ -1641,6 +1641,9 @@ pub struct Input<'a> {
     pub scroll: Option<(&'a str, f32)>,
     /// What the participant may do with walls.
     pub rights: editing::Rights,
+    /// The environment's declared surfaces, its floors and decks, carried into the space: a locked wall's padlock beyond
+    /// one is not shown, and the ray takes no padlock, handle, bar or wall beyond one. `None` where nothing is declared.
+    pub surfaces: Option<&'a crate::locomotion::Locomotion>,
     /// The left hand's ray, grip and trigger, which act on the panels and walls as the right's above do: it points,
     /// pulls off and carries a panel of its own, and takes hold of a wall and its handles. The stick and its click act
     /// on what the right hand carries, or else on what the left does. See `design/interaction.md`.
@@ -1823,6 +1826,7 @@ impl Projector {
     ///     controls: Controls::Controllers,
     ///     scroll: None,
     ///     rights: Rights::default(),
+    ///     surfaces: None,
     ///     left: tomori_scene::projection::Hold::default(),
     ///     now: std::time::Instant::now(),
     ///     dt: 1.0 / 72.0,
@@ -2015,6 +2019,11 @@ impl Projector {
                             hit(*model, *size, &ray)
                                 .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
                         })
+                        // Nothing of a wall beyond a floor or deck is taken, its panels included.
+                        .filter(|(panel, _, _, distance, _)| {
+                            !matches!(panel.place, Place::Wall { .. })
+                                || !editing::beyond(input.surfaces, &ray, *distance)
+                        })
                         .min_by(|a, b| a.3.total_cmp(&b.3))
                 });
             told[side].item = pointed.and_then(|(panel, model, fit, _, point)| {
@@ -2063,6 +2072,7 @@ impl Projector {
                 straighten: input.straighten && steered == Some(editing) && picking,
                 free: hand.free,
                 viewer,
+                surfaces: input.surfaces,
                 rights: input.rights,
                 controls: input.controls,
                 now: input.now,

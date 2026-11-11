@@ -1784,6 +1784,8 @@ impl Step {
         let left = hold(self, Side::Left);
         // Which hands held a panel or a card before this frame, so that what each takes or puts down is felt on it.
         let held_before = Hands::from_fn(|side| self.projector.held_in(side).is_some());
+        // The environment's floors and decks hide a locked wall's padlock beyond them, and stop the ray before what is.
+        let surfaces = conversation.surfaces();
         let projecting = Instant::now();
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
@@ -1801,6 +1803,7 @@ impl Step {
                 .as_ref()
                 .map(|(panel, rows)| (panel.as_str(), *rows)),
             rights: conversation.wall_rights(),
+            surfaces: Some(&surfaces),
             left,
             now,
             dt,

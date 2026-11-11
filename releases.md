@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A locked wall's padlock no longer shows through a floor.** An owner standing on a deck above a locked wall, such as an environment's status wall, no longer sees its padlock through the deck's floor, however near: the padlock shows only within about 3 m and in clear view, with none of the environment's floors or decks in between. The ray no longer takes a padlock, a handle, a grab bar, a wall or a panel on one beneath a floor, and a locked wall a deck hides the padlock of says only that it is locked, rather than to come closer. See `design/projection.md`.
+
+- For clients: `tomori-scene`'s `projection::Input` and `projection::editing::Input` gain `surfaces`, the environment's declared floors and decks, `None` for none; `Conversation::surfaces` gives them, whether or not travel is turned off.
+
 - For clients and environments: **glam 0.33.** Every crate that speaks glam now uses glam 0.33 rather than 0.30, as the physics engine the farmyard's stones will use needs (`docs/proposals/physics-and-stacking.md`), and its deprecated `Mat4` camera constructors give way to `glam::camera`'s. **Breaking** for code that passes glam 0.30's types to Tomori's crates.
 
 - **Locked walls stay out of the way.** A locked wall, such as the farmyard's notice board or a console's wall, no longer shows a grab bar or any handle, and squeezing it takes nothing. Only an owner, who can unlock it, sees its padlock, and only within about 3 m of it, so that walls far away show nothing; squeeze it to unlock the wall and take hold of it, and squeeze the padlock again to lock it and let go. Pointing at a locked wall says faintly that it is locked, and, to an owner too far away, to come closer to unlock it. A group with a locked wall at its bottom left keeps its grab bar, on its lowest left wall that is unlocked.
