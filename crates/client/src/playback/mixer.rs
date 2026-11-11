@@ -126,10 +126,10 @@ fn is_agent(source: u32) -> bool {
 
 /// How `source` sounds now at `sample_rate`: where `scene` places it, or centred. Agent speech played again comes from where the agent is.
 fn placement(scene: &Scene, sample_rate: u32, source: u32, layout: Layout) -> Placement {
-    let floor = if is_agent(source) {
-        spatial::AGENT_FLOOR
+    let falloff = if is_agent(source) {
+        spatial::Falloff::AGENT
     } else {
-        spatial::PERSON_FLOOR
+        spatial::Falloff::PERSON
     };
     let position = scene.position(source).or_else(|| {
         is_agent(source)
@@ -140,7 +140,7 @@ fn placement(scene: &Scene, sample_rate: u32, source: u32, layout: Layout) -> Pl
         (Some(listener), Some(position)) => spatial::place(
             &listener,
             position,
-            floor,
+            falloff,
             sample_rate,
             scene.mono || layout == Layout::Mono,
         ),
@@ -753,7 +753,7 @@ impl Mixer {
                     spatial::place(
                         &listener,
                         playing.position,
-                        spatial::PERSON_FLOOR,
+                        spatial::Falloff::SOUND,
                         rate,
                         self.scene.mono || layout == Layout::Mono,
                     )

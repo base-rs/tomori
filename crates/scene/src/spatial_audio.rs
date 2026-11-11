@@ -218,7 +218,7 @@ mod tests {
         let placed = tomori_client::playback::spatial::place(
             &scene.listener.unwrap(),
             scene.position(2).unwrap(),
-            tomori_client::playback::spatial::PERSON_FLOOR,
+            tomori_client::playback::spatial::Falloff::PERSON,
             48_000,
             false,
         );
