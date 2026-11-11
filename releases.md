@@ -4,6 +4,8 @@
 
 - **Tomori comes to you when it speaks to you unasked.** Replying aloud to a sub-agent's report, a timer or anything else that isn't someone's words, a following agent now comes to whoever it was last talking with, where they stand now, and keeps with them while it speaks, as when you speak to it, provided you are still here and talked with it in the last 10 minutes; otherwise it speaks from where it is. Pinned, moving only when asked, walking with someone or saying nothing aloud, it stays as before. Its panels in such a reply go beside the same person. See `design/environments.md`.
 
+- **Replies are heard after launching with the headset off.** The headset opens its speaker again each time Tomori gains focus, as when you put the headset on, since Horizon OS silenced a speaker opened while Tomori was in the background, so that replies arrived but could not be heard until Tomori was started again. For clients: `tomori-client`'s `speaker::Playback` gains `reopens_on_focus`, false unless a platform asks for it. See `design/spatial-audio.md`.
+
 - **Live audio is on the left stick click.** Click the left stick to turn live audio on or off, rather than squeezing the left grip, which now does nothing, as the left trigger doesn't, so that both are free for taking hold of things. A click while you push the stick to travel never turns live audio on, though it always turns it off. Mute spoken replies from the hand menu's **Spoken replies** row instead; the desktop window's V still mutes. See `design/live-audio.md`.
 
 - For clients: `tomori-scene`'s headset `Actions` and `Controls` replace `sound_toggle` and `audience_grip` with `live_toggle`, `LiveGrip` becomes `LiveClick`, and `Step` gains `left_stick_free`. **Breaking** for code that builds them.

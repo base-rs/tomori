@@ -331,6 +331,11 @@ pub mod playback {
                 None => open(player, failed, None),
             }
         }
+
+        /// Horizon OS mutes a stream started while the application had no focus, as when it launches with the headset off, through app ops once it gains focus, telling neither the stream nor its error callback; a stream opened again then plays.
+        fn reopens_on_focus(&self) -> bool {
+            true
+        }
     }
 
     /// Open the speaker, as voice communication in `session` when given, or else as media.

@@ -54,6 +54,11 @@ pub struct Route {
 pub trait Playback: Send + Sync {
     /// Start playing `player` until the returned output is dropped, as `route` says where the platform can. Called on the speaker thread.
     fn open(&self, player: Shared, failed: Failed, route: Route) -> Result<Output, String>;
+
+    /// Whether an open output is to be opened again each time the application gains focus, as on a platform that may silence one without failing it.
+    fn reopens_on_focus(&self) -> bool {
+        false
+    }
 }
 
 /// The speaker thread, which opens an output and keeps it until this is dropped, then closes it. Dropping does not wait for the device to close.

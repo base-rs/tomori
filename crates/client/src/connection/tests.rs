@@ -860,6 +860,8 @@ struct FakeSpeaker {
     closed: Arc<AtomicU32>,
     refuse: Arc<AtomicBool>,
     failed: Arc<Mutex<Option<crate::speaker::Failed>>>,
+    /// Whether an open output is opened again on gaining focus.
+    reopens: bool,
 }
 
 /// Closes by counting, so that a test can see the speaker thread close its output.
@@ -890,6 +892,10 @@ impl Playback for FakeSpeaker {
         *self.failed.lock().unwrap() = Some(failed);
         self.opened.fetch_add(1, Ordering::Relaxed);
         Ok(Output::new(FakeOutput(self.closed.clone())))
+    }
+
+    fn reopens_on_focus(&self) -> bool {
+        self.reopens
     }
 }
 
@@ -968,6 +974,42 @@ impl Playback for Communicating {
     ) -> Result<Output, String> {
         Ok(Output::communicating((), 42))
     }
+}
+
+#[test]
+fn an_open_speaker_is_opened_again_on_gaining_focus_where_the_platform_asks() {
+    let fake = FakeSpeaker {
+        reopens: true,
+        ..FakeSpeaker::default()
+    };
+    let opened = fake.opened.clone();
+    let mut speaker = Speaker::new(Box::new(fake));
+    speaker.player = Some(player());
+    // Nothing open: gaining focus opens nothing.
+    speaker.focus(false);
+    speaker.focus(true);
+    assert!(speaker.output.is_none());
+    speaker.focus(false);
+    speaker.open();
+    wait(|| opened.load(Ordering::Relaxed) == 1);
+    speaker.focus(true);
+    wait(|| opened.load(Ordering::Relaxed) == 2);
+    // Keeping focus, or losing it, keeps the output.
+    speaker.focus(true);
+    speaker.focus(false);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(opened.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn an_open_speaker_is_kept_on_gaining_focus_where_the_platform_does_not_ask() {
+    let mut speaker = Speaker::new(Box::new(Communicating));
+    speaker.player = Some(player());
+    speaker.open();
+    wait(|| speaker.output.as_ref().is_some_and(Speaking::is_open));
+    speaker.focus(false);
+    speaker.focus(true);
+    assert!(speaker.output.as_ref().is_some_and(Speaking::is_open));
 }
 
 #[test]
