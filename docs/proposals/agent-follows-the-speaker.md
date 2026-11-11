@@ -415,7 +415,7 @@ Stages 1 and 2 can swap if the data centre's clutter is the pressing problem, si
 The maintainer approved the proposal with these amendments, November 2026:
 
 1. Following, as modelled: on press it turns; after 0.4 s it commits from what was captured as the words began; it moves only beyond 3 m and 50° or when in the way; it stays at least 10 s; in a queue, it moves to whoever it answers. **Approved.**
-2. Where it stands: 1.5 m, 45° to the speaker's left of their focus, eye height plus 0.1 m, facing them, left because float-beside goes right first. **Approved.**
+2. Where it stands: 1.5 m, 45° to the speaker's left of their focus, eye height plus 0.1 m, facing them, left because float-beside goes right first. **Approved**, and later **replaced by the maintainer's choice**, November 2026: it comes straight towards them from where it is, stopping 2 m from them, on no side and off no line of sight, and a panel floating beside them goes to the side it is not on (see `design/environments.md`).
 3. Return home after 90 s idle, as a space setting from 30 s to never, with a running worker not holding it. **Approved.**
 4. The trigger's summons removed: summoning by voice, `move_agent stay` to pin, and **Call Tomori here** in the hand menu as the fallback without speech; the trigger freed for pointing and selecting. **Approved**, as the maintainer's amendment.
 5. The Tomori wall becomes the space's status wall, never travelling, given by `with_status_wall` as one of the environment's own walls or one it places, falling back to beneath the agent's home; in the farmyard, its notice board. **Approved.**

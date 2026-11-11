@@ -7,6 +7,7 @@
 //! given, never for a visitor, stops where it is when nothing was said, goes home once the conversation is quiet, and
 //! stays where it is pinned. See `design/environments.md`.
 use super::*;
+use crate::follow::CONVERSATION;
 use crate::hub::following::{COMMIT, DWELL, EMPTY, GLANCE, LEFT};
 use tomori_protocol::{AgentMovement, Movement};
 
@@ -119,16 +120,27 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
     release(&ada, "u1");
     hub.flush_snapshots(start + COMMIT + Duration::from_millis(100));
     assert_eq!(agent(&hub, &space).0, None);
-    // Held, it goes to stand 1.5 m from her, to her left, a little above her eyes, facing her.
+    // Held, it comes straight towards her from its home, to stand 2 m from her, a little above her eyes, facing her,
+    // whichever way she looks.
     press(&ada, "u2");
     let held = Instant::now() + COMMIT;
     assert!(hub.snapshot_deadline().is_some_and(|due| due <= held));
     hub.flush_snapshots(held);
     let (summoned, facing, pinned) = agent(&hub, &space);
     let at = summoned.expect("gone to her");
-    assert!((level(at.position, ADA) - 1.5).abs() < 1e-3, "{at:?}");
-    assert!(at.position[0] < -1.0 && at.position[2] < ADA[2]);
+    assert!(
+        (level(at.position, ADA) - CONVERSATION).abs() < 1e-3,
+        "{at:?}"
+    );
+    assert!(
+        at.position[0].abs() < 1e-4 && at.position[2] < ADA[2],
+        "{at:?}"
+    );
     assert!((at.position[1] - 1.7).abs() < 1e-4);
+    assert_eq!(
+        at.orientation,
+        tomori_protocol::Pose::upright_facing(at.position, [ADA[0], 1.7, ADA[2]]).orientation
+    );
     assert_eq!((facing, pinned), (None, false));
     // Its wall and its workers stay home, and its way there is a glide.
     let state = last_state(&ada).expect("told");
@@ -138,13 +150,15 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
     );
     // It stands for her, as clients are told.
     assert_eq!(state.partner, Some(ADA));
-    // Arrived, a follow-up from where she stands only turns it.
+    // Arrived, well within 3 m of her, a follow-up from where she stands only turns it, even a step further away.
     hub.flush_snapshots(held + Duration::from_secs(10));
+    let stepped = [0.0, 1.6, ADA[2] + 0.9];
+    ada.send(looking(stepped, [0.0, 1.6, -3.0]));
     press(&ada, "u3");
     hub.flush_snapshots(Instant::now() + COMMIT);
     let (again, facing, _) = agent(&hub, &space);
     assert_eq!(again, Some(at));
-    assert_eq!(facing, Some(ADA));
+    assert_eq!(facing, Some(stepped));
 }
 
 #[test]
@@ -166,10 +180,10 @@ fn a_tap_only_turns_it_even_once_its_words_are_given() {
 #[test]
 fn with_someone_in_its_way_it_glides_there_by_a_waypoint() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
-    // Bob stands between its home and where it stands for Ada.
+    // Bob stands between its home and where it stands for Ada, on its way straight to her.
     let bob = Client::greeted(&hub, Access::open(), "bob");
     bob.join(&space);
-    bob.send(looking([-0.53, 1.6, -0.68], [0.0, 1.6, -3.0]));
+    bob.send(looking([0.3, 1.6, -1.2], [0.0, 1.6, -3.0]));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     press(&ada, "u1");
     hub.flush_snapshots(Instant::now() + COMMIT);
@@ -226,7 +240,7 @@ fn it_waits_its_dwell_before_leaving_one_partner_for_another_unless_they_are_far
     press(&bob, "u4");
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(5));
     let for_bob = agent(&hub, &space).0.expect("gone to Bob");
-    assert!((level(for_bob.position, near) - 1.5).abs() < 1e-3);
+    assert!((level(for_bob.position, near) - CONVERSATION).abs() < 1e-3);
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(8));
     cancel(&bob, "u4");
     assert_eq!(agent(&hub, &space).0, Some(for_bob));
@@ -238,7 +252,7 @@ fn it_waits_its_dwell_before_leaving_one_partner_for_another_unless_they_are_far
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(9));
     let far = agent(&hub, &space).0.expect("gone to Carl");
     assert!(
-        (level(far.position, [8.0, 1.6, 8.0]) - 1.5).abs() < 1e-3,
+        (level(far.position, [8.0, 1.6, 8.0]) - CONVERSATION).abs() < 1e-3,
         "{far:?}"
     );
 }
@@ -262,7 +276,10 @@ fn a_huddle_who_spoke_to_it_lately_is_served_from_one_spot() {
     hub.flush_snapshots(start + DWELL + Duration::from_secs(5));
     let spot = agent(&hub, &space).0.expect("serving them");
     let nearest = level(spot.position, at_ada).min(level(spot.position, at_bob));
-    assert!((1.5..1.7).contains(&nearest), "{spot:?}");
+    assert!(
+        (CONVERSATION..CONVERSATION + 0.2).contains(&nearest),
+        "{spot:?}"
+    );
     // And it faces the middle of them.
     let ahead = crate::stage::geometry::rotate(spot.orientation, [0.0, 0.0, 1.0]);
     let towards = [0.25 - spot.position[0], 0.0, 2.75 - spot.position[2]];
@@ -289,7 +306,7 @@ fn while_it_answers_someone_a_press_only_glances_and_it_goes_to_them_as_their_wo
         })
         .expect("given");
     let for_ada = agent(&hub, &space).0.expect("gone to Ada");
-    assert!((level(for_ada.position, ADA) - 1.5).abs() < 1e-3);
+    assert!((level(for_ada.position, ADA) - CONVERSATION).abs() < 1e-3);
     hub.space_sent(&space, &key, Ok(()));
     hub.drive_event(&space, Event::Busy);
     // Bob speaks while it answers: it glances at him, for a moment, and moves nothing.
@@ -307,7 +324,7 @@ fn while_it_answers_someone_a_press_only_glances_and_it_goes_to_them_as_their_wo
     hub.drive_event(&space, Event::Idle);
     let for_bob = agent(&hub, &space).0.expect("gone to Bob");
     assert!(
-        (level(for_bob.position, at_bob) - 1.5).abs() < 1e-3,
+        (level(for_bob.position, at_bob) - CONVERSATION).abs() < 1e-3,
         "{for_bob:?}"
     );
 }
@@ -483,6 +500,53 @@ fn a_move_for_words_that_came_to_nothing_stops_where_it_has_reached() {
 }
 
 #[test]
+fn stopped_on_its_way_by_words_with_nothing_in_them_it_faces_them_from_there_turning_no_more_than_it_must()
+ {
+    let (hub, _jobs, space, _commands, ada) = following(Some(90));
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    // Held, then let go with nothing said a second along its way, coming straight towards her: it stops there, facing
+    // her as it already faced her on its way, so that it does not turn at all.
+    press(&ada, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    let going = agent(&hub, &space).0.expect("going to her");
+    release(&ada, "u1");
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .backdate(COMMIT + Duration::from_secs(1));
+    heard(&hub, "");
+    let stopped = agent(&hub, &space).0.expect("stopped on its way");
+    assert!(level(stopped.position, going.position) > 0.5, "{stopped:?}");
+    assert_eq!(stopped.orientation, going.orientation);
+    assert_eq!(last_state(&ada).expect("told").summoned, Some(stopped));
+    // Going round a post by a waypoint, it stops off the straight line to her, where it would face her otherwise
+    // turned: it faces her from where it stops instead.
+    let (hub, _jobs, space, _commands, ada) = following(Some(90));
+    hub.set_environments(Environments::new([crate::Environment::new("sky", "Sky")
+        .with_solids([([-0.25, 0.0, -1.4], [0.25, 4.0, -1.0])])]));
+    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
+    press(&ada, "u1");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    let going = agent(&hub, &space).0.expect("going to her");
+    assert!(last_state(&ada).expect("told").via.is_some());
+    release(&ada, "u1");
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .backdate(COMMIT + Duration::from_secs(1));
+    heard(&hub, "");
+    let stopped = agent(&hub, &space).0.expect("stopped on its way");
+    assert_ne!(stopped.orientation, going.orientation);
+    let facing = tomori_protocol::Pose::upright_facing(
+        stopped.position,
+        [ADA[0], stopped.position[1], ADA[2]],
+    );
+    assert_eq!(stopped, facing);
+}
+
+#[test]
 fn it_goes_home_once_the_conversation_has_been_quiet_and_new_words_or_its_speech_put_that_off() {
     let (hub, _jobs, space, commands, ada) = following(Some(90));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
@@ -588,7 +652,7 @@ fn called_it_comes_beside_them_and_stays_pinned_turning_only_until_sent_home_or_
     let at = summoned.expect("called");
     assert!(pinned);
     // Following the speaker, it stands beside them, its entourage home.
-    assert!((level(at.position, ADA) - 1.5).abs() < 1e-3);
+    assert!((level(at.position, ADA) - CONVERSATION).abs() < 1e-3);
     let state = last_state(&ada).expect("told");
     assert!(state.pinned);
     assert_eq!(state.summoner, None);
@@ -691,7 +755,7 @@ fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pi
     let state = last_state(&ada).expect("told");
     assert_eq!(state.summoner, None);
     assert!(state.pinned);
-    assert!((level(state.summoned.expect("called").position, ADA) - 1.5).abs() < 1e-3);
+    assert!((level(state.summoned.expect("called").position, ADA) - CONVERSATION).abs() < 1e-3);
     // A way it does not know is refused; the same again changes nothing.
     ada.send(ClientMessage::SetAgentMovement {
         movement: AgentMovement::new(Movement::Unknown, None),

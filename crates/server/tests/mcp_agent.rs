@@ -115,10 +115,15 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         }
     };
     assert!(called.pinned);
-    // Beside her, 1.5 m from her eyes, to her left, a little above them, as following stands it.
+    // Straight towards her from its home, 2 m from her eyes, a little above them, as following stands it.
     let at = called.summoned.unwrap().position;
-    assert!(((at[0] - 1.0).hypot(at[2]) - 1.5).abs() < 1e-3, "{at:?}");
-    assert!(at[0] < 1.0 && (at[1] - 1.7).abs() < 1e-4, "{at:?}");
+    assert!(((at[0] - 1.0).hypot(at[2]) - 2.0).abs() < 1e-3, "{at:?}");
+    let ((x, z), (hx, hz)) = ((at[0] - 1.0, at[2]), (-1.0, -2.3));
+    assert!(
+        (x * hz - z * hx).abs() < 1e-3 && x * hx + z * hz > 0.0,
+        "{at:?}"
+    );
+    assert!((at[1] - 1.7).abs() < 1e-4, "{at:?}");
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
     assert_eq!(presence["agent"]["at_home"], false);
     assert_eq!(presence["agent"]["mode"], "pinned");

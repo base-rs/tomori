@@ -3,10 +3,11 @@
 
 //! The agent's own controls of where it stands, through the hub: `move_agent` to someone's conversation spot, in front
 //! of them, by an object its environment gives a position, at the anchor by one, `stay` and `follow`, within the limits
-//! on its own moves; what someone points at as their focus; its mode, partner and return in `presence`; and the hand
+//! on its own moves; its mode, partner and return in `presence`; and the hand
 //! menu's **Tomori: stay here** and **Tomori: follow again**. See `design/mcp.md` and `design/environments.md`.
 use super::anchors::{rack, yard};
 use super::*;
+use crate::follow::CONVERSATION;
 use crate::hub::following::COMMIT;
 use serde_json::json;
 use tomori_environment::{Object, Outlet};
@@ -67,12 +68,12 @@ fn follows(ada: &Client) {
 fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with_front() {
     let (hub, space, commands, _outlet, ada) = yard(0);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
-    // Near her, by name: 1.5 m away, to her left of what she looks at, a little above her eyes, facing her.
+    // Near her, by name: straight towards her from its home, 2 m from her, a little above her eyes, facing her.
     let moved = hub.agent_move_agent("session", "near ada", None).unwrap();
     assert_eq!(moved["moved"], true);
     let at = summoned(&hub, &space).unwrap();
-    assert!((level(at, ADA) - 1.5).abs() < 1e-3, "{at:?}");
-    assert!(at[0] < -1.0 && at[2] < ADA[2]);
+    assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
+    assert!(at[0].abs() < 1e-4 && at[2] < ADA[2], "{at:?}");
     assert!((at[1] - 1.7).abs() < 1e-4);
     // She is whom it talks with now, as presence says; moving only when asked, it is away.
     let report = &moved["agent"];
@@ -98,7 +99,7 @@ fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with
     hub.agent_move_agent("session", "beside", Some("ada"))
         .unwrap();
     let at = summoned(&hub, &space).unwrap();
-    assert!((level(at, ADA) - 1.5).abs() < 1e-3, "{at:?}");
+    assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     // Someone the words were not from, or nobody here, is refused.
     assert!(
         hub.agent_move_agent("session", "near ada", Some("bob"))
@@ -120,8 +121,7 @@ fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with
 }
 
 #[test]
-fn standing_in_someones_way_close_by_it_stays_until_they_ask_and_near_them_takes_it_out_of_their_way()
- {
+fn standing_in_someones_way_close_by_it_stays_and_near_them_again_it_stays_on_its_line_to_them() {
     let (hub, space, commands, _outlet, ada) = yard(0);
     follows(&ada);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
@@ -141,15 +141,15 @@ fn standing_in_someones_way_close_by_it_stays_until_they_ask_and_near_them_takes
     ada.send(ClientMessage::UtteranceCancel {
         utterance: "u1".to_owned(),
     });
-    // Asked to move out of her way, it goes beside her, off her line of sight to what she looks at.
+    // Asked to come near her again, it is already on the straight line to her, 2 m from her, whichever way she
+    // looks: it stays.
     said(&hub, &ada, &commands, Vec::new(), None);
     let moved = hub
         .agent_move_agent("session", "near ada", Some("ada"))
         .unwrap();
-    assert_eq!(moved["moved"], true);
-    let after = summoned(&hub, &space).unwrap();
-    assert!((level(after, ADA) - 1.5).abs() < 1e-3, "{after:?}");
-    assert!(apart(ADA, after, beyond) > 36.0, "{after:?}");
+    assert_eq!(moved["moved"], false);
+    assert_eq!(summoned(&hub, &space), Some(before));
+    assert!(apart(ADA, before, beyond) < 1e-3, "{before:?}");
 }
 
 #[test]
@@ -165,8 +165,8 @@ fn near_someone_who_has_not_reported_it_stands_beside_where_they_were_as_they_sp
         .for_each(|participant| participant.seen = None);
     hub.agent_move_agent("session", "near", None).unwrap();
     let at = summoned(&hub, &space).unwrap();
-    assert!((level(at, ADA) - 1.5).abs() < 1e-3, "{at:?}");
-    assert!(at[0] < -1.0);
+    assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
+    assert!(at[0].abs() < 1e-4, "{at:?}");
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn by_an_object_it_stands_off_the_line_of_sight_to_it_where_it_stands_now_or_at_
     hub.agent_move_agent("session", "object: rack/7", Some("ada"))
         .unwrap();
     assert!(level(summoned(&hub, &space).unwrap(), moved_to) < 2.0);
-    // Near her, it stands at her conversation spot for it.
+    // Near her, it stands beside her, off her line of sight to it.
     assert_eq!(
         outlet.describe(vec![
             Object::new("rack-7", "rack 7, beside her")
@@ -317,7 +317,7 @@ fn whoever_asked_having_left_it_stands_beside_where_they_were_as_they_spoke() {
     ada.send(ClientMessage::Leave);
     let moved = hub.agent_move_agent("session", "near", None).unwrap();
     let at = summoned(&hub, &space).unwrap();
-    assert!((level(at, ADA) - 1.5).abs() < 1e-3, "{at:?}");
+    assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     // Talking with nobody here now.
     assert!(moved["agent"].get("partner").is_none());
     // An object named by nothing is no object.
@@ -434,7 +434,10 @@ fn stay_pins_it_and_follow_lets_it_follow_again_only_where_it_follows_the_speake
         .unwrap();
     assert_eq!(followed["moved"], true);
     let at = summoned(&hub, &space).unwrap();
-    assert!((level(at, [6.0, 1.6, 6.0]) - 1.5).abs() < 1e-3, "{at:?}");
+    assert!(
+        (level(at, [6.0, 1.6, 6.0]) - CONVERSATION).abs() < 1e-3,
+        "{at:?}"
+    );
     assert_eq!(agent(&hub)["mode"], "following");
 }
 
@@ -526,76 +529,7 @@ fn its_partner_gone_it_says_it_goes_home_sooner() {
 }
 
 #[test]
-fn what_someone_points_at_where_the_server_knows_its_place_is_their_focus() {
-    let (hub, space, _commands, outlet, ada) = yard(1);
-    follows(&ada);
-    ada.send(looking(ADA, [0.0, 1.6, -3.0]));
-    // An object to her right, its side giving where it stands: the agent stands to her left of it, not of her gaze.
-    let lamp = [4.0, 1.6, 2.0];
-    assert_eq!(
-        outlet.describe(vec![Object::new("lamp-1", "a lamp").at(lamp)]),
-        Ok(())
-    );
-    press(
-        &ada,
-        "u1",
-        vec![Resource::card("issue-1"), Resource::object("lamp-1")],
-    );
-    let start = Instant::now();
-    hub.flush_snapshots(start + COMMIT);
-    let at = summoned(&hub, &space).unwrap();
-    assert!((apart(ADA, at, lamp) - 45.0).abs() < 1.0, "{at:?}");
-    assert!(at[2] < ADA[2] - 0.5);
-    ada.send(ClientMessage::UtteranceCancel {
-        utterance: "u1".to_owned(),
-    });
-    hub.lock()
-        .agent_home(&space, "a test sent it", Instant::now());
-    // A worker, where its cluster seats it.
-    let worker = {
-        let state = hub.lock();
-        let record = state.space(&space).unwrap();
-        let environments = hub.environments();
-        record
-            .seated(&environments)
-            .position(
-                &record.clusters(&environments),
-                &crate::seating::Member::Worker("ses_00".to_owned()),
-            )
-            .unwrap()
-            .0
-    };
-    press(&ada, "u2", vec![Resource::worker("ses_00")]);
-    let start = Instant::now();
-    hub.flush_snapshots(start + COMMIT);
-    let at = summoned(&hub, &space).unwrap();
-    assert!((apart(ADA, at, worker) - 45.0).abs() < 1.0, "{at:?}");
-    ada.send(ClientMessage::UtteranceCancel {
-        utterance: "u2".to_owned(),
-    });
-    hub.lock()
-        .agent_home(&space, "a test sent it", Instant::now());
-    // An object without a place, or one it does not know, leaves her gaze her focus.
-    assert_eq!(
-        outlet.describe(vec![Object::new("post-1", "a post")]),
-        Ok(())
-    );
-    for object in ["post-1", "nothing"] {
-        press(&ada, "u3", vec![Resource::object(object)]);
-        let start = Instant::now();
-        hub.flush_snapshots(start + COMMIT);
-        let at = summoned(&hub, &space).unwrap();
-        assert!(at[0] < -1.0, "{at:?}");
-        ada.send(ClientMessage::UtteranceCancel {
-            utterance: "u3".to_owned(),
-        });
-        hub.lock()
-            .agent_home(&space, "a test sent it", Instant::now());
-    }
-}
-
-#[test]
-fn an_object_it_points_at_has_no_place_in_a_space_whose_side_is_another_environment_s() {
+fn an_object_has_no_place_in_a_space_whose_side_is_another_environment_s() {
     let (hub, space, _commands, outlet, ada) = yard(0);
     follows(&ada);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
@@ -611,10 +545,6 @@ fn an_object_it_points_at_has_no_place_in_a_space_whose_side_is_another_environm
         .as_mut()
         .unwrap()
         .environment = "sky".to_owned();
-    press(&ada, "u1", vec![Resource::object("lamp-1")]);
-    let start = Instant::now();
-    hub.flush_snapshots(start + COMMIT);
-    assert!(summoned(&hub, &space).unwrap()[0] < -1.0);
     assert!(
         hub.agent_move_agent("session", "object lamp-1", None)
             .unwrap_err()

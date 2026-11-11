@@ -308,7 +308,7 @@ impl Hub {
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
-        let solids = environments.solids(&record.model.environment);
+        let solids = record.panel_solids(&environments);
         let to = match place {
             Some(place) => record.panel_destination(
                 &environments,
@@ -528,7 +528,7 @@ impl Hub {
             origin.as_ref(),
             &people,
             &projection,
-            &environments.solids(&record.model.environment),
+            &record.panel_solids(&environments),
         )?;
         let pinned = projection.panel(&id).is_some_and(|shown| shown.pinned);
         // The panel was found in this view, under the same lock, so it is here to move.
@@ -1102,7 +1102,7 @@ impl Hub {
                 // Whom it goes to, where they have reported: whoever is named, or whoever's words it answers.
                 let participant = self.participant_named(&state, &space, name.as_deref(), &people);
                 let (at, eyes) = if beside {
-                    self.beside_spot(&state, &space, participant.as_deref(), head)
+                    self.beside_spot(&state, &space, participant.as_deref(), head, now)
                 } else {
                     (crate::presence::before(&head), head.position)
                 };

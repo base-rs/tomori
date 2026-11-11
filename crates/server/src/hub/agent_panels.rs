@@ -475,7 +475,7 @@ impl Hub {
                 origin.as_ref(),
                 &people,
                 &projection,
-                &environments.solids(&record.model.environment),
+                &record.panel_solids(&environments),
             )?),
             None => None,
         };

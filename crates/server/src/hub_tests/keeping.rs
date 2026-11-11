@@ -9,6 +9,7 @@
 //! `design/environments.md`.
 use super::following::{ADA, agent, cancel, following, heard, last_state, level, press, release};
 use super::*;
+use crate::follow::CONVERSATION;
 use crate::hub::following::{COMMIT, DWELL, RESTLESS, SETTLE};
 
 /// Ada, held past a tap, asks the agent something, and the agent, gone to her, thinks about it: its turn is running.
@@ -52,15 +53,18 @@ fn while_it_thinks_it_turns_to_whoever_it_answers_and_follows_them_once_they_set
     stands(&ada, ADA, [0.0, 1.6, -3.0]);
     asked(&hub, &ada, &commands, &space);
     let for_ada = agent(&hub, &space).0.expect("gone to Ada");
-    // A step back: it turns to her where she stands now, and stays.
-    let back = [0.0, 1.6, 2.3];
+    // A step straight back, along the way it came to her: it already faces her, and stays.
+    stands(&ada, [0.0, 1.6, 2.3], [0.0, 1.6, -3.0]);
+    assert_eq!(agent(&hub, &space), (Some(for_ada), None, false));
+    // A step back and aside: it turns to her where she stands now, and stays.
+    let back = [0.4, 1.6, 2.3];
     stands(&ada, back, [0.0, 1.6, -3.0]);
     assert_eq!(agent(&hub, &space), (Some(for_ada), Some(back), false));
     hub.flush_snapshots(Instant::now() + SETTLE);
     assert_eq!(agent(&hub, &space).0, Some(for_ada));
     assert_eq!(last_state(&ada).expect("told").facing, Some(back));
     // A sway of her head turns it no more.
-    stands(&ada, [0.04, 1.6, 2.3], [0.0, 1.6, -3.0]);
+    stands(&ada, [0.44, 1.6, 2.3], [0.0, 1.6, -3.0]);
     assert_eq!(agent(&hub, &space).1, Some(back));
     // She walks away, turning it as she goes, and stops more than 3 m from it.
     for step in [[1.0, 1.6, 3.0], [2.5, 1.6, 3.0]] {
@@ -77,7 +81,7 @@ fn while_it_thinks_it_turns_to_whoever_it_answers_and_follows_them_once_they_set
     let (summoned, facing, pinned) = agent(&hub, &space);
     let to_her = summoned.expect("followed");
     assert!(
-        (level(to_her.position, far) - 1.5).abs() < 1e-3,
+        (level(to_her.position, far) - CONVERSATION).abs() < 1e-3,
         "{to_her:?}"
     );
     assert_eq!((facing, pinned), (None, false));
@@ -105,7 +109,7 @@ fn while_it_replies_it_follows_them_and_once_its_reply_is_over_it_stays_until_th
     stands(&ada, far, [3.0, 1.6, 0.0]);
     hub.flush_snapshots(Instant::now() + SETTLE);
     let to_her = agent(&hub, &space).0.expect("followed");
-    assert!((level(to_her.position, far) - 1.5).abs() < 1e-3);
+    assert!((level(to_her.position, far) - CONVERSATION).abs() < 1e-3);
     arrived(&hub, &space);
     // Its reply heard, it keeps with her no more.
     let over = now + Duration::from_secs(6);
@@ -142,7 +146,7 @@ fn as_they_speak_it_follows_them_but_not_for_a_tap_nor_once_their_words_come_to_
     hub.flush_snapshots(Instant::now() + SETTLE);
     let to_her = agent(&hub, &space).0.expect("followed");
     assert_ne!(to_her, for_ada);
-    assert!((level(to_her.position, far) - 1.5).abs() < 1e-3);
+    assert!((level(to_her.position, far) - CONVERSATION).abs() < 1e-3);
     arrived(&hub, &space);
     // Moving again, then letting go of X with nothing said before it checks, she is kept with no more.
     stands(&ada, [3.0, 1.6, 5.0], [3.0, 1.6, 0.0]);
@@ -188,7 +192,7 @@ fn within_3_m_it_only_turns_whichever_way_they_face_and_while_they_travel_it_wai
     hub.flush_snapshots(Instant::now() + SETTLE);
     let state = last_state(&ada).expect("told");
     assert!(state.stream);
-    assert!((level(state.summoned.expect("followed").position, far) - 1.5).abs() < 1e-3);
+    assert!((level(state.summoned.expect("followed").position, far) - CONVERSATION).abs() < 1e-3);
 }
 
 #[test]
@@ -211,19 +215,20 @@ fn someone_who_never_stands_still_beyond_3_m_is_followed_on_after_3_s() {
     hub.flush_snapshots(Instant::now());
     let to_her = agent(&hub, &space).0.expect("followed");
     assert!(
-        (level(to_her.position, on) - 1.5).abs() < 1e-3,
+        (level(to_her.position, on) - CONVERSATION).abs() < 1e-3,
         "{to_her:?}"
     );
 }
 
 #[test]
-fn close_by_a_fresh_press_only_turns_it_though_she_looks_more_than_50_degrees_from_it() {
+fn close_by_a_fresh_press_only_turns_it_whichever_way_she_looks() {
     let (hub, _jobs, space, commands, ada) = following(Some(90));
     stands(&ada, ADA, [0.0, 1.6, -3.0]);
     asked(&hub, &ada, &commands, &space);
     hub.drive_event(&space, Event::Idle);
     let for_ada = agent(&hub, &space).0.expect("gone to Ada");
-    // It stands 45° to her left: she looks 10° further right, then away from it, and asks again each time.
+    // It stands straight ahead of her, where it came from: she looks 10° to her right, then away from it, and asks
+    // again each time.
     for (turn, utterance) in [(10.0_f32, "u2"), (150.0, "u3")] {
         let turn = turn.to_radians();
         let target = [3.0 * turn.sin(), 1.6, ADA[2] - 3.0 * turn.cos()];
@@ -309,7 +314,7 @@ fn it_waits_its_dwell_before_keeping_up_with_someone_new_but_never_for_whoever_i
     hub.flush_snapshots(committed + DWELL + Duration::from_secs(5));
     let for_bob = agent(&hub, &space).0.expect("gone to Bob");
     assert!(
-        (level(for_bob.position, again) - 1.5).abs() < 1e-3,
+        (level(for_bob.position, again) - CONVERSATION).abs() < 1e-3,
         "{for_bob:?}"
     );
 }
@@ -343,7 +348,10 @@ fn in_a_huddle_it_stays_while_the_speaker_moves_within_it_and_follows_the_group_
     hub.flush_snapshots(start + DWELL + Duration::from_secs(7));
     let group = agent(&hub, &space).0.expect("following them");
     let nearest = level(group.position, at_ada).min(level(group.position, at_bob));
-    assert!((1.5..1.7).contains(&nearest), "{group:?}");
+    assert!(
+        (CONVERSATION..CONVERSATION + 0.2).contains(&nearest),
+        "{group:?}"
+    );
     arrived(&hub, &space);
     // He leaves her: it follows him alone.
     let alone = [7.0, 1.6, 10.0];
@@ -351,7 +359,7 @@ fn in_a_huddle_it_stays_while_the_speaker_moves_within_it_and_follows_the_group_
     hub.flush_snapshots(start + DWELL + Duration::from_secs(8));
     let for_bob = agent(&hub, &space).0.expect("following him");
     assert!(
-        (level(for_bob.position, alone) - 1.5).abs() < 1e-3,
+        (level(for_bob.position, alone) - CONVERSATION).abs() < 1e-3,
         "{for_bob:?}"
     );
 }

@@ -5163,6 +5163,81 @@ fn a_reply_s_panels_float_beside_whoever_asked_when_no_wall_they_look_at_is_read
 }
 
 #[test]
+fn a_panel_floating_beside_whoever_asked_goes_to_the_side_of_them_the_agent_is_not_on() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    // Ada stands across the space from the Tomori wall, looking away from it.
+    let (eyes, ahead) = ([-6.0, 1.6, 6.0], [-6.0, 1.6, 0.0]);
+    ada.send(looking(eyes, ahead));
+    // The agent came to her straight from where it was, so that it stands 2 m away, 40° to her right.
+    let towards = 40f32.to_radians();
+    let at = [
+        eyes[0] + crate::follow::CONVERSATION * towards.sin(),
+        1.7,
+        eyes[2] - crate::follow::CONVERSATION * towards.cos(),
+    ];
+    let agent = tomori_protocol::Pose::upright_facing(at, [eyes[0], 1.7, eyes[2]]);
+    hub.lock().summon(&space, Some(agent), Some(eyes));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    let text = [
+        "Here.",
+        "```panel\ntitle: Notes\n---\nSome.\n```",
+        "```panel\ntitle: Beside\nplace: beside\n---\nAsked for.\n```",
+    ]
+    .join("\n\n");
+    reply(&hub, &space, "m1", &text);
+    let projection = ada.projection();
+    let floating = |title: &str| {
+        let place = projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .map(|panel| &panel.place);
+        let Some(tomori_protocol::Place::Free { pose }) = place else {
+            unreachable!("{title} floats");
+        };
+        *pose
+    };
+    // Rather than to her right first, where the agent stands, to her left, then further round, clear of the agent.
+    assert_eq!(aside(eyes, ahead, &floating("Notes")), -30.0);
+    let body = crate::follow::body(&agent);
+    for title in ["Notes", "Beside"] {
+        let pose = floating(title);
+        assert!(!body.contains(pose.position), "{title}: {pose:?}");
+        assert!(aside(eyes, ahead, &pose) != 30.0, "{title}: {pose:?}");
+    }
+    // With the agent to her left instead, the first goes to her right, as ever.
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    ada.send(looking(eyes, ahead));
+    let left = [eyes[0] - (at[0] - eyes[0]), 1.7, at[2]];
+    let agent = tomori_protocol::Pose::upright_facing(left, [eyes[0], 1.7, eyes[2]]);
+    hub.lock().summon(&space, Some(agent), Some(eyes));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\ntitle: Notes\n---\nSome.\n```",
+    );
+    let projection = ada.projection();
+    let notes = projection
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Notes");
+    let Some(tomori_protocol::Place::Free { pose }) = notes.map(|panel| panel.place.clone()) else {
+        unreachable!("it floats");
+    };
+    assert_eq!(aside(eyes, ahead, &pose), 30.0);
+}
+
+#[test]
 fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_visitor() {
     let (hub, _jobs) = hub();
     let space = stopped(&hub, Snapshot::default());
@@ -5941,7 +6016,10 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     let (at, pinned, _) = summoned(&vic).expect("told");
     assert!(pinned);
     let at = at.expect("away").position;
-    assert!((at[0].hypot(at[2]) - 1.5).abs() < 1e-3, "{at:?}");
+    assert!(
+        (at[0].hypot(at[2]) - crate::follow::CONVERSATION).abs() < 1e-3,
+        "{at:?}"
+    );
     // A visitor watches, but calls nothing and sends nothing home.
     vic.send(ClientMessage::CallAgent);
     vic.send(ClientMessage::PlaceAgent { at: None });
@@ -5994,7 +6072,7 @@ fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked
             (record.summoned.expect("away"), record.partner)
         };
         assert!(
-            (across(summoned.position, eyes) - 1.5).abs() < 1e-3,
+            (across(summoned.position, eyes) - crate::follow::CONVERSATION).abs() < 1e-3,
             "{summoned:?}"
         );
         // It stands for her, so that clients draw the swarm in near her.
