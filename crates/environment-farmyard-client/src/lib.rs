@@ -452,6 +452,13 @@ mod tests {
         for facing in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
             assert_eq!(profile.backstep(eyes, facing, top.y), None);
         }
+        // Nor is anyone kept there: a teleport aimed from it at the lookout's track lands on it.
+        let (lookout, _, _) = trail::frame(trail::VIEWPOINTS[1].2);
+        let track = Vec3::new(lookout.x, trail::HEIGHT, lookout.y);
+        let landing = profile
+            .landing(&Ray::new(eyes, track - eyes).unwrap())
+            .unwrap();
+        assert!(landing.distance(track) < 1e-3, "{landing}");
         for pair in profile.pads() {
             for pad in pair {
                 assert!(pad.centre().distance(top) > 5.0);
@@ -459,8 +466,7 @@ mod tests {
         }
         // From the lookout, the rock's side or top is within reach, and the ray to it crosses no surface before it;
         // and from the rock, the seat's.
-        let (lookout, _, _) = trail::frame(trail::VIEWPOINTS[1].2);
-        let lookout = Vec3::new(lookout.x, 1.6, lookout.y);
+        let lookout = track.with_y(1.6);
         for (from, target) in trail::targets()
             .into_iter()
             .zip([lookout, eyes])
