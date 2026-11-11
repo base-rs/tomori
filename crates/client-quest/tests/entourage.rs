@@ -10,8 +10,8 @@
 //! to its left and 70° to its right, each sign turned to face whoever looks; `home.png`, the agent at home with its wall
 //! beneath it, from the arrival; `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
 //! someone standing, 1.6 m and 1.8 m, down the sheet; and `workbench.png`, the agent at its workbench in the yard's
-//! corner, its workers in the ring about it, from the arrival turned towards it, from the yard before it and from within
-//! the ring, down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
+//! corner, its workers in the ring about it, from the arrival turned towards it, from the yard before it, from within
+//! the ring and from straight above, down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
 //! `design/interaction.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1082,10 +1082,13 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
         let out = (eyes - agent).with_y(0.0).normalize();
         let yard = agent + out * 2.6 + Vec3::Y * 0.1;
         let within = agent + out * 0.9 + out.cross(Vec3::Y) * 0.5 - Vec3::Y * 0.1;
+        // And from straight above the agent, the ring on the floor about the middle of the bench's curve.
+        let above = agent.with_y(7.0);
         let views = [
             (eyes, towards - Vec3::Y * 0.12, 1.2),
             (yard, -out - Vec3::Y * 0.25, 1.3),
             (within, -out - Vec3::Y * 0.3, 1.2),
+            (above, -Vec3::Y + out * 0.001, 0.75),
         ];
         let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * views.len() as u32);
         for (row, (from, looking, fov)) in views.into_iter().enumerate() {

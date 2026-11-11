@@ -60,6 +60,10 @@ pub const HOME_RING_AWAY: f32 = 0.85;
 /// The widest ring on the floor at home drawn, in metres; one wider is drawn beneath the swarm.
 pub const MOST_HOME_RING: f32 = 4.0;
 
+/// How far above the floor the ring on the floor stands, the middles of its cubes, in metres: just enough that the
+/// ground beneath never shows through it, as the floor's other markings stand.
+pub const FLOOR_LIFT: f32 = 0.015;
+
 /// How many cubes make the ring drawn where a teleport being aimed would land.
 const LANDING_CUBES: usize = 16;
 /// The ring's radius, in metres.
@@ -632,7 +636,8 @@ impl Renderer {
     }
 
     /// Draw the ring on the floor at `ring`, the agent's home, from the next [`Self::update`], wherever the agent goes:
-    /// a little dimmer while it is away, brightening as it comes back. With none, or one that is nonsense, it is drawn beneath the
+    /// on the space's floor, however high its home stands, a little dimmer while the agent is away, brightening as it
+    /// comes back. With none, or one that is nonsense, it is drawn beneath the
     /// swarm wherever it stands, as before there were homes. See `design/environments.md`.
     pub fn set_home_ring(&mut self, ring: Option<tomori_scene::anchors::HomeRing>) {
         self.home_ring = ring.filter(|ring| {
@@ -687,29 +692,40 @@ impl Renderer {
         if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
-        // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, or else beneath
-        // the swarm: on the room's floor, or, for a home raised above the swarm's usual height, on the floor it would
-        // stand that high over. A little dimmer while the agent is away, it brightens as it comes back within the ring.
+        // The ring on the floor at home, the agent's place, which stays there wherever the agent goes, on the space's
+        // floor however high its home stands; or else beneath the swarm, as before there were homes: on the room's
+        // floor, or, for a swarm raised above its usual height, on the floor it would stand that high over. A little
+        // dimmer while the agent is away, it brightens as it comes back within the ring.
         let swarm_at = swarm.anchor().position;
-        let ring = self.home_ring.unwrap_or(tomori_scene::anchors::HomeRing {
-            centre: swarm_at,
-            ..tomori_scene::anchors::HomeRing::WHOLE
-        });
+        let (ring, floor) = match self.home_ring {
+            Some(ring) => (ring, tomori_protocol::entourage::FLOOR + FLOOR_LIFT),
+            None => (
+                tomori_scene::anchors::HomeRing {
+                    centre: swarm_at,
+                    ..tomori_scene::anchors::HomeRing::WHOLE
+                },
+                (swarm_at.y - crate::swarm::CENTER.y).max(0.0) + FLOOR_LIFT,
+            ),
+        };
         let (centre, radius) = (ring.centre, ring.radius);
-        let floor = (centre.y - crate::swarm::CENTER.y).max(0.0) + 0.015;
         let away = (swarm_at.x - centre.x).hypot(swarm_at.z - centre.z);
         let faint = ((away - radius / 2.0) / radius).clamp(0.0, 1.0);
         let brightness = 1.0 - (1.0 - HOME_RING_AWAY) * faint;
-        // Only as much of it as its workers take, about the way to whoever they gather about.
+        // Only as much of it as its workers take, about the way their anchor faces, its cubes standing evenly either
+        // side of that way, so that the side it leaves open is centred on it.
         let towards = glam::Vec2::new(ring.towards.x, ring.towards.z)
             .try_normalize()
-            .unwrap_or(glam::Vec2::Y);
+            .unwrap_or(glam::Vec2::Y)
+            .to_angle();
+        let step = std::f32::consts::TAU / HOME_RING_CUBES as f32;
         for n in 0..HOME_RING_CUBES {
-            let angle = n as f32 * std::f32::consts::TAU / HOME_RING_CUBES as f32;
-            let off = glam::Vec2::from_angle(angle).angle_to(towards).abs();
-            if off > ring.sweep / 2.0 + 1e-4 {
+            // Out from that way, alternately one side and the other, the last straight opposite it.
+            let side = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let off = side * n.div_ceil(2) as f32 * step;
+            if off.abs() > ring.sweep / 2.0 + 1e-4 {
                 continue;
             }
+            let angle = towards + off;
             self.scene.push(Instance {
                 position: [
                     centre.x + angle.cos() * radius,
@@ -3183,15 +3199,17 @@ mod tests {
                 sweep: std::f32::consts::TAU,
             };
             renderer.set_home_ring(Some(ring));
-            // The ring's cubes, on the floor beneath home, raised 0.1 m above the swarm's usual height.
-            let floor = |renderer: &Renderer| -> Vec<Instance> {
+            // The ring's cubes, on the space's floor beneath home, though home stands 0.1 m above the swarm's usual
+            // height; or `raised` above it, beneath the swarm.
+            let on = |renderer: &Renderer, raised: f32| -> Vec<Instance> {
                 renderer
                     .scene
                     .iter()
-                    .filter(|instance| (instance.position[1] - 0.115).abs() < 1e-5)
+                    .filter(|instance| (instance.position[1] - (FLOOR_LIFT + raised)).abs() < 1e-5)
                     .copied()
                     .collect()
             };
+            let floor = |renderer: &Renderer| on(renderer, 0.0);
             let at = |anchor: glam::Vec3| tomori_scene::anchors::Anchor {
                 position: anchor,
                 orientation: glam::Quat::IDENTITY,
@@ -3247,6 +3265,51 @@ mod tests {
                 part.iter()
                     .all(|instance| instance.position[2] - home.z > -0.71)
             );
+            // However high home stands, and whichever way it opens, the ring is on the floor, its cubes either side of
+            // the way it faces alike, so that the side it leaves open is centred on the way straight behind it.
+            for (height, yaw, sweep) in [
+                (0.6, 0.3, 300.0),
+                (1.5, -1.15f32.to_radians(), 300.0),
+                (2.4, 2.0, 170.0),
+                (1.4, 0.0, 360.0),
+            ] {
+                let centre = home.with_y(height);
+                let towards = glam::Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                renderer.set_home_ring(Some(HomeRing {
+                    centre,
+                    towards,
+                    sweep: f32::to_radians(sweep),
+                    ..ring
+                }));
+                swarm.set_anchor(at(centre));
+                renderer.update(&queue, &swarm, None, false);
+                let drawn = floor(&renderer);
+                assert!(!drawn.is_empty() && drawn.len() <= HOME_RING_CUBES);
+                let ahead = glam::Vec2::new(towards.x, towards.z);
+                let mut sides = [0.0f32; 2];
+                let mut middle = glam::Vec2::ZERO;
+                for instance in &drawn {
+                    let out = glam::Vec2::new(
+                        instance.position[0] - centre.x,
+                        instance.position[2] - centre.z,
+                    );
+                    assert!((out.length() - ring.radius).abs() < 1e-4);
+                    let off = ahead.angle_to(out);
+                    assert!(off.abs() <= f32::to_radians(sweep) / 2.0 + 1e-3, "{off}");
+                    // The cube straight opposite, of a whole ring, is on neither side.
+                    if off.abs() < std::f32::consts::PI - 1e-3 {
+                        sides[usize::from(off > 0.0)] += off.abs();
+                    }
+                    middle += out;
+                }
+                assert!((sides[0] - sides[1]).abs() < 1e-3, "{height} {sides:?}");
+                assert!(
+                    middle.perp_dot(ahead).abs() < 1e-3
+                        && (sweep == 360.0 || middle.dot(ahead) > 0.0),
+                    "{height} {middle}"
+                );
+            }
+            swarm.set_anchor(at(home + glam::Vec3::new(0.9, 0.0, 0.0)));
             // Nonsense, or none, draws it beneath the swarm, as before there were homes.
             for nonsense in [
                 HomeRing {
@@ -3260,7 +3323,9 @@ mod tests {
             ] {
                 renderer.set_home_ring(Some(nonsense));
                 renderer.update(&queue, &swarm, None, false);
-                let beneath = floor(&renderer);
+                // Beneath the swarm, raised as it is, 0.1 m above its usual height.
+                assert!(floor(&renderer).is_empty());
+                let beneath = on(&renderer, 0.1);
                 assert_eq!(beneath.len(), HOME_RING_CUBES);
                 let middle = beneath
                     .iter()
