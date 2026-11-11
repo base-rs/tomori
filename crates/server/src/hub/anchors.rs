@@ -539,6 +539,29 @@ impl Hub {
             self.keep();
         }
     }
+    /// Tell the server side of each space who takes part in it now, by their numbers: its participants whose clients
+    /// are connected and take part, not its visitors, so that a side can let go of what someone who left held, or tidy
+    /// up once nobody is there. Called as the hub sweeps. See `tomori_environment::Space::present`.
+    pub(crate) fn sweep_present(&self) {
+        let state = self.lock();
+        for record in &state.spaces {
+            let space = &record.model.id;
+            let present: Vec<u32> = record
+                .model
+                .participants
+                .iter()
+                .filter_map(|key| state.participants.get(key))
+                .filter(|participant| {
+                    participant.connection.is_some_and(|connection| {
+                        state.role(connection, Some(space)).participates()
+                    })
+                })
+                .map(|participant| participant.source)
+                .collect();
+            self.server_sides.present(space, present);
+        }
+    }
+
     /// Look, at `now`, at who is near the anchors of each space that notify its agent, and tell its agent, through the
     /// space's event queue, of each participant who came within one, as [`crate::proximity::Proximity`] decides: only
     /// participants, whose clients report where they are, named by their handle where another in the space shares

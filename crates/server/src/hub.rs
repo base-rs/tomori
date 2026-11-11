@@ -3334,6 +3334,7 @@ impl Hub {
         self.flush_anchors(now);
         self.sweep_places(now);
         self.sweep_proximity(now);
+        self.sweep_present();
         // Such as after a closed space was forgotten.
         self.keep();
     }

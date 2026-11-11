@@ -39,7 +39,7 @@ pub use scheduler::{Due, LEAST, Random, Scheduler};
 
 /// The most of an ambience's sounds that play at once, its beds, loops and calls together: those declared first keep
 /// theirs, and a call due while every voice plays is skipped.
-pub const VOICES: usize = 8;
+pub const VOICES: usize = 10;
 /// The most points a loop's path keeps.
 pub const PATH_POINTS: usize = 16;
 /// The largest file a slot plays, in bytes: a slot whose file is larger is silent. See `design/assets.md`.

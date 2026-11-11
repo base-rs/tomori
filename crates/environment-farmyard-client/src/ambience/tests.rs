@@ -97,8 +97,8 @@ fn heard_call(call: &Call, ear: [f32; 3]) -> [f32; 3] {
 fn its_levels_keep_the_beds_quiet_the_water_soft_and_the_birds_a_little_above_them() {
     let ambience = with(&[]);
     let beds = beds(&ambience);
-    let [river, waterfall] = &ambience.loops[..] else {
-        panic!("a river and a waterfall");
+    let [river, waterfall, fire] = &ambience.loops[..] else {
+        panic!("a river, a waterfall and a fire");
     };
     // Louder at the fence nearest each: the right side's, level with the river's bend, and the back's, before the fall.
     let fence = [
@@ -114,7 +114,13 @@ fn its_levels_keep_the_beds_quiet_the_water_soft_and_the_birds_a_little_above_th
             levels[0], levels[1], levels[2]
         ));
     };
-    let level = |decibels: f32| format!("{:.0} LUFS", decibels - 33.0);
+    let level = |decibels: f32| {
+        if decibels < -150.0 {
+            "silent".to_owned()
+        } else {
+            format!("{:.0} LUFS", decibels - 33.0)
+        }
+    };
     for bed in &ambience.beds {
         row(bed.slot.name(), [0; 3].map(|_| level(bed.gain)));
     }
@@ -142,6 +148,19 @@ fn its_levels_keep_the_beds_quiet_the_water_soft_and_the_birds_a_little_above_th
         });
         row(name, [arrival, workbench, String::from("as in the yard")]);
     }
+    // The bonfire, nowhere in the yard, and, at the nearest fence, as heard sitting on the lookout's seat.
+    let lookout_seat = tomori_environment_farmyard::trail::seat().0;
+    row(
+        "fire",
+        [
+            level(heard_loop(fire, listeners()[0].1)),
+            level(heard_loop(fire, listeners()[1].1)),
+            format!(
+                "{} (on the lookout's seat)",
+                level(heard_loop(fire, [lookout_seat.x, 1.1, lookout_seat.z]))
+            ),
+        ],
+    );
     // At the default level, low, 10 dB beneath as mastered, each sound as heard over its own length, before ducking.
     println!("{table}");
     for (_, ear) in ears {
@@ -169,6 +188,26 @@ fn its_levels_keep_the_beds_quiet_the_water_soft_and_the_birds_a_little_above_th
         let heard = heard_loop(sound, ear);
         assert!(heard > heard_loop(sound, listeners()[0].1) + 2.0);
         assert!(heard < beds + 1.0, "{heard} beside {beds}");
+    }
+    // The bonfire is not heard in the yard at all; sitting by it, on either seat or standing by it, it crackles over the
+    // beds and the waterfall beyond, by a few decibels, but well beneath a voice, which is mastered some 20 dB above
+    // them.
+    for (_, ear) in listeners() {
+        assert!(heard_loop(fire, ear) < -150.0);
+    }
+    let seated = |(middle, _, _, _): (glam::Vec3, glam::Vec2, f32, f32)| [middle.x, 1.1, middle.z];
+    let (standing, _) = campsite::standing()[1];
+    for ear in [
+        seated(tomori_environment_farmyard::campsite::seat()),
+        seated(tomori_environment_farmyard::trail::seat()),
+        [standing.x, EYES, standing.y],
+    ] {
+        let heard = heard_loop(fire, ear);
+        assert!(
+            heard > beds + 3.0 && heard < beds + 14.0,
+            "{heard} beside {beds}"
+        );
+        assert!(heard > heard_loop(waterfall, ear) + 2.0);
     }
 }
 
@@ -221,8 +260,8 @@ fn its_sounds_are_where_the_backdrop_has_them_and_leave_voices_for_the_birds() {
     let ambience = with(&[]);
     assert_eq!(ambience.beds.len(), 2);
     assert!(ambience.beds.iter().all(|bed| bed.gain < 0.0));
-    let [river, waterfall] = &ambience.loops[..] else {
-        panic!("a river and a waterfall");
+    let [river, waterfall, fire] = &ambience.loops[..] else {
+        panic!("a river, a waterfall and a fire");
     };
     // The river from where it leaves the pool, over its lip, along each of its bends.
     assert_eq!(river.path.points()[0], layout::RIVER[1].to_array());
@@ -240,6 +279,15 @@ fn its_sounds_are_where_the_backdrop_has_them_and_leave_voices_for_the_birds() {
     assert!(distance(river.path.nearest(arrival), arrival) < river.radius * 0.75);
     assert_eq!(waterfall.path.points(), [layout::WATERFALL.to_array()]);
     assert!(distance(layout::WATERFALL.to_array(), arrival) < waterfall.radius * 0.75);
+    // The bonfire from among its flames, heard from the trail beside it and the lookout, but not from the arrival, nor
+    // the workbench.
+    assert_eq!(fire.path.points(), [campsite::heart().to_array()]);
+    assert_eq!((fire.radius, fire.gain), (FIRE_RADIUS, FIRE_GAIN));
+    assert!(distance(fire.path.points()[0], arrival) > fire.radius);
+    let workbench = [layout::WORKBENCH.x, 0.0, layout::WORKBENCH.y];
+    assert!(distance(fire.path.points()[0], workbench) > fire.radius);
+    let (lookout, _, _) = tomori_environment_farmyard::trail::frame(36);
+    assert!(distance(fire.path.points()[0], [lookout.x, 1.6, lookout.y]) < fire.radius * 0.5);
     // Four kinds of bird, each with variants, from the canopy of every patch of bush, with voices left for them.
     assert_eq!(ambience.calls.len(), 4);
     for call in &ambience.calls {
@@ -302,8 +350,8 @@ fn every_slot_has_its_sound_credited_and_within_the_limits() {
 fn the_waterfall_is_loud_on_the_rock_before_it_as_its_place_makes_it() {
     let ambience = with(&[]);
     let beds = beds(&ambience);
-    let [river, waterfall] = &ambience.loops[..] else {
-        panic!("a river and a waterfall");
+    let [river, waterfall, _] = &ambience.loops[..] else {
+        panic!("a river, a waterfall and a fire");
     };
     // Standing on the waterfall rock, its spray about them, and at the lookout over the pool, at the eyes.
     let rock = (layout::WATERFALL_ROCK + glam::Vec3::Y * EYES).to_array();

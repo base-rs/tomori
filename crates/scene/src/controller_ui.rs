@@ -124,8 +124,8 @@ const STICK: f32 = 0.6;
 const REPEAT_AFTER: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(120);
 /// How firmly the grip is squeezed to count, and how far it is let go before it counts again.
-const SQUEEZE: f32 = 0.75;
-const RELEASE: f32 = 0.5;
+pub(crate) const SQUEEZE: f32 = 0.75;
+pub(crate) const RELEASE: f32 = 0.5;
 
 /// The stick as steps: one on moving it, then repeating while it is held.
 #[derive(Clone, Debug, Default)]

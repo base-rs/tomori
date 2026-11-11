@@ -229,11 +229,11 @@ fn a_silent_slot_plays_nothing_and_leaves_the_thread_idle() {
 }
 
 #[test]
-fn no_more_than_eight_voices_play_and_calls_wait_for_one_to_be_free() {
+fn no_more_than_its_voices_play_and_calls_wait_for_one_to_be_free() {
     let (mut feeder, mut bus) = pair(1);
     feeder.apply(Command::Gain(1.0), Duration::ZERO);
     let mut many = Ambience::new();
-    for index in 0..10 {
+    for index in 0..VOICES + 2 {
         many = many.with_loop(Loop::at(mono(), [index as f32, 1.6, -2.0]));
     }
     let many = many.with_call(Call::new(vec![mono()]).every(Duration::ZERO, Duration::ZERO));

@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Whose the trigger, A and each stick are: one ordered list of rungs for each, the first that claims the control as it
+//! Whose the trigger, A, the right grip and each stick are: one ordered list of rungs for each, the first that claims the control as it
 //! begins taking it. Whatever the participant points at gets the input, Tomori's own interface first: an environment's
 //! client side is reached only after every rung of Tomori's declines, which, since one of them claims anything of
 //! Tomori's the ray is on, is only while the ray is on something of the environment's or on nothing of Tomori's. A
@@ -172,6 +172,36 @@ impl Ladder for A {
     ];
 }
 
+/// Whose a squeeze of the right grip is, decided as it closes, until it is let go. Each of Tomori's own uses of the grip
+/// still decides for itself what it takes, as before; this order decides only whether the squeeze is the environment's,
+/// which it is only after every rung of Tomori's declines it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grab {
+    /// The right wrist's transcript while it shows: the squeeze detaches or reattaches it.
+    Transcript,
+    /// A projected panel, a wall or a card carried: the squeeze is the carrying's.
+    Carried,
+    /// Anything of Tomori's the ray is on, such as a panel, which the squeeze pulls off, a wall's board or handles, which
+    /// it takes hold of, a card, which it picks up, or a worker: the squeeze is Tomori's, and never reaches the
+    /// environment behind it.
+    Tomori,
+    /// An object of the environment's client side within reach of the hand, or else one the ray is on that takes the
+    /// grip ([`crate::client_side::Actions::GRAB`]), for a participant: the squeeze takes it, until it is let go.
+    Environment,
+    /// Nothing else: the squeeze does nothing.
+    Nothing,
+}
+
+impl Ladder for Grab {
+    const ORDER: &'static [Self] = &[
+        Self::Transcript,
+        Self::Carried,
+        Self::Tomori,
+        Self::Environment,
+        Self::Nothing,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +253,7 @@ mod tests {
         each_rung_wins_over_the_ones_after_it::<Left>();
         each_rung_wins_over_the_ones_after_it::<Trigger>();
         each_rung_wins_over_the_ones_after_it::<A>();
+        each_rung_wins_over_the_ones_after_it::<Grab>();
     }
 
     #[test]
@@ -272,6 +303,11 @@ mod tests {
         ] {
             assert!(before(rung, A::Environment), "{rung:?}");
         }
+        for rung in [Grab::Transcript, Grab::Carried, Grab::Tomori] {
+            assert!(before(rung, Grab::Environment), "{rung:?}");
+        }
+        assert_eq!(Grab::ORDER.last(), Some(&Grab::Nothing));
+        assert_eq!(Grab::ORDER[Grab::ORDER.len() - 2], Grab::Environment);
         // The environment comes before only the fallback that does nothing, or attracts the swarm.
         assert_eq!(Right::ORDER.last(), Some(&Right::Cards));
         assert_eq!(Left::ORDER.last(), Some(&Left::Nothing));

@@ -287,6 +287,30 @@ impl LeftStick {
     }
 }
 
+/// Whose a squeeze of the right grip is: each squeeze belongs to what took it as it closed, until it is let go, as
+/// [`precedence::Grab`] orders. Tomori's own uses of the grip each decide for themselves what they take, as before.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Gripping {
+    /// Let go.
+    #[default]
+    Free,
+    /// Something of Tomori's, or nothing, took it: it is theirs, as ever, and the environment's client side is told
+    /// nothing of it.
+    Other,
+    /// It took the environment's object `object`, within reach of the hand, or pointed at `distance` along the ray,
+    /// which the hand is held at where there is no controller, as on the desktop; `told` once its client side has been
+    /// told it began, and the hand it was last told of.
+    Environment {
+        object: String,
+        distance: Option<f32>,
+        told: bool,
+        hand: Option<crate::client_side::Hand>,
+    },
+    /// It was the environment's when its client side went: it is nobody's until it is let go, telling the next client
+    /// side nothing.
+    Abandoned,
+}
+
 /// The client side of the joined space's environment, for that space and environment, with what the participant does
 /// with it. See `design/environments.md`.
 struct Client {
@@ -302,6 +326,10 @@ struct Client {
     scrollable: Option<String>,
     /// The pushes of the right stick, and turns of the wheel, it has been told of.
     scroller: crate::client_side::Scroller,
+    /// The object of its within reach of the right hand last frame, and the one the ray pointed at last frame that takes
+    /// the grip, with how far along the ray, which a squeeze of the grip takes, the one within reach first.
+    reachable: Option<String>,
+    grabbable: Option<(String, f32)>,
 }
 
 /// How near the middle the right stick returns to end a push.
@@ -490,6 +518,9 @@ pub struct Step {
     environment_sticks: (Vec2, Vec2),
     /// Whose the left stick's push is, from when it left the middle until it returns.
     left_stick: LeftStick,
+    /// Whose the right grip's squeeze is, from when it closed until it is let go, and whether it is closed.
+    gripping: Gripping,
+    grip_closed: bool,
     /// The pulls of the trigger and the presses of A on the client side's selectable objects, which outlive a client
     /// side, so that a pull begun for one is nobody's once it has gone. See `design/environments.md`.
     selector: crate::client_side::Selector,
@@ -498,6 +529,9 @@ pub struct Step {
     /// Whose the last press of B was, for tests that check the order.
     #[cfg(test)]
     last_back: Option<crate::conversation::Back>,
+    /// Whose the last squeeze of the grip was, for tests that check the order.
+    #[cfg(test)]
+    last_grab: Option<precedence::Grab>,
     /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
     /// swarm appears at the new one rather than gliding. See `design/environments.md`.
     agent_home: crate::anchors::Anchor,
@@ -589,10 +623,14 @@ impl Default for Step {
             ambience: None,
             environment_sticks: (Vec2::ZERO, Vec2::ZERO),
             left_stick: LeftStick::Free,
+            gripping: Gripping::Free,
+            grip_closed: false,
             selector: crate::client_side::Selector::default(),
             a_press: crate::client_side::Press::default(),
             #[cfg(test)]
             last_back: None,
+            #[cfg(test)]
+            last_grab: None,
             agent_home: crate::anchors::Anchor::AGENT,
             clock: crate::dials::Clock::default(),
             system: None,
@@ -650,6 +688,73 @@ impl Step {
         }
         self.wheel_push = None;
         self.scroll_axis = Vec2::ZERO;
+        // And a squeeze of the grip that was an object's, which the next client side is told nothing of.
+        if matches!(self.gripping, Gripping::Environment { .. }) {
+            self.gripping = Gripping::Abandoned;
+        }
+    }
+
+    /// Whose the right grip's squeeze is this frame, from `grip`, its value while it acts, with `wrist_active` whether
+    /// the transcript showed: as it closes, the first rung of [`precedence::Grab`] that claims it, as things stood last
+    /// frame, Tomori's own first, the environment's object within reach of the hand, or else pointed at, only for a
+    /// participant; held until it is let go. Returns whether it is the environment's, or was as it was let go this frame,
+    /// so that nothing of Tomori's is given it.
+    fn grip(&mut self, grip: Option<f32>, wrist_active: bool, participates: bool) -> bool {
+        let value = grip.filter(|value| value.is_finite()).unwrap_or(0.0);
+        let closed = if self.grip_closed {
+            value > controller_ui::RELEASE
+        } else {
+            value > controller_ui::SQUEEZE
+        };
+        let began = closed && !self.grip_closed;
+        self.grip_closed = closed;
+        if began && self.gripping == Gripping::Free {
+            let target = self
+                .client
+                .as_ref()
+                .filter(|_| participates)
+                .and_then(|client| {
+                    client
+                        .reachable
+                        .clone()
+                        .map(|object| (object, None))
+                        .or_else(|| {
+                            client
+                                .grabbable
+                                .clone()
+                                .map(|(object, distance)| (object, Some(distance)))
+                        })
+                });
+            let rung = precedence::Grab::first(|rung| match rung {
+                precedence::Grab::Transcript => wrist_active,
+                precedence::Grab::Carried => {
+                    self.projector.carrying() || self.board.held().is_some()
+                }
+                precedence::Grab::Tomori => self.aim == precedence::Aim::Tomori,
+                precedence::Grab::Environment => target.is_some(),
+                precedence::Grab::Nothing => true,
+            });
+            #[cfg(test)]
+            {
+                self.last_grab = Some(rung);
+            }
+            self.gripping = match (rung, target) {
+                (precedence::Grab::Environment, Some((object, distance))) => {
+                    Gripping::Environment {
+                        object,
+                        distance,
+                        told: false,
+                        hand: None,
+                    }
+                }
+                _ => Gripping::Other,
+            };
+        }
+        let environment = matches!(self.gripping, Gripping::Environment { .. });
+        if !closed && !environment {
+            self.gripping = Gripping::Free;
+        }
+        environment
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -1122,6 +1227,19 @@ impl Step {
             );
         self.menu_was_shown = menu_shown;
         let in_space = conversation.joined_space().is_some();
+        // Whose the right grip's squeeze is, decided as it closes, until it is let go: Tomori's own first, and the
+        // environment's object only where none of them takes it, which nothing of Tomori's is then given. See
+        // `design/interaction.md` and `design/environments.md`.
+        let environment_grip = self.grip(
+            senses.grip.filter(|_| focused && in_space),
+            self.wrist.state().active(),
+            conversation.role().participates(),
+        );
+        let tomori_grip = if environment_grip {
+            Some(0.0)
+        } else {
+            senses.grip
+        };
         let (wrist_opened, wrist) = self.wrist.update(
             conversation,
             WristFrame {
@@ -1134,7 +1252,7 @@ impl Step {
                 menu_pinned: self.hand_menu.pinned(),
                 // A panel carried keeps the transcript away, as pointing does, so that turning the wrist does not let it go.
                 pointing: senses.pointing || self.projector.carrying(),
-                grip: senses.grip,
+                grip: tomori_grip,
             },
             moment,
         );
@@ -1436,8 +1554,7 @@ impl Step {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
             // Only a participant pulls panels off; a visitor only looks at them and points.
-            grip: senses
-                .grip
+            grip: tomori_grip
                 .filter(|_| self.board.held().is_none() && conversation.role().participates()),
             viewer: senses.viewer,
             active: carrying_through && self.board.held().is_none(),
@@ -1485,7 +1602,7 @@ impl Step {
         let board = self.board.update(crate::board::Input {
             cards: conversation.cards().filter(|_| !in_arrival),
             ray: senses.ray,
-            grip: senses.grip.filter(|_| !carrying),
+            grip: tomori_grip.filter(|_| !carrying),
             viewer: senses.viewer,
             active: in_space && !carrying,
             now,
@@ -1581,6 +1698,8 @@ impl Step {
                         back: false,
                         scrollable: None,
                         scroller: Default::default(),
+                        reachable: None,
+                        grabbable: None,
                     });
                     self.selector.abandon();
                     self.abandon_scroll();
@@ -1695,6 +1814,20 @@ impl Step {
                 .as_ref()
                 .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
                 .map(|picked| picked.object.clone());
+            // And what a squeeze of the grip takes: what is within reach of the right hand, or else what the ray is on
+            // that takes the grip.
+            client.grabbable = object
+                .as_ref()
+                .filter(|picked| picked.actions.contains(crate::client_side::Actions::GRAB))
+                .map(|picked| (picked.object.clone(), picked.distance));
+            client.reachable = senses.controllers[crate::controller::RIGHT]
+                .filter(|pose| in_space && pose.valid())
+                .and_then(|pose| {
+                    let hand = arrangement
+                        .carriage
+                        .unplace(Vec3::from_array(pose.position));
+                    client.side.within_reach(hand)
+                });
         }
         // The checklist item the ray meets on the panel pointed at, not one carried, which A ticks or unticks next, or, a
         // list's choosable row, chooses: a target of its own.
@@ -1897,13 +2030,84 @@ impl Step {
                     _ => None,
                 };
                 let scroll = client.scroller.update(push);
+                // The hand that holds what the grip took: the right controller's grip pose, or, without one, as on the
+                // desktop, a point along the ray as far as the ray took it, facing along the ray; in the environment's
+                // own coordinates.
+                let carriage = arrangement.carriage;
+                let unturn = carriage.orientation.inverse();
+                let controller = senses.controllers[crate::controller::RIGHT]
+                    .filter(|pose| pose.valid())
+                    .map(|pose| {
+                        crate::client_side::Hand::new(
+                            carriage.unplace(Vec3::from_array(pose.position)),
+                            unturn * glam::Quat::from_array(pose.orientation).normalize(),
+                        )
+                    });
+                let grab = match std::mem::take(&mut self.gripping) {
+                    Gripping::Environment {
+                        object,
+                        distance,
+                        told,
+                        hand,
+                    } => {
+                        let along = senses.ray.zip(distance).map(|(ray, distance)| {
+                            let ray = carriage.unplace_ray(&ray);
+                            crate::client_side::Hand::new(
+                                ray.at(distance.clamp(0.3, 1.2)),
+                                glam::Quat::from_rotation_arc(Vec3::NEG_Z, ray.direction),
+                            )
+                        });
+                        let held = controller.or(along).or(hand);
+                        let closed = self.grip_closed;
+                        let phase = match (closed, told) {
+                            (true, false) => crate::client_side::Phase::Began,
+                            (true, true) => crate::client_side::Phase::Changed,
+                            (false, _) => crate::client_side::Phase::Ended,
+                        };
+                        // Told nothing until there is a hand to tell of, nor its end if its beginning never was.
+                        let told_now = held.filter(|_| closed || told);
+                        if closed {
+                            self.gripping = Gripping::Environment {
+                                object: object.clone(),
+                                distance,
+                                told: told || told_now.is_some(),
+                                hand: held,
+                            };
+                        }
+                        told_now.map(|hand| crate::client_side::Grab::new(object, hand, phase))
+                    }
+                    other => {
+                        self.gripping = other;
+                        None
+                    }
+                };
+                let hands = conversation
+                    .right_hands()
+                    .into_iter()
+                    .map(|(source, pose)| {
+                        (
+                            source,
+                            crate::client_side::Hand::new(
+                                carriage.unplace(Vec3::from_array(pose.position)),
+                                unturn * glam::Quat::from_array(pose.orientation).normalize(),
+                            ),
+                        )
+                    })
+                    .collect();
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(object.as_ref().map(|picked| picked.object.as_str()), head)
                         .with_select(client.select.take())
                         .with_back(std::mem::take(&mut client.back))
                         .with_sticks(left, right)
-                        .with_scroll(scroll),
+                        .with_scroll(scroll)
+                        .with_grab(grab)
+                        .with_hands(hands)
+                        .as_participant(
+                            conversation
+                                .source()
+                                .filter(|_| conversation.role().participates()),
+                        ),
                 );
                 for intent in output.intents {
                     conversation.environment_intent(
@@ -9810,6 +10014,9 @@ mod tests {
         assert!(card.model.is_some());
         assert_eq!(badge, &Sheet::default());
     }
+
+    /// The right grip for an object of an environment's that takes it.
+    mod grab;
 
     /// The right stick's push for an object of an environment's that takes it.
     mod scroll;

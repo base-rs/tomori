@@ -7,7 +7,7 @@ use tomori_server::{Builder, Environment, Server};
 /// The label clients show for the Minimal grid.
 pub const GRID_LABEL: &str = "Grid";
 
-/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, and its trail's stations and viewpoints, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
+/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock and the campsite's marshmallow sticks, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, its trail's stations and viewpoints and its campsite, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
 ///
 /// ```
 /// let builder = tomori_server_app::builder();
@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 6)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 7)]);
 /// ```
 pub fn builder() -> Builder {
     let farmyard = Environment::new(
@@ -33,6 +33,7 @@ pub fn builder() -> Builder {
     .with_solids(farmyard_solids());
     let farmyard = farmyard_trail()
         .into_iter()
+        .chain([farmyard_campsite()])
         .fold(farmyard, Environment::with_anchor);
     let builder = Server::builder()
         .environment(
@@ -47,14 +48,31 @@ pub fn builder() -> Builder {
     tomori_environment_github_server::register(builder)
 }
 
-/// The farmyard's solids: the yard's, the posts and seat along its trail, the waterfall rock, and the backdrop's plants
-/// and pines beside the trail and the rock, so that the agent coming to someone there swings clear of them.
+/// The farmyard's solids: the yard's, the posts and seat along its trail, the waterfall rock, the backdrop's plants and
+/// pines beside the trail and the rock, so that the agent coming to someone there swings clear of them, and the
+/// campsite's fire and its second seat, with the sticks leaning on it.
 pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
-    use tomori_environment_farmyard::{layout, trail};
+    use tomori_environment_farmyard::{campsite, layout, trail};
     let mut solids = layout::solids();
     solids.extend(trail::solids());
     solids.extend(trail::beside());
+    solids.extend(campsite::solids());
     solids
+}
+
+/// The farmyard campsite's named anchor, `campsite`, of kind `area`, high above its bonfire, a little towards the trail,
+/// facing the trail, with room, `campsite::ROOM`, for one to eighteen workers, so that the agent can suggest toasting
+/// marshmallows by the fire, go there and stand its workers there. See `design/farmyard.md`.
+pub fn farmyard_campsite() -> tomori_protocol::cluster::Anchor {
+    use tomori_environment_farmyard::campsite;
+    let place = campsite::place();
+    tomori_protocol::cluster::Anchor::new(
+        place.name,
+        tomori_protocol::Pose::at(place.at.to_array()).facing_towards(place.towards.to_array()),
+    )
+    .with_extent(campsite::ROOM[0], campsite::ROOM[1], campsite::ROOM[2])
+    .with_kind(place.kind)
+    .with_label(place.label)
 }
 
 /// The farmyard trail's named anchors: its viewpoints, `riverbank`, `pool-lookout` and `waterfall-rock`, beside the rock
@@ -145,7 +163,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 6)
+                ("farmyard", "Farmyard", 7)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
@@ -228,7 +246,8 @@ mod tests {
         use tomori_protocol::cluster::Cluster;
         let builder = super::builder();
         let farmyard = &builder.environments()[2];
-        // After its home, its viewpoints, then its stations in order along the trail, each labelled with its exercise.
+        // After its home, its viewpoints, then its stations in order along the trail, each labelled with its exercise, and
+        // the campsite.
         let named: Vec<(&str, Option<&str>, Option<&str>)> = farmyard
             .anchors()
             .iter()
@@ -264,6 +283,11 @@ mod tests {
                     Some("station"),
                     Some("30 arm circles and 3 deep breaths, 15 circles each way")
                 ),
+                (
+                    "campsite",
+                    Some("area"),
+                    Some("The campsite, with a bonfire and marshmallow sticks to toast")
+                ),
             ]
         );
         // The stations tell the agent of whoever comes within their radius; the viewpoints tell it nothing.
@@ -276,7 +300,9 @@ mod tests {
         let radius = Some(trail::STATION_RADIUS);
         assert_eq!(
             told,
-            [None, None, None, radius, radius, radius, radius, radius]
+            [
+                None, None, None, radius, radius, radius, radius, radius, None
+            ]
         );
         // Every one is sent to a space: within reach of home, where participants arrive, on each axis as the arrival
         // carries it, the waterfall rock's furthest, and above the trail.
@@ -295,7 +321,10 @@ mod tests {
         assert_eq!(farmyard.solids(), super::farmyard_solids());
         assert_eq!(
             farmyard.solids().len(),
-            layout::solids().len() + trail::solids().len() + trail::beside().len()
+            layout::solids().len()
+                + trail::solids().len()
+                + trail::beside().len()
+                + tomori_environment_farmyard::campsite::solids().len()
         );
         let solids: Vec<Solid> = farmyard
             .solids()

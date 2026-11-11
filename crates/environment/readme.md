@@ -26,7 +26,7 @@ impl ServerSide for Observe {
 }
 ```
 
-A side shares what its environment presents with the clients in its space through the state channel: `Space::share` keeps a state for everyone in the space now and whoever joins later, `Space::announce` sends an event with the state it leaves, `Space::describe` describes what a participant can point at for the space's agent, and `Space::next_intent` takes what participants ask of it, which the side validates. The state, events and intents are the environment's own JSON, which the server carries without reading:
+A side shares what its environment presents with the clients in its space through the state channel: `Space::share` keeps a state for everyone in the space now and whoever joins later, `Space::announce` sends an event with the state it leaves, `Space::describe` describes what a participant can point at for the space's agent, `Space::next_intent` takes what participants ask of it, which the side validates, and `Space::present` says who takes part in the space now, as the server last looked. The state, events and intents are the environment's own JSON, which the server carries without reading:
 
 ```rust
 use std::time::Duration;

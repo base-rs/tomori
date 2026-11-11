@@ -10,7 +10,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use tomori_protocol::Payload;
 
 use crate::channel::Update;
@@ -51,6 +51,16 @@ pub struct Input<'a> {
     /// beginning to its end: see [`Picked::handles`] and [`Scroll`]. `right_stick` is zero while a push is an object's,
     /// so that one push is told once.
     pub scroll: Option<Scroll>,
+    /// A squeeze of the right grip that took an object of its, by the object's identity, from its beginning to its end,
+    /// with the hand that holds it each frame: see [`Actions::GRAB`], [`ClientSide::within_reach`] and [`Grab`].
+    pub grab: Option<Grab>,
+    /// The right hands of the others in the space, by their numbers, as their presence last said, in the environment's
+    /// own coordinates: so that what one of them holds is drawn in their hand, where they hold it, with nothing more
+    /// sent. A participant whose presence says no right hand, as the desktop's does not, is not among them.
+    pub hands: Vec<(u32, Hand)>,
+    /// This participant's own number, which the server knows them by, as the others' hands and the server side's
+    /// intents do; `None` for a visitor, who holds nothing, and outside a space.
+    pub participant: Option<u32>,
 }
 
 impl<'a> Input<'a> {
@@ -65,6 +75,9 @@ impl<'a> Input<'a> {
             left_stick: Vec2::ZERO,
             right_stick: Vec2::ZERO,
             scroll: None,
+            grab: None,
+            hands: Vec::new(),
+            participant: None,
         }
     }
 
@@ -98,6 +111,65 @@ impl<'a> Input<'a> {
     pub fn with_scroll(mut self, scroll: Option<Scroll>) -> Self {
         self.scroll = scroll;
         self
+    }
+
+    /// This input, with the grip on an object, if any.
+    pub fn with_grab(mut self, grab: Option<Grab>) -> Self {
+        self.grab = grab;
+        self
+    }
+
+    /// This input, with the others' right hands, `hands`, by their numbers.
+    pub fn with_hands(mut self, hands: Vec<(u32, Hand)>) -> Self {
+        self.hands = hands;
+        self
+    }
+
+    /// This input, for the participant numbered `participant`, if they take part.
+    pub fn as_participant(mut self, participant: Option<u32>) -> Self {
+        self.participant = participant;
+        self
+    }
+}
+
+/// A hand, as a controller's grip pose says it: where it is and how it is turned, its −Z forward through the fist and
+/// its +Y up the back of the hand, in the environment's own coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hand {
+    pub position: Vec3,
+    pub orientation: Quat,
+}
+
+impl Hand {
+    pub fn new(position: Vec3, orientation: Quat) -> Self {
+        Self {
+            position,
+            orientation,
+        }
+    }
+}
+
+/// The right grip on an object that takes it ([`Actions::GRAB`]), or within reach of the hand
+/// ([`ClientSide::within_reach`]): the object it took, by its identity, which it keeps until the grip is let go,
+/// wherever the hand goes; the hand that holds it, this frame; and where in the squeeze it is, `Began` once as the grip
+/// closes on it, `Changed` each frame after while it is held, and `Ended` once as it is let go, focus is lost or the
+/// space is left, with the hand as it was let go. A client side draws what is held from the hand, every frame, so that
+/// it never lags it, and decides what letting go does.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Grab {
+    pub object: String,
+    pub hand: Hand,
+    pub phase: Phase,
+}
+
+impl Grab {
+    pub fn new(object: impl Into<String>, hand: Hand, phase: Phase) -> Self {
+        Self {
+            object: object.into(),
+            hand,
+            phase,
+        }
     }
 }
 
@@ -164,6 +236,9 @@ impl Actions {
     pub const NONE: Self = Self(0);
     /// The right stick's push, and the desktop's keys and wheel that stand for it: [`Input::scroll`].
     pub const SCROLL: Self = Self(1);
+    /// The right grip, and the desktop's G that stands for it, squeezed while the ray points at it, where nothing of
+    /// Tomori's takes the grip: [`Input::grab`].
+    pub const GRAB: Self = Self(2);
 
     /// Whether these actions include every one of `other`.
     pub const fn contains(self, other: Self) -> bool {
@@ -443,6 +518,14 @@ pub trait ClientSide: Send {
     /// What `ray` meets first of what the environment shows, if anything.
     fn pick(&self, ray: &Ray) -> Option<Picked>;
 
+    /// The object of its within reach of a hand at `hand`, in the environment's own coordinates, that a squeeze of the
+    /// right grip takes, where nothing of Tomori's takes the grip, before anything the ray points at that takes it
+    /// ([`Actions::GRAB`]): as a hand closes on what it touches. None, unless a client side says.
+    fn within_reach(&self, hand: Vec3) -> Option<String> {
+        let _ = hand;
+        None
+    }
+
     /// A frame: take what the server side sent, move on to `input.now`, note what the participant points at and does,
     /// and say what to do. A select or back may name, or be meant for, an object picked on the frame before that has
     /// since gone: ignore an identity it no longer knows.
@@ -481,6 +564,33 @@ mod tests {
             (input.left_stick, input.right_stick),
             (Vec2::X, Vec2::NEG_Y)
         );
+    }
+
+    #[test]
+    fn an_input_is_told_no_grip_hands_or_participant_until_its_builders_say() {
+        let now = Instant::now();
+        let input = Input::new(Vec::new(), now);
+        assert_eq!(
+            (input.grab, input.hands, input.participant),
+            (None, Vec::new(), None)
+        );
+        let hand = Hand::new(Vec3::Y, Quat::from_rotation_y(0.5));
+        let grab = Grab::new("stick", hand, Phase::Began);
+        assert_eq!(
+            (grab.object.as_str(), grab.hand, grab.phase),
+            ("stick", hand, Phase::Began)
+        );
+        let input = Input::new(Vec::new(), now)
+            .with_grab(Some(grab.clone()))
+            .with_hands(vec![(2, hand)])
+            .as_participant(Some(1));
+        assert_eq!(input.grab, Some(grab));
+        assert_eq!(input.hands, [(2, hand)]);
+        assert_eq!(input.participant, Some(1));
+        // Taking the grip is apart from taking the stick.
+        let picked = Picked::new("stick", "the stick", 1.0).handles(Actions::GRAB);
+        assert!(picked.actions.contains(Actions::GRAB));
+        assert!(!picked.actions.contains(Actions::SCROLL));
     }
 
     #[test]

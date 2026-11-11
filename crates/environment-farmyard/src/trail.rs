@@ -76,6 +76,19 @@ pub const GATEWAY: [Vec2; 2] = [Vec2::new(0.0, 0.9), WAYPOINTS[0]];
 /// The middle of the yard, which the loop goes round.
 const YARD: Vec2 = Vec2::new(0.0, -4.7);
 
+/// How far `point` is from the trail's middle, across the ground.
+pub fn from_middle(point: Vec2) -> f32 {
+    let line = line();
+    (0..line.len())
+        .map(|index| {
+            let (from, to) = (line[index], line[(index + 1) % line.len()]);
+            let along = to - from;
+            let t = ((point - from).dot(along) / along.length_squared()).clamp(0.0, 1.0);
+            point.distance(from + along * t)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
 /// The trail's middle, a closed loop smoothed through [`WAYPOINTS`], [`STEPS`] points to each, the first at the gate;
 /// the last joins the first.
 pub fn centreline() -> Vec<Vec2> {
