@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use tomori_protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
 
+use super::ambience::bus::Bus;
 use super::spatial::{self, Ears, Placement, Scene};
-use super::{Bank, Duck, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
+use super::{Bank, Duck, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics, Shape};
 
 /// How long a source may go without frames before its buffer is released.
 const IDLE_LIMIT: Duration = Duration::from_secs(10);
@@ -271,6 +272,15 @@ pub struct Mixer {
     faded: u32,
     /// The ambient sounds playing.
     ambient: [Option<Ambient>; AMBIENT],
+    /// The environment's ambience, fed by its own thread, while there is one.
+    bus: Option<Box<Bus>>,
+    /// The ambience bus's mix, the ambient sounds' and the ambience's, for the current [`Self::mix`] call.
+    bus_mix: Vec<f32>,
+    /// The participant's ambience level, as a gain, and the gain the last mix ended at, before ducking.
+    ambience_gain: f32,
+    ambience_applied: f32,
+    /// The ambience ducking under anyone speaking.
+    ambience_duck: Duck,
     /// How many times a source's audio has begun to arrive, after running dry or for the first time.
     arrivals: u64,
 }
@@ -304,6 +314,11 @@ impl Mixer {
             probe: None,
             limited: Layout::Mono,
             ambient: Default::default(),
+            bus: None,
+            bus_mix: Vec::new(),
+            ambience_gain: 1.0,
+            ambience_applied: 1.0,
+            ambience_duck: Duck::new(Shape::AMBIENCE),
             arrivals: 0,
         }
     }
@@ -348,6 +363,41 @@ impl Mixer {
     /// How many ambient sounds are playing.
     pub fn playing_ambient(&self) -> usize {
         self.ambient.iter().flatten().count()
+    }
+
+    /// Mix the ambience its thread feeds `bus`, or none, at the mixer's rate. See [`super::ambience`].
+    pub(crate) fn set_ambience_bus(&mut self, bus: Option<Box<Bus>>) {
+        self.bus = bus.map(|mut bus| {
+            bus.prepare(self.options.sample_rate);
+            bus
+        });
+    }
+
+    /// The ambience bus, taken for a mixer made again at another rate.
+    pub(crate) fn take_ambience_bus(&mut self) -> Option<Box<Bus>> {
+        self.bus.take()
+    }
+
+    /// How many of the ambience's voices are playing, and how many times one's next block was late.
+    pub fn playing_ambience(&self) -> (usize, u64) {
+        self.bus
+            .as_ref()
+            .map_or((0, 0), |bus| (bus.playing(), bus.late()))
+    }
+
+    /// Play the ambience bus, the ambience and the ambient sounds, at `gain`, the participant's level: the next mix
+    /// glides to it. Negative values are treated as zero.
+    pub fn set_ambience_gain(&mut self, gain: f32) {
+        self.ambience_gain = gain.max(0.0);
+    }
+
+    pub fn ambience_gain(&self) -> f32 {
+        self.ambience_gain
+    }
+
+    /// How far the ambience is ducked now, in decibels.
+    pub fn ambience_duck_depth(&self) -> f32 {
+        self.ambience_duck.depth()
     }
 
     /// Where the listener and the sources are, which the next mix glides to. The application keeps the scene current, typically once a frame; see [`super::PlayerControl::set_scene`].
@@ -688,6 +738,12 @@ impl Mixer {
             self.voices[index] = (position < self.bank.samples(voice.earcon).len())
                 .then_some(Voice { position, ..voice });
         }
+        // The ambience bus: the environment's ambience and its ambient sounds, then its level and its ducking.
+        self.bus_mix.clear();
+        self.bus_mix.resize(output.len(), 0.0);
+        if let Some(bus) = self.bus.as_mut() {
+            bus.mix(&self.scene, layout, &mut self.bus_mix, &mut self.scratch);
+        }
         for slot in &mut self.ambient {
             let Some(playing) = slot.as_mut() else {
                 continue;
@@ -708,7 +764,7 @@ impl Mixer {
             // Played at the mixer's rate, in a straight line between its own samples.
             let step = f64::from(playing.sound.rate) / f64::from(rate);
             let samples = &playing.sound.samples;
-            for frame in self.accumulator.chunks_exact_mut(channels) {
+            for frame in self.bus_mix.chunks_exact_mut(channels) {
                 let at = playing.played as usize;
                 if at + 1 >= samples.len() {
                     playing.played = samples.len() as f64;
@@ -723,6 +779,25 @@ impl Mixer {
             }
             if playing.played as usize + 1 >= samples.len() {
                 *slot = None;
+            }
+        }
+        // Anyone heard speaking ducks it: a person, or agent speech not silent here.
+        let speaking = self.sources.iter().any(|(&id, source)| {
+            source.loud && (!is_agent(id) || (self.agent_heard && source.stopped.is_none()))
+        });
+        let (duck_from, duck_to) = self.ambience_duck.update(speaking, frames, rate);
+        let from = self.ambience_applied * duck_from;
+        let to = self.ambience_gain * duck_to;
+        self.ambience_applied = self.ambience_gain;
+        for (index, (frame, mixed)) in self
+            .accumulator
+            .chunks_exact_mut(channels)
+            .zip(self.bus_mix.chunks_exact(channels))
+            .enumerate()
+        {
+            let gain = from + (to - from) * (index + 1) as f32 / frames as f32;
+            for (total, sample) in frame.iter_mut().zip(mixed) {
+                *total += sample * gain;
             }
         }
         if let Some(position) = self.probe {

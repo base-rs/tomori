@@ -17,6 +17,8 @@ base-scheduler = "0.5.0"
 base-scheduler-native = "0.5.0"
 tomori-discovery = { version = "0.2.0", path = "../discovery" }
 futures-lite = "2.6.1"
+# Decoding an environment's ambience, Ogg Vorbis, a packet at a time on its own thread: pure Rust, without unsafe code, under MIT or Apache-2.0. See design/spatial-audio.md.
+lewton = "0.10.2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

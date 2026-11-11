@@ -1107,6 +1107,47 @@ fn opening_the_speaker_discards_audio_queued_while_nothing_played() {
     wait(|| fake.opened.load(Ordering::Relaxed) == 1);
 }
 
+#[test]
+fn the_speaker_keeps_the_ambience_and_its_level_for_this_player_and_the_next() {
+    use crate::playback::ambience::{Ambience, Bed, Slot};
+    let mut speaker = Speaker::new(Box::new(FakeSpeaker::default()));
+    let farm = Arc::new(Ambience::new().with_bed(Bed::new(Slot::missing("wind"))));
+    // Without a player, kept for the next.
+    speaker.set_ambience(Some(farm.clone()));
+    speaker.set_ambience_gain(0.5);
+    let (_sender, audio) = mpsc::sync_channel(8);
+    let (player, control) = Player::new(audio, MixerOptions::default());
+    speaker.player = Some((Arc::new(Mutex::new(player)), control));
+    // With one, told it now.
+    speaker.set_ambience(None);
+    speaker.set_ambience_gain(0.25);
+    assert!(speaker.ambience.is_none());
+    assert_eq!(speaker.ambience_gain, 0.25);
+    // A connection's player is given what was kept, and a change of the ambience its feedback hands on.
+    let mut session = Script::default();
+    let mut connection = kept(
+        &mut session,
+        Store::new(None),
+        None,
+        None,
+        Scripted::default(),
+        Nowhere,
+    );
+    assert_eq!(
+        connection.speaker.ambience_gain,
+        crate::feedback::Ambience::Low.gain()
+    );
+    connection.feedback().set_ambience(Some(farm.clone()));
+    connection.poll(true, &mut session);
+    assert!(
+        connection
+            .speaker
+            .ambience
+            .as_ref()
+            .is_some_and(|kept| Arc::ptr_eq(kept, &farm))
+    );
+}
+
 /// An echo test for a live microphone opened at `opened`, as it starts.
 fn echo_test(routed: bool) -> EchoTest {
     EchoTest {
@@ -1755,6 +1796,7 @@ fn the_feedback_setting_is_applied_and_kept_on_the_device() {
         sounds: Level::Off,
         vibration: Level::Reduced,
         mono: true,
+        ambience: crate::feedback::Ambience::Off,
     };
     session.push(Action::SetFeedback(quiet));
     connection.poll(true, &mut session);

@@ -1,7 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Real-time playback of received audio: per-source jitter buffers, a mixer, and a [`Player`] that feeds the mixer from a [`crate::Client`] for an output device. Pure logic with no I/O, so it can run inside an audio device callback. See `design/live-audio.md`.
+//! Real-time playback of received audio: per-source jitter buffers, a mixer, and a [`Player`] that feeds the mixer from a [`crate::Client`] for an output device, with an environment's [`ambience`] beneath it. Pure logic with no I/O, so it can run inside an audio device callback; the ambience is decoded on a thread of its own. See `design/live-audio.md` and `design/spatial-audio.md`.
+pub mod ambience;
 mod duck;
 mod earcon;
 mod jitter_buffer;
@@ -10,7 +11,7 @@ mod mixer;
 mod player;
 pub mod spatial;
 
-pub use duck::Duck;
+pub use duck::{Duck, Shape};
 pub use earcon::{Bank, Earcon, Note, PROBE_LENGTH, PROBE_LEVEL, Spec, probe};
 pub use jitter_buffer::{JitterBuffer, JitterOptions};
 pub use limiter::{CEILING, Limiter};

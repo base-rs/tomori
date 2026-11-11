@@ -472,3 +472,80 @@ fn a_scene_left_poisoned_by_the_application_is_still_taken() {
             .any(|sample| *sample != 0)
     );
 }
+
+mod ambience {
+    use super::*;
+    use crate::playback::ambience::engine::tests::MONO;
+    use crate::playback::ambience::{Ambience, Bed, Slot};
+
+    fn tone() -> Option<Arc<Ambience>> {
+        Some(Arc::new(
+            Ambience::new().with_bed(Bed::new(Slot::embedded("tone", MONO))),
+        ))
+    }
+
+    /// Render `frames` at `rate` in stereo, a few milliseconds' worth at a time and about as often, and whether the
+    /// last was heard.
+    fn play(player: &mut Player, rate: u32, frames: usize) -> bool {
+        let mut heard = false;
+        for _ in 0..frames / 96 {
+            let mut output = vec![0; 192];
+            player.render(rate, Layout::Stereo, &mut output);
+            heard = output.iter().any(|sample| sample.unsigned_abs() > 500);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        heard
+    }
+
+    /// Render until the ambience is heard, as its thread begins it, for at most ten seconds.
+    fn until_heard(player: &mut Player, rate: u32) {
+        assert!(
+            (0..1_000).any(|_| play(player, rate, 96)),
+            "the ambience was never heard"
+        );
+    }
+
+    #[test]
+    fn an_ambience_plays_from_its_own_thread_and_on_in_a_mixer_at_another_rate() {
+        let (_sender, mut player, control) = player();
+        // Without an ambience, no thread starts.
+        control.set_ambience(None);
+        assert!(!control.end_ambience());
+        control.set_ambience(tone());
+        until_heard(&mut player, 48_000);
+        // Its thread decodes more as it plays: more than its channels hold at first.
+        assert!(play(&mut player, 48_000, 48_000 / 2));
+        // A mixer made at another rate takes the bus, at the level set.
+        control.set_ambience_gain(0.5);
+        until_heard(&mut player, 44_100);
+        assert_eq!(player.mixer.as_ref().map(Mixer::ambience_gain), Some(0.5));
+        let (playing, _) = player.mixer.as_ref().unwrap().playing_ambience();
+        assert_eq!(playing, 1);
+        // Another ambience, or none, reaches the thread it has.
+        control.set_ambience(None);
+        assert!(control.end_ambience());
+    }
+
+    #[test]
+    fn off_from_the_start_it_decodes_nothing_and_its_thread_waits() {
+        let (_sender, mut player, control) = player();
+        control.set_ambience_gain(-1.0);
+        control.set_ambience(tone());
+        assert!(!play(&mut player, 48_000, 960));
+        assert_eq!(player.mixer.as_ref().map(Mixer::ambience_gain), Some(0.0));
+        assert!(control.end_ambience());
+    }
+
+    #[test]
+    fn an_ambience_whose_thread_cannot_start_is_silent() {
+        let (_sender, mut player, control) = player();
+        crate::system::refuse("tomori-ambience");
+        control.set_ambience(tone());
+        assert!(!play(&mut player, 48_000, 960));
+        assert!(!control.end_ambience());
+        // Asked again, it starts.
+        control.set_ambience(tone());
+        until_heard(&mut player, 48_000);
+        assert!(control.end_ambience());
+    }
+}
