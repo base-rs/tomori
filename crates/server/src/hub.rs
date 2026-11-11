@@ -487,7 +487,7 @@ pub struct Hub {
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
     environments: RwLock<Environments>,
     /// The server sides of the environments, run for the spaces bound to them. See `design/environments.md`.
-    server_sides: crate::server_sides::ServerSides,
+    server_sides: Arc<crate::server_sides::ServerSides>,
     /// Notified when a space defers a snapshot, or an agent's next move is due sooner, so that the server's snapshot
     /// timer can wake for it.
     deferred_snapshot: Arc<Notify>,
@@ -529,6 +529,11 @@ pub struct Hub {
 
 #[derive(Default)]
 struct HubState {
+    /// The environments' server sides, the hub's own, which are told where their panels go.
+    sides: Arc<crate::server_sides::ServerSides>,
+    /// Set while a participant's message is taken, so that where it moves an environment's panels is told to its side
+    /// once, as theirs, when it is done, rather than as the layout's at each change.
+    acting: Cell<bool>,
     next_connection: ConnectionId,
     next_source: u32,
     /// Random for each server run and part of every space identifier, so a client restoring a space from an earlier run never joins an unrelated space that reused its number.
@@ -755,6 +760,16 @@ struct ParticipantRecord {
     headset: bool,
 }
 
+/// Where a space's environment's panels were last told to its side to be, by the environment's ids, for the
+/// environment named and its side's binding, and the participant whose moves past their rate are yet to be told, if any.
+#[derive(Default)]
+struct Told {
+    environment: String,
+    binding: Option<u64>,
+    places: std::collections::BTreeMap<String, tomori_environment::PanelPlace>,
+    owed: Option<u32>,
+}
+
 struct SpaceRecord {
     model: SpaceModel,
     commands: async_channel::Sender<SpaceCommand>,
@@ -798,6 +813,8 @@ struct SpaceRecord {
     /// earlier run gave (see [`crate::versions::first_revision`]). A cell, because raising it only needs shared access
     /// to the state. See `design/projection.md`.
     projection_revision: Cell<u64>,
+    /// Where its environment's panels were last told to its side to be. See [`HubState::tell_places`].
+    told: std::cell::RefCell<Told>,
     /// The versions of its walls and panels, found from each projection built. See [`SpaceRecord::versioned`].
     versions: std::cell::RefCell<crate::versions::Versions>,
     /// When its connections were last told of a change its environment's side made to what it projects, and when they
@@ -1285,7 +1302,132 @@ impl HubState {
 
     /// Send what is projected in `space` again to everyone in it whose client reads it, participants and visitors alike.
     /// See `design/projection.md`.
+    /// What has changed of where `record`'s environment's panels are since its side, bound as `binding`, was last told: each that is on
+    /// another wall, floating, or, new to what was told, not on the wall it asked for, as where it rested, by the
+    /// environment's id, with where it is now; and each gone that stays away, dismissed by a participant or given up by
+    /// the layout, as dismissed; never one moved between the slots of one wall, nor one retracted or resting. With where
+    /// they all are now, to tell next time.
+    fn moved_places(
+        record: &SpaceRecord,
+        binding: Option<u64>,
+    ) -> (
+        Vec<(String, tomori_environment::PanelPlace)>,
+        std::collections::BTreeMap<String, tomori_environment::PanelPlace>,
+    ) {
+        use tomori_environment::PanelPlace;
+        // The wall a panel at `place` is on, by its place among the environment's own, `Some(None)` for another wall,
+        // and `None` floating.
+        let walled = |place: PanelPlace| match place {
+            PanelPlace::Wall { wall, .. } => Some(Some(wall)),
+            PanelPlace::OtherWall => Some(None),
+            _ => None,
+        };
+        let environment = &record.model.environment;
+        let told = record.told.borrow();
+        // A side bound anew, as one started again, knows nothing of where its panels were: each is new to it.
+        let before =
+            (told.environment == *environment && told.binding == binding).then_some(&told.places);
+        let now = record.stage.published_places(environment);
+        let mut moved = Vec::new();
+        for (id, (place, asked)) in &now {
+            let changed = match before.and_then(|before| before.get(id)) {
+                Some(was) => walled(*was) != walled(*place),
+                None => walled(*place) != Some(Some(*asked as usize)),
+            };
+            if changed {
+                moved.push((id.clone(), *place));
+            }
+        }
+        for id in before.into_iter().flat_map(|before| before.keys()) {
+            if !now.contains_key(id) && record.stage.dismissed(environment, id) {
+                moved.push((id.clone(), PanelPlace::Dismissed));
+            }
+        }
+        let places = now
+            .into_iter()
+            .map(|(id, (place, _))| (id, place))
+            .collect();
+        (moved, places)
+    }
+
+    /// Tell `space`'s environment's side of every change of where its panels are since it was last told (see
+    /// [`HubState::moved_places`]), each as an intent the server makes, `Intent::moved`, as `cause`'s, the participant's
+    /// number, or `0`, the number the server gives nobody, for the layout's, the agent's or the environment's own; or as
+    /// the participant's whose moves were held back by their rate, if any were. Nothing while a participant's message is
+    /// taken, which [`HubState::tell_places_for`] tells once it is done. See `design/panel-actions.md`.
+    fn tell_places(&self, space: &str, cause: u32) {
+        if self.acting.get() {
+            return;
+        }
+        for record in self.space(space).into_iter() {
+            self.tell_record_places(record, cause);
+        }
+    }
+
+    /// Tell `record`'s side, as [`HubState::tell_places`] does.
+    fn tell_record_places(&self, record: &SpaceRecord, cause: u32) {
+        let space = record.model.id.as_str();
+        let binding = self.sides.binding(space);
+        let (moved, places) = Self::moved_places(record, binding);
+        let mut told = record.told.borrow_mut();
+        // Moves held back are told as their mover's, unless the side is new to them.
+        let owed = told.owed.take();
+        let cause = match owed {
+            Some(owed)
+                if told.environment == record.model.environment && told.binding == binding =>
+            {
+                owed
+            }
+            _ => cause,
+        };
+        for (id, place) in moved {
+            let delivered = self.sides.deliver(
+                space,
+                tomori_environment::Intent::move_of(
+                    cause,
+                    tomori_environment::Moved::new(id.as_str(), place),
+                ),
+            );
+            log::debug!(
+                "Panel {id} of space {space} is now {place:?}, by {cause}; told to its side: {delivered}."
+            );
+        }
+        told.environment.clone_from(&record.model.environment);
+        told.binding = binding;
+        told.places = places;
+    }
+
+    /// Tell `space`'s environment's side what the participant `participant`'s message changed of where its panels are,
+    /// as theirs, taking one of their intents if it changed any: past their rate, nothing is told yet, and what it
+    /// changed is told as theirs with the next telling, as the hub sweeps if nothing else changes first.
+    fn tell_places_for(&mut self, space: &str, participant: &str) {
+        let changed = self.space(space).is_some_and(|record| {
+            !Self::moved_places(record, self.sides.binding(space))
+                .0
+                .is_empty()
+        });
+        if !changed {
+            return;
+        }
+        let participant = self
+            .participants
+            .get_mut(participant)
+            .expect("the participant acting is listed");
+        let source = participant.source;
+        if participant.intents.take(Instant::now()) {
+            self.tell_places(space, source);
+        } else {
+            log::debug!("Moves of panels in space {space} wait for their mover's rate.");
+            self.space(space)
+                .expect("checked above")
+                .told
+                .borrow_mut()
+                .owed = Some(source);
+        }
+    }
+
     fn touch_projection(&self, space: &str) {
+        self.tell_places(space, 0);
         // Every change is a revision, even one that leaves the projection as it was, so that a client that showed a
         // change at once, such as a tick the server refused, is sent a patch that undoes it.
         for record in self.space(space).into_iter() {
@@ -1320,6 +1462,7 @@ impl HubState {
     /// deferred to the interval's end, and told then with every change since, the server's snapshot timer woken for
     /// it, as for an agent's next move, so that it is told then though nothing else happens.
     fn touch_projection_paced(&self, space: &str, now: Instant) {
+        self.tell_places(space, 0);
         for record in self.space(space).into_iter() {
             record
                 .projection_revision
@@ -2225,8 +2368,10 @@ impl Hub {
         slots: Arc<SpaceSlots>,
     ) -> Arc<Self> {
         let deferred_snapshot = Arc::new(Notify::new());
+        let server_sides = Arc::new(crate::server_sides::ServerSides::default());
         let hub = Arc::new_cyclic(|this| Self {
             state: Mutex::new(HubState {
+                sides: server_sides.clone(),
                 run: run_token(),
                 woken: deferred_snapshot.clone(),
                 ..HubState::default()
@@ -2237,7 +2382,7 @@ impl Hub {
             slots,
             roots: RwLock::new(roots),
             environments: RwLock::new(Environments::default()),
-            server_sides: crate::server_sides::ServerSides::default(),
+            server_sides,
             deferred_snapshot,
             counts_changed: Notify::new(),
             cards_watched: Notify::new(),
@@ -3491,14 +3636,23 @@ impl Hub {
                 let role = state.role(connection, space.as_deref());
                 match access::refusal(role, &message) {
                     Some(refusal) => state.error(&participant, refusal),
-                    None => self.act(
-                        &mut state,
-                        connection,
-                        &participant,
-                        space.as_deref(),
-                        message,
-                        &mut deferred,
-                    ),
+                    None => {
+                        // Whatever of where an environment's panels are this changes is told to its side as this
+                        // participant's, once it is done, within their rate of intents.
+                        state.acting.set(true);
+                        self.act(
+                            &mut state,
+                            connection,
+                            &participant,
+                            space.as_deref(),
+                            message,
+                            &mut deferred,
+                        );
+                        state.acting.set(false);
+                        if let Some(space) = state.member(connection).and_then(|(_, space)| space) {
+                            state.tell_places_for(&space, &participant);
+                        }
+                    }
                 }
             } else if let Some(record) = state.connections.get(&connection) {
                 record.outbox.message(error_message("Send hello first."));
@@ -5785,6 +5939,7 @@ impl Hub {
             commands,
             touched: Cell::new(None),
             projection_revision: Cell::new(crate::versions::first_revision()),
+            told: Default::default(),
             versions: Default::default(),
             projection_told: Cell::new(None),
             projection_deferred: Cell::new(None),
@@ -5952,6 +6107,7 @@ impl Hub {
                     commands,
                     touched: Cell::new(None),
                     projection_revision: Cell::new(crate::versions::first_revision()),
+                    told: Default::default(),
                     versions: Default::default(),
                     projection_told: Cell::new(None),
                     projection_deferred: Cell::new(None),

@@ -24,6 +24,10 @@ static MOST_PUBLISHED: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Published {
     pub(super) id: String,
+    /// The environment's own wall it asked for, by its place in their order, so that a place it is given elsewhere, as
+    /// where it rested, is told to its side.
+    #[serde(default)]
+    pub(super) wall: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,15 +394,16 @@ impl Stage {
             id,
             content,
             chart,
+            wall: asked,
             slot,
             reference,
             rows,
             highlighted,
-            ..
         } = publishing;
         let room = self.room(walls.environment);
         let published = Published {
             id: id.clone(),
+            wall: asked,
             reference,
             chart,
             rows,
@@ -546,6 +551,40 @@ impl Stage {
     pub(crate) fn published(&self, environment: &str, panel: &str) -> Option<(&str, Option<&str>)> {
         let published = self.kept(environment, panel)?.published.as_ref()?;
         Some((&published.id, published.reference.as_deref()))
+    }
+
+    /// Where each panel its environment published in `environment` is now, by the environment's id for it, with the
+    /// environment's own wall it asked for: on one of the environment's own walls, by its place in their order, and its
+    /// slot, on another wall, or floating. See `design/panel-actions.md`.
+    pub(crate) fn published_places(
+        &self,
+        environment: &str,
+    ) -> std::collections::BTreeMap<String, (tomori_environment::PanelPlace, u32)> {
+        use tomori_environment::PanelPlace;
+        self.here(environment)
+            .filter_map(|kept| {
+                let published = kept.published.as_ref()?;
+                let place = match &kept.place {
+                    Placed::Wall { wall, slot } => wall
+                        .strip_prefix("environment-")
+                        .and_then(|index| index.parse().ok())
+                        .map_or(PanelPlace::OtherWall, |wall| PanelPlace::Wall {
+                            wall,
+                            slot: *slot,
+                        }),
+                    Placed::Free { .. } => PanelPlace::Floating,
+                };
+                Some((published.id.clone(), (place, published.wall)))
+            })
+            .collect()
+    }
+
+    /// Whether the panel its environment published in `environment` as `id` stays away, dismissed by a participant or
+    /// given up by the layout, until the environment retracts it.
+    pub(crate) fn dismissed(&self, environment: &str, id: &str) -> bool {
+        self.rooms
+            .get(environment)
+            .is_some_and(|room| room.dismissed.contains(id))
     }
 
     /// The rows of the list panel `panel` shown in `environment`, in order, and the id of the one it highlights, if

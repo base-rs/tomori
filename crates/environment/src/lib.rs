@@ -137,7 +137,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// ```
 ///
 /// An intent may instead be a participant's choice of a row of a list panel the side published, which the server makes
-/// itself, never from what a client sends as an intent: see [`Intent::chosen`].
+/// itself, never from what a client sends as an intent: see [`Intent::chosen`]; or a change of where one of its panels
+/// is, by a participant or the layout, or its dismissal: see [`Intent::moved`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Intent {
@@ -145,6 +146,64 @@ pub struct Intent {
     payload: String,
     chosen: Option<Chosen>,
     acted: Option<Acted>,
+    moved: Option<Moved>,
+}
+
+/// Where a panel the side published is now, as the server tells the side in a [`Moved`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PanelPlace {
+    /// On one of the environment's own walls, by its place in the order the environment declares them, from 0, as
+    /// [`Panel::on_wall`] names it, in the slot `slot`.
+    Wall { wall: usize, slot: u32 },
+    /// On a wall the environment does not declare, as one a participant added.
+    OtherWall,
+    /// Floating, on no wall.
+    Floating,
+    /// Thrown away: it stays away, its updates ignored, until the side [retracts](Space::retract) it and publishes it
+    /// again.
+    Dismissed,
+}
+
+/// A change of where a panel the side published is, as the server tells the side: the side's own id for the panel, as
+/// it published it, and where it is now. The server tells every change of the wall a panel is on, whatever made it: a
+/// participant's move, and the panel a dropped one swapped with; a wall removed or its grid shrunk, floating what it held;
+/// the agent's moves; a panel put back, as the side publishes it again, somewhere other than the wall it asks for, as
+/// where it rested before the side started again; and a dismissal, by a participant or by the layout, as the floating
+/// bound giving one up. It never tells a move between the slots of one wall, a floating panel moved on, a retraction
+/// or a run ending. See `design/panel-actions.md`.
+///
+/// ```
+/// use tomori_environment::{Moved, PanelPlace};
+///
+/// let moved = Moved::new("system", PanelPlace::Floating);
+/// assert_eq!((moved.panel(), moved.place()), ("system", PanelPlace::Floating));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Moved {
+    panel: String,
+    place: PanelPlace,
+}
+
+impl Moved {
+    /// The panel `panel`, by the side's id, now at `place`.
+    pub fn new(panel: impl Into<String>, place: PanelPlace) -> Self {
+        Self {
+            panel: panel.into(),
+            place,
+        }
+    }
+
+    /// The side's id for the panel, as it published it.
+    pub fn panel(&self) -> &str {
+        &self.panel
+    }
+
+    /// Where it is now.
+    pub fn place(&self) -> PanelPlace {
+        self.place
+    }
 }
 
 /// A participant's choice of a row of a list panel the side published, as the server hands it on: the side's own id
@@ -203,6 +262,7 @@ impl Intent {
             payload: payload.into(),
             chosen: None,
             acted: None,
+            moved: None,
         }
     }
 
@@ -224,6 +284,7 @@ impl Intent {
             payload: String::new(),
             chosen: Some(chosen),
             acted: None,
+            moved: None,
         }
     }
 
@@ -246,6 +307,30 @@ impl Intent {
             payload: String::new(),
             chosen: None,
             acted: Some(acted),
+            moved: None,
+        }
+    }
+
+    /// A change, `moved`, of where a panel the side published is, made by the participant numbered `participant`, or
+    /// `0`, the number the server gives nobody, for one the layout, the agent or the side's own publishing made, whose
+    /// payload is empty. The server makes it, never from a client's intent; a side's own tests make it to try their
+    /// handling of a move.
+    ///
+    /// ```
+    /// use tomori_environment::{Intent, Moved, PanelPlace};
+    ///
+    /// let intent = Intent::move_of(3, Moved::new("system", PanelPlace::Wall { wall: 2, slot: 0 }));
+    /// assert_eq!(intent.moved().map(Moved::place), Some(PanelPlace::Wall { wall: 2, slot: 0 }));
+    /// assert_eq!((intent.participant(), intent.payload(), intent.chosen()), (3, "", None));
+    /// assert_eq!(Intent::new(3, "{}").moved(), None);
+    /// ```
+    pub fn move_of(participant: u32, moved: Moved) -> Self {
+        Self {
+            participant,
+            payload: String::new(),
+            chosen: None,
+            acted: None,
+            moved: Some(moved),
         }
     }
 
@@ -277,6 +362,15 @@ impl Intent {
     /// its own state. See `design/environment-actions.md`.
     pub fn acted(&self) -> Option<&Acted> {
         self.acted.as_ref()
+    }
+
+    /// A change of where one of the side's panels is, if this is one rather than the client side's own intent: onto
+    /// another wall, off its wall to float, or dismissed, by the participant [`Intent::participant`] names, or by
+    /// nobody, `0`, for the layout's, the agent's or the side's own. Only the server makes one: a client's intent is
+    /// never one, whatever its payload says. A side may then keep updating the panel where it is, as for something else,
+    /// retract it, or publish another in its place. See `design/panel-actions.md`.
+    pub fn moved(&self) -> Option<&Moved> {
+        self.moved.as_ref()
     }
 }
 
@@ -788,7 +882,8 @@ impl Space {
     /// Publish `panel` onto the environment's own wall it names, for everyone in the space, as the agent's panels are
     /// shown: or, where the side published a panel with its id before, update that panel in place, replacing what it
     /// shows and keeping where it is, wherever a participant or the agent moved it. Participants and the agent move,
-    /// point at and dismiss it as any panel; one dismissed stays away, its updates ignored, until the side
+    /// point at and dismiss it as any panel, every change of the wall it is on and its dismissal, whatever made them,
+    /// reaching the side as an [`Intent::moved`]; one dismissed stays away, its updates ignored, until the side
     /// [retracts](Space::retract) it and publishes it again, the space comes back to the environment or the server restarts.
     ///
     /// The server refuses, saying why: an id [`valid_panel_id`] refuses; a wall the environment does not declare, or a
@@ -1136,6 +1231,28 @@ mod tests {
         assert_eq!(forged.chosen(), None);
         // Choices wait in the same inbox, in order with the client side's intents.
         let space = Space::new("space-1-4", "Fleet", "/");
+        assert!(space.inbox().push(forged.clone()));
+        assert!(space.inbox().push(intent.clone()));
+        assert_eq!(space.next_intent(Duration::ZERO), Some(forged));
+        assert_eq!(space.next_intent(Duration::ZERO), Some(intent));
+    }
+
+    #[test]
+    fn a_move_is_an_intent_apart_from_any_payload() {
+        let moved = Moved::new("system", PanelPlace::Wall { wall: 3, slot: 1 });
+        assert_eq!(
+            (moved.panel(), moved.place()),
+            ("system", PanelPlace::Wall { wall: 3, slot: 1 })
+        );
+        let intent = Intent::move_of(4, moved.clone());
+        assert_eq!(intent.moved(), Some(&moved));
+        assert_eq!((intent.chosen(), intent.acted()), (None, None));
+        // A client's intent, a choice and an action are never a move, whatever they say.
+        let forged = Intent::new(4, r#"{"moved":{"panel":"system","place":"floating"}}"#);
+        assert_eq!(forged.moved(), None);
+        assert_eq!(Intent::choice(4, Chosen::new("a", "b", true)).moved(), None);
+        // Moves wait in the same inbox, in order with the rest.
+        let space = Space::new("space-1-5", "Fleet", "/");
         assert!(space.inbox().push(forged.clone()));
         assert!(space.inbox().push(intent.clone()));
         assert_eq!(space.next_intent(Duration::ZERO), Some(forged));

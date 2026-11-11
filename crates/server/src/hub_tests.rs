@@ -4516,6 +4516,400 @@ fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_els
 }
 
 #[test]
+fn a_participant_moving_a_panel_to_another_wall_or_dismissing_it_is_told_to_its_environment() {
+    use tomori_environment::{Intent, Moved, PanelPlace};
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([crate::environments::Environment::new(
+        "yard", "Yard",
+    )
+    .with_walls([upright([3.0, 1.4, -4.0]), upright([-3.0, 1.4, -4.0])])
+    .with_server_side(Recording(seen.clone()))]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let start = Instant::now();
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::text("system", "System", "- a").on_wall(0, Some(0)),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let panel = ada.projection().panels[0].id.clone();
+    let source = {
+        let state = hub.lock();
+        let key = state.connections[&ada.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    let place =
+        |wall: Option<&str>, slot: Option<u32>, pose: Option<[f32; 3]>| ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: wall.map(str::to_owned),
+            slot,
+            pose: pose.map(upright),
+        };
+    let told = |count: usize| {
+        eventually_in("the side is told the move", || {
+            seen.lock().unwrap().len() >= count
+        });
+        seen.lock().unwrap()[count - 1].clone()
+    };
+    let moved = |place: PanelPlace| Intent::move_of(source, Moved::new("system", place));
+    // Onto its environment's other wall, the side is told which, by its order, and the slot, with its own id.
+    ada.send(place(Some("environment-1"), Some(1), None));
+    assert!(ada.errors().is_empty());
+    assert_eq!(told(1), moved(PanelPlace::Wall { wall: 1, slot: 1 }));
+    // Between the slots of one wall, nothing is told; off it, floating, it is; moved on floating, nothing again.
+    ada.send(place(Some("environment-1"), Some(0), None));
+    ada.send(place(None, None, Some([1.0, 1.5, -1.0])));
+    assert_eq!(told(2), moved(PanelPlace::Floating));
+    ada.send(place(None, None, Some([0.0, 1.5, -1.0])));
+    // Onto a wall a participant added, which the environment does not declare, it is told so.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let added = ada
+        .projection()
+        .walls
+        .iter()
+        .find(|wall| wall.kind == tomori_protocol::WallKind::Added)
+        .unwrap()
+        .id
+        .clone();
+    ada.send(place(Some(&added), None, None));
+    assert_eq!(told(3), moved(PanelPlace::OtherWall));
+    // Back on its own wall, then thrown away, each is told.
+    ada.send(place(Some("environment-0"), None, None));
+    assert_eq!(told(4), moved(PanelPlace::Wall { wall: 0, slot: 0 }));
+    ada.send(ClientMessage::DismissPanel {
+        panel: panel.clone(),
+    });
+    assert_eq!(told(5), moved(PanelPlace::Dismissed));
+    // Gone, it is moved and dismissed no more, and nothing more is told.
+    ada.send(ClientMessage::DismissPanel { panel });
+    assert_eq!(ada.errors(), ["That panel is not here."]);
+    assert_eq!(seen.lock().unwrap().len(), 5);
+}
+
+/// A hub serving the yard, its side recording every intent, a space bound to it, and Ada in it, with her number.
+struct Yard {
+    hub: Arc<Hub>,
+    _jobs: async_channel::Receiver<Job>,
+    seen: Arc<Mutex<Vec<tomori_environment::Intent>>>,
+    id: String,
+    _commands: async_channel::Receiver<SpaceCommand>,
+    ada: Client,
+    source: u32,
+}
+
+/// The yard, whose first wall holds two panels and second the default, with a side that records every intent.
+fn yard_recording() -> Yard {
+    let (hub, jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([
+                crate::EnvironmentWall::new(upright([3.0, 1.4, -4.0]))
+                    .with_grid(tomori_protocol::Grid::from((1, 2))),
+                crate::EnvironmentWall::new(upright([-3.0, 1.4, -4.0])),
+            ])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, commands) = running(&hub, &bound, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let source = {
+        let state = hub.lock();
+        let key = state.connections[&ada.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    Yard {
+        hub,
+        _jobs: jobs,
+        seen,
+        id,
+        _commands: commands,
+        ada,
+        source,
+    }
+}
+
+/// The outlet of the side bound to `id` now.
+fn yard_outlet(hub: &Arc<Hub>, id: &str) -> SpaceOutlet {
+    SpaceOutlet {
+        hub: Arc::downgrade(hub),
+        space: id.to_owned(),
+        binding: hub.server_sides.binding(id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    }
+}
+
+/// The moves `seen` holds from the `from`th on, waiting until there are at least `count` of them, by panel, with who
+/// moved each and where to.
+fn moves_from(
+    seen: &Mutex<Vec<tomori_environment::Intent>>,
+    from: usize,
+    count: usize,
+) -> Vec<(String, u32, tomori_environment::PanelPlace)> {
+    eventually_in("the side is told the moves", || {
+        seen.lock().unwrap().len() >= from + count
+    });
+    seen.lock().unwrap()[from..]
+        .iter()
+        .filter_map(|intent| {
+            intent.moved().map(|moved| {
+                (
+                    moved.panel().to_owned(),
+                    intent.participant(),
+                    moved.place(),
+                )
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn every_panel_of_an_environment_whose_place_changes_is_told_whatever_moved_it() {
+    use tomori_environment::PanelPlace;
+    let Yard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        ada,
+        source,
+    } = yard_recording();
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    for (name, wall, slot) in [("a", 0, 0), ("b", 0, 1), ("c", 1, 0)] {
+        hub.channel_publish_at(
+            &outlet,
+            tomori_environment::Panel::text(name, name, "- x").on_wall(wall, Some(slot)),
+            start,
+        )
+        .unwrap();
+    }
+    hub.flush_publishes(start);
+    let panel = |title: &str| {
+        ada.projection()
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (a, b, c) = (panel("a"), panel("b"), panel("c"));
+    // Published where each asked, nothing is told.
+    hub.sweep_present();
+    assert!(seen.lock().unwrap().is_empty());
+    // Floating, then dropped into the full first wall's first slot: the one there swaps with it, going where it came
+    // from, floating, and both are told, as Ada's.
+    ada.send(ClientMessage::PlacePanel {
+        panel: c.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(upright([1.0, 1.5, -1.0])),
+    });
+    assert_eq!(
+        moves_from(&seen, 0, 1),
+        [("c".to_owned(), source, PanelPlace::Floating)]
+    );
+    ada.send(ClientMessage::PlacePanel {
+        panel: c.clone(),
+        wall: Some("environment-0".into()),
+        slot: Some(0),
+        pose: None,
+    });
+    assert_eq!(
+        moves_from(&seen, 1, 2),
+        [
+            ("a".to_owned(), source, PanelPlace::Floating),
+            (
+                "c".to_owned(),
+                source,
+                PanelPlace::Wall { wall: 0, slot: 0 }
+            ),
+        ]
+    );
+    // Its grid shrunk by an owner, the first wall floats what was in its second slot.
+    let lock = ClientMessage::LockWall {
+        wall: "environment-0".into(),
+        locked: false,
+        reset: false,
+    };
+    ada.send(lock);
+    ada.send(ClientMessage::SetWall {
+        wall: "environment-0".into(),
+        grid: Some(tomori_protocol::Grid::from((1, 1))),
+        scale: None,
+        aspect: None,
+        shape: None,
+        pose: None,
+        tilt: None,
+        content_scale: None,
+        revision: None,
+    });
+    assert!(ada.errors().is_empty());
+    assert_eq!(
+        moves_from(&seen, 3, 1),
+        [("b".to_owned(), source, PanelPlace::Floating)]
+    );
+    // On a wall Ada added, then that wall removed: floating again.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let added = ada
+        .projection()
+        .walls
+        .iter()
+        .find(|wall| wall.kind == tomori_protocol::WallKind::Added)
+        .unwrap()
+        .id
+        .clone();
+    ada.send(ClientMessage::PlacePanel {
+        panel: b.clone(),
+        wall: Some(added.clone()),
+        slot: None,
+        pose: None,
+    });
+    assert_eq!(
+        moves_from(&seen, 4, 1),
+        [("b".to_owned(), source, PanelPlace::OtherWall)]
+    );
+    ada.send(ClientMessage::RemoveWall { wall: added });
+    assert_eq!(
+        moves_from(&seen, 5, 1),
+        [("b".to_owned(), source, PanelPlace::Floating)]
+    );
+    // Panels the agent floats push the one floating longest away, past the floating bound: given up by the layout,
+    // it is told as dismissed, by nobody.
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        for index in 0..crate::stage::FLOATING - 1 {
+            let notes = record.stage.project(
+                &walls,
+                crate::stage::Content::parse("title: Notes\n---\nx").unwrap(),
+                None,
+                0,
+            );
+            let pose = upright([(index % 16) as f32 - 8.0, 1.5, -1.0 - (index / 16) as f32]);
+            record
+                .stage
+                .place(&walls, &notes, crate::stage::Target::Free(pose))
+                .unwrap();
+        }
+        drop(environments);
+        state.touch_projection(&id);
+    }
+    assert_eq!(
+        moves_from(&seen, 6, 1),
+        [("a".to_owned(), 0, PanelPlace::Dismissed)]
+    );
+    assert_eq!(seen.lock().unwrap().len(), 7);
+    let _ = (a, c);
+}
+
+#[test]
+fn moves_past_a_participant_s_rate_wait_and_a_side_started_again_is_told_where_its_panels_rest() {
+    use tomori_environment::PanelPlace;
+    let Yard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        ada,
+        source,
+    } = yard_recording();
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::text("r", "r", "- x").on_wall(0, Some(0)),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let panel = ada.projection().panels[0].id.clone();
+    let to = |wall: Option<&str>| ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: wall.map(str::to_owned),
+        slot: None,
+        pose: wall.is_none().then(|| upright([1.0, 1.5, -1.0])),
+    };
+    // Twice her burst of moves, to and fro: at most a burst is told as they come, the inbox never flooded.
+    let burst = crate::channel::INTENT_BURST as usize;
+    for index in 0..burst * 2 + 1 {
+        ada.send(to((index % 2 == 1).then_some("environment-1")));
+    }
+    assert!(ada.errors().is_empty());
+    let told = moves_from(&seen, 0, burst);
+    assert!(told.len() <= burst + 1, "{told:?}");
+    // The last, floating, held back, is told as hers as the hub sweeps.
+    hub.sweep_present();
+    eventually_in("the move held back is told", || {
+        seen.lock().unwrap().last().and_then(|intent| {
+            intent
+                .moved()
+                .map(|moved| (intent.participant(), moved.place()))
+        }) == Some((source, PanelPlace::Floating))
+    });
+    // Moved onto her second wall, then the side started again, as the space comes back to its environment: published
+    // as before, it is put back where it rested, which the new side is told, by nobody.
+    ada.send(to(Some("environment-1")));
+    let before = seen.lock().unwrap().len();
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".into(),
+    });
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "yard".into(),
+    });
+    ada.read();
+    let again = yard_outlet(&hub, &id);
+    assert_ne!(again.binding, outlet.binding);
+    let later = start + Duration::from_secs(5);
+    hub.channel_publish_at(
+        &again,
+        tomori_environment::Panel::text("r", "r", "- y").on_wall(0, Some(0)),
+        later,
+    )
+    .unwrap();
+    hub.flush_publishes(later);
+    let restored = moves_from(&seen, before, 1);
+    assert_eq!(
+        restored.last().unwrap(),
+        &("r".to_owned(), 0, PanelPlace::Wall { wall: 1, slot: 0 })
+    );
+}
+
+#[test]
 fn a_choice_made_against_the_version_a_paced_client_was_sent_is_resolved_by_id() {
     let (hub, _jobs) = hub_with(FakeBackend::new());
     let seen = Arc::new(Mutex::new(Vec::new()));
