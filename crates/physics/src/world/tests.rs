@@ -851,3 +851,122 @@ fn taking_a_stone_from_beneath_others_wakes_them_and_they_fall() {
     }
     let _ = Intent::Take(take);
 }
+
+/// A number from 0 to 1, the next of `state`'s, the same on every platform.
+fn uniform(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    (*state >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Wake every body and step Rapier alone for `seconds`, without the world's stillness rule: how far the farthest moved.
+fn unruled(world: &mut World, seconds: f32) -> f32 {
+    let before: Vec<Vec3> = world
+        .entries
+        .iter()
+        .map(|entry| world.placement_of(entry).position)
+        .collect();
+    for entry in &world.entries {
+        world.physics.bodies[entry.handle].wake_up(true);
+    }
+    for _ in 0..(seconds / world.settings.step) as usize {
+        world.physics.step();
+    }
+    world
+        .entries
+        .iter()
+        .zip(before)
+        .map(|(entry, before)| world.placement_of(entry).position.distance(before))
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn cairns_placed_by_less_careful_hands_stand_and_sleep_and_the_stillness_rule_holds_none_up() {
+    for seed in 0..12u64 {
+        let mut state = seed.wrapping_mul(7_919).wrapping_add(1);
+        for count in 3..=7u32 {
+            // Up to 4 mm off centre, 1 to 3 mm apart, any way round and tipped up to a degree.
+            let mut height = 0.0;
+            let bodies: Vec<Body> = (0..count)
+                .map(|index| {
+                    let width = 0.2 - index as f32 * 0.07 / count as f32;
+                    let tall = width * (0.36 + uniform(&mut state) * 0.08);
+                    let hull = pebble(seed as u32 * 100 + index, width, tall);
+                    let lowest = hull
+                        .iter()
+                        .map(|point| point.y)
+                        .fold(f32::INFINITY, f32::min);
+                    let highest = hull
+                        .iter()
+                        .map(|point| point.y)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let off =
+                        Vec2::new(uniform(&mut state) - 0.5, uniform(&mut state) - 0.5) * 0.008;
+                    let gap = 0.001 + uniform(&mut state) * 0.002;
+                    let middle = Vec3::new(off.x, height - lowest + gap, off.y);
+                    height = middle.y + highest;
+                    let turn = Quat::from_rotation_y(uniform(&mut state) * std::f32::consts::TAU)
+                        * Quat::from_rotation_x((uniform(&mut state) - 0.5) * 0.035);
+                    Body::convex(index, hull).at(Placement::new(middle, turn))
+                })
+                .collect();
+            let placed: Vec<Vec3> = bodies.iter().map(|body| body.home.position).collect();
+            let mut world = world(bodies);
+            assert!(
+                world.settle(10.0),
+                "seed {seed}, {count} stones never slept"
+            );
+            assert!(
+                world.clock() <= 5_000,
+                "seed {seed}, {count} stones took {} ms to sleep",
+                world.clock()
+            );
+            for (index, (placed, rested)) in placed.iter().zip(placements(&world)).enumerate() {
+                let crept = (rested.position - placed).with_y(0.0).length();
+                assert!(
+                    crept < 0.015,
+                    "seed {seed}, {count} stones: stone {index} crept {crept} m"
+                );
+            }
+            // Woken and left to Rapier alone, it stands as it was put to sleep: nothing the rule stopped was falling.
+            let moved = unruled(&mut world, 3.0);
+            assert!(
+                moved < 0.005,
+                "seed {seed}, {count} stones moved {moved} m without the rule"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_stone_overhanging_its_support_falls_rather_than_being_put_to_sleep() {
+    let base = pebble(1, 0.2, 0.07);
+    let top = pebble(2, 0.14, 0.05);
+    let lowest = |hull: &[Vec3]| {
+        hull.iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min)
+    };
+    let highest = base
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let under = -lowest(&base) + 0.001;
+    let placed = under + highest - lowest(&top) + 0.002;
+    // The base's top face reaches 62% of its half width: within it, the stone stands; well beyond it, it falls.
+    for (overhang, stands) in [(0.3, true), (0.5, true), (0.75, false), (0.9, false)] {
+        let mut world = world(vec![
+            Body::convex(1, base.clone()).at(Placement::at(Vec3::new(0.0, under, 0.0))),
+            Body::convex(2, top.clone()).at(Placement::at(Vec3::new(overhang * 0.1, placed, 0.0))),
+        ]);
+        assert!(world.settle(10.0), "{overhang}");
+        let fell = placed - world.placement(2).unwrap().position.y;
+        assert_eq!(
+            fell < 0.01,
+            stands,
+            "overhanging by {overhang}, it fell {fell} m"
+        );
+        assert!(unruled(&mut world, 3.0) < 0.005, "{overhang}");
+    }
+}
