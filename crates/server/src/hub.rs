@@ -3902,8 +3902,6 @@ impl Hub {
                 // client, which the space resolves, ignoring those it does not have, cards only on the board of a
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
-                // What the agent stands off the line of sight to, where the server knows where it stands.
-                let attended = attention.clone();
                 let attention = match state.space(&space) {
                     Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
@@ -3971,9 +3969,7 @@ impl Hub {
                     .expect("checked above")
                     .speech
                     .recording(participant);
-                if question
-                    && let Some(captured) = self.capture(state, &space, participant, &attended)
-                {
+                if question && let Some(captured) = self.capture(state, &space, participant) {
                     state.agent_pressed(&space, participant, captured, Instant::now());
                 }
                 deferred.push(Deferred::Begin(id));
@@ -6171,7 +6167,7 @@ impl Hub {
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
-        let solids = environments.solids(&record.model.environment);
+        let solids = record.panel_solids(&environments);
         for (contents, origin) in replies {
             let projection = record.stage.view(space, &walls, now);
             // How many of the reply's panels went to each anchor before, so that each takes a slot of its own there.

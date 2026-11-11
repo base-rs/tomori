@@ -1,28 +1,39 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Where the agent stands for whoever it is talking with, and the way it goes there: the conversation spot, beside the
-//! speaker, off their line of sight to what they attend to; whether it already stands near enough to need no move; the
-//! spot that serves a huddle; and the route, straight, through one waypoint, or streamed. It holds no I/O and no clock:
-//! the hub decides when the agent follows and asks this where. See `design/environments.md`.
+//! Where the agent stands for whoever it is talking with, and the way it goes there: the conversation spot, on the
+//! straight line from where the agent is to them, [`CONVERSATION`] from them; whether it already stands near enough to
+//! need no move; the spot that serves a huddle, the same way; the spot beside an object, off the asker's line of sight
+//! to it; and the route, straight, through one waypoint, or streamed. It holds no I/O and no clock: the hub decides
+//! when the agent follows and asks this where. See `design/environments.md`.
 use tomori_environment::sightlines::Solid;
 use tomori_protocol::{Pose, Wall, entourage};
 
 use crate::stage::geometry::{boxes, rotate};
 
-/// How far from the speaker's eyes, horizontally, the agent stands, in metres, tried in this order: a comfortable
-/// conversational distance, between a person's 1.2 m social bubble and the 1.8 m at which a group forms.
+/// How far from someone's eyes, horizontally, the agent stops as it comes to them, in metres: comfortably within
+/// [`NEAR`], so that it never stands at the edge of moving again. The maintainer chose it; 2.5 m is the alternative to
+/// try.
+pub(crate) const CONVERSATION: f32 = 2.0;
+
+/// How far round them, in degrees, each try swings from the straight line where the spot on it is not clear, either
+/// way, until it has gone half a turn.
+pub(crate) const SWING: f32 = 10.0;
+
+/// How far from the asker's eyes, horizontally, the agent stands beside an object, in metres, tried in this order: a
+/// comfortable conversational distance, between a person's 1.2 m social bubble and the 1.8 m at which a group forms.
 pub(crate) const DISTANCES: [f32; 3] = [1.5, 1.8, 1.2];
 
-/// How far it stands when no spot at [`DISTANCES`] is clear, in metres: as far as the summons stood it.
+/// How far it stands beside an object when no spot at [`DISTANCES`] is clear, in metres: as far as the summons stood
+/// it.
 pub(crate) const FALLBACK: f32 = entourage::SUMMONED;
 
-/// The bearings it is tried at, in degrees clockwise from the speaker's line of sight to what they attend to, as seen
+/// The bearings it is tried at beside an object, in degrees clockwise from the asker's line of sight to it, as seen
 /// from above: to their left first, since a panel floating beside them goes to their right first, then their right,
 /// then further out, then nearer in.
 pub(crate) const BEARINGS: [f32; 6] = [-45.0, 45.0, -70.0, 70.0, -25.0, 25.0];
 
-/// How far its reach stays off the speaker's line of sight to what they attend to, as seen from their eyes, in
+/// How far its reach stays off the asker's line of sight to an object it stands beside, as seen from their eyes, in
 /// degrees, so that it never stands in the way of what they look at.
 pub(crate) const SIGHT: f32 = 12.0;
 
@@ -60,7 +71,8 @@ const THICKNESS: f32 = 0.05;
 /// four metres; 4 m is the alternative to try.
 pub(crate) const NEAR: f32 = 3.0;
 
-/// How far along the way their head faces the speaker is taken to attend to, in metres, with nothing else known.
+/// How far from an object the asker is taken to look at it from, beside it, in metres, where they stand further
+/// from it.
 pub(crate) const GAZE: f32 = 2.0;
 
 /// How much higher than the tallest head along the way a raised waypoint takes its middle, in metres: enough that its
@@ -76,11 +88,10 @@ pub(crate) const STREAM: f32 = 5.0;
 /// How far apart, in metres, the heads of a huddle stand at most.
 pub(crate) const HUDDLE: f32 = 4.0;
 
-/// Someone the agent is talking with, as they began speaking: where their head was, and what they attended to.
+/// Someone the agent is talking with, as they began speaking, or as they last stood still: where their head was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Speaker {
     pub head: Pose,
-    pub focus: [f32; 3],
 }
 
 /// What the agent keeps clear of where it stands and on its way there.
@@ -179,12 +190,6 @@ fn wrapped(angle: f32) -> f32 {
     (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
-/// What someone whose head is at `head` attends to with nothing else known: [`GAZE`] along the way it faces.
-pub(crate) fn gaze(head: &Pose) -> [f32; 3] {
-    let ahead = rotate(head.orientation, [0.0, 0.0, -1.0]);
-    std::array::from_fn(|axis| head.position[axis] + ahead[axis] * GAZE)
-}
-
 /// The height the agent's middle stands at for eyes at `eyes`, by [`RISE`] and [`HEIGHTS`].
 fn height(eyes: f32) -> f32 {
     (eyes + RISE).clamp(entourage::FLOOR + HEIGHTS.0, entourage::FLOOR + HEIGHTS.1)
@@ -206,6 +211,26 @@ fn corners(pose: &Pose) -> [[f32; 3]; 8] {
                 + ahead[axis] * half[2] * side(4)
         })
     })
+}
+
+/// The box, upright and level, about the agent standing at `pose`, its reach and [`MARGIN`] on every side, that a
+/// panel floating beside someone keeps clear of, so that the panel never stands in the swarm. See
+/// `design/projection.md`.
+pub(crate) fn body(pose: &Pose) -> Solid {
+    let corners = corners(pose);
+    let least = std::array::from_fn(|axis| {
+        corners
+            .iter()
+            .map(|corner| corner[axis])
+            .fold(f32::INFINITY, f32::min)
+    });
+    let greatest = std::array::from_fn(|axis| {
+        corners
+            .iter()
+            .map(|corner| corner[axis])
+            .fold(f32::NEG_INFINITY, f32::max)
+    });
+    Solid::new(least, greatest)
 }
 
 /// How far `point` is from the box the agent standing at `pose` keeps clear.
@@ -265,19 +290,58 @@ fn in_the_way(pose: &Pose, eyes: [f32; 3], focus: [f32; 3]) -> bool {
     wrapped(bearing(to_agent) - bearing(to_focus)).abs() - half < SIGHT.to_radians()
 }
 
-/// Where the agent stands for `speaker`, clear of `scene`: at the first of [`DISTANCES`] and [`BEARINGS`] about the
-/// line from their eyes to what they attend to at which it stands clear and out of their way, at [`height`], facing
-/// them; else the same bearings at [`FALLBACK`]; else none, for it to stay where it is and only turn. See
-/// `design/environments.md`.
-pub(crate) fn spot(speaker: &Speaker, scene: &Scene) -> Option<Pose> {
+/// The turns, in radians, about someone that a spot swings round from the straight line to them where it is not
+/// clear: none first, then [`SWING`] more each time, one way and then the other, to half a turn.
+fn swings() -> impl Iterator<Item = f32> {
+    let steps = (180.0 / SWING).round() as i32;
+    std::iter::once(0.0).chain((1..=steps).flat_map(|step| {
+        let turn = (step as f32 * SWING).to_radians();
+        [turn, -turn]
+    }))
+}
+
+/// Where the agent, at `from`, stands for `speaker`, clear of `scene`: on the straight line from their eyes towards
+/// it, [`CONVERSATION`] from them, at [`height`], facing them, whichever way they face or what they attend to, even
+/// behind them; where that is not clear, at the same distance, swung round them by the least of [`swings`] at which
+/// it is; else none, for it to stay where it is and only turn. Coming to someone, it only ever comes straight towards
+/// them. See `design/environments.md`.
+pub(crate) fn spot(from: [f32; 3], speaker: &Speaker, scene: &Scene) -> Option<Pose> {
     let eyes = speaker.head.position;
+    // Standing where their eyes are, about the vertical, there is no line to them: the way their head faces.
+    let back = sub(from, eyes);
+    let line = if level(back) > 1e-3 {
+        bearing(back)
+    } else {
+        heading(&speaker.head)
+    };
+    let panels = scene.panels_near(eyes);
+    let y = height(eyes[1]);
+    swings()
+        .map(|turn| {
+            let towards = line + turn;
+            let middle = [
+                eyes[0] + CONVERSATION * towards.sin(),
+                y,
+                eyes[2] - CONVERSATION * towards.cos(),
+            ];
+            Pose::upright_facing(middle, [eyes[0], y, eyes[2]])
+        })
+        .filter_map(|pose| crate::stage::valid(&pose))
+        .find(|pose| clear(pose, eyes, scene, &panels))
+}
+
+/// Where the agent stands beside an object at `object`, for the asker, whose head is at `head`, looking at it from
+/// where they stand, clear of `scene`: at the first of [`DISTANCES`] and [`BEARINGS`] about the line from their eyes to
+/// it at which it stands clear and out of their way, at [`height`], facing them; else the same bearings at
+/// [`FALLBACK`]; else none. See `design/environments.md`.
+pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pose> {
+    let eyes = head.position;
     let line = {
-        let to_focus = sub(speaker.focus, eyes);
-        if level(to_focus) > 1e-3 {
-            bearing(to_focus)
+        let to_object = sub(object, eyes);
+        if level(to_object) > 1e-3 {
+            bearing(to_object)
         } else {
-            let (x, z) = level_ahead(&speaker.head);
-            x.atan2(-z)
+            heading(head)
         }
     };
     let panels = scene.panels_near(eyes);
@@ -296,15 +360,15 @@ pub(crate) fn spot(speaker: &Speaker, scene: &Scene) -> Option<Pose> {
             Pose::upright_facing(middle, [eyes[0], y, eyes[2]])
         })
         .filter_map(|pose| crate::stage::valid(&pose))
-        .find(|pose| clear(pose, eyes, scene, &panels) && !in_the_way(pose, eyes, speaker.focus))
+        .find(|pose| clear(pose, eyes, scene, &panels) && !in_the_way(pose, eyes, object))
 }
 
-/// Where the agent stands for a huddle, `speakers`, who spoke to it lately and stand together, the one it answers
-/// first: on the side of the group most of them face, about [`DISTANCES`]' first from the nearest of them, facing the
-/// middle of their heads, at [`height`] for their eyes on average, clear of `scene` and out of the way of what each of
-/// them attends to, and seen by each; else where it stands for the first alone, by [`spot`]; else none. See
-/// `design/environments.md`.
-pub(crate) fn huddle(speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
+/// Where the agent, at `from`, stands for a huddle, `speakers`, who spoke to it lately and stand together, the one it
+/// answers first: on the straight line from the middle of their heads towards it, about [`CONVERSATION`] from the
+/// nearest of them, facing that middle, at [`height`] for their eyes on average, clear of `scene` and seen by each,
+/// whichever way they face; where that is not clear, swung round them by the least of [`swings`] at which it is; else
+/// where it stands for the first alone, by [`spot`]; else none. See `design/environments.md`.
+pub(crate) fn huddle(from: [f32; 3], speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
     let count = speakers.len() as f32;
     let middle: [f32; 3] = std::array::from_fn(|axis| {
         speakers
@@ -313,15 +377,11 @@ pub(crate) fn huddle(speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
             .sum::<f32>()
             / count
     });
-    let (x, z) = speakers.iter().fold((0.0, 0.0), |(x, z), speaker| {
-        let (dx, dz) = level_ahead(&speaker.head);
-        (x + dx, z + dz)
-    });
-    let facing = if x.hypot(z) > 1e-3 {
-        x.atan2(-z)
+    let back = sub(from, middle);
+    let line = if level(back) > 1e-3 {
+        bearing(back)
     } else {
-        let (x, z) = level_ahead(&speakers[0].head);
-        x.atan2(-z)
+        heading(&speakers[0].head)
     };
     let y = height(middle[1]);
     let panels: Vec<Solid> = speakers
@@ -334,32 +394,30 @@ pub(crate) fn huddle(speakers: &[Speaker], scene: &Scene) -> Option<Pose> {
             .map(|speaker| level(sub(at, speaker.head.position)))
             .fold(f32::INFINITY, f32::min)
     };
-    [0.0f32, -25.0, 25.0, -50.0, 50.0, -75.0, 75.0]
-        .into_iter()
+    swings()
         .filter_map(|turn| {
-            let towards = facing + turn.to_radians();
+            let towards = line + turn;
             let (dx, dz) = (towards.sin(), -towards.cos());
             // Out from the middle of the group until it stands far enough from the nearest of them.
             (0..=60)
                 .map(|step| step as f32 * 0.1)
                 .map(|out| [middle[0] + dx * out, y, middle[2] + dz * out])
-                .find(|at| nearest(*at) >= DISTANCES[0])
+                .find(|at| nearest(*at) >= CONVERSATION)
         })
         .map(|at| Pose::upright_facing(at, [middle[0], y, middle[2]]))
         .filter_map(|pose| crate::stage::valid(&pose))
         .find(|pose| {
-            speakers.iter().all(|speaker| {
-                let eyes = speaker.head.position;
-                clear(pose, eyes, scene, &panels) && !in_the_way(pose, eyes, speaker.focus)
-            })
+            speakers
+                .iter()
+                .all(|speaker| clear(pose, speaker.head.position, scene, &panels))
         })
-        .or_else(|| spot(&speakers[0], scene))
+        .or_else(|| spot(from, &speakers[0], scene))
 }
 
 /// Whether the agent standing at `agent` already serves `speaker`, so that it never moves on its own, only turning to
 /// them: within [`NEAR`] of their eyes. Distance is the only rule that moves it: where it stands off the way they face,
-/// or in their way to what they attend to, it stays, and moves only when asked; the way they face and what they attend
-/// to choose where it stands once it moves, by [`spot`].
+/// or in their way to what they attend to, it stays, and moves only when asked; once it moves, it comes straight
+/// towards them, by [`spot`], to [`CONVERSATION`], within this.
 pub(crate) fn near_enough(agent: &Pose, speaker: &Speaker) -> bool {
     distance(agent.position, speaker.head.position) <= NEAR
 }

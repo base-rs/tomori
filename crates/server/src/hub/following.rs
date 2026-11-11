@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The agent following whoever it is talking with, in a space whose owner chose **Follow the speaker**: it turns to
-//! someone as they press X; after [`COMMIT`] of holding it goes to stand beside them, unless it already stands near
+//! someone as they press X; after [`COMMIT`] of holding it comes straight towards them, unless it already stands near
 //! enough; while it answers someone else, it only glances at a new speaker, and goes to them as their words are given;
 //! it stays [`DWELL`] before leaving one partner for another, serves a huddle from one spot, and goes home once the
 //! conversation has been quiet for the space's delay. Through its partner's exchange with it, as they speak, while it
@@ -42,8 +42,8 @@ pub(crate) const EMPTY: Duration = Duration::from_secs(30 * 60);
 /// How often, while it is away from home, whether to go home is checked.
 pub(crate) const POLL: Duration = Duration::from_secs(1);
 
-/// How fast it glides, in metres a second, at most, as the swarm's agents do.
-pub(crate) const GLIDE: f32 = 0.85;
+/// How fast it glides, in metres a second, at most, as clients glide it (`tomori-scene`'s `glide::SPEED`).
+pub(crate) const GLIDE: f32 = 1.0625;
 
 /// How fast it streams, in metres a second, at most, as a worker's flock flies.
 pub(crate) const STREAMING: f32 = 6.0;
@@ -327,6 +327,24 @@ impl Following {
     }
 }
 
+impl super::SpaceRecord {
+    /// What a panel floating beside someone keeps clear of in this space, among `environments`: its environment's
+    /// solids, and the agent where it stands or goes, so that, wherever the agent came to them from, the panel goes to
+    /// the side of them it is not on. See `design/projection.md`.
+    pub(super) fn panel_solids(
+        &self,
+        environments: &crate::environments::Environments,
+    ) -> Vec<tomori_environment::sightlines::Solid> {
+        let environment = &self.model.environment;
+        let mut solids = environments.solids(environment);
+        let agent = self
+            .summoned
+            .unwrap_or_else(|| home(&environments.anchors(environment)));
+        solids.push(follow::body(&agent));
+        solids
+    }
+}
+
 /// Where the agent's home is among `anchors`: the environment's, or else the default.
 pub(crate) fn home(anchors: &tomori_protocol::Anchors) -> Pose {
     anchors.agent.unwrap_or_else(|| {
@@ -335,17 +353,13 @@ pub(crate) fn home(anchors: &tomori_protocol::Anchors) -> Pose {
 }
 
 impl Hub {
-    /// What `participant`, in `space`, attends to now, as their client last reported, with what the agent keeps clear
-    /// of there and where its home is: what `attention` names that the server knows the place of, an environment's
-    /// object its side gave a position or a worker where it stands, else what they point at with their right
-    /// controller, else what they look at, a wall, a panel or another person, else [`follow::GAZE`] along the way their
-    /// head faces. None before they report where they are.
+    /// Where `participant`, in `space`, stands now, as their client last reported, with what the agent keeps clear of
+    /// there and where its home is. None before they report where they are.
     pub(super) fn capture(
         &self,
         state: &HubState,
         space: &str,
         participant: &str,
-        attention: &[tomori_protocol::Resource],
     ) -> Option<Captured> {
         let seen = state
             .participants
@@ -353,29 +367,9 @@ impl Hub {
             .expect("a participant is known")
             .seen
             .as_ref()?;
-        let (scene, projection, home) = self.scene(state, space);
-        let others: Vec<(&str, &str, [f32; 3])> = scene
-            .heads
-            .iter()
-            .filter(|head| **head != seen.head.position)
-            .map(|head| ("", "", *head))
-            .collect();
-        let point = |ray: &Pose| {
-            let ahead = crate::stage::geometry::rotate(ray.orientation, [0.0, 0.0, -1.0]);
-            crate::presence::meet(ray.position, ahead, &projection, &others).map(|(_, along)| {
-                std::array::from_fn(|axis| ray.position[axis] + ahead[axis] * along)
-            })
-        };
-        let focus = self
-            .attended(state, space, attention)
-            .or_else(|| seen.controllers[1].as_ref().and_then(point))
-            .or_else(|| point(&seen.head))
-            .unwrap_or_else(|| follow::gaze(&seen.head));
+        let (scene, _, home) = self.scene(state, space);
         Some(Captured {
-            speaker: Speaker {
-                head: seen.head,
-                focus,
-            },
+            speaker: Speaker { head: seen.head },
             scene,
             home,
         })
@@ -514,11 +508,11 @@ impl Hub {
         }
     }
 
-    /// Follow on `participant`, whom the agent of `space` keeps with, as [`keep_up`](Self::keep_up) does, from where they
-    /// stand and what they attend to now.
+    /// Follow on `participant`, whom the agent of `space` keeps with, as [`keep_up`](Self::keep_up) does, to where they
+    /// stand now.
     fn keep_up_with(&self, state: &mut HubState, space: &str, participant: &str, now: Instant) {
         // They are kept with only once they have reported where they are.
-        if let Some(captured) = self.capture(state, space, participant, &[]) {
+        if let Some(captured) = self.capture(state, space, participant) {
             self.keep_up_from(state, space, participant, &captured, now);
         }
     }
@@ -543,7 +537,7 @@ impl Hub {
                     && now.saturating_duration_since(*at) < LATELY
                     && record.model.participants.contains(who)
             })
-            .filter_map(|(who, _)| self.capture(state, space, who, &[]))
+            .filter_map(|(who, _)| self.capture(state, space, who))
             .map(|captured| captured.speaker)
             .filter(|other| follow::together(other.head.position, eyes))
             .collect();
@@ -563,40 +557,10 @@ impl Hub {
         state.go_to(space, participant, captured, others, now, reason);
     }
 
-    /// Where the first of `attention` stands that the server knows the place of, in `space`: an object its environment's
-    /// side describes with a position, or a worker, where its cluster seats it.
-    fn attended(
-        &self,
-        state: &HubState,
-        space: &str,
-        attention: &[tomori_protocol::Resource],
-    ) -> Option<[f32; 3]> {
-        let record = state.space(space).expect("the caller found it");
-        let environments = self.environments();
-        attention.iter().find_map(|resource| match resource {
-            tomori_protocol::Resource::Object { object, .. } => {
-                record
-                    .channel
-                    .as_ref()
-                    .filter(|channel| channel.environment == record.model.environment)?
-                    .describe(object)?
-                    .position
-            }
-            tomori_protocol::Resource::Worker { worker, .. } => {
-                let anchors = record.clusters(&environments);
-                record
-                    .seated(&environments)
-                    .position(&anchors, &crate::seating::Member::Worker(worker.clone()))
-                    .map(|(at, _)| at)
-            }
-            _ => None,
-        })
-    }
-
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
-    /// does: beside them, as following stands it, or, with nowhere clear there, in front of them, as a summons stood it,
-    /// its status wall and workers staying home. Refused where the space keeps it home, or before they report where
-    /// they are.
+    /// does: at their conversation spot, as following stands it, or, with nowhere clear there, in front of them, as a
+    /// summons stood it, its status wall and workers staying home. Refused where the space keeps it home, or before they
+    /// report where they are.
     pub(super) fn call_agent(
         &self,
         state: &mut HubState,
@@ -614,7 +578,7 @@ impl Hub {
             );
         }
         let captured = self
-            .capture(state, space, participant, &[])
+            .capture(state, space, participant)
             .ok_or("Tomori does not know where you are yet.")?;
         let record = state.space(space).expect("found above");
         let from = record
@@ -622,7 +586,7 @@ impl Hub {
             .at(record.summoned, captured.home, now)
             .position;
         let head = captured.speaker.head;
-        let at = follow::spot(&captured.speaker, &captured.scene)
+        let at = follow::spot(from, &captured.speaker, &captured.scene)
             .unwrap_or_else(|| crate::presence::before(&head));
         let route = follow::route(from, at.position, &captured.scene);
         let was = record.summoned;
@@ -640,9 +604,9 @@ impl Hub {
         Ok(())
     }
 
-    /// Where the agent of `space` stands at `participant`'s conversation spot, as following would choose it, as its own
-    /// `move_agent near` or `beside` asks: from where they stand now and what they attend to, else, where they have not
-    /// reported, from `head`, where they were as their words began, looking ahead; or, with nowhere clear there, in front
+    /// Where the agent of `space` stands at `participant`'s conversation spot at `now`, as following would choose it, as
+    /// its own `move_agent beside` asks: straight towards them from where it is, from where they stand now, else, where
+    /// they have not reported, from `head`, where they were as their words began; or, with nowhere clear there, in front
     /// of them. With the eyes it faces.
     pub(super) fn beside_spot(
         &self,
@@ -650,20 +614,17 @@ impl Hub {
         space: &str,
         participant: Option<&str>,
         head: Pose,
+        now: Instant,
     ) -> (Pose, [f32; 3]) {
-        let captured =
-            participant.and_then(|participant| self.capture(state, space, participant, &[]));
+        let captured = participant.and_then(|participant| self.capture(state, space, participant));
         let (speaker, scene) = match captured {
             Some(captured) => (captured.speaker, captured.scene),
-            None => (
-                Speaker {
-                    head,
-                    focus: follow::gaze(&head),
-                },
-                self.scene(state, space).0,
-            ),
+            None => (Speaker { head }, self.scene(state, space).0),
         };
-        let at = follow::spot(&speaker, &scene)
+        let record = state.space(space).expect("the caller found it");
+        let home = home(&self.environments().anchors(&record.model.environment));
+        let from = record.following.at(record.summoned, home, now).position;
+        let at = follow::spot(from, &speaker, &scene)
             .unwrap_or_else(|| crate::presence::before(&speaker.head));
         (at, speaker.head.position)
     }
@@ -688,11 +649,8 @@ impl Hub {
         } else {
             eyes
         };
-        let speaker = Speaker {
-            head: Pose::upright_facing(viewpoint, [object[0], viewpoint[1], object[2]]),
-            focus: object,
-        };
-        follow::spot(&speaker, &self.scene(state, space).0)
+        let head = Pose::upright_facing(viewpoint, [object[0], viewpoint[1], object[2]]);
+        follow::beside(&head, object, &self.scene(state, space).0)
     }
 
     /// Move the agent of `space` to `at`, before someone whose eyes are at `eyes`, as its own `move_agent` asked, at
@@ -887,13 +845,29 @@ impl HubState {
         following.stream = false;
         following.quiet = None;
         let reached = glide.at(now);
-        // Barely begun, it stays where it was.
+        let eyes = record.partner;
+        // Barely begun, it stays where it was; else it stops where it has reached, facing whoever it went to from
+        // there, rather than as it would have faced them from where it was going, unless that is within [`FACE`] of
+        // it, as it is coming straight towards them, so that it turns no more than it must.
         record.summoned = if follow::distance(reached, glide.from) < 0.05 {
             glide.was
         } else {
-            record.summoned.map(|summoned| Pose {
-                position: reached,
-                ..summoned
+            record.summoned.map(|summoned| {
+                let stopped = Pose {
+                    position: reached,
+                    ..summoned
+                };
+                match eyes {
+                    Some(eyes)
+                        if follow::apart(
+                            follow::faces(&stopped),
+                            follow::towards(reached, eyes),
+                        ) > FACE.to_radians() =>
+                    {
+                        Pose::upright_facing(reached, [eyes[0], reached[1], eyes[2]])
+                    }
+                    _ => stopped,
+                }
             })
         };
         if record.summoned.is_none() {
@@ -1013,15 +987,16 @@ impl HubState {
         let mut group = vec![speaker];
         group.extend(others);
         let huddle = group.len() > 1;
+        // Straight towards them from where it is, whichever way they face.
         let spot = if huddle {
-            follow::huddle(&group, scene)
+            follow::huddle(agent.position, &group, scene)
         } else {
-            follow::spot(&speaker, scene)
+            follow::spot(agent.position, &speaker, scene)
         };
         let Some(spot) = spot else {
             turn(following);
             log::info!(
-                "The agent of space {space} only turned to {name}, as {reason}, {:.1} m from them, as nowhere beside them was clear.",
+                "The agent of space {space} only turned to {name}, as {reason}, {:.1} m from them, as nowhere near them was clear.",
                 follow::distance(agent.position, eyes)
             );
             self.touch_space(space);
