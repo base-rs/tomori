@@ -558,7 +558,12 @@ impl Hub {
                 .model
                 .participants
                 .iter()
-                .filter_map(|key| Some((key, state.participants.get(key)?)))
+                .filter_map(|key| {
+                    state
+                        .participants
+                        .get(key)
+                        .map(|participant| (key, participant))
+                })
                 .filter(|(_, participant)| {
                     participant.connection.is_some_and(|connection| {
                         state.role(connection, Some(&space)).participates()
@@ -577,11 +582,10 @@ impl Hub {
                     } else {
                         participant.name.clone()
                     };
-                    Some((
-                        (*key).clone(),
-                        name,
-                        participant.seen.as_ref()?.head.position,
-                    ))
+                    participant
+                        .seen
+                        .as_ref()
+                        .map(|seen| ((*key).clone(), name, seen.head.position))
                 })
                 .collect();
             if people.is_empty() && record.proximity.is_empty() {
@@ -603,8 +607,12 @@ impl Hub {
             if !told || notes.is_empty() {
                 continue;
             }
+            // Who came near where is not logged, as nothing of presence is. See `design/mcp.md`.
+            log::debug!(
+                "Space {space} tells its agent of {} coming near its anchors.",
+                notes.len()
+            );
             for (key, note) in notes {
-                log::info!("Space {space}: {note}.");
                 record.model.tell_proximity(&key, note);
             }
             state.pump(&space);

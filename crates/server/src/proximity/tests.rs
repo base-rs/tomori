@@ -57,8 +57,29 @@ fn an_anchor_without_a_radius_tells_nothing() {
         name: "Ada",
         at: [0.0, 1.6, 0.0],
     };
-    assert!(proximity.observe(Instant::now(), &[ada], &[pen]).is_empty());
+    let now = Instant::now();
+    assert!(
+        proximity
+            .observe(now, &[ada], std::slice::from_ref(&pen))
+            .is_empty()
+    );
     assert!(proximity.within("pen").is_empty());
+    assert!(proximity.is_empty());
+    // One with a radius alone says only its name.
+    let gate = Anchor::new("gate", Pose::at([0.5, 0.0, 0.0])).notify_within(1.25);
+    let ada = Person {
+        key: "p2",
+        name: "Ada",
+        at: [0.0, 1.6, 0.0],
+    };
+    assert_eq!(
+        proximity.observe(now, &[ada], &[pen, gate]),
+        [(
+            "p2/gate".to_owned(),
+            "Ada came within 1.3 m of gate".to_owned()
+        )]
+    );
+    assert!(!proximity.is_empty());
 }
 
 #[test]

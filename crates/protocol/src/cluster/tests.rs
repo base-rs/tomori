@@ -47,6 +47,18 @@ fn an_anchor_s_name_and_extent_are_bounded() {
     }
     assert!(Extent::new(LEAST_EXTENT, MOST_EXTENT, 1.0).valid());
     assert!(ahead(HOME).is_home() && !ahead("aisle").is_home());
+    // How near someone comes for the agent to be told is bounded, and none by default.
+    assert_eq!(ahead("station").notify_within, None);
+    for metres in [LEAST_NOTIFY, 1.8, MOST_NOTIFY] {
+        assert_eq!(ahead("station").notify_within(metres).checked(), Ok(()));
+    }
+    for metres in [0.0, 0.29, 10.5, f32::NAN] {
+        let refused = ahead("station")
+            .notify_within(metres)
+            .checked()
+            .unwrap_err();
+        assert!(refused.contains("notify_within"), "{metres}");
+    }
     // A kind is a short slug, an object a reference, and Tomori's own names are its own; a label is cut, not refused.
     let rack = ahead("rack/a12")
         .with_kind("rack")
