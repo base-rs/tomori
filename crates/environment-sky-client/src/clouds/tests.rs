@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use tomori_render::test_gpu;
 
 #[test]
@@ -69,8 +69,12 @@ fn clouds_are_translucent_stereo_stable_and_occluded_by_foreground_depth() {
                 crate::Sky::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 512, 384);
             let matrices = [-0.032, 0.032].map(|x| {
                 let eye = Vec3::new(x, 1.6, 0.0);
-                Mat4::perspective_rh(1.1, 512.0 / 384.0, 0.05, 100.0)
-                    * Mat4::look_at_rh(eye, eye + Vec3::new(0.0, -0.3, -1.0), Vec3::Y)
+                glam::camera::rh::proj::directx::perspective(1.1, 512.0 / 384.0, 0.05, 100.0)
+                    * glam::camera::rh::view::look_at_mat4(
+                        eye,
+                        eye + Vec3::new(0.0, -0.3, -1.0),
+                        Vec3::Y,
+                    )
             });
             let mut encoder = device.create_command_encoder(&Default::default());
             for (eye, matrix) in matrices.into_iter().enumerate() {

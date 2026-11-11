@@ -23,7 +23,7 @@ app = ["dep:tomori-environment-farmyard-client", "dep:tomori-environment-github-
 [dependencies]
 anyhow = "1"
 env_logger = "0.11"
-glam = "0.30"
+glam = "0.33"
 log = "0.4"
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }

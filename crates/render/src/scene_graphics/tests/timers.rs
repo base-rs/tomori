@@ -199,17 +199,27 @@ fn render(ring: bool, variable: &str) {
             tomori_scene::anchors::Anchor::AGENT.position
         };
         // From a step behind home, to see the dials at the agent and the workers about it.
-        let overview =
-            Mat4::perspective_rh(60f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(Vec3::new(0.0, 1.9, 1.6), agent + Vec3::Y * 0.1, Vec3::Y);
+        let overview = glam::camera::rh::proj::directx::perspective(
+            60f32.to_radians(),
+            WIDTH as f32 / HEIGHT as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            Vec3::new(0.0, 1.9, 1.6),
+            agent + Vec3::Y * 0.1,
+            Vec3::Y,
+        );
         // From home, at about the headset's pixels to the degree: twenty, over a field 32° high, at the dials.
-        let home =
-            Mat4::perspective_rh(32f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(
-                    arrival::HOME,
-                    Vec3::new(agent.x, first.y + 0.1, agent.z),
-                    Vec3::Y,
-                );
+        let home = glam::camera::rh::proj::directx::perspective(
+            32f32.to_radians(),
+            WIDTH as f32 / HEIGHT as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            arrival::HOME,
+            Vec3::new(agent.x, first.y + 0.1, agent.z),
+            Vec3::Y,
+        );
         let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
             renderer.render(
                 &device,

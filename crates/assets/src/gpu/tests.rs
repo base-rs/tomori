@@ -167,8 +167,12 @@ fn arm() -> Arc<Model> {
 }
 
 fn camera() -> Mat4 {
-    Mat4::perspective_rh(1.0, 1.0, 0.1, 20.0)
-        * Mat4::look_at_rh(Vec3::new(1.0, 0.3, 4.0), Vec3::new(1.0, 0.3, 0.0), Vec3::Y)
+    glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.1, 20.0)
+        * glam::camera::rh::view::look_at_mat4(
+            Vec3::new(1.0, 0.3, 4.0),
+            Vec3::new(1.0, 0.3, 0.0),
+            Vec3::Y,
+        )
 }
 
 fn even() -> Lighting {
@@ -321,7 +325,8 @@ fn instances_are_drawn_together_and_hidden_nodes_and_what_lies_outside_the_revea
         let model = Arc::new(square);
         let gpu = renderer.upload(&device, &queue, &model);
         let mut batch = renderer.batch(&device);
-        let view_projection = Mat4::orthographic_rh(0.0, 2.0, 0.0, 2.0, -1.0, 1.0);
+        let view_projection =
+            glam::camera::rh::proj::directx::orthographic(0.0, 2.0, 0.0, 2.0, -1.0, 1.0);
         renderer.prepare(&queue, 0, view_projection, Vec3::new(1.0, 1.0, 5.0));
         // Nothing to draw draws nothing.
         renderer.place(&device, &queue, &gpu, &mut batch, &[]);
@@ -411,7 +416,7 @@ fn a_textured_model_read_from_a_file_is_drawn() {
         renderer.prepare(
             &queue,
             0,
-            Mat4::orthographic_rh(-1.0, 3.0, -1.0, 3.0, -5.0, 5.0),
+            glam::camera::rh::proj::directx::orthographic(-1.0, 3.0, -1.0, 3.0, -5.0, 5.0),
             Vec3::Z * 5.0,
         );
         // The arm is a line, with no area; drawing it must still be valid.

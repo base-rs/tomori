@@ -695,10 +695,11 @@ mod tests {
     #[test]
     fn the_eye_is_where_every_ray_of_its_view_begins() {
         let position = Vec3::new(1.0, 1.6, 3.0);
-        let view = Mat4::look_at_rh(position, Vec3::new(0.0, 1.0, -2.0), Vec3::Y);
-        let projection = Mat4::perspective_rh(1.4, 0.95, 0.05, 100.0);
+        let view =
+            glam::camera::rh::view::look_at_mat4(position, Vec3::new(0.0, 1.0, -2.0), Vec3::Y);
+        let projection = glam::camera::rh::proj::directx::perspective(1.4, 0.95, 0.05, 100.0);
         assert!(eye(projection * view).distance(position) < 1e-3);
-        let infinite = Mat4::perspective_infinite_rh(1.4, 1.0, 0.05);
+        let infinite = glam::camera::rh::proj::directx::perspective_infinite(1.4, 1.0, 0.05);
         assert!(eye(infinite * view).distance(position) < 1e-3);
         // A view with no such point, or none at all, is seen from the origin.
         assert_eq!(eye(Mat4::IDENTITY), Vec3::ZERO);
@@ -898,8 +899,12 @@ mod tests {
                 })
                 .create_view(&Default::default());
             let position = Vec3::new(0.5, 1.6, 1.0);
-            let eye_to_clip = Mat4::perspective_rh(1.2, 1.0, 0.05, 100.0)
-                * Mat4::look_at_rh(position, Vec3::new(0.0, 0.0, -2.0), Vec3::Y);
+            let eye_to_clip = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 100.0)
+                * glam::camera::rh::view::look_at_mat4(
+                    position,
+                    Vec3::new(0.0, 0.0, -2.0),
+                    Vec3::Y,
+                );
             // One new glyph a frame: the label's new glyphs count against the frame the renderer ends as it syncs the
             // atlas, so that the second waits for the next frame, and is drawn then.
             let _budget = crate::test_support::Budgeted::new(atlas::Budget {

@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30"
+glam = "0.33"
 # Without Tomori's own `android_main`, as this build has its own.
 tomori-client-quest = { version = "0.2.0", path = "../../crates/client-quest", default-features = false }
 tomori-render = { version = "0.2.0", path = "../../crates/render" }

@@ -250,8 +250,8 @@ impl Camera {
     }
 
     fn view_projection(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.05, 50.0)
-            * Mat4::look_at_rh(self.position(), CENTER, Vec3::Y)
+        glam::camera::rh::proj::directx::perspective(60_f32.to_radians(), aspect, 0.05, 50.0)
+            * glam::camera::rh::view::look_at_mat4(self.position(), CENTER, Vec3::Y)
     }
 
     fn orbit(&mut self, delta: Vec2) {

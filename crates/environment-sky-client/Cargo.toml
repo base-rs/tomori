@@ -12,7 +12,7 @@ categories = ["rendering", "graphics"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30"
+glam = "0.33"
 tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
 tomori-render = { version = "0.2.0", path = "../render" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
@@ -28,4 +28,4 @@ tomori-protocol = { version = "0.2.0", path = "../protocol" }
 
 [build-dependencies]
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30"
+glam = "0.33"

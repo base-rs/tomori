@@ -151,8 +151,16 @@ fn chart_panels_follow_a_curved_wall_s_slots_and_read_from_the_reading_distance(
         );
         let slots = tomori_scene::projection::slot_frames(&wall, frame);
         let eye = glam::Vec3::new(0.0, 1.25, 0.0);
-        let view = Mat4::perspective_rh(0.9, width as f32 / height as f32, 0.05, 50.0)
-            * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 0.52, -2.3), glam::Vec3::Y);
+        let view = glam::camera::rh::proj::directx::perspective(
+            0.9,
+            width as f32 / height as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            eye,
+            glam::Vec3::new(0.0, 0.52, -2.3),
+            glam::Vec3::Y,
+        );
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let scale = Mat4::from_scale(glam::Vec3::splat(wall.scale()));
         let mut composed = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
@@ -193,13 +201,16 @@ fn chart_panels_follow_a_curved_wall_s_slots_and_read_from_the_reading_distance(
             false,
             Fit::SLOT,
         );
-        let far = Mat4::perspective_rh(0.9, width as f32 / height as f32, 0.05, 50.0)
-            * Mat4::look_at_rh(
-                glam::Vec3::new(0.0, 1.6, 4.0),
-                glam::Vec3::new(0.0, 1.6, 0.0),
-                glam::Vec3::Y,
-            )
-            * Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0));
+        let far = glam::camera::rh::proj::directx::perspective(
+            0.9,
+            width as f32 / height as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::new(0.0, 1.6, 4.0),
+            glam::Vec3::new(0.0, 1.6, 0.0),
+            glam::Vec3::Y,
+        ) * Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0));
         let capacity = crate::scene_graphics::CARD_CAPACITY;
         let drawn = drawn_within(&gpu, &canvas, &[far], (width, height), format, capacity);
         crate::test_support::preview("TOMORI_FAR_CHART_PREVIEW", &drawn);
@@ -390,13 +401,16 @@ fn a_chart_in_a_wide_slot_and_on_a_wall_five_times_the_size_lays_out_its_width()
             false,
             Fit::Slot(wide(4.0)),
         );
-        let view = Mat4::perspective_rh(0.9, width as f32 / height as f32, 0.05, 50.0)
-            * Mat4::look_at_rh(
-                glam::Vec3::new(0.0, 1.6, 8.0),
-                glam::Vec3::new(0.0, 1.6, 0.0),
-                glam::Vec3::Y,
-            )
-            * Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0))
+        let view = glam::camera::rh::proj::directx::perspective(
+            0.9,
+            width as f32 / height as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::new(0.0, 1.6, 8.0),
+            glam::Vec3::new(0.0, 1.6, 0.0),
+            glam::Vec3::Y,
+        ) * Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0))
             * Mat4::from_scale(glam::Vec3::splat(5.0));
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let capacity = crate::scene_graphics::CARD_CAPACITY;

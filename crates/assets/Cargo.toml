@@ -16,7 +16,7 @@ default = ["gpu"]
 gpu = ["dep:wgpu", "dep:bytemuck"]
 
 [dependencies]
-glam = "0.30"
+glam = "0.33"
 # Base colour textures embedded in a `.glb`, decoded within limits.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"

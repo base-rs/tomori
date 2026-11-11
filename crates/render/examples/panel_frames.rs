@@ -203,8 +203,8 @@ fn main() {
         // Both eyes, a few centimetres apart, looking ahead.
         let matrices = [-0.032f32, 0.032].map(|side| {
             let eye = viewer + Vec3::X * side;
-            glam::Mat4::perspective_rh(1.6, 1.0, 0.05, 50.0)
-                * glam::Mat4::look_at_rh(eye, eye - Vec3::Z, Vec3::Y)
+            glam::camera::rh::proj::directx::perspective(1.6, 1.0, 0.05, 50.0)
+                * glam::camera::rh::view::look_at_mat4(eye, eye - Vec3::Z, Vec3::Y)
         });
         renderer.render(
             device,

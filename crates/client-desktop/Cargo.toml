@@ -17,7 +17,7 @@ testing = ["tomori-scene/testing", "tomori-render/test-gpu"]
 [dependencies]
 anyhow = "1"
 cpal = "0.18"
-glam = "0.30"
+glam = "0.33"
 log = "0.4"
 pollster = "0.4"
 tomori-client = { version = "0.2.0", path = "../client" }

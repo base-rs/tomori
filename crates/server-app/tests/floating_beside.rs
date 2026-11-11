@@ -214,7 +214,7 @@ fn three_panels_float_fanned_beside_someone_far_from_every_wall() {
         let mut step = Step::default();
         let mut feedback = Feedback::new(Settings::default());
         let now = Instant::now();
-        let transform = Mat4::look_at_rh(eyes, eyes + ahead, Vec3::Y).inverse();
+        let transform = glam::camera::rh::view::look_at_mat4(eyes, eyes + ahead, Vec3::Y).inverse();
         let senses = Senses {
             focused: true,
             head: Some(transform),
@@ -232,11 +232,15 @@ fn three_panels_float_fanned_beside_someone_far_from_every_wall() {
         draw(&mut renderer, &device, &queue, &mut panels, &frame);
         let aspect = WIDTH as f32 / HEIGHT as f32;
         // From their eyes, about as wide as a headset sees; and from behind and above them, to see all three.
-        let first = Mat4::perspective_rh(1.35, aspect, 0.05, 80.0)
-            * Mat4::look_at_rh(eyes, eyes + ahead - Vec3::Y * 0.1, Vec3::Y);
+        let first = glam::camera::rh::proj::directx::perspective(1.35, aspect, 0.05, 80.0)
+            * glam::camera::rh::view::look_at_mat4(eyes, eyes + ahead - Vec3::Y * 0.1, Vec3::Y);
         let behind = eyes - ahead * 0.8 + Vec3::Y * 2.0;
-        let overview = Mat4::perspective_rh(1.5, aspect, 0.05, 80.0)
-            * Mat4::look_at_rh(behind, eyes + ahead * 0.6 - Vec3::Y * 0.6, Vec3::Y);
+        let overview = glam::camera::rh::proj::directx::perspective(1.5, aspect, 0.05, 80.0)
+            * glam::camera::rh::view::look_at_mat4(
+                behind,
+                eyes + ahead * 0.6 - Vec3::Y * 0.6,
+                Vec3::Y,
+            );
         for (name, matrix) in [
             ("beside-first-person.png", first),
             ("beside-overview.png", overview),

@@ -125,9 +125,10 @@ fn cached_moon_shadows_occlude_scenery_preserve_emission_and_survive_resize() {
                 buffer.unmap();
                 pixels
             };
-            let projection = Mat4::orthographic_rh(-6.0, 6.0, -6.0, 6.0, 0.1, 30.0);
+            let projection =
+                glam::camera::rh::proj::directx::orthographic(-6.0, 6.0, -6.0, 6.0, 0.1, 30.0);
             let matrix = projection
-                * Mat4::look_at_rh(
+                * glam::camera::rh::view::look_at_mat4(
                     Vec3::new(0.0, 12.0, -2.5),
                     Vec3::new(0.0, 0.0, -2.5),
                     -Vec3::Z,
@@ -197,8 +198,12 @@ fn cached_moon_shadows_occlude_scenery_preserve_emission_and_survive_resize() {
             );
             // Change camera and cloud-target size. Neither invalidates a static,
             // scene-space shadow map; returning to the same view is bit-stable.
-            let side = Mat4::perspective_rh(1.1, 1.0, 0.05, 100.0)
-                * Mat4::look_at_rh(Vec3::new(4.0, 3.0, 5.0), Vec3::new(0.0, 1.0, -2.5), Vec3::Y);
+            let side = glam::camera::rh::proj::directx::perspective(1.1, 1.0, 0.05, 100.0)
+                * glam::camera::rh::view::look_at_mat4(
+                    Vec3::new(4.0, 3.0, 5.0),
+                    Vec3::new(0.0, 1.0, -2.5),
+                    Vec3::Y,
+                );
             // The top-down view sees lantern caps, not their emissive faces. Use a
             // second view to actually exercise emission rather than vacuously pass.
             sky.shadows.set_strength(&queue, 0.0);

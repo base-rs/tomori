@@ -424,7 +424,7 @@ mod tests {
         let (w, h) = canvas.size();
         let metres = w / columns as f32 / scale;
         let (left, top) = (-w / 2.0 - shift[0] * metres, h / 2.0 + shift[1] * metres);
-        let transform = glam::Mat4::orthographic_rh(
+        let transform = glam::camera::rh::proj::directx::orthographic(
             left,
             left + width as f32 * metres,
             top - height as f32 * metres,

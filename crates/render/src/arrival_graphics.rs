@@ -1453,8 +1453,13 @@ mod tests {
         let hovered = Key::Space("space-1".into());
         // About 13 pixels a degree across the image's 960 rows.
         let fov = (SIZE.1 as f32 / 13.0).to_radians();
-        let matrix = glam::Mat4::perspective_rh(fov, SIZE.0 as f32 / SIZE.1 as f32, 0.05, 50.0)
-            * glam::Mat4::look_at_rh(HOME, crate::arrival::CENTRE, Vec3::Y);
+        let matrix =
+            glam::camera::rh::proj::directx::perspective(
+                fov,
+                SIZE.0 as f32 / SIZE.1 as f32,
+                0.05,
+                50.0,
+            ) * glam::camera::rh::view::look_at_mat4(HOME, crate::arrival::CENTRE, Vec3::Y);
         let checked = render(&scene, Some(&hovered), matrix, SIZE)
             .inspect(|image| crate::test_support::preview("TOMORI_LOBBY_PREVIEW", image));
         // Each space's label is drawn, every line of it: light text beneath its object, in view.
@@ -1503,8 +1508,8 @@ mod tests {
         const SIZE: u32 = 256;
         let (eye, scene) = tilted();
         let centre = on_label(&scene, 4.0, 4.0);
-        let matrix = glam::Mat4::perspective_rh(0.25, 1.0, 0.05, 50.0)
-            * glam::Mat4::look_at_rh(eye, centre, Vec3::Y);
+        let matrix = glam::camera::rh::proj::directx::perspective(0.25, 1.0, 0.05, 50.0)
+            * glam::camera::rh::view::look_at_mat4(eye, centre, Vec3::Y);
         crate::test_gpu::with(|gpu| {
             let device = &gpu.device;
             let queue = &gpu.queue;

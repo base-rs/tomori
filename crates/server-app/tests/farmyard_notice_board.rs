@@ -178,7 +178,7 @@ fn the_farmyard_s_notice_board_stands_on_its_wooden_board_seen_from_where_partic
         let now = Instant::now();
         // Standing where participants arrive, turned towards the notice board.
         let towards = Vec3::new(middle.x, arrival::HOME.y, middle.z);
-        let head = Mat4::look_at_rh(arrival::HOME, towards, Vec3::Y).inverse();
+        let head = glam::camera::rh::view::look_at_mat4(arrival::HOME, towards, Vec3::Y).inverse();
         let senses = Senses {
             focused: true,
             head: Some(head),
@@ -194,8 +194,16 @@ fn the_farmyard_s_notice_board_stands_on_its_wooden_board_seen_from_where_partic
         }
         let frame = step.update(&senses, &mut conversation, &mut feedback, now, 1.0 / 72.0);
         draw(&mut renderer, &device, &queue, &mut panels, &frame);
-        let matrix = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-            * Mat4::look_at_rh(arrival::HOME, middle - Vec3::Y * 0.2, Vec3::Y);
+        let matrix = glam::camera::rh::proj::directx::perspective(
+            1.2,
+            WIDTH as f32 / HEIGHT as f32,
+            0.05,
+            80.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            arrival::HOME,
+            middle - Vec3::Y * 0.2,
+            Vec3::Y,
+        );
         renderer.render(
             &device,
             &queue,

@@ -324,8 +324,16 @@ fn rules_on_a_curved_wall_s_panels_follow_each_slot_without_seams() {
         );
         let slots = tomori_scene::projection::slot_frames(&wall, frame);
         let eye = glam::Vec3::new(0.35, 0.7, -0.9);
-        let view = Mat4::perspective_rh(0.9, width as f32 / height as f32, 0.05, 50.0)
-            * Mat4::look_at_rh(eye, slots[2].w_axis.truncate(), glam::Vec3::Y);
+        let view = glam::camera::rh::proj::directx::perspective(
+            0.9,
+            width as f32 / height as f32,
+            0.05,
+            50.0,
+        ) * glam::camera::rh::view::look_at_mat4(
+            eye,
+            slots[2].w_axis.truncate(),
+            glam::Vec3::Y,
+        );
         let panel = |rule: bool| {
             let mut rows = vec![Row::text("Release steps", Style::bold(TEXT), 30)];
             rows.push(if rule {

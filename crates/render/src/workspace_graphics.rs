@@ -3109,7 +3109,7 @@ mod tests {
 
     #[test]
     fn overlap_order_uses_visible_surfaces_not_centers_and_changes_with_view() {
-        let projection = glam::Mat4::perspective_rh(0.95, 1.0, 0.05, 50.0);
+        let projection = glam::camera::rh::proj::directx::perspective(0.95, 1.0, 0.05, 50.0);
         let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
         let mut rear = Panel {
             origin: [-0.2, 2.0, -2.92],
@@ -3128,8 +3128,8 @@ mod tests {
             for x in [-0.032, 0.032] {
                 let eye = glam::Vec3::new(x, 1.6, 0.0);
                 let direction = glam::Vec3::new(yaw.sin(), 0.0, -yaw.cos());
-                let matrix =
-                    projection * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
+                let matrix = projection
+                    * glam::camera::rh::view::look_at_mat4(eye, eye + direction, glam::Vec3::Y);
                 let depth = |p: &Panel| {
                     let clip = matrix * p.center().extend(1.0);
                     clip.z / clip.w
@@ -3158,7 +3158,7 @@ mod tests {
         cache.update(vec![front, rear]);
         for (z, expected) in [(0.0, [1, 0]), (-6.0, [0, 1])] {
             let matrix = projection
-                * glam::Mat4::look_at_rh(
+                * glam::camera::rh::view::look_at_mat4(
                     glam::Vec3::new(0.0, 1.6, z),
                     glam::Vec3::new(0.0, 1.6, -3.0),
                     glam::Vec3::Y,
@@ -3169,7 +3169,7 @@ mod tests {
 
     #[test]
     fn surface_projection_clips_near_plane_and_marks_true_intersections_ambiguous() {
-        let matrix = glam::Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
+        let matrix = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.05, 50.0);
         let surface = [[
             glam::Vec3::new(-0.1, -0.1, -0.5),
             glam::Vec3::new(0.1, -0.1, -0.5),
@@ -3223,14 +3223,15 @@ mod tests {
         let panel = test_layout(&workspace, &[station], 0, 0).0.remove(0);
         let mut mesh = Vec::new();
         panel_mesh(&panel, &mut mesh);
-        let projection = glam::Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
+        let projection = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.05, 50.0);
         let target = glam::Vec3::new(-1.0, 1.75, -2.8);
         let recenter = glam::Mat4::from_rotation_y(0.7)
             * glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, -0.3));
         let mut projected = Vec::new();
         for eye_x in [-0.032, 0.032] {
             let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
-            let view = projection * glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
+            let view =
+                projection * glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
             let v = glam::Vec3::from_array(mesh[0].position).extend(1.0);
             let normal = view * v;
             let compensated = (view * recenter.inverse()) * recenter * v;
@@ -3496,12 +3497,17 @@ mod tests {
                 let capture = |graphics: &WorkspaceGraphics, matrix, body| {
                     capture_order(graphics, matrix, body, true)
                 };
-                let projection = glam::Mat4::perspective_rh(0.65, 1.0, 0.05, 50.0);
+                let projection =
+                    glam::camera::rh::proj::directx::perspective(0.65, 1.0, 0.05, 50.0);
                 let mut eye_images = Vec::new();
                 for eye_x in [-0.032, 0.032] {
                     let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
                     let matrix = projection
-                        * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
+                        * glam::camera::rh::view::look_at_mat4(
+                            eye,
+                            eye + glam::Vec3::NEG_Z,
+                            glam::Vec3::Y,
+                        );
                     graphics.hide();
                     let empty = capture(&graphics, matrix, false);
                     station.opacity = 1.0;
@@ -3615,7 +3621,8 @@ mod tests {
                     );
                     graphics.count = graphics.cache.vertices.len() as u32;
                 };
-                let projection = glam::Mat4::perspective_rh(0.95, 1.0, 0.05, 50.0);
+                let projection =
+                    glam::camera::rh::proj::directx::perspective(0.95, 1.0, 0.05, 50.0);
                 for distance in [1.8, 2.8, 4.0] {
                     for bearing in [-0.45_f32, 0.0, 0.45] {
                         let mut sign_station = station.clone();
@@ -3644,7 +3651,11 @@ mod tests {
                                 let heading = bearing + yaw;
                                 let direction = glam::Vec3::new(heading.sin(), 0.0, -heading.cos());
                                 let matrix = projection
-                                    * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
+                                    * glam::camera::rh::view::look_at_mat4(
+                                        eye,
+                                        eye + direction,
+                                        glam::Vec3::Y,
+                                    );
                                 upload(&mut graphics, vec![rear.clone()]);
                                 let rear_image = capture(&graphics, matrix, false);
                                 upload(&mut graphics, vec![sign.clone()]);
@@ -3727,7 +3738,8 @@ mod tests {
                 // center sorting wrong, although these surfaces never intersect.
                 // Mirror the case so both yaw signs and both eye positions matter.
                 let mut overlap_previews = Vec::new();
-                let angled_projection = glam::Mat4::perspective_rh(1.1, 1.0, 0.05, 50.0);
+                let angled_projection =
+                    glam::camera::rh::proj::directx::perspective(1.1, 1.0, 0.05, 50.0);
                 for yaw in [-0.3_f32, 0.3] {
                     let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
                     let rear = Panel {
@@ -3744,7 +3756,11 @@ mod tests {
                         let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
                         let direction = glam::Vec3::new(yaw.sin(), 0.0, -yaw.cos());
                         let matrix = angled_projection
-                            * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
+                            * glam::camera::rh::view::look_at_mat4(
+                                eye,
+                                eye + direction,
+                                glam::Vec3::Y,
+                            );
                         let depth = |p: &Panel| {
                             let clip = matrix * p.center().extend(1.0);
                             clip.z / clip.w
@@ -3801,7 +3817,11 @@ mod tests {
                 for eye_x in [-0.032, 0.032] {
                     let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
                     let matrix = projection
-                        * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
+                        * glam::camera::rh::view::look_at_mat4(
+                            eye,
+                            eye + glam::Vec3::NEG_Z,
+                            glam::Vec3::Y,
+                        );
                     upload(&mut graphics, vec![sign.clone()]);
                     let sign_image = capture(&graphics, matrix, false);
                     graphics.hide();
@@ -3905,8 +3925,8 @@ mod tests {
                 let mut sheet = image::RgbaImage::new(4096, 2048);
                 for (i, panel) in graphics.cache.panels.iter().enumerate() {
                     let eye = glam::Vec3::new(if i % 2 == 0 { -0.032 } else { 0.032 }, 1.6, 0.0);
-                    let matrix =
-                        projection * glam::Mat4::look_at_rh(eye, panel.center(), glam::Vec3::Y);
+                    let matrix = projection
+                        * glam::camera::rh::view::look_at_mat4(eye, panel.center(), glam::Vec3::Y);
                     let image = capture(&graphics, matrix, false);
                     // Across the whole sign, which stands about the middle of the view, its rows centred.
                     let glyphs = (230..285)

@@ -172,8 +172,16 @@ fn the_default_tomori_wall_stands_below_the_swarm_in_every_environment() {
         tomori_environment_farmyard_client::register(&mut sceneries);
         let capture = |renderer: &Renderer, panels: &Panels| {
             // From home, looking ahead a little down, wide enough to see the first workers' stations either side.
-            let matrix = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-                * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.0, 1.15, -2.3), Vec3::Y);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_at_mat4(
+                arrival::HOME,
+                Vec3::new(0.0, 1.15, -2.3),
+                Vec3::Y,
+            );
             renderer.render(
                 &device,
                 &queue,

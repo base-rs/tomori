@@ -75,11 +75,20 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                 swarm.step(1.0 / 72.0, None);
             }
             let positions: Vec<_> = swarm.agents.iter().map(|a| a.position).collect();
-            let projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 100.0);
+            let projection = glam::camera::rh::proj::directx::perspective(
+                1.2,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                100.0,
+            );
             let matrices = [-0.032, 0.032].map(|x| {
                 let eye = glam::Vec3::new(x, 1.6, 0.0);
                 projection
-                    * Mat4::look_at_rh(eye, eye + glam::Vec3::new(0.0, 0.15, -1.0), glam::Vec3::Y)
+                    * glam::camera::rh::view::look_at_mat4(
+                        eye,
+                        eye + glam::Vec3::new(0.0, 0.15, -1.0),
+                        glam::Vec3::Y,
+                    )
             });
             let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
                 renderer.render(&device, &queue, &views, &matrices, anchor, &[]);
@@ -183,7 +192,7 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                 "translation must not drag the sky: {sky_changes}"
             );
             let overview = projection
-                * Mat4::look_at_rh(
+                * glam::camera::rh::view::look_at_mat4(
                     glam::Vec3::new(6.0, 5.0, 8.0),
                     glam::Vec3::new(0.0, 0.7, -2.5),
                     glam::Vec3::Y,
@@ -293,8 +302,16 @@ fn sky_multisamples_with_the_scene_pass() {
             });
             let view = texture.create_view(&Default::default());
             let eye = glam::Vec3::new(0.0, 1.6, 0.0);
-            let matrix = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 0.8, -3.0), glam::Vec3::Y);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                1.0,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                50.0,
+            ) * glam::camera::rh::view::look_at_mat4(
+                eye,
+                glam::Vec3::new(0.0, 0.8, -3.0),
+                glam::Vec3::Y,
+            );
             let swarm = Swarm::default();
             // Sky's pipelines must match the pass's sample count, or drawing fails validation.
             let render = |samples: u32| {
