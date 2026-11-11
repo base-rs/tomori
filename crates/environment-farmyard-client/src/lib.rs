@@ -171,13 +171,9 @@ mod tests {
         for surface in surfaces {
             match surface.navmesh() {
                 Some(mesh) => {
-                    // But the beach's shingle, which slopes down towards the river, as high as it is drawn.
+                    // The beach's flat shingle among it, a little above the meadow, as high as it is drawn.
                     assert!(mesh.triangles().iter().flatten().all(|corner| {
-                        let shingle = tomori_environment_farmyard::beach::height(Vec2::new(
-                            corner.x, corner.z,
-                        ));
                         (-1e-6..=trail::LIFT + trail::EDGE + 1e-6).contains(&corner.y)
-                            || shingle.is_some_and(|shingle| (shingle - corner.y).abs() < 1e-3)
                     }))
                 }
                 None => assert!((0.0..0.009).contains(&surface.height())),
