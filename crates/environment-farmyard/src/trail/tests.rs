@@ -116,7 +116,7 @@ fn the_trail_loops_round_the_outside_of_the_fence_past_the_river_on_the_level_me
 fn the_waterfall_and_the_pool_are_seen_from_the_lookout_and_the_river_from_the_riverbank() {
     use tomori_environment::sightlines::EYES;
     let solids = solids();
-    for ((name, _, at), sights) in VIEWPOINTS.iter().zip([
+    for ((name, _, at, _), sights) in VIEWPOINTS.iter().zip([
         vec![layout::RIVER[6], layout::RIVER[7]],
         vec![layout::WATERFALL, layout::WATERFALL_FOOT, POOL],
     ]) {
@@ -474,4 +474,96 @@ fn the_trail_is_one_model_drawn_above_the_meadow_and_beyond_the_fence_the_same_e
         );
         assert_eq!(plaque.lines, station.plaque);
     }
+}
+
+#[test]
+fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_the_plants_and_pines()
+ {
+    use tomori_environment::sightlines::{EYES, Solid};
+    use tomori_protocol::entourage::SWARM;
+    // As the server's `follow` stands the agent: its middle 2 m from their eyes, horizontally, 0.1 m above them, facing
+    // them, its box its swarm's reach and 0.1 m more on every side, seen from their eyes.
+    let (conversation, rise, margin) = (2.0, 0.1, 0.1);
+    let half = Vec3::from_array(SWARM.map(|reach| reach / 2.0 + margin));
+    let meets = |middle: Vec3, eyes: Vec3, solid: &Solid| {
+        let ahead = ((eyes - middle) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+        let across = Vec3::new(ahead.z, 0.0, -ahead.x);
+        let corners: Vec<Vec3> = (0..8)
+            .map(|index| {
+                let side = |bit: usize| if index & bit == 0 { -1.0 } else { 1.0 };
+                middle
+                    + across * half.x * side(1)
+                    + Vec3::Y * half.y * side(2)
+                    + ahead * half.z * side(4)
+            })
+            .collect();
+        let mut lines: Vec<(Vec3, Vec3)> = (0..8usize)
+            .flat_map(|from| [1, 2, 4].map(|bit| (from, from | bit)))
+            .filter(|(from, to)| from != to)
+            .map(|(from, to)| (corners[from], corners[to]))
+            .collect();
+        lines.extend((0..4).map(|from| (corners[from], corners[7 - from])));
+        lines.push((eyes, middle));
+        solid.contains(middle.to_array())
+            || lines
+                .iter()
+                .any(|(from, to)| solid.blocks(from.to_array(), to.to_array()))
+    };
+    let solid = |(low, high): ([f32; 3], [f32; 3])| Solid::new(low, high);
+    let beside: Vec<Solid> = super::beside().into_iter().map(solid).collect();
+    let plants_and_pines: Vec<Solid> = solids()
+        .into_iter()
+        .skip(layout::solids().len() + super::solids().len())
+        .collect();
+    let kept: Vec<Solid> = layout::solids()
+        .into_iter()
+        .chain(super::solids())
+        .map(solid)
+        .chain(beside.iter().copied())
+        .collect();
+    assert!(
+        beside.len() < plants_and_pines.len() / 2,
+        "{}",
+        beside.len()
+    );
+    // Anyone anywhere on the trail's band, every quarter of a step along it, or at the edge of a clearing.
+    let mut standing = Vec::new();
+    for index in 0..centreline().len() {
+        let (from, _, outward) = frame(index);
+        let (to, _, _) = frame(index + 1);
+        for step in 0..4 {
+            let at = from.lerp(to, step as f32 / 4.0);
+            standing.extend([-0.5, 0.0, 0.5].map(|across| at + outward * across));
+        }
+    }
+    for (middle, radius) in clearings() {
+        standing.extend((0..8).map(|step| {
+            let yaw = step as f32 / 8.0 * TAU;
+            middle + Vec2::new(yaw.sin(), yaw.cos()) * (radius - 0.05)
+        }));
+    }
+    let mut met = 0;
+    for at in standing {
+        let eyes = Vec3::new(at.x, HEIGHT + EYES, at.y);
+        let mut clear = 0;
+        for bearing in 0..36 {
+            let yaw = bearing as f32 / 36.0 * TAU;
+            let spot = at + Vec2::new(yaw.sin(), -yaw.cos()) * conversation;
+            let middle = Vec3::new(spot.x, eyes.y + rise, spot.y);
+            // Whatever plant or pine its spot there meets, the server knows of, so that it swings past it.
+            for solid in &plants_and_pines {
+                if meets(middle, eyes, solid) {
+                    met += 1;
+                    assert!(beside.contains(solid), "{at} {bearing} {solid:?}");
+                }
+            }
+            if !kept.iter().any(|solid| meets(middle, eyes, solid)) {
+                clear += 1;
+            }
+        }
+        // And most ways round them are clear, so that it comes nearly straight to them.
+        assert!(clear >= 18, "{at} {clear}");
+    }
+    // Some ways would stand it in a tree fern or a pine, but for these.
+    assert!(met > 0);
 }

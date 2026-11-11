@@ -217,19 +217,21 @@ pub struct Place {
 }
 
 /// The room each of the trail's anchors gives what gathers there, as width, height and depth, so that one to eighteen
-/// workers placed there stand in slots of their own, clear of its posts and seat.
+/// workers placed there stand in slots of their own, clear of its posts and seat and the plants and pines beside it.
 pub const ROOM: [f32; 3] = [5.0, 3.0, 2.0];
 
 /// How high a station's anchor stands above the trail, a little above the head of one exercising, and how far beside
-/// its clearing, along the trail, opposite its post; and how high a viewpoint's stands, and how far beyond the trail.
+/// its clearing, along the trail, opposite its post; and how high a viewpoint's stands.
 const STATION_ANCHOR: (f32, f32) = (2.0, 1.4);
-const VIEWPOINT_ANCHOR: (f32, f32) = (1.8, 3.0);
+const VIEWPOINT_HEIGHT: f32 = 1.8;
 
 /// The viewpoints along the trail: the riverbank, on the yard's right side, and the lookout behind the coop over the
-/// waterfall's pool, where the seat is; each as an anchor's name and label, and a point of [`centreline`].
-pub const VIEWPOINTS: [(&str, &str, usize); 2] = [
-    ("riverbank", "The riverbank", 18),
-    ("pool-lookout", "The pool lookout", 36),
+/// waterfall's pool, where the seat is; each as an anchor's name and label, a point of [`centreline`], and how far
+/// beyond the trail its anchor stands: the lookout's a little nearer, so that its room keeps clear of the tree ferns
+/// on the pool's bank and of the fourth station's post.
+pub const VIEWPOINTS: [(&str, &str, usize, f32); 2] = [
+    ("riverbank", "The riverbank", 18, 3.0),
+    ("pool-lookout", "The pool lookout", 36, 2.8),
 ];
 
 /// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; and its stations,
@@ -238,16 +240,16 @@ pub const VIEWPOINTS: [(&str, &str, usize); 2] = [
 /// the agent may go to any, and workers be placed at one, in its [`ROOM`].
 pub fn places() -> Vec<Place> {
     let raised = |point: Vec2, height: f32| Vec3::new(point.x, HEIGHT + height, point.y);
-    let (high, beyond) = VIEWPOINT_ANCHOR;
+    let high = VIEWPOINT_HEIGHT;
     let mut places: Vec<Place> = VIEWPOINTS
         .iter()
-        .map(|(name, label, at)| {
+        .map(|(name, label, at, beyond)| {
             let (point, _, outward) = frame(*at);
             Place {
                 name,
                 kind: "viewpoint",
                 label,
-                at: raised(point + outward * beyond, high),
+                at: raised(point + outward * *beyond, high),
                 towards: raised(point, high),
                 notify_within: None,
             }
@@ -384,6 +386,37 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
     let high = ends[0].max(ends[1]) + Vec3::new(radius, 0.0, radius);
     solids.push(([low.x, 0.0, low.z], [high.x, radius * 2.0 + 0.05, high.z]));
     solids
+}
+
+/// How far from the trail's middle, on the ground, the backdrop's plants and pines are counted among [`beside`]: as far
+/// as the agent's swarm reaches, coming to 2 m from someone at the far side of a clearing.
+pub const BESIDE: f32 = 5.0;
+
+/// The backdrop's plants and pines within [`BESIDE`] of the trail, each as the box it stands within, from its foot to its
+/// top, as `(least, greatest)` corners: the agent, coming to someone on the trail, keeps clear of them as it does of the
+/// trail's [`solids`], swinging round them, so that it never stands in a tree fern or a pine, nor a panel floats in one.
+pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
+    let line = line();
+    let pines = crate::props::pines().into_iter().map(|(base, height)| {
+        let reach = height * 0.32;
+        (
+            (base - Vec3::new(reach, 0.0, reach)).to_array(),
+            (base + Vec3::new(reach, height, reach)).to_array(),
+        )
+    });
+    backdrop::plants()
+        .iter()
+        .map(|plant| {
+            let solid = plant.solid();
+            (solid.low, solid.high)
+        })
+        .chain(pines)
+        .filter(|(low, high)| {
+            let (low, high) = (Vec2::new(low[0], low[2]), Vec2::new(high[0], high[2]));
+            line.iter()
+                .any(|point| (low - *point).max(*point - high).max(Vec2::ZERO).length() < BESIDE)
+        })
+        .collect()
 }
 
 /// What a plaque says, and where its text stands: on its face, centred, `+X` along it and `+Y` up, facing `+Z` towards

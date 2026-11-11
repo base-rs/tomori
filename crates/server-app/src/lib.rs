@@ -47,10 +47,13 @@ pub fn builder() -> Builder {
     tomori_environment_github_server::register(builder)
 }
 
-/// The farmyard's solids: the yard's, and the posts and seat along its trail.
+/// The farmyard's solids: the yard's, the posts and seat along its trail, and the backdrop's plants and pines beside
+/// the trail, so that the agent coming to someone on it swings clear of them.
 pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
-    let mut solids = tomori_environment_farmyard::layout::solids();
-    solids.extend(tomori_environment_farmyard::trail::solids());
+    use tomori_environment_farmyard::{layout, trail};
+    let mut solids = layout::solids();
+    solids.extend(trail::solids());
+    solids.extend(trail::beside());
     solids
 }
 
@@ -277,13 +280,13 @@ mod tests {
             );
             assert!(at.y >= 1.4, "{anchor:?}");
         }
-        // Its solids are the yard's and the trail's posts and seat, which the agent and the panels keep clear of; and
-        // one to eighteen workers placed at any of the trail's anchors stand in its cluster clear of them, above the
-        // trail.
+        // Its solids are the yard's, the trail's posts and seat and the plants and pines beside it, which the agent and
+        // the panels keep clear of; and one to eighteen workers placed at any of the trail's anchors stand in its
+        // cluster clear of them, above the trail.
         assert_eq!(farmyard.solids(), super::farmyard_solids());
         assert_eq!(
             farmyard.solids().len(),
-            layout::solids().len() + trail::solids().len()
+            layout::solids().len() + trail::solids().len() + trail::beside().len()
         );
         let solids: Vec<Solid> = farmyard
             .solids()

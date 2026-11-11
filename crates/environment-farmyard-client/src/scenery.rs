@@ -353,7 +353,7 @@ pub(crate) fn plaque(lines: &[&str]) -> Canvas {
 struct Plaques {
     glyphs: tomori_render::glyphs::SharedGlyphs,
     pipeline: Pipeline,
-    plaques: Vec<(Panel, Canvas, Mat4)>,
+    plaques: Vec<(Panel, Arc<Canvas>, Mat4)>,
 }
 
 impl Plaques {
@@ -365,7 +365,7 @@ impl Plaques {
             .map(|plaque| {
                 (
                     Panel::new(target.device, &pipeline, 600),
-                    self::plaque(&plaque.lines),
+                    Arc::new(self::plaque(&plaque.lines)),
                     plaque.transform,
                 )
             })
@@ -377,10 +377,11 @@ impl Plaques {
         }
     }
 
-    /// Show each plaque's text, building it again only while glyphs it needs wait for the atlas.
+    /// Show each plaque's text, the very canvas it showed, so that it is built again only while glyphs it needs wait
+    /// for the atlas.
     fn set(&mut self, queue: &wgpu::Queue) {
         for (panel, canvas, _) in &mut self.plaques {
-            panel.set(queue, canvas);
+            panel.show(queue, canvas);
         }
     }
 
@@ -392,7 +393,7 @@ impl Plaques {
 
     /// Draw those the reveal sphere, if the scenery is growing, has reached.
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize, reveal: Option<(Vec3, f32)>) {
-        let shown: Vec<&Panel> = self
+        let mut shown = self
             .plaques
             .iter()
             .filter(|(_, _, transform)| {
@@ -401,8 +402,8 @@ impl Plaques {
                 })
             })
             .map(|(panel, _, _)| panel)
-            .collect();
-        if shown.is_empty() {
+            .peekable();
+        if shown.peek().is_none() {
             return;
         }
         let binding = self.glyphs.binding();
