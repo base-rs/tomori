@@ -440,6 +440,27 @@ impl Feed {
             (arrangement.formation, arrangement.sweep),
             arrangement.placement,
         );
+        // The space's timers, as dials above the agent's home, as on the headset.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        self.scene.set_walls(
+            self.conversation
+                .projection()
+                .map_or(&[][..], |projection| &projection.walls),
+        );
+        self.scene.set_timers(
+            self.conversation
+                .joined_space()
+                .map_or(&[][..], |(space, _)| &space.timers),
+            arrangement.home,
+            match self.swarm.coordinator.shown() {
+                Some(_) => glam::Vec3::splat(bounds.radius),
+                None => tomori_scene::dials::SWARM_REACH,
+            },
+            now,
+        );
         self.scene.update(root, workspace, dt);
 
         // Convert protocol poses to controller poses for the frame.
@@ -467,6 +488,7 @@ impl Feed {
             interaction: self.swarm.coordinator.visual(),
             worker_cubes: self.scene.cubes().to_vec(),
             worker_stations: self.scene.stations().to_vec(),
+            timer_dials: self.scene.dials().to_vec(),
             workspace: workspace.clone(),
             presentation_page: 0,
             presentation_content_page: 0,
@@ -753,6 +775,68 @@ mod tests {
         assert_eq!(frame.interaction.mode, interaction::Mode::Ready);
         assert!(!frame.interaction.working);
         assert_ne!(frame.agents, initial.agents);
+    }
+
+    #[test]
+    fn frames_carry_the_space_s_timers_as_dials_above_the_agent_as_the_headset_draws_them() {
+        let mut feed = feed(SpectatorOptions::default());
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        let next = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3 * 3600
+            + 300;
+        let space = SpaceState {
+            id: "space".into(),
+            title: "Test".into(),
+            timers: vec![tomori_protocol::Timer::new(
+                "standup",
+                "weekdays at 09:00",
+                "when present",
+                Some(next),
+                tomori_protocol::TimerState::Paused,
+            )],
+            ..Default::default()
+        };
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(space),
+            }));
+        let mut frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        for _ in 0..30 {
+            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 20.0);
+        }
+        assert_eq!(frame.timer_dials.len(), 1);
+        let dial = &frame.timer_dials[0];
+        assert_eq!(dial.name, "standup");
+        assert!(dial.pill.starts_with("Paused 3h 0"), "{}", dial.pill);
+        let places = tomori_scene::dials::places(
+            1,
+            &tomori_scene::dials::Room::open(
+                tomori_scene::anchors::Anchor::AGENT,
+                tomori_scene::anchors::EYES,
+            ),
+        );
+        assert_eq!(dial.position, places[0].0.to_array());
+        // Its cubes among the workers'.
+        assert!(!frame.worker_cubes.is_empty());
+        let encoded = serde_json::to_value(&frame.timer_dials).unwrap();
+        let decoded: Vec<tomori_scene::dials::Dial> = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, frame.timer_dials);
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod controller;
 pub mod controller_ui;
 pub mod conversation;
 pub mod delegation;
+pub mod dials;
 pub mod environment;
 pub mod glide;
 pub mod hand_menu;

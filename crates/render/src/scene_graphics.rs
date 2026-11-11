@@ -240,6 +240,7 @@ pub fn draw(
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
     renderer.set_presentation_page(frame.card);
     renderer.set_presentation_content_page(frame.content);
+    renderer.set_dials(frame.dials);
     renderer.update_workspace(
         device,
         queue,
@@ -286,6 +287,7 @@ mod tests {
 
     mod cards;
     mod image_sharpness;
+    mod timers;
 
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {

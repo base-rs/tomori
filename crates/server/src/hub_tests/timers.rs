@@ -376,3 +376,48 @@ fn a_closed_space_s_timers_wait_and_are_kept_and_restored_with_it() {
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+#[test]
+fn a_participant_cancels_a_timer_by_pointing_at_it_and_asking_the_agent_even_in_a_turn_a_timer_began()
+ {
+    let (hub, _jobs, space, commands, ada) = space();
+    engage(&ada, tomori_protocol::Engagement::Engaged);
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.join(&space);
+    hub.agent_set_timer("session", hourly("status")).unwrap();
+    assert_eq!(super::anchors::state(&vic).unwrap().timers.len(), 1);
+    hub.tick_timers(at("2026-11-11 09:20"));
+    // Ada points at its dial as she asks: the agent is told which timer she means.
+    let prompt = said(
+        &hub,
+        &ada,
+        &commands,
+        vec![tomori_protocol::Resource::timer("status")],
+        None,
+    );
+    assert!(
+        prompt.text.starts_with(
+            "ada: [Pointing at timer \"status\" (every hour, when present; next in 40 min)]"
+        ),
+        "{}",
+        prompt.text
+    );
+    take(&hub, &space, &prompt);
+    // The timer fires before the agent acts, and its note begins the next turn: cancelling needs nobody's word, so the
+    // agent may still cancel it, as Ada asked.
+    hub.lock().space_mut(&space).unwrap().model.quieten();
+    hub.tick_timers(at("2026-11-11 10:00"));
+    let prompts = handed(&commands);
+    assert_eq!(prompts.len(), 1);
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    let cancelled = hub.agent_cancel_timer("session", "STATUS").unwrap();
+    assert_eq!(cancelled["cancelled"], "status");
+    // Everyone sees its dial go, the visitor too.
+    assert!(super::anchors::state(&ada).unwrap().timers.is_empty());
+    assert!(super::anchors::state(&vic).unwrap().timers.is_empty());
+}

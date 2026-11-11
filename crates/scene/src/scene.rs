@@ -175,6 +175,8 @@ pub struct Frame<'a> {
     pub content: usize,
     pub cubes: &'a [delegation::Cube],
     pub stations: &'a [delegation::Station],
+    /// The space's timers' dials, their cubes among `cubes`, for their signs. See `design/timers.md`.
+    pub dials: &'a [crate::dials::Dial],
     /// Where this client's viewer is, followed smoothly, which workers' signs turn to face; nowhere without one, when
     /// they face whoever the agent faces. See [`crate::sign_facing`].
     pub sign_facing: Option<Vec3>,
@@ -497,6 +499,11 @@ pub struct Step {
     /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
     /// swarm appears at the new one rather than gliding. See `design/environments.md`.
     agent_home: crate::anchors::Anchor,
+    /// This client's clock, which the timers' dials count down by, reckoned from the instants each frame is given and
+    /// read again from the system's clock as they drift apart, and the system's clock, unless a test gives another. See
+    /// `design/timers.md`.
+    clock: crate::dials::Clock,
+    system: Option<Box<dyn Fn() -> f64 + Send + Sync>>,
     /// The pulls of the trigger on teleport pads, with the thresholds that choose an arrival object, and the pad the ray
     /// pointed at last frame, which a pull begun on it, or A, chooses. See `design/locomotion.md`.
     pad_selector: crate::client_side::Selector,
@@ -584,6 +591,8 @@ impl Default for Step {
             #[cfg(test)]
             last_back: None,
             agent_home: crate::anchors::Anchor::AGENT,
+            clock: crate::dials::Clock::default(),
+            system: None,
             pad_selector: crate::client_side::Selector::default(),
             row_selector: crate::client_side::Selector::default(),
             pointed_pad: None,
@@ -1040,6 +1049,24 @@ impl Step {
         );
     }
 
+    /// Read the system's clock, in seconds since the Unix epoch, from `system` rather than the system, as a test does to
+    /// make it jump. See `design/timers.md`.
+    pub fn set_clock(&mut self, system: impl Fn() -> f64 + Send + Sync + 'static) {
+        self.system = Some(Box::new(system));
+    }
+
+    /// The time at `now`, in seconds since the Unix epoch, by this client's clock.
+    fn unix(&mut self, now: Instant) -> f64 {
+        let system = match &self.system {
+            Some(system) => system(),
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+        };
+        self.clock.now(system, now)
+    }
+
     /// Move everything on by `dt` seconds to `now`, as `senses` find it, and say what to draw and report.
     pub fn update(
         &mut self,
@@ -1488,6 +1515,12 @@ impl Step {
                 .map(|(card, _, _)| card.clone())
         });
         let worker = worker.filter(|_| card.is_none());
+        // Or a timer's dial, nearer than any worker. See `design/timers.md`.
+        let timer = self
+            .delegation_scene
+            .pointed_timer()
+            .filter(|_| card.is_none())
+            .map(str::to_owned);
         // Or the "+N more" sign of a cluster, which stands for the workers gathered into it.
         let gathered = self
             .delegation_scene
@@ -1558,6 +1591,7 @@ impl Step {
             .or_else(|| {
                 worker
                     .as_ref()
+                    .or(timer.as_ref())
                     .and(self.delegation_scene.hit_point())
                     .map(reach)
             })
@@ -1573,10 +1607,10 @@ impl Step {
             // The client side picks in the environment's own coordinates.
             .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)));
         let object = picked.clone().filter(|picked| picked.distance < nearest);
-        let (card, worker) = if object.is_some() {
-            (None, None)
+        let (card, worker, timer) = if object.is_some() {
+            (None, None, None)
         } else {
-            (card, worker)
+            (card, worker, timer)
         };
         // A panel is pointed at where nothing else the ray meets is nearer; a panel carried is pointed at all along.
         let nearest = object.as_ref().map_or(nearest, |picked| picked.distance);
@@ -1587,10 +1621,10 @@ impl Step {
                 .filter(|(_, distance, _)| *distance < nearest && self.board.held().is_none())
                 .map(|(panel, _, _)| panel.clone())
         });
-        let (card, worker, object) = if panel.is_some() {
-            (None, None, None)
+        let (card, worker, timer, object) = if panel.is_some() {
+            (None, None, None, None)
         } else {
-            (card, worker, object)
+            (card, worker, timer, object)
         };
         // A teleport pad is pointed at, while travel may be used and nothing is carried, where the ray meets nothing else
         // nearer that it may point at or take hold of: a card, a worker, an environment's object, or what the projector
@@ -1607,10 +1641,10 @@ impl Step {
         let pad = pad_met
             .filter(|_| !self.projector.carrying())
             .filter(|(_, distance, _)| *distance < met);
-        let (card, worker, object, panel) = if pad.is_some() {
-            (None, None, None, None)
+        let (card, worker, timer, object, panel) = if pad.is_some() {
+            (None, None, None, None, None)
         } else {
-            (card, worker, object, panel)
+            (card, worker, timer, object, panel)
         };
         // What the ray is on, Tomori's own interface first, which the trigger and the sticks act on next frame: a wall's
         // board, bar or handles, where the participant may take hold of walls, or a wall carried, count as Tomori's too.
@@ -1629,6 +1663,7 @@ impl Step {
             || panel.is_some()
             || card.is_some()
             || worker.is_some()
+            || timer.is_some()
         {
             precedence::Aim::Tomori
         } else if pad.is_some() {
@@ -1673,6 +1708,7 @@ impl Step {
                 .map(feedback::key)
                 .or_else(|| card.as_ref().map(feedback::key))
                 .or_else(|| worker.as_ref().map(feedback::key))
+                .or_else(|| timer.as_ref().map(|timer| feedback::key(&("timer", timer))))
                 .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
                 .or_else(|| panel.as_ref().map(feedback::key))
                 .or_else(|| pad.map(|(key, _, _)| feedback::key(&("pad", key))))
@@ -1810,6 +1846,9 @@ impl Step {
             (None, Some(worker), _) => {
                 conversation.point(Some(tomori_protocol::Resource::worker(worker)))
             }
+            (None, None, _) if timer.is_some() => {
+                conversation.point(timer.map(tomori_protocol::Resource::timer))
+            }
             (None, None, _) if gathered.is_some() => {
                 conversation.point(gathered.map(tomori_protocol::Resource::gathered))
             }
@@ -1875,6 +1914,8 @@ impl Step {
             }
             None => None,
         };
+        // The time the timers' dials count down from, by this client's clock.
+        let unix = self.unix(now);
         let (root, workspace) = self.workers.update(conversation.joined_space());
         // Workers fly out from the agent and back to it, wherever it stands.
         self.delegation_scene
@@ -1891,6 +1932,24 @@ impl Step {
             arrangement.extent,
             (arrangement.formation, arrangement.sweep),
             arrangement.placement,
+        );
+        // The space's timers, as dials at the agent's home, clear of its reach.
+        let agent = match self.coordinator.shown() {
+            Some(_) => Vec3::splat(bounds.radius),
+            None => crate::dials::SWARM_REACH,
+        };
+        self.delegation_scene.set_walls(
+            conversation
+                .projection()
+                .map_or(&[][..], |projection| &projection.walls),
+        );
+        self.delegation_scene.set_timers(
+            conversation
+                .joined_space()
+                .map_or(&[][..], |(space, _)| &space.timers),
+            arrangement.home,
+            agent,
+            unix,
         );
         self.delegation_scene.update(root, workspace, dt);
         // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
@@ -1965,6 +2024,7 @@ impl Step {
             content: self.presentation_navigation.content,
             cubes: self.delegation_scene.cubes(),
             stations: self.delegation_scene.stations(),
+            dials: self.delegation_scene.dials(),
             sign_facing: self.sign_facing.update(senses.viewer, dt),
             workspace,
             arrival,
@@ -9607,4 +9667,7 @@ mod tests {
 
     /// The right stick's push for an object of an environment's that takes it.
     mod scroll;
+
+    /// The space's timers, drawn as dials and pointed at.
+    mod timers;
 }

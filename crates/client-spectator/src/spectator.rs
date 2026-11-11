@@ -35,6 +35,10 @@ pub struct Frame {
     pub worker_cubes: Vec<crate::delegation::Cube>,
     #[serde(default)]
     pub worker_stations: Vec<crate::delegation::Station>,
+    /// The space's timers' dials, their cubes among `worker_cubes`, for their signs; absent in older senders. See
+    /// `design/timers.md`.
+    #[serde(default)]
+    pub timer_dials: Vec<tomori_scene::dials::Dial>,
     #[serde(default)]
     pub workspace: crate::delegation::Workspace,
     #[serde(default)]
@@ -140,6 +144,7 @@ mod tests {
             interaction: Default::default(),
             worker_cubes: Vec::new(),
             worker_stations: Vec::new(),
+            timer_dials: Vec::new(),
             workspace: Default::default(),
             presentation_page: 0,
             presentation_content_page: 0,
@@ -151,6 +156,7 @@ mod tests {
         for key in [
             "worker_cubes",
             "worker_stations",
+            "timer_dials",
             "workspace",
             "presentation_page",
             "presentation_content_page",

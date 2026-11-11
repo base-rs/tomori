@@ -760,6 +760,12 @@ impl Renderer {
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
     }
 
+    /// The space's timers' dials, whose cubes come among the workers', and whose signs the next `update_workspace` draws.
+    /// See `design/timers.md`.
+    pub fn set_dials(&mut self, dials: &[tomori_scene::dials::Dial]) {
+        self.workspace.set_dials(dials);
+    }
+
     /// Append coordinator-curated workspace visuals without replacing the swarm,
     /// floor, or controller models. Call after `update` for both XR and spectator.
     pub fn update_workspace(
