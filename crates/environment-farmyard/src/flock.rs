@@ -534,7 +534,7 @@ impl Flock {
             .find(|index| self.reference(*index) == reference)
             .ok_or_else(|| "There is no such hen in the yard now.".to_owned())?;
         let doing = self.hens[index].behaviour.doing;
-        let grounded = self.position(index, now).y < 0.01 && doing != Doing::Roost;
+        let grounded = self.position(index, now).y < layout::ON_GROUND && doing != Doing::Roost;
         if !grounded || matches!(doing, Doing::Sprint { .. }) {
             return Err(format!(
                 "{} is {}, so she cannot peck now.",

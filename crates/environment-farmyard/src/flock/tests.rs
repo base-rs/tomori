@@ -562,6 +562,21 @@ fn the_agent_has_a_hen_on_the_ground_peck_a_bounded_number_of_times() {
         flock.peck("hen/nobody", 1, 0),
         Err("There is no such hen in the yard now.".to_owned())
     );
+    // Standing on the path's tallest stone, she is on the ground, and pecks.
+    let stone = layout::stones()
+        .into_iter()
+        .max_by(|a, b| a.height.total_cmp(&b.height))
+        .unwrap();
+    assert!(stone.height > 0.01);
+    let middle = stone.middle();
+    flock.hens[0].behaviour = Behaviour {
+        since: 0,
+        at: [middle.x, stone.height, middle.y],
+        heading: 0.0,
+        doing: Doing::Stand,
+    };
+    assert_eq!(flock.position(0, 4_000).y, stone.height);
+    assert!(flock.peck(&pip, 1, 4_000).is_ok());
     // Up in the coop, or running off, she cannot.
     let mut flock = Flock::new(seed("space-1"), Arc::new(chicken()), 0);
     let mut now = 0;
@@ -569,7 +584,7 @@ fn the_agent_has_a_hen_on_the_ground_peck_a_bounded_number_of_times() {
     while now < 30 * 60_000 && refused == 0 {
         flock.update(now);
         for index in 0..flock.hens().len() {
-            let up = flock.position(index, now).y > 0.01
+            let up = flock.position(index, now).y >= layout::ON_GROUND
                 || flock.hens()[index].behaviour.doing == Doing::Roost;
             if up {
                 let reference = flock.reference(index);
