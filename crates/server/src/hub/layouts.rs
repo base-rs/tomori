@@ -62,10 +62,10 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
-        let origin = record.model.origin();
         let head = crate::presence::head_of(name.as_deref(), origin.as_ref(), &people)?;
         let middles = |extent: tomori_protocol::group::Extent, radius: Option<f32>| {
             crate::presence::layout_middles(&head, looking, extent.right - extent.left, radius)
@@ -126,12 +126,12 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
-        let origin = record.model.origin();
         let id = crate::presence::which_wall(group, origin.as_ref(), &people, &projection)?;
         // In the order they are shown, as they are named.
         let mut members = record.stage.group_of(&walls, &id);

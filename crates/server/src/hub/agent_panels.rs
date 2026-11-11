@@ -409,6 +409,7 @@ impl Hub {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
+        let origin = state.asking(&space);
         let carried = state.carried(&space, std::time::Instant::now());
         let record = state.space_mut(&space).expect("found above");
         let environments = self.environments();
@@ -471,7 +472,7 @@ impl Hub {
                 &environments,
                 placement,
                 0,
-                record.model.origin().as_ref(),
+                origin.as_ref(),
                 &people,
                 &projection,
                 &environments.solids(&record.model.environment),

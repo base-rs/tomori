@@ -44,6 +44,28 @@ pub struct Given {
     pub superseded: Option<Superseded>,
 }
 
+/// Where a speaker's head was, and the way it faced, as their words began, and when they began. See
+/// `design/projection.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Origin {
+    pub head: tomori_protocol::Pose,
+    pub at: std::time::Instant,
+}
+
+/// Who stands behind what the agent does in its turn, for placing what it projects, or where it goes, for whoever
+/// asked: the speaker of the entry given last, whether the turn still answers their words, and, while it does, where
+/// they were as their words began, if the space knows. The hub finds where they are now. See `design/projection.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Asked {
+    /// The participant number of the speaker of the entry given last, if any was.
+    pub source: Option<u32>,
+    /// Whether their words are still the agent's latest input: nothing reached it since, such as Tomori's notes
+    /// alone, a sub-agent's report or a message typed into its session outside Tomori.
+    pub answering: bool,
+    /// Where they were as their words began, while the turn answers them.
+    pub origin: Option<Origin>,
+}
+
 /// Why the entry given last is no longer the agent's latest input. See `design/security.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Superseded {
@@ -142,20 +164,20 @@ pub struct SpaceModel {
     /// What each waiting queue entry's speaker attended to as they began speaking, by entry key, as the space knew it
     /// then. Told to the agent with the entry. See `design/spaces.md`.
     attending: BTreeMap<String, Vec<Attended>>,
-    /// Where each waiting queue entry's speaker's head was, and the way it faced, as they began speaking, by entry key.
-    /// See `design/projection.md`.
-    origins: BTreeMap<String, tomori_protocol::Pose>,
+    /// Where each waiting queue entry's speaker's head was, and the way it faced, as they began speaking, and when, by
+    /// entry key. See `design/projection.md`.
+    origins: BTreeMap<String, Origin>,
     /// What each waiting queue entry's speaker had seen of the agent's messages as they began speaking, by entry key,
     /// so that the agent is told which message they answer if it said more before their words arrived. See
     /// `design/interaction.md`.
     seen: BTreeMap<String, Seen>,
     /// The [`MessageModel::order`] of the message the space saw last.
     last_order: u64,
-    /// Where the speaker of the input delivered last stood, and the way they faced, as they began speaking, if the space
-    /// knows: what the agent projects in its turn goes where they were looking, or onto the wall nearest them.
-    origin: Option<tomori_protocol::Pose>,
-    /// The panels of each reply completed since the hub last took them, with where its asker stood.
-    projected: Vec<(Vec<crate::stage::Found>, Option<tomori_protocol::Pose>)>,
+    /// Where the speaker of the input delivered last stood, and the way they faced, as they began speaking, and when, if
+    /// the space knows: what the agent projects in answer goes where they were looking, or beside them.
+    origin: Option<Origin>,
+    /// The panels of each reply completed since the hub last took them, with who stood behind it as it completed.
+    projected: Vec<(Vec<crate::stage::Found>, Asked)>,
     /// The latest replies whose panels were taken, so that none is projected twice.
     projected_replies: VecDeque<String>,
     /// What participants did that the agent is told before the next words spoken in the space, oldest first: each
@@ -1915,10 +1937,10 @@ impl SpaceModel {
         Ok(())
     }
 
-    /// The speaker of the waiting entry `key`'s head was at `origin`, facing as it faces, as they began speaking, so
-    /// that what the agent projects in answer goes where they were looking, or onto the wall nearest them. See
+    /// The speaker of the waiting entry `key`'s head was at `origin`, facing as it faces, as they began speaking, at
+    /// `origin`'s time, so that what the agent projects in answer goes where they were looking, or beside them. See
     /// `design/projection.md`.
-    pub fn originate(&mut self, key: &str, origin: tomori_protocol::Pose) {
+    pub fn originate(&mut self, key: &str, origin: Origin) {
         if self
             .queue
             .entries()
@@ -1983,18 +2005,34 @@ impl SpaceModel {
         }
     }
 
-    /// The panels of each reply completed since this was last called, with where whoever asked for it stood, if the
-    /// space knows, for the replies that have any. See `design/projection.md`.
-    pub fn take_projected(
-        &mut self,
-    ) -> Vec<(Vec<crate::stage::Found>, Option<tomori_protocol::Pose>)> {
+    /// The panels of each reply completed since this was last called, with who stood behind it as it completed, for
+    /// the replies that have any. See `design/projection.md`.
+    pub fn take_projected(&mut self) -> Vec<(Vec<crate::stage::Found>, Asked)> {
         std::mem::take(&mut self.projected)
     }
 
-    /// Where the speaker of the input delivered last stood, and the way they faced, as they began speaking, if the
-    /// space knows: the person who asked for what the agent does in its turn.
-    pub fn origin(&self) -> Option<tomori_protocol::Pose> {
-        self.origin
+    /// Who stands behind what the agent does now: the speaker of the entry given last, whether its turn still answers
+    /// their words, and, while it does, where they stood as they began speaking, if the space knows.
+    pub fn asked(&self) -> Asked {
+        let answering = self
+            .given
+            .as_ref()
+            .is_some_and(|given| given.superseded.is_none());
+        Asked {
+            source: self.given.as_ref().map(|given| given.source),
+            answering,
+            origin: self.origin.filter(|_| answering),
+        }
+    }
+
+    /// Have the words given last have begun `ago` earlier than they did, as a test does rather than wait.
+    #[cfg(test)]
+    pub fn age_origin(&mut self, ago: std::time::Duration) {
+        let origin = self
+            .origin
+            .as_mut()
+            .expect("words given where their speaker began");
+        origin.at -= ago;
     }
 
     /// Lift the panel blocks out of the reply at `index`, once, for the hub to project.
@@ -2009,7 +2047,8 @@ impl SpaceModel {
         self.projected_replies.push_back(message.id.clone());
         let panels = crate::stage::panels(&message.text);
         if !panels.is_empty() {
-            self.projected.push((panels, self.origin));
+            let asked = self.asked();
+            self.projected.push((panels, asked));
         }
     }
 
@@ -4883,12 +4922,20 @@ mod tests {
         space
             .take_projected()
             .into_iter()
-            .flat_map(|(panels, origin)| {
+            .flat_map(|(panels, asked)| {
                 panels
                     .into_iter()
-                    .map(move |found| (found.content.title, origin))
+                    .map(move |found| (found.content.title, asked.origin.map(|origin| origin.head)))
             })
             .collect()
+    }
+
+    /// Having begun speaking now, standing at `position`, facing straight ahead.
+    fn began(position: [f32; 3]) -> Origin {
+        Origin {
+            head: at(position),
+            at: std::time::Instant::now(),
+        }
     }
 
     /// Standing at `position`, facing straight ahead.
@@ -4909,10 +4956,10 @@ mod tests {
         // Where the speaker of the input delivered stood, for each panel of the replies in their turn.
         space.enqueue("a".into(), 1, "Ada".into(), "status?".into());
         space.enqueue("b".into(), 2, "Bob".into(), "and?".into());
-        space.originate("a", at([1.0, 1.6, 0.0]));
-        space.originate("b", at([2.0, 1.6, 0.0]));
+        space.originate("a", began([1.0, 1.6, 0.0]));
+        space.originate("b", began([2.0, 1.6, 0.0]));
         // Only a waiting entry's speaker is kept.
-        space.originate("unknown", at([9.0, 1.6, 0.0]));
+        space.originate("unknown", began([9.0, 1.6, 0.0]));
         assert_eq!(space.origins.len(), 2);
         let prompt = space.next_prompt().unwrap();
         space.sent(&prompt.key, Ok(()));
@@ -4940,7 +4987,7 @@ mod tests {
         space.cancel("b").unwrap();
         assert!(space.origins.is_empty());
         space.enqueue("c".into(), 1, "Ada".into(), "x".into());
-        space.originate("c", at([0.0; 3]));
+        space.originate("c", began([0.0; 3]));
         space.apply(Event::Closed { reason: None });
         assert!(space.origins.is_empty());
     }
@@ -4949,7 +4996,7 @@ mod tests {
     fn an_entry_delivered_without_where_its_speaker_stood_projects_onto_the_tomori_wall() {
         let mut space = model();
         space.enqueue("a".into(), 1, "Ada".into(), "one".into());
-        space.originate("a", at([1.0, 1.6, 0.0]));
+        space.originate("a", began([1.0, 1.6, 0.0]));
         let prompt = space.next_prompt().unwrap();
         space.sent(&prompt.key, Ok(()));
         space.apply(Event::Idle);
@@ -4958,6 +5005,48 @@ mod tests {
         space.sent(&prompt.key, Ok(()));
         reply(&mut space, "m1", PANEL);
         assert_eq!(projected(&mut space), [("Status".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_reply_after_a_sub_agent_s_report_answers_nobody_s_words_but_names_who_spoke_last() {
+        let mut space = model();
+        space.enqueue("a".into(), 7, "Ada".into(), "check the tests".into());
+        space.originate("a", began([1.0, 1.6, 0.0]));
+        let prompt = space.next_prompt().unwrap();
+        space.sent(&prompt.key, Ok(()));
+        // In reply to her words, where she stood as she began.
+        let asked = space.asked();
+        assert_eq!((asked.source, asked.answering), (Some(7), true));
+        assert_eq!(
+            asked.origin.map(|origin| origin.head),
+            Some(at([1.0, 1.6, 0.0]))
+        );
+        reply(&mut space, "m1", PANEL);
+        space.apply(Event::Idle);
+        // A sub-agent's report reaches the agent, not through Tomori: what it replies answers no one's words, so where
+        // she stood then says nothing of where its panels go, though she spoke last.
+        space.apply(Event::Delivered {
+            key: "report".into(),
+        });
+        reply(&mut space, "m2", PANEL);
+        let taken = space.take_projected();
+        assert_eq!(taken.len(), 2);
+        assert!(taken[0].1.answering && taken[0].1.origin.is_some());
+        let nobody = Asked {
+            source: Some(7),
+            answering: false,
+            origin: None,
+        };
+        assert_eq!(taken[1].1, nobody);
+        // So does a turn of Tomori's notes alone, such as someone coming near an anchor.
+        space.apply(Event::Idle);
+        space.tell_proximity("near", "[Ada came within 2 m of station-1]".into());
+        space.quieten();
+        let prompt = space
+            .next_prompt_at(std::time::Instant::now(), false)
+            .expect("the note is given");
+        space.sent(&prompt.key, Ok(()));
+        assert_eq!(space.asked(), nobody);
     }
 
     #[test]

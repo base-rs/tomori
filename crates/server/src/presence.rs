@@ -863,9 +863,41 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
 /// eyes: within reach, and low enough to read without hiding what is behind it.
 const FRONT: (f32, f32) = (1.2, 0.15);
 
-/// Where the agent's panel goes when it asks for none, for whoever asked, whose head was at `asker` as they began
-/// speaking: onto the wall they were looking at, if they could read it from there; or else floating beside them, clear
-/// of the environment's `solids`; or onto the Tomori wall when nobody asked. See `design/projection.md`.
+/// How long after someone's words began the head they began them with still says where what the agent does in answer
+/// goes for them, rather than where they are now: a minute, longer than a long question and a reply that calls a tool
+/// or two take together, so that a panel answering them goes onto the wall they were looking at as they asked, though
+/// they look elsewhere as they listen; later, the agent answers after long work, and where they are is the better guide.
+pub(crate) const ORIGIN_FRESH: Duration = Duration::from_secs(60);
+
+/// How far, in metres, someone may walk from where their words began and still have those words' head say where what
+/// the agent does in answer goes for them: 3 m, a few steps about where they asked, but no further, since a panel
+/// floated beside where they stood would then be about [`READING`] from their eyes, too far to read.
+pub(crate) const ORIGIN_MOVED: f32 = 3.0;
+
+/// Where the head of whoever asked is, for placing what the agent does for them at `now`: where it was as their words
+/// began, `origin`, unless they have since walked [`ORIGIN_MOVED`] from there or the words began [`ORIGIN_FRESH`] ago,
+/// when it is where they are now, `current`, as it is without an origin; and where it was, if they no longer report.
+/// See `design/projection.md`.
+pub(crate) fn asking(
+    origin: Option<crate::space::Origin>,
+    current: Option<Pose>,
+    now: Instant,
+) -> Option<Pose> {
+    match (origin, current) {
+        (Some(origin), Some(current))
+            if now.saturating_duration_since(origin.at) >= ORIGIN_FRESH
+                || length(sub(current.position, origin.head.position)) > ORIGIN_MOVED =>
+        {
+            Some(current)
+        }
+        (Some(origin), _) => Some(origin.head),
+        (None, current) => current,
+    }
+}
+
+/// Where the agent's panel goes when it asks for none, for whoever asked, whose head is at `asker`, as [`asking`]
+/// finds it: onto the wall they look at, if they can read it from there; or else floating beside them, clear of the
+/// environment's `solids`; or onto the Tomori wall when nobody asked. See `design/projection.md`.
 pub(crate) fn by_default(
     asker: Option<&Pose>,
     projection: &Projection,
@@ -1187,7 +1219,7 @@ pub(crate) fn which_wall(
 }
 
 /// Where the head of the participant `name`, of `people`, is, as they last reported, or, naming nobody, of whoever
-/// asked, whose head was at `asker` as they began speaking; or why not.
+/// asked, whose head is at `asker`, as [`asking`] finds it; or why not.
 pub(crate) fn head_of(
     name: Option<&str>,
     asker: Option<&Pose>,
@@ -1207,7 +1239,7 @@ pub(crate) fn head_of(
 }
 
 /// Where `place` puts the agent's panel, in `projection`, clear of the environment's `solids`, for whoever asked, whose
-/// head was at `asker` as they began speaking, among `people`, the participants in the space, by name or handle, and
+/// head is at `asker`, as [`asking`] finds it, among `people`, the participants in the space, by name or handle, and
 /// their heads as they last reported; or why it cannot, as when it names someone who has not reported, a name several
 /// have, or a wall that is not here. A form that names nobody is about whoever asked.
 pub(crate) fn destination(
