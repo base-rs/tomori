@@ -1,6 +1,6 @@
 // The farmyard's water beyond the fence: the river and the pool, their ripples carried downstream and glinting in the
-// moonlight, the waterfall streaking down its cliff, and foam churning about its foot, moved by the time alone, hazed
-// with distance as the models are, and drawn only inside the reveal sphere while the farmyard grows.
+// moonlight, the waterfall streaking down its cliff, foam churning and mist billowing about its foot, moved by the time
+// alone, hazed with distance as the models are, and drawn only inside the reveal sphere while the farmyard grows.
 
 struct Camera {
     inverse_view_projection: mat4x4<f32>,
@@ -16,8 +16,8 @@ struct Camera {
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// A point of the water: where it is, its colour, with what it is in the fourth component, the surface 0, the fall 1 and
-// foam 2, and where it is in its flow, metres across and along it.
+// A point of the water: where it is, its colour, with what it is in the fourth component, the surface 0, the fall 1,
+// foam 2 and mist 3, and where it is in its flow, metres across and along it.
 struct Point {
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
@@ -67,10 +67,14 @@ fn water_fragment(in: Shaded) -> @location(0) vec4<f32> {
         let pace = 1.1 + hash(lane) * 0.6;
         let streak = fract(in.flow.y * 0.45 - time * pace + hash(lane + 7.0));
         color = mix(color * 0.7, color * 1.6, smoothstep(0.3, 0.95, streak));
-    } else {
+    } else if in.color.a < 2.5 {
         // Foam churning about the fall's foot, thinning into the pool outwards.
         let churn = sin(in.flow.x * 4.0 + time * 2.3) * sin(in.flow.y * 7.0 - time * 3.1) * 0.5 + 0.5;
         color = mix(DEEP, color, (0.45 + 0.55 * churn) * (1.0 - smoothstep(0.5, 1.9, in.flow.y)));
+    } else {
+        // Mist billowing slowly upwards.
+        let billow = sin(in.flow.x * 3.0 + time * 0.9) * sin(in.flow.y * 5.0 - time * 1.4) * 0.5 + 0.5;
+        color = color * (0.8 + 0.3 * billow);
     }
     let far = distance(in.world, camera.eye.xyz);
     let haze = 1.0 - exp(-camera.haze.w * far * far);

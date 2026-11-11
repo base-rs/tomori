@@ -220,6 +220,15 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
                 < POOL_RADIUS + 1.0
         );
     }
+    // The mist rises from the pool about the fall's foot, low, before the cliff's lip.
+    let mist: Vec<_> = water.iter().filter(|point| point.kind == MIST).collect();
+    assert_eq!(mist.len(), 3 * 15 * 3);
+    for point in &mist {
+        let at = Vec2::new(point.position.x, point.position.z);
+        assert!(point.position.y >= POOL.y && point.position.y <= POOL.y + 1.0);
+        assert!(at.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS);
+        assert!(by_waterfall(at).0 < layout::CLIFF[1] - 0.25);
+    }
     for point in water.iter().filter(|point| point.kind == SURFACE) {
         assert!(point.position.y <= POOL.y + 0.03 && point.position.y > 0.05);
         assert!(point.flow.y >= 0.0);
@@ -369,26 +378,26 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 18 thousand triangles, which the scenery draws in eight draws: the foothills, one for
+    // Under the budget, about 19 thousand triangles, which the scenery draws in eight draws: the foothills, one for
     // each kind of plant with all its instances, the water and the ranges.
     let triangles = Triangles::counted();
     assert_eq!(
         triangles,
         Triangles {
             foothills: 2880,
-            plants: 14_022,
+            plants: 15_222,
             ranges: 1184,
-            water: 124,
+            water: 197,
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 18_210);
+    assert_eq!(triangles.total(), 19_483);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances.
     for (kind, count) in [
         (Kind::Canopy, 18),
         (Kind::Podocarp, 112),
-        (Kind::Fern, 79),
+        (Kind::Fern, 109),
         (Kind::CabbageTree, 145),
         (Kind::Flax, 39),
     ] {

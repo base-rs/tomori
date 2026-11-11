@@ -321,26 +321,55 @@ fn blade(
     }
 }
 
+/// How many fronds a tree fern's crown has, and how many dead ones hang in its skirt.
+const FRONDS: u32 = 18;
+const SKIRT: u32 = 9;
+
 fn fern(shapes: &mut Shapes) {
-    shapes.cylinder(
-        Vec3::new(0.0, -SUNK, 0.0),
-        0.13,
-        3.3 + SUNK,
-        5,
-        colors::FERN_TRUNK,
-    );
-    shapes.cone(Vec3::new(0.0, 2.6, 0.0), 0.34, 0.75, 6, colors::DEAD_FROND);
-    for frond in 0..12 {
-        let yaw = (frond as f32 + (scatter(frond + 300) - 0.5) * 0.5) / 12.0 * TAU;
-        let length = 1.6 + scatter(frond + 320) * 0.5;
-        let rise = 0.35 + scatter(frond + 340) * 0.3;
+    // The trunk, flaring to its matted roots, its top hidden in the crown.
+    let ring = |y: f32, radius: f32| -> Vec<Vec3> {
+        (0..5)
+            .map(|side| {
+                let yaw = side as f32 / 5.0 * TAU;
+                Vec3::new(yaw.sin() * radius, y, yaw.cos() * radius)
+            })
+            .collect()
+    };
+    let (foot, top) = (ring(-SUNK, 0.24), ring(3.3, 0.12));
+    for side in 0..5 {
+        let next = (side + 1) % 5;
+        let corners = [foot[side], foot[next], top[next], top[side]];
+        let outward = corners.iter().copied().sum::<Vec3>().with_y(0.0);
+        facing(shapes, &corners, outward, colors::FERN_TRUNK);
+    }
+    // The skirt: dead fronds hanging close about the trunk below the crown.
+    for frond in 0..SKIRT {
+        let yaw = (frond as f32 + scatter(frond + 280) * 0.6) / SKIRT as f32 * TAU;
         blade(
             shapes,
             Vec3::new(0.0, 3.25, 0.0),
             yaw,
-            (length, rise, 0.9),
-            &[0.03, 0.27, 0.2],
-            colors::FROND * (0.9 + scatter(frond + 360) * 0.25),
+            (0.3 + scatter(frond + 290) * 0.12, 0.0, 1.35),
+            &[0.18],
+            colors::DEAD_FROND * (0.75 + scatter(frond + 295) * 0.35),
+        );
+    }
+    // The crown: many long, narrow fronds, arching up and out from the trunk's top and drooping at their tips, wide and
+    // flat as a parasol, the lower ones older, darker and drooping further.
+    for frond in 0..FRONDS {
+        let yaw = (frond as f32 + (scatter(frond + 300) - 0.5) * 0.6) / FRONDS as f32 * TAU;
+        let old = frond % 3 == 0;
+        let length = if old { 1.8 } else { 1.95 } + scatter(frond + 320) * 0.3;
+        let rise = if old { 0.15 } else { 0.45 } + scatter(frond + 340) * 0.2;
+        let droop = if old { 1.5 } else { 1.05 };
+        let shade = if old { 0.7 } else { 1.0 } + scatter(frond + 360) * 0.25;
+        blade(
+            shapes,
+            Vec3::new(0.0, 3.25, 0.0),
+            yaw,
+            (length, rise, droop),
+            &[0.02, 0.15, 0.1],
+            colors::FROND * shade,
         );
     }
 }
@@ -883,12 +912,13 @@ pub fn ranges() -> Vec<Far> {
     triangles
 }
 
-/// What a point of the water is: its surface, still or flowing, the waterfall, or foam.
+/// What a point of the water is: its surface, still or flowing, the waterfall, foam, or the mist rising at its foot.
 pub const SURFACE: f32 = 0.0;
 pub const FALLING: f32 = 1.0;
 pub const FOAM: f32 = 2.0;
+pub const MIST: f32 = 3.0;
 
-/// A point of the water: where it is, its colour, what it is ([`SURFACE`], [`FALLING`] or [`FOAM`]), and where it is
+/// A point of the water: where it is, its colour, what it is ([`SURFACE`], [`FALLING`], [`FOAM`] or [`MIST`]), and where it is
 /// in its flow, metres across it and along it, downstream or down the fall, which the scenery's shader moves its
 /// ripples and streaks along.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -925,7 +955,7 @@ fn river_line(steps: usize) -> Vec<Vec3> {
 const SPREAD: f32 = 2.2;
 
 /// The water, as triangles: the river from the pool, its surface reaching under its banks; the pool; the waterfall,
-/// over the lip and down the cliff in front of its face; and foam about its foot.
+/// over the lip and down the cliff in front of its face; and foam and mist about its foot.
 pub fn water() -> Vec<Water> {
     let mut triangles = Vec::new();
     let quad = |triangles: &mut Vec<Water>, corners: [Water; 4]| {
@@ -996,53 +1026,54 @@ pub fn water() -> Vec<Water> {
             + (layout::CLIFF[1] - layout::CLIFF[0]) * (y - bottom) / (layout::CLIFF_TOP - bottom)
     };
     let top = layout::CLIFF_TOP + 0.08;
+    // Over the top, curling out over the lip, where it is palest, and down the face.
     let fall = [
-        (layout::CLIFF[1] + 0.7, top),
-        (face(layout::CLIFF_TOP) - 0.3, top),
-        (face(6.0) - 0.4, 6.0),
-        (face(4.0) - 0.4, 4.0),
-        (face(2.2) - 0.35, 2.2),
+        (layout::CLIFF[1] + 0.9, top),
+        (face(layout::CLIFF_TOP) - 0.15, top),
+        (face(6.0) - 0.6, 6.0),
+        (face(4.6) - 0.5, 4.6),
+        (face(3.0) - 0.45, 3.0),
+        (face(1.8) - 0.4, 1.8),
         (face(POOL.y) - 0.3, POOL.y + 0.02),
     ];
     let at = |(radius, y): (f32, f32), side: f32| {
         let ground = BACKDROP_CENTRE + outward * radius + across * side;
         Vec3::new(ground.x, y, ground.y)
     };
-    // Narrow where it leaves the lip, fanning out as it falls.
-    let spread = |row: usize| 0.55 + 0.6 * row as f32 / (fall.len() - 1) as f32;
+    const COLUMNS: usize = 4;
+    // Narrow where it leaves the lip, fanning out as it falls, its edges ragged, each a little in or out.
+    let spread = |row: usize, column: usize| {
+        let side = column as f32 / COLUMNS as f32 * 2.0 - 1.0;
+        let wide = 0.6 + 0.6 * row as f32 / (fall.len() - 1) as f32;
+        let ragged = 1.0 + (scatter((row * 8 + column) as u32 + 1500) - 0.5) * 0.35;
+        side * wide * if row == 0 { 1.0 } else { ragged }
+    };
+    // Paler at the lip and down the middle, darker and thinner at its edges.
+    let shade = |row: usize, column: usize| {
+        let edge = (column as f32 / COLUMNS as f32 * 2.0 - 1.0).abs();
+        let lip = if row == 1 { 1.5 } else { 1.0 };
+        colors::FALLING * lip * (1.1 - 0.45 * edge)
+    };
     let mut down = 0.0;
     for (row, pair) in fall.windows(2).enumerate() {
         let length = Vec2::new(pair[1].0 - pair[0].0, pair[1].1 - pair[0].1).length();
-        let (upper, lower) = (spread(row), spread(row + 1));
-        for column in [-1.0f32, 0.0] {
-            let next = column + 1.0;
+        for column in 0..COLUMNS {
+            let corner = |row: usize, column: usize, from: (f32, f32), down: f32| {
+                let lane = column as f32 / COLUMNS as f32 * 2.0 - 1.0;
+                point(
+                    at(from, spread(row, column)),
+                    shade(row, column),
+                    FALLING,
+                    Vec2::new(lane, down),
+                )
+            };
             quad(
                 &mut triangles,
                 [
-                    point(
-                        at(pair[0], column * upper),
-                        colors::FALLING,
-                        FALLING,
-                        Vec2::new(column, down),
-                    ),
-                    point(
-                        at(pair[0], next * upper),
-                        colors::FALLING,
-                        FALLING,
-                        Vec2::new(next, down),
-                    ),
-                    point(
-                        at(pair[1], next * lower),
-                        colors::FALLING,
-                        FALLING,
-                        Vec2::new(next, down + length),
-                    ),
-                    point(
-                        at(pair[1], column * lower),
-                        colors::FALLING,
-                        FALLING,
-                        Vec2::new(column, down + length),
-                    ),
+                    corner(row, column, pair[0], down),
+                    corner(row, column + 1, pair[0], down),
+                    corner(row + 1, column + 1, pair[1], down + length),
+                    corner(row + 1, column, pair[1], down + length),
                 ],
             );
         }
@@ -1065,6 +1096,50 @@ pub fn water() -> Vec<Water> {
                 point(ring(side, 1.9), colors::FOAM, FOAM, flow(side, 1.9)),
             ],
         );
+    }
+    // Mist rising before its foot, in a few low, rounded billows, hiding where it meets the pool.
+    for (billow, (side, ahead, radius, height)) in [
+        (-0.8, 0.35, 0.75, 0.6),
+        (0.1, 0.65, 0.9, 0.8),
+        (0.9, 0.3, 0.7, 0.5),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let centre = splash + Vec3::new(across.x, 0.0, across.y) * side
+            - Vec3::new(outward.x, 0.0, outward.y) * ahead;
+        let corner = |index: u32, level: f32, wide: f32, turn: f32| {
+            let yaw = (index as f32 + turn) / 5.0 * TAU + billow as f32;
+            let at = centre
+                + Vec3::new(
+                    yaw.sin() * radius * wide,
+                    POOL.y - centre.y + height * level,
+                    yaw.cos() * radius * wide,
+                );
+            point(
+                at,
+                colors::FOAM * (0.55 + 0.4 * level),
+                MIST,
+                Vec2::new(yaw * radius, height * level),
+            )
+        };
+        let apex = point(
+            centre + Vec3::Y * (POOL.y - centre.y + height),
+            colors::FOAM * 0.95,
+            MIST,
+            Vec2::new(0.0, height),
+        );
+        for index in 0..5 {
+            let (low, next) = (
+                corner(index, 0.0, 1.0, 0.0),
+                corner(index + 1, 0.0, 1.0, 0.0),
+            );
+            let (high, beside) = (
+                corner(index, 0.55, 0.8, 0.5),
+                corner(index + 1, 0.55, 0.8, 0.5),
+            );
+            triangles.extend([low, next, high, next, beside, high, high, beside, apex]);
+        }
     }
     triangles
 }

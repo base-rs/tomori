@@ -312,6 +312,8 @@ pub struct Farmyard {
     yard: Drawn,
     coop: Drawn,
     backdrop: Backdrop,
+    /// The haze's colour and density, which the water is hazed by as the models are.
+    haze: [f32; 4],
     clock: Clock,
     made: Instant,
     /// The chickens, uploaded once their client side first shows them, placed as it last did.
@@ -376,7 +378,8 @@ impl Farmyard {
             "Farmyard sky",
         );
         let models = Renderer::new(device, target.queue, target.format, target.samples);
-        models.set_lighting(target.queue, &lighting());
+        let lighting = lighting();
+        models.set_lighting(target.queue, &lighting);
         let yard = Drawn::new(
             device,
             target.queue,
@@ -400,6 +403,7 @@ impl Farmyard {
             yard,
             coop,
             backdrop,
+            haze: lighting.haze.extend(lighting.haze_density).to_array(),
             clock,
             made: Instant::now(),
             chickens: None,
@@ -439,7 +443,6 @@ impl Scenery for Farmyard {
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
         let inverse = scene_to_clip.inverse();
-        let lighting = lighting();
         let camera = SkyCamera {
             inverse_view_projection: if inverse.is_finite() {
                 inverse
@@ -453,7 +456,7 @@ impl Scenery for Farmyard {
             },
             view_projection: scene_to_clip.to_cols_array(),
             eye: self::eye(scene_to_clip).extend(1.0).to_array(),
-            haze: lighting.haze.extend(lighting.haze_density).to_array(),
+            haze: self.haze,
             time: [self.clock.seconds(self.made), 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
