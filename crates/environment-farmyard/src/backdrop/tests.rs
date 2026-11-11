@@ -15,7 +15,9 @@ fn eyes() -> Vec<Vec3> {
             Vec2::new(footprint.high.x, footprint.high.y),
         ]
     });
-    let trail = trail::outlines().into_iter().flatten();
+    let trail = trail::outlines()
+        .into_iter()
+        .flat_map(|(outline, _)| outline);
     let clearings = trail::clearings().into_iter().flat_map(|(middle, radius)| {
         (0..12).map(move |step| {
             let yaw = step as f32 / 12.0 * TAU;

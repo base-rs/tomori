@@ -159,10 +159,29 @@ fn the_way_out_goes_from_the_yard_s_earth_between_the_gate_s_posts_to_the_loop()
     assert!(inside.x - HALF > layout::GATE[0] + post && inside.x + HALF < layout::GATE[1] - post);
     assert!(inside.y < FENCE.high.y && outside.y > FENCE.high.y + HALF);
     assert_eq!(inside.x, outside.x);
-    // Its outline is a rectangle the yard's earth and the loop's band both overlap.
+    // Its outlines are two rectangles, the yard's earth overlapping the first, at the earth's height, to the fence,
+    // where the second takes it on at the track's to the loop, whose band overlaps it.
     let outlines = outlines();
-    assert_eq!(outlines.len(), STRETCHES + 1);
-    assert_eq!(outlines[STRETCHES].len(), 4);
+    assert_eq!(outlines.len(), STRETCHES + 2);
+    let fence = FENCE.high.y;
+    for ((outline, height), (from, to, at)) in outlines[STRETCHES..]
+        .iter()
+        .zip([(inside.y, fence, EARTH), (fence, outside.y, HEIGHT)])
+    {
+        assert_eq!(outline.len(), 4);
+        assert_eq!(*height, at);
+        let (low, high) = outline.iter().fold(
+            (Vec2::INFINITY, Vec2::NEG_INFINITY),
+            |(low, high), corner| (low.min(*corner), high.max(*corner)),
+        );
+        assert_eq!((low, high), (Vec2::new(-HALF, from), Vec2::new(HALF, to)));
+    }
+    // The loop's stretches are all on its track.
+    assert!(
+        outlines[..STRETCHES]
+            .iter()
+            .all(|(_, height)| *height == HEIGHT)
+    );
 }
 
 #[test]
@@ -416,9 +435,10 @@ fn a_pair_of_pads_joins_the_yard_and_the_lookout_off_the_way() {
         assert!(point.distance(at) >= HALF + pad, "{point}");
     }
     assert!(clearings().contains(&(bay, 0.75)));
-    // Both at the trail's height, within 20 m of the yard's origin on each axis, named, facing level.
+    // Each at the height of what it stands on, the yard's earth and the bay's clearing, within 20 m of the yard's origin
+    // on each axis, named, facing level.
+    assert_eq!((yard.centre.y, lookout.centre.y), (EARTH, CLEARING_HEIGHT));
     for pad in [yard, lookout] {
-        assert_eq!(pad.centre.y, HEIGHT);
         assert!(pad.centre.abs().max_element() < 20.0);
         assert!(!pad.name.is_empty() && pad.facing.y == 0.0 && pad.facing.length() > 0.1);
     }
@@ -461,7 +481,12 @@ fn the_trail_is_one_model_drawn_above_the_meadow_and_beyond_the_fence_the_same_e
         .map(|position| position.y)
         .fold(0.0, f32::max);
     assert!((highest - (POST_HEIGHT + 0.05)).abs() < 0.01, "{highest}");
-    const { assert!(LIFT > 0.02 && EDGE > 0.02) };
+    // Its track, and its clearings below it, at least 5 mm clear of the meadow, 10 mm below the earth, and of each other,
+    // as the yard's faces keep clear of the earth, and within the centimetre a backstep goes up or down of the earth.
+    const {
+        assert!(HEIGHT == LIFT && CLEARING_HEIGHT + 0.005 <= LIFT && LIFT < EARTH + 0.01);
+        assert!(CLEARING_HEIGHT >= EARTH - 0.005 && EDGE > 0.02);
+    };
     // Each plaque's text stands just proud of its board, facing its clearing, at the board's height.
     for (plaque, station) in plaques().iter().zip(&STATIONS) {
         let face = plaque.transform.transform_point3(Vec3::ZERO);

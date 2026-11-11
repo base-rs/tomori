@@ -68,6 +68,12 @@ pub const FLOOR_LIFT: f32 = 0.015;
 const LANDING_CUBES: usize = 16;
 /// The ring's radius, in metres.
 const LANDING_RADIUS: f32 = 0.3;
+/// How far above the landing the ring's bars stand, and how far into the surface below it they reach, in metres: tall
+/// enough that a surface drawn up to 2 cm above where it is declared, such as a path's stones on the earth, never hides
+/// the ring, and sunk enough that one drawn up to 1 cm below never shows a gap under it, so that it sits on what is
+/// drawn rather than floating.
+pub const LANDING_TOP: f32 = 0.025;
+pub const LANDING_SUNK: f32 = 0.01;
 /// The most teleport pads drawn: two for each pair a profile uses.
 const MOST_PADS: usize = 2 * tomori_scene::locomotion::MOST_PAIRS;
 /// How many bars make a pad's ring, and its highlight's.
@@ -1089,17 +1095,18 @@ fn blink_pipeline(
     })
 }
 
-/// The ring where a teleport would land: flat on the surface at `landing`, in the hover highlight's colour.
+/// The ring where a teleport would land: on the surface at `landing`, [`LANDING_TOP`] above it and [`LANDING_SUNK`]
+/// into it, in the hover highlight's colour.
 fn landing_ring(landing: glam::Vec3, scene: &mut Vec<Instance>) {
     for n in 0..LANDING_CUBES {
         let angle = n as f32 * std::f32::consts::TAU / LANDING_CUBES as f32;
         scene.push(Instance {
             position: [
                 landing.x + angle.cos() * LANDING_RADIUS,
-                landing.y + 0.01,
+                landing.y + (LANDING_TOP - LANDING_SUNK) * 0.5,
                 landing.z + angle.sin() * LANDING_RADIUS,
             ],
-            scale: [0.04, 0.01, 0.04],
+            scale: [0.04, LANDING_TOP + LANDING_SUNK, 0.04],
             color: [0.45, 0.95, 1.0],
             ..Default::default()
         });
@@ -2953,7 +2960,10 @@ mod tests {
             assert_eq!(renderer.scene.len(), without + LANDING_CUBES);
             for instance in &renderer.scene[without..] {
                 let at = glam::Vec3::from_array(instance.position);
-                assert!((at.y - landing.y - 0.01).abs() < 1e-5);
+                // Each bar stands 2.5 cm above the landing and reaches 1 cm into the surface beneath it.
+                let half = instance.scale[1] * 0.5;
+                assert!((at.y + half - landing.y - 0.025).abs() < 1e-5);
+                assert!((at.y - half - landing.y + 0.01).abs() < 1e-5);
                 let across = glam::Vec2::new(at.x - landing.x, at.z - landing.z).length();
                 assert!((across - LANDING_RADIUS).abs() < 1e-5);
             }
