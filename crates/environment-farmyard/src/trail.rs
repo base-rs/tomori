@@ -9,9 +9,10 @@
 //!
 //! Participants walk it as they walk the yard: its band ([`outlines`]) and the clearings beside it ([`clearings`]) are
 //! walkable at the height each is drawn, within a centimetre of the yard's earth, joined to it through the gate
-//! ([`GATEWAY`]), and a pair of teleport pads
-//! ([`PADS`]) takes them between the yard and the lookout. Its stations and viewpoints are named anchors ([`places`]),
-//! and its posts and its seat are solids ([`solids`]). It stays within [`REACH`] of the backdrop's middle, so that the
+//! ([`GATEWAY`]), a pair of teleport pads ([`pads`]) takes them between the yard and the lookout, and pointing at the
+//! waterfall rock from the lookout, or at the lookout's seat from the rock, takes them there ([`targets`]). Its
+//! stations, viewpoints and the rock are named anchors ([`places`]), and its posts, its seat and the rock are solids
+//! ([`solids`]). It stays within [`REACH`] of the backdrop's middle, so that the
 //! whole backdrop stands within the headset's far plane from it, and clear of the river's banks, the pool's rim, the
 //! pines, the bush and the fence. See the crate's `context/trail.md`.
 use std::f32::consts::TAU;
@@ -242,7 +243,13 @@ pub const VIEWPOINTS: [(&str, &str, usize, f32); 2] = [
     ("pool-lookout", "The pool lookout", 36, 2.8),
 ];
 
-/// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; and its stations,
+/// How far from the waterfall rock's middle, towards the lookout, its anchor stands, and how high above its top: behind
+/// whoever stands on it facing the waterfall, so that whatever gathers there is beside them rather than before the fall,
+/// and within 20 m of where participants arrive, as every anchor is.
+const ROCK_ANCHOR: (f32, f32) = (1.6, 1.8);
+
+/// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; the waterfall
+/// rock's, beside the rock towards the lookout, facing the rock; and its stations,
 /// each beside its clearing, along the trail, opposite its post, facing the clearing, telling the agent of whoever
 /// comes within [`STATION_RADIUS`] of it, its clearing and the trail beside it;
 /// the agent may go to any, and workers be placed at one, in its [`ROOM`].
@@ -276,6 +283,21 @@ pub fn places() -> Vec<Place> {
             notify_within: Some(STATION_RADIUS),
         }
     }));
+    let rock = layout::WATERFALL_ROCK;
+    let (lookout, _, _) = frame(LOOKOUT);
+    let (beside, high) = ROCK_ANCHOR;
+    let back = (lookout - Vec2::new(rock.x, rock.z)).normalize() * beside;
+    places.insert(
+        2,
+        Place {
+            name: "waterfall-rock",
+            kind: "viewpoint",
+            label: "The waterfall rock",
+            at: rock + Vec3::new(back.x, high, back.y),
+            towards: rock + Vec3::Y * high,
+            notify_within: None,
+        },
+    );
     places
 }
 
@@ -311,6 +333,50 @@ pub fn pads() -> [PadPlace; 2] {
             centre: Vec3::new(bay.x, CLEARING_HEIGHT, bay.y),
             name: "Pool lookout",
             facing: Vec3::new(layout::POOL.x - bay.x, 0.0, layout::POOL.z - bay.y),
+        },
+    ]
+}
+
+/// A teleport target of the trail's, an object participants point at to go to it rather than a pad they step onto:
+/// the middle of its foot, how far from its upright axis and how high above its foot it is pointed at, where it takes
+/// them, its name, which the label beside it shows, and which way they face there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TargetPlace {
+    pub foot: Vec3,
+    pub radius: f32,
+    pub height: f32,
+    pub arrival: Vec3,
+    pub name: &'static str,
+    pub facing: Vec3,
+}
+
+/// The waterfall rock and the lookout's seat, each a teleport target: pointing at the rock, from the lookout or anywhere
+/// within reach, takes one onto its top, facing the waterfall, and pointing at the seat from the rock takes one back
+/// onto the trail before it, facing the pool. The rock's top is where one stands, but not a surface a teleport lands on,
+/// so that it is reached only by pointing at it.
+pub fn targets() -> [TargetPlace; 2] {
+    let rock = layout::WATERFALL_ROCK;
+    let (middle, along, length, radius) = seat();
+    let (lookout, _, _) = frame(LOOKOUT);
+    let before = lookout + along * 0.7;
+    let arrival = Vec3::new(before.x, HEIGHT, before.y);
+    let level = |towards: Vec3, from: Vec3| (towards - from) * Vec3::new(1.0, 0.0, 1.0);
+    [
+        TargetPlace {
+            foot: Vec3::new(rock.x, layout::ROCK_FOOT, rock.z),
+            radius: layout::ROCK_REACH,
+            height: rock.y - layout::ROCK_FOOT,
+            arrival: rock,
+            name: "Waterfall rock",
+            facing: level(layout::WATERFALL, rock),
+        },
+        TargetPlace {
+            foot: middle,
+            radius: length * 0.5 + 0.05,
+            height: radius * 2.0 + 0.1,
+            arrival,
+            name: "Pool lookout",
+            facing: level(layout::POOL, arrival),
         },
     ]
 }
@@ -379,7 +445,7 @@ pub fn seat() -> (Vec3, Vec2, f32, f32) {
 }
 
 /// The solids of the trail, which the agent, walls and panels keep clear of, as `(least, greatest)` corners: each
-/// station's post with its plaque, and the seat.
+/// station's post with its plaque, the seat, and the waterfall rock.
 pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
     let mut solids: Vec<([f32; 3], [f32; 3])> = STATIONS
         .iter()
@@ -400,6 +466,11 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
     let low = ends[0].min(ends[1]) - Vec3::new(radius, 0.0, radius);
     let high = ends[0].max(ends[1]) + Vec3::new(radius, 0.0, radius);
     solids.push(([low.x, 0.0, low.z], [high.x, radius * 2.0 + 0.05, high.z]));
+    let (rock, reach) = (layout::WATERFALL_ROCK, layout::ROCK_REACH);
+    solids.push((
+        [rock.x - reach, layout::ROCK_FOOT, rock.z - reach],
+        [rock.x + reach, rock.y, rock.z + reach],
+    ));
     solids
 }
 
@@ -407,9 +478,10 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
 /// as the agent's swarm reaches, coming to 2 m from someone at the far side of a clearing.
 pub const BESIDE: f32 = 5.0;
 
-/// The backdrop's plants and pines within [`BESIDE`] of the trail, each as the box it stands within, from its foot to its
-/// top, as `(least, greatest)` corners: the agent, coming to someone on the trail, keeps clear of them as it does of the
-/// trail's [`solids`], swinging round them, so that it never stands in a tree fern or a pine, nor a panel floats in one.
+/// The backdrop's plants and pines within [`BESIDE`] of the trail or the waterfall rock, each as the box it stands
+/// within, from its foot to its top, as `(least, greatest)` corners: the agent, coming to someone on the trail or the
+/// rock, keeps clear of them as it does of the trail's [`solids`], swinging round them, so that it never stands in a tree
+/// fern or a pine, nor a panel floats in one.
 pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
     let line = line();
     let pines = crate::props::pines().into_iter().map(|(base, height)| {
@@ -428,7 +500,9 @@ pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
         .chain(pines)
         .filter(|(low, high)| {
             let (low, high) = (Vec2::new(low[0], low[2]), Vec2::new(high[0], high[2]));
+            let rock = Vec2::new(layout::WATERFALL_ROCK.x, layout::WATERFALL_ROCK.z);
             line.iter()
+                .chain([&rock])
                 .any(|point| (low - *point).max(*point - high).max(Vec2::ZERO).length() < BESIDE)
         })
         .collect()

@@ -221,9 +221,9 @@ fn its_sounds_are_where_the_backdrop_has_them_and_leave_voices_for_the_birds() {
     let [river, waterfall] = &ambience.loops[..] else {
         panic!("a river and a waterfall");
     };
-    // The river from the pool at the waterfall's foot, along each of its bends.
-    assert_eq!(river.path.points()[0], layout::POOL.to_array());
-    assert_eq!(river.path.points().len(), layout::RIVER.len());
+    // The river from where it leaves the pool, over its lip, along each of its bends.
+    assert_eq!(river.path.points()[0], layout::RIVER[1].to_array());
+    assert_eq!(river.path.points().len(), layout::RIVER.len() - 1);
     assert_eq!(
         river.path.points().last().copied(),
         layout::RIVER.last().map(|point| point.to_array())
@@ -293,4 +293,25 @@ fn every_slot_has_its_sound_credited_and_within_the_limits() {
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["LICENSE.md", "readme.md"]);
+}
+
+#[test]
+fn the_waterfall_is_loud_on_the_rock_before_it_as_its_place_makes_it() {
+    let ambience = with(&[]);
+    let beds = beds(&ambience);
+    let [river, waterfall] = &ambience.loops[..] else {
+        panic!("a river and a waterfall");
+    };
+    // Standing on the waterfall rock, its spray about them, and at the lookout over the pool, at the eyes.
+    let rock = (layout::WATERFALL_ROCK + glam::Vec3::Y * EYES).to_array();
+    let (lookout, _, _) = crate::trail::frame(crate::trail::VIEWPOINTS[1].2);
+    let lookout = [lookout.x, EYES, lookout.y];
+    let (on_rock, at_lookout) = (heard_loop(waterfall, rock), heard_loop(waterfall, lookout));
+    println!("waterfall: rock {on_rock:.1}, lookout {at_lookout:.1}, beds {beds:.1}");
+    // Nothing but where it is makes it so: on the rock, well within its radius, it is far louder than at the lookout
+    // and above the beds, which it was beneath from the yard, and the river, which leaves the pool beyond it.
+    assert!(distance(layout::WATERFALL.to_array(), rock) < waterfall.radius * 0.5);
+    assert!(on_rock > at_lookout + 8.0, "{on_rock} {at_lookout}");
+    assert!(on_rock > beds + 6.0, "{on_rock} {beds}");
+    assert!(on_rock > heard_loop(river, rock), "{on_rock}");
 }

@@ -213,11 +213,12 @@ impl Triangles {
 }
 
 /// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the river's stones, the
-/// trail, the water and the ranges.
+/// waterfall rock, the trail, the water and the ranges.
 struct Backdrop {
     foothills: Drawn,
     plants: Vec<Drawn>,
     stones: Drawn,
+    rock: Drawn,
     trail: Drawn,
     water: Triangles,
     ranges: Triangles,
@@ -255,6 +256,13 @@ impl Backdrop {
             .map(backdrop::Stone::transform)
             .collect();
         let stones = Drawn::placed(device, queue, models, &Arc::new(backdrop::stone()), &stones);
+        let rock = Drawn::new(
+            device,
+            queue,
+            models,
+            &Arc::new(backdrop::rock()),
+            Mat4::IDENTITY,
+        );
         let trail = Drawn::new(
             device,
             queue,
@@ -317,6 +325,7 @@ impl Backdrop {
             foothills,
             plants,
             stones,
+            rock,
             trail,
             water,
             ranges,
@@ -583,15 +592,15 @@ impl Scenery for Farmyard {
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.draw(0..3, 0..1);
         // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, then the
-        // foothills, the bush and the river's stones beyond, the water, and the ranges at the sky's depth, where nothing
-        // else has been drawn.
+        // foothills, the bush, the river's stones and the waterfall rock beyond, the water, and the ranges at the sky's
+        // depth, where nothing else has been drawn.
         let backdrop = &self.backdrop;
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
             .flatten()
             .chain([&backdrop.trail, &backdrop.foothills])
             .chain(&backdrop.plants)
-            .chain([&backdrop.stones])
+            .chain([&backdrop.stones, &backdrop.rock])
         {
             self.models.draw(pass, eye, &drawn.model, &drawn.batch);
         }

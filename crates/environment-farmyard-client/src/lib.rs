@@ -19,10 +19,11 @@ pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple William
 /// Where participants may travel in the farmyard: teleporting onto the yard's ground, clear of what stands in it, and
 /// along the trail round the outside of the fence, its band and its clearings, which join the yard's earth through the
 /// gate, each at the height it is drawn, so that whoever stands or lands there, and the ring where they would, is on
-/// what is drawn; turning in snaps; and between the yard and the lookout at the trail's far end by a pair of
-/// teleport pads. See Tomori's `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
+/// what is drawn; turning in snaps; between the yard and the lookout at the trail's far end by a pair of teleport
+/// pads; and onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat. See Tomori's
+/// `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
 pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
-    use tomori_scene::locomotion::{Locomotion, Pad, Surface};
+    use tomori_scene::locomotion::{Locomotion, Pad, Surface, Target};
     let mut surfaces: Vec<Surface> = layout::walkable()
         .into_iter()
         .map(|(centre, size)| Surface::rectangle(centre, size))
@@ -37,7 +38,15 @@ pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
         )
     }));
     let pads = trail::pads().map(|pad| Pad::at(pad.centre).named(pad.name).facing(pad.facing));
-    Locomotion::teleport(surfaces).with_pads([pads])
+    let targets = trail::targets().map(|target| {
+        Target::object(target.foot, target.radius, target.height)
+            .arriving(target.arrival)
+            .named(target.name)
+            .facing(target.facing)
+    });
+    Locomotion::teleport(surfaces)
+        .with_pads([pads])
+        .with_targets(targets)
 }
 
 /// Register the farmyard with a client's `sceneries`: its scenery, at the identity in `tomori-environment-farmyard`,
@@ -344,6 +353,135 @@ mod tests {
                 stone.height + 0.003 < tomori_render::graphics::LANDING_TOP,
                 "{stone:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_water_is_never_walked_into_and_the_waterfall_rock_is_reached_only_by_pointing_at_it() {
+        use glam::{Vec2, Vec3};
+        use tomori_environment_farmyard::backdrop;
+        use tomori_scene::locomotion::Locomotion;
+        use tomori_scene::pointing::Ray;
+
+        use super::{layout, trail};
+        let profile = super::locomotion();
+        let Locomotion::Teleport { surfaces, .. } = &profile else {
+            unreachable!("the farmyard teleports");
+        };
+        let walkable = |point: Vec3| {
+            surfaces
+                .iter()
+                .any(|surface| surface.contains(point.with_y(surface.height())))
+        };
+        // No surface reaches the river's water, its banks within the spread of its surface, or the pool and its rim.
+        let line = layout::river_line(8);
+        for (index, middle) in line.iter().enumerate() {
+            let after = line[(index + 1).min(line.len() - 1)];
+            let before = line[index.saturating_sub(1)];
+            let across = Vec2::new(after.x - before.x, after.z - before.z)
+                .normalize()
+                .perp();
+            for step in -12..=12 {
+                let offset =
+                    across * step as f32 / 12.0 * (layout::RIVER_HALF_WIDTH + backdrop::SPREAD);
+                let point = Vec3::new(middle.x + offset.x, middle.y, middle.z + offset.y);
+                assert!(!walkable(point), "{point}");
+            }
+        }
+        let pool = layout::POOL;
+        for step in 0..48 {
+            let yaw = step as f32 / 48.0 * std::f32::consts::TAU;
+            for reach in [0.0, 2.0, layout::POOL_RADIUS, backdrop::RIM[2]] {
+                let point = pool + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * reach;
+                assert!(!walkable(point), "{point}");
+            }
+        }
+        // Two targets, used as the profile is carried into a space, where participants arrive at home, within its
+        // bounds: the rock, arriving on its top, as high as it is drawn, facing the waterfall; and the lookout's seat,
+        // arriving on the trail before it, facing the pool.
+        let arrival = tomori_protocol::Pose::at(layout::ARRIVAL.to_array())
+            .facing_towards(layout::ARRIVAL_FACING.to_array());
+        let carriage = tomori_scene::anchors::Anchor::carriage(&arrival).unwrap();
+        let carried = profile.carried(&carriage);
+        assert_eq!(carried.pads().count(), 1);
+        let targets: Vec<_> = carried.targets().collect();
+        assert_eq!(targets.len(), 2);
+        for target in &targets {
+            let arrival = target.arrival();
+            assert!(arrival.abs().max_element() < 19.9, "{arrival}");
+        }
+        let (rock, back) = (targets[0], targets[1]);
+        assert_eq!(
+            (rock.name(), back.name()),
+            (Some("Waterfall rock"), Some("Pool lookout"))
+        );
+        let top = layout::WATERFALL_ROCK;
+        let place = |at: Vec3| carriage.place(at);
+        assert!(rock.arrives_on_top() && rock.arrival().distance(place(top)) < 1e-4);
+        let drawn = backdrop::rock().meshes[0].primitives[0]
+            .positions
+            .iter()
+            .map(|position| position.y)
+            .fold(f32::MIN, f32::max);
+        assert_eq!(drawn, top.y, "its top is drawn where one stands");
+        let facing = |yaw: f32| Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+        let towards = |to: Vec3, from: Vec3| {
+            ((place(to) - place(from)) * Vec3::new(1.0, 0.0, 1.0)).normalize()
+        };
+        assert!(facing(rock.yaw().unwrap()).dot(towards(layout::WATERFALL, top)) > 0.999);
+        let [_, declared] = trail::targets();
+        assert!(
+            !back.arrives_on_top()
+                && walkable(declared.arrival)
+                && declared.arrival.y == trail::HEIGHT
+        );
+        assert!(back.arrival().distance(place(declared.arrival)) < 1e-4);
+        assert!(facing(back.yaw().unwrap()).dot(towards(pool, declared.arrival)) > 0.999);
+        // The rock's top is no surface, so that aiming a teleport at it from anywhere on the trail lands nowhere, on it or
+        // in the pool about it, and stepping back on it steps nowhere, off it into the pool; nor is any pad there.
+        assert!(!walkable(top));
+        let line = trail::centreline();
+        for point in &line {
+            let eyes = Vec3::new(point.x, 1.6, point.y);
+            for offset in [Vec3::ZERO, Vec3::X * 0.5, Vec3::Z * -0.5] {
+                let ray = Ray::new(eyes, top + offset - eyes).unwrap();
+                assert_eq!(profile.landing(&ray), None, "{point} {offset}");
+            }
+        }
+        let eyes = top + Vec3::Y * 1.6;
+        for facing in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+            assert_eq!(profile.backstep(eyes, facing, top.y), None);
+        }
+        // Nor is anyone kept there: a teleport aimed from it at the lookout's track lands on it.
+        let (lookout, _, _) = trail::frame(trail::VIEWPOINTS[1].2);
+        let track = Vec3::new(lookout.x, trail::HEIGHT, lookout.y);
+        let landing = profile
+            .landing(&Ray::new(eyes, track - eyes).unwrap())
+            .unwrap();
+        assert!(landing.distance(track) < 1e-3, "{landing}");
+        for pair in profile.pads() {
+            for pad in pair {
+                assert!(pad.centre().distance(top) > 5.0);
+            }
+        }
+        // From the lookout, the rock's side or top is within reach, and the ray to it crosses no surface before it;
+        // and from the rock, the seat's.
+        let lookout = track.with_y(1.6);
+        for (from, target) in trail::targets()
+            .into_iter()
+            .zip([lookout, eyes])
+            .map(|(target, from)| (from, target))
+        {
+            let to = target.foot + Vec3::Y * target.height * 0.6;
+            assert!(
+                Vec2::new(to.x - from.x, to.z - from.z).length()
+                    < tomori_scene::locomotion::REACH - 2.0
+            );
+            let ray = Ray::new(from, to - from).unwrap();
+            let crossed = (trail::HEIGHT - from.y) / ray.direction.y;
+            if crossed > 0.0 && crossed < from.distance(to) {
+                assert!(!walkable(ray.at(crossed)), "{from} {to}");
+            }
         }
     }
 }

@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 5)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 6)]);
 /// ```
 pub fn builder() -> Builder {
     let farmyard = Environment::new(
@@ -47,8 +47,8 @@ pub fn builder() -> Builder {
     tomori_environment_github_server::register(builder)
 }
 
-/// The farmyard's solids: the yard's, the posts and seat along its trail, and the backdrop's plants and pines beside
-/// the trail, so that the agent coming to someone on it swings clear of them.
+/// The farmyard's solids: the yard's, the posts and seat along its trail, the waterfall rock, and the backdrop's plants
+/// and pines beside the trail and the rock, so that the agent coming to someone there swings clear of them.
 pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
     use tomori_environment_farmyard::{layout, trail};
     let mut solids = layout::solids();
@@ -57,9 +57,10 @@ pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
     solids
 }
 
-/// The farmyard trail's named anchors: its viewpoints, `riverbank` and `pool-lookout`, of kind `viewpoint`, and its
-/// exercise stations, `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent
-/// can suggest a walk, go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
+/// The farmyard trail's named anchors: its viewpoints, `riverbank`, `pool-lookout` and `waterfall-rock`, beside the rock
+/// in the pool that participants teleport onto from the lookout, of kind `viewpoint`, and its exercise stations,
+/// `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent can suggest a walk,
+/// go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
 /// A station's anchor stands beside its clearing, opposite its post, facing the clearing, and tells the agent of whoever
 /// comes within `trail::STATION_RADIUS` of it, `notify_within`, its clearing and the trail beside it, but not where
 /// participants arrive, the gate or a pad. See `tomori-environment-farmyard`'s `context/trail.md`.
@@ -144,7 +145,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 5)
+                ("farmyard", "Farmyard", 6)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
@@ -245,6 +246,11 @@ mod tests {
             [
                 ("riverbank", Some("viewpoint"), Some("The riverbank")),
                 ("pool-lookout", Some("viewpoint"), Some("The pool lookout")),
+                (
+                    "waterfall-rock",
+                    Some("viewpoint"),
+                    Some("The waterfall rock")
+                ),
                 ("station-1", Some("station"), Some("10 squats")),
                 (
                     "station-2",
@@ -268,21 +274,24 @@ mod tests {
             .map(|anchor| anchor.notify_within)
             .collect();
         let radius = Some(trail::STATION_RADIUS);
-        assert_eq!(told, [None, None, radius, radius, radius, radius, radius]);
-        // Every one is sent to a space: well within reach of home, where participants arrive, on each axis however the
-        // arrival turns them, facing level, above the trail.
-        let arrival = layout::ARRIVAL;
+        assert_eq!(
+            told,
+            [None, None, None, radius, radius, radius, radius, radius]
+        );
+        // Every one is sent to a space: within reach of home, where participants arrive, on each axis as the arrival
+        // carries it, the waterfall rock's furthest, and above the trail.
+        let carriage = tomori_protocol::Pose::carriage(&super::farmyard_arrival());
         for anchor in farmyard.anchors() {
-            let at = glam::Vec3::from_array(anchor.pose.position);
+            let carried = carriage.carry(&anchor.pose);
             assert!(
-                glam::Vec2::new(at.x - arrival.x, at.z - arrival.z).length() < 18.0,
-                "{anchor:?}"
+                carried.position.iter().all(|axis| axis.abs() < 19.5),
+                "{anchor:?} {carried:?}"
             );
-            assert!(at.y >= 1.4, "{anchor:?}");
+            assert!(anchor.pose.position[1] >= 1.4, "{anchor:?}");
         }
-        // Its solids are the yard's, the trail's posts and seat and the plants and pines beside it, which the agent and
-        // the panels keep clear of; and one to eighteen workers placed at any of the trail's anchors stand in its
-        // cluster clear of them, above the trail.
+        // Its solids are the yard's, the trail's posts and seat, the waterfall rock and the plants and pines beside them,
+        // which the agent and the panels keep clear of; and one to eighteen workers placed at any of the trail's anchors
+        // stand in its cluster clear of them, above the trail.
         assert_eq!(farmyard.solids(), super::farmyard_solids());
         assert_eq!(
             farmyard.solids().len(),

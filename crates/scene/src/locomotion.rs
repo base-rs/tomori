@@ -46,6 +46,10 @@ pub const WIDEST_PAD: f32 = 2.0;
 pub const LONGEST_NAME: usize = 24;
 /// The most pairs of pads a profile uses: those declared after them are ignored.
 pub const MOST_PAIRS: usize = 8;
+/// The most teleport targets a profile uses: those declared after them are ignored.
+pub const MOST_TARGETS: usize = 8;
+/// The tallest a teleport target may be, in metres: a taller one is ignored.
+pub const TALLEST_TARGET: f32 = 4.0;
 /// The most steps [`Surface::sector_triangles`] cuts a sector's sweep into.
 pub const MOST_SEGMENTS: usize = 1024;
 
@@ -487,6 +491,145 @@ impl Pad {
     }
 }
 
+/// A teleport target: an object of the environment's own, such as a rock to stand on, that takes a participant who
+/// points at it and chooses it to where it says, as a pad's partner does, and never by stepping onto it. The ray points
+/// at it where it meets the upright cylinder about its foot, as wide and as tall as it says, which the environment
+/// draws; Tomori draws only, while it is pointed at, the ring where the participant will stand. A participant arrives on
+/// its top's middle unless it says elsewhere, and may say which way they face and its name, which the label beside it
+/// shows. Its top is a floor for whoever it takes there, not a surface a teleport lands on, so that it is reached only by
+/// pointing at it; two targets, one at each end, make a way there and back. See `design/locomotion.md`.
+///
+/// ```
+/// use glam::{Vec2, Vec3};
+/// use tomori_scene::locomotion::{Locomotion, Surface, Target};
+///
+/// let shore = Surface::rectangle(Vec3::ZERO, Vec2::new(10.0, 10.0));
+/// let rock = Target::object(Vec3::new(0.0, -0.8, -9.0), 0.9, 1.1)
+///     .named("Rock")
+///     .facing(Vec3::NEG_Z);
+/// let back = Target::object(Vec3::new(1.0, 0.0, -1.0), 0.3, 1.0).arriving(Vec3::new(0.0, 0.0, -1.0));
+/// let profile = Locomotion::teleport(vec![shore]).with_targets([rock, back]);
+/// assert_eq!(profile.targets().count(), 2);
+/// assert_eq!(profile.targets().next().unwrap().arrival(), Vec3::new(0.0, 0.3, -9.0));
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    foot: Vec3,
+    radius: f32,
+    height: f32,
+    arrival: Vec3,
+    /// Which way a participant arriving faces, as a turn about the vertical from −Z, as [`Rig`] turns, or `None` for the
+    /// way they faced.
+    yaw: Option<f32>,
+    name: Option<std::sync::Arc<str>>,
+}
+
+impl Target {
+    /// An object standing on `foot`, the middle of its base, pointed at within `radius` of its upright axis and up to
+    /// `height` above its foot, on whose top's middle a participant arrives, facing the way they faced, unnamed.
+    pub fn object(foot: Vec3, radius: f32, height: f32) -> Self {
+        Self {
+            foot,
+            radius: radius.abs(),
+            height,
+            arrival: foot + Vec3::Y * height,
+            yaw: None,
+            name: None,
+        }
+    }
+
+    /// The target, where a participant arrives at `arrival` instead, the room's floor at its height: on a declared
+    /// surface, or still on its top.
+    pub fn arriving(mut self, arrival: Vec3) -> Self {
+        self.arrival = arrival;
+        self
+    }
+
+    /// The target, where a participant arriving faces `direction`, horizontally, as a pad's does.
+    pub fn facing(mut self, direction: Vec3) -> Self {
+        self.yaw = Pad::at(Vec3::ZERO).facing(direction).yaw;
+        self
+    }
+
+    /// The target, called `name`, which the label beside it shows, kept as a pad's name is.
+    pub fn named(mut self, name: impl AsRef<str>) -> Self {
+        self.name = Pad::at(Vec3::ZERO).named(name).name;
+        self
+    }
+
+    /// The middle of its base.
+    pub fn foot(&self) -> Vec3 {
+        self.foot
+    }
+
+    /// How far from its axis it is pointed at.
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// How tall it is from its foot.
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+
+    /// Where a participant arrives, the room's floor at its height.
+    pub fn arrival(&self) -> Vec3 {
+        self.arrival
+    }
+
+    /// Which way a participant arriving faces, as a turn about the vertical from −Z, if it says.
+    pub fn yaw(&self) -> Option<f32> {
+        self.yaw
+    }
+
+    /// What it is called, if anything.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Whether `point`, seen from above, is within its radius of its axis.
+    pub fn over(&self, point: Vec3) -> bool {
+        Vec2::new(point.x - self.foot.x, point.z - self.foot.z).length() <= self.radius
+    }
+
+    /// Whether its arrival is on its own top: at its height, within a centimetre, and within its radius.
+    pub fn arrives_on_top(&self) -> bool {
+        (self.arrival.y - (self.foot.y + self.height)).abs() <= STANDING && self.over(self.arrival)
+    }
+
+    /// The target, declared in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
+    /// turned with it, its axis still upright.
+    pub fn carried(&self, carriage: &crate::anchors::Anchor) -> Self {
+        Self {
+            foot: carriage.place(self.foot),
+            arrival: carriage.place(self.arrival),
+            yaw: self.yaw.map(|yaw| yaw + carriage.yaw()),
+            ..self.clone()
+        }
+    }
+
+    /// Whether a participant may be taken to it: finite, no wider than [`WIDEST_PAD`] from its axis, no taller than
+    /// [`TALLEST_TARGET`], it and its arrival within [`crate::anchors::REACH`] of home on each axis, and arriving on its
+    /// own top or on one of `surfaces`, so that whoever arrives stands on a floor.
+    fn usable(&self, surfaces: &[Surface]) -> bool {
+        let within =
+            |point: Vec3| point.is_finite() && point.abs().max_element() <= crate::anchors::REACH;
+        within(self.foot)
+            && within(self.foot + Vec3::Y * self.height)
+            && within(self.arrival)
+            && self.radius > 0.0
+            && self.radius <= WIDEST_PAD
+            && self.height > 0.0
+            && self.height <= TALLEST_TARGET
+            && self.yaw.is_none_or(f32::is_finite)
+            && (self.arrives_on_top()
+                || surfaces.iter().any(|surface| {
+                    (surface.height() - self.arrival.y).abs() <= STANDING
+                        && surface.contains(self.arrival)
+                }))
+    }
+}
+
 /// How an environment lets its participants travel beyond the room. Made with [`Locomotion::teleport`] and [`Locomotion::fly`], and given pairs of teleport pads with [`Locomotion::with_pads`], so that it can grow, as with a fly speed, without breaking; a variant's fields cannot be given directly outside this crate:
 ///
 /// ```compile_fail
@@ -498,20 +641,22 @@ pub enum Locomotion {
     /// Room scale, as before: no artificial travel.
     #[default]
     None,
-    /// Teleport onto the walkable `surfaces`, and turn in snaps, and between each pair of `pads`. Made with
-    /// [`Locomotion::teleport`].
+    /// Teleport onto the walkable `surfaces`, and turn in snaps, between each pair of `pads`, and to each of `targets`.
+    /// Made with [`Locomotion::teleport`].
     #[non_exhaustive]
     Teleport {
         surfaces: Vec<Surface>,
         pads: Vec<[Pad; 2]>,
+        targets: Vec<Target>,
     },
-    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes, and between each
-    /// pair of `pads`. Made with [`Locomotion::fly`].
+    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes, between each pair
+    /// of `pads`, and to each of `targets`. Made with [`Locomotion::fly`].
     #[non_exhaustive]
     Fly {
         surfaces: Vec<Surface>,
         ceiling: f32,
         pads: Vec<[Pad; 2]>,
+        targets: Vec<Target>,
     },
 }
 
@@ -521,6 +666,7 @@ impl Locomotion {
         Self::Teleport {
             surfaces,
             pads: Vec::new(),
+            targets: Vec::new(),
         }
     }
 
@@ -530,6 +676,7 @@ impl Locomotion {
             surfaces,
             ceiling,
             pads: Vec::new(),
+            targets: Vec::new(),
         }
     }
 
@@ -549,13 +696,42 @@ impl Locomotion {
     pub fn pads(&self) -> impl Iterator<Item = &[Pad; 2]> {
         let (surfaces, pads): (&[Surface], &[[Pad; 2]]) = match self {
             Self::None => (&[], &[]),
-            Self::Teleport { surfaces, pads } | Self::Fly { surfaces, pads, .. } => {
+            Self::Teleport { surfaces, pads, .. } | Self::Fly { surfaces, pads, .. } => {
                 (surfaces, pads)
             }
         };
         pads.iter()
             .filter(move |pair| pair.iter().all(|pad| pad.usable(surfaces)))
             .take(MOST_PAIRS)
+    }
+
+    /// The profile, with `targets` as well, each taking a participant who points at it and chooses it there. A profile
+    /// of none has no targets, since nothing travels there. Only the first [`MOST_TARGETS`] of those that may be used
+    /// are, as [`Self::targets`] gives them.
+    pub fn with_targets(mut self, more: impl IntoIterator<Item = Target>) -> Self {
+        if let Self::Teleport { targets, .. } | Self::Fly { targets, .. } = &mut self {
+            targets.extend(more);
+        }
+        self
+    }
+
+    /// The teleport targets a participant may use: the first [`MOST_TARGETS`] of those declared that are finite, no
+    /// wider than [`WIDEST_PAD`], no taller than [`TALLEST_TARGET`], within [`crate::anchors::REACH`] of home on each
+    /// axis and arriving on their own top or on a declared surface.
+    pub fn targets(&self) -> impl Iterator<Item = &Target> {
+        let (surfaces, targets): (&[Surface], &[Target]) = match self {
+            Self::None => (&[], &[]),
+            Self::Teleport {
+                surfaces, targets, ..
+            }
+            | Self::Fly {
+                surfaces, targets, ..
+            } => (surfaces, targets),
+        };
+        targets
+            .iter()
+            .filter(move |target| target.usable(surfaces))
+            .take(MOST_TARGETS)
     }
 
     /// Whether the participant travels at all.
@@ -590,16 +766,29 @@ impl Locomotion {
                 .map(|pair| pair.each_ref().map(|pad| pad.carried(carriage)))
                 .collect()
         };
+        let aims = |targets: &[Target]| -> Vec<Target> {
+            targets
+                .iter()
+                .map(|target| target.carried(carriage))
+                .collect()
+        };
         match self {
             Self::None => Self::None,
-            Self::Teleport { surfaces, pads } => {
-                Self::teleport(carry(surfaces)).with_pads(pairs(pads))
-            }
+            Self::Teleport {
+                surfaces,
+                pads,
+                targets,
+            } => Self::teleport(carry(surfaces))
+                .with_pads(pairs(pads))
+                .with_targets(aims(targets)),
             Self::Fly {
                 surfaces,
                 ceiling,
                 pads,
-            } => Self::fly(carry(surfaces), ceiling + carriage.position.y).with_pads(pairs(pads)),
+                targets,
+            } => Self::fly(carry(surfaces), ceiling + carriage.position.y)
+                .with_pads(pairs(pads))
+                .with_targets(aims(targets)),
         }
     }
 
@@ -773,9 +962,9 @@ pub(crate) struct Input<'a> {
     pub facing: Option<Vec3>,
     /// Nothing else takes the stick and the ray: in a space, focused, neither the hand menu nor the transcript showing, and no card carried. A panel carried does not stop travel, which carries it along.
     pub active: bool,
-    /// The teleport pad the participant chose with the ray this frame, if any, as `crate::pads` keys it among the
-    /// profile's pairs.
-    pub chosen: Option<crate::pads::Key>,
+    /// The teleport pad or target the participant chose with the ray this frame, if any, as `crate::pads` keys it
+    /// among the profile's.
+    pub chosen: Option<crate::pads::Way>,
     /// Seconds since the last frame.
     pub dt: f32,
 }
@@ -875,20 +1064,26 @@ impl Travel {
             };
         }
         // A teleport pad stepped on for long enough, or chosen with the ray, takes the participant to the pad paired with
-        // it, as the frame's poses were placed, before the stick moves anything, and nothing else moves them this frame.
+        // it, and a target chosen with the ray to itself, as the frame's poses were placed, before the stick moves
+        // anything, and nothing else moves them this frame.
         let pairs: Vec<&[Pad; 2]> = input.locomotion.pads().collect();
         let stepped = self
             .stepping
-            .update(&pairs, input.head, self.rig.floor(), dt);
-        if let (Some(key), Some(head)) = (input.chosen.or(stepped), input.head)
-            && let Some(partner) = crate::pads::lookup(&pairs, key.partner())
+            .update(&pairs, input.head, self.rig.floor(), dt)
+            .map(crate::pads::Way::Pad);
+        if let (Some(way), Some(head)) = (input.chosen.or(stepped), input.head)
+            && let Some((arrival, yaw)) = crate::pads::destination(input.locomotion, way)
         {
-            self.rig.teleport(partner.centre(), head);
-            if let (Some(yaw), Some(facing)) = (partner.yaw(), input.facing) {
+            self.rig.teleport(arrival, head);
+            if let (Some(yaw), Some(facing)) = (yaw, input.facing) {
                 let faced = (-facing.x).atan2(-facing.z);
-                self.rig.turn(yaw - faced, partner.centre().with_y(head.y));
+                self.rig.turn(yaw - faced, arrival.with_y(head.y));
             }
-            self.stepping.arrive(key.partner());
+            // The pad arrived on is disarmed until stepped off; a target's arrival disarms whatever pad it is on.
+            match way {
+                crate::pads::Way::Pad(key) => self.stepping.arrive(key.partner()),
+                crate::pads::Way::Target(_) => self.stepping.pause(),
+            }
             self.cancel();
             self.blink = 1.0;
             return Outcome {
@@ -2417,7 +2612,7 @@ mod tests {
     #[test]
     fn a_pad_chosen_with_the_ray_takes_the_participant_from_anywhere_while_travel_is_active() {
         let storeys = storeys();
-        let racks = crate::pads::Key { pair: 0, end: 1 };
+        let racks = crate::pads::Way::Pad(crate::pads::Key { pair: 0, end: 1 });
         let mut travel = Travel::default();
         let away = HEAD + Vec3::new(-3.0, 0.0, 2.0);
         let chose = |chosen, active: bool, head: Option<Vec3>| Input {
@@ -2430,7 +2625,11 @@ mod tests {
         for nowhere in [
             chose(Some(racks), false, Some(away)),
             chose(Some(racks), true, None),
-            chose(Some(crate::pads::Key { pair: 3, end: 0 }), true, Some(away)),
+            chose(
+                Some(crate::pads::Way::Pad(crate::pads::Key { pair: 3, end: 0 })),
+                true,
+                Some(away),
+            ),
         ] {
             assert!(!travel.update(nowhere).transported);
         }
@@ -2449,7 +2648,7 @@ mod tests {
         let aim = Some(ray(head, Vec3::new(2.0, 0.0, -3.0)));
         travel.update(input(&storeys, Vec2::Y, aim));
         travel.update(Input {
-            chosen: Some(crate::pads::Key { pair: 0, end: 0 }),
+            chosen: Some(crate::pads::Way::Pad(crate::pads::Key { pair: 0, end: 0 })),
             ..input(&storeys, Vec2::Y, aim)
         });
         assert!(!travel.update(input(&storeys, Vec2::ZERO, aim)).teleported);
@@ -2510,5 +2709,156 @@ mod tests {
             pad.name().unwrap().as_ptr(),
             carried.name().unwrap().as_ptr()
         ));
+    }
+
+    /// A shore at the floor's height and a rock standing in the water beyond it, flat on top, 0.4 m above the shore.
+    fn rock() -> Target {
+        Target::object(Vec3::new(0.0, -0.6, -6.0), 0.8, 1.0)
+            .named("Rock")
+            .facing(Vec3::NEG_Z)
+    }
+
+    fn shore() -> Vec<Surface> {
+        vec![Surface::rectangle(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec2::new(6.0, 6.0),
+        )]
+    }
+
+    #[test]
+    fn targets_are_declared_where_they_stand_and_may_say_more() {
+        let rock = rock();
+        assert_eq!(
+            (rock.foot(), rock.radius(), rock.height()),
+            (Vec3::new(0.0, -0.6, -6.0), 0.8, 1.0)
+        );
+        // Arriving on its top's middle, facing the way it says, called what it says.
+        assert!(rock.arrival().distance(Vec3::new(0.0, 0.4, -6.0)) < 1e-6);
+        assert!(rock.arrives_on_top());
+        assert_eq!(rock.yaw(), Some(0.0));
+        assert_eq!(rock.name(), Some("Rock"));
+        let plain = Target::object(Vec3::ZERO, -0.5, 1.0);
+        assert_eq!(
+            (plain.radius(), plain.yaw(), plain.name()),
+            (0.5, None, None)
+        );
+        assert_eq!(plain.clone().facing(Vec3::Y).yaw(), None);
+        assert_eq!(plain.clone().named("\n").name(), None);
+        assert!(plain.over(Vec3::new(0.4, 9.0, 0.2)) && !plain.over(Vec3::new(0.5, 0.0, 0.2)));
+        // Arriving elsewhere, on the floor beside it.
+        let beside = plain.arriving(Vec3::new(1.0, 0.0, 0.0));
+        assert!(!beside.arrives_on_top());
+        assert_eq!(beside.arrival(), Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn only_targets_that_arrive_on_a_floor_within_bounds_are_used() {
+        let used = |target: Target| {
+            Locomotion::teleport(shore())
+                .with_targets([target])
+                .targets()
+                .count()
+        };
+        assert_eq!(used(rock()), 1, "its own top is its floor");
+        assert_eq!(
+            used(
+                Target::object(Vec3::new(4.0, 0.0, 0.0), 0.3, 1.0)
+                    .arriving(Vec3::new(2.5, 0.0, 0.0))
+            ),
+            1,
+            "on the shore beside it"
+        );
+        for bad in [
+            Target::object(Vec3::new(4.0, 0.0, 0.0), 0.3, 1.0).arriving(Vec3::new(4.0, 0.0, 0.0)),
+            rock().arriving(Vec3::new(0.0, 0.4, -7.0)),
+            rock().arriving(Vec3::new(2.0, 0.2, 2.0)),
+            Target::object(Vec3::new(0.0, 0.0, -6.0), 2.1, 1.0),
+            Target::object(Vec3::new(0.0, 0.0, -6.0), 0.0, 1.0),
+            Target::object(Vec3::new(0.0, 0.0, -6.0), 0.5, 0.0),
+            Target::object(Vec3::new(0.0, 0.0, -6.0), 0.5, TALLEST_TARGET + 0.1),
+            Target::object(Vec3::new(0.0, 0.0, -6.0), f32::NAN, 1.0),
+            Target::object(Vec3::new(0.0, f32::INFINITY, -6.0), 0.5, 1.0),
+            Target::object(Vec3::new(0.0, 0.0, -21.0), 0.5, 1.0),
+            Target::object(Vec3::new(0.0, 19.5, -6.0), 0.5, 1.0),
+            rock().arriving(Vec3::new(0.0, 0.0, 21.0)),
+            Target {
+                yaw: Some(f32::NAN),
+                ..rock()
+            },
+        ] {
+            assert_eq!(used(bad.clone()), 0, "{bad:?}");
+        }
+        let many = Locomotion::fly(shore(), 5.0).with_targets((0..10).map(|_| rock()));
+        assert_eq!(many.targets().count(), MOST_TARGETS);
+        assert_eq!(Locomotion::None.with_targets([rock()]).targets().count(), 0);
+    }
+
+    #[test]
+    fn targets_are_carried_into_the_space_with_the_profile() {
+        let street = tomori_protocol::Pose::at([8.0, 0.5, 0.0]).facing_towards([0.0, 0.5, 0.0]);
+        let carriage = crate::anchors::Anchor::carriage(&street).unwrap();
+        for profile in [
+            Locomotion::teleport(shore()).with_targets([rock()]),
+            Locomotion::fly(shore(), 4.0).with_targets([rock()]),
+        ] {
+            let carried = profile.carried(&carriage);
+            let target = carried.targets().next().expect("still on its own top");
+            assert!(target.foot().distance(carriage.place(rock().foot())) < 1e-5);
+            assert!(target.arrival().distance(carriage.place(rock().arrival())) < 1e-5);
+            assert!((target.yaw().unwrap() - carriage.yaw()).abs() < 1e-5);
+            assert_eq!((target.radius(), target.height()), (0.8, 1.0));
+        }
+    }
+
+    #[test]
+    fn a_target_chosen_with_the_ray_takes_the_participant_onto_it_facing_as_it_says() {
+        let profile = Locomotion::teleport(shore()).with_targets([
+            rock(),
+            Target::object(Vec3::new(2.8, 0.0, 0.0), 0.2, 1.0).arriving(Vec3::new(2.0, 0.0, 0.0)),
+        ]);
+        let mut travel = Travel::default();
+        let away = HEAD + Vec3::new(1.0, 0.0, 1.0);
+        let chose = |chosen| Input {
+            chosen,
+            head: Some(away),
+            facing: Some(Vec3::X),
+            ..input(&profile, Vec2::ZERO, None)
+        };
+        // A target not among the profile's takes them nowhere.
+        assert!(
+            !travel
+                .update(chose(Some(crate::pads::Way::Target(2))))
+                .transported
+        );
+        let outcome = travel.update(chose(Some(crate::pads::Way::Target(0))));
+        assert!(outcome.transported && outcome.blink == 1.0);
+        let rig = travel.rig();
+        assert!((rig.floor() - 0.4).abs() < 1e-5);
+        let head = rig.matrix().transform_point3(away);
+        assert!(close(head, Vec3::new(0.0, away.y + 0.4, -6.0)), "{head}");
+        assert!(close(rig.matrix().transform_vector3(Vec3::X), Vec3::NEG_Z));
+        // On its top, nothing is a surface to step back along, so a push back steps nowhere.
+        let back = |stick| Input {
+            head: Some(head),
+            facing: Some(Vec3::NEG_Z),
+            ..input(&profile, stick, None)
+        };
+        travel.update(back(Vec2::new(0.0, -1.0)));
+        assert!(!travel.update(back(Vec2::ZERO)).stepped);
+        // The other takes them back to the shore beside it, facing as they faced.
+        let outcome = travel.update(Input {
+            chosen: Some(crate::pads::Way::Target(1)),
+            head: Some(head),
+            facing: Some(Vec3::NEG_Z),
+            ..input(&profile, Vec2::ZERO, None)
+        });
+        assert!(outcome.transported);
+        let rig = travel.rig();
+        assert_eq!(rig.floor(), 0.0);
+        assert!(close(
+            rig.matrix().transform_point3(away),
+            Vec3::new(2.0, away.y, 0.0)
+        ));
+        assert!(close(rig.matrix().transform_vector3(Vec3::X), Vec3::NEG_Z));
     }
 }
