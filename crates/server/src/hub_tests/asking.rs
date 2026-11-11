@@ -78,7 +78,12 @@ fn a_reply_to_a_sub_agent_s_report_puts_its_panels_beside_whoever_spoke_last_whe
     // Talking with Bob now, the agent's next report's panels go beside him, where he stands.
     let (his, ahead_of_him) = ([4.0, 1.6, -6.0], [10.0, 1.6, -6.0]);
     bob.send(looking(his, ahead_of_him));
-    hub.lock().space_mut(&space).unwrap().following.partner = Some(key_of(&hub, "bob"));
+    let bob_key = key_of(&hub, "bob");
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .talk_with(&bob_key, Instant::now());
     reported(&hub, &space);
     reply(
         &hub,
@@ -87,16 +92,35 @@ fn a_reply_to_a_sub_agent_s_report_puts_its_panels_beside_whoever_spoke_last_whe
         "```panel\ntitle: For Bob\nplace: beside\n---\nHis.\n```",
     );
     assert!(beside(his, ahead_of_him, &floating(&bob, "For Bob"), 30.0));
-    // Once he has left, beside whoever spoke last, Ada, again.
-    bob.send(ClientMessage::Leave);
+    // Ten minutes after it last talked with him, beside whoever spoke last, Ada, again, as it goes to nobody.
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .talked_ago(crate::hub::following::TALKED);
     reported(&hub, &space);
     reply(
         &hub,
         &space,
         "m4",
+        "```panel\ntitle: Stale\nplace: beside\n---\nHers.\n```",
+    );
+    assert!(beside(eyes, ahead, &floating(&ada, "Stale"), 70.0));
+    // Once he has left, beside whoever spoke last, Ada, again.
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .talk_with(&bob_key, Instant::now());
+    bob.send(ClientMessage::Leave);
+    reported(&hub, &space);
+    reply(
+        &hub,
+        &space,
+        "m5",
         "```panel\ntitle: Last\nplace: beside\n---\nHers.\n```",
     );
-    assert!(beside(eyes, ahead, &floating(&ada, "Last"), 70.0));
+    assert!(beside(eyes, ahead, &floating(&ada, "Last"), -70.0));
 }
 
 #[test]

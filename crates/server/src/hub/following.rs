@@ -8,8 +8,9 @@
 //! conversation has been quiet for the space's delay. Through its partner's exchange with it, as they speak, while it
 //! thinks and while it replies, it keeps with them: it turns to them as they move and, once they settle more than
 //! [`follow::NEAR`] away, follows them on; a reply to Tomori's notes about someone, as they come near an anchor, is an
-//! exchange with them. Walking with someone, as they ask, it keeps with them throughout, until they ask otherwise,
-//! leave or [`WALK_IDLE`] passes with nothing between them. A pin, from **Call Tomori here** or `move_agent stay`, keeps
+//! exchange with them, and a reply aloud to nobody's words, as to a sub-agent's report, is one with its partner, while
+//! they talked with it within [`TALKED`]. Walking with someone, as they ask, it keeps with them throughout, until they
+//! ask otherwise, leave or [`WALK_IDLE`] passes with nothing between them. A pin, from **Call Tomori here** or `move_agent stay`, keeps
 //! it where it is. Everything here is for this run only. See `design/environments.md`.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -44,6 +45,12 @@ pub(crate) const EMPTY: Duration = Duration::from_secs(30 * 60);
 /// How long the agent walks with someone with nothing between them, neither of them speaking nor they moving, before
 /// it walks with them no more.
 pub(crate) const WALK_IDLE: Duration = Duration::from_secs(30 * 60);
+
+/// How lately the agent's partner must have been in conversation with it to be whom it talks with still: they spoke to
+/// it, it went to them for their words, a note about them or a walk, they called it, or its reply to them sounded. A
+/// reply to nobody's words, as after a worker's report or a timer, spoken aloud, goes to them within it, and its panels
+/// go beside them; later, it speaks from where it is, and does not make them its partner for longer.
+pub(crate) const TALKED: Duration = Duration::from_secs(10 * 60);
 
 /// How often, while it is away from home, whether to go home is checked.
 pub(crate) const POLL: Duration = Duration::from_secs(1);
@@ -171,6 +178,8 @@ pub(crate) struct Following {
     captured: HashMap<String, Captured>,
     /// The participant it talks with now, or last did.
     pub(super) partner: Option<String>,
+    /// When it was last in conversation with its partner, for [`TALKED`].
+    talked: Option<Instant>,
     /// When it last went somewhere for someone, and for whom.
     moved: Option<(Instant, String)>,
     /// Who spoke to it lately, and when.
@@ -206,6 +215,9 @@ pub(crate) struct Following {
     /// The participant whose words it was last given, until its reply to them is over: its turn ended and its speech
     /// heard.
     answering: Option<String>,
+    /// Whether its reply to [`answering`](Self::answering) answers nobody's words, spoken aloud to its partner: it
+    /// keeps with them through it, but it is no conversation of theirs, for [`TALKED`].
+    unprompted: bool,
     /// Whom it keeps with, while it does.
     keeping: Option<Keeping>,
     /// Whom it walks with, while it does: it keeps with them throughout, not only through their exchanges.
@@ -252,6 +264,9 @@ impl Following {
         self.speaking = Some(self.speaking.map_or(until, |was| was.max(until)));
         self.progressed = Some(now);
         self.walked(now);
+        if !self.unprompted && self.answering.is_some() && self.answering == self.partner {
+            self.talked = Some(now);
+        }
         // Its speech starting puts off its return, however short, between one check and the next.
         self.quiet = None;
     }
@@ -341,6 +356,18 @@ impl Following {
     /// The participant it talks with now, or last did, by their key.
     pub(super) fn partner(&self) -> Option<&str> {
         self.partner.as_deref()
+    }
+
+    /// It is in conversation with `participant` at `now`, as they called it or it went to them: they are its partner.
+    pub(super) fn talk_with(&mut self, participant: &str, now: Instant) {
+        self.partner = Some(participant.to_owned());
+        self.talked = Some(now);
+    }
+
+    /// Its partner was last in conversation with it `by` earlier, for tests of a partner from long ago.
+    #[cfg(test)]
+    pub(super) fn talked_ago(&mut self, by: Duration) {
+        self.talked = self.talked.map(|talked| talked - by);
     }
 
     /// The participant it walks with, by their key, while it does.
@@ -617,7 +644,10 @@ impl Hub {
     /// The agent of `space` queued speech at `now`, as its turn's text came: if Tomori's notes about a participant prompted
     /// its turn, as when they came near an anchor, its reply is an exchange with them, so it goes to them and keeps with
     /// them through it, as though they had spoken to it, where it follows the speaker, unpinned, and walks with nobody
-    /// else. A turn with no speech in it moves nothing. See `design/environments.md`.
+    /// else; otherwise, where nobody's words prompted it, as a worker's report, a timer or a message from outside
+    /// Tomori, it is an exchange with whom it talks with, as [`HubState::talks_with`] finds them, by the same rules,
+    /// where it walks with nobody, and, with nobody, it speaks from where it is. A turn with no speech in it moves
+    /// nothing. See `design/environments.md`.
     pub(super) fn agent_voiced(&self, state: &mut HubState, space: &str, now: Instant) {
         let record = state.space(space).expect("the caller found it");
         let following = &record.following;
@@ -637,11 +667,13 @@ impl Hub {
             self.capture(state, space, &who)
                 .map(|captured| (who, captured))
         }) else {
+            self.partner_voiced(state, space, now);
             return;
         };
         let others = self.huddled(state, space, &who, &captured, now);
         let following = &mut state.space_mut(space).expect("found above").following;
         following.answering = Some(who.clone());
+        following.unprompted = false;
         state.go_to(
             space,
             &who,
@@ -649,6 +681,40 @@ impl Hub {
             others,
             now,
             "it began answering a note about them",
+        );
+    }
+
+    /// The agent of `space` queued speech at `now` in a turn nobody's words prompted, nor a note about anyone it goes
+    /// to: it goes to whom it talks with, and keeps with them through its reply, as [`agent_voiced`](Self::agent_voiced)
+    /// says, unless it keeps with someone already.
+    fn partner_voiced(&self, state: &mut HubState, space: &str, now: Instant) {
+        let record = state.space(space).expect("the caller found it");
+        let following = &record.following;
+        if record.model.asked().answering
+            || record.model.movement().mode != Movement::Follow
+            || following.pinned
+            || following.walking.is_some()
+            || state.keeps_with(space, now).is_some()
+        {
+            return;
+        }
+        let Some((who, captured)) = state.talks_with(space, now).and_then(|who| {
+            self.capture(state, space, &who)
+                .map(|captured| (who, captured))
+        }) else {
+            return;
+        };
+        let others = self.huddled(state, space, &who, &captured, now);
+        let following = &mut state.space_mut(space).expect("found above").following;
+        following.answering = Some(who.clone());
+        following.unprompted = true;
+        state.go_to(
+            space,
+            &who,
+            &captured,
+            others,
+            now,
+            "it began speaking to them, whom it talks with",
         );
     }
 
@@ -747,7 +813,7 @@ impl Hub {
             .space_mut(space)
             .expect("found above")
             .following
-            .partner = Some(participant.to_owned());
+            .talk_with(participant, now);
         log::info!("{name} called the agent of space {space} to them, where it stays.");
         Ok(())
     }
@@ -949,6 +1015,9 @@ impl HubState {
         if record.following.walks_with() == Some(participant) {
             record.following.walked(now);
         }
+        if record.following.partner() == Some(participant) {
+            record.following.talked = Some(now);
+        }
         let mode = record.model.movement().mode;
         if mode != Movement::Follow && !(mode == Movement::Asked && record.following.pinned) {
             return;
@@ -1092,6 +1161,7 @@ impl HubState {
             following.tapped.retain(|who| *who != participant);
             // It keeps with them while it thinks and replies, unless their press was a tap.
             following.answering = (!tapped).then(|| participant.clone());
+            following.unprompted = false;
             if !tapped {
                 self.follow(space, &participant, now, "it began answering them");
             }
@@ -1154,6 +1224,10 @@ impl HubState {
         let speaker = captured.speaker;
         let eyes = speaker.head.position;
         let scene = &captured.scene;
+        // Keeping with them through a reply to nobody's words, it is no conversation of theirs.
+        if !(following.unprompted && following.answering.as_deref() == Some(participant)) {
+            following.talked = Some(now);
+        }
         following.partner = Some(participant.to_owned());
         following.keeping = Some(Keeping {
             who: participant.to_owned(),
@@ -1242,6 +1316,9 @@ impl HubState {
         };
         record.following = Following {
             homing,
+            // Home, it still knows whom it talks with.
+            partner: record.following.partner.take(),
+            talked: record.following.talked,
             captured: std::mem::take(&mut record.following.captured),
             spoken: std::mem::take(&mut record.following.spoken),
             holding: std::mem::take(&mut record.following.holding),
@@ -1413,6 +1490,29 @@ impl HubState {
             || record.following.speaking.is_some_and(|until| until > now)
     }
 
+    /// Whom the agent of `space` talks with at `now`, by their key, if anyone: its partner, the participant it was last
+    /// in conversation with, while they are in the space and have reported where they are, as a visitor never does, and
+    /// were in conversation with it within [`TALKED`]. A reply to nobody's words goes to them, and its panels beside
+    /// them. See `design/environments.md` and `design/projection.md`.
+    pub(crate) fn talks_with(&self, space: &str, now: Instant) -> Option<String> {
+        let record = self.space(space).expect("the caller found it");
+        let following = &record.following;
+        following
+            .partner
+            .as_ref()
+            .filter(|partner| {
+                following
+                    .talked
+                    .is_some_and(|talked| now.saturating_duration_since(talked) < TALKED)
+                    && record.model.participants.contains(*partner)
+                    && self
+                        .participants
+                        .get(*partner)
+                        .is_some_and(|participant| participant.seen.is_some())
+            })
+            .cloned()
+    }
+
     /// Whom the agent of `space` keeps with at `now`, if anyone: the partner it went to, or turned to, for their words,
     /// while they still speak to it, holding X past a tap or being transcribed, and while it thinks and replies to them,
     /// in a space whose agent follows the speaker and is not pinned. Never a visitor, nor anyone after it was sent
@@ -1491,6 +1591,7 @@ impl HubState {
         // Its reply over, it keeps with them no more, unless they speak to it again.
         if !replying {
             following.answering = None;
+            following.unprompted = false;
         }
         // A press held long enough commits.
         let committed = match &following.pending {

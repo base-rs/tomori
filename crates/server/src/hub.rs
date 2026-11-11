@@ -1604,11 +1604,16 @@ impl HubState {
         })
     }
 
-    /// Which participant of `space`, by their key, its agent acts for, as `asked` says: while its turn answers someone's
-    /// words, the speaker; while it answers nobody's, as after a sub-agent's report, a timer or a message from outside
-    /// Tomori, the participant it talks with, where they are here and have reported, or else whoever spoke last. None
-    /// once they have left. See `design/projection.md`.
-    pub(crate) fn asked_by(&self, space: &str, asked: &crate::space::Asked) -> Option<String> {
+    /// Which participant of `space`, by their key, its agent acts for at `now`, as `asked` says: while its turn answers
+    /// someone's words, the speaker; while it answers nobody's, as after a sub-agent's report, a timer or a message from
+    /// outside Tomori, whom it talks with, as [`Self::talks_with`] finds them, or else whoever spoke last. None once
+    /// they have left. See `design/projection.md`.
+    pub(crate) fn asked_by(
+        &self,
+        space: &str,
+        asked: &crate::space::Asked,
+        now: Instant,
+    ) -> Option<String> {
         let record = self.space(space).expect("the caller found it");
         let numbered = |source: u32| {
             record.model.participants.iter().find(|key| {
@@ -1617,15 +1622,10 @@ impl HubState {
                     .is_some_and(|participant| participant.source == source)
             })
         };
-        let partner = record.following.partner.as_ref().filter(|partner| {
-            !asked.answering
-                && record.model.participants.contains(*partner)
-                && self
-                    .participants
-                    .get(*partner)
-                    .is_some_and(|participant| participant.seen.is_some())
-        });
-        partner.or_else(|| asked.source.and_then(numbered)).cloned()
+        let partner = (!asked.answering)
+            .then(|| self.talks_with(space, now))
+            .flatten();
+        partner.or_else(|| asked.source.and_then(numbered).cloned())
     }
 
     /// Where the head of whoever the agent of `space` acts for at `now` is, as `asked` says who that is, by
@@ -1639,7 +1639,7 @@ impl HubState {
         now: Instant,
     ) -> Option<tomori_protocol::Pose> {
         let head = self
-            .asked_by(space, asked)
+            .asked_by(space, asked, now)
             .and_then(|key| self.participants.get(&key))
             .and_then(|participant| participant.seen.as_ref())
             .map(|seen| seen.head);

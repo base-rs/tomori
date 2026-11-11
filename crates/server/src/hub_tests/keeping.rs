@@ -10,7 +10,7 @@
 use super::following::{ADA, agent, cancel, following, heard, last_state, level, press, release};
 use super::*;
 use crate::follow::CONVERSATION;
-use crate::hub::following::{COMMIT, DWELL, RESTLESS, SETTLE};
+use crate::hub::following::{COMMIT, DWELL, POLL, RESTLESS, SETTLE, TALKED};
 
 /// Ada, held past a tap, asks the agent something, and the agent, gone to her, thinks about it: its turn is running.
 fn asked(hub: &Hub, ada: &Client, commands: &async_channel::Receiver<SpaceCommand>, space: &str) {
@@ -588,4 +588,164 @@ fn at_an_environment_s_follow_height_arrived_it_only_turns_to_presses_and_settle
         cancel(&ada, utterance);
         assert_eq!(agent(&hub, &space).0, Some(for_ada), "{utterance}");
     }
+}
+
+/// Ada, held past a tap, asks the agent something, and its reply to her is over: its turn ended, with no speech to come.
+fn answered(
+    hub: &Hub,
+    ada: &Client,
+    commands: &async_channel::Receiver<SpaceCommand>,
+    space: &str,
+) {
+    asked(hub, ada, commands, space);
+    hub.drive_event(space, Event::Idle);
+    hub.flush_snapshots(Instant::now() + POLL);
+}
+
+/// A sub-agent's report reaches the agent of `space`, not through Tomori, and it thinks about it.
+fn reported(hub: &Hub, space: &str) {
+    hub.drive_event(space, Event::Busy);
+    hub.drive_event(
+        space,
+        Event::Delivered {
+            key: "report".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_spoken_reply_to_a_worker_s_report_goes_to_whom_it_talks_with_and_keeps_with_them_through_it() {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    answered(&hub, &ada, &commands, &space);
+    let for_ada = agent(&hub, &space).0.expect("gone to Ada");
+    // She walks across the yard, her exchange with it over: it stays.
+    let far = [12.0, 1.6, 8.0];
+    stands(&ada, far, [12.0, 1.6, 0.0]);
+    hub.flush_snapshots(Instant::now() + SETTLE);
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    // A worker's report reaches it: thinking, it moves nothing.
+    reported(&hub, &space);
+    hub.flush_snapshots(Instant::now() + SETTLE * 2);
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    // Its reply's speech queued, it comes to her, 2 m from her, as though she had spoken to it.
+    hub.speech_queued(&space, 2);
+    let to_her = agent(&hub, &space).0.expect("followed");
+    assert!(
+        (level(to_her.position, far) - CONVERSATION).abs() < 1e-3,
+        "{to_her:?}"
+    );
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, Some(to_her));
+    // Its turn over, its voice still to come, it follows her on as she walks on.
+    hub.drive_event(&space, Event::Idle);
+    arrived(&hub, &space);
+    let on = [12.0, 1.6, 14.0];
+    stands(&ada, on, [12.0, 1.6, 20.0]);
+    hub.flush_snapshots(Instant::now() + SETTLE);
+    let on_her = agent(&hub, &space).0.expect("followed on");
+    assert!(
+        (level(on_her.position, on) - CONVERSATION).abs() < 1e-3,
+        "{on_her:?}"
+    );
+    // Its voice heard, it keeps with her no more.
+    for _ in 0..3 {
+        hub.speech_sent(&space);
+    }
+    arrived(&hub, &space);
+    hub.flush_snapshots(Instant::now() + POLL);
+    stands(&ada, [4.0, 1.6, 14.0], [4.0, 1.6, 20.0]);
+    hub.flush_snapshots(Instant::now() + POLL + SETTLE);
+    assert_eq!(agent(&hub, &space).0, Some(on_her));
+}
+
+#[test]
+fn home_it_still_speaks_to_whom_it_talks_with_but_not_once_they_spoke_long_ago_or_have_left() {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    stands(&bob, [-6.0, 1.6, 6.0], [0.0, 1.6, 0.0]);
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    answered(&hub, &ada, &commands, &space);
+    // Sent home, it still talks with Ada.
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    assert_eq!(agent(&hub, &space).0, None);
+    let far = [12.0, 1.6, 8.0];
+    stands(&ada, far, [12.0, 1.6, 0.0]);
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    let to_her = agent(&hub, &space).0.expect("gone to her");
+    assert!((level(to_her.position, far) - CONVERSATION).abs() < 1e-3);
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    // That reply was no conversation of hers: ten minutes after she last spoke to it, it speaks from home.
+    hub.lock()
+        .space_mut(&space)
+        .unwrap()
+        .following
+        .talked_ago(TALKED);
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, None);
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    // She speaks to it again, and leaves: it goes to nobody, nor to Bob, who never spoke to it.
+    press(&ada, "u2");
+    hub.flush_snapshots(Instant::now() + COMMIT);
+    release(&ada, "u2");
+    heard(&hub, "And this?");
+    sent(&hub, &commands, &space);
+    hub.drive_event(&space, Event::Idle);
+    assert!(agent(&hub, &space).0.is_some());
+    ada.send(ClientMessage::PlaceAgent { at: None });
+    ada.send(ClientMessage::Leave);
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, None);
+}
+
+#[test]
+fn a_reply_to_a_worker_s_report_moves_nothing_unspoken_pinned_walking_with_another_or_moving_only_when_asked()
+ {
+    let (hub, _jobs, space, commands, ada) = following(Some(90));
+    stands(&ada, ADA, [0.0, 1.6, -3.0]);
+    answered(&hub, &ada, &commands, &space);
+    let for_ada = agent(&hub, &space).0.expect("gone to Ada");
+    let far = [12.0, 1.6, 8.0];
+    stands(&ada, far, [12.0, 1.6, 0.0]);
+    // Saying nothing aloud, it moves nothing.
+    reported(&hub, &space);
+    reply(&hub, &space, "m1", "Noted.");
+    hub.drive_event(&space, Event::Idle);
+    hub.flush_snapshots(Instant::now() + POLL);
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    // Pinned, it stays.
+    ada.send(ClientMessage::PinAgent { pinned: true });
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, Some(for_ada));
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    // Walking with Bob, it stays with him.
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&space);
+    let his = [-3.0, 1.6, 0.0];
+    stands(&bob, his, [0.0, 1.6, 0.0]);
+    bob.send(ClientMessage::WalkAgent { walking: true });
+    let with_him = agent(&hub, &space).0.expect("walks with Bob");
+    arrived(&hub, &space);
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, Some(with_him));
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    bob.send(ClientMessage::WalkAgent { walking: false });
+    // Moving only when asked, it stays too.
+    ada.send(ClientMessage::SetAgentMovement {
+        movement: tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Asked, Some(90)),
+    });
+    reported(&hub, &space);
+    hub.speech_queued(&space, 1);
+    assert_eq!(agent(&hub, &space).0, Some(with_him));
 }

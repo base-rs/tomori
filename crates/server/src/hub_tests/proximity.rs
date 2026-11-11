@@ -384,7 +384,8 @@ fn a_note_s_reply_moves_nothing_without_speech_nor_for_a_timer_and_follows_whoev
     take(&hub, &space, &prompts[0]);
     hub.flush_snapshots(Instant::now() + Duration::from_secs(2));
     assert_eq!(summoned(&hub, &space), None);
-    // The timer fires: its reply to that is nobody's exchange, so its speech moves nothing.
+    // The timer fires: its reply to that is nobody's exchange, and it talks with nobody yet, so its speech moves
+    // nothing.
     hub.lock().space_mut(&space).unwrap().model.lapse();
     hub.tick_timers("2026-11-11T10:00:00Z".parse().unwrap());
     let prompts = handed(&commands);
@@ -468,4 +469,54 @@ fn a_note_s_reply_follows_nobody_who_has_left_nor_where_it_does_not_follow() {
     ada.send(ClientMessage::PinAgent { pinned: true });
     hub.speech_queued(&space, 1);
     assert_eq!(summoned(&hub, &space), None);
+}
+
+#[test]
+fn a_spoken_reply_to_a_timer_goes_to_whom_it_talks_with() {
+    use crate::hub::following::POLL;
+    let (hub, space, commands, _outlet, ada) = trail();
+    follows(&ada);
+    hourly(&hub, &ada);
+    ada.send(standing([6.0, 1.6, -6.0]));
+    hub.sweep_proximity(Instant::now());
+    // Its reply to a note about her coming near the station goes to her, and is over.
+    let near = [0.5, 1.6, -7.5];
+    ada.send(standing(near));
+    hub.sweep_proximity(Instant::now());
+    let prompts = handed(&commands);
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    hub.speech_queued(&space, 1);
+    let at = summoned(&hub, &space).expect("gone to her");
+    hub.speech_sent(&space);
+    hub.drive_event(&space, Event::Idle);
+    arrived(&hub, &space);
+    hub.flush_snapshots(Instant::now() + POLL);
+    // She walks off: it stays.
+    let off = [8.0, 1.6, 2.0];
+    ada.send(standing(off));
+    hub.flush_snapshots(Instant::now() + POLL + crate::hub::following::SETTLE);
+    assert_eq!(summoned(&hub, &space), Some(at));
+    // The timer fires, naming nobody: its spoken reply goes to her, whom it talks with.
+    hub.lock().space_mut(&space).unwrap().model.lapse();
+    hub.tick_timers("2026-11-11T10:00:00Z".parse().unwrap());
+    let prompts = handed(&commands);
+    let text = &prompts[0].text;
+    assert!(text.starts_with("[Timer \"status\""), "{text}");
+    hub.drive_event(
+        &space,
+        Event::Delivered {
+            key: prompts[0].key.clone(),
+        },
+    );
+    hub.speech_queued(&space, 1);
+    let to_her = summoned(&hub, &space).expect("gone to her");
+    assert!(
+        (level(to_her, off) - crate::follow::CONVERSATION).abs() < 1e-3,
+        "{to_her:?}"
+    );
 }
