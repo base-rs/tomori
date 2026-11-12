@@ -153,6 +153,7 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

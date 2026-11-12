@@ -373,6 +373,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

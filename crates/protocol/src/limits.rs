@@ -50,6 +50,17 @@ pub struct Limits {
     /// The most panels of one projection, on its walls and floating: [`PROJECTION_PANELS`].
     #[serde(default = "panels")]
     pub panels: u32,
+    /// The most volumes, panels with depth, of one projection that are sent their diagrams, and their nodes together:
+    /// none from a peer that says nothing of them, as an older one, which is sent each volume as its outline. Volumes
+    /// beyond these are sent as their outlines too. See `design/diagrams.md`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub volumes: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub nodes: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 fn frame_bytes() -> u32 {
@@ -86,6 +97,8 @@ impl Limits {
         slots: PROJECTION_SLOTS,
         floating: PROJECTION_FLOATING,
         panels: PROJECTION_PANELS,
+        volumes: 0,
+        nodes: 0,
     };
 
     /// The most any connection is bound by, which Tomori's server states in its `Welcome`, and its desktop window in its
@@ -99,6 +112,8 @@ impl Limits {
         slots: 10 * PROJECTION_SLOTS,
         floating: 10 * PROJECTION_FLOATING,
         panels: 10 * PROJECTION_SLOTS + 10 * PROJECTION_FLOATING,
+        volumes: 32,
+        nodes: 2048,
     };
 
     /// What a connection is bound by between a side stating `own` and a peer stating `peer`, `None` from an older peer,
@@ -124,6 +139,8 @@ impl Limits {
             slots: self.slots.min(other.slots),
             floating: self.floating.min(other.floating),
             panels: self.panels.min(other.panels),
+            volumes: self.volumes.min(other.volumes),
+            nodes: self.nodes.min(other.nodes),
         }
     }
 
@@ -148,6 +165,13 @@ impl Limits {
         self.panels = panels;
         self
     }
+
+    /// These limits, sent the diagrams of at most `volumes` volumes of `nodes` nodes together in one projection.
+    pub const fn with_volumes(mut self, volumes: u32, nodes: u32) -> Self {
+        self.volumes = volumes;
+        self.nodes = nodes;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +190,8 @@ mod tests {
                 slots: 78,
                 floating: 12,
                 panels: 90,
+                volumes: 0,
+                nodes: 0,
             }
         );
         let partial: Limits =
@@ -207,6 +233,8 @@ mod tests {
                 slots: 780,
                 floating: 120,
                 panels: 900,
+                volumes: 32,
+                nodes: 2048,
             }
         );
         assert_eq!(
@@ -230,6 +258,14 @@ mod tests {
         assert_eq!(Limits::negotiate(Limits::MOST, Some(headset)), headset);
         assert_eq!(Limits::negotiate(headset, Some(Limits::MOST)), headset);
         assert_eq!(Limits::negotiate(headset, None), Limits::TODAY);
+        // Volumes are sent only where both sides state them, the lesser of each, and are left out of the JSON at none.
+        let volumes = headset.with_volumes(16, 1024);
+        assert_eq!(Limits::negotiate(Limits::MOST, Some(volumes)), volumes);
+        assert_eq!(Limits::negotiate(Limits::MOST, Some(headset)).volumes, 0);
+        assert_eq!(
+            serde_json::to_value(Limits::TODAY.with_volumes(16, 1024)).unwrap()["volumes"],
+            16
+        );
     }
 
     #[test]
@@ -240,6 +276,8 @@ mod tests {
             slots: u32::MAX,
             floating: u32::MAX,
             panels: u32::MAX,
+            volumes: u32::MAX,
+            nodes: u32::MAX,
         };
         // Even a side that states as much is held to the most any connection takes.
         assert_eq!(Limits::negotiate(hostile, Some(hostile)), Limits::MOST);

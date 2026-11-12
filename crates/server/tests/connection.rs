@@ -174,6 +174,7 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

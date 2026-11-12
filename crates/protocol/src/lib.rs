@@ -12,6 +12,7 @@ mod cards;
 mod channel;
 pub mod chart;
 pub mod checklist;
+pub mod diagram;
 pub mod cluster;
 pub mod entourage;
 mod frame;

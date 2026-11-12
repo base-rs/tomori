@@ -625,6 +625,9 @@ struct ConnectionRecord {
     speech_held: bool,
     /// Whether the client said in Hello that it shows image panels, fetching their images. See `design/projection.md`.
     images: bool,
+    /// Whether the client said in Hello that it draws volumes, sent their diagrams within its limits. See
+    /// `design/diagrams.md`.
+    diagrams: bool,
     /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
     /// `design/projection.md`.
     patches: bool,
@@ -3392,6 +3395,7 @@ impl Hub {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 patches: false,
                 live_panels: false,
                 limits: Limits::TODAY,
@@ -3633,6 +3637,7 @@ impl Hub {
                 pairing_window,
                 speech_held,
                 images,
+                diagrams,
                 projection_patches,
                 live_panels,
                 limits,
@@ -3645,6 +3650,7 @@ impl Hub {
                     record.pairing_window = pairing_window;
                     record.speech_held = speech_held;
                     record.images = images;
+                    record.diagrams = diagrams;
                     record.patches = projection && projection_patches;
                     record.live_panels = record.patches && live_panels;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
@@ -7253,6 +7259,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7357,6 +7364,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7431,6 +7439,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7472,6 +7481,7 @@ mod tests {
                     pairing_window: false,
                     speech_held: false,
                     images: false,
+                    diagrams: false,
                     projection_patches: false,
                     live_panels: false,
                     limits: None,
@@ -7676,6 +7686,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
