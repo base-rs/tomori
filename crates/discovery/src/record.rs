@@ -127,7 +127,11 @@ fn fingerprint(value: Option<&str>) -> Option<String> {
 
 /// A decimal `u32` TXT value; anything else, such as a sign, a fraction or an empty value, is unknown rather than a guess.
 fn number(value: Option<&str>) -> Option<u32> {
-    value.and_then(|value| value.trim().parse().ok())
+    // `u32`'s parser takes a leading `+`, which is a sign too.
+    value
+        .map(str::trim)
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse().ok())
 }
 
 /// `name` cut to at most `limit` bytes on a character boundary.
@@ -394,7 +398,7 @@ mod tests {
         // A server from before the counts were advertised is still found.
         let server = found(&lookup(&[("protocol", &protocol)]));
         assert_eq!((server.spaces, server.participants), (None, None));
-        for value in ["", "two", "-1", "1.5", "4294967296", "0x2"] {
+        for value in ["", "two", "-1", "+1", "1.5", "4294967296", "0x2"] {
             let server = found(&lookup(&[
                 ("protocol", &protocol),
                 ("spaces", value),
