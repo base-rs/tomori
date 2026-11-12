@@ -8516,6 +8516,7 @@ mod tests {
             .map(drop),
         );
         refused(block_on(backend.attach("s1", "/tmp")).map(drop));
+        refused(block_on(backend.locate("s1")).map(drop));
         refused(block_on(
             backend.forget_instructions("s1", vec!["tomori".into()]),
         ));
