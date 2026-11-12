@@ -6,7 +6,7 @@
 use glam::{Mat4, Vec3};
 
 use crate::bvh::{Bvh, Leaf};
-use crate::light::{EnvironmentLight, Light, LightId};
+use crate::light::{self, EnvironmentLight, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit};
 use crate::{Aabb, Tally, Views};
 
 /// A mesh, as the backend that uploaded it names it: the world never reads its vertices.
@@ -104,17 +104,20 @@ impl Item {
 }
 
 /// An item with its instances: where each may be drawn, or none for anywhere, the box about them all, or none if one
-/// may be anywhere, and which the views may see, as last culled.
+/// may be anywhere, which the views may see, and the lights each is lit by, its range of `lit`, as last culled.
 #[derive(Debug)]
 struct Entry {
     item: Item,
     bounds: Vec<Option<Aabb>>,
     about: Option<Aabb>,
     seen: Vec<bool>,
+    lists: Vec<[u32; 2]>,
+    lit: Vec<Lit>,
 }
 
 /// Coordinates, carried into the views' by `transform`; whether they are culled; the views in them, as last culled;
-/// their environment light; and the hierarchy of their static instances, and whether it must be built again.
+/// their environment light; the hierarchy of their static instances, and whether it must be built again; and the
+/// lights that light their items, as last culled, with the lights' slots ranked to find them.
 #[derive(Debug)]
 struct Root {
     transform: Mat4,
@@ -123,6 +126,8 @@ struct Root {
     environment: Option<EnvironmentLight>,
     bvh: Bvh,
     built: bool,
+    lit: Vec<Light>,
+    ranked: Vec<(f32, u32)>,
 }
 
 /// Values kept in slots, each with its generation, and the slots free to use again.
@@ -236,6 +241,8 @@ impl World {
             environment: None,
             bvh: Bvh::default(),
             built: true,
+            lit: Vec::with_capacity(LIGHTS),
+            ranked: Vec::new(),
         });
         RootId(self.roots.len() as u32 - 1)
     }
@@ -278,6 +285,7 @@ impl World {
         let root = &mut self.roots[root.0 as usize];
         root.environment = None;
         root.built = false;
+        root.lit.clear();
     }
 
     /// Add `item`, with no instances until it is placed.
@@ -287,6 +295,8 @@ impl World {
             bounds: Vec::new(),
             about: Some(Aabb::EMPTY),
             seen: Vec::new(),
+            lists: Vec::new(),
+            lit: Vec::new(),
         }))
     }
 
@@ -310,7 +320,8 @@ impl World {
     }
 
     /// Place `item`'s instances where `bounds` say each may be drawn, in its root's coordinates, or anywhere for none,
-    /// in place of those placed before, each seen until it is culled. Placing as many as before allocates nothing.
+    /// in place of those placed before, each seen, and lit by nothing, until it is culled. Placing as many as before
+    /// allocates nothing.
     ///
     /// # Panics
     ///
@@ -326,6 +337,11 @@ impl World {
         });
         entry.seen.clear();
         entry.seen.resize(entry.bounds.len(), true);
+        entry.lists.clear();
+        entry.lists.resize(entry.bounds.len(), [0, 0]);
+        // Room for as many lights as each may be lit by, so that culling never allocates.
+        entry.lit.clear();
+        entry.lit.reserve(entry.bounds.len() * LIGHTS_PER_INSTANCE);
         let item = entry.item;
         self.changed(&item);
     }
@@ -389,8 +405,9 @@ impl World {
     }
 
     /// Find what the views may see of every active root: its static instances through their hierarchy, built again if
-    /// they changed, and its dynamic items one by one, each item's bounds and then its instances'; and which of its
-    /// lights reach into the views.
+    /// they changed, and its dynamic items one by one, each item's bounds and then its instances'; which of its lights
+    /// reach into the views, of which at most [`LIGHTS`] light its items, those nearest the eyes of more; and, by
+    /// [`light::assign`], which of those light each instance seen.
     pub fn cull(&mut self) {
         let unculled = Views::unculled(self.views.clips());
         for root in &mut self.roots {
@@ -482,6 +499,88 @@ impl World {
                     .sees(&Aabb::new(light.position - reach, light.position + reach));
             }
         }
+        self.light();
+    }
+
+    /// Choose each active root's lights, then the lights of each instance seen.
+    fn light(&mut self) {
+        for (index, root) in self.roots.iter_mut().enumerate() {
+            if !root.active {
+                continue;
+            }
+            let id = RootId(index as u32);
+            // By how far each is from reaching the first eye, then in the order they were added.
+            let eye = root.views.eyes().next().unwrap_or(Vec3::ZERO);
+            root.ranked.clear();
+            root.ranked
+                .extend(
+                    self.lights
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(slot, (_, light))| {
+                            let (light, seen) = light.as_ref()?;
+                            (light.root == id && *seen && light.gives_light()).then(|| {
+                                let gap = light.position.distance(eye) - light.reach;
+                                (gap.max(0.0), slot as u32)
+                            })
+                        }),
+                );
+            if root.ranked.len() > LIGHTS {
+                root.ranked
+                    .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                root.ranked.truncate(LIGHTS);
+                root.ranked.sort_unstable_by_key(|(_, slot)| *slot);
+            }
+            root.lit.clear();
+            root.lit.extend(root.ranked.iter().map(|(_, slot)| {
+                self.lights.slots[*slot as usize]
+                    .1
+                    .expect("a light ranked is here")
+                    .0
+            }));
+        }
+        for (_, entry) in self.items.slots.iter_mut() {
+            let Some(Entry {
+                item,
+                bounds,
+                seen,
+                lists,
+                lit,
+                ..
+            }) = entry
+            else {
+                continue;
+            };
+            let root = &self.roots[item.root.0 as usize];
+            if !root.active {
+                continue;
+            }
+            lit.clear();
+            for ((list, seen), bounds) in lists.iter_mut().zip(seen.iter()).zip(bounds.iter()) {
+                let start = lit.len();
+                if *seen {
+                    light::assign(&root.lit, bounds.as_ref(), lit);
+                }
+                *list = [start as u32, (lit.len() - start) as u32];
+            }
+        }
+    }
+
+    /// The lights that light `root`'s items, as last culled, in the order they were added, which [`Lit::light`] indexes.
+    pub fn root_lights(&self, root: RootId) -> &[Light] {
+        &self.roots[root.0 as usize].lit
+    }
+
+    /// The lights that light each of `item`'s instances, as last culled, in the order they were placed: none for one
+    /// not seen, and nothing for an item not here.
+    pub fn lit(&self, item: ItemId) -> impl ExactSizeIterator<Item = &[Lit]> + '_ {
+        let (lists, lit) = self.items.get(item.0).map_or((&[][..], &[][..]), |entry| {
+            (entry.lists.as_slice(), entry.lit.as_slice())
+        });
+        lists
+            .iter()
+            .map(move |[start, count]| &lit[*start as usize..(*start + *count) as usize])
     }
 
     /// Which of `item`'s instances the views may see, as last culled, in the order they were placed; none for an item

@@ -275,3 +275,93 @@ fn lights_are_kept_with_their_roots_and_culled_by_their_reach() {
     world.set_environment(root, Some(evening));
     assert_eq!(world.environment(root), Some(&evening));
 }
+
+#[test]
+fn each_instance_seen_is_lit_by_its_root_s_lights_within_the_budgets() {
+    let mut world = World::new();
+    let root = world.add_root();
+    let other = world.add_root();
+    world.set_views(&arrival());
+    // Seventy lamps in a row ahead of the eyes, each a metre further, reaching 3 m: of more than 64, the nearest.
+    let lamps: Vec<LightId> = (0..70)
+        .map(|index| {
+            world.add_light(Light::new(
+                root,
+                Vec3::new(0.0, 1.0, -2.0 - index as f32),
+                3.0,
+                Vec3::splat(0.5),
+            ))
+        })
+        .collect();
+    // And one of another root's, beside the first, and one behind the eyes, which they cannot see.
+    world.add_light(Light::new(other, Vec3::new(0.0, 1.0, -2.0), 3.0, Vec3::ONE));
+    let behind = world.add_light(Light::new(root, Vec3::new(0.0, 1.0, 9.0), 3.0, Vec3::ONE));
+    let posts = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+    world.place(
+        posts,
+        [
+            // Beside the first lamps, about the 58th to the 60th, behind the eyes, anywhere, and empty.
+            Some(around(Vec3::new(0.0, 1.0, -2.5), 0.5)),
+            Some(Aabb::new(
+                Vec3::new(-0.5, 0.5, -62.0),
+                Vec3::new(0.5, 1.5, -58.5),
+            )),
+            Some(around(Vec3::new(0.0, 1.0, 9.0), 0.5)),
+            None,
+            Some(Aabb::EMPTY),
+        ],
+    );
+    world.cull();
+    let lit = world.root_lights(root);
+    assert_eq!(lit.len(), LIGHTS);
+    assert_eq!(
+        lit.iter().map(|light| light.position.z).collect::<Vec<_>>(),
+        (0..64).map(|index| -2.0 - index as f32).collect::<Vec<_>>()
+    );
+    let lists: Vec<Vec<u32>> = world
+        .lit(posts)
+        .map(|list| list.iter().map(|lit| lit.light).collect())
+        .collect();
+    // The first post by the four lamps within reach of it, and a fifth whose reach only just meets it; the second by the
+    // eight brightest on it of the ten that reach it, leaving out the 55th and the 64th, furthest from it; the
+    // one behind by none, as the eyes do not see it; the one anywhere by the eight brightest anywhere, all alike, so
+    // the first eight; and the empty one by none.
+    assert_eq!(lists[0], [0, 1, 2, 3, 4]);
+    assert_eq!(lists[1], [55, 56, 57, 58, 59, 60, 61, 62]);
+    assert!(lists[2].is_empty() && lists[4].is_empty());
+    assert_eq!(lists[3], [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert!(
+        world
+            .lit(posts)
+            .all(|list| list.iter().all(|lit| lit.weight > 0.0))
+    );
+    assert!(world.root_lights(other).len() == 1);
+    // A light that moves into the views, and one removed, change the lights the next cull.
+    world.light_mut(behind).unwrap().position = Vec3::new(0.5, 1.0, -2.5);
+    for lamp in &lamps[1..] {
+        world.remove_light(*lamp);
+    }
+    world.cull();
+    assert_eq!(world.root_lights(root).len(), 2);
+    let first: Vec<u32> = world
+        .lit(posts)
+        .next()
+        .unwrap()
+        .iter()
+        .map(|lit| lit.light)
+        .collect();
+    assert_eq!(first, [0, 1]);
+    // While its root is not culled, its lights are left as they were; cleared, it has none, and nothing for an item gone.
+    world.set_active(root, false);
+    world.remove_light(behind);
+    world.cull();
+    assert_eq!(world.root_lights(root).len(), 2);
+    world.set_active(root, true);
+    world.clear(root);
+    assert!(world.root_lights(root).is_empty());
+    assert_eq!(world.lit(posts).len(), 0);
+    // Placed again, an item is lit by nothing until culled.
+    let post = world.add(Item::new(root, Layer::Opaque, Mobility::Dynamic));
+    world.place(post, [Some(around(Vec3::new(0.0, 1.0, -2.5), 0.5))]);
+    assert!(world.lit(post).all(<[Lit]>::is_empty));
+}
