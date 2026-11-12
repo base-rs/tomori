@@ -844,18 +844,15 @@ mod tests {
                 }
             }
         }
-        assert!(floor_points.len() > 300, "{}", floor_points.len());
+        let count = floor_points.len();
+        assert!(count > 300, "{count}");
         // Aimed with the stick from anywhere below, a teleport never lands on it: its floor is above every eye there, and
         // a ray lands only on a surface it meets from above.
         for from in below.iter().step_by(7) {
             let eyes = *from + Vec3::Y * 1.9;
             for to in floor_points.iter().step_by(23) {
-                let Some(ray) = Ray::new(eyes, *to - eyes) else {
-                    continue;
-                };
-                if let Some(landing) = profile.landing(&ray) {
-                    assert!(!on_terrace(landing), "{from} {to} {landing}");
-                }
+                let landing = profile.landing(&Ray::new(eyes, *to - eyes).unwrap());
+                assert_ne!(landing.map(on_terrace), Some(true), "{from} {to}");
             }
         }
         // On it, a teleport aimed at its floor lands there, within a millimetre of what is drawn; and a backstep from

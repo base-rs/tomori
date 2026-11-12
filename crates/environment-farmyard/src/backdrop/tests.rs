@@ -418,6 +418,10 @@ fn the_patch_about_the_stream_and_the_upper_pool_is_drawn_over_the_foothills_ben
         }
     }
     assert!(sampled > 2000);
+    // None of it is steep enough to be drawn as rock, as the foothills' faces steeper than 53° are.
+    for [a, b, c] in patch() {
+        assert!((b - a).cross(c - a).normalize().y.abs() > 0.6);
+    }
     // Its water: the upper pool's surface over its basin about its middle, and the stream's over its bed, as drawn.
     let pool = Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z);
     assert!(drawn_ground(pool).unwrap() < layout::UPPER_POOL.y - 0.15);

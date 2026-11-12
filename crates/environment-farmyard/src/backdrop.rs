@@ -345,7 +345,8 @@ fn patch_cell(along: usize, across: usize) -> [[Vec3; 3]; 2] {
     [[a, b, c], [a, c, d]]
 }
 
-/// The patch's triangles, each as drawn: stone by the water, rock where it is steep, and bush, as the mountain about it.
+/// The patch's triangles, each as drawn: stone by the water and bush, as the mountain about it; none is steep enough to
+/// be rock.
 pub fn patch() -> Vec<[Vec3; 3]> {
     let [rows, columns] = PATCH_CELLS;
     (0..rows)
@@ -508,24 +509,15 @@ fn foothills(shapes: &mut Shapes) {
             );
         }
     }
-    // The patch about the stream and the upper pool, over the foothills' corners sunk beneath it.
+    // The patch about the stream and the upper pool, over the foothills' corners sunk beneath it, none of it steep.
     for (index, corners) in patch().into_iter().enumerate() {
-        let normal = (corners[1] - corners[0])
-            .cross(corners[2] - corners[0])
-            .normalize();
         let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
         let at = Vec2::new(middle.x, middle.z);
         let pool = at.distance(Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z));
         let wet = middle.y < layout::UPPER_POOL.y + 0.2
             || pool < layout::UPPER_POOL_RADIUS + 0.4
             || from_stream(at).0 < 0.9;
-        let color = if normal.y.abs() < 0.6 {
-            colors::ROCK
-        } else if wet {
-            colors::SHINGLE
-        } else {
-            colors::BUSH
-        };
+        let color = if wet { colors::SHINGLE } else { colors::BUSH };
         let shade = 0.92 + scatter(index as u32 + 19_000) * 0.16;
         facing(shapes, &corners, Vec3::Y, color * shade);
     }
