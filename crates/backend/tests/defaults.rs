@@ -166,6 +166,11 @@ fn a_backend_without_tools_refuses_them_as_unsupported() {
 }
 
 #[test]
+fn a_backend_that_cannot_tell_where_a_session_is_now_says_so() {
+    assert_eq!(now(Minimal.locate("session")), Ok(None));
+}
+
+#[test]
 fn a_backend_that_names_no_avatar_is_shown_as_the_swarm() {
     assert_eq!(Minimal.avatar(), None);
 }

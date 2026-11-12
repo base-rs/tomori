@@ -24,6 +24,7 @@ trait DynamicBackend: Send + Sync {
     fn sessions<'a>(&'a self, directory: &'a str) -> Boxed<'a, Vec<SessionSummary>>;
     fn create(&self, spec: SessionSpec) -> Boxed<'_, AnySession>;
     fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession>;
+    fn locate<'a>(&'a self, id: &'a str) -> Boxed<'a, Option<String>>;
     fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()>;
     fn delete_session<'a>(&'a self, id: &'a str) -> Boxed<'a, ()>;
     fn delete_worker<'a>(&'a self, session: &'a str, worker: &'a str, force: bool)
@@ -58,6 +59,10 @@ impl<B: Backend> DynamicBackend for B {
     fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession> {
         let attached = Backend::attach(self, id, directory);
         Box::pin(async move { attached.await.map(AnySession::new) })
+    }
+
+    fn locate<'a>(&'a self, id: &'a str) -> Boxed<'a, Option<String>> {
+        Box::pin(Backend::locate(self, id))
     }
 
     fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()> {
@@ -198,6 +203,10 @@ impl Backend for AnyBackend {
 
     async fn attach(&self, id: &str, directory: &str) -> Result<AnySession> {
         self.0.attach(id, directory).await
+    }
+
+    async fn locate(&self, id: &str) -> Result<Option<String>> {
+        self.0.locate(id).await
     }
 
     async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {

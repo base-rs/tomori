@@ -296,6 +296,14 @@ pub async fn session_info<'scope>(
     Ok(value.get("data").cloned().unwrap_or(value))
 }
 
+/// The directory a session's record says it is in, if it says, as OpenCode names it: a session moved with OpenCode's
+/// session move names the directory it was moved to.
+pub fn session_directory(info: &Value) -> Option<&str> {
+    info.pointer("/location/directory")
+        .and_then(Value::as_str)
+        .filter(|directory| !directory.is_empty())
+}
+
 /// How long the optional active-session lookup may take alongside the
 /// session record during reconciliation.
 pub(crate) const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1287,6 +1295,8 @@ pub struct SnapshotParts {
     pub has_parent: bool,
     /// The session's own title, as its record gives it, if it gives one.
     pub title: Option<String>,
+    /// The directory the session is in now, as its record gives it, if it gives one.
+    pub directory: Option<String>,
 }
 
 impl SnapshotParts {
@@ -1391,6 +1401,7 @@ impl SnapshotParts {
             busy,
             has_parent: info.get("parentID").is_some(),
             title: info.get("title").and_then(Value::as_str).map(str::to_owned),
+            directory: session_directory(&info).map(str::to_owned),
         })
     }
 }
@@ -1945,6 +1956,7 @@ pub(crate) mod tests {
             busy: None,
             has_parent: false,
             title: None,
+            directory: None,
         };
         assert_eq!(
             parts

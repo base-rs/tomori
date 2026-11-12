@@ -83,6 +83,10 @@ struct FakeShared {
     tool_failure: AtomicBool,
     /// Each registration of tools, with its directory and server, and each removal, with its directory and `None`.
     tools: Mutex<Vec<(String, Option<ToolServer>)>>,
+    /// The backend cannot tell where a session is now; see [`FakeBackend::locate_nothing`].
+    no_locating: AtomicBool,
+    /// Each directory sessions were attached in, in order.
+    attached: Mutex<Vec<String>>,
     /// The avatar the backend names; see [`FakeBackend::name_avatar`].
     avatar: std::sync::OnceLock<String>,
 }
@@ -130,6 +134,16 @@ impl FakeBackend {
     /// Report no workers, as a backend without [`Capabilities::workers`].
     pub fn report_no_workers(&self) {
         self.shared.no_workers.store(true, Ordering::SeqCst);
+    }
+
+    /// Tell nowhere a session is now, as a backend that cannot read it.
+    pub fn locate_nothing(&self) {
+        self.shared.no_locating.store(true, Ordering::SeqCst);
+    }
+
+    /// Each directory the server attached sessions in, in order.
+    pub fn attached(&self) -> Vec<String> {
+        self.shared.attached.lock().unwrap().clone()
     }
 
     /// Take no tools, as a backend without [`Capabilities::tools`].
@@ -265,7 +279,7 @@ impl FakeBackend {
             inner: Arc::new(FakeSessionInner {
                 id: Mutex::new(format!("fake-{number}")),
                 title: Mutex::new(title.to_owned()),
-                directory: directory.to_owned(),
+                directory: Mutex::new(directory.to_owned()),
                 manual: self.shared.manual.load(Ordering::SeqCst),
                 snapshot_failure: self.shared.snapshot_failure.clone(),
                 closing_failure: self.shared.closing_failure.clone(),
@@ -475,11 +489,11 @@ impl Backend for FakeBackend {
             .iter()
             // The most recently started first, as the most recently active.
             .rev()
-            .filter(|session| std::path::Path::new(&session.inner.directory).starts_with(directory))
+            .filter(|session| std::path::Path::new(&session.directory()).starts_with(directory))
             .map(|session| SessionSummary {
                 id: session.id(),
                 title: session.inner.title.lock().unwrap().clone(),
-                directory: session.inner.directory.clone(),
+                directory: session.directory(),
                 busy: session.is_busy(),
             })
             .collect())
@@ -492,13 +506,31 @@ impl Backend for FakeBackend {
         Ok(self.start(&spec.title, &spec.directory))
     }
 
-    async fn attach(&self, id: &str, _directory: &str) -> Result<FakeSession> {
+    /// Where the session `id` is now, which [`FakeSession::relocate`] and [`FakeSession::move_to`] change, unless
+    /// told not to tell with [`FakeBackend::locate_nothing`].
+    async fn locate(&self, id: &str) -> Result<Option<String>> {
+        if self.shared.no_locating.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.started()
+            .into_iter()
+            .find(|session| session.id() == id)
+            .map(|session| Some(session.directory()))
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no fake session {id}")))
+    }
+
+    async fn attach(&self, id: &str, directory: &str) -> Result<FakeSession> {
         self.released().await;
         let session = self
             .started()
             .into_iter()
             .find(|session| session.id() == id)
             .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no fake session {id}")))?;
+        self.shared
+            .attached
+            .lock()
+            .unwrap()
+            .push(directory.to_owned());
         let mut bound = session.inner.bound.lock().unwrap();
         if bound.is_some() {
             return Err(Error::new(
@@ -560,7 +592,8 @@ struct FakeSessionInner {
     closing_failure: Arc<AtomicBool>,
     /// The session's own title, which [`Event::TitleChanged`] changes as the agent's would.
     title: Mutex<String>,
-    directory: String,
+    /// Where the session is, which [`Event::DirectoryChanged`] changes as the agent's would.
+    directory: Mutex<String>,
     manual: bool,
     snapshot_failure: Arc<AtomicBool>,
     commands_held: Arc<AtomicBool>,
@@ -646,6 +679,9 @@ impl FakeSession {
             Event::TitleChanged { title } => {
                 title.clone_into(&mut self.inner.title.lock().unwrap())
             }
+            Event::DirectoryChanged { directory } => {
+                directory.clone_into(&mut self.inner.directory.lock().unwrap())
+            }
             _ => {}
         }
         let mut outbound = self.inner.outbound.lock().unwrap();
@@ -719,6 +755,23 @@ impl FakeSession {
         });
     }
 
+    /// Where the session is now.
+    pub fn directory(&self) -> String {
+        self.inner.directory.lock().unwrap().clone()
+    }
+
+    /// Move the session to `directory`, reporting it as the agent would, as its user may with OpenCode's session move.
+    pub fn move_to(&self, directory: &str) {
+        self.emit(Event::DirectoryChanged {
+            directory: directory.to_owned(),
+        });
+    }
+
+    /// Move the session to `directory` without reporting it, as a move while no space heard of it would.
+    pub fn relocate(&self, directory: &str) {
+        directory.clone_into(&mut self.inner.directory.lock().unwrap());
+    }
+
     /// Name the session anew, as an agent may once it starts.
     pub fn rename(&self, id: &str) {
         *self.inner.id.lock().unwrap() = id.to_owned();
@@ -771,6 +824,7 @@ impl Session for FakeSession {
             questions: self.inner.questions.lock().unwrap().clone(),
             modes: self.inner.modes.lock().unwrap().clone(),
             title: Some(self.inner.title.lock().unwrap().clone()),
+            directory: Some(self.directory()),
             ..Snapshot::default()
         })
     }

@@ -92,10 +92,22 @@ pub fn event_for(
                 title: data.get("title")?.as_str()?.to_owned(),
             })
         }
+        // The session moved, as with OpenCode's session move: its location is where it is now.
+        "session.moved" => moved_to(data, session_id).map(|directory| Event::DirectoryChanged {
+            directory: directory.to_owned(),
+        }),
         // Child creation is routed to its parent by the connection.
         "session.created" | "session.forked" => None,
         _ => None,
     }
+}
+
+/// The directory `session_id` moved to, if `data`, a `session.moved` event's, is its and names one.
+pub fn moved_to<'a>(data: &'a Value, session_id: &str) -> Option<&'a str> {
+    if !for_session(data, session_id) {
+        return None;
+    }
+    crate::api::session_directory(data)
 }
 
 fn for_session(data: &Value, session_id: &str) -> bool {
@@ -558,6 +570,26 @@ mod tests {
         let numbered =
             serde_json::json!({"type":"session.renamed","data":{"sessionID":"s","title":1}});
         assert!(event_for(&numbered, "s", &mut Default::default()).is_none());
+    }
+
+    #[test]
+    fn moving_the_registered_session_says_where_it_is_now_and_a_move_naming_no_directory_is_none() {
+        let moved = serde_json::json!({"type":"session.moved","data":{"sessionID":"s","location":{"directory":"/work/new"},"projectID":"p","subpath":""}});
+        assert_eq!(
+            event_for(&moved, "s", &mut Default::default()),
+            Some(Event::DirectoryChanged {
+                directory: "/work/new".into()
+            })
+        );
+        assert!(event_for(&moved, "other", &mut Default::default()).is_none());
+        for location in [
+            serde_json::json!({}),
+            serde_json::json!({"directory": ""}),
+            serde_json::json!({"directory": 1}),
+        ] {
+            let unnamed = serde_json::json!({"type":"session.moved","data":{"sessionID":"s","location":location}});
+            assert!(event_for(&unnamed, "s", &mut Default::default()).is_none());
+        }
     }
 
     #[test]

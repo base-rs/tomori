@@ -897,6 +897,132 @@ fn a_kept_space_s_session_reaches_it_again_once_bound_with_the_new_run_s_token()
     assert_eq!(read["structuredContent"]["title"], "Kept");
 }
 
+/// Create a space titled `title` in `directory`, and wait for it.
+fn create_in(client: &mut TestClient, title: &str, directory: &std::path::Path) -> String {
+    client.send(&ClientMessage::CreateSpace {
+        title: title.to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: directory.to_string_lossy().into_owned(),
+        session: None,
+        environment: None,
+        instructions: None,
+    });
+    client.space(|state| state.title == title).id
+}
+
+/// A directory of the test's own, made now and removed when it is dropped, in its canonical form.
+fn place(name: &str) -> (State, PathBuf) {
+    let place = State::new(name);
+    std::fs::create_dir_all(&place.0).unwrap();
+    let canonical = std::fs::canonicalize(&place.0).unwrap();
+    (place, canonical)
+}
+
+/// The registrations `backend` has been asked for since the first `from`, once they end with `ending`.
+fn registrations_ending(
+    backend: &FakeBackend,
+    from: usize,
+    ending: &[(String, bool)],
+) -> Vec<(String, bool)> {
+    eventually(|| {
+        let made: Vec<(String, bool)> = backend.tools()[from..]
+            .iter()
+            .map(|(directory, server)| (directory.clone(), server.is_some()))
+            .collect();
+        made.ends_with(ending).then_some(made)
+    })
+}
+
+#[test]
+fn a_kept_space_whose_session_moved_is_bound_where_it_is_now_and_its_tools_move_with_it() {
+    // Its directory moved, leaving a link where it was, as a repository moved on disk may; or gone. Through the link,
+    // the server finds where it is now even from a backend that cannot say.
+    for (case, linked, locating) in [
+        ("linked", true, true),
+        ("linked-unlocated", true, false),
+        ("gone", false, true),
+    ] {
+        let state = State::new(&format!("moved-{case}"));
+        let (_place, root) = place(&format!("moved-place-{case}"));
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir(&old).unwrap();
+        let backend = FakeBackend::new();
+        if !locating {
+            backend.locate_nothing();
+        }
+        logged();
+        let kept = |state: &State| {
+            let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
+            move |backends| {
+                Server::new(backends, Arc::new(TextTranscriber::default())).with_kept_spaces(store)
+            }
+        };
+        let first = TestServer::with_tools(backend.clone(), kept(&state));
+        let mut ada = first.connect("ada", "Ada");
+        let space = create_in(&mut ada, "Moved", &old);
+        let old = old.to_string_lossy().into_owned();
+        assert_eq!(registrations(&backend, 1)[0].0, old);
+        drop(ada);
+        drop(first);
+
+        let session = backend.started()[0].clone();
+        if linked {
+            std::fs::rename(&old, &new).unwrap();
+            std::os::unix::fs::symlink(&new, &old).unwrap();
+        } else {
+            std::fs::remove_dir(&old).unwrap();
+            std::fs::create_dir(&new).unwrap();
+        }
+        let new = new.to_string_lossy().into_owned();
+        session.relocate(&new);
+        let earlier = backend.tools().len();
+        let second = TestServer::with_tools(backend.clone(), kept(&state));
+        // Removed from where it was, while waiting to be bound, and again once bound where its session is now, before
+        // being registered there.
+        let made = registrations_ending(
+            &backend,
+            earlier,
+            &[(old.clone(), false), (new.clone(), true)],
+        );
+        assert_eq!(made[0], (old.clone(), false), "{case}");
+        assert_eq!(backend.attached().last(), Some(&new), "{case}");
+        let line = format!(
+            "Space {space}'s session moved from {old} to {new}; Tomori's tools are re-registered there."
+        );
+        eventually(|| logged().contains(&line).then_some(()));
+        // Its session's agent reaches it there, and it is kept there.
+        let token = eventually(|| second.tools_token());
+        let read = eventually(|| {
+            let read = call(&second, &token, Some(&id(&session)), "space", json!({}));
+            (read["isError"] != true).then_some(read)
+        });
+        assert_eq!(read["structuredContent"]["title"], "Moved", "{case}");
+        drop(second);
+        let store = SpaceStore::open(&state.0).expect("the spaces open");
+        assert_eq!(store.spaces()[0].directory, new, "{case}");
+    }
+}
+
+#[test]
+fn a_space_whose_session_moves_while_it_runs_follows_it_and_its_tools_move_with_it() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    let space = create(&mut ada, "Moving");
+    registrations(&backend, 1);
+    let (_place, new) = place("moving");
+    let new = new.to_string_lossy().into_owned();
+    backend.started()[0].move_to(&new);
+    registrations_ending(&backend, 1, &[(tmp(), false), (new.clone(), true)]);
+    // Everyone in it sees where it is now.
+    ada.space(|state| state.directory == new);
+    let line = format!(
+        "Space {space}'s session moved from {} to {new}; Tomori's tools are re-registered there.",
+        tmp()
+    );
+    eventually(|| logged().contains(&line).then_some(()));
+}
+
 #[test]
 fn the_agent_changes_its_space_s_speech_and_environment_for_everyone_and_is_asked_to_say_so() {
     let backend = FakeBackend::new();
