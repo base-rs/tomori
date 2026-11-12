@@ -20,7 +20,7 @@ use crate::{
     identity::{Identity, Overrides, Store},
     interaction, speaker,
     spectator::Frame,
-    swarm::{CENTER, Swarm},
+    swarm::Swarm,
 };
 use glam::{Mat4, Quat, Vec3};
 use std::{
@@ -31,6 +31,12 @@ use std::{
 use tomori_protocol::{Hand, ServerMessage};
 use tomori_render::scenery::Sceneries;
 use tomori_scene::avatar::Coordinator;
+
+/// Where the spectator sees and hears from with nobody to follow, facing −Z: where a participant joining the space
+/// stands, at home with their rig unmoved, at standing eye height, as their headset starts. An environment's arrival is
+/// carried to home, so this is where everyone joins in every environment; anchors that spread participants out as they
+/// arrive (#79) would move it, once they exist.
+const NEUTRAL: Vec3 = tomori_scene::arrival::HOME;
 
 /// A participant's latest presence report, as relayed by the server.
 #[derive(Clone)]
@@ -136,6 +142,10 @@ pub struct Feed {
     environment: Environment,
     /// The sceneries the spectator draws, as [`Self::with_sceneries`] gave them: the grid alone until then.
     sceneries: Sceneries,
+    /// The client side of the environment drawn, registered with the sceneries, as a spectator runs it, and what it
+    /// shows this frame. See `design/spectator.md`.
+    client_side: tomori_scene::spectating::Spectated,
+    drawn: Option<tomori_scene::client_side::Drawn>,
     last_poll: Instant,
     last_caption: Option<String>,
 }
@@ -227,14 +237,17 @@ impl Feed {
             sequence: 0,
             environment: Environment::initial(&[]),
             sceneries: Sceneries::empty(),
+            client_side: tomori_scene::spectating::Spectated::new(),
+            drawn: None,
             last_poll: Instant::now(),
             last_caption: None,
         }
     }
 
-    /// Draw `sceneries`, as the application that runs the spectator registers them, such as Tomori's own: its `Hello` lists their environments, a space in one is shown in it, and `TOMORI_ENVIRONMENT` chooses among them outside a space, as on the desktop window. See `design/environments.md`.
+    /// Draw `sceneries`, as the application that runs the spectator registers them, such as Tomori's own: its `Hello` lists their environments, a space in one is shown in it, and `TOMORI_ENVIRONMENT` chooses among them outside a space, as on the desktop window. The client sides registered with them run as a spectator's, drawing what they show. See `design/environments.md` and `design/spectator.md`.
     pub fn with_sceneries(mut self, sceneries: Sceneries) -> Self {
         self.conversation.set_drawable(sceneries.environments());
+        self.conversation.set_client_sides(sceneries.client_sides());
         self.conversation.set_over_grid(sceneries.over_grid());
         self.conversation
             .set_worker_placements(sceneries.worker_placements());
@@ -274,6 +287,17 @@ impl Feed {
         &self.sceneries
     }
 
+    /// What the environment's client side shows this frame, for its scenery to draw, if it runs one. See
+    /// `design/spectator.md`.
+    pub fn drawn(&self) -> Option<&tomori_scene::client_side::Drawn> {
+        self.drawn.as_ref()
+    }
+
+    /// How many intents the environment's client sides have asked, all dropped, since a spectator asks nothing.
+    pub fn dropped_intents(&self) -> usize {
+        self.client_side.dropped()
+    }
+
     /// Poll the connection and produce the current frame. Non-blocking.
     pub fn poll(&mut self, aspect: f32) -> Frame {
         let now = Instant::now();
@@ -294,7 +318,7 @@ impl Feed {
         self.update_following(&presence);
 
         // Build the frame.
-        let frame = self.build_frame(&presence, aspect, dt);
+        let frame = self.build_frame(&presence, aspect, dt, now);
 
         // The audience hears as the participant it follows, from their head, or from the neutral view, and the others from their heads, all in the space's shared scene, where presence already puts each of them; see `design/spatial-audio.md`.
         let listener = match self.following.and_then(|source| presence.get(&source)) {
@@ -303,7 +327,7 @@ impl Feed {
                 orientation: followed.head.orientation,
             },
             None => Pose {
-                position: (CENTER + Vec3::new(0.0, 0.0, 3.0)).to_array(),
+                position: NEUTRAL.to_array(),
                 orientation: [0.0, 0.0, 0.0, 1.0],
             },
         };
@@ -363,6 +387,7 @@ impl Feed {
         presence: &BTreeMap<u32, ParticipantPresence>,
         aspect: f32,
         dt: f32,
+        now: Instant,
     ) -> Frame {
         self.sequence += 1;
 
@@ -393,10 +418,10 @@ impl Feed {
                 (projection, head_matrix, caption)
             }
             None => {
-                // No presence yet: a neutral view looking at the scene center.
-                let head_matrix = Mat4::from_translation(CENTER);
-                let projection = tomori_scene::depth::perspective(1.4, aspect)
-                    * Mat4::from_translation(CENTER + Vec3::new(0.0, 0.0, 3.0));
+                // No presence yet: a neutral view from where a participant joins, looking ahead, where its audience hears.
+                let head_matrix = Mat4::from_translation(NEUTRAL);
+                let projection =
+                    tomori_scene::depth::perspective(1.4, aspect) * head_matrix.inverse();
                 let caption = self.caption_text(&self.following_name);
                 (projection, head_matrix, caption)
             }
@@ -441,7 +466,7 @@ impl Feed {
             arrangement.placement,
         );
         // The space's timers, as dials above the agent's home, as on the headset.
-        let now = std::time::SystemTime::now()
+        let unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
@@ -459,9 +484,19 @@ impl Feed {
                 Some(_) => glam::Vec3::splat(bounds.radius),
                 None => tomori_scene::dials::SWARM_REACH,
             },
-            now,
+            unix,
         );
         self.scene.update(root, workspace, dt);
+        // The environment's client side, as a participant's frame step runs it, seen from the spectator's camera. See
+        // `design/spectator.md`.
+        let camera = Some(tomori_render::scenery::eye(projection)).filter(|eye| eye.is_finite());
+        self.drawn = self.client_side.update(
+            &mut self.conversation,
+            environment,
+            arrangement.carriage,
+            camera,
+            now,
+        );
 
         // Convert protocol poses to controller poses for the frame.
         let to_pose = |p: Option<tomori_protocol::Pose>| {
@@ -524,6 +559,7 @@ impl Feed {
 mod tests {
     use super::*;
     use crate::server_choice::{Choice, Source};
+    use crate::swarm::CENTER;
     use crate::test_support::{Nowhere, Server, Silent};
     use tomori_client::{ConnectionState, Event};
     use tomori_protocol::{Activity, ClientMessage, SpaceState};
@@ -765,7 +801,7 @@ mod tests {
             .apply(Event::Message(ServerMessage::Space {
                 state: Box::new(space.clone()),
             }));
-        let initial = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        let initial = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         assert_eq!(initial.interaction.mode, interaction::Mode::Working);
         assert!(initial.interaction.working);
 
@@ -776,7 +812,7 @@ mod tests {
             }));
         let mut frame = initial.clone();
         for _ in 0..120 {
-            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         }
         assert_eq!(frame.interaction.mode, interaction::Mode::Ready);
         assert!(!frame.interaction.working);
@@ -822,9 +858,9 @@ mod tests {
             .apply(Event::Message(ServerMessage::Space {
                 state: Box::new(space),
             }));
-        let mut frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        let mut frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         for _ in 0..30 {
-            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 20.0);
+            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 20.0, Instant::now());
         }
         assert_eq!(frame.timer_dials.len(), 1);
         let dial = &frame.timer_dials[0];
@@ -873,7 +909,7 @@ mod tests {
                         ..Default::default()
                     }),
                 }));
-            feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0)
+            feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now())
                 .environment
         };
         let frame = |feed: &mut Feed, environment: &str| versioned(feed, environment, None);
@@ -948,7 +984,7 @@ mod tests {
                     ..Default::default()
                 }),
             }));
-        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         assert_eq!(feed.swarm_anchor(), Anchor::from_pose(&agent).unwrap());
         // Its ring on the floor about the agent's home, as the headset draws it.
         assert_eq!(
@@ -1021,7 +1057,7 @@ mod tests {
             })
         };
         feed.conversation.apply(state("figure"));
-        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         // The figure shows in place of the swarm, which is not drawn.
         assert_eq!(feed.avatar().unwrap().avatar, "figure");
         assert!(frame.agents.is_empty());
@@ -1099,9 +1135,158 @@ mod tests {
                 name: None,
             }));
         plain.conversation.apply(state("figure"));
-        let frame = plain.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        let frame = plain.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
         assert!(plain.avatar().is_none());
         assert_eq!(frame.agents.len(), crate::swarm::AGENT_COUNT);
+    }
+
+    #[test]
+    fn the_spectator_runs_and_draws_the_environment_s_client_side_and_asks_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tomori_scene::client_side::{ClientSide, Input, Output, Picked};
+        /// A scenery that keeps what its client side last showed it.
+        struct Shown(Arc<AtomicUsize>);
+        impl tomori_render::scenery::Scenery for Shown {
+            fn animate(
+                &mut self,
+                _device: &wgpu::Device,
+                _queue: &wgpu::Queue,
+                drawn: &(dyn std::any::Any + Send + Sync),
+            ) {
+                self.0
+                    .store(*drawn.downcast_ref::<usize>().unwrap(), Ordering::Relaxed);
+            }
+            fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
+            fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
+            fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {}
+        }
+        /// A client side that shows how many updates it has had, keeps the head it was last told, and asks its server
+        /// side something every frame.
+        struct Counting(usize, Arc<Mutex<Option<Vec3>>>);
+        impl ClientSide for Counting {
+            fn pick(&self, _ray: &tomori_scene::pointing::Ray) -> Option<Picked> {
+                Some(Picked::new("thing", "the thing", 1.0))
+            }
+            fn update(&mut self, input: Input<'_>) -> Output {
+                self.0 += input.updates.len();
+                *self.1.lock().unwrap() = input.head;
+                Output::new()
+                    .with_intent(tomori_protocol::Payload::new(serde_json::json!({})))
+                    .drawing(Arc::new(self.0 + 1))
+            }
+        }
+        let animated = Arc::new(AtomicUsize::new(0));
+        let mut sceneries = Sceneries::empty();
+        let shown = animated.clone();
+        sceneries.register(tomori_scene::test_support::SKY.id(), move |_| {
+            Box::new(Shown(shown.clone()))
+        });
+        let head = Arc::new(Mutex::new(None));
+        let told = head.clone();
+        sceneries.set_client_side(tomori_scene::test_support::SKY.id(), move |_| {
+            Box::new(Counting(0, told.clone()))
+        });
+        let mut feed = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        )
+        .with_sceneries(sceneries);
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        // A spectator given an owner's token is no more a participant to its client side.
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Owner,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(SpaceState {
+                    id: "space".into(),
+                    environment: "sky".into(),
+                    ..Default::default()
+                }),
+            }));
+        for message in [
+            ServerMessage::EnvironmentState {
+                environment: "sky".into(),
+                version: 1,
+                state: tomori_protocol::Payload::new(serde_json::json!({})),
+            },
+            ServerMessage::EnvironmentEvent {
+                environment: "sky".into(),
+                version: 1,
+                event: tomori_protocol::Payload::new(serde_json::json!({})),
+            },
+        ] {
+            feed.conversation.apply(Event::Message(message));
+        }
+        feed.conversation.take_actions();
+        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now());
+        // With nobody to follow, it sees from where a participant joins, at home at standing eye height facing −Z, where
+        // its audience hears, and its client side's head is there.
+        let eye = tomori_render::scenery::eye(Mat4::from_cols_array(&frame.projection));
+        assert!(eye.distance(NEUTRAL) < 1e-4, "{eye}");
+        assert_eq!(&frame.head[12..15], &NEUTRAL.to_array());
+        assert!(head.lock().unwrap().unwrap().distance(NEUTRAL) < 1e-4);
+        assert_eq!(NEUTRAL, tomori_scene::anchors::EYES);
+        let ahead = Mat4::from_cols_array(&frame.projection).project_point3(NEUTRAL + Vec3::NEG_Z);
+        assert!(ahead.x.abs() < 1e-4 && ahead.y.abs() < 1e-4, "{ahead}");
+        // The environment's messages reached its client side, which shows them, and what it asked was dropped.
+        let drawn = feed.drawn().expect("its client side shows something");
+        assert_eq!(*drawn.downcast_ref::<usize>().unwrap(), 3);
+        assert_eq!(feed.dropped_intents(), 1);
+        let actions = feed.conversation.take_actions();
+        assert!(!format!("{actions:?}").contains("EnvironmentIntent"));
+        // Though its object is there to point at, the spectator points at nothing, and its scenery grows in at once.
+        let ray = tomori_scene::pointing::Ray::new(NEUTRAL, Vec3::NEG_Z).unwrap();
+        assert!(Counting(0, head.clone()).pick(&ray).is_some());
+        tomori_render::scenery::Scenery::set_reveal(&mut Shown(animated.clone()), None);
+        // Its scenery is given what the client side shows, in an offscreen render of the spectator's view.
+        tomori_render::test_gpu::with(|gpu| {
+            let mut renderer = crate::graphics::Renderer::with_sceneries(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                64,
+                48,
+                1,
+                feed.sceneries(),
+            );
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("spectator client side"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 48,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            crate::spectator_view::SpectatorView::new(feed).render(
+                crate::spectator_view::RenderInputs {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    renderer: &mut renderer,
+                    swarm: &mut Swarm::default(),
+                    target: target.create_view(&Default::default()),
+                    aspect: 4.0 / 3.0,
+                },
+            );
+            assert_eq!(animated.load(Ordering::Relaxed), 3);
+        });
     }
 
     #[test]

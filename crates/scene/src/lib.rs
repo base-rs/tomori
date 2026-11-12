@@ -58,6 +58,7 @@ pub mod sides;
 pub mod sign_facing;
 pub mod spatial_audio;
 mod speakers;
+pub mod spectating;
 pub mod swarm;
 mod table;
 /// Devices and connections for tests, shared with the other client crates' tests through the `testing` feature.

@@ -113,6 +113,40 @@ impl Relayed {
     }
 }
 
+/// The others' right hands and left hands, by their numbers.
+pub(crate) type Others = (Vec<(u32, Hand)>, Vec<(u32, Hand)>);
+
+/// The others' right and left hands at `now`, as `conversation` last heard them, carried out of the space's coordinates
+/// into the environment's own by `carriage`, each drawn between the updates that brought it by `relayed`: as the frame
+/// step and the spectator give an environment's client side them.
+pub(crate) fn others(
+    relayed: &mut crate::sides::Hands<Relayed>,
+    conversation: &crate::conversation::Conversation,
+    carriage: crate::anchors::Anchor,
+    now: Instant,
+) -> Others {
+    let unturn = carriage.orientation.inverse();
+    let relay = |relayed: &mut Relayed, hands: Vec<(u32, tomori_protocol::Pose)>| {
+        let hands = hands
+            .into_iter()
+            .map(|(source, pose)| {
+                (
+                    source,
+                    Hand::new(
+                        carriage.unplace(glam::Vec3::from_array(pose.position)),
+                        unturn * glam::Quat::from_array(pose.orientation).normalize(),
+                    ),
+                )
+            })
+            .collect();
+        relayed.update(now, hands)
+    };
+    (
+        relay(&mut relayed.right, conversation.right_hands()),
+        relay(&mut relayed.left, conversation.left_hands()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use glam::{Quat, Vec3};
