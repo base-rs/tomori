@@ -474,6 +474,15 @@ fn a_space_s_things_are_found_where_they_stand_or_said_to_be_away() {
                 pose: tomori_protocol::Pose::at([1.0, 1.4, -1.0]),
             },
         ),
+        Panel::new(
+            "panel-5",
+            "Stretched",
+            "",
+            tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::at([-1.0, 1.4, -1.0]),
+            },
+        )
+        .with_size(Some(2.0)),
     ];
     let state = hub.lock();
     let things = state.world_things(
@@ -499,6 +508,14 @@ fn a_space_s_things_are_found_where_they_stand_or_said_to_be_away() {
         Some([
             tomori_protocol::wall::SLOT_SIZE.0,
             tomori_protocol::wall::SLOT_SIZE.1
+        ])
+    );
+    // One stretched by two hands is framed as large as it floats.
+    assert_eq!(
+        things.panels[4].frame.map(|frame| frame.size),
+        Some([
+            tomori_protocol::wall::SLOT_SIZE.0 * 2.0,
+            tomori_protocol::wall::SLOT_SIZE.1 * 2.0
         ])
     );
     // An added wall is called by its number, never the status wall.

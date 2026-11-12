@@ -146,9 +146,11 @@ impl HubState {
                         .iter()
                         .find(|shown| shown.id == *wall)
                         .and_then(|wall| crate::presence::slot_frame(wall, *slot)),
+                    // As large as it floats, as two hands may have stretched it.
                     Place::Free { pose } => {
                         let (width, height) = tomori_protocol::wall::SLOT_SIZE;
-                        Some((*pose, [width, height]))
+                        let size = panel.floating_size();
+                        Some((*pose, [width * size, height * size]))
                     }
                     _ => None,
                 }
