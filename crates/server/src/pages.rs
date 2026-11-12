@@ -52,7 +52,8 @@ pub fn form_value(body: &[u8], name: &str) -> Option<String> {
     })
 }
 
-/// Percent-decode a form component, with `+` as a space.
+/// Percent-decode a form component, with `+` as a space, or `None` where an escape is not `%` and two hexadecimal
+/// digits or the result is not UTF-8.
 fn decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -61,7 +62,10 @@ fn decode(text: &str) -> Option<String> {
         match bytes[index] {
             b'+' => decoded.push(b' '),
             b'%' => {
-                let hex = text.get(index + 1..index + 3)?;
+                // Two digits, without the sign `from_str_radix` would take.
+                let hex = text
+                    .get(index + 1..index + 3)
+                    .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
                 decoded.push(u8::from_str_radix(hex, 16).ok()?);
                 index += 2;
             }
@@ -298,6 +302,13 @@ mod tests {
         assert_eq!(form_value(b"token=%2", "token"), None);
         assert_eq!(form_value(b"token=%ff", "token"), None);
         assert_eq!(form_value(&[0xff], "token"), None);
+    }
+
+    #[test]
+    fn a_percent_escape_is_two_hexadecimal_digits_without_a_sign() {
+        assert_eq!(form_value(b"token=%+1", "token"), None);
+        assert_eq!(form_value(b"%+1=1", "\u{1}"), None);
+        assert_eq!(form_value(b"token=%4A", "token"), Some("J".to_owned()));
     }
 
     #[test]
