@@ -738,6 +738,14 @@ fn tools() -> Value {
         .position(|tool| tool["name"] == "rename_space")
         .expect("rename_space is listed");
     list.insert(after + 1, set_my_name);
+    // Beside set_wall, the other tool that sets a wall.
+    let after = list
+        .iter()
+        .position(|tool| tool["name"] == "set_wall")
+        .expect("set_wall is listed");
+    for (index, tool) in context_tools(&read, &change).into_iter().enumerate() {
+        list.insert(after + 1 + index, tool);
+    }
     for tool in list.iter_mut() {
         arguments::strict(&mut tool["inputSchema"]);
     }
@@ -1001,6 +1009,8 @@ async fn call(
         "panels" => session.and_then(|session| panels(hub, session, arguments)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
+        "contexts" => session.and_then(|session| hub.tool_contexts(session).map(structured)),
+        "set_context" => session.and_then(|session| set_context(hub, session, arguments)),
         "create_layout" => session.and_then(|session| create_layout(hub, session, arguments)),
         "remove_layout" => session.and_then(|session| remove_layout(hub, session, arguments)),
         "add_wall" => session.and_then(|session| add_wall(hub, session, arguments)),
@@ -1316,6 +1326,87 @@ fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value,
         version(arguments.get("version"), "wall")?,
     )
     .map(structured)
+}
+
+/// The `contexts` and `set_context` tools' definitions, apart from the rest so that the list's macro stays within its
+/// recursion limit. See `design/panel-context.md`.
+fn context_tools(read: &Value, change: &Value) -> [Value; 2] {
+    let parameter_bytes = tomori_environment::CONTEXT_ID_BYTES;
+    [
+        json!({
+            "name": "contexts",
+            "description": "The context of your space's environment's walls and panels: the parameters the environment declares its panels depend on, such as region, each with its label, the value its own selection gives it now and the values it may take; every setting each wall and panel holds, fixing a parameter to a value or time to the last live_minutes or to a window from and to, instants in UTC, a panel's own over its wall's, each with whether it is shown, those of a parameter the environment does not declare now, of a wall it does not show now and of a panel resting kept and listed; and what each panel that depends on any shows now, each parameter and time following the environment, fixed by its own setting or inherited from its wall's. Within 32 KiB: where more, the last panels and then walls are left out, as cut says. Read it before set_context, and to answer what a wall or panel is showing.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read,
+        }),
+        json!({
+            "name": "set_context",
+            "description": "Fix what a wall or a panel of your space's environment shows, for everyone in it, as someone asks, such as \"show EU-WEST1 on this wall\" or \"line up 02:20 to 02:50 on the left wall\": wall, a wall by its identity or name as presence lists it, or looking or near, with a name or for whoever asked, or panel, a panel by its identity or title, one of them; parameter, one the environment declares, as contexts lists them, or time; and one of value, one of the parameter's choices where it has any; live_minutes, for time, the last that many minutes up to now, from 1 to 10080; from and to, for time, a window of instants with their offset from UTC, such as 2026-11-12T02:20:00Z, never a time of day alone, ending after it begins and spanning at most 31 days; or follow true, to let it follow the environment, or its wall's setting, again. A panel's own setting is over its wall's, and only a panel that depends on the parameter, or a chart for time, takes one; the Tomori wall takes none. A notice on the status wall says what you set, and the environment is told and shows what it says. Only when someone in the space asks; then say in a sentence what you set.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wall": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "parameter": { "type": "string", "maxLength": parameter_bytes },
+                    "value": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "live_minutes": { "type": "integer", "minimum": 1, "maximum": crate::stage::context::LIVE_MINUTES },
+                    "from": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "to": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "follow": { "type": "boolean" },
+                },
+                "required": ["parameter"],
+            },
+            "annotations": change,
+        }),
+    ]
+}
+
+/// The `set_context` tool: one of `wall` and `panel`, `parameter`, and one of `value`, `live_minutes`, `from` and `to`
+/// together, and `follow` true.
+fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
+    use crate::hub::agent_context::{Target, parse_instant};
+    use crate::stage::context::Setting;
+    let target = match (
+        optional_identifier(arguments, "wall")?,
+        optional_identifier(arguments, "panel")?,
+    ) {
+        (Some(wall), None) => Target::Wall(wall.to_owned()),
+        (None, Some(panel)) => Target::Panel(panel.to_owned()),
+        _ => return Err("Say either wall or panel, one of them.".to_owned()),
+    };
+    let parameter = text(arguments, "parameter")?;
+    crate::limits::check(parameter, tomori_environment::CONTEXT_ID_BYTES, "parameter")?;
+    let value = optional_identifier(arguments, "value")?;
+    let minutes = match arguments.get("live_minutes") {
+        None | Some(Value::Null) => None,
+        Some(given) => Some(
+            given
+                .as_u64()
+                .and_then(|minutes| u32::try_from(minutes).ok())
+                .ok_or("live_minutes is a whole number of minutes.")?,
+        ),
+    };
+    let from = optional_identifier(arguments, "from")?;
+    let to = optional_identifier(arguments, "to")?;
+    let follow = flag(arguments, "follow")?;
+    let setting = match (value, minutes, from, to, follow) {
+        (Some(value), None, None, None, false) => Some(Setting::Fixed {
+            value: value.to_owned(),
+        }),
+        (None, Some(minutes), None, None, false) => Some(Setting::Live { minutes }),
+        (None, None, Some(from), Some(to), false) => Some(Setting::Window {
+            from_ms: parse_instant(from, "from")?,
+            to_ms: parse_instant(to, "to")?,
+        }),
+        (None, None, None, None, true) => None,
+        _ => {
+            return Err(
+                "Say one of value, live_minutes, from and to together, or follow true.".to_owned(),
+            );
+        }
+    };
+    hub.agent_set_context(session, target, parameter, setting)
+        .map(structured)
 }
 
 /// The version of a wall or panel, `what`, the agent says it last read, `given`, if it says one.
