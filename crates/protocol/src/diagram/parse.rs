@@ -3,11 +3,12 @@
 
 //! A `diagram` block's body, shaped like a Mermaid flowchart, a line at a time: nodes with their shapes from their
 //! brackets, `@{ … }` attributes, edges with their styles and labels, `subgraph … end` groups, `classDef` and `class`,
-//! and `%%` comments. A line that cannot be read is skipped, saying so, and the rest read. See `design/diagrams.md`.
+//! `%%` comments, and world references, `fire := object farmyard:campsite/bonfire`, which edges then point at. A line that cannot be read is skipped, saying so, and the rest read. See `design/diagrams.md`.
 use super::{
-    Arrow, Attributes, Builder, Diagram, EdgeDraft, GroupKind, Layout, Shape, Style, Warning,
-    clean, group_kind,
+    Arrow, Attributes, Binding, Builder, Diagram, EdgeDraft, GroupKind, Layout, Shape, Style,
+    Warning, clean, group_kind,
 };
+use crate::world::{Kind, Reference};
 
 /// The diagram `body`, a `diagram` block's body after its header, describes, and what was left out or changed reading
 /// it, each with its line, counted from 1 within `body`.
@@ -125,8 +126,86 @@ impl Reader {
             "style" | "linkStyle" | "click" => Err(format!(
                 "{word} lines are not drawn: give a node a colour with @{{ colour: teal }}"
             )),
-            _ => self.statement(line),
+            _ => match line.split_once(":=") {
+                Some((id, rest)) if super::valid_id(id.trim()) => self.binding(id.trim(), rest),
+                _ => self.statement(line),
+            },
         }
+    }
+
+    /// A world reference's line after its id and `:=`: `KIND NAME`, then, optionally, `[Label]` and `@{ … }`, its name
+    /// in double quotes where it holds ` [` or ` @{`, or starts with a quote; or, without a kind, a name, taken as an
+    /// object's where it holds a `:`, and otherwise as the server finds it.
+    ///
+    /// The name runs to its label or attributes, or the end of the line.
+    fn binding(&mut self, id: &str, rest: &str) -> Result<(), String> {
+        let rest = rest.trim();
+        let (kind, rest) = match rest.split_once(char::is_whitespace) {
+            Some((word, after)) if Kind::parse(word).is_some() => (Kind::parse(word), after.trim()),
+            None if Kind::parse(rest).is_some() => (Kind::parse(rest), ""),
+            _ => (None, rest),
+        };
+        let (name, after) = match rest.strip_prefix('"') {
+            Some(quoted) => quoted
+                .split_once('"')
+                .ok_or_else(|| format!("the name of {id} is not closed by \""))?,
+            None => {
+                // A label or attributes end it, after a space or straight after it, as `bonfire[The bonfire]`.
+                let end = ["[", "@{"]
+                    .iter()
+                    .filter_map(|mark| rest.find(mark))
+                    .min()
+                    .unwrap_or(rest.len());
+                (&rest[..end], &rest[end..])
+            }
+        };
+        let name = name.trim();
+        let kind = kind.unwrap_or_else(|| {
+            if name.contains(':') {
+                Kind::Object
+            } else {
+                Kind::Unknown
+            }
+        });
+        if name.is_empty() && kind != Kind::Agent {
+            return Err(format!(
+                "{id} := names nothing: write a kind and a name, as {id} := object farmyard:campsite/bonfire"
+            ));
+        }
+        let mut cursor = Cursor::new(after.trim());
+        let mut binding = Binding::default();
+        if cursor.eat("[") {
+            let label = cursor.until("]").ok_or("[ is not closed by ]")?;
+            binding.label = Some(unquoted(label.trim()).to_owned());
+            cursor.eat_space();
+        }
+        if cursor.eat("@{") {
+            let inside = cursor.until("}").ok_or("@{ is not closed by }")?;
+            for pair in split_unquoted(inside, ',') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                let Some((key, value)) = pair.split_once(':') else {
+                    self.builder
+                        .warn(format!("\"{}\" is not key: value", clean(pair)));
+                    continue;
+                };
+                if let Err(why) = binding.set(key, unquoted(value.trim())) {
+                    self.builder.warn(why);
+                }
+            }
+            cursor.eat_space();
+        }
+        if !cursor.done() {
+            self.builder.warn(format!(
+                "\"{}\" after {id}'s reference is not read",
+                clean(cursor.rest())
+            ));
+        }
+        self.builder
+            .reference(id, Reference::new(kind, name), binding);
+        Ok(())
     }
 
     /// The line being read.

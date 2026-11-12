@@ -24,6 +24,7 @@ mod presence;
 mod projection;
 mod space;
 pub mod text;
+pub mod world;
 
 pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate, REPLAY_SOURCE};
 pub use cards::{Card, CardKind, Cards, Checks, Label, MAX_CARDS};

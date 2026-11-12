@@ -3,6 +3,7 @@
 
 use super::*;
 use tomori_protocol::diagram::{Edge, Group, Layout, Node};
+use tomori_protocol::world::{Kind, Mark, Reference, State, Target};
 use tomori_protocol::{Place, Pose};
 
 /// A diagram of `nodes`, laid out by hand: each at its own point, in millimetres.
@@ -62,7 +63,7 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
     with_detail.edges[0].via = vec![[0, 60, 0]];
     let mesh = Mesh::new(&with_detail);
     let mut instances = Vec::new();
-    mesh.instances(Mat4::IDENTITY, None, 0.0, &mut instances);
+    mesh.instances(Mat4::IDENTITY, None, 0.0, Vec3::ZERO, &mut instances);
     assert_eq!(instances.len(), mesh.solids());
     // A box for the box and the card, a sphere for the sphere and the flow's beads, and a diamond for the diamond and
     // the dotted edge's dots.
@@ -79,7 +80,7 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
     assert_eq!(mesh.labels(), 7);
     // Its flow moves: its beads stand elsewhere a moment later.
     let mut later = Vec::new();
-    mesh.instances(Mat4::IDENTITY, None, 0.5, &mut later);
+    mesh.instances(Mat4::IDENTITY, None, 0.5, Vec3::ZERO, &mut later);
     assert_ne!(instances, later);
     assert_eq!(mesh.source(), &with_detail);
     assert_eq!(mesh.diagram().nodes.len(), 6);
@@ -102,13 +103,13 @@ fn groups_are_trays_floors_and_frames_with_their_labels() {
     drawn.groups[0].label = "Tray".into();
     let mesh = Mesh::new(&drawn);
     let mut instances = Vec::new();
-    mesh.instances(Mat4::IDENTITY, None, 0.0, &mut instances);
+    mesh.instances(Mat4::IDENTITY, None, 0.0, Vec3::ZERO, &mut instances);
     // The node, a tray, a floor and a frame's twelve edges.
     assert_eq!(counted(&instances, Solid::Box), 1 + 1 + 1 + 12);
     assert_eq!(mesh.labels(), 1 + 3);
     // Focused on the node, the groups dim.
     let mut focused = Vec::new();
-    mesh.instances(Mat4::IDENTITY, Some(0), 0.0, &mut focused);
+    mesh.instances(Mat4::IDENTITY, Some(0), 0.0, Vec3::ZERO, &mut focused);
     assert_eq!(focused[1].colour, TRAY.map(|channel| channel * DIMMED));
     // A volume floating is as large as its face's cells, as every panel is.
     let panel = Panel::new(
@@ -151,6 +152,7 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
         model,
         focus: None,
         time: 0.0,
+        viewer: Vec3::ZERO,
     };
     let mut instances = Vec::new();
     volume.instances(&mut instances);
@@ -164,7 +166,7 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
     assert_eq!(volume, volume.clone());
     // Focused on a, b and the edge between them stay bright; c and its edge dim.
     let mut focused = Vec::new();
-    mesh.instances(model, Some(0), 0.0, &mut focused);
+    mesh.instances(model, Some(0), 0.0, Vec3::ZERO, &mut focused);
     let bright = rgb(tomori_protocol::chart::Colour::Grey);
     assert_eq!([focused[0].colour, focused[1].colour], [bright, bright]);
     assert_eq!(focused[2].colour, bright.map(|channel| channel * DIMMED));
@@ -379,6 +381,41 @@ mod projector {
     }
 
     #[test]
+    fn pointing_at_a_leader_names_its_world_edge_and_the_trigger_on_it_focuses_on_its_node() {
+        let (mut projection, _) = floating();
+        let mut fire = Target::new(
+            "fire",
+            Reference::new(Kind::Object, "farmyard:campsite/bonfire"),
+        );
+        fire.state = State::Here;
+        fire.at = Some([1.5, 0.5, -1.2]);
+        fire.radius = 0.2;
+        let diagram = projection.panels[0].diagram.as_mut().unwrap();
+        diagram.world = vec![fire];
+        diagram.world_edges = vec![edge(2, 0, Style::Solid, Arrow::Forward)];
+        let mut projector = Projector::default();
+        let now = Instant::now();
+        // At the near side of its ring, from home.
+        let at_ring = towards(Vec3::new(1.3, 0.5, -1.2));
+        let output = projector.update(input(
+            Some(&projection),
+            at_ring,
+            false,
+            Hold::default(),
+            now,
+        ));
+        assert_eq!(output.part, Some(Part::WorldEdge(0)));
+        projector.update(input(
+            Some(&projection),
+            at_ring,
+            true,
+            Hold::default(),
+            now,
+        ));
+        assert_eq!(projector.focus(), Some(("panel-1", 2)));
+    }
+
+    #[test]
     fn pointing_at_a_volume_names_its_node_or_edge_with_either_hand_and_the_trigger_focuses_on_a_node()
      {
         let (projection, pose) = floating();
@@ -476,4 +513,213 @@ mod projector {
         );
         assert_eq!(projector.focus(), None);
     }
+}
+
+/// A target `id` of `kind`, here at `at`, marked `mark`.
+fn target(id: &str, kind: Kind, at: [f32; 3], mark: Mark) -> Target {
+    let mut target = Target::new(id, Reference::new(kind, id));
+    target.state = State::Here;
+    target.at = Some(at);
+    target.mark = mark;
+    target.radius = 0.2;
+    target
+}
+
+/// A volume of two nodes a metre and a half up and a metre ahead, facing +Z, with a world edge from the first to each of
+/// `targets`, in `styles` in turn.
+fn pointing(targets: Vec<Target>, edges: &[(Style, Arrow)]) -> (Mesh, Mat4) {
+    let mut drawn = diagram(
+        &[
+            ("a", Shape::Box, [-100, 0, 0]),
+            ("b", Shape::Box, [100, 0, 0]),
+        ],
+        Vec::new(),
+    );
+    drawn.world_edges = edges
+        .iter()
+        .enumerate()
+        .map(|(index, (style, direction))| {
+            edge(0, (index % targets.len()) as u16, *style, *direction)
+        })
+        .collect();
+    drawn.world = targets;
+    let model =
+        Mat4::from_translation(Vec3::new(0.0, 1.5, -1.0)) * Mat4::from_scale(Vec3::splat(0.001));
+    (Mesh::new(&drawn), model)
+}
+
+#[test]
+fn a_world_edge_is_a_leader_from_its_node_to_its_target_in_its_style_with_a_mark() {
+    use tomori_protocol::world::Frame;
+    let mut panel = target("notes", Kind::Panel, [2.0, 1.4, -2.0], Mark::ByKind);
+    panel.frame = Some(Frame {
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        size: [0.6, 0.36],
+    });
+    let mut absent = target("away", Kind::Person, [0.0; 3], Mark::ByKind);
+    absent.state = State::Absent;
+    let targets = vec![
+        target("fire", Kind::Object, [1.5, 0.5, -1.0], Mark::ByKind),
+        target("lookout", Kind::Anchor, [-2.0, 0.0, -3.0], Mark::ByKind),
+        target("sam", Kind::Person, [0.0, 1.6, 1.0], Mark::ByKind),
+        panel,
+        target("board", Kind::Wall, [-1.0, 1.5, -4.0], Mark::Outline),
+        target("rock", Kind::Object, [0.5, 0.2, -2.0], Mark::Unmarked),
+        absent,
+    ];
+    let (mesh, model) = pointing(
+        targets,
+        &[
+            (Style::Solid, Arrow::Forward),
+            (Style::Dashed, Arrow::Back),
+            (Style::Dotted, Arrow::Both),
+            (Style::Thick, Arrow::None),
+            (Style::Flow, Arrow::Forward),
+            (Style::Flow, Arrow::Back),
+            (Style::Solid, Arrow::Forward),
+        ],
+    );
+    // One for each target here: the absent one has none.
+    assert_eq!(mesh.leaders(), 6);
+    assert_eq!((mesh.world_edge(5), mesh.world_edge(9)), (5, 0));
+    assert_eq!((mesh.leader_node(0), mesh.leader_node(9)), (Some(0), None));
+    let mut instances = Vec::new();
+    mesh.instances(model, None, 0.25, Vec3::new(0.0, 1.6, 0.0), &mut instances);
+    // Rings, halos and a frame are tubes; dots diamonds; beads spheres; arrowheads cones.
+    assert!(
+        counted(&instances, Solid::Tube) > 6 * 16,
+        "{}",
+        instances.len()
+    );
+    assert!(counted(&instances, Solid::Diamond) > 3);
+    assert_eq!(counted(&instances, Solid::Sphere), 8);
+    assert_eq!(counted(&instances, Solid::Cone), 6);
+    // More than three, every leader is at half strength, its mark at a third.
+    let colours: Vec<[f32; 3]> = instances.iter().map(|instance| instance.colour).collect();
+    assert!(colours.contains(&EDGE.map(|channel| channel * 0.5)));
+    assert!(colours.contains(&EDGE.map(|channel| channel * (1.0 / 3.0))));
+    // Focused on their node, in full, with their labels; on the other, dimmed, without.
+    let mut focused = Vec::new();
+    mesh.instances(model, Some(0), 0.0, Vec3::ZERO, &mut focused);
+    assert!(focused.iter().any(|instance| instance.colour == EDGE));
+    let mut dimmed = Vec::new();
+    mesh.instances(model, Some(1), 0.0, Vec3::ZERO, &mut dimmed);
+    assert!(dimmed.iter().all(|instance| instance.colour != EDGE));
+    let mut sheets = Vec::new();
+    mesh.sheets(model, Vec3::new(0.0, 1.6, 0.0), Some(0), &mut sheets);
+    // Its node's own label, and a label at each of its targets.
+    assert_eq!(sheets.len(), 1 + 6);
+    sheets.clear();
+    mesh.sheets(model, Vec3::new(0.0, 1.6, 0.0), None, &mut sheets);
+    assert_eq!(sheets.len(), 2);
+}
+
+#[test]
+fn a_few_leaders_are_drawn_in_full_and_the_ray_meets_one_along_its_line_or_at_its_mark() {
+    let (mesh, model) = pointing(
+        vec![target("fire", Kind::Object, [1.5, 0.5, -1.0], Mark::Ring)],
+        &[(Style::Solid, Arrow::Forward)],
+    );
+    let mut instances = Vec::new();
+    mesh.instances(model, None, 0.0, Vec3::ZERO, &mut instances);
+    assert!(instances.iter().any(|instance| instance.colour == EDGE));
+    let mut sheets = Vec::new();
+    mesh.sheets(model, Vec3::ZERO, None, &mut sheets);
+    assert_eq!(sheets.len(), 3);
+    // Labelled with the edge's label, or else the target's, or else its kind.
+    let mut unlabelled = target("rock", Kind::Object, [1.0, 0.0, -1.0], Mark::Ring);
+    unlabelled.label = String::new();
+    let mut labelled = unlabelled.clone();
+    labelled.label = "The rock".into();
+    let (named, _) = pointing(
+        vec![unlabelled, labelled],
+        &[(Style::Solid, Arrow::Forward); 2],
+    );
+    let text = |leader: &leaders::Leader| -> String {
+        leader.label.rows[0]
+            .cells
+            .iter()
+            .map(|(c, _)| *c)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    let texts: Vec<String> = named.leaders.iter().map(text).collect();
+    assert_eq!(texts, ["object", "The rock"]);
+    let mut with_label = mesh.diagram().clone();
+    with_label.world_edges[0].label = "here".into();
+    assert_eq!(text(&Mesh::new(&with_label).leaders[0]), "here");
+    // Its ring about the fire, a fifth of a metre out, is met from above.
+    let down = Ray::new(Vec3::new(1.7, 2.0, -1.0), -Vec3::Y).unwrap();
+    assert_eq!(mesh.hit(model, &down).unwrap().0, Met::Leader(0));
+    // And it leaves the volume through its face towards the fire, its right.
+    let out = leaders::out_of(model, [600, 400, 200], Vec3::new(1.5, 0.5, -1.0));
+    assert!((out - Vec3::X).length() < 1e-5, "{out:?}");
+    let behind = leaders::out_of(model, [600, 400, 200], Vec3::new(0.0, 1.5, -3.0));
+    assert!((behind + Vec3::Z).length() < 1e-5, "{behind:?}");
+    // Along its middle, too.
+    let path = mesh.leader_paths(model).remove(0);
+    let middle = path[path.len() / 2];
+    let at = Ray::new(Vec3::new(middle.x, middle.y, 1.0), -Vec3::Z).unwrap();
+    assert_eq!(mesh.hit(model, &at).unwrap().0, Met::Leader(0));
+}
+
+#[test]
+fn a_leader_to_something_far_off_is_drawn_with_no_more_dashes_or_dots_than_a_near_one() {
+    for (style, solid) in [
+        (Style::Dashed, Solid::Tube),
+        (Style::Dotted, Solid::Diamond),
+    ] {
+        let count = |at: [f32; 3]| {
+            let (mesh, model) = pointing(
+                vec![target("far", Kind::Object, at, Mark::Unmarked)],
+                &[(style, Arrow::None)],
+            );
+            let mut instances = Vec::new();
+            mesh.instances(model, None, 0.0, Vec3::ZERO, &mut instances);
+            counted(&instances, solid)
+        };
+        let (near, far) = (count([1.0, 0.5, -1.5]), count([0.0, 0.0, -900.0]));
+        assert!(near > 4, "{style:?}: {near}");
+        assert!(far <= 65, "{style:?}: {far}");
+    }
+}
+
+#[test]
+fn a_leader_ends_on_its_mark_nearest_where_it_comes_from() {
+    use tomori_protocol::world::Frame;
+    let mut board = target("board", Kind::Wall, [0.0, 1.5, -4.0], Mark::ByKind);
+    board.frame = Some(Frame {
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        size: [2.0, 1.0],
+    });
+    let (mesh, model) = pointing(
+        vec![
+            board,
+            target("halo", Kind::Agent, [0.0, 1.2, -3.0], Mark::Outline),
+            target("rock", Kind::Object, [3.0, 0.0, -1.0], Mark::Unmarked),
+        ],
+        &[
+            (Style::Solid, Arrow::Forward),
+            (Style::Solid, Arrow::Forward),
+            (Style::Solid, Arrow::Forward),
+        ],
+    );
+    let paths = mesh.leader_paths(model);
+    // At the top of the board's frame, above a halo standing for an outline without a frame, and on top of the rock.
+    let end = |index: usize| *paths[index].last().unwrap();
+    assert!(
+        (end(0).y - 2.0).abs() < 1e-4 && end(0).z > -4.0,
+        "{:?}",
+        end(0)
+    );
+    assert!((end(1).y - (1.2 + 0.2 + 0.1)).abs() < 1e-4, "{:?}", end(1));
+    assert!(
+        (end(2) - Vec3::new(3.0, 0.2, -1.0)).length() < 1e-4,
+        "{:?}",
+        end(2)
+    );
+    // Coming down onto it from above.
+    let last = paths[2][paths[2].len() - 2];
+    assert!(last.y > end(2).y);
 }

@@ -210,6 +210,10 @@ pub enum Resource {
         /// On a volume, the edge the ray meets, by its index among the diagram's edges.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edge: Option<u16>,
+        /// On a volume, the world edge the ray meets, by its index among the diagram's world edges, whose ends the server
+        /// names; an older server ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        world_edge: Option<u16>,
     },
     /// The "+N more" sign of a cluster anchor's cluster, by the anchor's name, which stands for the workers gathered
     /// into it: the server names them, their titles and sessions, from its own layout of the cluster. An older server
@@ -285,6 +289,7 @@ impl Resource {
             across: None,
             node: None,
             edge: None,
+            world_edge: None,
         }
     }
 
@@ -308,6 +313,7 @@ impl Resource {
             across: Some(across),
             node: None,
             edge: None,
+            world_edge: None,
         }
     }
 
@@ -321,6 +327,7 @@ impl Resource {
             across: None,
             node: None,
             edge: None,
+            world_edge: None,
         }
     }
 
@@ -347,6 +354,30 @@ impl Resource {
             across: None,
             node: node.map(str::to_owned),
             edge,
+            world_edge: None,
+        }
+    }
+
+    /// The volume whose [`crate::Panel::id`] is `panel`, pointed at on its world edge `index`, by its index among the
+    /// diagram's world edges.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::world_edge_at("panel-7", 2)).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-7", "world_edge": 2})
+    /// );
+    /// ```
+    pub fn world_edge_at(panel: impl Into<String>, index: u16) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line: None,
+            row: None,
+            across: None,
+            node: None,
+            edge: None,
+            world_edge: Some(index),
         }
     }
 
@@ -370,6 +401,7 @@ impl Resource {
             across: None,
             node: None,
             edge: None,
+            world_edge: None,
         }
     }
 }
@@ -533,6 +565,11 @@ pub enum ClientMessage {
         /// as a text panel of its outline. See `design/diagrams.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         diagrams: bool,
+        /// Whether this client draws a volume's world edges, the leader lines from its nodes to the things in the space
+        /// its diagram refers to, with their [`crate::diagram::Diagram::world`]. Absent from older clients, which are
+        /// sent each diagram without them, its outline listing them. See `design/diagrams.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        world_edges: bool,
         /// Whether this client applies [`ServerMessage::ProjectionPatch`] to the projection it holds, asking with
         /// [`ClientMessage::ResyncProjection`] for the whole projection when it cannot. Absent from older clients, which
         /// would refuse a patch and are sent the whole [`ServerMessage::Projection`] whenever it changes, as before. See
@@ -1903,6 +1940,7 @@ mod tests {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2021,6 +2059,7 @@ mod tests {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2097,6 +2136,7 @@ mod tests {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2140,6 +2180,7 @@ mod tests {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2201,6 +2242,7 @@ mod tests {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2229,6 +2271,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,

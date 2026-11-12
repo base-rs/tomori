@@ -52,12 +52,12 @@ fn a_volume_is_laid_out_with_its_outline_and_how_many_warnings_it_has() {
         content.warnings,
         ["line 10: style lines are not drawn: give a node a colour with @{ colour: teal }"]
     );
-    content.lay_out(None);
+    content.lay_out(None, None);
     assert_eq!(content.body, "- x\n- y\n\n**Edges**\n- x → y");
     // Its metadata is full, so the count is not added to it.
     assert_eq!(content.meta.len(), 4);
     let (mut content, _) = Content::parse_diagram("layout: radial\n---\nx --> y\n").unwrap();
-    content.lay_out(None);
+    content.lay_out(None, None);
     assert_eq!(content.meta, [("warnings".to_owned(), "1".to_owned())]);
     assert_eq!(
         content.warned("panel-3").as_deref(),
@@ -68,12 +68,12 @@ fn a_volume_is_laid_out_with_its_outline_and_how_many_warnings_it_has() {
     // Laid out again without them, the count goes.
     content.warnings.clear();
     content.diagram.as_mut().unwrap().layout = Layout::Force;
-    content.lay_out(None);
+    content.lay_out(None, None);
     assert!(content.meta.is_empty());
     assert_eq!(content.warned("panel-3"), None);
     // A panel that is not a volume is not laid out.
     let mut text = Content::parse("Notes.").unwrap();
-    text.lay_out(None);
+    text.lay_out(None, None);
     assert_eq!(text.body, "Notes.");
 }
 
@@ -82,7 +82,7 @@ fn shown(body: &str) -> (Stage, String) {
     let mut stage = Stage::default();
     let walls = SKY;
     let (mut content, _) = Content::parse_diagram(body).unwrap();
-    content.lay_out(None);
+    content.lay_out(None, None);
     let id = stage.project_to(
         &walls,
         content,
@@ -218,7 +218,7 @@ fn a_client_is_sent_as_many_diagrams_as_it_draws_and_the_rest_as_outlines() {
     );
     let panels = vec![panel.clone(), text.clone(), panel.clone(), panel];
     let sent = |diagrams: bool, limits: Limits| {
-        within_volumes(panels.clone(), diagrams, &limits)
+        within_volumes(panels.clone(), diagrams, true, &limits)
             .iter()
             .map(|panel| panel.diagram.is_some())
             .collect::<Vec<_>>()

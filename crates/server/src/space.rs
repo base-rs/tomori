@@ -1884,6 +1884,7 @@ impl SpaceModel {
                 across,
                 node,
                 edge,
+                world_edge,
                 ..
             } if panel.len() <= limits::IDENTIFIER_BYTES => {
                 let row = row
@@ -1902,6 +1903,7 @@ impl SpaceModel {
                                 .as_deref()
                                 .filter(|node| node.len() <= tomori_protocol::diagram::ID_BYTES),
                             edge: *edge,
+                            world_edge: *world_edge,
                         },
                     )?,
                 }))

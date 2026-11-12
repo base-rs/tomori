@@ -11,6 +11,7 @@ use tomori_protocol::diagram::{Arrow, Diagram, Layout, NODE_MM, Point, Rank, WAY
 
 mod force;
 mod layered;
+pub(crate) mod world;
 
 /// The gap kept between nodes, in millimetres of the volume.
 const GAP_MM: f64 = 60.0;
@@ -25,9 +26,14 @@ const PARALLEL_MM: f64 = 40.0;
 type Spot = [f64; 3];
 
 /// Lay `diagram` out, from where `previous`, the diagram it changes, stood, if it changes one: each node's position,
-/// each edge's waypoints, each group's box and the volume's extent. Returns what it laid out otherwise than asked, such
+/// each edge's waypoints, each group's box and the volume's extent, a node pointing at a thing in the world pulled
+/// towards the side facing it where the volume stands at `pose`. Returns what it laid out otherwise than asked, such
 /// as a layout that comes later, as warnings.
-pub(crate) fn lay_out(diagram: &mut Diagram, previous: Option<&Diagram>) -> Vec<Warning> {
+pub(crate) fn lay_out(
+    diagram: &mut Diagram,
+    previous: Option<&Diagram>,
+    pose: Option<&tomori_protocol::Pose>,
+) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let before: Vec<Option<Spot>> = diagram
         .nodes
@@ -39,7 +45,7 @@ pub(crate) fn lay_out(diagram: &mut Diagram, previous: Option<&Diagram>) -> Vec<
         })
         .collect();
     let graph = Graph::of(diagram);
-    let (spots, via) = match &diagram.layout {
+    let (mut spots, via) = match &diagram.layout {
         Layout::Layered { direction } => layered::lay_out(&graph, *direction, &before),
         Layout::Grid => (grid(&graph), Vec::new()),
         Layout::Force => (force::lay_out(&graph, &before), Vec::new()),
@@ -51,6 +57,19 @@ pub(crate) fn lay_out(diagram: &mut Diagram, previous: Option<&Diagram>) -> Vec<
             (force::lay_out(&graph, &before), Vec::new())
         }
     };
+    // Towards the things it points at, a layered layout's nodes only within their ranks, then parted again.
+    if let Some(pose) = pose.filter(|_| !diagram.world_edges.is_empty()) {
+        let fixed = match &diagram.layout {
+            Layout::Layered { direction } => Some(match direction {
+                Rank::Right | Rank::Left => 0,
+                Rank::Away => 2,
+                _ => 1,
+            }),
+            _ => None,
+        };
+        world::pull(diagram, &mut spots, &graph.widths, pose, fixed);
+        world::part(&graph, &mut spots, fixed);
+    }
     place(diagram, &graph, &spots, via);
     warnings
 }

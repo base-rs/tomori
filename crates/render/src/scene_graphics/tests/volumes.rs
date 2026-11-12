@@ -31,6 +31,7 @@ fn projected(reply: &str) -> (tomori_protocol::Projection, Wall) {
         speech_held: false,
         images: false,
         diagrams: true,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: Some(tomori_scene::conversation::HEADSET_LIMITS),

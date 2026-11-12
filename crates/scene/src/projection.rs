@@ -2054,6 +2054,8 @@ pub struct Projector {
 pub enum Part {
     Node(String),
     Edge(u16),
+    /// A world edge, by its index among the diagram's world edges.
+    WorldEdge(u16),
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -2385,10 +2387,18 @@ impl Projector {
             let trigger = hand.free && hand.active && hand.pointing;
             let pressed = trigger && !self.triggers[side];
             self.triggers[side] = trigger;
+            // On a leader, it focuses on the node it comes from.
+            let node = pointed.zip(met).and_then(|((panel, ..), met)| match met {
+                volume::Met::Node(index) => Some(index),
+                volume::Met::Leader(leader) => self
+                    .meshes
+                    .get(&panel.id)
+                    .and_then(|mesh| mesh.leader_node(leader)),
+                volume::Met::Edge(_) => None,
+            });
             if pressed
                 && self.held[side].is_none()
-                && let (Some((panel, _, _, distance, _)), Some(volume::Met::Node(index))) =
-                    (pointed, met)
+                && let (Some((panel, _, _, distance, _)), Some(index)) = (pointed, node)
                 && distance < hand.nearer
             {
                 let focus = (panel.id.clone(), index);
@@ -2653,6 +2663,7 @@ impl Projector {
                 model,
                 focus,
                 time,
+                viewer,
             });
         }
         // Pointing at a chart's plot with the right ray, not carrying a panel in that hand, its readout follows the ray,
@@ -3292,6 +3303,10 @@ impl Projector {
             }
             // At most `diagram::EDGES` of them, which a u16 holds.
             volume::Met::Edge(edge) => Part::Edge(edge as u16),
+            // A leader is drawn for each world edge to a thing here, in order, which names it by its own index.
+            volume::Met::Leader(leader) => {
+                Part::WorldEdge(self.meshes[&panel.id].world_edge(leader))
+            }
         }
     }
 

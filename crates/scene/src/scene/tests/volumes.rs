@@ -69,3 +69,59 @@ fn words_begun_pointing_at_a_volume_name_the_node_or_edge_the_ray_meets() {
         ]
     );
 }
+
+#[test]
+fn words_begun_pointing_at_a_leader_name_its_world_edge() {
+    use tomori_protocol::world::{Kind, Reference, State, Target};
+    let mut conversation = lobby(ConnectionRole::Owner);
+    conversation.apply(space(|state| state.projection = true));
+    let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -1.2);
+    let pose = Pose::upright_facing(ahead.to_array(), arrival::HOME.to_array());
+    let mut diagram = Diagram::default();
+    diagram.layout = Layout::Force;
+    let mut node = Node::new("a", "A");
+    node.at = [0, 0, 0];
+    diagram.nodes.push(node);
+    diagram.extent = [300, 300, 200];
+    let mut fire = Target::new(
+        "fire",
+        Reference::new(Kind::Object, "farmyard:campsite/bonfire"),
+    );
+    fire.state = State::Here;
+    fire.at = Some([1.5, 0.5, -1.2]);
+    fire.radius = 0.2;
+    diagram.world.push(fire);
+    diagram.world_edges.push(Edge::new(0, 0));
+    let panel = Panel::new("panel-1", "Fire", "- A", Place::Free { pose }).with_diagram(diagram);
+    conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+        projection: Box::new(
+            tomori_protocol::Projection::new(SPACE, "sky")
+                .with_walls(vec![tomori_wall()])
+                .with_panels(vec![panel]),
+        ),
+    }));
+    conversation.take_actions();
+    let mut step = Step::default();
+    let senses = Senses {
+        beam: true,
+        ray: Ray::new(arrival::HOME, Vec3::new(1.3, 0.5, -1.2) - arrival::HOME),
+        ..senses()
+    };
+    step.update(
+        &senses,
+        &mut conversation,
+        &mut felt(),
+        Instant::now(),
+        FRAME,
+    );
+    conversation.talk(true);
+    conversation.talk(false);
+    let actions = conversation.take_actions();
+    let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+        unreachable!("recording begins, not {actions:?}")
+    };
+    assert_eq!(
+        utterance.attention.first(),
+        Some(&Resource::world_edge_at("panel-1", 0))
+    );
+}

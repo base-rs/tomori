@@ -8,7 +8,7 @@ use tomori_protocol::diagram::{Diagram, parse};
 fn laid(body: &str, previous: Option<&Diagram>) -> (Diagram, Vec<String>) {
     let (mut diagram, warnings) = parse(body);
     assert!(warnings.is_empty(), "{warnings:?}");
-    let warnings = lay_out(&mut diagram, previous);
+    let warnings = lay_out(&mut diagram, previous, None);
     (diagram, warnings.iter().map(ToString::to_string).collect())
 }
 
@@ -66,8 +66,8 @@ fn the_same_diagram_is_laid_out_alike_every_time() {
             diagram.layout = tomori_protocol::diagram::Layout::Force;
         }
         let mut again = diagram.clone();
-        lay_out(&mut diagram, None);
-        lay_out(&mut again, None);
+        lay_out(&mut diagram, None, None);
+        lay_out(&mut again, None, None);
         assert_eq!(diagram, again);
         assert!(diagram.extent.iter().all(|side| *side > 0));
     }
@@ -94,7 +94,7 @@ fn ranks_go_the_way_the_layout_says() {
     diagram.layout = tomori_protocol::diagram::Layout::Layered {
         direction: Rank::Away,
     };
-    lay_out(&mut diagram, None);
+    lay_out(&mut diagram, None, None);
     assert!(
         at(&diagram, "b")[2] < at(&diagram, "a")[2],
         "away is into the volume"
@@ -180,7 +180,7 @@ fn a_small_edit_to_a_force_diagram_moves_little() {
     let force = |body: &str, previous: Option<&Diagram>| {
         let mut diagram = parse(body).0;
         diagram.layout = tomori_protocol::diagram::Layout::Force;
-        lay_out(&mut diagram, previous);
+        lay_out(&mut diagram, previous, None);
         diagram
     };
     let before = force(body, None);
@@ -251,7 +251,7 @@ fn groups_stand_together_and_their_boxes_hold_their_members() {
         ([0; 3], [0; 3])
     );
     let mut empty = Diagram::default();
-    lay_out(&mut empty, None);
+    lay_out(&mut empty, None, None);
     assert_eq!(empty.extent, [0; 3]);
 }
 
@@ -262,7 +262,7 @@ fn force_keeps_a_group_together_and_apart_from_others() {
     )
     .0;
     diagram.layout = tomori_protocol::diagram::Layout::Force;
-    lay_out(&mut diagram, None);
+    lay_out(&mut diagram, None, None);
     let within = apart(at(&diagram, "a"), at(&diagram, "c"));
     let between = apart(at(&diagram, "a"), at(&diagram, "f"));
     assert!(within < between, "{within} {between}");
@@ -274,16 +274,16 @@ fn radial_comes_later_and_grid_lays_out_in_order() {
     diagram.layout = tomori_protocol::diagram::Layout::Radial {
         hub: Some("a".into()),
     };
-    let warnings = lay_out(&mut diagram, None);
+    let warnings = lay_out(&mut diagram, None, None);
     assert_eq!(
         warnings[0].text,
         "radial layout comes in a later version: laid out by force"
     );
     diagram.layout = tomori_protocol::diagram::Layout::Unknown;
-    assert_eq!(lay_out(&mut diagram, None).len(), 1);
+    assert_eq!(lay_out(&mut diagram, None, None).len(), 1);
     let (mut diagram, _) = parse("a\nb\nc\nd\ne\n");
     diagram.layout = tomori_protocol::diagram::Layout::Grid;
-    assert!(lay_out(&mut diagram, None).is_empty());
+    assert!(lay_out(&mut diagram, None, None).is_empty());
     let spots: Vec<[i16; 3]> = diagram.nodes.iter().map(|node| node.at).collect();
     // Three columns, of two rows.
     assert_eq!(spots[0][1], spots[2][1]);
@@ -313,7 +313,7 @@ fn force_lays_out_one_node_parts_what_overlaps_and_turns_a_line_flat() {
     for body in ["a\n", "a\nb\nc --- d\n"] {
         let mut diagram = parse(body).0;
         diagram.layout = tomori_protocol::diagram::Layout::Force;
-        lay_out(&mut diagram, None);
+        lay_out(&mut diagram, None, None);
         assert!(diagram.extent.iter().all(|side| *side > 0));
     }
     let graph = Graph {
@@ -360,7 +360,7 @@ fn a_layered_layout_laid_out_again_across_keeps_its_ranks_order() {
 fn a_force_layout_is_golden() {
     let mut diagram = parse(&PIPELINE.replace("flowchart TD\n", "")).0;
     diagram.layout = tomori_protocol::diagram::Layout::Force;
-    lay_out(&mut diagram, None);
+    lay_out(&mut diagram, None, None);
     let spots: Vec<[i16; 3]> = diagram.nodes.iter().map(|node| node.at).collect();
     // Started from each id's hash and majorised in arithmetic every platform rounds alike, it is the same everywhere.
     assert_eq!(
@@ -378,4 +378,44 @@ fn a_force_layout_is_golden() {
     // Its cube root is the platform's, but for the last bits, which no `cbrt` promises alike.
     assert_eq!(super::force::cube_root(64.0), 4.0);
     assert!((super::force::cube_root(30.0) - 30f64.cbrt()).abs() < 1e-12);
+}
+
+#[test]
+fn a_node_pointing_at_a_thing_is_laid_out_on_the_side_of_its_volume_facing_it() {
+    use tomori_protocol::world::State;
+    // A volume a metre and a half up, facing +Z, the fire a metre to its right.
+    let pose = tomori_protocol::Pose::upright_facing([0.0, 1.5, 0.0], [0.0, 1.5, 2.0]);
+    for (layout, along) in [
+        ("layered down", 1),
+        ("layered right", 0),
+        ("layered away", 2),
+        ("force", 3),
+    ] {
+        let (mut diagram, _) = tomori_protocol::diagram::parse(
+            "fire := object farmyard:campsite/bonfire\na --> b & c & d\nc --> fire\n",
+        );
+        diagram.layout = tomori_protocol::diagram::Layout::parse(layout).unwrap();
+        diagram.world[0].state = State::Here;
+        diagram.world[0].at = Some([1.0, 1.5, 0.0]);
+        let mut alone = diagram.clone();
+        lay_out(&mut alone, None, None);
+        lay_out(&mut diagram, None, Some(&pose));
+        // Pulled towards the fire, it stands further right among its rank than it would.
+        let right = |diagram: &Diagram| {
+            let at = |id: &str| diagram.nodes[diagram.node(id).unwrap()].at;
+            [at("c")[0] - at("b")[0], at("c")[0] - at("d")[0]]
+        };
+        let (pulled, unpulled) = (right(&diagram), right(&alone));
+        assert!(
+            pulled[0] >= unpulled[0] && pulled[1] >= unpulled[1] && pulled != unpulled
+                || along == 0,
+            "{layout}: {pulled:?} against {unpulled:?}"
+        );
+        // Its ranks stay where they were along their axis.
+        if along < 3 {
+            for (node, before) in diagram.nodes.iter().zip(&alone.nodes) {
+                assert_eq!(node.at[along], before.at[along], "{layout}");
+            }
+        }
+    }
 }

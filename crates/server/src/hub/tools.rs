@@ -84,6 +84,8 @@ pub(crate) struct ShownDiagram {
     pub size: [f32; 3],
     /// What reading and laying it out found wrong, for the agent to put right.
     pub warnings: Vec<String>,
+    /// What each of its world references resolved to, a line each.
+    pub world: Vec<String>,
 }
 
 /// The placement `place` names, as the agent gives it to `move_panel` or `show_image`, or why Tomori does not know it.
@@ -389,13 +391,32 @@ impl Hub {
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
         let origin = state.asking(&space);
+        let carried = state.carried(&space, std::time::Instant::now());
         let environments = self.environments();
-        let record = state.space_mut(&space).expect("found above");
+        let record = state.space(&space).expect("found above");
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let projection = record.stage.view(&space, &walls, now);
+        // What its world references name, resolved before it is placed or laid out, which both follow.
+        let things = state.world_things(
+            &space,
+            &environments,
+            &projection,
+            &carried,
+            origin.as_ref(),
+            std::time::Instant::now(),
+        );
+        let world = content.resolve(&things);
+        let record = state.space_mut(&space).expect("found above");
+        let walls = environments.walls(&record.model.environment);
         let solids = record.panel_solids(&environments);
         let to = match place {
+            Some(crate::stage::Placement::NearReferences) => Some(super::world::near_references(
+                content.diagram.as_deref().expect("a volume"),
+                origin.as_ref(),
+                &projection,
+                &solids,
+            )),
             Some(place) => Some(record.panel_destination(
                 &environments,
                 place,
@@ -414,7 +435,13 @@ impl Hub {
             .slug
             .as_deref()
             .and_then(|slug| record.stage.named_diagram(walls.environment, slug));
-        content.lay_out(previous);
+        let standing = content
+            .slug
+            .as_deref()
+            .and_then(|slug| record.stage.named(walls.environment, slug))
+            .and_then(|id| projection.panel(&id).cloned());
+        let pose = super::world::volume_pose(&to, said, standing.as_ref(), &projection);
+        content.lay_out(previous, pose.as_ref());
         let warnings = std::mem::take(&mut content.warnings);
         let slug = content.slug.clone();
         let extent = content
@@ -437,6 +464,7 @@ impl Hub {
             updated,
             size: extent.map(|side| f32::from(side) / 1000.0),
             warnings,
+            world,
         })
     }
 

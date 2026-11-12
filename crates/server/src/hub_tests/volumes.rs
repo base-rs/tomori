@@ -27,6 +27,7 @@ impl Client {
             speech_held: false,
             images: false,
             diagrams: true,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: Some(Limits::TODAY.with_volumes(volumes, nodes)),

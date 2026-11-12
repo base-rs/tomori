@@ -1,0 +1,26 @@
+```diagram
+title: Toasting a marshmallow
+id: marshmallow
+layout: layered down
+place: near references
+---
+fire := object farmyard:campsite/bonfire [The bonfire]
+stick := object farmyard:campsite/stick-2 [A marshmallow stick]
+seat := anchor pool-lookout [The lookout's seat]
+samuel := person Samuel#11
+
+find_fire[1. Find the fire]@{ colour: amber, detail: "At the campsite, beside the pool lookout" }
+take_stick[2. Take a stick]@{ detail: "Any of the four leaning on the far log; grip to take it" }
+hold[3. Hold it over the embers]@{ detail: "A hand's breadth above the embers, not in the flames" }
+turn[4. Turn it slowly]@{ detail: "About 16 s to golden at the hottest; black soon after" }
+eat((5. Let it cool and eat))@{ colour: green }
+sit[Sit while it cools]@{ size: 1 }
+
+find_fire --> take_stick --> hold --> turn --> eat
+eat -.-> sit
+find_fire --> fire : here
+take_stick --> stick : this one
+hold ~~> fire : over the embers
+sit -.-> seat
+eat --> samuel : your turn
+```

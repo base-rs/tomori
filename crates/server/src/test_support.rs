@@ -525,6 +525,7 @@ impl TestClient {
             speech_held: false,
             images,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,

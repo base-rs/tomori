@@ -374,6 +374,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         speech_held: false,
         images: false,
         diagrams: false,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

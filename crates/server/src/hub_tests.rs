@@ -86,6 +86,7 @@ impl Client {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -237,6 +238,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         speech_held: false,
         images: false,
         diagrams: false,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: None,
@@ -1952,6 +1954,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         speech_held: false,
         images: false,
         diagrams: false,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: None,
@@ -3172,6 +3175,7 @@ fn presenting(
         speech_held: false,
         images: false,
         diagrams: false,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: None,
@@ -5617,6 +5621,7 @@ impl Client {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -7808,6 +7813,7 @@ impl Client {
             speech_held: false,
             images: true,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -8195,6 +8201,8 @@ mod patches;
 mod placing;
 #[path = "hub_tests/proximity.rs"]
 mod proximity;
+#[path = "hub_tests/references.rs"]
+mod references;
 #[path = "hub_tests/relocating.rs"]
 mod relocating;
 #[path = "hub_tests/timers.rs"]

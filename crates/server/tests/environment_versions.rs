@@ -150,6 +150,7 @@ fn a_hello_longer_than_a_visitor_sends_is_refused() {
         speech_held: false,
         images: false,
         diagrams: false,
+        world_edges: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

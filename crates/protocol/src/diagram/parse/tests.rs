@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::diagram::{Colour, Rank};
+use crate::world::Mark;
 
 fn texts(warnings: &[Warning]) -> Vec<String> {
     warnings.iter().map(ToString::to_string).collect()
@@ -240,4 +241,84 @@ fn the_first_label_of_an_edge_is_kept() {
     assert_eq!(diagram.layout, Layout::default());
     assert_eq!(diagram.edges[0].label, "first");
     assert_eq!(diagram.edges[1].label, "third");
+}
+
+#[test]
+fn a_binding_names_a_thing_in_the_world_by_its_kind_and_name() {
+    let (diagram, warnings) = parse(concat!(
+        "fire := object farmyard:campsite/bonfire [The bonfire]\n",
+        "seat := Anchor pool-lookout[The lookout's seat] @{ mark: halo, colour: teal, }\n",
+        "board := wall \"Notice [board]\" @{ mark: outline }\n",
+        "notes := panel trial-checklist\n",
+        "builder := worker \"Build the client\"\n",
+        "samuel := person Samuel#11\n",
+        "me := agent\n",
+        "hen := farmyard:hen/biscuit\n",
+        "lookout := pool-lookout\n",
+        "a[A] --> fire & seat & board & notes & builder & samuel & me & hen & lookout\n",
+    ));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let references: Vec<String> = diagram
+        .world
+        .iter()
+        .map(|target| format!("{} {}", target.id, target.reference))
+        .collect();
+    assert_eq!(
+        references,
+        [
+            "fire object farmyard:campsite/bonfire",
+            "seat anchor pool-lookout",
+            "board wall Notice [board]",
+            "notes panel trial-checklist",
+            "builder worker Build the client",
+            "samuel person Samuel#11",
+            "me agent",
+            // Without a kind, a name with a colon is an object's, and any other the server finds.
+            "hen object farmyard:hen/biscuit",
+            "lookout thing pool-lookout",
+        ]
+    );
+    assert_eq!(diagram.world[0].label, "The bonfire");
+    assert_eq!(
+        (diagram.world[1].mark, diagram.world[1].colour),
+        (Mark::Halo, Some(crate::chart::Colour::Teal))
+    );
+    assert_eq!(diagram.world[2].mark, Mark::Outline);
+    // Only `a` is a node; the rest are world edges, one to each.
+    assert_eq!(diagram.nodes.len(), 1);
+    assert!(diagram.edges.is_empty());
+    assert_eq!(diagram.world_edges.len(), 9);
+    assert!(diagram.world_edges.iter().all(|edge| edge.from == 0));
+}
+
+#[test]
+fn a_binding_that_cannot_be_read_is_skipped_and_named() {
+    let (diagram, warnings) = parse(concat!(
+        "nothing := object\n",
+        "open := wall \"Notice board\n",
+        "label := anchor home [Home\n",
+        "attributes := anchor home @{ mark: glow, size: 2, odd }\n",
+        "unclosed := anchor home @{ mark: ring\n",
+        "trailing := anchor home [Home] extra\n",
+        "step --> attributes & trailing\n",
+    ));
+    assert_eq!(
+        texts(&warnings),
+        [
+            "line 1: nothing := names nothing: write a kind and a name, as nothing := object farmyard:campsite/bonfire",
+            "line 2: the name of open is not closed by \"",
+            "line 3: [ is not closed by ]",
+            "line 4: \"glow\" is not a mark: a ring, halo, outline or none",
+            "line 4: \"size\" is not an attribute of a world reference: mark or colour",
+            "line 4: \"odd\" is not key: value",
+            "line 5: @{ is not closed by }",
+            "line 6: \"extra\" after trailing's reference is not read",
+        ]
+    );
+    assert_eq!(diagram.world.len(), 2);
+    assert_eq!(diagram.world[1].label, "Home");
+    // A line whose left side is not an id is read as nodes and edges, as Mermaid's.
+    let (diagram, _) = parse("a --> b : x := y\n");
+    assert_eq!(diagram.edges[0].label, "x := y");
+    assert!(diagram.world.is_empty());
 }

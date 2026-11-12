@@ -55,7 +55,7 @@ impl Hub {
                 (name, false)
             }
             Placement::Looking(name) => (name, true),
-            Placement::Wall(..) | Placement::Anchor(_) => {
+            Placement::Wall(..) | Placement::Anchor(_) | Placement::NearReferences => {
                 return Err("A layout stands in front of someone or where they are looking: say front, near or looking, with a name or for whoever asked.".to_owned());
             }
         };
