@@ -7,7 +7,7 @@ use tomori_server::{Builder, Environment, Server};
 /// The label clients show for the Minimal grid.
 pub const GRID_LABEL: &str = "Grid";
 
-/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock and the campsite's marshmallow sticks, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, its trail's stations and viewpoints and its campsite, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
+/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock and the campsite's marshmallow sticks, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, its trail's stations and viewpoints and its campsite, and its walkable ground, the navmesh its clients walk on, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
 ///
 /// ```
 /// let builder = tomori_server_app::builder();
@@ -30,7 +30,8 @@ pub fn builder() -> Builder {
     .with_arrival(farmyard_arrival())
     .with_agent(farmyard_agent())
     .with_anchor(farmyard_home())
-    .with_solids(farmyard_solids());
+    .with_solids(farmyard_solids())
+    .with_navmesh(tomori_environment_farmyard::walkable::navmesh().clone());
     let farmyard = farmyard_trail()
         .into_iter()
         .chain([farmyard_campsite()])

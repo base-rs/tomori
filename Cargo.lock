@@ -4411,6 +4411,7 @@ dependencies = [
  "futures-lite",
  "futures-util",
  "gethostname",
+ "glam 0.33.12",
  "image",
  "jiff",
  "libc",
