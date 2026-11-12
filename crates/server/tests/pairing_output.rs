@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tomori_protocol::{ClientMessage, ServerMessage};
-use tomori_security::Fingerprint;
 use tomori_security::pairing::{ChosenName, Nonce, code, display};
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{PairingEvent, PairingView};
+
+pub mod pairing_support;
+use pairing_support::{failed, fingerprint, reveal};
 
 /// Every log record of this test process, at every level, with its level and target.
 struct Recorder(Mutex<Vec<String>>);
@@ -44,10 +46,6 @@ fn logged() -> Vec<String> {
     log::Log::flush(&LOG);
     assert!(log::Log::enabled(&LOG, &log::Metadata::builder().build()));
     LOG.0.lock().unwrap().clone()
-}
-
-fn fingerprint() -> Fingerprint {
-    Fingerprint::of(b"test certificate")
 }
 
 /// A server that pairs, configured by `configure`, with its pairing handle and what its console is told.
@@ -84,30 +82,12 @@ struct Secrets {
 
 /// Begin and reveal, as a device does, returning what it knows.
 fn pair(client: &mut TestClient) -> Secrets {
-    let device = Nonce::generate();
-    client.send(&ClientMessage::PairBegin {
-        commitment: device.commitment(),
-    });
-    let server = client.wait_for(|message| match message {
-        ServerMessage::PairNonce { nonce } => Nonce::parse(nonce),
-        _ => None,
-    });
-    client.send(&ClientMessage::PairReveal {
-        nonce: device.to_hex(),
-    });
-    client.wait_for(|message| matches!(message, ServerMessage::PairWaiting).then_some(()));
+    let (device, server) = reveal(client);
     Secrets {
         code: code(fingerprint(), device, server),
         device: device.to_hex(),
         server: server.to_hex(),
     }
-}
-
-fn failed(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::PairFailed { error } => Some(error.clone()),
-        _ => None,
-    })
 }
 
 /// Everything the console was told, as it shows each event and as each is debugged.

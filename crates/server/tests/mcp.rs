@@ -16,6 +16,9 @@ use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::kept::SpaceStore;
 use tomori_server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually};
 
+pub mod mcp_support;
+use mcp_support::{agent_replies, create, failure};
+
 /// Every log record of this test process.
 struct Recorder(std::sync::Mutex<Vec<String>>);
 
@@ -59,19 +62,6 @@ fn tmp() -> String {
         .expect("the temporary directory exists")
         .to_string_lossy()
         .into_owned()
-}
-
-/// Create a space titled `title` in `/tmp`, and wait for it.
-fn create(client: &mut TestClient, title: &str) -> String {
-    client.send(&ClientMessage::CreateSpace {
-        title: title.to_owned(),
-        backend: FAKE_BACKEND_NAME.to_owned(),
-        directory: "/tmp".to_owned(),
-        session: None,
-        environment: None,
-        instructions: None,
-    });
-    client.space(|state| state.title == title).id
 }
 
 /// The registrations `backend` has been asked for, once there are `count`.
@@ -166,12 +156,6 @@ fn call(
     );
     assert_eq!(answer.status, 200, "{}", answer.body);
     answer.json()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> &str {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap()
 }
 
 /// A state directory of its own, removed when dropped.
@@ -1630,21 +1614,6 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         moved["people"][0]["presence"],
         "Their client has not reported where they are."
     );
-}
-
-/// The agent of `session` completes the reply `message`, of `text`.
-fn agent_replies(session: &FakeSession, message: &str, text: &str) {
-    session.emit(Event::MessageStarted {
-        message: message.into(),
-        role: tomori_backend::Role::Assistant,
-    });
-    session.emit(Event::TextDelta {
-        message: message.into(),
-        text: text.into(),
-    });
-    session.emit(Event::MessageCompleted {
-        message: message.into(),
-    });
 }
 
 #[test]

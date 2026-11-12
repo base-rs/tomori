@@ -9,10 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tomori_protocol::{ClientMessage, ServerMessage};
-use tomori_security::Fingerprint;
 use tomori_security::pairing::{Nonce, code, display};
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{PAIRING_ATTEMPTS, PairingEvent};
+
+pub mod mcp_support;
+use mcp_support::{call_with, failure, say};
+
+pub mod pairing_support;
+use pairing_support::{failed, fingerprint, pair};
 
 /// Every log record of this test process.
 struct Recorder(Mutex<Vec<String>>);
@@ -41,11 +46,6 @@ fn logged() -> Vec<String> {
     log::Log::flush(&LOG);
     assert!(log::Log::enabled(&LOG, &log::Metadata::builder().build()));
     LOG.0.lock().unwrap().clone()
-}
-
-/// The certificate fingerprint the code is derived from; the test clients speak plain HTTP.
-fn fingerprint() -> Fingerprint {
-    Fingerprint::of(b"test certificate")
 }
 
 /// A server that pairs and serves Tomori's tools, with Ada, an owner, in her space "Studio", whose agent session is `session`.
@@ -109,7 +109,7 @@ impl Studio {
         if let Some(session) = session {
             params["_meta"] = json!({ "ai.opencode/sessionID": session });
         }
-        call(&self.server, &self.token, &params)
+        call_with(&self.server, &self.token, &params)
     }
 
     /// Call `name` as the studio's agent, passing Ada, whose words it was given last, as who asked for a pairing tool, unless `arguments` names someone else, or `null` for nobody.
@@ -162,16 +162,6 @@ impl Studio {
     }
 }
 
-/// `client` says `words` to the agent of their space, and waits until it is given them.
-fn say(client: &mut TestClient, utterance: &str, words: &str) {
-    client.say(utterance, words);
-    client.space(|state| {
-        state.queue.iter().any(|entry| {
-            entry.text == words && entry.state == tomori_protocol::QueueState::Delivered
-        })
-    });
-}
-
 /// The line the operator and owners are told that the agent of `space`, titled `title`, from `session`, `did` something, as someone asked, with their entry, or as it asked and was refused, once it is logged.
 fn told(
     prompts: &Mutex<Vec<PairingEvent>>,
@@ -199,53 +189,6 @@ fn told(
     });
     assert!(logged().contains(&line), "{line}");
     line
-}
-
-/// Call a tool with `params` at `server`'s MCP endpoint, with `token`, and return its result.
-fn call(server: &TestServer, token: &str, params: &Value) -> Value {
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
-}
-
-/// Begin and reveal, as a device does, returning the code it derives and shows.
-fn pair(client: &mut TestClient) -> String {
-    let device = Nonce::generate();
-    client.send(&ClientMessage::PairBegin {
-        commitment: device.commitment(),
-    });
-    let server = client.wait_for(|message| match message {
-        ServerMessage::PairNonce { nonce } => Nonce::parse(nonce),
-        _ => None,
-    });
-    client.send(&ClientMessage::PairReveal {
-        nonce: device.to_hex(),
-    });
-    client.wait_for(|message| matches!(message, ServerMessage::PairWaiting).then_some(()));
-    code(fingerprint(), device, server)
-}
-
-fn failed(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::PairFailed { error } => Some(error.clone()),
-        _ => None,
-    })
 }
 
 /// Another six digits than `code`.
@@ -807,7 +750,7 @@ fn an_open_server_does_not_pair_and_the_tools_say_so() {
             "_meta": {"ai.opencode/sessionID": session},
         });
         assert!(
-            failure(&call(&server, &token, &params))
+            failure(&call_with(&server, &token, &params))
                 .starts_with("This server does not pair devices: in --auth open mode"),
             "{tool}"
         );

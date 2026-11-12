@@ -5,8 +5,6 @@
 //! setting of its walls and panels, those not shown marked, and what each panel shows; `set_context` fixes a parameter,
 //! or time as absolute instants in UTC, on a wall or a panel, or lets it follow, everyone seeing the chips and the side
 //! told. See `design/panel-context.md` and `design/mcp.md`.
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,33 +17,8 @@ use tomori_protocol::{Pose, ServerMessage};
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{Environment, EnvironmentWall};
 
-/// Call a tool with `arguments` at `server`'s MCP endpoint, with `token`, as the agent of `session`.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
-}
+pub mod mcp_support;
+use mcp_support::{call, failure};
 
 /// A console's side: it declares the parameters it is given, a latency chart of the selected region on its first wall
 /// and a list of the selected region's pod on its second, and records each context it is told.

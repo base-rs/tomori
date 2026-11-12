@@ -3,8 +3,6 @@
 
 //! Ids on what an environment's server side describes, in the note before a participant's words, and the `inspect`
 //! tool, which asks the side for more. See `design/environments.md` and `design/mcp.md`.
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +12,9 @@ use tomori_protocol::{ClientMessage, QueueState, Resource};
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
 use tomori_server::{Environment, INSPECTION_BYTES, Server};
+
+pub mod mcp_support;
+use mcp_support::{call_from, failure};
 
 /// How long the tests' server waits for an inspection.
 const WAIT: Duration = Duration::from_millis(400);
@@ -153,40 +154,6 @@ fn token(backend: &FakeBackend) -> String {
     value.strip_prefix("Bearer ").unwrap().to_owned()
 }
 
-/// Call the tool `name` with `arguments` for the agent of `session`, or with no `_meta` at all.
-fn call(
-    server: &TestServer,
-    token: &str,
-    session: Option<&str>,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    let mut params = json!({ "name": name, "arguments": arguments });
-    if let Some(session) = session {
-        params["_meta"] = json!({ "ai.opencode/sessionID": session });
-    }
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
-}
-
 /// The prompts `session` was given.
 fn prompts(session: &FakeSession) -> Vec<String> {
     session
@@ -208,7 +175,7 @@ fn what_is_pointed_at_carries_its_id_only_when_the_environment_gives_one() {
     let me = tomori_backend::Session::id(&session);
     // Once the side has described what it shows.
     eventually(|| {
-        call(
+        call_from(
             &server,
             &token,
             Some(&me),
@@ -267,7 +234,7 @@ fn the_agent_inspects_an_id_for_the_details_its_environment_gives() {
         tomori_backend::Session::id(&sessions[1]),
     );
     let inspect = |session: Option<&str>, id: &str| {
-        call(&server, &token, session, "inspect", json!({ "id": id }))
+        call_from(&server, &token, session, "inspect", json!({ "id": id }))
     };
 
     // A hen, as the side answers for her, with what the space knows of her.
@@ -329,7 +296,7 @@ fn the_agent_inspects_an_id_for_the_details_its_environment_gives() {
 
     // What the side declares no actions on offers none to take.
     assert_eq!(
-        failure(&call(
+        failure(&call_from(
             &server,
             &token,
             Some(&one),
@@ -353,7 +320,13 @@ fn the_agent_inspects_an_id_for_the_details_its_environment_gives() {
     );
     assert!(failure(&inspect(Some(&one), &"x".repeat(300))).contains("id"));
     assert_eq!(
-        failure(&call(&server, &token, Some(&one), "inspect", json!({}))),
+        failure(&call_from(
+            &server,
+            &token,
+            Some(&one),
+            "inspect",
+            json!({})
+        )),
         "This tool needs id, as text."
     );
 
@@ -381,7 +354,7 @@ fn an_inspection_is_bounded_in_time_and_size_and_contains_the_side_s_failures() 
     create(&mut ada, "Yard", "observe");
     let token = token(&backend);
     let one = tomori_backend::Session::id(&backend.started()[0]);
-    let inspect = |id: &str| call(&server, &token, Some(&one), "inspect", json!({ "id": id }));
+    let inspect = |id: &str| call_from(&server, &token, Some(&one), "inspect", json!({ "id": id }));
     eventually(|| {
         inspect("observe:hen/marigold")
             .get("structuredContent")

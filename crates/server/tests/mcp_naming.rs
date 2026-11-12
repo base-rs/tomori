@@ -2,50 +2,13 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Someone saying their name to a space's agent, which renames them, on their own device, through Tomori's tools. See `design/security.md` and `design/mcp.md`.
-use std::io::{Read, Write};
-use std::net::TcpStream;
 
 use serde_json::{Value, json};
 use tomori_protocol::ClientMessage;
-use tomori_server::test_support::{TestClient, TestServer, eventually};
+use tomori_server::test_support::{TestServer, eventually};
 
-/// Call the tool `name` with `arguments`, as the agent of `session`.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
-}
-
-/// `client` says `words` to the agent of their space, and waits until it is given them.
-fn say(client: &mut TestClient, utterance: &str, words: &str) {
-    client.say(utterance, words);
-    client.space(|state| {
-        state.queue.iter().any(|entry| {
-            entry.text == words && entry.state == tomori_protocol::QueueState::Delivered
-        })
-    });
-}
+pub mod mcp_support;
+use mcp_support::{call, failure, say};
 
 #[test]
 fn someone_wearing_an_owner_s_headset_says_their_name_and_keeps_it() {

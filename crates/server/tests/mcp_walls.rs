@@ -3,51 +3,14 @@
 
 //! A space's agent and its locked walls: `set_wall` and `remove_wall` refuse a locked wall, and `set_wall`'s `locked`
 //! and `reset` lock, unlock and put back a wall only when an owner asks. See `design/projection.md` and `design/mcp.md`.
-use std::io::{Read, Write};
-use std::net::TcpStream;
 
 use serde_json::{Value, json};
 use tomori_protocol::{ClientMessage, Grid, Pose, ServerMessage};
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{Environment, EnvironmentWall};
 
-/// Call a tool with `arguments` at `server`'s MCP endpoint, with `token`, as the agent of `session`.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
-}
-
-/// `client` says `words`, which are given to the agent, beginning its turn.
-fn say(client: &mut TestClient, utterance: &str, words: &str) {
-    client.say(utterance, words);
-    client.space(|state| {
-        state.queue.iter().any(|entry| {
-            entry.text == words && entry.state == tomori_protocol::QueueState::Delivered
-        })
-    });
-}
+pub mod mcp_support;
+use mcp_support::{call, failure, say};
 
 /// The yard's notice board, two slots wide and one high, as the environment declares it.
 fn board() -> Pose {

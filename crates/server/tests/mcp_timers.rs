@@ -12,37 +12,8 @@ use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend};
 use tomori_server::test_support::{TestServer, TextTranscriber, eventually};
 
-/// Call the tool `name` with `arguments` for the agent of `session`, as OpenCode does, and return its result.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = std::net::TcpStream::connect(server.tools.unwrap()).unwrap();
-    std::io::Write::write_all(
-        &mut stream,
-        format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    let mut response = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The text of a refused call's result.
-fn refusal(result: &Value) -> &str {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap()
-}
+pub mod mcp_support;
+use mcp_support::{call, failure};
 
 #[test]
 fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
@@ -192,16 +163,16 @@ fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
         ),
     ] {
         let result = call("set_timer", arguments.clone());
-        let refused = refusal(&result);
+        let refused = failure(&result);
         assert!(refused.contains(said), "{arguments}: {refused}");
     }
 
     assert_eq!(
-        refusal(&call("cancel_timer", json!({}))),
+        failure(&call("cancel_timer", json!({}))),
         "This tool needs name, as text."
     );
     assert!(
-        refusal(&call("cancel_timer", json!({"name": "x".repeat(161)})))
+        failure(&call("cancel_timer", json!({"name": "x".repeat(161)})))
             .contains("The name is too long")
     );
     let cancelled = call("cancel_timer", json!({"name": "tea"}));
@@ -209,7 +180,7 @@ fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
     ada.space(|state| state.timers.len() == 4);
     // Another session has no space, and so no timers.
     let other = call_other(&server, &token);
-    assert!(refusal(&other).contains("not bound to a Tomori space"));
+    assert!(failure(&other).contains("not bound to a Tomori space"));
 }
 
 /// `timers` called by a session bound to no space.
@@ -321,17 +292,17 @@ fn a_timer_named_with_an_argument_set_timer_does_not_take_is_refused_and_nothing
         json!({"name": "overnight", "note": "Check the build", "every_minutes": 60, "when_present": false}),
     );
     assert_eq!(
-        refusal(&refused),
+        failure(&refused),
         "when_present is not an argument of set_timer; it takes: condition, count, cron, daily_at, days, every_minutes, every_seconds, in_minutes, in_seconds, name, note, once_at, until, zone."
     );
     let refused = call("cancel_timer", json!({"name": "overnight", "force": true}));
     assert_eq!(
-        refusal(&refused),
+        failure(&refused),
         "force is not an argument of cancel_timer; it takes: name."
     );
     let refused = call("timers", json!({"all": true}));
     assert_eq!(
-        refusal(&refused),
+        failure(&refused),
         "all is not an argument of timers; it takes: none."
     );
     assert_eq!(
