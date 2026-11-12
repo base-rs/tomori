@@ -2573,13 +2573,25 @@ fn a_locked_wall_shows_no_bar_nor_handles_and_only_an_owner_near_it_its_padlock_
         }
     }
     // Of two padlocks the ray meets, the nearer is taken: another locked wall behind it, its padlock on the same ray.
+    // Seen from the left, so that each shows its padlock beyond its top left corner, nearest the owner.
+    let eye = HOME - Vec3::X;
     let mut behind = wall.clone();
     behind.id = "environment-1".into();
-    let shift = (padlock - HOME).normalize() * 0.3;
+    let shift = (padlock - eye).normalize() * 0.3;
     behind.pose.position = (Vec3::from_array(wall.pose.position) + shift).to_array();
+    assert!((padlock + shift).distance(eye) <= PADLOCK_NEAR);
+    let walls = [&wall, &behind];
+    for (shown_wall, at) in [(&wall, padlock), (&behind, padlock + shift)] {
+        let frame_of = model(&shown_wall.pose).unwrap();
+        let nearest = padlock_point(shown_wall, frame_of, &walls, eye).unwrap();
+        assert!(nearest.distance(at) < 1e-4, "{nearest} {at}");
+    }
     let projection = shown(vec![behind, wall.clone()], Vec::new());
     let mut projector = Projector::default();
-    let output = projector.update(frame(&projection, at(padlock), 1.0, LOCKER, now));
+    let output = projector.update(Frame {
+        viewer: Some(eye),
+        ..frame(&projection, Ray::new(eye, padlock - eye), 1.0, LOCKER, now)
+    });
     assert_eq!(output.lock.unwrap().wall, "environment-0");
     // An owner further from its padlock than `PADLOCK_NEAR` sees nothing of it, and the ray there meets nothing.
     let mut far = wall.clone();
@@ -3455,14 +3467,24 @@ fn an_owner_s_padlock_is_laid_out_once_and_again_only_as_its_wall_changes() {
     assert_eq!(projector.editor.padlock_layouts.len(), 1);
     // Kept, as it was laid out, while the wall is the same: drawn where what was kept puts it.
     let elsewhere = padlock + Vec3::X * 0.1;
-    projector
+    let kept = projector
         .editor
         .padlock_layouts
         .get_mut("environment-0")
-        .unwrap()
-        .models[0]
-        .w_axis = elsewhere.extend(1.0);
+        .unwrap();
+    assert_eq!(kept.at, 0);
+    kept.places[0].model.w_axis = elsewhere.extend(1.0);
     let output = projector.update(frame(&projection, None, 0.0, LOCKER, now));
+    assert!(
+        beside(&output, &wall)
+            .iter()
+            .any(|at| at.distance(elsewhere) < 1e-4)
+    );
+    // The owner moving about lays out nothing again, standing where it was kept while that is nearest them.
+    let output = projector.update(Frame {
+        viewer: Some(HOME + Vec3::new(-0.2, 0.0, 0.1)),
+        ..frame(&projection, None, 0.0, LOCKER, now)
+    });
     assert!(
         beside(&output, &wall)
             .iter()
@@ -3484,6 +3506,318 @@ fn an_owner_s_padlock_is_laid_out_once_and_again_only_as_its_wall_changes() {
     let projection = shown(vec![moved.with_locked(false)], Vec::new());
     projector.update(frame(&projection, None, 0.0, LOCKER, now));
     assert!(projector.editor.padlock_layouts.is_empty());
+}
+
+/// A big wall someone added, locked, six slots wide and two high at twice a standard slot's size, 2 m ahead of home
+/// and facing it, its middle 2.5 m up: its top left corner well beyond reach of an owner standing by its right end.
+fn big_locked_wall() -> Wall {
+    Wall::new(
+        "wall-big",
+        WallKind::Added,
+        Pose::upright_facing([0.0, 2.5, -2.0], HOME.to_array()),
+    )
+    .with_grid(Grid::new(6, 2).unwrap())
+    .with_scale(2.0)
+    .with_locked(true)
+}
+
+/// Where an owner stands by `wall`'s bottom right corner, 1.5 m out from it, their eyes 1.6 m up.
+fn by_the_right_end(wall: &Wall) -> Vec3 {
+    let (width, height) = wall.size();
+    let corner = on(wall, width / 2.0, -height / 2.0);
+    let out = model(&wall.frame())
+        .unwrap()
+        .transform_vector3(Vec3::Z)
+        .normalize();
+    Vec3::new(corner.x, 1.6, corner.z) + out * 1.5
+}
+
+#[test]
+fn a_locked_wall_s_padlock_may_stand_beyond_each_corner_and_along_its_top_and_bottom_edges() {
+    let wall = big_locked_wall();
+    let frame_of = model(&wall.pose).unwrap();
+    let (width, height) = wall.size();
+    assert!(width > 2.0 * PADLOCK_SPACING, "{width}");
+    let (points, size) = padlock_points(&wall, frame_of, &[&wall]);
+    let local: Vec<Vec3> = points
+        .iter()
+        .map(|point| frame_of.inverse().transform_point3(*point))
+        .collect();
+    // The first where it has always stood, a row beyond the top left corner.
+    let (handles, _) = handle_points_with(&wall, frame_of, LockControls::of(&wall, LOCKER));
+    assert!(points[0].distance(handles[0].1) < 1e-4);
+    // A row beyond each corner, and along the top and bottom edges, no two of them further apart than the spacing.
+    for (right, up) in [(-1.0, 1.0), (1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)] {
+        assert!(
+            local
+                .iter()
+                .any(|at| at.x * right > width / 2.0 && at.y * up > height / 2.0),
+            "{right} {up}: {local:?}"
+        );
+    }
+    for up in [1.0f32, -1.0] {
+        let mut row: Vec<f32> = local
+            .iter()
+            .filter(|at| at.y * up > height / 2.0)
+            .map(|at| at.x)
+            .collect();
+        row.sort_by(f32::total_cmp);
+        assert!(row.len() > 2, "{row:?}");
+        assert!(
+            row.windows(2)
+                .all(|pair| pair[1] - pair[0] <= PADLOCK_SPACING + 1e-3 && pair[1] - pair[0] > size),
+            "{row:?}"
+        );
+    }
+    // None within reach of the floor: a low wall's are only above it.
+    let mut low = wall.clone();
+    low.pose.position[1] = height / 2.0 + 0.1;
+    let low_frame = model(&low.pose).unwrap();
+    let (points, size) = padlock_points(&low, low_frame, &[&low]);
+    assert!(!points.is_empty());
+    for point in points {
+        assert!(point.y - size / 2.0 >= FLOOR_CLEARANCE - 1e-4, "{point}");
+        assert!(low_frame.inverse().transform_point3(point).y > height / 2.0);
+    }
+    // A wall sunk below the floor has none, and shows an owner no padlock.
+    let mut sunk = wall.clone();
+    sunk.pose.position[1] = -height * 2.0;
+    let sunk_frame = model(&sunk.pose).unwrap();
+    assert!(padlock_points(&sunk, sunk_frame, &[&sunk]).0.is_empty());
+    assert_eq!(padlock_point(&sunk, sunk_frame, &[&sunk], HOME), None);
+    let projection = shown(vec![sunk.clone()], Vec::new());
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(Vec3::new(0.0, 1.6, -1.0)),
+        ..frame(&projection, None, 0.0, LOCKER, Instant::now())
+    });
+    assert!(beside(&output, &sunk).is_empty());
+}
+
+#[test]
+fn an_owner_sees_a_big_locked_wall_s_padlock_at_its_place_nearest_them_within_reach_and_unlocks_it_there()
+ {
+    let wall = big_locked_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let eye = by_the_right_end(&wall);
+    let (points, _) = padlock_points(&wall, frame_of, &[&wall]);
+    // The top left corner's is beyond reach, but the nearest within it, by the right end.
+    assert!(points[0].distance(eye) > PADLOCK_NEAR);
+    let nearest = padlock_point(&wall, frame_of, &[&wall], eye).unwrap();
+    assert!(nearest.distance(eye) <= PADLOCK_NEAR, "{nearest} {eye}");
+    assert!(frame_of.inverse().transform_point3(nearest).x > 0.0);
+    assert!(
+        points
+            .iter()
+            .all(|point| point.distance(eye) >= nearest.distance(eye) - 1e-5)
+    );
+    let from = |ray: Option<Ray>, grip: f32| Frame {
+        viewer: Some(eye),
+        ..frame(&projection, ray, grip, LOCKER, now)
+    };
+    let mut projector = Projector::default();
+    let drawn = beside(&projector.update(from(None, 0.0)), &wall);
+    assert!(
+        drawn.len() == 1 && drawn[0].distance(nearest) < 1e-4,
+        "{drawn:?}"
+    );
+    // Pointed at, it ticks and says the grip unlocks the wall; squeezed, it unlocks it.
+    let towards = Ray::new(eye, nearest - eye);
+    let output = projector.update(from(towards, 0.0));
+    assert!(output.wall_ticked && output.end.is_some());
+    // What it says stands beyond it, clear of the wall: below it, as it stands below the wall's bottom edge.
+    assert!(frame_of.inverse().transform_point3(nearest).y < 0.0);
+    let label = output
+        .sheets
+        .iter()
+        .find(|sheet| {
+            sheet
+                .canvas
+                .as_deref()
+                .is_some_and(|canvas| canvas.plain().contains("unlock this wall"))
+        })
+        .and_then(|sheet| sheet.model)
+        .unwrap();
+    assert!(label.w_axis.y < nearest.y, "{} {nearest}", label.w_axis);
+    let output = projector.update(from(towards, 1.0));
+    assert_eq!(
+        output.lock,
+        Some(LockChange {
+            wall: "wall-big".into(),
+            locked: false,
+            reset: false
+        })
+    );
+}
+
+#[test]
+fn the_hint_to_come_closer_follows_the_padlock_s_place_nearest_the_owner() {
+    let wall = big_locked_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let (width, _) = wall.size();
+    let said = |output: &crate::projection::Output| {
+        output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
+            .find(|text| text.contains("Locked"))
+            .map(|text| text.trim().to_owned())
+    };
+    // By its right end, its top left corner beyond reach, its padlock shows near them, and its board says nothing more.
+    let eye = by_the_right_end(&wall);
+    let board = on(&wall, width / 2.0 - 0.3, 0.0);
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(eye),
+        ..frame(&projection, Ray::new(eye, board - eye), 0.0, LOCKER, now)
+    });
+    assert_eq!(beside(&output, &wall).len(), 1);
+    assert_eq!(said(&output), None);
+    // Far back, every place beyond reach, it says to come closer.
+    let far = eye + Vec3::Z * 3.0;
+    let frame_of = model(&wall.pose).unwrap();
+    assert!(
+        padlock_points(&wall, frame_of, &[&wall])
+            .0
+            .iter()
+            .all(|point| point.distance(far) > PADLOCK_NEAR)
+    );
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(far),
+        ..frame(&projection, Ray::new(far, board - far), 0.0, LOCKER, now)
+    });
+    assert_eq!(
+        said(&output).as_deref(),
+        Some("Locked: come closer to unlock")
+    );
+}
+
+#[test]
+fn a_locked_wall_s_padlock_stays_where_it_is_until_another_place_is_clearly_nearer() {
+    let wall = big_locked_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let (width, _) = wall.size();
+    let (points, _) = padlock_points(&wall, frame_of, &[&wall]);
+    let mut projector = Projector::default();
+    let mut drawn_from = |eye: Vec3| {
+        let drawn = beside(
+            &projector.update(Frame {
+                viewer: Some(eye),
+                ..frame(&projection, None, 0.0, LOCKER, now)
+            }),
+            &wall,
+        );
+        assert_eq!(drawn.len(), 1, "{eye}: {drawn:?}");
+        drawn[0]
+    };
+    // Walking along the wall, 1.5 m out, from beyond its left end to beyond its right, in steps of 5 cm.
+    let start = by_the_right_end(&wall) - Vec3::X * (width + 1.0);
+    let steps = ((width + 2.0) / 0.05) as usize;
+    let mut moves = Vec::new();
+    let mut last = drawn_from(start);
+    for step in 1..=steps {
+        let eye = start + Vec3::X * (step as f32 * 0.05);
+        let padlock = drawn_from(eye);
+        let nearest = points
+            .iter()
+            .map(|point| point.distance(eye))
+            .fold(f32::INFINITY, f32::min);
+        // Never more than the margin further than the nearest place, and always at one of its places.
+        assert!(padlock.distance(eye) <= nearest + PADLOCK_STAY + 1e-4);
+        assert!(points.iter().any(|point| point.distance(padlock) < 1e-4));
+        if padlock.distance(last) > 1e-4 {
+            moves.push(eye);
+        }
+        last = padlock;
+    }
+    // It moved along with them, but not at every step: only once for each place passed.
+    assert!(moves.len() >= 2, "{moves:?}");
+    assert!(moves.len() < points.len(), "{moves:?}");
+    // Just past where it last moved, stepping back and forth across that point within the margin moves it no more.
+    let past = moves[moves.len() - 1];
+    let mut projector = Projector::default();
+    let mut drawn_from = |eye: Vec3| {
+        beside(
+            &projector.update(Frame {
+                viewer: Some(eye),
+                ..frame(&projection, None, 0.0, LOCKER, now)
+            }),
+            &wall,
+        )[0]
+    };
+    let settled = drawn_from(past);
+    for offset in [-0.1, 0.05, -0.1, 0.0, -0.05] {
+        assert!(drawn_from(past + Vec3::X * offset).distance(settled) < 1e-4);
+    }
+    // The padlock is laid out once as they walk: only which place it stands at changes.
+    assert_eq!(projector.editor.padlock_layouts.len(), 1);
+}
+
+#[test]
+fn a_deck_hides_a_big_locked_wall_s_nearest_padlock_from_an_owner_on_it() {
+    let wall = big_locked_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let (width, height) = wall.size();
+    // A deck over the wall, 25 cm above its top, an owner on it by its right end, within reach of a place beyond its
+    // top right corner.
+    let top = on(&wall, 0.0, height / 2.0).y;
+    let (points, size) = padlock_points(&wall, frame_of, &[&wall]);
+    let high = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let floor = high + size + 0.25;
+    assert!(floor > top);
+    let deck = crate::locomotion::Locomotion::teleport(vec![
+        crate::locomotion::Surface::disc(Vec3::ZERO, 20.0),
+        crate::locomotion::Surface::rectangle(
+            Vec3::new(0.0, floor, -2.0),
+            Vec2::new(width + 4.0, 8.0),
+        ),
+    ]);
+    let right = by_the_right_end(&wall);
+    let eye = Vec3::new(right.x, floor + 1.6, right.z);
+    let nearest = padlock_point(&wall, frame_of, &[&wall], eye).unwrap();
+    assert!(nearest.distance(eye) <= PADLOCK_NEAR);
+    let on_deck = |surfaces| Frame {
+        viewer: Some(eye),
+        surfaces,
+        ..frame(&projection, Ray::new(eye, nearest - eye), 1.0, LOCKER, now)
+    };
+    // Undeclared, it shows there and unlocks the wall; declared, it shows nowhere and unlocks nothing.
+    let mut projector = Projector::default();
+    let output = projector.update(on_deck(None));
+    assert!(
+        beside(&output, &wall)
+            .iter()
+            .any(|at| at.distance(nearest) < 1e-4)
+    );
+    assert!(output.lock.is_some());
+    let mut projector = Projector::default();
+    let output = projector.update(on_deck(Some(&deck)));
+    assert!(beside(&output, &wall).is_empty());
+    assert!(output.lock.is_none() && output.end.is_none());
+    // From the floor beneath, by its right end, it shows at the place nearest them.
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(right),
+        surfaces: Some(&deck),
+        ..frame(&projection, None, 0.0, LOCKER, now)
+    });
+    let nearest = padlock_point(&wall, frame_of, &[&wall], right).unwrap();
+    let drawn = beside(&output, &wall);
+    assert!(
+        drawn.len() == 1 && drawn[0].distance(nearest) < 1e-4,
+        "{drawn:?}"
+    );
 }
 
 /// `frame`, with the right hand idle and the left hand's ray and grip.
@@ -3582,4 +3916,209 @@ fn the_left_grip_takes_hold_of_and_carries_a_wall_as_the_right_does_and_the_righ
         ..left_handed(&projection, None, 0.0, none, now)
     });
     assert_eq!(output.hit, None);
+}
+
+#[test]
+fn a_locked_wall_s_padlock_beyond_reach_where_it_stands_moves_at_once_to_the_place_nearest() {
+    let wall = big_locked_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let (points, _) = padlock_points(&wall, frame_of, &[&wall]);
+    let start = by_the_right_end(&wall);
+    let first = padlock_point(&wall, frame_of, &[&wall], start).unwrap();
+    // Where the place it stands at is beyond reach and another, nearest, is within it, but nearer by less than the
+    // margin it would otherwise wait for.
+    let distances =
+        |eye: Vec3| -> Vec<f32> { points.iter().map(|point| point.distance(eye)).collect() };
+    let eye = (0..240)
+        .flat_map(|across| (0..80).map(move |out| (across, out)))
+        .map(|(across, out)| start + Vec3::new(-6.0 + across as f32 * 0.05, 0.0, out as f32 * 0.05))
+        .find(|eye| {
+            let nearest = padlock_point(&wall, frame_of, &[&wall], *eye).unwrap();
+            let kept = first.distance(*eye);
+            nearest.distance(first) > 1e-3
+                && kept > PADLOCK_NEAR
+                && nearest.distance(*eye) <= PADLOCK_NEAR
+                && kept - nearest.distance(*eye) < PADLOCK_STAY - 0.05
+        })
+        .expect("a place where the margin would keep it beyond reach");
+    let nearest = padlock_point(&wall, frame_of, &[&wall], eye).unwrap();
+    assert!(
+        distances(eye)
+            .iter()
+            .all(|distance| *distance >= nearest.distance(eye) - 1e-5)
+    );
+    let mut projector = Projector::default();
+    let from = |eye: Vec3, ray: Option<Ray>| Frame {
+        viewer: Some(eye),
+        ..frame(&projection, ray, 0.0, LOCKER, now)
+    };
+    let drawn = beside(&projector.update(from(start, None)), &wall);
+    assert!(drawn.len() == 1 && drawn[0].distance(first) < 1e-4);
+    // There, it shows at the place nearest, and the board says nothing more, as the hint has it.
+    let (width, _) = wall.size();
+    let board = on(&wall, width / 2.0 - 0.3, 0.0);
+    let output = projector.update(from(eye, Ray::new(eye, board - eye)));
+    let drawn = beside(&output, &wall);
+    assert!(
+        drawn.iter().any(|at| at.distance(nearest) < 1e-4),
+        "{drawn:?} {nearest}"
+    );
+    assert!(
+        !output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref().map(Canvas::plain))
+            .any(|text| text.contains("Locked"))
+    );
+}
+
+#[test]
+fn what_a_padlock_below_a_low_wall_says_stands_above_it_clear_of_the_floor() {
+    let mut wall = big_locked_wall();
+    let frame_of = model(&wall.pose).unwrap();
+    let (points, size) = padlock_points(&wall, frame_of, &[&wall]);
+    // Lowered until its lowest padlock just clears the floor.
+    let lowest = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::INFINITY, f32::min);
+    wall.pose.position[1] += FLOOR_CLEARANCE + 0.02 + size / 2.0 - lowest;
+    let frame_of = model(&wall.pose).unwrap();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    // Crouching by its right end.
+    let eye = by_the_right_end(&wall).with_y(0.8);
+    let nearest = padlock_point(&wall, frame_of, &[&wall], eye).unwrap();
+    assert!(
+        frame_of.inverse().transform_point3(nearest).y < 0.0,
+        "{nearest}"
+    );
+    assert!(nearest.y - size / 2.0 < FLOOR_CLEARANCE + 0.05);
+    let mut projector = Projector::default();
+    let output = projector.update(Frame {
+        viewer: Some(eye),
+        ..frame(
+            &projection,
+            Ray::new(eye, nearest - eye),
+            0.0,
+            LOCKER,
+            Instant::now(),
+        )
+    });
+    let label = output
+        .sheets
+        .iter()
+        .find(|sheet| {
+            sheet
+                .canvas
+                .as_deref()
+                .is_some_and(|canvas| canvas.plain().contains("unlock this wall"))
+        })
+        .and_then(|sheet| sheet.model)
+        .unwrap();
+    assert!(label.w_axis.y > nearest.y, "{} {nearest}", label.w_axis);
+}
+
+/// [`big_locked_wall`], as an environment's own, which an owner puts back with `↺`.
+fn big_environment_wall() -> Wall {
+    let mut wall = big_locked_wall();
+    wall.id = "environment-big".into();
+    wall.kind = WallKind::Environment;
+    wall
+}
+
+#[test]
+fn a_padlock_unlocked_where_it_stands_stays_there_with_the_control_that_puts_it_back_beside_it() {
+    let wall = big_environment_wall();
+    let projection = shown(vec![wall.clone()], Vec::new());
+    let unlocked = shown(vec![wall.clone().with_locked(false)], Vec::new());
+    let now = Instant::now();
+    let frame_of = model(&wall.pose).unwrap();
+    let (points, size) = padlock_points(&wall, frame_of, &[&wall]);
+    let (width, height) = wall.size();
+    let by_the_left_end = by_the_right_end(&wall) - Vec3::X * width;
+    for (eye, inwards) in [(by_the_right_end(&wall), -1.0f32), (by_the_left_end, 1.0)] {
+        let nearest = padlock_point(&wall, frame_of, &[&wall], eye).unwrap();
+        assert!(nearest.distance(points[0]) > 1e-3);
+        let from = |projection, ray: Option<Ray>, grip| Frame {
+            viewer: Some(eye),
+            ..frame(projection, ray, grip, LOCKER, now)
+        };
+        let towards = |point: Vec3| Ray::new(eye, point - eye);
+        // Unlocked there, its padlock, open, stays there, rather than beyond the top left corner.
+        let mut projector = Projector::default();
+        projector.update(from(&projection, None, 0.0));
+        let output = projector.update(from(&projection, towards(nearest), 1.0));
+        assert!(output.lock.is_some_and(|lock| !lock.locked));
+        projector.update(from(&unlocked, None, 0.0));
+        assert_eq!(projector.editing_wall(), Some("environment-big"));
+        let drawn = beside(&projector.update(from(&unlocked, None, 0.0)), &wall);
+        assert!(
+            drawn.iter().any(|at| at.distance(nearest) < 1e-4),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.iter().all(|at| at.distance(points[0]) > 1e-3),
+            "{drawn:?}"
+        );
+        // `↺` stands beside it, inwards, and puts the wall back.
+        let local = frame_of.inverse().transform_point3(nearest);
+        assert!(
+            local.y < -height / 2.0 && local.x * inwards < 0.0,
+            "{local}"
+        );
+        let reset = frame_of.transform_point3(local + Vec3::X * inwards * SPACING * size);
+        assert!(
+            drawn.iter().any(|at| at.distance(reset) < 1e-4),
+            "{drawn:?}"
+        );
+        let output = projector.update(from(&unlocked, towards(reset), 1.0));
+        assert!(output.lock.is_some_and(|lock| lock.reset && lock.locked));
+        // Unlocked again, the padlock there, squeezed, locks it again, and lets go of it.
+        let mut projector = Projector::default();
+        projector.update(from(&projection, towards(nearest), 1.0));
+        projector.update(from(&unlocked, towards(nearest), 0.0));
+        let output = projector.update(from(&unlocked, towards(nearest), 1.0));
+        assert!(output.lock.is_some_and(|lock| lock.locked && !lock.reset));
+        assert_eq!(projector.editing_wall(), None);
+    }
+}
+
+#[test]
+fn a_curved_or_tilted_locked_wall_s_padlock_places_stand_on_its_surface_facing_as_it_does() {
+    let flat = big_locked_wall();
+    for wall in [
+        flat.clone().with_shape(WallShape::Arc { radius: 3.0 }),
+        flat.clone().with_tilt(Some(30.0)),
+        flat.clone()
+            .with_shape(WallShape::Arc { radius: 4.0 })
+            .with_tilt(Some(-20.0)),
+    ] {
+        let frame_of = model(&wall.frame()).unwrap();
+        let (places, _) = padlock_places(&wall, frame_of, &[&wall]);
+        assert!(places.len() > 4, "{}", places.len());
+        let (width, _) = wall.size();
+        for place in places {
+            let local = frame_of.inverse() * place.model;
+            let at = local.w_axis.truncate();
+            // On the wall as drawn, as it would go on beyond its ends, and turned as it runs there, facing as it faces.
+            let (x, (on_wall, runs)) = (0..=4000)
+                .map(|step| -width + step as f32 * width / 2000.0)
+                .map(|x| (x, along(&wall, x)))
+                .min_by(|a, b| {
+                    a.1.0
+                        .distance(at.with_y(0.0))
+                        .total_cmp(&b.1.0.distance(at.with_y(0.0)))
+                })
+                .unwrap();
+            assert!(
+                on_wall.distance(at.with_y(0.0)) < 2e-3,
+                "{wall:?}: {at} {x} {on_wall}"
+            );
+            let across = local.x_axis.truncate().normalize();
+            assert!(across.distance(runs) < 0.01, "{across} {runs}");
+            assert!((local.y_axis.truncate().normalize() - Vec3::Y).length() < 1e-4);
+        }
+    }
 }
