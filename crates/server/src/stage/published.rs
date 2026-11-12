@@ -256,6 +256,15 @@ fn value(value: f32) -> Option<f32> {
     tomori_protocol::row_value(value).map(|value| (value * 1000.0).round() / 1000.0)
 }
 
+/// A list panel as [`list`] makes it: its body, the rows it shows, the one it highlights, if it shows it, and its
+/// columns, none for a list that is not a table.
+struct Listed {
+    body: String,
+    rows: Vec<Row>,
+    highlighted: Option<String>,
+    columns: Vec<ListColumn>,
+}
+
 /// The pointer before the row a list panel highlights, bold, which every client draws as it draws any list.
 const POINTER: &str = "**▸** ";
 
@@ -271,12 +280,11 @@ const POINTER: &str = "**▸** ";
 /// with cells, keeps its rows' cells and its columns, as [`cells`] and [`columns`] clean them, and a row whose side gave
 /// it no text shows its cells, as [`written`] writes them; rows past a body's bounds are left out of the table too,
 /// each row being a line of the body, as are those whose cells would take the table's past a body's characters.
-#[allow(clippy::type_complexity)]
 fn list(
     rows: &[tomori_environment::Row],
     highlighted: Option<String>,
     columns: &[tomori_environment::Column],
-) -> Result<(String, Vec<Row>, Option<String>, Vec<ListColumn>), String> {
+) -> Result<Listed, String> {
     if rows.len() > tomori_environment::ROW_LIMIT {
         return Err(format!(
             "A list panel has at most {} rows.",
@@ -367,7 +375,12 @@ fn list(
     }
     let highlighted =
         highlighted.filter(|highlighted| shown.iter().any(|row| &row.id == highlighted));
-    Ok((body, shown, highlighted, columns))
+    Ok(Listed {
+        body,
+        rows: shown,
+        highlighted,
+        columns,
+    })
 }
 
 /// A panel its environment published that no run of its side has published since the space came back to the
@@ -483,7 +496,12 @@ impl Publishing {
         let chart = chart.map(Chart::cleaned).transpose()?;
         let (body, rows, highlighted, columns) = match listed {
             Some(listed) => {
-                let (body, rows, highlighted, columns) = list(&listed, highlighted, &declared)?;
+                let Listed {
+                    body,
+                    rows,
+                    highlighted,
+                    columns,
+                } = list(&listed, highlighted, &declared)?;
                 (body, Some(rows), highlighted, columns)
             }
             None if highlighted.is_some() => {
