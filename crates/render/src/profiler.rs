@@ -18,7 +18,9 @@ pub const FEATURES: wgpu::Features =
 /// The layers of an eye's pass, as marks within it divide it, in the order they are drawn.
 pub const LAYERS: [&str; 5] = ["scenery", "tomori", "translucent", "panels", "labels"];
 
-/// Timestamps written for each eye: its pass's start, a mark after each layer but the last, and its end.
+/// Timestamps written for each eye where layers are marked: its pass's start, a mark after each layer but the last,
+/// and its end; where they are not, only its start and its end, so that every query resolved was written, as Vulkan
+/// requires of results waited for.
 const MARKS: u32 = LAYERS.len() as u32 + 1;
 
 /// How many frames' timestamps may be on their way back from the GPU at once; a frame finding none free is not timed.
@@ -40,9 +42,9 @@ struct Readback {
 }
 
 impl Readback {
-    /// The bytes of its frame's timestamps.
-    fn size(&self) -> u64 {
-        u64::from(self.eyes as u32 * MARKS) * 8
+    /// The bytes of its frame's timestamps, `marks` an eye.
+    fn size(&self, marks: u32) -> u64 {
+        u64::from(self.eyes as u32 * marks) * 8
     }
 }
 
@@ -55,6 +57,15 @@ struct Queries {
     period: f32,
     /// Whether layers are marked within each eye's pass.
     within: bool,
+    /// The timestamps written for each eye: [`MARKS`] where layers are marked, or its pass's start and end.
+    marks: u32,
+}
+
+impl Queries {
+    /// The first query `eye` of `frame` writes.
+    fn first(&self, frame: Frame, eye: usize) -> u32 {
+        (frame.slot as u32 * 2 + eye as u32) * self.marks
+    }
 }
 
 /// One frame as the GPU drew it: each eye's pass, and each layer, both eyes', in milliseconds, if marked.
@@ -86,8 +97,10 @@ impl Profiler {
         if !features.contains(wgpu::Features::TIMESTAMP_QUERY) {
             return Self::untimed();
         }
+        let within = within && features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+        let marks = if within { MARKS } else { 2 };
         let queries = Some({
-            let count = (IN_FLIGHT as u32) * 2 * MARKS;
+            let count = (IN_FLIGHT as u32) * 2 * marks;
             let set = device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("Frame profiler"),
                 ty: wgpu::QueryType::Timestamp,
@@ -103,7 +116,7 @@ impl Profiler {
                 .map(|_| Readback {
                     buffer: device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Frame profiler readback"),
-                        size: u64::from(2 * MARKS) * 8,
+                        size: u64::from(2 * marks) * 8,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -116,7 +129,8 @@ impl Profiler {
                 resolved,
                 readbacks,
                 period: queue.get_timestamp_period(),
-                within: within && features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+                within,
+                marks,
             }
         });
         Self {
@@ -151,7 +165,7 @@ impl Profiler {
             let ticks: Vec<u64> = {
                 let data = readback
                     .buffer
-                    .slice(..readback.size())
+                    .slice(..readback.size(queries.marks))
                     .get_mapped_range()
                     .expect("a mapped readback reads");
                 bytemuck::cast_slice(&data).to_vec()
@@ -162,7 +176,7 @@ impl Profiler {
             let between = |from: usize, to: usize| {
                 ticks[to].saturating_sub(ticks[from]) as f64 * period / 1e6
             };
-            let marks = MARKS as usize;
+            let marks = queries.marks as usize;
             let eyes = (0..readback.eyes)
                 .map(|eye| between(eye * marks, eye * marks + marks - 1))
                 .collect();
@@ -192,11 +206,11 @@ impl Profiler {
         eye: usize,
     ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         let (queries, frame) = (self.queries.as_ref()?, frame?);
-        let first = Self::first(frame, eye);
+        let first = queries.first(frame, eye);
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &queries.set,
             beginning_of_pass_write_index: Some(first),
-            end_of_pass_write_index: Some(first + MARKS - 1),
+            end_of_pass_write_index: Some(first + queries.marks - 1),
         })
     }
 
@@ -211,7 +225,7 @@ impl Profiler {
         if let (Some(queries), Some(frame)) = (&self.queries, frame)
             && queries.within
         {
-            pass.write_timestamp(&queries.set, Self::first(frame, eye) + 1 + layer as u32);
+            pass.write_timestamp(&queries.set, queries.first(frame, eye) + 1 + layer as u32);
         }
     }
 
@@ -221,8 +235,8 @@ impl Profiler {
             return;
         };
         let readback = &queries.readbacks[frame.slot];
-        let first = Self::first(frame, 0);
-        let count = readback.eyes as u32 * MARKS;
+        let first = queries.first(frame, 0);
+        let count = readback.eyes as u32 * queries.marks;
         let offset = STRIDE * frame.slot as u64;
         encoder.resolve_query_set(
             &queries.set,
@@ -235,7 +249,7 @@ impl Profiler {
             offset,
             &readback.buffer,
             0,
-            readback.size(),
+            readback.size(queries.marks),
         );
     }
 
@@ -248,7 +262,7 @@ impl Profiler {
         let state = readback.state.clone();
         readback
             .buffer
-            .slice(..readback.size())
+            .slice(..readback.size(queries.marks))
             .map_async(wgpu::MapMode::Read, move |result| {
                 // A readback that could not be mapped is not timed, and is free again.
                 state.store(u8::from(result.is_ok()) * MAPPED, Ordering::Release);
@@ -258,11 +272,6 @@ impl Profiler {
     /// Keep what a frame drew, in each eye.
     pub fn tally(&mut self, tally: Tally) {
         self.tallies.push(tally);
-    }
-
-    /// The first query `eye` of `frame` writes.
-    fn first(frame: Frame, eye: usize) -> u32 {
-        (frame.slot as u32 * 2 + eye as u32) * MARKS
     }
 
     /// A line summarizing the frames since the last, which are then forgotten, or `None` if there were none: of the

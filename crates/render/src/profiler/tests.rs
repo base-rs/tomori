@@ -93,6 +93,16 @@ fn a_profiler_times_each_eye_and_each_layer_where_the_device_has_timestamps() {
                 );
                 return;
             }
+            // Unmarked, as on the headset, each eye writes only its pass's start and end, and only those are resolved:
+            // Vulkan waits for every query a resolve copies, and one never written would never be ready.
+            let marked = within
+                && gpu
+                    .device
+                    .features()
+                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+            let queries = profiler.queries.as_ref().unwrap();
+            assert_eq!(queries.marks, if marked { MARKS } else { 2 });
+            assert_eq!(queries.set.count(), IN_FLIGHT as u32 * 2 * queries.marks);
             for _ in 0..3 {
                 assert!(frame(&gpu, &mut profiler, 2).is_some());
                 profiler.tally(Tally::default());
