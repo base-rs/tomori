@@ -62,11 +62,11 @@ fn decode(text: &str) -> Option<String> {
         match bytes[index] {
             b'+' => decoded.push(b' '),
             b'%' => {
-                // Two digits, without the sign `from_str_radix` would take.
-                let hex = text
-                    .get(index + 1..index + 3)
-                    .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
-                decoded.push(u8::from_str_radix(hex, 16).ok()?);
+                // Exactly two digits, without the sign `u8::from_str_radix` would take.
+                let digit = |at: usize| char::from(*bytes.get(at)?).to_digit(16);
+                let high = digit(index + 1)?;
+                let low = digit(index + 2)?;
+                decoded.push((high * 16 + low) as u8);
                 index += 2;
             }
             byte => decoded.push(byte),
