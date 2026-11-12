@@ -635,12 +635,7 @@ impl Hub {
                     .find(|anchor| anchor.name == name)
                     .map(|anchor| anchor.pose.position)
             };
-            let object = |id: &str| {
-                objects
-                    .iter()
-                    .find(|object| object.id == id)
-                    .and_then(|object| object.position)
-            };
+            let object = |id: &str| objects.get(id).and_then(|object| object.position);
             zones.observe(
                 now,
                 &heads,

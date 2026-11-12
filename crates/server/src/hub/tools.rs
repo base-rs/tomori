@@ -428,8 +428,36 @@ impl Hub {
     /// reported, with the space's walls and the panels on them, as the `presence` tool tells its agent. Only the agent
     /// bound to the space is told, through its own session. See `design/mcp.md`.
     pub(crate) fn tool_presence(&self, session: &str) -> Result<Value, String> {
-        let state = self.lock();
+        let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
+        // The environment's objects that matter most to whoever the turn is for, by what they pointed at and where their
+        // head is, ranked once a turn.
+        let asked = state.space(&space).expect("found above").model.asked();
+        let now = std::time::Instant::now();
+        let speaker = state.asked_by(&space, &asked, now);
+        let head = state.asker(&space, &asked, now);
+        let record = state.space_mut(&space).expect("found above");
+        let turn = record.model.turns();
+        let objects = match record
+            .channel
+            .as_mut()
+            .filter(|channel| channel.environment == record.model.environment)
+        {
+            Some(channel) => {
+                let listed = channel.ambient.listed(
+                    &channel.objects,
+                    turn,
+                    speaker.as_deref(),
+                    head.as_ref(),
+                );
+                crate::presence::objects(&channel.objects, &listed, &record.model.environment)
+            }
+            None => crate::presence::objects(
+                &crate::channel::Objects::default(),
+                &[],
+                &record.model.environment,
+            ),
+        };
         let record = state.space(&space).expect("found above");
         let environments = self.environments();
         let projection = record.versioned(&environments, crate::cards::unix_now());
@@ -505,6 +533,7 @@ impl Hub {
                 &|session| record.placed_by(session),
                 &record.proximity,
             ),
+            "objects": objects,
         }))
     }
 

@@ -246,6 +246,7 @@ impl Hub {
                 crate::space::one_line(id, super::agent_inspect::ID_BYTES)
             ));
         };
+        let acted_on = object.id.clone();
         let offered = channel.offered(object);
         let Some(declared) = offered.iter().find(|offered| offered.name() == action) else {
             let names: Vec<&str> = offered.iter().map(|offered| offered.name()).collect();
@@ -313,6 +314,13 @@ impl Hub {
                     format!("The {label} environment is not keeping up; try again shortly.")
                 }
             })?;
+        // Acted on, it ranks above the rest in the agent's ambient list for a while.
+        record
+            .channel
+            .as_mut()
+            .expect("found above")
+            .ambient
+            .noted(&acted_on);
         Ok(Acting {
             space,
             id: crate::space::inspectable(&current, reference),

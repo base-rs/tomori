@@ -1052,6 +1052,9 @@ struct UtteranceRecord {
     /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
     /// identities. See `design/spaces.md`.
     attention: Vec<crate::space::Attended>,
+    /// The environment's objects, by identity, that the participant pointed at as the utterance began, which rank first
+    /// in the agent's ambient list for their words once those are queued, and not before. See [`crate::ambient`].
+    pointed: Vec<String>,
     /// What the participant had seen of the agent's messages as the utterance began, as the space knew it then, for
     /// words for the agent. Their client names only the message. See `design/interaction.md`.
     seen: Option<crate::space::Seen>,
@@ -2488,9 +2491,12 @@ impl Hub {
         });
         drop(environments);
         let mut state = self.lock();
-        if let Some(record) = self.current_channel(&mut state, outlet) {
-            record.objects = objects;
-        }
+        let replaced = self
+            .current_channel(&mut state, outlet)
+            .map(|record| std::mem::replace(&mut record.objects, objects));
+        // Those it described before, as many as a binding keeps, are freed once the hub is free.
+        drop(state);
+        drop(replaced);
         Ok(())
     }
 
@@ -4126,6 +4132,32 @@ impl Hub {
                 // client, which the space resolves, ignoring those it does not have, cards only on the board of a
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
+                // What they point at among the objects the environment describes, all of which it is resolved among,
+                // ranks first in the agent's ambient list for their words, once those are queued. See `crate::ambient`.
+                let pointed: Vec<String> = state
+                    .space(&space)
+                    .filter(|_| question)
+                    .and_then(|record| {
+                        record
+                            .channel
+                            .as_ref()
+                            .filter(|channel| channel.environment == record.model.environment)
+                    })
+                    .map(|channel| {
+                        attention
+                            .iter()
+                            .take(tomori_protocol::ATTENTION_LIMIT)
+                            .filter_map(|resource| match resource {
+                                tomori_protocol::Resource::Object { object, .. }
+                                    if channel.objects.get(object).is_some() =>
+                                {
+                                    Some(object.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let attention = match state.space(&space) {
                     Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
@@ -4169,6 +4201,7 @@ impl Hub {
                         naming,
                         titling,
                         attention,
+                        pointed,
                         seen,
                         origin,
                         progress: progress.then_some(connection),
@@ -5926,6 +5959,16 @@ impl Hub {
             record.attention,
         );
         debug_assert!(queued, "repeats are acknowledged above");
+        // What they pointed at ranks first in the agent's ambient list for their words, and lately, now that the words
+        // are the agent's to answer; an utterance cancelled or never transcribed changes nothing.
+        let environment = &space.model.environment;
+        if let Some(channel) = space
+            .channel
+            .as_mut()
+            .filter(|channel| &channel.environment == environment)
+        {
+            channel.ambient.focus(&record.participant, record.pointed);
+        }
         if let Some(head) = record.origin {
             space.model.originate(
                 &key,

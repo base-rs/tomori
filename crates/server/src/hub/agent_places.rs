@@ -254,18 +254,18 @@ impl Hub {
                     return Ok(placed(anchor.name.clone(), None, None));
                 }
                 // Else in a small cluster of its own, 1 m before where the object stands, towards whoever asked.
-                let objects = record
+                let (index, object, position) = record
                     .channel
                     .as_ref()
                     .filter(|channel| channel.environment == record.model.environment)
-                    .map_or(&[][..], |channel| channel.objects.as_slice());
-                let (index, object, position) = objects
-                    .iter()
-                    .enumerate()
-                    .find(|(_, object)| {
-                        object.reference.as_deref() == Some(reference) || object.id == id
+                    .and_then(|channel| {
+                        let objects = &channel.objects;
+                        let index = objects
+                            .reference_index(reference)
+                            .or_else(|| objects.index(&id))?;
+                        let object = &objects[index];
+                        Some((index, object, object.position?))
                     })
-                    .and_then(|(index, object)| Some((index, object, object.position?)))
                     .ok_or_else(|| {
                         format!(
                             "Nothing here stands by the object {:?}, and the environment does not say where it stands, so a worker has nowhere to stand by it: presence lists the anchors and what each stands by.",

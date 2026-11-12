@@ -146,7 +146,7 @@ impl Hub {
         if let Some(action) = action {
             crate::limits::check(action, tomori_environment::ACTION_NAME_BYTES, "action")?;
         }
-        let state = self.lock();
+        let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let Some((environment, reference)) = id.rsplit_once(':') else {
             return Err("An id is an environment's identifier and an object's reference, as Tomori gives it in square brackets, such as farmyard:hen/marigold.".to_owned());
@@ -212,6 +212,7 @@ impl Hub {
                     crate::space::one_line(id, ID_BYTES)
                 )
             })?;
+        let inspected = object.map(|(_, object)| object.id.clone());
         let inspector = match self.server_sides.inspector(&space) {
             Ok(inspector) => Some(inspector),
             Err(Uninspectable::Silent) => None,
@@ -221,7 +222,7 @@ impl Hub {
                 ));
             }
         };
-        Ok(Asking {
+        let asking = Asking {
             space: space.clone(),
             id: crate::space::inspectable(current, reference),
             reference: reference.to_owned(),
@@ -232,7 +233,18 @@ impl Hub {
             actions,
             one: action.is_some(),
             key,
-        })
+        };
+        // Inspected, an object ranks above the rest in the agent's ambient list for a while.
+        if let Some(inspected) = inspected {
+            let record = state.space_mut(&space).expect("found above");
+            record
+                .channel
+                .as_mut()
+                .expect("found above")
+                .ambient
+                .noted(&inspected);
+        }
+        Ok(asking)
     }
 
     /// Ask the side for what `asking` names, on a thread of its own, never the hub's or the scheduler's, waiting for at
