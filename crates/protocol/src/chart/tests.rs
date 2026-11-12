@@ -649,7 +649,7 @@ fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s
     );
     assert_eq!(
         with(TimeAxis::Fixed {
-            from_ms: -CHART_INSTANT_MS - 1,
+            from_ms: CHART_EARLIEST_MS - 1,
             to_ms: 0
         }),
         None
@@ -660,6 +660,13 @@ fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s
             to_ms: CHART_INSTANT_MS + 1
         }),
         None
+    );
+    assert!(
+        with(TimeAxis::Fixed {
+            from_ms: CHART_EARLIEST_MS,
+            to_ms: CHART_EARLIEST_MS + 1
+        })
+        .is_some()
     );
     let widest = 180 * i64::from(CHART_STEP_MS);
     assert!(

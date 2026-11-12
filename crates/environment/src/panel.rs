@@ -375,6 +375,7 @@ pub struct Panel {
     rows: Option<Vec<Row>>,
     highlighted: Option<String>,
     columns: Vec<Column>,
+    depends: Vec<String>,
 }
 
 impl Panel {
@@ -391,6 +392,7 @@ impl Panel {
             rows: None,
             highlighted: None,
             columns: Vec::new(),
+            depends: Vec::new(),
         }
     }
 
@@ -421,6 +423,31 @@ impl Panel {
             rows: Some(rows),
             ..Self::text(id, title, "")
         }
+    }
+
+    /// The panel, which depends on each of the parameters `parameters`, by their ids, as the side declares them with
+    /// [`crate::Space::set_context`], or [`crate::TIME`] for a panel that is not a chart but shows a time, a chart
+    /// depending on time already: what it shows follows each one's value, unless its wall or its own setting fixes one,
+    /// and the side is told how it is bound ([`crate::Intent::context`]). At most [`crate::CONTEXT_PARAMETERS`] and time,
+    /// each an id [`crate::valid_context_id`] takes, or time, and none twice; the server refuses another, saying why.
+    /// A panel that depends on nothing is shown as it is published, whatever its wall's context. See
+    /// `design/panel-context.md`.
+    ///
+    /// ```
+    /// use tomori_environment::Panel;
+    ///
+    /// let latency = Panel::text("latency", "Latency", "").depends_on(["region"]);
+    /// assert_eq!(latency.depends(), ["region"]);
+    /// assert!(Panel::text("rota", "Rota", "").depends().is_empty());
+    /// ```
+    pub fn depends_on(mut self, parameters: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.depends = parameters.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The parameters it depends on, by their ids, in the order it named them.
+    pub fn depends(&self) -> &[String] {
+        &self.depends
     }
 
     /// The panel, highlighting its row `row`, by its id: the server draws that row with a pointer before it. Only a list

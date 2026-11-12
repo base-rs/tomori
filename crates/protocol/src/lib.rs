@@ -13,6 +13,7 @@ mod channel;
 pub mod chart;
 pub mod checklist;
 pub mod cluster;
+pub mod context;
 pub mod diagram;
 pub mod entourage;
 mod frame;

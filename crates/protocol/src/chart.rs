@@ -381,8 +381,11 @@ pub struct Chart {
 /// The most milliseconds between a chart's points, a day.
 pub const CHART_STEP_MS: u32 = 86_400_000;
 
-/// The farthest from the Unix epoch a chart's window reaches, in milliseconds either side: the end of the year 9999.
+/// The latest instant a chart's window reaches, in milliseconds since the Unix epoch: the last of the year 9999, UTC.
 pub const CHART_INSTANT_MS: i64 = 253_402_300_799_999;
+
+/// The earliest instant a chart's window reaches, in milliseconds since the Unix epoch: the first of the year 0, UTC.
+pub const CHART_EARLIEST_MS: i64 = -62_167_219_200_000;
 
 /// What a chart's points are in time: those of a live chart, whose last point is now and each `step_ms` milliseconds
 /// after the one before, or those of a fixed window, whose first point is at `from_ms` and last at `to_ms`, absolute
@@ -418,13 +421,13 @@ pub enum TimeAxis {
 
 impl TimeAxis {
     /// It as a chart of `points` keeps it once cleaned: a live step from 1 ms to [`CHART_STEP_MS`], and a fixed window
-    /// that ends after it begins, within [`CHART_INSTANT_MS`] of the epoch and no wider than its points at
+    /// that ends after it begins, within the years 0 to 9999, from [`CHART_EARLIEST_MS`] to [`CHART_INSTANT_MS`], and no wider than its points at
     /// [`CHART_STEP_MS`] apart; none otherwise.
     fn cleaned(self, points: u32) -> Option<Self> {
         match self {
             Self::Live { step_ms } => (1..=CHART_STEP_MS).contains(&step_ms).then_some(self),
             Self::Fixed { from_ms, to_ms } => (from_ms < to_ms
-                && from_ms >= -CHART_INSTANT_MS
+                && from_ms >= CHART_EARLIEST_MS
                 && to_ms <= CHART_INSTANT_MS
                 && to_ms - from_ms <= i64::from(points - 1) * i64::from(CHART_STEP_MS))
             .then_some(self),

@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use base_scheduler::Cancellation;
 
 mod action;
+mod context;
 pub mod navmesh;
 mod panel;
 pub mod sightlines;
@@ -43,6 +44,10 @@ pub use action::{
     CHOICE_LABEL_LIMIT, CHOICE_LIMIT, Choice, Kind, OFFER_LIMIT, OUTCOME_LIMIT, Outcome,
     PARAMETER_DESCRIPTION_LIMIT, PARAMETER_LIMIT, Parameter, TEXT_LIMIT, check_actions,
     valid_action_name,
+};
+pub use context::{
+    Binding, CONTEXT_CHOICES, CONTEXT_ID_BYTES, CONTEXT_LABEL_CHARS, CONTEXT_PARAMETERS,
+    CONTEXT_VALUE_CHARS, Context, ContextParameter, TIME, Time, valid_context_id,
 };
 
 pub use zone::{
@@ -163,6 +168,7 @@ pub struct Intent {
     acted: Option<Acted>,
     moved: Option<Moved>,
     occupancy: Option<Occupancy>,
+    context: Option<Context>,
 }
 
 /// Where a panel the side published is now, as the server tells the side in a [`Moved`].
@@ -312,6 +318,7 @@ impl Intent {
             acted: None,
             moved: None,
             occupancy: None,
+            context: None,
         }
     }
 
@@ -335,6 +342,7 @@ impl Intent {
             acted: None,
             moved: None,
             occupancy: None,
+            context: None,
         }
     }
 
@@ -359,6 +367,7 @@ impl Intent {
             acted: Some(acted),
             moved: None,
             occupancy: None,
+            context: None,
         }
     }
 
@@ -383,6 +392,7 @@ impl Intent {
             acted: None,
             moved: Some(moved),
             occupancy: None,
+            context: None,
         }
     }
 
@@ -406,7 +416,40 @@ impl Intent {
             acted: None,
             moved: None,
             occupancy: Some(occupancy),
+            context: None,
         }
+    }
+
+    /// How one of the side's panels is bound to its context now, `context`, changed by the participant numbered
+    /// `participant`, or `0`, the number the server gives nobody, for one the agent or the layout changed or the side
+    /// started again; its payload is empty. The server makes it, never from a client's intent; a side's own tests make
+    /// it to try their handling of a context. See `design/panel-context.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Binding, Context, Intent, Time};
+    ///
+    /// let context = Context::new("latency", vec![("region".into(), Binding::Fixed("EU-WEST1".into()))], Time::Follows);
+    /// let intent = Intent::context_of(0, context.clone());
+    /// assert_eq!((intent.context(), intent.payload(), intent.moved()), (Some(&context), "", None));
+    /// assert_eq!(Intent::new(3, "{}").context(), None);
+    /// ```
+    pub fn context_of(participant: u32, context: Context) -> Self {
+        Self {
+            participant,
+            payload: String::new(),
+            chosen: None,
+            acted: None,
+            moved: None,
+            occupancy: None,
+            context: Some(context),
+        }
+    }
+
+    /// How one of the side's panels is bound to its context now, if this tells it rather than being the client side's
+    /// own intent. Only the server tells one, as the setting of the panel or its wall changes, and for each panel bound
+    /// to anything but following as the side starts: a client's intent is never one, whatever its payload says.
+    pub fn context(&self) -> Option<&Context> {
+        self.context.as_ref()
     }
 
     /// Who asked: the number the server gave the participant, which everyone in the space knows them by, as the
@@ -758,6 +801,12 @@ pub trait Outlet: Send + Sync {
     /// zones, as one made before zones were, keeps nothing.
     fn declare_zones(&self, zones: Vec<Zone>) -> Result<()> {
         let _ = zones;
+        Ok(())
+    }
+    /// Declare the parameters the side's panels depend on, with their values now, replacing those declared before. An
+    /// outlet that takes no context, as one made before context was, keeps nothing.
+    fn set_context(&self, parameters: Vec<ContextParameter>) -> Result<()> {
+        let _ = parameters;
         Ok(())
     }
 }
@@ -1148,6 +1197,29 @@ impl Space {
     /// changes nothing.
     pub fn retract(&self, id: &str) -> Result<()> {
         self.outlet.retract(id)
+    }
+
+    /// Declare the parameters the side's panels depend on, as its own selection gives them now, replacing those declared
+    /// before, such as the region its console has selected: a panel that names one in [`Panel::depends_on`] and follows
+    /// it shows its value, and a wall or panel that fixes it to another value is shown so, the side being told
+    /// ([`Intent::context`]) and showing in that panel what its context says. Call it again as the selection changes;
+    /// every participant sees the values on the walls' and panels' chips. A setting of a parameter this leaves out is kept, shown nowhere, and its panels told no binding for it until the side declares it again; a value fixed that is no longer among the choices is kept and still shown and told as fixed. Declarations belong to the binding, as
+    /// everything a side keeps does, so a side declares them again as it starts. See `design/panel-context.md`.
+    ///
+    /// The server refuses, saying why: more than [`CONTEXT_PARAMETERS`] parameters, an id [`valid_context_id`] refuses
+    /// or another parameter has, and a parameter of more than [`CONTEXT_CHOICES`] choices. It cleans each label, value and
+    /// choice onto one line, cutting a label after [`CONTEXT_LABEL_CHARS`] and a value after [`CONTEXT_VALUE_CHARS`]
+    /// characters, a label empty once cleaned taking its id, and holds declarations to the rate its publishing is held
+    /// to.
+    ///
+    /// ```
+    /// use tomori_environment::{ContextParameter, Space};
+    ///
+    /// let space = Space::new("space-1-1", "Fleet", "/");
+    /// space.set_context(vec![ContextParameter::new("region", "Region", "US-EAST1")]).unwrap();
+    /// ```
+    pub fn set_context(&self, parameters: Vec<ContextParameter>) -> Result<()> {
+        self.outlet.set_context(parameters)
     }
 
     /// Place `anchor`, a named place in the environment that workers, panels and the agent gather at, in the
