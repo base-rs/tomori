@@ -9,6 +9,7 @@ use glam::{Mat4, Quat, Vec3, Vec4};
 use tomori_render::test_gpu;
 
 use super::*;
+use crate::bounds::{Frustum, Tally};
 use crate::{Pose, Transform};
 
 const SIZE: u32 = 96;
@@ -423,6 +424,128 @@ fn a_textured_model_read_from_a_file_is_drawn() {
         render(&device, &queue, 1, |pass| {
             renderer.draw(pass, 0, &gpu, &batch)
         });
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// A model of two primitives: a closed box, a metre on each side about its origin, and an open card beside it, facing
+/// +Z, drawn on both sides.
+fn box_and_card() -> Arc<Model> {
+    let cube = crate::bounds::tests::cuboid(Vec3::splat(-0.5), Vec3::splat(0.5), true);
+    let card = crate::Primitive::new(
+        vec![
+            Vec3::new(0.7, -0.4, 0.0),
+            Vec3::new(1.3, -0.4, 0.0),
+            Vec3::new(1.3, 0.4, 0.0),
+            Vec3::new(0.7, 0.4, 0.0),
+        ],
+        Vec::new(),
+        vec![0, 1, 2, 0, 2, 3],
+    );
+    assert!(cube.closed() && !card.closed());
+    Arc::new(
+        Model::built(
+            vec![crate::Node::new("box", Transform::IDENTITY).with_mesh(0)],
+            vec![0],
+            vec![crate::Mesh::new("box", vec![cube, card])],
+            Vec::new(),
+            &crate::Limits::default(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn only_instances_the_eyes_may_see_are_drawn_and_closed_primitives_without_their_back_faces() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 4);
+        renderer.set_lighting(&queue, &even());
+        let model = box_and_card();
+        let gpu = renderer.upload(&device, &queue, &model);
+        let mut batch = renderer.batch(&device);
+        let view = camera();
+        // One before the eye, one mirrored beside it, turned so that its sides show, and one behind the eye.
+        let placed = |transform: Mat4| {
+            let mut instance = Instance::new(model.clone());
+            instance.transform = transform;
+            instance
+        };
+        let turned = Quat::from_rotation_y(0.6) * Quat::from_rotation_x(0.4);
+        let instances = [
+            placed(Mat4::from_rotation_translation(
+                turned,
+                Vec3::new(0.2, 0.3, 0.0),
+            )),
+            placed(Mat4::from_scale_rotation_translation(
+                Vec3::new(-0.6, 0.6, 0.6),
+                turned,
+                Vec3::new(2.0, 0.9, 0.5),
+            )),
+            placed(Mat4::from_translation(Vec3::new(1.0, 0.3, 9.0))),
+        ];
+        renderer.place(&device, &queue, &gpu, &mut batch, &instances);
+        renderer.prepare(&queue, 0, view, Vec3::new(1.0, 0.3, 4.0));
+        // Placed, every primitive of every instance is drawn: the box's closed ones apart from its mirrored one.
+        let all = batch.tally();
+        assert_eq!(
+            all,
+            Tally {
+                drawn: 6,
+                culled: 0,
+                draws: 3,
+                triangles: 2 * 12 + 12 + 3 * 2
+            }
+        );
+        let draw = |renderer: &Renderer, batch: &Batch| {
+            render(&device, &queue, 4, |pass| {
+                renderer.draw(pass, 0, &gpu, batch)
+            })
+        };
+        let whole = draw(&renderer, &batch);
+        // Culled against the eye's frustum, the instance behind the eye is not drawn, and what is drawn looks the same,
+        // with or without the closed box's back faces.
+        let frustum = Frustum::new(view);
+        let culled = renderer.cull(&queue, &gpu, &mut batch, Some(&frustum));
+        assert_eq!((culled.drawn, culled.culled, culled.draws), (4, 2, 3));
+        assert_eq!(culled.triangles, 12 + 12 + 2 + 2);
+        assert_eq!(draw(&renderer, &batch), whole);
+        renderer.set_back_faces_culled(false);
+        assert_eq!(draw(&renderer, &batch), whole);
+        renderer.set_back_faces_culled(true);
+        // Culled again as it was, nothing is written; looking away, nothing is drawn; unculled, all are again.
+        assert_eq!(
+            renderer.cull(&queue, &gpu, &mut batch, Some(&frustum)),
+            culled
+        );
+        let away = Frustum::new(
+            glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.1, 20.0)
+                * glam::camera::rh::view::look_at_mat4(
+                    Vec3::new(1.0, 0.3, 4.0),
+                    Vec3::new(30.0, 0.3, 4.0),
+                    Vec3::Y,
+                ),
+        );
+        let nothing = renderer.cull(&queue, &gpu, &mut batch, Some(&away));
+        assert_eq!((nothing.drawn, nothing.culled, nothing.draws), (0, 6, 0));
+        assert!(drawn(&draw(&renderer, &batch)).is_empty());
+        assert_eq!(renderer.cull(&queue, &gpu, &mut batch, None), all);
+        assert_eq!(draw(&renderer, &batch), whole);
+        // A primitive that may be drawn anywhere, a skin whose weights are not whole, is never culled.
+        let mut loose = crate::pose::tests::arm();
+        loose.meshes[0].primitives[0].weights[1] = [0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let loose = Arc::new(loose);
+        let loose_gpu = renderer.upload(&device, &queue, &loose);
+        let mut loose_batch = renderer.batch(&device);
+        renderer.place(
+            &device,
+            &queue,
+            &loose_gpu,
+            &mut loose_batch,
+            &[Instance::new(loose.clone())],
+        );
+        let kept = renderer.cull(&queue, &loose_gpu, &mut loose_batch, Some(&away));
+        assert_eq!((kept.drawn, kept.culled), (1, 0));
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

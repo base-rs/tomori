@@ -58,6 +58,49 @@ pub fn eye(scene_to_clip: Mat4) -> Vec3 {
     }
 }
 
+/// What the eyes see this frame, in a scenery's own coordinates: each eye's view and projection, and one frustum
+/// holding all they see, which a scenery culls what it draws against, once, before its eyes are prepared. See
+/// `design/rendering.md`.
+pub struct Views<'a> {
+    clips: &'a [Mat4],
+    frustum: Option<tomori_assets::bounds::Frustum>,
+}
+
+impl<'a> Views<'a> {
+    /// The eyes `clips`, each a view and projection, and the frustum enclosing them all.
+    pub fn new(clips: &'a [Mat4]) -> Self {
+        Self {
+            clips,
+            frustum: Some(tomori_assets::bounds::Frustum::enclosing(clips)),
+        }
+    }
+
+    /// The eyes `clips`, with nothing to be culled, as when culling is turned off to compare.
+    pub fn unculled(clips: &'a [Mat4]) -> Self {
+        Self {
+            clips,
+            frustum: None,
+        }
+    }
+
+    /// Each eye's view and projection.
+    pub fn clips(&self) -> &[Mat4] {
+        self.clips
+    }
+
+    /// The frustum enclosing every eye's, outside which nothing is seen, or none when nothing is to be culled.
+    pub fn frustum(&self) -> Option<&tomori_assets::bounds::Frustum> {
+        self.frustum.as_ref()
+    }
+
+    /// Whether anything of `bounds` may be seen: always, when nothing is to be culled.
+    pub fn sees(&self, bounds: &tomori_assets::bounds::Aabb) -> bool {
+        self.frustum
+            .as_ref()
+            .is_none_or(|frustum| frustum.sees(bounds))
+    }
+}
+
 /// Scenery drawn natively in each eye's pass.
 pub trait Scenery {
     /// Once a frame, before the eyes: what the environment's client side shows now, the environment's own, which only
@@ -69,6 +112,12 @@ pub trait Scenery {
         _drawn: &(dyn std::any::Any + Send + Sync),
     ) {
     }
+    /// Once a frame, after [`Scenery::animate`] and before the eyes are prepared: draw only what `views`' frustum may
+    /// see, and say how much it then draws in each eye and how much it culled. By default it culls nothing and says
+    /// nothing, drawing everything as before. See `design/rendering.md`.
+    fn cull(&mut self, _queue: &wgpu::Queue, _views: &Views<'_>) -> tomori_assets::bounds::Tally {
+        tomori_assets::bounds::Tally::default()
+    }
     /// Before the eye's pass: per-eye uniforms, for the eye's view and projection.
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4);
     /// Before the eye's pass, in place of [`Scenery::prepare`]: per-eye uniforms, for the eye's view and projection and
@@ -79,7 +128,9 @@ pub trait Scenery {
     }
     /// Before the eye's pass: work in its own passes, such as Sky's clouds.
     fn encode(&self, _encoder: &mut wgpu::CommandEncoder, _eye: usize) {}
-    /// In the eye's pass, before the scene.
+    /// In the eye's pass, before the scene: its opaque bodies, nearest first, and then, at the far plane, comparing
+    /// `LessEqual` without writing depth, anything as far away as the sky, so that it is shaded only where nothing nearer
+    /// covers it.
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize);
     /// In the eye's pass, after the scene and before the panels.
     fn draw_translucent(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
@@ -1090,7 +1141,7 @@ mod tests {
                         .create_view(&Default::default())
                 })
                 .collect();
-            let render = |renderer: &Renderer| {
+            let render = |renderer: &mut Renderer| {
                 renderer.render(
                     &device,
                     &queue,
@@ -1102,7 +1153,7 @@ mod tests {
             };
             // The grid has no scenery of its own, nor any to hand what a client side shows.
             renderer.animate(&device, &queue, &1usize);
-            render(&renderer);
+            render(&mut renderer);
             assert_eq!(counted.drawn(), 0);
             renderer.set_scenery(crate::arrival_motion::Scenery {
                 environment: floor,
@@ -1113,15 +1164,15 @@ mod tests {
             });
             // What its client side shows reaches the current environment's scenery, which, as this one, may ignore it.
             renderer.animate(&device, &queue, &1usize);
-            render(&renderer);
+            render(&mut renderer);
             assert_eq!(counted.drawn(), 2);
             assert_eq!(renderer.environment(), floor);
             // A blank scenery is made for a renderer, and draws nothing.
             let mut blank = Sceneries::empty();
             blank.register("blank", test::blank);
-            let renderer = Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &blank);
+            let mut renderer = Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &blank);
             assert_eq!(renderer.environments()[1], Environment::new("blank"));
-            render(&renderer);
+            render(&mut renderer);
         });
     }
 }

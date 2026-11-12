@@ -92,7 +92,8 @@ impl Gpu {
         let adapter = hal_instance
             .expose_adapter(physical)
             .context("exposing XR Vulkan adapter")?;
-        let features = wgpu::Features::empty();
+        // The GPU's timestamps, where it has them, for the frame log; see `design/rendering.md`.
+        let features = adapter.features & tomori_render::profiler::FEATURES;
         let limits = wgpu::Limits::default();
         let device_extensions = adapter.adapter.required_device_extensions(features);
         let device_ptrs: Vec<_> = device_extensions.iter().map(|e| e.as_ptr()).collect();

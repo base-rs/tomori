@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 /// The environment variable that makes a missing adapter fail the test instead of skipping it.
 pub const REQUIRE_GPU: &str = "TOMORI_REQUIRE_GPU";
 
-/// The adapter a test renders with, and a device and queue created on it with default limits and features, shared by every test in the binary.
+/// The adapter a test renders with, and a device and queue created on it with default limits, and the features of the frame profiler it has, shared by every test in the binary.
 #[derive(Clone)]
 pub struct Gpu {
     pub adapter: wgpu::Adapter,
@@ -60,8 +60,12 @@ fn create(backends: wgpu::Backends) -> Result<Gpu, String> {
         "GPU tests use {} ({:?}, {}).",
         info.name, info.device_type, info.driver
     ));
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))
-        .expect("the adapter must provide a device");
+    // With the GPU's timestamps where it has them, as lavapipe does, so that the frame profiler is tested timing.
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & crate::profiler::FEATURES,
+        ..Default::default()
+    }))
+    .expect("the adapter must provide a device");
     Ok(Gpu {
         adapter,
         device,

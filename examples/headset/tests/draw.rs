@@ -27,7 +27,7 @@ fn srgb(linear: f32) -> u8 {
 }
 
 /// The pixel at the bottom centre of what `renderer` draws, looking down at the floor from standing height.
-fn bottom_centre(gpu: &test_gpu::Gpu, renderer: &Renderer) -> [u8; 4] {
+fn bottom_centre(gpu: &test_gpu::Gpu, renderer: &mut Renderer) -> [u8; 4] {
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("placeholder floor test"),
         size: wgpu::Extent3d {
@@ -138,14 +138,14 @@ fn a_space_in_the_placeholder_environment_shows_the_floor() {
         renderer.resize(&gpu.device, WIDTH, HEIGHT);
         renderer.set_environment(conversation.environment());
         renderer.update(&gpu.queue, &swarm, None, false);
-        let floor = bottom_centre(&gpu, &renderer);
+        let floor = bottom_centre(&gpu, &mut renderer);
         assert_eq!(
             floor,
             [srgb(COLOUR[0]), srgb(COLOUR[1]), srgb(COLOUR[2]), 255]
         );
         renderer.set_environment(Environment::MINIMAL);
         renderer.update(&gpu.queue, &swarm, None, false);
-        assert_ne!(bottom_centre(&gpu, &renderer), floor);
+        assert_ne!(bottom_centre(&gpu, &mut renderer), floor);
     });
 }
 

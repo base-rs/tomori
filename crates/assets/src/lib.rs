@@ -21,6 +21,7 @@
 //!
 //! See `design/assets.md`, `design/animation.md` and `context/usage.md`.
 pub mod animation;
+pub mod bounds;
 mod gltf;
 mod instance;
 mod library;

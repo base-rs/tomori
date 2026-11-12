@@ -170,7 +170,7 @@ fn the_default_tomori_wall_stands_below_the_swarm_in_every_environment() {
         let mut sceneries = Sceneries::empty();
         tomori_environment_sky_client::register(&mut sceneries);
         tomori_environment_farmyard_client::register(&mut sceneries);
-        let capture = |renderer: &Renderer, panels: &Panels| {
+        let capture = |renderer: &mut Renderer, panels: &Panels| {
             // From home, looking ahead a little down, wide enough to see the first workers' stations either side.
             let matrix = glam::camera::rh::proj::directx::perspective(
                 1.2,
@@ -251,7 +251,7 @@ fn the_default_tomori_wall_stands_below_the_swarm_in_every_environment() {
                 assert_eq!(frame.scenery.environment, environment);
                 assert_eq!(frame.stations.len(), 8);
                 draw(&mut renderer, &device, &queue, &mut panels, &frame);
-                drawn.push(capture(&renderer, &panels));
+                drawn.push(capture(&mut renderer, &panels));
             }
             assert_ne!(drawn[0], drawn[1], "{environment:?}: the panels are drawn");
             image::imageops::replace(&mut sheet, &drawn[1], 0, (index as u32 * HEIGHT).into());

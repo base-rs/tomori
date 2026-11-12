@@ -14,6 +14,8 @@ use tomori_render::test_gpu;
 use super::*;
 use tomori_environment_farmyard::trail;
 
+mod culling;
+
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 200;
 
@@ -51,6 +53,25 @@ fn capture_sized(
     (width, height, projection): (u32, u32, Mat4),
 ) -> Vec<u8> {
     let view_projection = projection * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
+    capture_clip(
+        device,
+        queue,
+        scenery,
+        samples,
+        view_projection,
+        (width, height),
+    )
+}
+
+/// What `scenery` draws through `view_projection`, `width` by `height`, read back as RGBA rows.
+fn capture_clip(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scenery: &dyn Scenery,
+    samples: u32,
+    view_projection: Mat4,
+    (width, height): (u32, u32),
+) -> Vec<u8> {
     let texture = |format, samples, usage| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Farmyard test target"),
@@ -1419,7 +1440,8 @@ fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
     let all = ferns::all();
     for eyes in [layout::ARRIVAL + Vec3::Y * 1.6, ponga()] {
         let details: Vec<Detail> = all.iter().map(|fern| fern.detail(eyes)).collect();
-        let (instances, draws) = fern_instances(&all, &details, &meshes);
+        let placed: Vec<Option<Detail>> = details.iter().copied().map(Some).collect();
+        let (instances, draws) = fern_instances(&all, &placed, &meshes);
         // Every one, but the koru beyond their distance, which are too small to see.
         let unseen = all
             .iter()

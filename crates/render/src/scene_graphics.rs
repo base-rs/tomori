@@ -614,7 +614,7 @@ mod tests {
             };
             let mut step = Step::default();
             let now = Instant::now();
-            let capture = |renderer: &Renderer, panels: &Panels| {
+            let capture = |renderer: &mut Renderer, panels: &Panels| {
                 // About the field of view the headset gives the inbox, to judge its text at the headset's resolution.
                 let matrix = glam::camera::rh::proj::directx::perspective(
                     0.45,
@@ -666,10 +666,10 @@ mod tests {
                 buffer.unmap();
                 image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
             };
-            let bare = capture(&renderer, &panels);
+            let bare = capture(&mut renderer, &panels);
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let pointed = capture(&renderer, &panels);
+            let pointed = capture(&mut renderer, &panels);
             assert_ne!(pointed, bare, "the inbox must draw over the bare scene");
             // Picked up and carried to the right.
             let squeezed = Senses {
@@ -686,7 +686,7 @@ mod tests {
             };
             let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let moved = capture(&renderer, &panels);
+            let moved = capture(&mut renderer, &panels);
             assert_ne!(moved, pointed);
             let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
             image::imageops::replace(&mut sheet, &pointed, 0, 0);
@@ -855,7 +855,7 @@ mod tests {
             let facing = slots[2].transform_vector3(Vec3::Z).normalize();
             let close = lens
                 * glam::camera::rh::view::look_at_mat4(slot(2) + facing * 0.8, slot(2), Vec3::Y);
-            let capture_from = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+            let capture_from = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -896,9 +896,10 @@ mod tests {
                 buffer.unmap();
                 image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
             };
-            let capture =
-                |renderer: &Renderer, panels: &Panels| capture_from(renderer, panels, from_home);
-            let bare = capture(&renderer, &panels);
+            let capture = |renderer: &mut Renderer, panels: &Panels| {
+                capture_from(renderer, panels, from_home)
+            };
+            let bare = capture(&mut renderer, &panels);
             // Looking at the wall, pointing at nothing.
             let away = Senses {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
@@ -912,16 +913,16 @@ mod tests {
                 "the wall's slots, its label and its panels"
             );
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let wall_drawn = capture(&renderer, &panels);
+            let wall_drawn = capture(&mut renderer, &panels);
             assert_ne!(wall_drawn, bare, "the wall must draw over the bare scene");
-            let highlighted = capture_from(&renderer, &panels, close);
+            let highlighted = capture_from(&mut renderer, &panels, close);
             // The same code without its spans is drawn plain, which differs: its kinds are coloured.
             let mut plain_conversation = joined();
             show_projection(&mut plain_conversation, Vec::new(), plain);
             let mut plain_step = Step::default();
             let frame = plain_step.update(&away, &mut plain_conversation, &mut felt(), now, 0.01);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let unhighlighted = capture_from(&renderer, &panels, close);
+            let unhighlighted = capture_from(&mut renderer, &panels, close);
             assert_ne!(highlighted, unhighlighted, "code must be coloured by kind");
             // Coloured pixels, such as the keywords' violet, where plain code has none.
             let violet = |image: &image::RgbaImage| {
@@ -942,7 +943,7 @@ mod tests {
                 "with the label"
             );
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let pointed = capture(&renderer, &panels);
+            let pointed = capture(&mut renderer, &panels);
             assert_ne!(pointed, wall_drawn);
             // Pulled off and carried towards the last slot, whose outline shows where it would go, over the code panel there.
             let squeezed = Senses {
@@ -956,7 +957,7 @@ mod tests {
             };
             let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let moved = capture(&renderer, &panels);
+            let moved = capture(&mut renderer, &panels);
             assert_ne!(moved, pointed);
             let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 4);
             image::imageops::replace(&mut sheet, &wall_drawn, 0, 0);
@@ -1076,7 +1077,7 @@ mod tests {
                     floating_at,
                     Vec3::Y,
                 );
-            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+            let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -1100,7 +1101,7 @@ mod tests {
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
             assert!(frame.images.is_empty());
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let waiting = capture(&renderer, &panels, at_wall);
+            let waiting = capture(&mut renderer, &panels, at_wall);
             assert_eq!(orange(&waiting), 0);
             // Once it arrives, both panels draw it, from one texture with every mipmap level.
             conversation.apply(tomori_client::Event::Image {
@@ -1125,8 +1126,8 @@ mod tests {
             .map(|level| level.pixels.len())
             .sum();
             assert_eq!(renderer.images().used(), one);
-            let on_wall = capture(&renderer, &panels, at_wall);
-            let close = capture(&renderer, &panels, at_floating);
+            let on_wall = capture(&mut renderer, &panels, at_wall);
+            let close = capture(&mut renderer, &panels, at_floating);
             // The disc is drawn in the wall's slot, and large floating close up.
             let (small, large) = (orange(&on_wall), orange(&close));
             assert!(small > 100, "{small}");
@@ -1532,7 +1533,7 @@ mod tests {
                     Vec3::new(0.0, 1.0, -2.3),
                     Vec3::Y,
                 );
-            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+            let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -1568,8 +1569,8 @@ mod tests {
                 );
                 draw(&mut renderer, &device, &queue, &mut panels, &frame);
                 (
-                    capture(&renderer, &panels, at_wall),
-                    capture(&renderer, &panels, ahead),
+                    capture(&mut renderer, &panels, at_wall),
+                    capture(&mut renderer, &panels, ahead),
                 )
             };
             let (answered, answered_ahead) = shown(projection.panels.clone());
@@ -1689,7 +1690,7 @@ mod tests {
                 ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
                 ..Default::default()
             };
-            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+            let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -1718,9 +1719,9 @@ mod tests {
                 let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
                 draw(&mut renderer, &device, &queue, &mut panels, &frame);
                 (
-                    capture(&renderer, &panels, at_wide),
-                    capture(&renderer, &panels, at_curved),
-                    capture(&renderer, &panels, beside),
+                    capture(&mut renderer, &panels, at_wide),
+                    capture(&mut renderer, &panels, at_curved),
+                    capture(&mut renderer, &panels, beside),
                 )
             };
             let (wide_full, curved_full, beside_full) = drawn(shown.clone());
@@ -3073,7 +3074,7 @@ mod tests {
                 0.05,
                 50.0,
             );
-            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+            let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -3115,7 +3116,7 @@ mod tests {
             let looking = ahead - Vec3::Y * 0.2;
             let from_home =
                 lens * glam::camera::rh::view::look_at_mat4(arrival::HOME, looking, Vec3::Y);
-            let hinted = capture(&renderer, &panels, from_home);
+            let hinted = capture(&mut renderer, &panels, from_home);
             // Without its hint, the same frame differs: the hint draws, and its warm row with it.
             let mut bare = frame.projection.clone();
             bare.pop();
@@ -3124,7 +3125,7 @@ mod tests {
                 ..frame
             };
             draw(&mut renderer, &device, &queue, &mut panels, &without);
-            let unhinted = capture(&renderer, &panels, from_home);
+            let unhinted = capture(&mut renderer, &panels, from_home);
             assert_ne!(hinted, unhinted, "the hint must draw");
             let warm = |image: &image::RgbaImage| {
                 image
@@ -3177,7 +3178,7 @@ mod tests {
                     slot(2) + Vec3::Y * 0.25,
                     Vec3::Y,
                 );
-            let swapping = capture(&renderer, &panels, toward);
+            let swapping = capture(&mut renderer, &panels, toward);
             // The code panel on its own, close up, from 0.5 m, and from home.
             let mut code_only = joined();
             show_projection(&mut code_only, Vec::new(), vec![code]);
@@ -3191,14 +3192,14 @@ mod tests {
             let facing = slots[2].transform_vector3(Vec3::Z).normalize();
             let close = lens
                 * glam::camera::rh::view::look_at_mat4(slot(2) + facing * 0.5, slot(2), Vec3::Y);
-            let wrapped = capture(&renderer, &panels, close);
+            let wrapped = capture(&mut renderer, &panels, close);
             let from_home = lens
                 * glam::camera::rh::view::look_at_mat4(
                     arrival::HOME,
                     slot(2) + Vec3::Y * 0.1,
                     Vec3::Y,
                 );
-            let wrapped_from_home = capture(&renderer, &panels, from_home);
+            let wrapped_from_home = capture(&mut renderer, &panels, from_home);
             // The string's green carries onto the row its line wraps onto.
             let green = |image: &image::RgbaImage| {
                 image

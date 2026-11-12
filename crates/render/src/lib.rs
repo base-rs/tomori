@@ -11,6 +11,7 @@ pub mod glyphs;
 pub mod graphics;
 pub mod occlusion;
 pub mod panel_images;
+pub mod profiler;
 pub mod scene_graphics;
 pub mod scenery;
 #[cfg(any(test, feature = "test-gpu"))]

@@ -198,6 +198,30 @@ pub struct Renderer {
     /// Image panels' images, drawn over their faces. See `design/projection.md`.
     images: crate::panel_images::PanelImages,
     glyphs: crate::glyphs::SharedGlyphs,
+    /// Whether what neither eye can see is culled, as it is unless a comparison turns it off.
+    culling: bool,
+    /// What the last frame drew in each eye, and how much it culled.
+    tally: tomori_assets::bounds::Tally,
+    /// The cubes drawn this frame, of [`Self::scene`], those the eyes may see, and whether the cubes' buffer holds only
+    /// those rather than the whole scene, as `update` and the rest write it.
+    shown: Vec<Instance>,
+    cubes_culled: bool,
+    /// The GPU's time for each frame, and what each drew; see `design/rendering.md`.
+    profiler: crate::profiler::Profiler,
+}
+
+/// Where a cube of Tomori's own may be drawn: the unit cube, scaled, turned by its basis and moved to its position.
+fn cube_bounds(cube: &Instance) -> tomori_assets::bounds::Aabb {
+    let placed = glam::Mat3::from_cols_array_2d(&cube.basis)
+        * glam::Mat3::from_diagonal(glam::Vec3::from_array(cube.scale));
+    let placed = Mat4::from_cols(
+        placed.x_axis.extend(0.0),
+        placed.y_axis.extend(0.0),
+        placed.z_axis.extend(0.0),
+        glam::Vec3::from_array(cube.position).extend(1.0),
+    );
+    tomori_assets::bounds::Aabb::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5))
+        .transformed(placed)
 }
 
 impl Renderer {
@@ -408,7 +432,30 @@ impl Renderer {
             panels,
             images,
             glyphs,
+            culling: true,
+            tally: Default::default(),
+            shown: Vec::with_capacity(MAX_INSTANCES),
+            cubes_culled: false,
+            // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
+            profiler: crate::profiler::Profiler::new(device, queue, !cfg!(target_os = "android")),
         }
+    }
+
+    /// Cull what neither eye can see, as by default, or draw everything, `false`, to compare.
+    pub fn set_culling(&mut self, culling: bool) {
+        self.culling = culling;
+    }
+
+    /// What the last frame drew in each eye, and how much it culled: the scenery's and the avatar's, Tomori's cubes and
+    /// the panels.
+    pub fn tally(&self) -> tomori_assets::bounds::Tally {
+        self.tally
+    }
+
+    /// A line summarizing what the GPU took for the frames since the last summary, and what they drew, for the frame log
+    /// once a minute; see `design/rendering.md`.
+    pub fn gpu_summary(&mut self) -> Option<String> {
+        self.profiler.summary()
     }
 
     /// This frame's panels show the images `shown`, by hash, each with its PNG: decode and upload them, within the
@@ -511,6 +558,14 @@ impl Renderer {
     }
 
     /// The scenery drawn now, if the environment has one.
+    fn scenery_mut(&mut self) -> Option<&mut Box<dyn crate::scenery::Scenery>> {
+        let environment = self.environment;
+        self.sceneries
+            .iter_mut()
+            .find(|(registered, _)| *registered == environment)
+            .map(|(_, scenery)| scenery)
+    }
+
     fn scenery(&self) -> Option<&dyn crate::scenery::Scenery> {
         self.sceneries
             .iter()
@@ -765,6 +820,7 @@ impl Renderer {
         assert!(self.scene.len() <= MAX_INSTANCES);
         self.base_scene_len = self.scene.len();
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
+        self.cubes_culled = false;
     }
 
     /// The space's timers' dials, whose cubes come among the workers', and whose signs the next `update_workspace` draws.
@@ -795,6 +851,7 @@ impl Renderer {
             }
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
+        self.cubes_culled = false;
         self.workspace
             .update(device, queue, workspace, stations, viewer);
     }
@@ -830,6 +887,7 @@ impl Renderer {
             }
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
+        self.cubes_culled = false;
         self.arrival
             .update(device, queue, frame.scene, frame.hovered);
     }
@@ -869,7 +927,7 @@ impl Renderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         targets: &[wgpu::TextureView],
@@ -881,6 +939,19 @@ impl Renderer {
         assert!((1..=2).contains(&targets.len()));
         // The glyphs that this frame's meshes were built with, which may be new.
         self.glyphs.glyphs().sync(device, queue);
+        // What the eyes see: once, before either is drawn, everything that neither can see is culled, each against one
+        // frustum enclosing both. See `design/rendering.md`.
+        let both = tomori_assets::bounds::Frustum::enclosing(matrices);
+        let visible: Vec<bool> = panels
+            .iter()
+            .map(|(panel, model)| !self.culling || both.sees(&panel.bounds().transformed(*model)))
+            .collect();
+        let tally = self.cull(queue, matrices, scene_to_space, panels, &visible);
+        // The GPU's timestamps of frames it has finished are read back as they are mapped.
+        let _ = device.poll(wgpu::PollType::Poll);
+        let profiled = self.profiler.begin(targets.len());
+        self.profiler.tally(tally);
+        self.tally = tally;
         let glyphs = self.glyphs.binding();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("swarm frame"),
@@ -914,7 +985,7 @@ impl Renderer {
                 bytemuck::cast_slice(&scene_to_clip.to_cols_array()),
             );
             // Each panel's model is in the same space as the eyes' matrices.
-            for (panel, model) in panels {
+            for ((panel, model), _) in panels.iter().zip(&visible).filter(|(_, seen)| **seen) {
                 panel.prepare(queue, eye, matrices[eye] * *model);
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -946,22 +1017,25 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.pass(profiled, eye),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw(&mut pass, eye);
             }
+            self.profiler.mark(&mut pass, profiled, eye, 0);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bindings[eye], &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
-            pass.draw(0..self.vertex_count, 0..self.scene.len() as u32);
+            pass.draw(0..self.vertex_count, 0..self.shown.len() as u32);
             self.controllers.draw(&mut pass);
+            self.profiler.mark(&mut pass, profiled, eye, 1);
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw_translucent(&mut pass, eye);
             }
+            self.profiler.mark(&mut pass, profiled, eye, 2);
             // Workers' signs and the space's panels are translucent, so they are drawn after the opaque scene, against its
             // depth, back to front from this eye: each in the order it keeps among its own, the signs' by where they
             // overlap and the panels' as the frame step gave them, farthest first, and between the two whichever is
@@ -973,6 +1047,11 @@ impl Renderer {
             let (mut sign, mut panel) = (0, 0);
             let mut drawing_panels = false;
             while sign < signs.len() || panel < panels.len() {
+                // A panel neither eye can see is not drawn, and the rest keep their order.
+                if panel < panels.len() && !visible[panel] {
+                    panel += 1;
+                    continue;
+                }
                 let next_sign = sign < signs.len()
                     && panels
                         .get(panel)
@@ -1000,6 +1079,7 @@ impl Renderer {
                 }
                 panel += 1;
             }
+            self.profiler.mark(&mut pass, profiled, eye, 3);
             // Arrival's labels are drawn last: in a space they are the hand menu's, by the hand, nearer than the panels, so
             // they blend over those behind them, and are hidden by any in front of them, which has written its depth. Nothing
             // drawn after them needs theirs, so they write none.
@@ -1018,7 +1098,78 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
         }
-        queue.submit([encoder.finish()])
+        self.profiler.resolve(&mut encoder, profiled);
+        let submitted = queue.submit([encoder.finish()]);
+        self.profiler.submitted(profiled);
+        submitted
+    }
+
+    /// Cull, against one frustum enclosing all the eyes `matrices` see, what the scenery and the avatar draw and Tomori's
+    /// cubes, writing those seen for this frame, and say how much is drawn in each eye and culled, panels' with it.
+    fn cull(
+        &mut self,
+        queue: &wgpu::Queue,
+        matrices: &[Mat4],
+        scene_to_space: Mat4,
+        panels: &[(&crate::ui_panel::Panel, Mat4)],
+        visible: &[bool],
+    ) -> tomori_assets::bounds::Tally {
+        let culling = self.culling;
+        let views = |clips| {
+            if culling {
+                crate::scenery::Views::new(clips)
+            } else {
+                crate::scenery::Views::unculled(clips)
+            }
+        };
+        let scene: Vec<Mat4> = matrices
+            .iter()
+            .map(|matrix| *matrix * scene_to_space)
+            .collect();
+        let carried: Vec<Mat4> = scene.iter().map(|clip| *clip * self.carriage).collect();
+        let mut tally = tomori_assets::bounds::Tally::default();
+        if let Some(scenery) = self.scenery_mut() {
+            tally += scenery.cull(queue, &views(&carried));
+        }
+        if let Some((_, _, scenery)) = &mut self.avatar {
+            tally += scenery.cull(queue, &views(&scene));
+        }
+        // Tomori's cubes, the swarm, workers, rings, pads and rays among them, in one draw.
+        let cubes = views(&scene);
+        self.shown.clear();
+        self.shown.extend(
+            self.scene
+                .iter()
+                .filter(|cube| cubes.sees(&cube_bounds(cube))),
+        );
+        let culled = self.shown.len() != self.scene.len();
+        if culled || self.cubes_culled {
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.shown));
+        }
+        self.cubes_culled = culled;
+        tally += tomori_assets::bounds::Tally {
+            drawn: self.shown.len(),
+            culled: self.scene.len() - self.shown.len(),
+            draws: 1,
+            triangles: self.shown.len() * self.vertex_count as usize / 3,
+        };
+        // The panels, each a draw of its face, and its backing's into depth.
+        for ((panel, _), seen) in panels.iter().zip(visible) {
+            tally += if *seen {
+                tomori_assets::bounds::Tally {
+                    drawn: 1,
+                    draws: 1,
+                    triangles: panel.triangles(),
+                    ..Default::default()
+                }
+            } else {
+                tomori_assets::bounds::Tally {
+                    culled: 1,
+                    ..Default::default()
+                }
+            };
+        }
+        tally
     }
 }
 
@@ -1595,7 +1746,7 @@ mod tests {
                 let mut swarm = Swarm::default();
                 swarm.agents.clear();
                 renderer.update(&queue, &swarm, None, false);
-                let capture = |renderer: &Renderer| {
+                let capture = |renderer: &mut Renderer| {
                     renderer.render(
                         &device,
                         &queue,
@@ -1640,7 +1791,7 @@ mod tests {
                     buffer.unmap();
                     data
                 };
-                let empty = capture(&renderer);
+                let empty = capture(&mut renderer);
                 renderer.update_controllers(
                     &queue,
                     [
@@ -1655,7 +1806,7 @@ mod tests {
                     ],
                     [None, None],
                 );
-                let with_controllers = capture(&renderer);
+                let with_controllers = capture(&mut renderer);
                 let changed = |start: usize, end: usize| {
                     (0..128).any(|y| {
                         (start..end).any(|x| {
@@ -1685,7 +1836,7 @@ mod tests {
                     [None, None],
                     [Some(make_hand(-0.45)), Some(make_hand(0.45))],
                 );
-                let with_hands = capture(&renderer);
+                let with_hands = capture(&mut renderer);
                 let hand_changed = |start: usize, end: usize| {
                     (0..128).any(|y| {
                         (start..end).any(|x| {
@@ -1704,7 +1855,7 @@ mod tests {
                     })
                 };
                 renderer.update_controllers(&queue, [pose(-0.45), pose(0.45)], [None, None]);
-                assert_eq!(capture(&renderer), with_controllers);
+                assert_eq!(capture(&mut renderer), with_controllers);
                 let vertex = |x, y| crate::controller::Vertex {
                     position: [x, y, 0.0],
                     normal: [0.0, 0.0, -1.0],
@@ -1721,7 +1872,7 @@ mod tests {
                     textures: Vec::new(),
                 };
                 renderer.set_controller_model(&device, &queue, 0, &triangle);
-                let replaced = capture(&renderer);
+                let replaced = capture(&mut renderer);
                 let differs = |a: &[u8], b: &[u8], start: usize, end: usize| {
                     (0..128).any(|y| {
                         (start..end).any(|x| {
@@ -1746,7 +1897,7 @@ mod tests {
                 renderer.set_controller_model(&device, &queue, 1, &empty_model);
                 renderer.set_controller_model(&device, &queue, 2, &triangle);
                 assert_eq!(
-                    capture(&renderer),
+                    capture(&mut renderer),
                     replaced,
                     "an empty model or unknown hand is ignored"
                 );
@@ -1754,9 +1905,9 @@ mod tests {
                 // Without tracked controllers, the desktop's pointer is a cube that turns orange while it attracts the swarm.
                 renderer.update_controllers(&queue, [None, None], [None, None]);
                 renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), false);
-                let pointer = capture(&renderer);
+                let pointer = capture(&mut renderer);
                 renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), true);
-                let attracting = capture(&renderer);
+                let attracting = capture(&mut renderer);
                 assert_ne!(pointer, empty, "the pointer should render");
                 assert_ne!(
                     pointer, attracting,
@@ -1810,54 +1961,55 @@ mod tests {
                     projection
                         * glam::camera::rh::view::look_at_mat4(eye, eye + direction, glam::Vec3::Y)
                 });
-                let capture = |renderer: &Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
-                    renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
-                    let buffers: [_; 2] = std::array::from_fn(|_| {
-                        device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("workspace test readback"),
-                            size: 256 * 256 * 4,
-                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                            mapped_at_creation: false,
-                        })
-                    });
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    for i in 0..2 {
-                        encoder.copy_texture_to_buffer(
-                            textures[i].as_image_copy(),
-                            wgpu::TexelCopyBufferInfo {
-                                buffer: &buffers[i],
-                                layout: wgpu::TexelCopyBufferLayout {
-                                    offset: 0,
-                                    bytes_per_row: Some(256 * 4),
-                                    rows_per_image: Some(256),
+                let capture =
+                    |renderer: &mut Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
+                        renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
+                        let buffers: [_; 2] = std::array::from_fn(|_| {
+                            device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("workspace test readback"),
+                                size: 256 * 256 * 4,
+                                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                                mapped_at_creation: false,
+                            })
+                        });
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        for i in 0..2 {
+                            encoder.copy_texture_to_buffer(
+                                textures[i].as_image_copy(),
+                                wgpu::TexelCopyBufferInfo {
+                                    buffer: &buffers[i],
+                                    layout: wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(256 * 4),
+                                        rows_per_image: Some(256),
+                                    },
                                 },
-                            },
-                            wgpu::Extent3d {
-                                width: 256,
-                                height: 256,
-                                depth_or_array_layers: 1,
-                            },
-                        );
-                    }
-                    queue.submit([encoder.finish()]);
-                    buffers
-                        .iter()
-                        .map(|buffer| {
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            buffer
-                                .slice(..)
-                                .map_async(wgpu::MapMode::Read, move |result| {
-                                    let _ = tx.send(result);
-                                });
-                            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                            rx.recv().unwrap().unwrap();
-                            let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                            buffer.unmap();
-                            data
-                        })
-                        .collect::<Vec<_>>()
-                };
-                let empty = capture(&renderer, matrices, Mat4::IDENTITY);
+                                wgpu::Extent3d {
+                                    width: 256,
+                                    height: 256,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                        }
+                        queue.submit([encoder.finish()]);
+                        buffers
+                            .iter()
+                            .map(|buffer| {
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                buffer
+                                    .slice(..)
+                                    .map_async(wgpu::MapMode::Read, move |result| {
+                                        let _ = tx.send(result);
+                                    });
+                                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                                rx.recv().unwrap().unwrap();
+                                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                                buffer.unmap();
+                                data
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                let empty = capture(&mut renderer, matrices, Mat4::IDENTITY);
                 let workspace = crate::delegation::Workspace {
                     presentations: (0..5)
                         .map(|i| crate::delegation::Presentation {
@@ -1877,13 +2029,13 @@ mod tests {
                 };
                 renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 assert_eq!(renderer.presentation_page_count(), 5);
-                let page0 = capture(&renderer, matrices, Mat4::IDENTITY);
+                let page0 = capture(&mut renderer, matrices, Mat4::IDENTITY);
                 assert_ne!(page0[0], empty[0]);
                 assert_ne!(page0[1], empty[1]);
                 assert_ne!(page0[0], page0[1], "each eye uses its own matrix");
                 renderer.set_presentation_content_page(1);
                 renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
-                let content_page1 = capture(&renderer, matrices, Mat4::IDENTITY);
+                let content_page1 = capture(&mut renderer, matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
                     assert_ne!(page0[eye], content_page1[eye], "content page in eye {eye}");
                 }
@@ -1891,7 +2043,7 @@ mod tests {
                 renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 let recenter = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
                 let compensated = capture(
-                    &renderer,
+                    &mut renderer,
                     matrices.map(|m| m * recenter.inverse()),
                     recenter,
                 );
@@ -1910,7 +2062,7 @@ mod tests {
                 }
                 renderer.set_presentation_page(1);
                 renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
-                let page1 = capture(&renderer, matrices, Mat4::IDENTITY);
+                let page1 = capture(&mut renderer, matrices, Mat4::IDENTITY);
                 assert_ne!(page0[0], page1[0]);
                 assert_ne!(page1[0], empty[0]);
 
@@ -1934,7 +2086,7 @@ mod tests {
                     None,
                 );
                 assert_eq!(renderer.scene.len(), renderer.base_scene_len + 1);
-                let unrotated = capture(&renderer, matrices, Mat4::IDENTITY);
+                let unrotated = capture(&mut renderer, matrices, Mat4::IDENTITY);
                 let rotated = crate::delegation::Cube {
                     orientation: glam::Quat::from_euler(glam::EulerRot::YXZ, 0.6, 0.35, 0.15)
                         .to_array(),
@@ -1950,7 +2102,7 @@ mod tests {
                 );
                 assert_ne!(
                     unrotated,
-                    capture(&renderer, matrices, Mat4::IDENTITY),
+                    capture(&mut renderer, matrices, Mat4::IDENTITY),
                     "orientation must reach both the vertex transform and lighting shader"
                 );
                 let invalid_rotation = crate::delegation::Cube {
@@ -1969,7 +2121,7 @@ mod tests {
                 renderer.update_workspace(&device, &queue, &[], &[], &Default::default(), None);
                 assert_eq!(renderer.scene.len(), renderer.base_scene_len);
                 assert_eq!(renderer.presentation_page_count(), 0);
-                assert_eq!(capture(&renderer, matrices, Mat4::IDENTITY), empty);
+                assert_eq!(capture(&mut renderer, matrices, Mat4::IDENTITY), empty);
 
                 let label_workspace = crate::delegation::Workspace {
                     nodes: vec![crate::delegation::Node {
@@ -1992,7 +2144,7 @@ mod tests {
                     projection
                         * glam::camera::rh::view::look_at_mat4(eye, eye + direction, glam::Vec3::Y)
                 });
-                let without_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                let without_label = capture(&mut renderer, label_matrices, Mat4::IDENTITY);
                 renderer.update_workspace(
                     &device,
                     &queue,
@@ -2001,7 +2153,7 @@ mod tests {
                     &label_workspace,
                     None,
                 );
-                let with_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                let with_label = capture(&mut renderer, label_matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
                     assert_ne!(
                         without_label[eye], with_label[eye],
@@ -2011,7 +2163,7 @@ mod tests {
                 let mut faded = workers.stations().to_vec();
                 faded[0].opacity = 0.4;
                 renderer.update_workspace(&device, &queue, &[], &faded, &label_workspace, None);
-                let faded_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                let faded_label = capture(&mut renderer, label_matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
                     assert_ne!(
                         with_label[eye], faded_label[eye],
@@ -2074,7 +2226,7 @@ mod tests {
                             renderer.scene.len(),
                             renderer.base_scene_len + scene.cubes().len()
                         );
-                        let image = capture(&renderer, matrices, Mat4::IDENTITY);
+                        let image = capture(&mut renderer, matrices, Mat4::IDENTITY);
                         if let Some(previous) = &previous {
                             assert_ne!(
                                 *previous, image,
@@ -2124,7 +2276,7 @@ mod tests {
             let mut swarm = Swarm::default();
             swarm.agents.clear();
             renderer.update(&queue, &swarm, None, false);
-            let capture = |renderer: &Renderer, matrix: Mat4| {
+            let capture = |renderer: &mut Renderer, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -2192,9 +2344,9 @@ mod tests {
             let sign = look(station + glam::Vec3::new(0.0, 0.32, 0.0), 0.32);
             let far = look(station + glam::Vec3::new(0.0, 0.32, 0.0), 1.0);
             let tiles = [
-                capture(&renderer, card),
-                capture(&renderer, sign),
-                capture(&renderer, far),
+                capture(&mut renderer, card),
+                capture(&mut renderer, sign),
+                capture(&mut renderer, far),
             ];
             // Text that lights pixels in each: the card's and the sign's titles and the sign seen from afar.
             for (index, tile) in tiles.iter().enumerate() {
@@ -2266,7 +2418,7 @@ mod tests {
                     crate::arrival::CREATE,
                     glam::Vec3::Y,
                 );
-                let capture = |renderer: &Renderer, matrix: Mat4| {
+                let capture = |renderer: &mut Renderer, matrix: Mat4| {
                     renderer.render(
                         &device,
                         &queue,
@@ -2363,7 +2515,7 @@ mod tests {
                     ..Default::default()
                 };
                 renderer.update(&queue, &swarm, None, false);
-                let bare = capture(&renderer, matrix);
+                let bare = capture(&mut renderer, matrix);
                 let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
                 for (row, (view, hovered, matrix)) in [
                     (&choosing, Key::Space("a1".into()), matrix),
@@ -2392,7 +2544,7 @@ mod tests {
                             time: 1.0,
                         },
                     );
-                    let image = capture(&renderer, matrix);
+                    let image = capture(&mut renderer, matrix);
                     assert_ne!(image, bare, "arrival must draw over the bare scene");
                     image::imageops::replace(
                         &mut sheet,
@@ -3450,7 +3602,7 @@ mod tests {
                     crate::swarm::CENTER,
                     glam::Vec3::Y,
                 );
-            let capture = |renderer: &Renderer| -> Vec<u8> {
+            let capture = |renderer: &mut Renderer| -> Vec<u8> {
                 renderer.render(
                     &device,
                     &queue,
@@ -3495,20 +3647,20 @@ mod tests {
                 let mut renderer =
                     Renderer::with_samples(&device, &queue, format, SIZE, SIZE, samples);
                 renderer.update(&queue, &Swarm::default(), None, false);
-                let open = capture(&renderer);
+                let open = capture(&mut renderer);
                 assert!(light(&open) > 0, "something is seen");
                 renderer.set_blink(0.5);
-                let half = capture(&renderer);
+                let half = capture(&mut renderer);
                 assert!(light(&half) > 0 && light(&half) < light(&open), "{samples}");
                 // Shut, nothing is seen, not even the background.
                 renderer.set_blink(1.0);
-                assert_eq!(light(&capture(&renderer)), 0, "{samples}");
+                assert_eq!(light(&capture(&mut renderer)), 0, "{samples}");
                 renderer.set_blink(2.0);
-                assert_eq!(light(&capture(&renderer)), 0, "{samples}");
+                assert_eq!(light(&capture(&mut renderer)), 0, "{samples}");
                 // Open again, or given nonsense, it draws as before.
                 for open_again in [0.0, -1.0, f32::NAN] {
                     renderer.set_blink(open_again);
-                    assert_eq!(capture(&renderer), open, "{samples} {open_again}");
+                    assert_eq!(capture(&mut renderer), open, "{samples} {open_again}");
                 }
             }
             assert!(pollster::block_on(scope.pop()).is_none());
@@ -3596,5 +3748,144 @@ mod tests {
         assert!(shader.contains("rotation * (vertex * scale)"));
         assert!(shader.contains("out.normal = rotation * normal;"));
         assert!(shader.contains("@location(7) basis_z"));
+    }
+
+    #[test]
+    fn what_neither_eye_sees_is_culled_and_the_rest_drawn_as_before() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let size = (128, 128);
+            let textures: [wgpu::Texture; 2] = std::array::from_fn(|_| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("culling test eye"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            });
+            let targets = textures
+                .each_ref()
+                .map(|texture| texture.create_view(&Default::default()));
+            let mut renderer = Renderer::with_samples(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                size.0,
+                size.1,
+                4,
+            );
+            // The swarm ahead, and a teleport's ring behind the eyes, which neither sees.
+            renderer.set_landing(Some(glam::Vec3::new(0.0, 0.0, 4.0)));
+            renderer.update(&queue, &Swarm::default(), None, false);
+            let projection = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 50.0);
+            let matrices = [-0.032, 0.032]
+                .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
+            // A panel before the eyes, and one behind them.
+            let mut canvas = crate::ui_panel::Canvas::new(20, 0.004);
+            canvas.rows = vec![crate::ui_text::Row::text(
+                "Seen",
+                crate::ui_text::Style::plain([1.0; 4]),
+                20,
+            )];
+            let mut ahead = renderer.panel(&device, 6_000);
+            ahead.set(&queue, &canvas);
+            let mut behind = renderer.panel(&device, 6_000);
+            behind.set(&queue, &canvas);
+            assert!(!ahead.bounds().is_empty() && ahead.triangles() > 0);
+            let panels = [
+                (
+                    &behind,
+                    Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 2.0)),
+                ),
+                (
+                    &ahead,
+                    Mat4::from_translation(glam::Vec3::new(0.0, 1.5, -1.5)),
+                ),
+            ];
+            let draw = |renderer: &mut Renderer| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    &targets,
+                    &matrices,
+                    Mat4::IDENTITY,
+                    &panels,
+                );
+                textures.each_ref().map(|texture| {
+                    crate::test_support::read_back(&device, &queue, texture, size).into_raw()
+                })
+            };
+            let culled = draw(&mut renderer);
+            let tally = renderer.tally();
+            // The ring's cubes and the panel behind are culled, and the rest drawn.
+            let cubes = renderer.scene.len();
+            assert!(renderer.shown.len() <= cubes - LANDING_CUBES);
+            assert_eq!(tally.culled, cubes - renderer.shown.len() + 1, "{tally:?}");
+            assert_eq!(tally.drawn, renderer.shown.len() + 1);
+            assert_eq!(tally.draws, 2);
+            assert_eq!(
+                tally.triangles,
+                renderer.shown.len() * 12 + ahead.triangles()
+            );
+            // Drawn without culling, both eyes look the same, and nothing is culled.
+            renderer.set_culling(false);
+            let whole = draw(&mut renderer);
+            assert_eq!(renderer.tally().culled, 0);
+            assert_eq!(renderer.shown.len(), cubes);
+            assert!(whole == culled, "culling changed what the eyes see");
+            renderer.set_culling(true);
+            assert!(draw(&mut renderer) == culled);
+            // The frames' GPU time, where the device has timestamps, and what they drew, a frame.
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            draw(&mut renderer);
+            let summary = renderer.gpu_summary().unwrap();
+            assert!(summary.starts_with("GPU over 4 frames, "), "{summary}");
+            assert_eq!(
+                summary.contains(" timed, ms mean/p95/max: eyes "),
+                device.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+                "{summary}"
+            );
+            assert_eq!(renderer.gpu_summary(), None);
+            // Each cube's box holds the cube, scaled, turned and moved.
+            let cube = Instance {
+                position: [1.0, 2.0, 3.0],
+                scale: [0.2, 0.4, 0.6],
+                basis: glam::Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2).to_cols_array_2d(),
+                ..Default::default()
+            };
+            let bounds = cube_bounds(&cube);
+            assert!(bounds.min.distance(glam::Vec3::new(0.7, 1.8, 2.9)) < 1e-5);
+            assert!(bounds.max.distance(glam::Vec3::new(1.3, 2.2, 3.1)) < 1e-5);
+            // A ray, a cube stretched along its length and turned along it, is held whole, its ends and edges.
+            let along = glam::Vec3::new(1.0, -0.4, -2.0).normalize();
+            let turn = glam::Quat::from_rotation_arc(glam::Vec3::Z, along);
+            let ray = Instance {
+                position: (glam::Vec3::new(0.2, 1.2, -0.3) + along * 1.5).to_array(),
+                scale: [0.004, 0.004, 3.0],
+                basis: glam::Mat3::from_quat(turn).to_cols_array_2d(),
+                ..Default::default()
+            };
+            let bounds = cube_bounds(&ray);
+            for corner in super::cube() {
+                let corner = glam::Vec3::from_array(ray.position)
+                    + turn
+                        * (glam::Vec3::from_array(corner.position)
+                            * glam::Vec3::from_array(ray.scale));
+                assert!(
+                    corner.cmpge(bounds.min - 1e-5).all() && corner.cmple(bounds.max + 1e-5).all()
+                );
+            }
+            assert!((bounds.max - bounds.min).length() < 3.1);
+            let error = pollster::block_on(scope.pop());
+            assert!(error.is_none(), "{error:?}");
+        });
     }
 }

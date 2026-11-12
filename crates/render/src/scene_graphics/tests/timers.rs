@@ -220,7 +220,7 @@ fn render(ring: bool, variable: &str) {
             Vec3::new(agent.x, first.y + 0.1, agent.z),
             Vec3::Y,
         );
-        let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+        let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
             renderer.render(
                 &device,
                 &queue,
@@ -231,8 +231,8 @@ fn render(ring: bool, variable: &str) {
             );
             read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
         };
-        let wide = capture(&renderer, &panels, overview);
-        let shown = capture(&renderer, &panels, home);
+        let wide = capture(&mut renderer, &panels, overview);
+        let shown = capture(&mut renderer, &panels, home);
         // Pointing at the first dial highlights it.
         let pointing = Senses {
             ray: tomori_scene::pointing::Ray::new(arrival::HOME, first - arrival::HOME),
@@ -246,7 +246,7 @@ fn render(ring: bool, variable: &str) {
             &mut panels,
             &mut conversation,
         );
-        let pointed = capture(&renderer, &panels, home);
+        let pointed = capture(&mut renderer, &panels, home);
         let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
         image::imageops::replace(&mut sheet, &wide, 0, 0);
         image::imageops::replace(&mut sheet, &pointed, 0, HEIGHT.into());

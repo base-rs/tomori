@@ -23,6 +23,8 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "names"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
 tomori-client = { version = "0.2.0", path = "../client" }
+# Boxes and frustums, which the renderer and its sceneries cull what they draw with; without its GPU drawing.
+tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 tomori-text = { version = "0.2.0", path = "../text" }

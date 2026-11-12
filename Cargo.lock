@@ -4351,6 +4351,7 @@ dependencies = [
  "naga",
  "pollster",
  "serde_json",
+ "tomori-assets",
  "tomori-client",
  "tomori-protocol",
  "tomori-scene",

@@ -213,6 +213,11 @@ impl Participant {
                 "Desktop frames, {}; {summary}",
                 frame_timing::rate(due.rate())
             );
+            // What those frames cost the GPU, and what they drew, which every frame drawn has; see `design/rendering.md`.
+            self.renderer
+                .gpu_summary()
+                .into_iter()
+                .for_each(|gpu| log::info!("Desktop {gpu}"));
         }
         Ok(())
     }
@@ -640,7 +645,7 @@ mod tests {
                 .unwrap();
             let drawn = surface.pixels(&device, &queue);
             // What the window draws is the space, and the panels in it, both taken to the participant's room; drawing either from home instead would differ.
-            let render = |world: Mat4, panels: Mat4| {
+            let mut render = |world: Mat4, panels: Mat4| {
                 let target = surface.texture.create_view(&Default::default());
                 window.renderer.render(
                     &device,

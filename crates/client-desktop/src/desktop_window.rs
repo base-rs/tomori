@@ -180,6 +180,8 @@ impl WindowSurface {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("desktop device"),
+                // The GPU's timestamps, where it has them, for the frame log; see `design/rendering.md`.
+                required_features: adapter.features() & tomori_render::profiler::FEATURES,
                 ..Default::default()
             })
             .await?;
