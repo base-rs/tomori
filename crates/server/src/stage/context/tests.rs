@@ -795,3 +795,44 @@ fn settings_read_back_from_the_state_file_are_held_to_what_the_server_would_set(
     assert!(read(serde_json::json!(5)).is_err());
     assert!(read_walls(serde_json::json!("wall")).is_err());
 }
+
+#[test]
+fn a_chip_pointed_at_is_described_with_what_it_shows_and_where_that_comes_from() {
+    let walls = console();
+    let (mut stage, latency, pods, _) = stage();
+    let pointed = |stage: &Stage, panel: &str, chip: &str| {
+        stage
+            .describe_at(
+                &walls,
+                panel,
+                crate::stage::Pointed {
+                    chip: Some(chip),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
+            .unwrap()
+    };
+    assert!(
+        pointed(&stage, &pods, "region")
+            .contains("; pointing at its chip: \"Region: US-EAST1\", following the environment"),
+        "{}",
+        pointed(&stage, &pods, "region")
+    );
+    assert!(pointed(&stage, &latency, "time").contains("\"Time: the last 15 minutes\", following"));
+    stage
+        .set_wall_context(&walls, "environment-0", "region", Some(region("EU-WEST1")))
+        .unwrap();
+    stage
+        .set_panel_context(&walls, &latency, "time", Some(WINDOW))
+        .unwrap();
+    assert!(
+        pointed(&stage, &latency, "region")
+            .contains("\"Region: EU-WEST1\", inherited from its wall")
+    );
+    assert!(pointed(&stage, &latency, "time").contains(
+        "\"Time: 2026-11-12T02:20:00Z to 2026-11-12T02:50:00Z, UTC\", fixed by its own setting"
+    ));
+    // A chip it does not show says nothing.
+    assert!(!pointed(&stage, &pods, "time").contains("chip"));
+}

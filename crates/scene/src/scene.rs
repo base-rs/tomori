@@ -2001,12 +2001,14 @@ impl Step {
                 projected.item,
                 projected.hit,
                 projected.part.clone(),
+                projected.chip.clone(),
             ),
             left: (
                 projected.left.pointed.clone(),
                 projected.left.item,
                 projected.left.hit,
                 projected.left.part.clone(),
+                projected.left.chip.clone(),
             ),
         };
         // The space's cards stand wherever it shows them; each ray and grip acts on them only while nothing else takes them, such as a panel that hand carries. See `design/github.md`.
@@ -2099,7 +2101,8 @@ impl Step {
         for side in Side::BOTH {
             let ray = casts[side];
             let in_space = points[side];
-            let (panel_pointed, panel_item, projected_hit, panel_part) = views[side].clone();
+            let (panel_pointed, panel_item, projected_hit, panel_part, panel_chip) =
+                views[side].clone();
             let worker = self
                 .delegation_scene
                 .point_with(side, ray.filter(|_| in_space))
@@ -2282,24 +2285,33 @@ impl Step {
                         .as_ref()
                         .is_some_and(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
                 });
-                panel.clone().map(|panel| match (item, row, across, part) {
-                    (_, _, _, Some(crate::projection::Part::Node(node))) => {
-                        tomori_protocol::Resource::volume_at(panel, Some(&node), None)
-                    }
-                    (_, _, _, Some(crate::projection::Part::Edge(edge))) => {
-                        tomori_protocol::Resource::volume_at(panel, None, Some(edge))
-                    }
-                    (_, _, _, Some(crate::projection::Part::WorldEdge(edge))) => {
-                        tomori_protocol::Resource::world_edge_at(panel, edge)
-                    }
-                    (_, _, Some(across), None) => {
-                        tomori_protocol::Resource::chart_at(panel, across)
-                    }
-                    (Some(line), Some(row), ..) => {
-                        tomori_protocol::Resource::panel_row(panel, line, row)
-                    }
-                    _ => tomori_protocol::Resource::panel_at(panel, item),
-                })
+                // On a chip of its context, the chip's parameter, so that the agent is told what it shows.
+                let chip = panel_chip.clone().filter(|_| {
+                    panel_pointed
+                        .as_ref()
+                        .is_some_and(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
+                });
+                panel
+                    .clone()
+                    .map(|panel| match (item, row, across, part, chip) {
+                        (.., Some(chip)) => tomori_protocol::Resource::panel_chip(panel, chip),
+                        (_, _, _, Some(crate::projection::Part::Node(node)), _) => {
+                            tomori_protocol::Resource::volume_at(panel, Some(&node), None)
+                        }
+                        (_, _, _, Some(crate::projection::Part::Edge(edge)), _) => {
+                            tomori_protocol::Resource::volume_at(panel, None, Some(edge))
+                        }
+                        (_, _, _, Some(crate::projection::Part::WorldEdge(edge)), _) => {
+                            tomori_protocol::Resource::world_edge_at(panel, edge)
+                        }
+                        (_, _, Some(across), None, _) => {
+                            tomori_protocol::Resource::chart_at(panel, across)
+                        }
+                        (Some(line), Some(row), ..) => {
+                            tomori_protocol::Resource::panel_row(panel, line, row)
+                        }
+                        _ => tomori_protocol::Resource::panel_at(panel, item),
+                    })
             } else if let Some(card) = &card {
                 Some(tomori_protocol::Resource::card(card))
             } else if let Some(worker) = &worker {
@@ -7923,6 +7935,81 @@ mod tests {
         };
         let frame = step.update(&away, &mut conversation, &mut felt(), Instant::now(), FRAME);
         assert!(overlays(&frame).is_empty());
+    }
+
+    #[test]
+    fn words_begun_pointing_at_a_panel_s_chip_name_the_chip() {
+        use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+        use tomori_protocol::{Panel, Place, Pose, Resource, ServerMessage};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.projection = true));
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        let panel = Panel::new(
+            "panel-1",
+            "Pods",
+            "- pod-7",
+            Place::Free {
+                pose: Pose::upright_facing(ahead.to_array(), arrival::HOME.to_array()),
+            },
+        )
+        .with_context(vec![ContextChip::new(
+            "region",
+            "Region",
+            ContextValue::Text {
+                text: "EU-WEST1".into(),
+            },
+            ContextSetting::Fixed,
+        )]);
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![panel.clone()]),
+            ),
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let (width, height) = crate::projection::fitted_size(&panel, crate::projection::Fit::Text);
+        let (padding, pixel) = (crate::projection::PADDING, crate::projection::PIXEL);
+        let at = |column: f32, row: f32| {
+            ahead
+                + Vec3::new(
+                    -width / 2.0
+                        + (padding.0 as f32 + column * crate::ui_text::CELL_WIDTH as f32) * pixel,
+                    height / 2.0
+                        - (padding.1 as f32 + row * crate::ui_text::CELL_HEIGHT as f32) * pixel,
+                    0.0,
+                )
+        };
+        let mut named = |point: Vec3| {
+            let senses = Senses {
+                beam: true,
+                ray: Ray::new(arrival::HOME, point - arrival::HOME),
+                ..senses()
+            };
+            step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                FRAME,
+            );
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            utterance.attention.first().cloned()
+        };
+        assert_eq!(
+            named(at(3.0, 1.5)),
+            Some(Resource::panel_chip("panel-1", "region"))
+        );
+        assert_eq!(
+            named(at(3.0, 0.5)),
+            Some(Resource::panel_at("panel-1", None))
+        );
     }
 
     #[test]

@@ -118,6 +118,19 @@ fn settings_json(settings: &Settings, declared: &[crate::stage::context::Paramet
         .collect()
 }
 
+/// What a chip's `value` is, as a sentence says it: its value, the last so many minutes, or its window as instants in
+/// UTC; nothing for a kind this server does not know.
+pub(crate) fn spoken(value: &ContextValue) -> String {
+    match value {
+        ContextValue::Text { text } => text.clone(),
+        ContextValue::Live { minutes } => format!("the last {minutes} minutes"),
+        ContextValue::Window { from_ms, to_ms } => {
+            format!("{} to {}, UTC", instant(*from_ms), instant(*to_ms))
+        }
+        _ => String::new(),
+    }
+}
+
 /// What a panel's chip says, as the agent is told it: the parameter, its label, its value, its live minutes or its
 /// window's ends in UTC, and whether it follows, is fixed by the panel's own setting or inherited from its wall's.
 fn chip_json(chip: &ContextChip) -> Value {
@@ -312,7 +325,7 @@ impl Hub {
             None => json!({ "parameter": parameter, "follows": true }),
         };
         result["next"] = json!(if changed {
-            "A notice on the status wall says what you set; tell everyone in the space in a sentence what you set."
+            "Everyone sees it on the chips, and a notice on the status wall says what you set; tell everyone in the space in a sentence what you set."
         } else {
             "It was already so, so nothing changed and there is nothing to tell."
         });

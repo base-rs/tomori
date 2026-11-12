@@ -214,6 +214,11 @@ pub enum Resource {
         /// names; an older server ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         world_edge: Option<u16>,
+        /// On one of its context's chips ([`crate::Panel::context`]), the chip's parameter, as `region` or `time`, so
+        /// that the server describes what that chip shows from its own copy; an older server ignores it. See
+        /// `design/panel-context.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chip: Option<String>,
     },
     /// The "+N more" sign of a cluster anchor's cluster, by the anchor's name, which stands for the workers gathered
     /// into it: the server names them, their titles and sessions, from its own layout of the cluster. An older server
@@ -290,6 +295,7 @@ impl Resource {
             node: None,
             edge: None,
             world_edge: None,
+            chip: None,
         }
     }
 
@@ -314,6 +320,30 @@ impl Resource {
             node: None,
             edge: None,
             world_edge: None,
+            chip: None,
+        }
+    }
+
+    /// The projected panel whose [`crate::Panel::id`] is `panel`, pointed at on the chip of its context for `parameter`.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::panel_chip("panel-3", "region")).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-3", "chip": "region"})
+    /// );
+    /// ```
+    pub fn panel_chip(panel: impl Into<String>, parameter: impl Into<String>) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line: None,
+            row: None,
+            across: None,
+            node: None,
+            edge: None,
+            world_edge: None,
+            chip: Some(parameter.into()),
         }
     }
 
@@ -328,6 +358,7 @@ impl Resource {
             node: None,
             edge: None,
             world_edge: None,
+            chip: None,
         }
     }
 
@@ -355,6 +386,7 @@ impl Resource {
             node: node.map(str::to_owned),
             edge,
             world_edge: None,
+            chip: None,
         }
     }
 
@@ -378,6 +410,7 @@ impl Resource {
             node: None,
             edge: None,
             world_edge: Some(index),
+            chip: None,
         }
     }
 
@@ -402,6 +435,7 @@ impl Resource {
             node: None,
             edge: None,
             world_edge: None,
+            chip: None,
         }
     }
 }

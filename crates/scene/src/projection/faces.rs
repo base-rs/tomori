@@ -236,6 +236,20 @@ impl Faces {
         self.at(fit).item(model, scroll, point)
     }
 
+    /// The chip of its context where the ray meets its face, at `point`, sized as `fit` says, by its parameter, as
+    /// [`Layout::chip`] finds it; none while it is behind the projection's panel, whose chips it no longer shows.
+    pub(super) fn chip(
+        &mut self,
+        fit: Fit,
+        model: glam::Mat4,
+        point: glam::Vec3,
+    ) -> Option<String> {
+        if self.behind {
+            return None;
+        }
+        self.at(fit).chip(model, point)
+    }
+
     /// Its chart's readout where the ray meets its face, sized as `fit` says, as [`Layout::readout`] finds it, of the
     /// panel as it was last followed, whose face is drawn.
     pub(super) fn readout(
@@ -270,6 +284,37 @@ pub(super) struct Layout {
     pub(super) size: (f32, f32),
     pub(super) most_scroll: usize,
     face: Option<Face>,
+    /// Its context's chips as its face lays them out, which the ray finds the chip it meets among without laying them
+    /// out again: none for a code, image or volume panel, which draws none.
+    chips: super::chips::Laid,
+}
+
+/// `panel`'s context's chips as its face lays them out on `columns`, beside or below its metadata: a text, list or
+/// chart panel's, those an environment publishes; none for a code, image or volume panel, which draws none.
+fn chips_of(panel: &Panel, columns: usize) -> super::chips::Laid {
+    if [
+        panel.code.is_some(),
+        panel.image.is_some(),
+        panel.diagram.is_some(),
+    ]
+    .contains(&true)
+    {
+        return super::chips::Laid::default();
+    }
+    let after = match &panel.chart {
+        Some(chart) => chart::metadata(&crate::chart::bounded(chart)),
+        None => vec![crate::ui_text::Span::new(
+            super::about(panel),
+            crate::ui_text::Style::plain(crate::transcript::DIM),
+        )],
+    };
+    super::chips::header(
+        &panel.context,
+        (&after, &after),
+        columns,
+        super::chips::today(),
+    )
+    .2
 }
 
 /// A face drawn: the scroll, the rows marked and the frame it was drawn with, and, a chart's, where its plot is.
@@ -338,6 +383,7 @@ impl Layout {
             fit,
             code,
             lines,
+            chips: chips_of(panel, cells.0),
             cells,
             size,
             most_scroll,
@@ -352,6 +398,7 @@ impl Layout {
         let (_, _, lines) = fitted(panel, self.fit);
         self.most_scroll = lines.len().saturating_sub(self.cells.1);
         self.lines = lines;
+        self.chips = chips_of(panel, self.cells.0);
         self.face = None;
     }
 
@@ -413,6 +460,26 @@ impl Layout {
                 None,
             ),
         }
+    }
+
+    /// The chip of its panel's context where the ray meets its face, at `point`, drawn with `model`, by its parameter: on
+    /// the row its face draws its chips on, among them as laid out once with it; none elsewhere, nor on a panel that
+    /// draws none.
+    fn chip(&self, model: glam::Mat4, point: glam::Vec3) -> Option<String> {
+        if self.chips.spans.is_empty() {
+            return None;
+        }
+        // As its face is laid out, whether or not it is drawn yet: its columns, its size and so its font pixel.
+        let ((width, height), columns) = (self.size, self.cells.0);
+        let pixel = width / (columns * CELL_WIDTH + 2 * super::PADDING.0) as f32;
+        let local = model.inverse().transform_point3(point);
+        let x = (local.x + width / 2.0) / pixel - super::PADDING.0 as f32;
+        let y = (height / 2.0 - local.y) / pixel - super::PADDING.1 as f32;
+        let top = (self.chips.row * CELL_HEIGHT) as f32;
+        if !((top..top + CELL_HEIGHT as f32).contains(&y) && x >= 0.0) {
+            return None;
+        }
+        super::chips::at(&self.chips, (x / CELL_WIDTH as f32) as usize).map(str::to_owned)
     }
 
     /// The readout of its chart where the ray meets its face, at `point`, drawn with `model`: where along the time axis

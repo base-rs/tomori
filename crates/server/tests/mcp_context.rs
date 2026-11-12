@@ -275,7 +275,7 @@ fn the_agent_reads_every_setting_and_sets_a_wall_s_or_a_panel_s_context_in_utc()
     );
     assert_eq!(
         set["next"],
-        "A notice on the status wall says what you set; tell everyone in the space in a sentence what you set."
+        "Everyone sees it on the chips, and a notice on the status wall says what you set; tell everyone in the space in a sentence what you set."
     );
     // A notice on the status wall says what the agent set.
     let listed = tool("panels", json!({}))["structuredContent"]["panels"].clone();
