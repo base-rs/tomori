@@ -12,7 +12,10 @@ use tomori_scene::{environment::Environment, locomotion::Locomotion};
 pub struct Builder {
     sceneries: Sceneries,
     /// The program's name, which `--help` gives, unless `tomori`. Only the desktop's command line reads it.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "android",
+        expect(dead_code, reason = "the headset has no command line to name it in")
+    )]
     program: Option<String>,
 }
 
