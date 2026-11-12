@@ -286,6 +286,8 @@ impl TestServer {
         build: impl FnOnce(Backends) -> Server + Send + 'static,
         tools: bool,
     ) -> Self {
+        // Every log line's arguments are evaluated, so that what each would say is exercised; nothing is written unless the test installs a logger.
+        log::set_max_level(log::LevelFilter::Trace);
         let cancellation = Cancellation::new();
         let (sender, receiver) = channel();
         let thread = {

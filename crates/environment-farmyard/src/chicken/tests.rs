@@ -261,6 +261,7 @@ fn a_model_that_is_not_the_chicken_is_refused() {
     );
     let _ = built(vec![Node::new("x", Transform::IDENTITY).with_mesh(0)]);
     // A library without it cannot load it, and what cannot be loaded is not shared; one with it embedded can.
+    log::set_max_level(log::LevelFilter::Trace);
     assert!(Chicken::kept(Chicken::load(&Library::default())).is_none());
     let library = Library::default();
     library.add(Embedded::new().with(include_bytes!("../../assets/models/chicken.glb")));

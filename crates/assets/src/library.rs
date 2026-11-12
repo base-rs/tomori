@@ -180,6 +180,7 @@ mod tests {
 
     #[test]
     fn a_library_loads_an_asset_once_from_the_first_source_that_has_it_as_it_should_be() {
+        log::set_max_level(log::LevelFilter::Trace);
         let tiny: &'static [u8] =
             Box::leak(crate::gltf::tests::Glb::arm().bytes().into_boxed_slice());
         let library = Library::default();

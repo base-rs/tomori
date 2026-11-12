@@ -57,6 +57,7 @@ fn nothing_is_shown_until_the_server_says_what_there_is() {
     assert!(output.drawn.is_none() && output.intents.is_empty() && output.sounds.is_empty());
     assert_eq!(client.clock(epoch), None);
     // What cannot be read is passed over.
+    log::set_max_level(log::LevelFilter::Trace);
     let broken = Payload::new(serde_json::json!({"chickens": "none"}));
     client.update(Input::new(
         vec![Update::State(broken.clone()), Update::Event(broken)],

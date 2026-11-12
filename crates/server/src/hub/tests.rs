@@ -7,6 +7,8 @@ use super::*;
 use crate::transcriber::NullTranscriber;
 
 fn hub() -> Arc<Hub> {
+    // Every log line's arguments are evaluated, so that what each would say is exercised; nothing is written, as no logger is installed.
+    log::set_max_level(log::LevelFilter::Trace);
     let (jobs, _) = async_channel::unbounded();
     Hub::new(
         Backends::new(),

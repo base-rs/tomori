@@ -104,6 +104,13 @@ struct Failure {
     connecting: bool,
 }
 
+impl Failure {
+    /// Why it failed, whether connecting or not.
+    fn error(self) -> Error {
+        self.error
+    }
+}
+
 /// One address's HTTP client, whose pool keeps connections to it for the requests after.
 struct Route<'a> {
     address: SocketAddr,
@@ -215,7 +222,7 @@ async fn send(state: &State<'_>, job: &Job) -> Result<Reply, Error> {
     // Any failure from here on retires only the connection it happened on, in the HTTP client's pool.
     read(opened, job, state.settings)
         .await
-        .map_err(|failure| failure.error)
+        .map_err(Failure::error)
 }
 
 /// What is left of `job`'s time, shared among `left` addresses, within the bounds of an attempt to connect.
@@ -242,7 +249,7 @@ async fn opened_in_turn<'a>(
     match turn(state, job, last).await? {
         Found::Kept(route) => open(state.scheduler, &route.http, job, state.settings, None)
             .await
-            .map_err(|failure| failure.error),
+            .map_err(Failure::error),
         Found::Opened(opened) => Ok(opened),
     }
 }
@@ -303,12 +310,12 @@ async fn establish<'a>(
         let limit = share(job, count - index);
         match attempt(state, job, *address, count, Some(limit)).await {
             Err(failure) if failure.connecting => {}
-            opened => return opened.map_err(|failure| failure.error),
+            opened => return opened.map_err(Failure::error),
         }
     }
     attempt(state, job, *last, count, None)
         .await
-        .map_err(|failure| failure.error)
+        .map_err(Failure::error)
 }
 
 /// Open `job`'s request over a new route to `address`, which is kept, and its address preferred, once it has connected.

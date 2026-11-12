@@ -228,6 +228,7 @@ fn the_farmyard_declares_every_slot_each_silent_until_its_sound_is_found() {
 
 #[test]
 fn a_sound_found_is_loaded_from_the_program_s_library_by_its_digest() {
+    log::set_max_level(log::LevelFilter::Trace);
     const RIVER: &[u8] = b"the river's sound, as a test bundles it";
     let river = Digest::of(RIVER).to_string();
     let absent = Digest::of(b"a sound no source has").to_string();

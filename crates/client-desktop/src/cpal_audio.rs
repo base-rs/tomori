@@ -118,6 +118,7 @@ mod tests {
 
     #[test]
     fn desktop_input_errors_that_lose_audio_fail_the_capture() {
+        log::set_max_level(log::LevelFilter::Trace);
         let reported = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = reported.clone();
         let failed: Failed = Box::new(move |error| sink.lock().unwrap().push(error));
@@ -144,6 +145,7 @@ mod tests {
 
     #[test]
     fn only_desktop_output_errors_that_stop_it_are_reported() {
+        log::set_max_level(log::LevelFilter::Trace);
         let reported = Arc::new(Mutex::new(Vec::new()));
         let sink = reported.clone();
         let failed: speaker::Failed = Box::new(move |error| sink.lock().unwrap().push(error));

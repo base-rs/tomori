@@ -67,6 +67,8 @@ struct FakeShared {
     no_delete: AtomicBool,
     /// Deleting a session fails, as this; see [`FakeBackend::fail_deleting`].
     delete_failure: Mutex<Option<Error>>,
+    /// Listing sessions fails, as this; see [`FakeBackend::fail_listing`].
+    listing_failure: Mutex<Option<Error>>,
     /// The sessions the server deleted, in order.
     deleted: Mutex<Vec<String>>,
     /// Removing each of these workers fails, as its error; see [`FakeBackend::fail_removing`].
@@ -202,6 +204,11 @@ impl FakeBackend {
     /// Make deleting sessions fail with `error`, as an agent that cannot be reached would, or succeed again.
     pub fn fail_deleting(&self, error: Option<Error>) {
         *self.shared.delete_failure.lock().unwrap() = error;
+    }
+
+    /// Make listing sessions fail with `error`, as an agent that cannot be reached would, or succeed again.
+    pub fn fail_listing(&self, error: Option<Error>) {
+        *self.shared.listing_failure.lock().unwrap() = error;
     }
 
     /// The sessions the server deleted, in order.
@@ -484,6 +491,9 @@ impl Backend for FakeBackend {
     }
 
     async fn sessions(&self, directory: &str) -> Result<Vec<SessionSummary>> {
+        if let Some(error) = self.shared.listing_failure.lock().unwrap().clone() {
+            return Err(error);
+        }
         Ok(self
             .started()
             .iter()

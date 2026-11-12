@@ -278,6 +278,7 @@ mod tests {
             assert_eq!(unusable(name), Some(why), "{name:?}");
         }
         assert_eq!(unusable("floor-ü"), None);
+        log::set_max_level(log::LevelFilter::Trace);
         for name in [
             "",
             "floor headset",

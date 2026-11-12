@@ -78,7 +78,7 @@ pub(super) fn cancel(client: &Client, utterance: &str) {
 /// Every utterance still being transcribed is heard as `text`, in the order they began.
 pub(super) fn heard(hub: &Hub, text: &str) {
     let mut utterances: Vec<UtteranceId> = hub.lock().utterances.keys().copied().collect();
-    utterances.sort_by_key(|id| id.0);
+    utterances.sort();
     for utterance in utterances {
         hub.transcript_finished(utterance, text);
     }

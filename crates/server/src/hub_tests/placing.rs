@@ -711,3 +711,24 @@ fn a_worker_placed_beside_whoever_asked_stands_to_their_right_as_they_stood_as_t
     assert!((own.pose.position[0] - 1.5).abs() < 1e-3);
     drop(space);
 }
+
+#[test]
+fn a_worker_placed_by_a_wall_stands_beyond_the_end_nearer_whoever_asked() {
+    let placed = |asker: Option<[f32; 3]>| {
+        let (hub, _space, commands, _outlet, ada) = yard(1);
+        if let Some(at) = asker {
+            ada.send(standing(at));
+            said(&hub, &ada, &commands, Vec::new(), None);
+        }
+        hub.agent_place_worker("session", "ses_00", "wall status wall", None)
+            .unwrap();
+        let seen = state(&ada).unwrap();
+        let (by_wall, _) = seat(&seen, "ses_00").unwrap();
+        seen.anchors.cluster(&by_wall).unwrap().pose.position
+    };
+    // Without anyone asking, beyond its right end; beyond its left for someone who asked from that side.
+    let right = placed(None);
+    assert_eq!(placed(Some([20.0, 1.6, 0.0])), right);
+    let left = placed(Some([-20.0, 1.6, 0.0]));
+    assert!(left[0] < right[0], "{left:?} {right:?}");
+}

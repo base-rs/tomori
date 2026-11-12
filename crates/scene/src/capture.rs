@@ -339,6 +339,7 @@ mod tests {
 
     #[test]
     fn recurring_live_overruns_are_reported_together() {
+        crate::test_support::log_everything();
         let active: Active = Box::new(|| true);
         let stop = Arc::new(AtomicBool::new(false));
         let release = stop.clone();

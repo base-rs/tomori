@@ -351,10 +351,10 @@ impl Gpu {
                     "a density map for each swapchain image"
                 );
                 for (image, density) in images.iter().zip(&maps.images) {
-                    for eye in 0..2 {
+                    for (eye, &target) in image.targets.iter().enumerate() {
                         let view = unsafe { layer_view(device, *density, eye as u32) }?;
                         foveation.views.push(view);
-                        passes.target(image.targets[eye], view);
+                        passes.target(target, view);
                     }
                 }
             }

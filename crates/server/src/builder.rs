@@ -766,8 +766,14 @@ mod tests {
             ExitCode::FAILURE
         );
         assert!(exited.borrow().is_empty());
-        command::finish(ExitCode::SUCCESS, false, exit);
-        command::finish(ExitCode::FAILURE, false, exit);
+        assert_eq!(
+            command::finish(ExitCode::SUCCESS, false, exit),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            command::finish(ExitCode::FAILURE, false, exit),
+            ExitCode::FAILURE
+        );
         assert_eq!(*exited.borrow(), [0, 1]);
     }
 }

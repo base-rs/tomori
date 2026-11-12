@@ -58,13 +58,18 @@ if [[ "$variant" == cuda ]]; then
     exit 0
 fi
 
-# sherpa-onnx-sys links whatever it already unpacked into the target directory without checking it, so remove a copy
-# unless the verified archive it came from is beside it; the next build unpacks the verified archive instead.
+# sherpa-onnx-sys links whatever it already unpacked into the target directory without checking it, so unpack the
+# verified archive there, where the build looks, unless it is already there beside what it unpacked. A build script
+# that has already run, as in a target directory restored from a cache, does not run again to unpack it.
 target=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 cache="$target/sherpa-onnx-prebuilt"
 stem="${archive%.tar.bz2}"
-if [[ -e "$cache/$stem" || -e "$cache/$archive" ]] && ! { [[ -f "$cache/$archive" ]] && verify "$cache/$archive"; }; then
-    echo "Removing an unverified sherpa-onnx copy from $cache"
+if ! { [[ -d "$cache/$stem/lib" && -f "$cache/$archive" ]] && verify "$cache/$archive"; }; then
+    echo "Unpacking the verified sherpa-onnx archive into $cache"
     rm -rf "${cache:?}/$archive" "${cache:?}/$stem"
+    mkdir -p "$cache"
+    cp "$path" "$cache/$archive.part"
+    mv "$cache/$archive.part" "$cache/$archive"
+    tar -xjf "$cache/$archive" -C "$cache"
 fi
 echo "sherpa-onnx $version libraries ready in $root"

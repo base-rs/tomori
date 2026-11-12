@@ -18,6 +18,8 @@ fn hub_hearing(
     backend: FakeBackend,
     transcriber: Arc<dyn Transcriber>,
 ) -> (Arc<Hub>, async_channel::Receiver<Job>) {
+    // Every log line's arguments are evaluated, so that what each would say is exercised; nothing is written, as no logger is installed.
+    log::set_max_level(log::LevelFilter::Trace);
     let (jobs, receiver) = async_channel::unbounded();
     let hub = Hub::new(
         Backends::new().with(backend),
@@ -7707,6 +7709,40 @@ fn moves_on(hub: &Hub, space: &str, id: &str, text: &str) {
     hub.drive_event(space, Event::Busy);
     reply(hub, space, id, text);
     hub.drive_event(space, Event::Idle);
+}
+
+#[test]
+fn words_the_agent_could_not_be_given_fail_saying_why() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&space);
+    begin_seeing(&ada, "u1", None);
+    ada.send(ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, "Hello.");
+    let prompt = std::iter::from_fn(|| commands.try_recv().ok())
+        .find_map(|command| match command {
+            SpaceCommand::Send(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("the words are handed to the agent");
+    let gone = tomori_backend::Error::new(ErrorKind::Unavailable, "the session is gone");
+    hub.space_sent(&space, &prompt.key, Err(gone));
+    let error = hub
+        .lock()
+        .space(&space)
+        .unwrap()
+        .model
+        .state(Vec::new(), "")
+        .error;
+    assert_eq!(
+        error.as_deref(),
+        Some("Could not deliver input: the session is gone")
+    );
 }
 
 #[test]

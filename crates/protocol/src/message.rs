@@ -1437,6 +1437,7 @@ mod tests {
 
     #[test]
     fn attention_is_optional_and_tolerates_new_kinds() {
+        log::set_max_level(log::LevelFilter::Trace);
         // An older client attends to nothing, and nothing is added for nothing.
         let bare: ClientMessage = serde_json::from_value(
             serde_json::json!({"type": "utterance_begin", "utterance": "u"}),
@@ -1493,6 +1494,7 @@ mod tests {
 
     #[test]
     fn malformed_attention_is_skipped_and_the_utterance_kept() {
+        log::set_max_level(log::LevelFilter::Trace);
         let begin = |attention| ClientMessage::UtteranceBegin {
             utterance: "u".into(),
             answer: None,
@@ -1812,6 +1814,7 @@ mod tests {
 
     #[test]
     fn environments_are_optional_for_older_peers() {
+        log::set_max_level(log::LevelFilter::Trace);
         // An older client chooses no environment, and the server binds its first.
         let create: ClientMessage = serde_json::from_value(serde_json::json!({
             "type": "create_space", "title": "Tomori", "backend": "fake", "directory": "/tmp",
