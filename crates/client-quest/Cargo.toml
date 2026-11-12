@@ -83,7 +83,7 @@ reason = "OpenXR runtime calls: the instance, session, swapchain, actions and th
 
 [[package.metadata.bake.test.coverage.exclude]]
 path = "src/vulkan.rs"
-reason = "Creates the Vulkan instance and device through OpenXR and imports the runtime's swapchain images into wgpu; needs an OpenXR runtime."
+reason = "Creates the Vulkan instance and device through OpenXR, imports the runtime's swapchain images into wgpu, and attaches the eyes' density maps to their render passes; needs an OpenXR runtime and a GPU with fragment density maps."
 
 # Tomori's own APK, which `bash scripts/android.sh build` packages. `cargo-apk` reads this table only from the package it builds, so a headset build of another project's has a copy of its own, with its own application ID, label, icon and assets; see context/android.md.
 [package.metadata.android]

@@ -10,6 +10,7 @@ pub mod app;
 mod builder;
 #[cfg(not(target_os = "android"))]
 mod cli;
+mod foveation;
 mod vulkan;
 mod xr;
 mod xr_types;
@@ -207,6 +208,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
         // xr::run owns the connection, so it closes before Destroy is acknowledged.
         Ok(android) => {
             let samples = android_samples(&android);
+            let foveation = android_foveation(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_drawable(sceneries.environments());
             conversation.set_over_grid(sceneries.over_grid());
@@ -219,6 +221,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             xr::run(
                 &platform,
                 samples,
+                foveation,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
@@ -245,6 +248,18 @@ fn android_samples(android: &android::Android) -> u32 {
         None
     });
     graphics::requested_samples(value.as_deref())
+}
+
+/// The fixed foveation the headset draws with: the intent extra `tomori.foveation`, as with `am start -e tomori.foveation low`, `none` to turn it off or `high:own` for Tomori's own density map at high, and high when absent; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_foveation(android: &android::Android) -> foveation::Request {
+    let value = android
+        .intent_extra("tomori.foveation")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.foveation intent extra: {error:#}");
+            None
+        });
+    foveation::Request::parse(value.as_deref())
 }
 
 /// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
