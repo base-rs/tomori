@@ -436,6 +436,10 @@ pub fn run(
             if let Some(summary) = frame_times.summary() {
                 log::info!("{summary}");
             }
+            // And what they cost the GPU, each eye's pass, and what they drew.
+            if let Some(gpu) = renderer.gpu_summary() {
+                log::info!("{gpu}");
+            }
         }
     }
     if headset.running() && session.request_exit().is_ok() {

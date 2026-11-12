@@ -239,8 +239,6 @@ impl Sky {
     /// clouds are composited separately after the application's opaque content.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
         pass.set_bind_group(0, &self.bindings[eye], &[]);
-        pass.set_pipeline(&self.background);
-        pass.draw(0..3, 0..1);
         pass.set_pipeline(if self.reveal.is_some() {
             &self.revealed_scenery
         } else {
@@ -250,6 +248,10 @@ impl Sky {
         pass.set_bind_group(2, &self.lightmap.binding, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+        // The sky after the platform and shrine, at the far plane, comparing `LessEqual` without writing depth, so that
+        // it is shaded only where they do not cover it.
+        pass.set_pipeline(&self.background);
+        pass.draw(0..3, 0..1);
     }
 }
 

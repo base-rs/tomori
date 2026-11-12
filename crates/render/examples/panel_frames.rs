@@ -141,7 +141,7 @@ fn main() {
     let (device, queue) = (&gpu.device, &gpu.queue);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (256, 256);
-    let renderer = Renderer::new(device, queue, format, width, height);
+    let mut renderer = Renderer::new(device, queue, format, width, height);
     let eyes: Vec<wgpu::TextureView> = (0..2)
         .map(|_| {
             device

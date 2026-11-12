@@ -163,6 +163,8 @@ pub struct Panel {
     image_quad: wgpu::Buffer,
     /// How many times its mesh was built, and its frame alone recoloured.
     pub(crate) builds: (usize, usize),
+    /// The box about its mesh and its image's quad, in its own plane, which the renderer culls it by.
+    bounds: tomori_assets::bounds::Aabb,
 }
 
 impl Panel {
@@ -208,6 +210,7 @@ impl Panel {
             image: None,
             image_quad,
             builds: (0, 0),
+            bounds: tomori_assets::bounds::Aabb::EMPTY,
         }
     }
 
@@ -294,9 +297,18 @@ impl Panel {
         if !mesh.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
         }
+        let point = |x: f32, y: f32| glam::Vec3::new(x, y, 0.0);
+        self.bounds = tomori_assets::bounds::Aabb::from_points(
+            mesh.iter()
+                .map(|vertex| point(vertex.position[0], vertex.position[1])),
+        );
         self.image = canvas
             .image_rect()
             .map(|(hash, [left, bottom, right, top])| {
+                self.bounds = self
+                    .bounds
+                    .with(point(left, bottom))
+                    .with(point(right, top));
                 let quad: [[f32; 4]; 6] = [
                     [left, top, 0.0, 0.0],
                     [right, top, 1.0, 0.0],
@@ -314,6 +326,16 @@ impl Panel {
     #[cfg(test)]
     pub(crate) fn shown(&self) -> Option<&Arc<Canvas>> {
         self.canvas.as_ref()
+    }
+
+    /// The box about what it draws, in its own plane, about its middle: empty while it draws nothing.
+    pub fn bounds(&self) -> tomori_assets::bounds::Aabb {
+        self.bounds
+    }
+
+    /// How many triangles it draws.
+    pub fn triangles(&self) -> usize {
+        self.count as usize / 3
     }
 
     /// The image its canvas shows, by hash, if any.

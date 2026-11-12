@@ -4,12 +4,17 @@
 //! Drawing models with wgpu: a [`Renderer`] uploads each model once, as a [`GpuModel`], and draws a [`Batch`] of its
 //! instances in an eye's pass, one draw for every instance of each primitive, skinned on the GPU from each instance's
 //! joint matrices, which a storage buffer holds, or placed by its node's matrix, lit by the scenery's [`Lighting`].
+//!
+//! Once a frame, [`Renderer::cull`] keeps only the instances of each primitive that the eyes' frustum may see, and a
+//! closed primitive, [`Primitive::closed`](crate::Primitive::closed), is drawn without its back faces. See
+//! `design/rendering.md`.
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
+use crate::bounds::{self, Aabb, Extent, Frustum, Tally};
 use crate::{INFLUENCES, Instance, Model, Texture};
 
 /// The most lamps that light a scenery's models.
@@ -170,12 +175,16 @@ struct Vertex {
     weights: [f32; INFLUENCES],
 }
 
-/// A primitive on the GPU.
+/// A primitive on the GPU, with how far it reaches; its triangles in closed parts first, its material hiding what is
+/// behind them, then the rest.
 struct GpuPrimitive {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     count: u32,
+    /// How many of its indices are of triangles in closed parts, which may be drawn without their back faces.
+    closed: u32,
     material: Option<usize>,
+    extent: Extent,
 }
 
 /// A model on the GPU: its primitives, by mesh, and its materials with their textures.
@@ -186,25 +195,72 @@ pub struct GpuModel {
     plain: wgpu::BindGroup,
 }
 
-/// What a batch draws: each primitive with its range of placed instances.
+/// What a batch draws: each primitive with its range of placed instances, and whether the triangles of its closed parts
+/// may be drawn without their back faces.
 struct Call {
     primitive: usize,
     instances: Range<u32>,
+    /// How many of the primitive's indices, first, are of closed parts, drawn without their back faces: none for a
+    /// mirrored instance.
+    closed: u32,
+    /// How many indices the primitive has.
+    count: u32,
 }
 
-/// The instances of one model to draw this frame: where each primitive of each is placed, and its joint matrices.
+/// One primitive of one instance as placed: where, where in the scene it may be drawn, if that is known, and whether its
+/// closed parts may be drawn without their back faces, as they may unless it is mirrored.
+struct Piece {
+    primitive: usize,
+    placed: Placed,
+    bounds: Option<Aabb>,
+    closed: bool,
+}
+
+/// The instances of one model to draw this frame: where each primitive of each is placed, and its joint matrices; and,
+/// as last culled, which of them are drawn.
 pub struct Batch {
     placed: wgpu::Buffer,
     joints: wgpu::Buffer,
     binding: wgpu::BindGroup,
     calls: Vec<Call>,
+    /// Every piece placed, by primitive, those with closed parts drawn without their back faces before the rest of each.
+    pieces: Vec<Piece>,
+    /// Which pieces the placements' buffer holds now.
+    shown: Vec<bool>,
+    /// Where any piece may be drawn, or none if one of them may be drawn anywhere.
+    bounds: Option<Aabb>,
+}
+
+impl Batch {
+    /// What it draws in each eye as last placed or culled: its pieces drawn and culled, its draws and their triangles.
+    pub fn tally(&self) -> Tally {
+        let drawn = self.shown.iter().filter(|shown| **shown).count();
+        Tally {
+            drawn,
+            culled: self.pieces.len() - drawn,
+            draws: self
+                .calls
+                .iter()
+                .map(|call| usize::from(call.closed > 0) + usize::from(call.closed < call.count))
+                .sum(),
+            triangles: self
+                .calls
+                .iter()
+                .map(|call| call.instances.len() * call.count as usize / 3)
+                .sum(),
+        }
+    }
 }
 
 /// Draws models in an eye's pass, into targets of the format and sample count it was made for, with a 32-bit float
 /// depth buffer.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    /// As `pipeline`, without back faces, for closed primitives.
+    closed: wgpu::RenderPipeline,
     revealed: wgpu::RenderPipeline,
+    /// Whether closed primitives are drawn without their back faces, as they are unless a comparison turns it off.
+    back_faces_culled: bool,
     material_layout: wgpu::BindGroupLayout,
     placed_layout: wgpu::BindGroupLayout,
     cameras: [wgpu::Buffer; 2],
@@ -423,7 +479,7 @@ impl Renderer {
             0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4,
             4 => Uint16x4, 5 => Uint16x4, 6 => Float32x4, 7 => Float32x4
         ];
-        let pipeline = |fragment: &str| {
+        let pipeline = |fragment: &str, cull_mode: Option<wgpu::Face>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Model pipeline"),
                 layout: Some(&layout),
@@ -448,7 +504,7 @@ impl Renderer {
                     })],
                 }),
                 primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
+                    cull_mode,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -476,8 +532,11 @@ impl Renderer {
             },
         );
         Self {
-            pipeline: pipeline("model_fragment"),
-            revealed: pipeline("revealed_model_fragment"),
+            pipeline: pipeline("model_fragment", None),
+            closed: pipeline("model_fragment", Some(wgpu::Face::Back)),
+            // Cut off by the reveal sphere, a closed primitive is open: what is inside it shows.
+            revealed: pipeline("revealed_model_fragment", None),
+            back_faces_culled: true,
             material_layout,
             placed_layout,
             cameras,
@@ -584,7 +643,27 @@ impl Renderer {
                             weights: primitive.weights.get(index).copied().unwrap_or_default(),
                         })
                         .collect();
+                    // The triangles of its closed parts first, if its material hides what is behind them.
+                    let closed = if bounds::opaque(model, primitive.material) {
+                        primitive.closed_triangles()
+                    } else {
+                        vec![false; primitive.indices.len() / 3]
+                    };
+                    let (inside, outside): (Vec<_>, Vec<_>) = primitive
+                        .indices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .zip(&closed)
+                        .partition(|(_, closed)| **closed);
+                    let indices: Vec<u32> = inside
+                        .iter()
+                        .chain(&outside)
+                        .flat_map(|(triangle, _)| triangle.iter().copied())
+                        .collect();
                     primitives.push(GpuPrimitive {
+                        extent: Extent::of(primitive),
+                        closed: inside.len() as u32 * 3,
                         vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Model vertices"),
                             contents: bytemuck::cast_slice(&vertices),
@@ -592,7 +671,7 @@ impl Renderer {
                         }),
                         indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Model indices"),
-                            contents: bytemuck::cast_slice(&primitive.indices),
+                            contents: bytemuck::cast_slice(&indices),
                             usage: wgpu::BufferUsages::INDEX,
                         }),
                         count: primitive.indices.len() as u32,
@@ -649,6 +728,9 @@ impl Renderer {
             joints,
             binding,
             calls: Vec::new(),
+            pieces: Vec::new(),
+            shown: Vec::new(),
+            bounds: Some(Aabb::EMPTY),
         }
     }
 
@@ -665,7 +747,10 @@ impl Renderer {
         batch: &mut Batch,
         instances: &[Instance],
     ) {
-        let mut placed: Vec<Vec<Placed>> = vec![Vec::new(); model.primitives.len()];
+        // Each primitive's pieces, the closed apart from the rest, so that each draws with its own pipeline.
+        let mut pieces: Vec<[Vec<Piece>; 2]> = (0..model.primitives.len())
+            .map(|_| [Vec::new(), Vec::new()])
+            .collect();
         let mut joints: Vec<[f32; 16]> = Vec::new();
         for instance in instances {
             for draw in instance.draws() {
@@ -674,39 +759,103 @@ impl Renderer {
                     joints.extend(matrices.iter().map(Mat4::to_cols_array));
                     1
                 });
+                let mirrored = bounds::mirrored(&draw);
                 for primitive in model.meshes[draw.mesh].clone() {
-                    placed[primitive].push(Placed {
-                        world: draw.world.to_cols_array(),
-                        joints: [first, skinned, 0, 0],
+                    let gpu = &model.primitives[primitive];
+                    let closed = gpu.closed > 0 && !mirrored;
+                    pieces[primitive][usize::from(!closed)].push(Piece {
+                        primitive,
+                        placed: Placed {
+                            world: draw.world.to_cols_array(),
+                            joints: [first, skinned, 0, 0],
+                        },
+                        bounds: gpu.extent.placed(&draw),
+                        closed,
                     });
                 }
             }
         }
-        let mut calls = Vec::new();
-        let mut flat = Vec::new();
-        for (primitive, placed) in placed.into_iter().enumerate() {
-            if placed.is_empty() {
-                continue;
-            }
-            let start = flat.len() as u32;
-            flat.extend(placed);
-            calls.push(Call {
-                primitive,
-                instances: start..flat.len() as u32,
-            });
-        }
-        let placed_bytes = (flat.len().max(1) * size_of::<Placed>()) as u64;
+        let pieces: Vec<Piece> = pieces.into_iter().flatten().flatten().collect();
+        let placed_bytes = (pieces.len().max(1) * size_of::<Placed>()) as u64;
         let joint_bytes = (joints.len().max(1) * size_of::<[f32; 16]>()) as u64;
         if placed_bytes > batch.placed.size() || joint_bytes > batch.joints.size() {
             *batch = self.sized_batch(
                 device,
-                flat.len().next_power_of_two(),
+                pieces.len().next_power_of_two(),
                 joints.len().max(1).next_power_of_two(),
             );
         }
-        queue.write_buffer(&batch.placed, 0, bytemuck::cast_slice(&flat));
         queue.write_buffer(&batch.joints, 0, bytemuck::cast_slice(&joints));
+        batch.bounds = pieces.iter().try_fold(Aabb::EMPTY, |bounds, piece| {
+            Some(bounds.union(piece.bounds?))
+        });
+        batch.pieces = pieces;
+        self.write(queue, model, batch, vec![true; batch.pieces.len()]);
+    }
+
+    /// Write the pieces of `batch` that `shown` says into its placements' buffer, each primitive's together, and draw
+    /// those.
+    fn write(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch, shown: Vec<bool>) {
+        let mut calls: Vec<Call> = Vec::new();
+        let mut flat = Vec::new();
+        for (piece, _) in batch.pieces.iter().zip(&shown).filter(|(_, shown)| **shown) {
+            let at = flat.len() as u32;
+            flat.push(piece.placed);
+            match calls.last_mut() {
+                Some(call)
+                    if call.primitive == piece.primitive && (call.closed > 0) == piece.closed =>
+                {
+                    call.instances.end = at + 1;
+                }
+                _ => {
+                    let primitive = &model.primitives[piece.primitive];
+                    calls.push(Call {
+                        primitive: piece.primitive,
+                        instances: at..at + 1,
+                        closed: if piece.closed { primitive.closed } else { 0 },
+                        count: primitive.count,
+                    });
+                }
+            }
+        }
+        if !flat.is_empty() {
+            queue.write_buffer(&batch.placed, 0, bytemuck::cast_slice(&flat));
+        }
         batch.calls = calls;
+        batch.shown = shown;
+    }
+
+    /// Draw only the instances of `batch`'s primitives that `frustum` may see, from the next pass, writing their
+    /// placements only when which are seen changes; with none, every one. What it then draws in each eye is its
+    /// [`Batch::tally`].
+    pub fn cull(
+        &self,
+        queue: &wgpu::Queue,
+        model: &GpuModel,
+        batch: &mut Batch,
+        frustum: Option<&Frustum>,
+    ) -> Tally {
+        let shown: Vec<bool> = match frustum {
+            // Nothing of it is in view at all.
+            Some(frustum) if batch.bounds.is_some_and(|bounds| !frustum.sees(&bounds)) => {
+                vec![false; batch.pieces.len()]
+            }
+            Some(frustum) => batch
+                .pieces
+                .iter()
+                .map(|piece| piece.bounds.is_none_or(|bounds| frustum.sees(&bounds)))
+                .collect(),
+            None => vec![true; batch.pieces.len()],
+        };
+        if shown != batch.shown {
+            self.write(queue, model, batch, shown);
+        }
+        batch.tally()
+    }
+
+    /// Draw closed primitives without their back faces, as by default, or with them, `false`, to compare.
+    pub fn set_back_faces_culled(&mut self, culled: bool) {
+        self.back_faces_culled = culled;
     }
 
     /// Light every model as `lighting` says, from the next pass.
@@ -748,14 +897,11 @@ impl Renderer {
         if batch.calls.is_empty() {
             return;
         }
-        pass.set_pipeline(if self.reveal.is_some() {
-            &self.revealed
-        } else {
-            &self.pipeline
-        });
         pass.set_bind_group(0, &self.frames[eye], &[]);
         pass.set_bind_group(2, &batch.binding, &[]);
-        for call in &batch.calls {
+        // Cut off by the reveal sphere, a closed part is open: what is inside it shows.
+        let culled = self.back_faces_culled && self.reveal.is_none();
+        let draw = |pass: &mut wgpu::RenderPass<'_>, call: &Call, indices: Range<u32>| {
             let primitive = &model.primitives[call.primitive];
             let material = primitive
                 .material
@@ -763,7 +909,23 @@ impl Renderer {
             pass.set_bind_group(1, material, &[]);
             pass.set_vertex_buffer(0, primitive.vertices.slice(..));
             pass.set_index_buffer(primitive.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..primitive.count, 0, call.instances.clone());
+            pass.draw_indexed(indices, 0, call.instances.clone());
+        };
+        // The closed parts without their back faces, then the rest with them.
+        let closed = |call: &Call| if culled { call.closed } else { 0 };
+        if batch.calls.iter().any(|call| closed(call) > 0) {
+            pass.set_pipeline(&self.closed);
+            for call in batch.calls.iter().filter(|call| closed(call) > 0) {
+                draw(pass, call, 0..closed(call));
+            }
+        }
+        pass.set_pipeline(if self.reveal.is_some() {
+            &self.revealed
+        } else {
+            &self.pipeline
+        });
+        for call in batch.calls.iter().filter(|call| closed(call) < call.count) {
+            draw(pass, call, closed(call)..call.count);
         }
     }
 }

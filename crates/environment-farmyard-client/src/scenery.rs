@@ -1,23 +1,24 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The farmyard's scenery, as Tomori's clients draw it in each eye's pass: the evening sky behind everything, then the
-//! yard and the coop, models drawn with `tomori-assets`, lit by the moon and the lanterns' warm light; beyond them the
-//! backdrop, its foothills and its bush, models too, its river and waterfall, drawn with a shader of its own that moves
-//! them, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the ferns
+//! The farmyard's scenery, as Tomori's clients draw it in each eye's pass: the yard and the coop, models drawn with
+//! `tomori-assets`, lit by the moon and the lanterns' warm light; beyond them the backdrop, its foothills and its bush,
+//! models too, its river and waterfall, drawn with a shader of its own that moves them, then the evening sky behind
+//! everything, where nothing nearer covers it, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the ferns
 //! about the trail, drawn with a shader of their own that sways them in the breeze; the stations' plaques, their text drawn from the renderer's glyph atlas; the campsite by the pool, its bonfire's flames
 //! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
 //! marshmallow sticks where its client side shows them; all of it growing out of the space through the reveal sphere as
-//! the space's environment does.
+//! the space's environment does. Once a frame, what neither eye can see of its models, ferns and plaques is culled.
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
+use tomori_assets::bounds::{Aabb, Tally};
 use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
 use tomori_assets::{Instance, Library, Model};
-use tomori_render::scenery::{Scenery, Target};
+use tomori_render::scenery::{Scenery, Target, Views};
 use wgpu::util::DeviceExt;
 
 use tomori_environment_farmyard::backdrop::{self, Kind};
@@ -504,8 +505,8 @@ pub(crate) type FernMeshes = Vec<((ferns::Kind, Detail), Range<u32>)>;
 pub(crate) type FernDraws = Vec<(Range<u32>, Range<u32>)>;
 
 /// The ferns: every kind's mesh in each detail, in one buffer, and their instances in another, grouped by the mesh each
-/// is drawn with, as the eyes were when last placed; one draw for each mesh with instances, all with one pipeline,
-/// swaying in the breeze.
+/// is drawn with, as the eyes were when last placed, of those the eyes may see; one draw for each mesh with instances,
+/// all with one pipeline, swaying in the breeze.
 struct Ferns {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
@@ -515,8 +516,35 @@ struct Ferns {
     ferns: Vec<Fern>,
     /// Where each fern's heart is, found once, so that placing them each frame only measures how far each is.
     hearts: Vec<Vec3>,
-    /// How each fern was drawn when last placed, and each mesh's range of vertices with its range of instances.
-    placed: Mutex<(Vec<Detail>, FernDraws)>,
+    /// Where each fern may be drawn, however it sways, and whether the eyes may see it this frame.
+    bounds: Vec<Aabb>,
+    seen: Vec<bool>,
+    /// How each fern was drawn when last placed, if it was, and each mesh's range of vertices with its range of
+    /// instances.
+    placed: Mutex<(Vec<Option<Detail>>, FernDraws)>,
+}
+
+/// Where `fern` may be drawn, in either detail, however it sways: about its foot, as far out as any point of its
+/// kind's meshes reaches whichever way it is turned, as high and as low, and as far again as the breeze sways its
+/// points, its swell and its flutter together at their most, 1.3 times the most a point sways.
+pub(crate) fn fern_bounds(fern: &Fern) -> Aabb {
+    let points: Vec<ferns::Point> = fern
+        .kind
+        .details()
+        .iter()
+        .flat_map(|detail| ferns::mesh(fern.kind, *detail))
+        .collect();
+    let out = points
+        .iter()
+        .map(|point| point.position.x.hypot(point.position.z))
+        .fold(0.0, f32::max);
+    let (low, high) = points.iter().fold((0.0f32, 0.0f32), |(low, high), point| {
+        (low.min(point.position.y), high.max(point.position.y))
+    });
+    let sway = points.iter().map(|point| point.sway).fold(0.0, f32::max);
+    Aabb::new(Vec3::new(-out, low, -out), Vec3::new(out, high, out))
+        .transformed(fern.transform())
+        .grown(1.3 * sway * fern.scale)
 }
 
 impl Ferns {
@@ -561,17 +589,51 @@ impl Ferns {
             instances,
             meshes,
             hearts: ferns.iter().map(Fern::heart).collect(),
+            bounds: ferns.iter().map(fern_bounds).collect(),
+            seen: vec![true; ferns.len()],
             ferns,
             placed: Mutex::new((Vec::new(), Vec::new())),
         }
     }
 
-    /// Group the ferns by the mesh each is drawn with for eyes at `eyes`, writing their instances only when that changes.
+    /// Draw only the ferns `views` may see, from the next [`Self::place`], and say how many it culled.
+    fn cull(&mut self, views: &Views<'_>) -> Tally {
+        for (seen, bounds) in self.seen.iter_mut().zip(&self.bounds) {
+            *seen = views.sees(bounds);
+        }
+        let drawn = self.seen.iter().filter(|seen| **seen).count();
+        Tally {
+            drawn,
+            culled: self.ferns.len() - drawn,
+            ..Tally::default()
+        }
+    }
+
+    /// What the ferns draw in each eye as last placed: their draws and triangles.
+    fn tally(&self) -> Tally {
+        let placed = self
+            .placed
+            .lock()
+            .expect("the ferns' placing is never poisoned");
+        Tally {
+            draws: placed.1.len(),
+            triangles: placed
+                .1
+                .iter()
+                .map(|(vertices, instances)| vertices.len() / 3 * instances.len())
+                .sum(),
+            ..Tally::default()
+        }
+    }
+
+    /// Group the ferns the eyes may see by the mesh each is drawn with for eyes at `eyes`, writing their instances only
+    /// when that changes.
     fn place(&self, queue: &wgpu::Queue, eyes: Vec3) {
-        let details: Vec<Detail> = self
+        let details: Vec<Option<Detail>> = self
             .hearts
             .iter()
-            .map(|heart| Detail::seen(*heart, eyes))
+            .zip(&self.seen)
+            .map(|(heart, seen)| seen.then(|| Detail::seen(*heart, eyes)))
             .collect();
         let mut placed = self
             .placed
@@ -623,11 +685,11 @@ pub(crate) fn fern_vertices() -> (Vec<FernVertex>, FernMeshes) {
     (vertices, meshes)
 }
 
-/// `ferns`' instances, each drawn in its detail of `details`, grouped by mesh in `meshes`' order, and each mesh with
-/// instances, its range of vertices with its range of instances.
+/// `ferns`' instances, each drawn in its detail of `details`, or not at all for none, grouped by mesh in `meshes`'
+/// order, and each mesh with instances, its range of vertices with its range of instances.
 pub(crate) fn fern_instances(
     ferns: &[Fern],
-    details: &[Detail],
+    details: &[Option<Detail>],
     meshes: &[((ferns::Kind, Detail), Range<u32>)],
 ) -> (Vec<FernInstance>, FernDraws) {
     let mut instances = Vec::with_capacity(ferns.len());
@@ -638,7 +700,7 @@ pub(crate) fn fern_instances(
             ferns
                 .iter()
                 .zip(details)
-                .filter(|(fern, drawn)| fern.kind == *kind && *drawn == detail)
+                .filter(|(fern, drawn)| fern.kind == *kind && **drawn == Some(*detail))
                 .map(|(fern, _)| FernInstance::from(fern)),
         );
         if instances.len() as u32 > start {
@@ -801,13 +863,15 @@ struct Plaques {
     glyphs: tomori_render::glyphs::SharedGlyphs,
     pipeline: Pipeline,
     plaques: Vec<(Panel, Arc<Canvas>, Mat4)>,
+    /// Whether the eyes may see each, this frame.
+    seen: Vec<bool>,
 }
 
 impl Plaques {
     fn new(target: &Target) -> Self {
         let pipeline =
             Pipeline::shared(target.device, target.format, &target.glyphs, target.samples);
-        let plaques = trail::plaques()
+        let plaques: Vec<_> = trail::plaques()
             .into_iter()
             .map(|plaque| {
                 (
@@ -820,8 +884,31 @@ impl Plaques {
         Self {
             glyphs: target.glyphs.clone(),
             pipeline,
+            seen: vec![true; plaques.len()],
             plaques,
         }
+    }
+
+    /// Draw only the plaques `views` may see, and say how much they then draw.
+    fn cull(&mut self, views: &Views<'_>) -> Tally {
+        let mut tally = Tally::default();
+        for (seen, (panel, _, transform)) in self.seen.iter_mut().zip(&self.plaques) {
+            *seen = views.sees(&panel.bounds().transformed(*transform));
+            tally += if *seen {
+                Tally {
+                    drawn: 1,
+                    draws: 1,
+                    triangles: panel.triangles(),
+                    ..Tally::default()
+                }
+            } else {
+                Tally {
+                    culled: 1,
+                    ..Tally::default()
+                }
+            };
+        }
+        tally
     }
 
     /// Show each plaque's text, the very canvas it showed, so that it is built again only while glyphs it needs wait
@@ -843,12 +930,14 @@ impl Plaques {
         let mut shown = self
             .plaques
             .iter()
-            .filter(|(_, _, transform)| {
-                reveal.is_none_or(|(centre, radius)| {
-                    transform.transform_point3(Vec3::ZERO).distance(centre) < radius
-                })
+            .zip(&self.seen)
+            .filter(|((_, _, transform), seen)| {
+                **seen
+                    && reveal.is_none_or(|(centre, radius)| {
+                        transform.transform_point3(Vec3::ZERO).distance(centre) < radius
+                    })
             })
-            .map(|(panel, _, _)| panel)
+            .map(|((panel, _, _), _)| panel)
             .peekable();
         if shown.peek().is_none() {
             return;
@@ -1003,6 +1092,11 @@ impl Farmyard {
             reveal: None,
         }
     }
+
+    /// Draw closed models' parts without their back faces, as by default, or with them, `false`, to compare.
+    pub fn set_back_faces_culled(&mut self, culled: bool) {
+        self.models.set_back_faces_culled(culled);
+    }
 }
 
 /// The beach's stones' model, built once.
@@ -1102,6 +1196,49 @@ impl Scenery for Farmyard {
         );
     }
 
+    fn cull(&mut self, queue: &wgpu::Queue, views: &Views<'_>) -> Tally {
+        let Self {
+            models,
+            yard,
+            coop,
+            backdrop,
+            chickens,
+            campsite,
+            sticks,
+            beach,
+            stones,
+            ferns,
+            plaques,
+            ..
+        } = self;
+        let frustum = views.frustum();
+        let mut tally = Tally::default();
+        for drawn in [Some(yard), Some(coop), chickens.as_mut()]
+            .into_iter()
+            .flatten()
+            .chain([
+                sticks,
+                stones,
+                campsite,
+                beach,
+                &mut backdrop.trail,
+                &mut backdrop.foothills,
+            ])
+            .chain(&mut backdrop.plants)
+            .chain([&mut backdrop.stones, &mut backdrop.rock])
+        {
+            tally += models.cull(queue, &drawn.model, &mut drawn.batch, frustum);
+        }
+        tally += ferns.cull(views);
+        // The ferns are placed for the first eye, as they are again when it is prepared.
+        let first = views
+            .clips()
+            .first()
+            .map_or(Vec3::ZERO, |clip| self::eye(*clip));
+        ferns.place(queue, first);
+        tally + ferns.tally() + plaques.cull(views)
+    }
+
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
         // The bonfire's light flickers, once a frame, as the first eye is prepared, and the ferns are drawn in the detail
         // its distance from them asks.
@@ -1148,12 +1285,9 @@ impl Scenery for Farmyard {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
-        pass.set_pipeline(&self.sky);
-        pass.set_bind_group(0, &self.bindings[eye], &[]);
-        pass.draw(0..3, 0..1);
         // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, the ferns
-        // about it, then the foothills, the bush, the river's stones and the waterfall rock beyond, the water, and the
-        // ranges at the sky's depth, where nothing else has been drawn.
+        // about it, then the foothills, the bush, the river's stones and the waterfall rock beyond, the water, then the
+        // sky, only where nothing nearer has been drawn, and the ranges at its depth.
         let backdrop = &self.backdrop;
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
@@ -1179,6 +1313,10 @@ impl Scenery for Farmyard {
         }
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         backdrop.water.draw(pass);
+        // The sky at the far plane, comparing `LessEqual` without writing depth, is shaded only where nothing nearer
+        // covers it, as before everything it was shaded everywhere.
+        pass.set_pipeline(&self.sky);
+        pass.draw(0..3, 0..1);
         backdrop.ranges.draw(pass);
         // The bonfire's flames last, added to what is behind them, writing no depth.
         self.fire.draw(pass);

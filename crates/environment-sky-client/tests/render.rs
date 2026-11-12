@@ -90,7 +90,7 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                         glam::Vec3::Y,
                     )
             });
-            let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
+            let capture = |renderer: &mut Renderer, matrices: [Mat4; 2], anchor: Mat4| {
                 renderer.render(&device, &queue, &views, &matrices, anchor, &[]);
                 let buffers: [_; 2] = std::array::from_fn(|_| {
                     device.create_buffer(&wgpu::BufferDescriptor {
@@ -139,16 +139,16 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
             };
             renderer.set_environment(GRID);
             renderer.update(&queue, &swarm, None, false);
-            let minimal = capture(&renderer, matrices, Mat4::IDENTITY);
+            let minimal = capture(&mut renderer, matrices, Mat4::IDENTITY);
             renderer.set_environment(SKY);
             renderer.update(&queue, &swarm, None, false);
-            let sky = capture(&renderer, matrices, Mat4::IDENTITY);
+            let sky = capture(&mut renderer, matrices, Mat4::IDENTITY);
             assert_ne!(sky[0], minimal[0]);
             assert_ne!(sky[0], sky[1], "scenery must have stereo parallax");
             // Return to the original preset without touching the simulation.
             renderer.set_environment(GRID);
             renderer.update(&queue, &swarm, None, false);
-            assert_eq!(minimal, capture(&renderer, matrices, Mat4::IDENTITY));
+            assert_eq!(minimal, capture(&mut renderer, matrices, Mat4::IDENTITY));
             assert_eq!(
                 positions,
                 swarm.agents.iter().map(|a| a.position).collect::<Vec<_>>()
@@ -159,7 +159,11 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                 glam::Quat::from_rotation_y(0.35),
                 glam::Vec3::new(1.0, 0.0, -0.5),
             );
-            let compensated = capture(&renderer, matrices.map(|m| m * anchor.inverse()), anchor);
+            let compensated = capture(
+                &mut renderer,
+                matrices.map(|m| m * anchor.inverse()),
+                anchor,
+            );
             for eye in 0..2 {
                 let changed = sky[eye]
                     .as_chunks::<4>()
@@ -175,7 +179,7 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
             }
             // Distant sky follows orientation, not the viewer's translation.
             let translated = capture(
-                &renderer,
+                &mut renderer,
                 matrices.map(|m| m * Mat4::from_translation(glam::Vec3::new(-0.4, 0.0, 0.0))),
                 Mat4::IDENTITY,
             );
@@ -197,7 +201,7 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                     glam::Vec3::new(0.0, 0.7, -2.5),
                     glam::Vec3::Y,
                 );
-            let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
+            let overview = capture(&mut renderer, [overview; 2], Mat4::IDENTITY);
             // Growing out of a space's object: Sky inside the sphere, the grid outside it.
             let reveal = |radius| tomori_scene::arrival_motion::Scenery {
                 environment: SKY,
@@ -209,7 +213,7 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
             let mut revealed = |scenery| {
                 renderer.set_scenery(scenery);
                 renderer.update(&queue, &swarm, None, false);
-                capture(&renderer, matrices, Mat4::IDENTITY)
+                capture(&mut renderer, matrices, Mat4::IDENTITY)
             };
             let point = revealed(reveal(0.0));
             let growing = revealed(reveal(1.5));
