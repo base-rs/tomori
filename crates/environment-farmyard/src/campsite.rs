@@ -89,9 +89,15 @@ pub fn seat_top(radius: f32) -> f32 {
     radius * 2.0 + 0.04
 }
 
-/// The point among the flames the fire is heard from, its light shines from and a marshmallow toasts best at.
+/// The point among the flames the fire is heard from, its light shines from and a marshmallow toasts best at, at its
+/// default size.
 pub fn heart() -> Vec3 {
-    FIRE + Vec3::Y * 0.45
+    heart_at(0.0)
+}
+
+/// The fire's [`heart`] at `size` ([`flames`]): as much higher as its toasting reaches further.
+pub fn heart_at(size: f32) -> Vec3 {
+    FIRE + Vec3::Y * 0.45 * reach(size)
 }
 
 /// How many marshmallow sticks there are.
@@ -218,14 +224,21 @@ fn closest(origin: Vec3, direction: Vec3, start: Vec3, way: Vec3, length: f32) -
     (along, on_ray.distance(start + way * on_segment))
 }
 
-/// How hot it is at `point` for a marshmallow, from 0 to 1: hottest a hand's breadth above the embers, among the
-/// flames' tips, and nothing beyond about 0.6 m of [`heart`].
+/// How hot it is at `point` for a marshmallow at the fire's default size, from 0 to 1: hottest a hand's breadth above
+/// the embers, among the flames' tips, and nothing beyond about 0.6 m of [`heart`].
 pub fn heat(point: Vec3) -> f32 {
-    let distance = point.distance(heart());
+    heat_at(point, 0.0)
+}
+
+/// How hot it is at `point` for a marshmallow with the fire at `size`: as at its default size, but as much further
+/// from its [`heart_at`] as its toasting reaches ([`reach`]), so that a bigger fire toasts from further off.
+pub fn heat_at(point: Vec3, size: f32) -> f32 {
+    let reach = reach(size);
+    let distance = point.distance(heart_at(size));
     if !distance.is_finite() {
         return 0.0;
     }
-    (1.0 - (distance - 0.15) / 0.45).clamp(0.0, 1.0)
+    (1.0 - (distance - 0.15 * reach) / (0.45 * reach)).clamp(0.0, 1.0)
 }
 
 /// How much a marshmallow toasts each second at full [`heat`]: white to black in 20 seconds over the heart of the fire.
@@ -275,33 +288,40 @@ pub fn looks(toast: f32) -> &'static str {
     }
 }
 
-/// Whether a marshmallow toasted `toast` at `at` catches, or burns on as long as it can: black, in the fire's heat. Out
-/// of it, it burns on as [`burns`] says.
+/// Whether a marshmallow toasted `toast` at `at` catches, or burns on as long as it can, with the fire at its default
+/// size: black, in the fire's heat. Out of it, it burns on as [`burns`] says.
 pub fn burning(toast: f32, at: Vec3) -> bool {
-    toast >= BLACK && heat(at) > 0.0
+    burning_at(toast, at, 0.0)
+}
+
+/// Whether a marshmallow toasted `toast` at `at` catches, or burns on as long as it can, with the fire at `size`: black,
+/// in the fire's heat ([`heat_at`]).
+pub fn burning_at(toast: f32, at: Vec3, size: f32) -> bool {
+    toast >= BLACK && heat_at(at, size) > 0.0
 }
 
 /// How long a marshmallow that has caught burns on out of the fire's heat, in seconds, before it goes out: long enough
 /// to write a few words in the air with it, as with an ember on a stick, which the client crate draws as its trail.
 pub const BURNS: f32 = 45.0;
 
-/// How long a marshmallow toasted `toast`, at `at`, burns on, `seconds` after it would have burned on for `left`, as
-/// each client draws it: for [`BURNS`] while it is [`burning`] in the fire's heat, and less as it is out of it, until it
-/// goes out on its own, or at once under the pool's water; and never unless it is black.
+/// How long a marshmallow toasted `toast`, at `at`, burns on, `seconds` after it would have burned on for `left`, with
+/// the fire at its default size, as [`burns_at`] says.
 pub fn burns(left: f32, toast: f32, at: Vec3, seconds: f32) -> f32 {
-    if burning(toast, at) {
+    burns_at(left, toast, at, seconds, 0.0)
+}
+
+/// How long a marshmallow toasted `toast`, at `at`, burns on, `seconds` after it would have burned on for `left`, with
+/// the fire at `size`, as each client draws it: for [`BURNS`] while it is [`burning_at`] in the fire's heat, and less
+/// as it is out of it, until it goes out on its own, or at once under the pool's water; and never unless it is black.
+pub fn burns_at(left: f32, toast: f32, at: Vec3, seconds: f32, size: f32) -> f32 {
+    if burning_at(toast, at, size) {
         return BURNS;
     }
     if toast.is_nan() || toast < BLACK {
         return 0.0;
     }
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.0)
-    } else {
-        0.0
-    };
     let left = if left.is_finite() {
-        (left - seconds).max(0.0)
+        (left - duration(seconds)).max(0.0)
     } else {
         0.0
     };
@@ -315,15 +335,255 @@ pub fn doused(point: Vec3) -> bool {
             < layout::POOL_RADIUS
 }
 
-/// How far toasting `toast` goes at `at` in `seconds`, as the side computes it from where the holder's hand holds the
-/// stick, and the holder's client foresees it from where it draws it: by the fire's [`heat`] there, at most to 1.
+/// How far toasting `toast` goes at `at` in `seconds` with the fire at its default size.
 pub fn toasted(toast: f32, at: Vec3, seconds: f32) -> f32 {
-    let seconds = if seconds.is_finite() {
+    toasted_at(toast, at, seconds, 0.0)
+}
+
+/// How far toasting `toast` goes at `at` in `seconds` with the fire at `size`, as the side computes it from where the
+/// holder's hand holds the stick, and the holder's client foresees it from where it draws it: by the fire's
+/// [`heat_at`] there, at most to 1.
+pub fn toasted_at(toast: f32, at: Vec3, seconds: f32, size: f32) -> f32 {
+    (toast + TOAST_RATE * heat_at(at, size) * duration(seconds)).clamp(0.0, 1.0)
+}
+
+/// `value` from 0 to 1, as a fire's size or how far a log has burnt is: nothing for nonsense.
+pub fn unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// `seconds`, as long as a step of the fire, toasting or burning takes: none for less than none, or nonsense.
+fn duration(seconds: f32) -> f32 {
+    if seconds.is_finite() {
         seconds.max(0.0)
     } else {
         0.0
-    };
-    (toast + TOAST_RATE * heat(at) * seconds).clamp(0.0, 1.0)
+    }
+}
+
+/// How big the fire's flames are with the fire at `size`, from 0, its default, to 1, the biggest wood makes it, as a
+/// scale of the flames as the bonfire was first drawn: a little smaller by default, and twice that at its biggest.
+pub fn flames(size: f32) -> f32 {
+    SMALL + (BIG - SMALL) * unit(size)
+}
+
+/// How big the flames are at the fire's default size and at its biggest ([`flames`]).
+pub const SMALL: f32 = 0.8;
+pub const BIG: f32 = 1.6;
+
+/// How far a marshmallow toasts from the fire at `size`, as a scale of how far at its default size: as much further as
+/// its flames are bigger, so that toasting by default is as it always was, and a fire at its biggest toasts from twice
+/// as far.
+pub fn reach(size: f32) -> f32 {
+    flames(size) / SMALL
+}
+
+/// How many logs the woodpile beside the fire holds, which participants put on the fire to make it bigger.
+pub const LOGS: usize = 8;
+/// The logs are bodies of the campsite's world, with the sticks, numbered from this.
+pub const FIRST_LOG: u32 = 110;
+
+/// The number of log `index`'s body.
+pub fn log_body(index: usize) -> u32 {
+    FIRST_LOG + index as u32
+}
+
+/// Which log body `body` is, if it is one.
+pub fn log_index(body: u32) -> Option<usize> {
+    body.checked_sub(FIRST_LOG)
+        .map(|index| index as usize)
+        .filter(|index| *index < LOGS)
+}
+
+/// How long a log is, how far its six sides' corners are from its middle, and how many sides it has: a length of split
+/// firewood, held in one hand.
+pub const LOG_LENGTH: f32 = 0.42;
+pub const LOG_RADIUS: f32 = 0.05;
+pub const LOG_SIDES: u32 = 6;
+
+/// How deep a log lies on one of its sides, from flat to flat.
+pub fn log_depth() -> f32 {
+    LOG_RADIUS * 3f32.sqrt()
+}
+
+/// The points of a log's hull, about its middle, along X: the corners of its ends, six-sided, a side flat beneath it
+/// and one flat on top, so that logs crossed on each other rest flat on flat, faces of four corners.
+pub fn log_hull() -> Vec<Vec3> {
+    [-0.5f32, 0.5]
+        .into_iter()
+        .flat_map(|end| {
+            (0..LOG_SIDES).map(move |side| {
+                let angle = side as f32 / LOG_SIDES as f32 * TAU;
+                Vec3::new(
+                    end * LOG_LENGTH,
+                    angle.sin() * LOG_RADIUS,
+                    angle.cos() * LOG_RADIUS,
+                )
+            })
+        })
+        .collect()
+}
+
+/// The middle of the woodpile's flat stone, on the ground: between the second seat's end and the fireside log's, a
+/// step beyond the ring participants walk round the fire, within reach of it and of both seats.
+pub fn woodpile() -> Vec3 {
+    let at = Vec2::new(FIRE.x, FIRE.z) + Vec2::new(-0.725, -0.69).normalize() * 1.75;
+    let ground = [
+        Vec2::new(-1.0, -1.0),
+        Vec2::new(1.0, -1.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 1.0),
+    ]
+    .into_iter()
+    .map(|corner| {
+        backdrop::drawn_ground(at + corner * PILE)
+            .unwrap_or(backdrop::MEADOW)
+            .max(trail::CLEARING_HEIGHT)
+    })
+    .fold(f32::NEG_INFINITY, f32::max);
+    Vec3::new(at.x, ground, at.y)
+}
+
+/// How far the woodpile's stone reaches from its middle each way, and how far its flat top stands above the highest of
+/// the ground beneath it.
+pub const PILE: f32 = 0.27;
+pub const PILE_TOP: f32 = 0.06;
+
+/// Where log `index` begins, on the woodpile: stacked in pairs, each pair across the one beneath, as a crib of firewood
+/// is, so that each log rests flat across the two beneath it near their ends; four pairs high.
+pub fn log_home(index: usize) -> Placement {
+    let pile = woodpile();
+    let layer = (index / 2) as f32;
+    let side = if index.is_multiple_of(2) { -1.0 } else { 1.0 };
+    // A fifth of a millimetre apart, so that none begins within another.
+    let height = pile.y + PILE_TOP + log_depth() * (layer + 0.5) + 0.0002 * (layer + 1.0);
+    let spread = 0.13;
+    if (index / 2).is_multiple_of(2) {
+        // Along Z, apart along X.
+        Placement::new(
+            Vec3::new(pile.x + side * spread, height, pile.z),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        )
+    } else {
+        Placement::new(
+            Vec3::new(pile.x, height, pile.z + side * spread),
+            Quat::IDENTITY,
+        )
+    }
+}
+
+/// The woodpile's stone, as a collider and as it is drawn: its least and greatest corners, its bottom sunk into the
+/// ground beneath it.
+pub fn pile_stone() -> (Vec3, Vec3) {
+    let pile = woodpile();
+    (
+        pile - Vec3::new(PILE, 0.08, PILE),
+        pile + Vec3::new(PILE, PILE_TOP, PILE),
+    )
+}
+
+/// How long a log burns, in seconds, from catching to burnt away, charring, glowing and shrinking as it goes; how long
+/// it takes to catch, over which it feeds the fire; and how much of the fire's whole size each log feeds it.
+pub const BURN: f32 = 40.0;
+pub const CATCH: f32 = 6.0;
+pub const FUEL: f32 = 0.4;
+/// How long the fire takes to die back from its biggest to its default size, without more wood, in seconds.
+pub const DIES_BACK: f32 = 240.0;
+
+/// How far a log that has burnt `burnt` of the way has burnt `seconds` on, at most all the way.
+pub fn burnt(burnt: f32, seconds: f32) -> f32 {
+    (burnt + duration(seconds) / BURN).clamp(0.0, 1.0)
+}
+
+/// Whether a log that has burnt `burnt` of the way is still catching, feeding the fire.
+pub fn catching(burnt: f32) -> bool {
+    burnt > 0.0 && burnt * BURN < CATCH
+}
+
+/// The fire's size `seconds` on from `size`, with `catching` logs catching: each feeding it [`FUEL`] over [`CATCH`],
+/// while it dies back over [`DIES_BACK`], from 0, its default, to 1, its biggest.
+pub fn grown(size: f32, catching: usize, seconds: f32) -> f32 {
+    unit(unit(size) + duration(seconds) * (catching as f32 * FUEL / CATCH - 1.0 / DIES_BACK))
+}
+
+/// Whether a log resting at `at` lies in the fire, which takes it: any of its length within the ring of stones, and
+/// low among the flames rather than held above them.
+pub fn in_fire(at: &Placement) -> bool {
+    let flat = |point: Vec3| Vec2::new(point.x, point.z);
+    let (from, to) = (
+        flat(at.transform_point(Vec3::X * LOG_LENGTH * 0.5)),
+        flat(at.transform_point(Vec3::NEG_X * LOG_LENGTH * 0.5)),
+    );
+    let fire = flat(FIRE);
+    let way = to - from;
+    let along = ((fire - from).dot(way) / way.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    let nearest = (from + way * along).distance(fire);
+    nearest.is_finite() && nearest < PIT && at.position.y < FLAMES
+}
+
+/// Whether a log resting at `at`, not alight, goes back on the woodpile: carried off beyond [`DROP_REACH`] of the fire,
+/// or nowhere at all. One lying about the fire stays, for anyone to put on it.
+pub fn log_goes_back(at: &Placement) -> bool {
+    let distance = Vec2::new(at.position.x, at.position.z).distance(Vec2::new(FIRE.x, FIRE.z));
+    !(distance.is_finite() && at.position.y.is_finite()) || distance > DROP_REACH
+}
+
+/// What the fire looks like at `size`, as the agent is told it.
+pub fn blaze(size: f32) -> &'static str {
+    match size {
+        size if size >= 0.75 => "blazing",
+        size if size >= 0.4 => "burning high",
+        size if size >= 0.1 => "burning well",
+        _ => "burning low",
+    }
+}
+
+/// How many shades a log is drawn in as it burns: its bark, charred, and glowing.
+pub const LOG_SHADES: usize = 3;
+
+/// The shade a log that has burnt `burnt` of the way is drawn in: its bark until it catches, charred as it catches,
+/// and glowing once it has caught.
+pub fn log_shade(burnt: f32) -> usize {
+    match burnt {
+        burnt if burnt * BURN >= CATCH => 2,
+        burnt if burnt > 0.0 => 1,
+        _ => 0,
+    }
+}
+
+/// How large a log that has burnt `burnt` of the way is drawn, about its middle: shrinking to a third as it burns away.
+pub fn charred(burnt: f32) -> f32 {
+    1.0 - 0.7 * unit(burnt)
+}
+
+/// Where a log placed at `placement` runs: one end, and the way along it to the other, a unit vector.
+fn log_axis(placement: &Placement) -> (Vec3, Vec3) {
+    let way = (placement.rotation * Vec3::X).normalize_or(Vec3::X);
+    (placement.position - way * LOG_LENGTH * 0.5, way)
+}
+
+/// How far along `ray`, from `origin` the way `direction` goes, a unit vector, it passes within `reach` of the log
+/// placed at `placement`, beyond its sides, if it does.
+pub fn log_met(placement: &Placement, origin: Vec3, direction: Vec3, reach: f32) -> Option<f32> {
+    let (start, way) = log_axis(placement);
+    let (along, distance) = closest(origin, direction, start, way, LOG_LENGTH);
+    (distance <= LOG_RADIUS + reach && along >= 0.0).then_some(along)
+}
+
+/// How far `point` is from the sides of the log placed at `placement`, or nothing within them.
+pub fn from_log(placement: &Placement, point: Vec3) -> f32 {
+    let (start, way) = log_axis(placement);
+    let along = (point - start).dot(way).clamp(0.0, LOG_LENGTH);
+    (point.distance(start + way * along) - LOG_RADIUS).max(0.0)
+}
+
+/// The name of the node of the log's model that draws it in shade `shade`.
+pub fn log_node(shade: usize) -> String {
+    format!("log-{shade}")
 }
 
 /// The sticks are bodies of `tomori-physics`, of a world of the campsite's own, numbered from this, so that they are
@@ -420,18 +680,27 @@ pub fn drawn(placement: &Placement) -> Mat4 {
     placement.matrix() * Mat4::from_translation(Vec3::Z * STICK_LENGTH * 0.5)
 }
 
-/// The sticks as bodies, each of dry wood, leaning on its log.
+/// The sticks as bodies, each of dry wood, leaning on its log; then the logs, of dry wood too, on the woodpile.
 pub fn bodies() -> Vec<Body> {
-    (0..STICKS)
-        .map(|index| {
-            Body::convex(body(index), hull())
-                .with_density(DENSITY)
-                .with_friction(FRICTION)
-                .with_restitution(RESTITUTION)
-                .at(home(index))
-        })
-        .collect()
+    let sticks = (0..STICKS).map(|index| {
+        Body::convex(body(index), hull())
+            .with_density(DENSITY)
+            .with_friction(FRICTION)
+            .with_restitution(RESTITUTION)
+            .at(home(index))
+    });
+    let logs = (0..LOGS).map(|index| {
+        Body::convex(log_body(index), log_hull())
+            .with_density(DENSITY)
+            .with_friction(LOG_FRICTION)
+            .with_restitution(RESTITUTION)
+            .at(log_home(index))
+    });
+    sticks.chain(logs).collect()
 }
+
+/// How much a log grips what it rests on: rough split wood.
+pub const LOG_FRICTION: f32 = 0.8;
 
 /// How far from [`FIRE`] what the sticks rest on reaches, taking in the pool below the campsite; beyond, a stick thrown
 /// is lost, and goes back on its log at once.
@@ -448,8 +717,9 @@ fn log_ends((middle, along, length, radius): (Vec3, Vec2, f32, f32)) -> Vec<Vec3
         .collect()
 }
 
-/// What the sticks rest on: the ground about the fire, the trail's track and the campsite's clearing, as they are drawn,
-/// and the pool's bed, one grid of heights; the three log seats; the ring of stones about the fire; and the bonfire.
+/// What the sticks and logs rest on: the ground about the fire, the trail's track and the campsite's clearing, as they
+/// are drawn, and the pool's bed, one grid of heights; the three log seats; the ring of stones about the fire; the
+/// bonfire; and the woodpile's stone.
 pub fn colliders() -> Vec<Static> {
     let fire = Vec2::new(FIRE.x, FIRE.z);
     let spacing = 0.5;
@@ -480,6 +750,8 @@ pub fn colliders() -> Vec<Static> {
         Static::convex(base.into_iter().chain(top).collect())
     }));
     colliders.push(Static::convex(bonfire().into_iter().flatten().collect()));
+    let (least, greatest) = pile_stone();
+    colliders.push(Static::cuboid(least, greatest, Quat::IDENTITY));
     colliders
 }
 
@@ -581,14 +853,26 @@ pub struct Toasted {
     pub toast: f32,
 }
 
-/// What the farmyard shares of the campsite, in its state beside the flock's, as `campsite`: every stick's body, and
-/// how toasted each is, in order.
+/// How far a log has burnt, as the side says it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Burnt {
+    pub body: u32,
+    pub burnt: f32,
+}
+
+/// What the farmyard shares of the campsite, in its state beside the flock's, as `campsite`: the bodies of its world,
+/// every stick's and then every log's, as `sticks`; how toasted each stick is, in order; how big the fire is, from 0,
+/// its default, to 1; and how far each log has burnt, in order, from 0, not alight, to 1, burnt away.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Shared {
     #[serde(default)]
     pub sticks: State,
     #[serde(default)]
     pub toast: Vec<f32>,
+    #[serde(default)]
+    pub size: f32,
+    #[serde(default)]
+    pub burnt: Vec<f32>,
 }
 
 /// The campsite as the farmyard shares it, in its state, or none in a state from before its sticks were bodies.
@@ -597,14 +881,19 @@ pub fn shared(state: &serde_json::Value) -> Shared {
 }
 
 /// What changed of the campsite, as the side sends it to everyone in the space: the farmyard's clock, what changed of
-/// the sticks' bodies, and how toasted those whose toasting changed are now. A client from before reads it as neither
-/// a chicken's nor a stone's, and ignores it.
+/// the sticks' and logs' bodies, how toasted those sticks whose toasting changed are now, how big the fire is, if that
+/// changed, and how far the logs whose burning changed have burnt. A client from before reads it as neither a
+/// chicken's nor a stone's, and ignores it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub clock: u64,
     pub sticks: Update,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub toast: Vec<Toasted>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub burnt: Vec<Burnt>,
 }
 
 /// The solids of the campsite, which the agent, walls and panels keep clear of, as `(least, greatest)` corners: the
@@ -660,7 +949,7 @@ pub fn ground() -> Vec<[Vec3; 3]> {
 }
 
 /// What stands about the fire, as `(least, greatest)` corners, which participants, the agent, walls and panels keep
-/// clear of: the log seat across it with the sticks leaning on it, and the fireside log.
+/// clear of: the log seat across it with the sticks leaning on it, the woodpile and the fireside log.
 pub fn furniture() -> Vec<([f32; 3], [f32; 3])> {
     let mut solids = Vec::new();
     let (middle, along, length, radius) = seat();
@@ -676,6 +965,16 @@ pub fn furniture() -> Vec<([f32; 3], [f32; 3])> {
         }
     }
     solids.push(([low.x, 0.0, low.z], high.to_array()));
+    // The woodpile, its stone and its logs stacked on it.
+    let (least, greatest) = pile_stone();
+    solids.push((
+        [least.x, greatest.y - PILE_TOP, least.z],
+        [
+            greatest.x,
+            greatest.y + log_depth() * (LOGS / 2) as f32,
+            greatest.z,
+        ],
+    ));
     // The fireside log.
     let (middle, along, length, radius) = fireside();
     let along = Vec3::new(along.x, 0.0, along.y);
@@ -932,6 +1231,14 @@ fn build(shapes: &mut Shapes, embers: &mut Shapes) {
             FIRE + Vec3::new(turn.sin(), 0.0, turn.cos()) * (0.12 + scatter(coal + 9870) * 0.12);
         embers.cone(at + Vec3::Y * lift, 0.035, 0.035, 4, colors::EMBER);
     }
+    // The woodpile's flat stone, its bottom sunk into the ground.
+    let (least, greatest) = pile_stone();
+    shapes.cuboid(
+        (least + greatest) * 0.5,
+        (greatest - least) * 0.5,
+        Quat::IDENTITY,
+        colors::STONE * 0.9,
+    );
     // The second log seat and the fireside log, each on two chocks, as the lookout's is, sunk a little into the ground
     // where it rises beneath them.
     for (middle, along, length, radius) in [seat(), fireside()] {
@@ -1018,8 +1325,44 @@ pub fn stick() -> Model {
         .expect("the stick is built within the limits")
 }
 
+/// The model of a log of the woodpile, about its middle, along X, in each of [`LOG_SHADES`], of which an instance shows
+/// one: its bark, with its cut ends pale; charred; and glowing, as embers do. Drawn from its hull's corners, as it
+/// collides.
+pub fn log_model() -> Model {
+    let corners = log_hull();
+    let sides = LOG_SIDES as usize;
+    let shades = [
+        (palette::BARK * 1.1, palette::WOOD, 0),
+        (colors::CHARRED * 1.4, colors::CHARRED, 0),
+        (colors::EMBER * 0.6, colors::EMBER * 0.8, EMBERS),
+    ];
+    let mut nodes = Vec::new();
+    let mut meshes = Vec::new();
+    for (shade, (bark, ends, material)) in shades.into_iter().enumerate() {
+        let mut shapes = Shapes::new();
+        for side in 0..sides {
+            let next = (side + 1) % sides;
+            let quad = [
+                corners[side],
+                corners[next],
+                corners[sides + next],
+                corners[sides + side],
+            ];
+            let outward = quad.iter().copied().sum::<Vec3>() / 4.0 * Vec3::new(0.0, 1.0, 1.0);
+            facing(&mut shapes, &quad, outward, bark);
+        }
+        facing(&mut shapes, &corners[..sides], Vec3::NEG_X, ends);
+        facing(&mut shapes, &corners[sides..], Vec3::X, ends);
+        nodes.push(Node::new(log_node(shade), Transform::IDENTITY).with_mesh(meshes.len()));
+        meshes.push(Mesh::new(log_node(shade), vec![shapes.primitive(material)]));
+    }
+    let roots = (0..nodes.len()).collect();
+    Model::built(nodes, roots, meshes, materials(), &Limits::default())
+        .expect("the log is built within the limits")
+}
+
 /// The most triangles the campsite, its sticks and its fire's flames and embers draw together, which the tests check.
-pub const BUDGET: usize = 800;
+pub const BUDGET: usize = 1000;
 
 #[cfg(test)]
 mod tests;

@@ -26,6 +26,8 @@ fn shared(change: impl FnOnce(&mut Shared)) -> Shared {
                 .collect(),
         },
         toast: vec![0.0; STICKS],
+        size: 0.0,
+        burnt: Vec::new(),
     };
     change(&mut shared);
     shared
@@ -73,6 +75,8 @@ fn holding(index: usize, epoch: u32, held: Option<Held>) -> Event {
             ..Update::default()
         },
         toast: Vec::new(),
+        size: None,
+        burnt: Vec::new(),
     }
 }
 
@@ -261,6 +265,8 @@ fn a_marshmallow_held_in_the_fire_is_foreseen_toasting_and_eases_to_what_the_ser
                 body: campsite::body(1),
                 toast: campsite::BLACK,
             }],
+            size: None,
+            burnt: Vec::new(),
         },
         0,
     );
@@ -396,6 +402,8 @@ fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_sa
                 body: campsite::body(0),
                 toast: 0.0,
             }],
+            size: None,
+            burnt: Vec::new(),
         },
         0,
     );
@@ -415,6 +423,8 @@ fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_sa
                     toast: 0.5,
                 },
             ],
+            size: None,
+            burnt: Vec::new(),
         },
         0,
     );
@@ -482,6 +492,8 @@ fn a_visitor_takes_no_stick_and_what_lands_is_heard_lightly_or_splashing() {
             ..Update::default()
         },
         toast: Vec::new(),
+        size: None,
+        burnt: Vec::new(),
     };
     assert_eq!(sticks.changed(&landed(3.0, false), 0).len(), 1);
     assert!(sticks.changed(&landed(0.6, false), 0).is_empty());
@@ -523,6 +535,8 @@ fn a_stick_on_its_way_back_fades_out_as_toasted_as_it_was_and_in_on_its_log_fres
                 body: campsite::body(2),
                 toast: 0.0,
             }],
+            size: None,
+            burnt: Vec::new(),
         },
         1_000,
     );
@@ -632,6 +646,8 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
                         ..Update::default()
                     },
                     toast: Vec::new(),
+                    size: None,
+                    burnt: Vec::new(),
                 },
                 sent,
             );
@@ -672,4 +688,263 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
     }
     assert!(ribbon[0].0.distance(drawn[0]) < 1e-4);
     assert!(ribbon.last().unwrap().1.distance(*drawn.last().unwrap()) < crate::embers::SPACING);
+}
+
+/// The sticks and logs, as the server side shares them, each in its place, fresh, the fire at its default, with `change`
+/// made.
+fn with_logs(change: impl FnOnce(&mut Shared)) -> Shared {
+    shared(|shared| {
+        shared.sticks.bodies.extend((0..LOGS).map(|index| Body {
+            body: campsite::log_body(index),
+            epoch: 0,
+            at: campsite::log_home(index).encoded(Precision::Rest),
+            moving: false,
+            held: None,
+        }));
+        shared.burnt = vec![0.0; LOGS];
+        change(shared);
+    })
+}
+
+/// A ray from a little above and before log `index` where it lies on the woodpile, straight at its middle.
+fn at_log(index: usize) -> Ray {
+    let middle = campsite::log_home(index).position;
+    let from = middle + Vec3::new(0.3, 0.8, 0.6);
+    Ray::new(from, middle - from).unwrap()
+}
+
+#[test]
+fn a_log_is_pointed_at_and_taken_where_the_hand_closes_on_it_but_not_one_burning_in_the_fire() {
+    let mut sticks = Sticks::new();
+    sticks.share(&with_logs(|shared| shared.burnt[7] = 0.2));
+    // Pointed at, a log on the woodpile is the grip's to take, called by its place on it.
+    let picked = sticks.pick(&at_log(6)).unwrap();
+    assert_eq!(picked.object, "log-6");
+    assert_eq!(picked.label, "a log");
+    assert!(picked.actions.contains(Actions::GRAB));
+    // Reached for, beside it.
+    let beside = campsite::log_home(5).position + Vec3::Y * (campsite::LOG_RADIUS + 0.03);
+    assert_eq!(sticks.within_reach(beside).as_deref(), Some("log-5"));
+    // Burning, it is neither pointed at nor reached for.
+    let burning = at_log(7);
+    assert_ne!(
+        sticks.pick(&burning).map(|picked| picked.object),
+        Some("log-7".to_owned())
+    );
+    let on = campsite::log_home(7).position + Vec3::Y * (campsite::LOG_RADIUS + 0.03);
+    assert_ne!(sticks.within_reach(on).as_deref(), Some("log-7"));
+    // Taken where the hand closes on it, and let go as it moved.
+    let now = Instant::now();
+    let hand = Hand::new(beside, Quat::IDENTITY);
+    let grab = Grab::new("log-5", hand, Phase::Began).of(Side::Right);
+    let intents = sticks.update([&grab].into_iter(), Some(3), now, 10);
+    let [Intent::Take(take)] = intents.as_slice() else {
+        panic!("{intents:?}");
+    };
+    assert_eq!(take.body, campsite::log_body(5));
+    let offset = take.offset.placement(Precision::Rest);
+    let held = Placement::new(beside, Quat::IDENTITY).then(&offset);
+    assert!(held.position.distance(campsite::log_home(5).position) < 1e-3);
+    let moved = Hand::new(beside + Vec3::X * 0.05, Quat::IDENTITY);
+    let release = Grab::new("log-5", moved, Phase::Ended).of(Side::Right);
+    let later = now + Duration::from_millis(50);
+    let intents = sticks.update([&release].into_iter(), Some(3), later, 60);
+    let [Intent::LetGo(let_go)] = intents.as_slice() else {
+        panic!("{intents:?}")
+    };
+    assert_eq!(let_go.body, campsite::log_body(5));
+    // Pointed at from afar, it is pulled into the palm, across it, turned as it was; and its touch, as the other hand
+    // takes it from the one that holds it, is how far the hand is from its sides.
+    let far = Placement::new(beside + Vec3::new(0.0, 1.0, 1.5), Quat::IDENTITY);
+    let (offset, pulled) = Pile::held(0, &campsite::log_home(4), &far, false);
+    assert!(pulled && offset.position.length() <= tomori_physics::HOLD);
+    assert_eq!(
+        Pile::touch(0, &campsite::log_home(4), beside),
+        Pile::reach(0, &campsite::log_home(4), beside)
+    );
+    // Heard landing, a knock softer than a stone's, or a splash, and nothing gently.
+    assert!(Pile::sound(0, false, 3.0).is_some() && Pile::sound(0, true, 3.0).is_some());
+    assert!(Pile::sound(0, false, 0.2).is_none());
+    // A visitor takes none.
+    let mut visiting = Sticks::new();
+    visiting.share(&with_logs(|_| {}));
+    let grab = Grab::new("log-5", hand, Phase::Began).of(Side::Right);
+    assert!(
+        visiting
+            .update([&grab].into_iter(), None, now, 10)
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_burning_log_chars_glows_and_shrinks_and_fades_back_onto_the_woodpile_fresh() {
+    let mut sticks = Sticks::new();
+    sticks.share(&with_logs(|shared| {
+        shared.burnt[6] = 0.5;
+        shared.burnt[5] = 0.05;
+    }));
+    let now = Instant::now();
+    let shown = sticks.logs_shown(&[], &[], now, 0);
+    assert_eq!(shown.len(), LOGS);
+    assert_eq!((shown[0].shade, shown[5].shade, shown[6].shade), (0, 1, 2));
+    let size = |log: &ShownLog| log.transform.x_axis.truncate().length();
+    assert!((size(&shown[0]) - 1.0).abs() < 1e-4);
+    assert!((size(&shown[6]) - campsite::charred(0.5)).abs() < 1e-4);
+    // Burnt away, it fades out where it lay, as burnt as it was, and in on the woodpile, fresh, the side saying so as it
+    // begins its way.
+    let from = Placement::at(campsite::FIRE + Vec3::Y * 0.1);
+    let to = campsite::log_home(6).snapped(Precision::Rest);
+    sticks.changed(
+        &Event {
+            clock: 1_000,
+            sticks: Update {
+                returning: vec![tomori_physics::message::Returning {
+                    body: campsite::log_body(6),
+                    from: from.encoded(Precision::Rest),
+                    to: to.encoded(Precision::Rest),
+                }],
+                ..Update::default()
+            },
+            toast: Vec::new(),
+            size: None,
+            // And something that is no log, which changes nothing.
+            burnt: [campsite::log_body(6), 7]
+                .map(|body| campsite::Burnt { body, burnt: 0.0 })
+                .to_vec(),
+        },
+        1_000,
+    );
+    assert_eq!(sticks.burnt(6), 0.0);
+    let out = sticks.logs_shown(&[], &[], now, 1_100 + tomori_physics::FADE / 2)[6];
+    assert_eq!(out.shade, 2);
+    assert!((size(&out) - campsite::charred(0.5) * 0.5).abs() < 1e-3);
+    assert!(out.transform.w_axis.truncate().distance(from.position) < 1e-4);
+    let coming = sticks.logs_shown(&[], &[], now, 1_100 + tomori_physics::FADE * 3 / 2)[6];
+    assert_eq!(coming.shade, 0);
+    assert!(coming.transform.w_axis.truncate().distance(to.position) < 1e-4);
+}
+
+#[test]
+fn the_fire_is_drawn_as_big_as_the_side_says_eased_there_toasting_and_crackling_the_more_the_bigger()
+ {
+    let mut sticks = Sticks::new();
+    sticks.share(&with_logs(|_| {}));
+    let now = Instant::now();
+    sticks.shown(&[], &[], now, 0);
+    assert_eq!(sticks.drawn_size(), 0.0);
+    // At its default, it crackles only as the ambience does.
+    let mut crackles = Vec::new();
+    for step in 0..=100 {
+        crackles.extend(sticks.crackles(step * 100));
+    }
+    assert!(crackles.is_empty());
+    // The side says it is at its biggest: drawn growing there over a moment, never jumping.
+    sticks.changed(
+        &Event {
+            clock: 10_000,
+            sticks: Update::default(),
+            toast: Vec::new(),
+            size: Some(1.0),
+            burnt: Vec::new(),
+        },
+        10_000,
+    );
+    assert_eq!(sticks.size(), 1.0);
+    let mut last = 0.0;
+    for frame in 1..=40 {
+        sticks.shown(&[], &[], now + Duration::from_millis(50 * frame), 10_000);
+        let drawn = sticks.drawn_size();
+        assert!(drawn > last && drawn - last < 0.25, "{frame}: {drawn}");
+        last = drawn;
+    }
+    assert!(last > 0.99);
+    // It crackles, about three times a second, at its heart, louder than at a small size.
+    let mut crackles = Vec::new();
+    for step in 101..=200 {
+        crackles.extend(sticks.crackles(step * 100));
+    }
+    let count = crackles.len();
+    assert!((10..60).contains(&count), "{count}");
+    for (sound, at) in &crackles {
+        assert!(Vec3::from(*at).distance(campsite::heart_at(1.0)) < 0.4);
+        assert!(!sound.samples.is_empty());
+    }
+    // A clock that jumps crackles nothing.
+    assert!(sticks.crackles(60_000).is_empty());
+    // A marshmallow held further off than a small fire reaches burns black in a big one.
+    sticks.share(&with_logs(|shared| {
+        shared.size = 1.0;
+        shared.toast[1] = campsite::BLACK;
+        shared.sticks.bodies[1].held = held_by(5);
+    }));
+    let along = Vec3::new(1.0, 0.0, 0.0);
+    let marshmallow = campsite::heart_at(1.0) + Vec3::X * 0.9;
+    assert_eq!(campsite::heat(marshmallow), 0.0);
+    let hand = marshmallow
+        - along * (campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD);
+    let hand = Hand::new(hand, Quat::from_rotation_arc(Vec3::NEG_Z, along));
+    let later = now + Duration::from_secs(5);
+    sticks.shown(&[(5, hand)], &[], later, 20_000);
+    let shown = sticks.shown(&[(5, hand)], &[], later + Duration::from_secs(1), 20_000);
+    assert!(shown[1].burning);
+}
+
+#[test]
+fn what_moves_and_rests_of_the_campsite_is_shown_of_the_sticks_and_the_logs_alike() {
+    let mut sticks = Sticks::new();
+    sticks.share(&with_logs(|_| {}));
+    let now = Instant::now();
+    // A stick and a log moving, then each coming to rest, as the server side says, each drawn where it says.
+    let moved = |body: u32, at: Placement| {
+        tomori_physics::message::Snapshot::new(body, &at, Precision::Moving)
+    };
+    let (stick, log) = (
+        Placement::at(campsite::FIRE + Vec3::new(1.0, 0.3, 0.5)),
+        Placement::at(campsite::FIRE + Vec3::new(-1.0, 0.3, 0.5)),
+    );
+    let event = |clock: u64, moving: bool| Event {
+        clock,
+        sticks: Update {
+            moving: if moving {
+                vec![
+                    moved(campsite::body(1), stick),
+                    moved(campsite::log_body(2), log),
+                ]
+            } else {
+                Vec::new()
+            },
+            rested: if moving {
+                Vec::new()
+            } else {
+                vec![
+                    tomori_physics::message::Snapshot::new(
+                        campsite::body(1),
+                        &stick,
+                        Precision::Rest,
+                    ),
+                    tomori_physics::message::Snapshot::new(
+                        campsite::log_body(2),
+                        &log,
+                        Precision::Rest,
+                    ),
+                ]
+            },
+            ..Update::default()
+        },
+        toast: Vec::new(),
+        size: None,
+        burnt: Vec::new(),
+    };
+    sticks.changed(&event(1_000, true), 1_000);
+    sticks.changed(&event(1_100, false), 1_100);
+    let shown = sticks.shown(&[], &[], now, 2_000);
+    let logs = sticks.logs_shown(&[], &[], now, 2_000);
+    assert!(
+        shown[1]
+            .transform
+            .transform_point3(-Vec3::Z * campsite::STICK_LENGTH * 0.5)
+            .distance(stick.position)
+            < 1e-3
+    );
+    assert!(logs[2].transform.w_axis.truncate().distance(log.position) < 1e-3);
 }

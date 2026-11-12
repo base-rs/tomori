@@ -18,6 +18,10 @@
 
 - For environments: `tomori-environment-farmyard`'s `campsite` gains `BURNS`, `burns` and `doused`; its client crate gains the `embers` module, `scenery::Clock::elapsed` and `Farmyard::embers_mut`, and `campsite::Shown` gains `index`, **breaking** for code that builds it.
 
+- **Feed the campfire.** The campsite has a woodpile of eight logs beside the fire. Take a log with either grip and put it on the fire: it catches and the fire grows, three logs making a blaze, with taller flames, more sparks, brighter light, more crackling, and toasting from further away, even from the seats. A burning log chars, glows and shrinks over 40 seconds, then reappears on the woodpile, so it never runs out; without more wood, the fire dies back over about four minutes to its default, which is now a little smaller. Toasting at the default size is as before. Logs dropped by the fire stay there; one carried off comes back to the woodpile. The agent knows how big the fire is and how many logs are left. See `design/farmyard.md`.
+
+- For environments: `tomori-environment-farmyard`'s `campsite::Shared` gains `size` and `burnt`, and `Event` gains `size` and `burnt`, **breaking** for code that builds them; `campsite::bodies` includes the logs; and its client crate's `client::Drawn` gains `logs` and `fire`, `scenery::lighting_at` and `fire_lamp` take the fire's size, and `loose::Loose` gains `keep`, **breaking** for code that builds `Drawn` or calls them.
+
 - **A fireside log to sit on.** The campsite has a third log, between the fire and the pool, facing the fire. Point at it and pull the trigger to jump there, sitting on it facing the fire; stand up and you're standing at it. The agent knows where it is. The farmyard's version is now 12, so an earlier client shows the grid there. See `design/farmyard.md`.
 
 - **Walk all the way round the campfire.** In the farmyard, you can now walk, and land, all the way round the campsite's fire, between its ring of stones and the logs about it; the log the marshmallow sticks lean on is a step further back to make room. The agent follows you round it too. See `design/farmyard.md`.

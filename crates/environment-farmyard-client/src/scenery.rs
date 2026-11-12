@@ -156,8 +156,12 @@ fn ember(foot: Vec3, rise: f32, size: f32, phase: f32) -> [FireVertex; 6] {
     [a, b, c, a, c, d]
 }
 
-/// The bonfire's flames and embers: five orange tongues about the fire's middle, three yellow ones within them, and a
-/// dozen embers rising, each moving by a phase of its own.
+/// How many embers rise from the bonfire at its biggest; at its default, about a dozen of them.
+const EMBERS: u32 = 24;
+
+/// The bonfire's flames and embers: five orange tongues about the fire's middle, three yellow ones within them, and
+/// [`EMBERS`] rising, each moving by a phase of its own; its shader draws its flames as big, and as many of its embers,
+/// as the fire is.
 pub(crate) fn bonfire() -> Vec<FireVertex> {
     use tomori_environment_farmyard::props::scatter;
     let middle = campsite::FIRE + Vec3::Y * (tomori_environment_farmyard::trail::LIFT + 0.02);
@@ -193,7 +197,7 @@ pub(crate) fn bonfire() -> Vec<FireVertex> {
             inner,
         ));
     }
-    for index in 0..12u32 {
+    for index in 0..EMBERS {
         let turn = scatter(index + 9950) * std::f32::consts::TAU;
         let foot = middle + Vec3::new(turn.sin(), 0.0, turn.cos()) * 0.12;
         vertices.extend(ember(
@@ -207,10 +211,10 @@ pub(crate) fn bonfire() -> Vec<FireVertex> {
 }
 
 /// The little flame of a marshmallow that burns, at `marshmallow`, the middle of its marshmallow: as tall as about two
-/// and a half of it and a little wider than it is long, so that it grows with it.
+/// and a half of it and a little wider than it is long, so that it grows with it, and as big however big the fire is.
 pub(crate) fn alight(marshmallow: Vec3, phase: f32) -> [FireVertex; 9] {
     let (length, radius) = campsite::MARSHMALLOW;
-    tongue(
+    let mut flame = tongue(
         marshmallow - Vec3::Y * radius * 0.6,
         (length * 2.4, length * 1.1),
         phase,
@@ -218,7 +222,11 @@ pub(crate) fn alight(marshmallow: Vec3, phase: f32) -> [FireVertex; 9] {
             glam::Vec4::new(1.0, 0.7, 0.25, 1.4),
             glam::Vec4::new(0.9, 0.2, 0.03, 0.5),
         ),
-    )
+    );
+    for corner in &mut flame {
+        corner.motion[3] = 2.0;
+    }
+    flame
 }
 
 /// How the bonfire's light flickers at `seconds`: a few waves of its own, about 1, never below 0.75.
@@ -228,14 +236,21 @@ pub fn flicker(seconds: f32) -> f32 {
         + 0.05 * (seconds * 29.0).sin()
 }
 
-/// The bonfire's lamp at `seconds`: warm, a little above its heart, reaching about 5 m, flickering.
-pub fn fire_lamp(seconds: f32) -> Lamp {
+/// The bonfire's lamp at `seconds`, with the fire at `size`: warm, a little above its heart, reaching about 4 m at its
+/// default size, a little smaller than it first was, and 7 m at its biggest, as much brighter, flickering.
+pub fn fire_lamp(seconds: f32, size: f32) -> Lamp {
     let flicker = flicker(seconds);
+    let size = campsite::unit(size);
     Lamp::new(
-        campsite::heart() + Vec3::Y * 0.15,
-        5.0 + 0.3 * (flicker - 1.0),
-        Vec3::new(1.0, 0.5, 0.18) * 2.2 * flicker,
+        campsite::heart_at(size) + Vec3::Y * 0.15,
+        4.2 + 2.8 * size + 0.3 * (flicker - 1.0),
+        Vec3::new(1.0, 0.5, 0.18) * (1.8 + 1.4 * size) * flicker,
     )
+}
+
+/// How many of the bonfire's [`EMBERS`] rise with the fire at `size`: half of them at its default, all at its biggest.
+pub fn embers(size: f32) -> f32 {
+    0.5 + 0.5 * campsite::unit(size)
 }
 
 /// What moves the water: the time since the scenery was made, wrapping every quarter of an hour, or a moment held
@@ -265,14 +280,14 @@ impl Clock {
 }
 
 /// How the farmyard is lit: a cool moon low in the east, the sky's blue overhead and the earth's brown below, the
-/// lanterns' warm light by the coop's door, on the gate and over the workbench, the campsite's bonfire, and a dusky haze
-/// over the far meadow.
+/// lanterns' warm light by the coop's door, on the gate and over the workbench, the campsite's bonfire, at its default
+/// size, and a dusky haze over the far meadow.
 pub fn lighting() -> Lighting {
-    lighting_at(0.0)
+    lighting_at(0.0, 0.0)
 }
 
-/// As [`lighting`], with the bonfire's light as it flickers at `seconds`.
-pub fn lighting_at(seconds: f32) -> Lighting {
+/// As [`lighting`], with the bonfire's light as it flickers at `seconds`, the fire at `size`.
+pub fn lighting_at(seconds: f32, size: f32) -> Lighting {
     Lighting::new(
         evening::MOON.normalize(),
         evening::MOONLIGHT,
@@ -287,7 +302,7 @@ pub fn lighting_at(seconds: f32) -> Lighting {
         3.5,
         palette::GLOW * 1.2,
     ))
-    .with_lamp(fire_lamp(seconds))
+    .with_lamp(fire_lamp(seconds, size))
 }
 
 /// Where the eye is, from its view and projection: the point every ray of the view begins from, as every scenery is
@@ -1065,11 +1080,14 @@ pub struct Farmyard {
     made: Instant,
     /// The chickens, uploaded once their client side first shows them, placed as it last did.
     chickens: Option<Drawn>,
-    /// The campsite, its sticks where its client side last showed them, and its bonfire's flames.
+    /// The campsite, its sticks and logs where its client side last showed them, its bonfire's flames, and how big its
+    /// fire is drawn.
     campsite: Drawn,
     sticks: Drawn,
+    logs: Drawn,
     fire: Fire,
     trails: Trails,
+    fire_size: f32,
     ferns: Ferns,
     /// The beach's shingle, and its stones where its client side last showed them.
     beach: Drawn,
@@ -1160,6 +1178,7 @@ impl Farmyard {
             Mat4::IDENTITY,
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
+        let logs = Drawn::placed(device, target.queue, &models, &log(), &[]);
         let shingle = Drawn::new(
             device,
             target.queue,
@@ -1186,8 +1205,10 @@ impl Farmyard {
             chickens: None,
             campsite,
             sticks,
+            logs,
             fire,
             trails,
+            fire_size: 0.0,
             ferns,
             beach: shingle,
             stones,
@@ -1237,6 +1258,28 @@ fn stick() -> Arc<Model> {
     STICK.get_or_init(|| Arc::new(campsite::stick())).clone()
 }
 
+/// The log's model, built once.
+fn log() -> Arc<Model> {
+    static LOG: std::sync::OnceLock<Arc<Model>> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| Arc::new(campsite::log_model())).clone()
+}
+
+/// The logs as `shown`, each an instance of the log's model showing it in its shade.
+pub(crate) fn log_instances(shown: &[crate::campsite::ShownLog]) -> Vec<Instance> {
+    let model = log();
+    shown
+        .iter()
+        .map(|log| {
+            let mut instance = Instance::new(model.clone());
+            instance.transform = log.transform;
+            for shade in 0..campsite::LOG_SHADES {
+                instance.set_shown(&campsite::log_node(shade), shade == log.shade);
+            }
+            instance
+        })
+        .collect()
+}
+
 /// The sticks as `shown`, each an instance of the stick's model showing its marshmallow in its shade.
 pub(crate) fn stick_instances(shown: &[crate::campsite::Shown]) -> Vec<Instance> {
     let model = stick();
@@ -1276,6 +1319,15 @@ impl Scenery for Farmyard {
             &mut self.sticks.batch,
             &stick_instances(&drawn.sticks),
         );
+        // The logs, where the client side shows them, and the fire, as big as it shows it.
+        self.models.place(
+            device,
+            queue,
+            &self.logs.model,
+            &mut self.logs.batch,
+            &log_instances(&drawn.logs),
+        );
+        self.fire_size = campsite::unit(drawn.fire);
         // The stones, where the client side shows them.
         self.models.place(
             device,
@@ -1322,6 +1374,7 @@ impl Scenery for Farmyard {
             chickens,
             campsite,
             sticks,
+            logs,
             beach,
             stones,
             ferns,
@@ -1335,6 +1388,7 @@ impl Scenery for Farmyard {
             .flatten()
             .chain([
                 sticks,
+                logs,
                 stones,
                 campsite,
                 beach,
@@ -1360,7 +1414,7 @@ impl Scenery for Farmyard {
         // The bonfire's light flickers, once a frame, as the first eye is prepared, and the ferns are drawn in the detail
         // its distance from them asks.
         let seconds = self.clock.seconds(self.made);
-        let lit = lighting_at(seconds);
+        let lit = lighting_at(seconds, self.fire_size);
         if eye == 0 {
             self.models.set_lighting(queue, &lit);
             self.ferns.place(queue, self::eye(scene_to_clip));
@@ -1383,7 +1437,12 @@ impl Scenery for Farmyard {
             view_projection: scene_to_clip.to_cols_array(),
             eye: self::eye(scene_to_clip).extend(1.0).to_array(),
             haze: self.haze,
-            time: [seconds, embers::WRAP as f32, 0.0, 0.0],
+            time: [
+                seconds,
+                campsite::flames(self.fire_size),
+                embers(self.fire_size),
+                embers::WRAP as f32,
+            ],
             moon: lit.sun_direction.normalize_or_zero().extend(0.0).to_array(),
             moonlight: lit.sun.extend(0.0).to_array(),
             sky: lit.sky.extend(0.0).to_array(),
@@ -1411,6 +1470,7 @@ impl Scenery for Farmyard {
             .flatten()
             .chain([
                 &self.sticks,
+                &self.logs,
                 &self.stones,
                 &self.campsite,
                 &self.beach,

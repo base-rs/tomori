@@ -390,6 +390,8 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_eithe
             body: campsite::body(3),
             toast: campsite::BROWN,
         }],
+        size: None,
+        burnt: Vec::new(),
     };
     let theirs = Hand::new(Vec3::new(-4.0, 1.2, -14.0), glam::Quat::IDENTITY);
     let output = client.update(
@@ -411,6 +413,36 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_eithe
             < 1e-3
     );
     assert_eq!(shown.shade, campsite::shade(campsite::BROWN));
+    // The woodpile's logs come with the state too; and, the side saying the fire is at its biggest, it is drawn growing
+    // there and crackles.
+    assert_eq!(drawn(&output).logs.len(), campsite::LOGS);
+    assert_eq!(drawn(&output).fire, 0.0);
+    let event = campsite::Event {
+        clock: 5_200,
+        sticks: Changed::default(),
+        toast: Vec::new(),
+        size: Some(1.0),
+        burnt: Vec::new(),
+    };
+    let mut sounds = 0;
+    let mut fire = 0.0;
+    for step in 0..50u64 {
+        let updates = if step == 0 {
+            vec![Update::Event(Payload::new(
+                serde_json::to_value(&event).unwrap(),
+            ))]
+        } else {
+            Vec::new()
+        };
+        let output = client.update(Input::new(
+            updates,
+            epoch + std::time::Duration::from_millis(100 * step + 100),
+        ));
+        sounds += output.sounds.len();
+        fire = drawn(&output).fire;
+    }
+    assert!(fire > 0.99, "{fire}");
+    assert!(sounds > 3, "{sounds}");
 }
 
 #[test]

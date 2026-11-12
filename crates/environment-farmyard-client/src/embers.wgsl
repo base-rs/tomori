@@ -14,7 +14,8 @@ struct Camera {
     eye: vec4<f32>,
     // The haze's colour, and its density in its fourth component.
     haze: vec4<f32>,
-    // The time in seconds, in its first component, which wraps every second component's seconds.
+    // The time in seconds, in its first component, which wraps every fourth component's seconds; its second and third
+    // are the bonfire's.
     time: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -47,7 +48,7 @@ struct Shaded {
 fn age_of(made: f32) -> f32 {
     var age = camera.time.x - made;
     if age < 0.0 {
-        age = age + camera.time.y;
+        age = age + camera.time.w;
     }
     return age;
 }
