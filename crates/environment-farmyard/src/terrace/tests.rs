@@ -113,7 +113,7 @@ fn key(point: Vec3) -> [u32; 3] {
 #[test]
 fn the_terrace_s_floor_is_even_faces_with_no_star_of_slivers_about_any_corner() {
     // The maintainer saw a star on the headset, the floor fanned from one corner in long slivers: now no corner is shared
-    // by more than eight faces, no angle of any face is under 25°, and every face is within a half and twice the size of
+    // by more than seven faces, no angle of any face is under 25°, and every face is within a half and twice the size of
     // the lattice's, 0.6 m across.
     let ground = ground();
     let mut shared = std::collections::HashMap::new();
@@ -121,7 +121,7 @@ fn the_terrace_s_floor_is_even_faces_with_no_star_of_slivers_about_any_corner() 
         *shared.entry(key(*corner)).or_insert(0) += 1;
     }
     let most = shared.values().copied().max().unwrap();
-    assert!(most <= 8, "{most}");
+    assert!(most <= 7, "{most}");
     let lattice = 3f32.sqrt() / 4.0 * SPACING * SPACING;
     for triangle in &ground {
         for index in 0..3 {
