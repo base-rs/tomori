@@ -42,22 +42,29 @@ pub(crate) trait Ladder: Copy + Eq + std::fmt::Debug + 'static {
     }
 }
 
-/// Whose a push of the right stick is, decided as it leaves the middle, until it returns there.
+/// Whose a push of the right stick is, decided as it leaves the middle, until it returns there. Each stick acts on what
+/// its own hand carries and on what its own hand's ray is on, shown in full, and the two sticks' orders are alike but
+/// for the right wrist's transcript, which is the right's, and what each does with what nothing takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Right {
-    /// A projected panel or a wall carried with the grip, which the push moves and turns.
+    /// A projected panel or a wall the right hand carries, which the push moves and turns.
     Carried,
     /// The right wrist's transcript while it shows, whose focus the push moves.
     Transcript,
-    /// A projected panel pointed at with more than it shows, which the push scrolls for this participant.
+    /// A projected panel the right ray is on with more than it shows, which the push scrolls for this participant.
     Scroll,
+    /// An object of the environment's client side the right ray is on that takes the stick
+    /// ([`crate::client_side::Actions::SCROLL`]): the push is that object's, told with its identity. It claims only
+    /// while the ray is on the environment's, nothing of Tomori's nearer.
+    Object,
+    /// Travel, in a space whose environment allows it on this headset: the push turns, aims a teleport along the right
+    /// ray, steps back or rises, as the left stick's does (see `design/locomotion.md`).
+    Travel,
     /// Anything else of Tomori's the ray is on, such as a panel that shows all it has, a card or a worker: the push is
     /// Tomori's, which pages result cards, as ever, and so nothing in a space.
     Tomori,
-    /// An object of the environment's client side pointed at that takes the right stick
-    /// ([`crate::client_side::Actions::SCROLL`]): the push is that object's, told with its identity.
-    Object,
-    /// The environment's client side, with the ray on something of its own or on nothing of Tomori's.
+    /// The environment's client side, with the ray on something of its own or on nothing of Tomori's, where there is no
+    /// travel.
     Environment,
     /// Nothing else: the push pages result cards, as ever, and so nothing in a space.
     Cards,
@@ -68,28 +75,46 @@ impl Ladder for Right {
         Self::Carried,
         Self::Transcript,
         Self::Scroll,
-        Self::Tomori,
         Self::Object,
+        Self::Travel,
+        Self::Tomori,
         Self::Environment,
         Self::Cards,
     ];
 }
 
-/// Whose a push of the left stick is, decided as it leaves the middle, until it returns there.
+/// Whose a push of the left stick is, decided as it leaves the middle, until it returns there, as the right stick's
+/// is, for the left hand and its ray.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Left {
-    /// Travel, in a space whose environment allows it on this headset (see `design/locomotion.md`).
+    /// A projected panel or a wall the left hand carries, which the push moves and turns.
+    Carried,
+    /// A projected panel the left ray is on with more than it shows, which the push scrolls for this participant.
+    Scroll,
+    /// An object of the environment's client side the left ray is on that takes the stick: the push is that object's.
+    Object,
+    /// Travel, in a space whose environment allows it on this headset: the push turns, aims a teleport along the left
+    /// ray, steps back or rises (see `design/locomotion.md`).
     Travel,
-    /// Anything of Tomori's the ray is on, such as a panel carried: the push does nothing.
+    /// Anything else of Tomori's the ray is on, such as a card carried: the push does nothing.
     Tomori,
-    /// The environment's client side, with the ray on something of its own or on nothing of Tomori's.
+    /// The environment's client side, with the ray on something of its own or on nothing of Tomori's, where there is no
+    /// travel.
     Environment,
     /// Nothing: the push does nothing in a space, and outside one moves in what the lobby lists.
     Nothing,
 }
 
 impl Ladder for Left {
-    const ORDER: &'static [Self] = &[Self::Travel, Self::Tomori, Self::Environment, Self::Nothing];
+    const ORDER: &'static [Self] = &[
+        Self::Carried,
+        Self::Scroll,
+        Self::Object,
+        Self::Travel,
+        Self::Tomori,
+        Self::Environment,
+        Self::Nothing,
+    ];
 }
 
 /// Whose a pull of the trigger is, decided as it begins, until it is let go.
@@ -207,18 +232,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_object_that_takes_the_right_stick_comes_after_every_rung_of_tomori_s_and_before_its_client_side()
-     {
+    fn an_object_that_takes_the_stick_comes_after_what_the_hand_carries_and_the_panel_it_scrolls() {
+        let at = |rung| Right::ORDER.iter().position(|other| *other == rung);
+        for rung in [Right::Carried, Right::Transcript, Right::Scroll] {
+            assert!(at(rung) < at(Right::Object), "{rung:?}");
+        }
+        assert!(at(Right::Object) < at(Right::Environment));
+        let at = |rung| Left::ORDER.iter().position(|other| *other == rung);
+        for rung in [Left::Carried, Left::Scroll] {
+            assert!(at(rung) < at(Left::Object), "{rung:?}");
+        }
+        assert!(at(Left::Object) < at(Left::Environment));
+    }
+
+    #[test]
+    fn each_stick_travels_only_where_nothing_its_ray_is_on_takes_it() {
+        // What the hand carries, the transcript, a panel that scrolls and an object that takes the stick come first, and
+        // travel straight after them, before anything else of Tomori's and the environment's client side.
         let at = |rung| Right::ORDER.iter().position(|other| *other == rung);
         for rung in [
             Right::Carried,
             Right::Transcript,
             Right::Scroll,
-            Right::Tomori,
+            Right::Object,
         ] {
-            assert!(at(rung) < at(Right::Object), "{rung:?}");
+            assert!(at(rung) < at(Right::Travel), "{rung:?}");
         }
-        assert_eq!(at(Right::Object).map(|at| at + 1), at(Right::Environment));
+        assert_eq!(at(Right::Travel).map(|at| at + 1), at(Right::Tomori));
+        let at = |rung| Left::ORDER.iter().position(|other| *other == rung);
+        for rung in [Left::Carried, Left::Scroll, Left::Object] {
+            assert!(at(rung) < at(Left::Travel), "{rung:?}");
+        }
+        assert_eq!(at(Left::Travel).map(|at| at + 1), at(Left::Tomori));
+        // The two orders are alike, but for the right wrist's transcript and what nothing takes.
+        let right: Vec<_> = Right::ORDER
+            .iter()
+            .filter(|rung| !matches!(rung, Right::Transcript))
+            .map(|rung| format!("{rung:?}"))
+            .collect();
+        let left: Vec<_> = Left::ORDER.iter().map(|rung| format!("{rung:?}")).collect();
+        assert_eq!(right[..right.len() - 1], left[..left.len() - 1]);
     }
 
     #[test]
@@ -277,11 +330,12 @@ mod tests {
             Right::Carried,
             Right::Transcript,
             Right::Scroll,
+            Right::Travel,
             Right::Tomori,
         ] {
             assert!(before(rung, Right::Environment), "{rung:?}");
         }
-        for rung in [Left::Travel, Left::Tomori] {
+        for rung in [Left::Carried, Left::Scroll, Left::Travel, Left::Tomori] {
             assert!(before(rung, Left::Environment), "{rung:?}");
         }
         for rung in [

@@ -546,7 +546,7 @@ fn a_lowered_ray_on_an_object_that_also_selects_and_scrolls_gives_it_only_the_gr
     }
     let client = rig.step.client.as_ref().unwrap();
     assert_eq!(client.focus.as_deref(), Some("stick"));
-    assert_eq!(client.scrollable.as_deref(), Some("stick"));
+    assert_eq!(client.scrollable.right.as_deref(), Some("stick"));
     // Hanging down, only the grip's.
     rig.senses.ray = down;
     for _ in 0..3 {
@@ -555,7 +555,7 @@ fn a_lowered_ray_on_an_object_that_also_selects_and_scrolls_gives_it_only_the_gr
     assert!(rig.step.hands.right.lowered);
     let client = rig.step.client.as_ref().unwrap();
     assert_eq!(client.focus, None);
-    assert_eq!(client.scrollable, None);
+    assert_eq!(client.scrollable.right, None);
     assert_eq!(
         client
             .grabbable

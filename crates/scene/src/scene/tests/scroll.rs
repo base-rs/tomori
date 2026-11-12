@@ -340,14 +340,14 @@ fn a_push_goes_to_the_first_rung_of_the_right_stick_s_order_that_takes_it() {
             // The rung, for a globe that takes it: as the frame step records it.
             if handles {
                 let owner = match rung {
-                    precedence::Right::Carried => RightStick::Carried,
-                    precedence::Right::Scroll => RightStick::Scrolled("panel-1".into()),
+                    precedence::Right::Carried => Push::Carried,
+                    precedence::Right::Scroll => Push::Scrolled("panel-1".into()),
                     precedence::Right::Object if expected == Taken::Object => {
-                        RightStick::Object("globe".into(), 1)
+                        Push::Object("globe".into(), 1)
                     }
-                    precedence::Right::Object => RightStick::Abandoned,
-                    precedence::Right::Environment => RightStick::Environment,
-                    _ => RightStick::Other,
+                    precedence::Right::Object => Push::Abandoned,
+                    precedence::Right::Environment => Push::Environment,
+                    _ => Push::Other,
                 };
                 assert_eq!(rig.step.right_stick, owner, "{name}");
             }
@@ -540,7 +540,7 @@ fn a_push_is_told_ended_once_however_it_ends_and_never_moves_to_anything_else() 
     for (name, change) in lost {
         let mut rig = Rig::new(true);
         assert_eq!(pushed_through(&mut rig, change), once(0), "{name}");
-        assert_eq!(rig.step.right_stick, RightStick::Free, "{name}");
+        assert_eq!(rig.step.right_stick, Push::Free, "{name}");
         // The next push on the globe begins anew.
         assert_eq!(rig.frame(Vec2::Y).0, began(Vec2::Y), "{name}");
     }
@@ -918,4 +918,45 @@ fn the_desktop_s_keys_and_wheel_push_the_globe_the_mouse_points_at() {
     now += Duration::from_millis(16);
     desktop.frame(&mut conversation, &mut felt(), now, SIZE);
     assert_eq!(last(&told).1, began(Vec2::Y));
+}
+
+#[test]
+fn the_left_stick_pushes_the_globe_its_own_ray_is_on_one_push_of_an_object_at_a_time() {
+    let mut rig = Rig::new(true);
+    // The left ray on the globe, the right on nothing.
+    rig.senses.ray = behind();
+    rig.senses.left_ray = ahead();
+    rig.update();
+    rig.update();
+    assert!(rig.step.hands.left.full);
+    let both = |left: Vec2, right: Vec2| {
+        press(|buttons| {
+            buttons.left_stick = left;
+            buttons.right_stick = right;
+        })
+    };
+    assert_eq!(
+        rig.frame_with(both(Vec2::Y, Vec2::ZERO)),
+        Some((began(Vec2::Y), Vec2::ZERO))
+    );
+    assert!(matches!(rig.step.left_stick, Push::Object(..)));
+    // The right ray comes to the globe too, but a push of the right stick meanwhile is nobody's: the globe is told the
+    // left's push alone.
+    rig.senses.ray = ahead();
+    rig.update();
+    assert_eq!(
+        rig.frame_with(both(Vec2::Y, Vec2::X)),
+        Some((changed(Vec2::Y), Vec2::ZERO))
+    );
+    assert_eq!(rig.step.right_stick, Push::Abandoned);
+    assert_eq!(
+        rig.frame_with(both(Vec2::ZERO, Vec2::X)),
+        Some((ended(), Vec2::ZERO))
+    );
+    // Once both are back at the middle, the right stick's next push is the globe's.
+    rig.frame_with(both(Vec2::ZERO, Vec2::ZERO));
+    assert_eq!(
+        rig.frame_with(both(Vec2::ZERO, Vec2::X)),
+        Some((began(Vec2::X), Vec2::ZERO))
+    );
 }

@@ -3504,6 +3504,7 @@ fn left_handed<'a>(
             pointing: true,
             nearer: f32::INFINITY,
             free: false,
+            stick: Vec2::ZERO,
         },
         ..frame(projection, None, 0.0, rights, now)
     }
