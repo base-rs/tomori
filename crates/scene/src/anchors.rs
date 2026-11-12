@@ -22,6 +22,12 @@ pub const REACH: f32 = 30.0;
 /// is not finite, the worker stands where the default arc would put it.
 pub const PLACEMENT_REACH: f32 = 90.0;
 
+/// Whether `point` is finite and within `reach` of the space's middle on each axis, as the bounds of anchors, places and
+/// points the scene is given are.
+pub fn within(point: Vec3, reach: f32) -> bool {
+    point.is_finite() && point.abs().max_element() <= reach
+}
+
 /// How far from its home the agent stands at least to be away from it, in metres, as its satellites show.
 pub const AWAY: f32 = 0.05;
 
@@ -93,7 +99,7 @@ impl Anchor {
     /// The anchor `pose` gives, as [`Self::from_pose`] makes it, but within `reach`.
     fn within(pose: &Pose, reach: f32) -> Option<Self> {
         let position = Vec3::from_array(pose.position);
-        if !(position.is_finite() && position.abs().max_element() <= reach) {
+        if !within(position, reach) {
             return None;
         }
         Self::from_pose(&Pose {
@@ -110,11 +116,7 @@ impl Anchor {
         let position = Vec3::from_array(pose.position);
         let orientation = Quat::from_array(pose.orientation);
         let length = orientation.length();
-        if !(position.is_finite()
-            && position.abs().max_element() <= REACH
-            && length.is_finite()
-            && length > 0.5)
-        {
+        if !(within(position, REACH) && length.is_finite() && length > 0.5) {
             return None;
         }
         let orientation = orientation / length;
@@ -316,7 +318,7 @@ pub fn place(
     let panicked = matches!(answer, Some(Err(_)));
     let spot = answer
         .and_then(Result::ok)
-        .filter(|position| position.is_finite() && position.abs().max_element() <= PLACEMENT_REACH)
+        .filter(|position| within(*position, PLACEMENT_REACH))
         .map(Spot::at)
         .unwrap_or_else(|| {
             let slot = cluster.slot(arrangement, worker.slot);

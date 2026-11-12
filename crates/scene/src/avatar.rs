@@ -416,7 +416,7 @@ impl Coordinator {
         for points in [&mut self.voices, &mut self.departures] {
             points.retain(|point| {
                 let point = Vec3::from_array(*point);
-                point.is_finite() && point.abs().max_element() <= REACH
+                crate::anchors::within(point, REACH)
             });
             if points.is_empty() {
                 points.push(input.anchor.position.to_array());

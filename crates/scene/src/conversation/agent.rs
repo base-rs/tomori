@@ -109,7 +109,7 @@ impl Conversation {
         if let Some(facing) = space
             .facing
             .map(glam::Vec3::from_array)
-            .filter(|eyes| eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH)
+            .filter(|eyes| crate::anchors::within(*eyes, crate::anchors::REACH))
         {
             let at = arrangement.agent.position;
             let turned =
@@ -119,14 +119,14 @@ impl Conversation {
         arrangement.via = space
             .via
             .map(glam::Vec3::from_array)
-            .filter(|via| via.is_finite() && via.abs().max_element() <= crate::anchors::REACH);
+            .filter(|via| crate::anchors::within(*via, crate::anchors::REACH));
         arrangement.stream = space.stream;
         // Away, it draws in near whoever it stands for, or whoever it turned to.
         arrangement.partner = space
             .summoned
             .and(space.partner.or(space.facing))
             .map(glam::Vec3::from_array)
-            .filter(|eyes| eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH);
+            .filter(|eyes| crate::anchors::within(*eyes, crate::anchors::REACH));
         // Away, its workers go with it, gathered about whoever it went to, or, from a server that does not say, about
         // whoever it faces, 1.2 m before it, as a trigger leaves it; but not from a server that has it follow the
         // speaker, which says so by sending how it moves and nobody they gather about: they stay home.
@@ -148,9 +148,7 @@ impl Conversation {
             arrangement.audience = space
                 .summoner
                 .map(glam::Vec3::from_array)
-                .filter(|eyes| {
-                    eyes.is_finite() && eyes.abs().max_element() <= crate::anchors::REACH
-                })
+                .filter(|eyes| crate::anchors::within(*eyes, crate::anchors::REACH))
                 .unwrap_or_else(|| arrangement.agent.place(glam::Vec3::new(0.0, 0.2, 1.2)));
         }
         // The environment drawn: one this build cannot draw at the space's version is the grid.
