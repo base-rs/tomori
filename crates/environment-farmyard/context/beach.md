@@ -16,7 +16,7 @@ Stones are numbered from 0: the river's first, `RIVER` of them, of four kinds (`
 
 `colliders()` are what the stones rest on: `drawn()`, the ground as drawn within reach, the meadow, the foothills' faces down the bank and across the river's bed to its far bank, and the trail's track, one mesh; and the river's stones beside it. `settings()` are the world's, in `SUBSTEPS`, eight, a step, so that a stack on level ground settles where it was put, each contact solved against its own triangle (`Settings::unclustered`), so that a broad stone lying across a bend rests rather than creeping. `bodies()` are the stones as bodies.
 
-`waters()` are the river beside it: first its dam reach, `dam_reach()`, the river beside the beach across its whole channel to the far bank (`DAM_OUT`) and `DAM_ALONG` either side of its middle, where a stone resting stays, as part of a dam; then bands along the river, where one resting a minute goes back to where it began. `stays(point)` says which. The physics proposal's fourth stage, water rising behind a dam, would raise the dam reach's level as its stones close it.
+`waters()` are the river beside it: first its dam reach, `dam_reach()`, the river beside the beach across its whole channel to the far bank (`DAM_OUT`) and `DAM_ALONG` either side of its middle, cut along the bands it crosses, each part at its band's level, where a stone resting stays, as part of a dam; then bands along the river, where one resting a minute goes back to where it began. `stays(point)` says which. The physics proposal's fourth stage, water rising behind a dam, would raise the dam reach's level as its stones close it.
 
 ## Changing it
 

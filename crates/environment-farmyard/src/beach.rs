@@ -784,18 +784,13 @@ pub fn dam_reach() -> Vec<Vec2> {
     ]
 }
 
-/// The river's water beside the beach: first its dam reach ([`dam_reach`]), at the river's level beside the beach,
-/// which slows and buoys a stone in it, and keeps it; then the rest of it, in bands along it at its level in each, which
-/// slows and buoys a stone thrown in and, once it has rested there a minute, takes it back to where it began on the
-/// beach, as it does one that comes to rest downstream or upstream of the dam reach. Where water is in two, the dam
-/// reach is the one, as it is first. The dam reach's level is where a dam's rising water would be raised, the physics
-/// proposal's fourth stage.
-pub fn waters() -> Vec<Water> {
+/// The river beside the beach in bands along it, each its outline and its level, the river's there.
+fn bands() -> Vec<(f32, Vec<Vec2>)> {
     let middle = at((NEAR + FAR) * 0.5, 0.0);
     let bands = 5;
     let band = REGION * 2.0 / bands as f32;
-    std::iter::once(Water::below(water_level(), dam_reach()))
-        .chain((0..bands).map(|index| {
+    (0..bands)
+        .map(|index| {
             let low = middle.y - REGION + index as f32 * band;
             let level = layout::nearest_river(Vec2::new(middle.x + 2.0, low + band * 0.5))
                 .0
@@ -806,8 +801,35 @@ pub fn waters() -> Vec<Water> {
                 Vec2::new(middle.x + REGION, low + band),
                 Vec2::new(middle.x - REGION, low + band),
             ];
-            Water::below(level, outline).returning(RETURNS)
-        }))
+            (level, outline)
+        })
+        .collect()
+}
+
+/// The river's water beside the beach: first its dam reach ([`dam_reach`]), cut along the bands it crosses, each part
+/// at its band's level, which slows and buoys a stone in it, and keeps it; then the bands, which slow and buoy a stone
+/// thrown in and, once it has rested there a minute, take it back to where it began on the beach, as they do one that
+/// comes to rest downstream or upstream of the dam reach. Where water is in two, the first is the water there, so that
+/// anywhere in the dam reach below its band's level is the dam reach's. Its levels are where a dam's rising water would
+/// be raised, the physics proposal's fourth stage.
+pub fn waters() -> Vec<Water> {
+    let bands = bands();
+    let reach: Vec<Vec3> = dam_reach()
+        .iter()
+        .map(|corner| Vec3::new(corner.x, 0.0, corner.y))
+        .collect();
+    let dam = bands.iter().filter_map(|(level, outline)| {
+        let part = shapes::cut(&reach, outline).0?;
+        let part = part.iter().map(|corner| Vec2::new(corner.x, corner.z));
+        Some(Water::below(*level, part.collect()))
+    });
+    dam.collect::<Vec<_>>()
+        .into_iter()
+        .chain(
+            bands
+                .into_iter()
+                .map(|(level, outline)| Water::below(level, outline).returning(RETURNS)),
+        )
         .collect()
 }
 

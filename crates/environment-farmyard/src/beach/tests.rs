@@ -424,7 +424,13 @@ fn what_the_stones_rest_on_and_the_water_are_within_the_world_s_bounds() {
     assert!(triangles <= tomori_physics::STATIC_TRIANGLES, "{triangles}");
     assert!(colliders.len() >= 2);
     let waters = waters();
-    assert_eq!(waters.len(), 6);
+    // The dam reach, in parts, one to each band it crosses, then the five bands.
+    let dam = waters
+        .iter()
+        .take_while(|water| water.returns_after.is_none())
+        .count();
+    assert!((1..=3).contains(&dam), "{dam}");
+    assert_eq!(waters.len(), dam + 5);
     // The river beside the beach is its dam reach, which keeps what rests in it, across the channel to its far bank;
     // upstream and downstream of it, the river takes back what rests in it; and the beach above it is not water.
     let level = water_level();
@@ -441,10 +447,32 @@ fn what_the_stones_rest_on_and_the_water_are_within_the_world_s_bounds() {
     };
     for along in [-DAM_ALONG + 0.2, 0.0, DAM_ALONG - 0.2] {
         let middle = in_river(along);
-        assert!(waters[0].contains(middle) && stays(middle), "{middle}");
-        assert_eq!(waters[0].returns_after, None);
+        assert!(waters[..dam].iter().any(|water| water.contains(middle)) && stays(middle));
         let shallows = at(FAR - 0.1, along);
         assert!(stays(Vec3::new(shallows.x, level - 0.03, shallows.y)));
+    }
+    // Anywhere in the dam reach, at any height below the river's water there, up to its ends, a stone stays, though
+    // the river is higher upstream than beside the beach; just beyond its ends, it returns.
+    for along in [-DAM_ALONG + 0.02, -1.0, 0.0, 1.0, DAM_ALONG - 0.02] {
+        let middle = in_river(along);
+        let surface = waters[dam..]
+            .iter()
+            .find(|water| water.contains(middle.with_y(-10.0)))
+            .unwrap()
+            .height;
+        for below in [0.002, 0.01, 0.05, 0.1] {
+            let point = middle.with_y(surface - below);
+            assert!(stays(point), "{point}");
+        }
+    }
+    for along in [-DAM_ALONG - 0.02, DAM_ALONG + 0.02] {
+        let middle = in_river(along);
+        let surface = waters[dam..]
+            .iter()
+            .find(|water| water.contains(middle.with_y(-10.0)))
+            .unwrap()
+            .height;
+        assert!(!stays(middle.with_y(surface - 0.002)), "{middle}");
     }
     // The far bank's water's edge is within the dam reach.
     let far = (0..=400)

@@ -130,7 +130,9 @@ fn a_stone_taken_within_reach_and_thrown_is_said_to_move_at_most_twenty_times_a_
     assert!(rested);
     // In the river's dam reach now, where it rests, it stays, as part of a dam, rather than soaking to go back.
     let at = shingle.world().placement(0).unwrap().position;
-    assert!(beach::waters()[0].contains(at) && beach::stays(at), "{at}");
+    let waters = beach::waters();
+    let water = waters.iter().find(|water| water.contains(at));
+    assert!(water.is_some_and(|water| water.returns_after.is_none()) && beach::stays(at));
     assert!(!shingle.world().moving());
 }
 
