@@ -892,6 +892,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                                 width: None,
                                 sized: false,
                                 attach: None,
+                                context: Vec::new(),
                             }],
                         )
                         .is_ok(),

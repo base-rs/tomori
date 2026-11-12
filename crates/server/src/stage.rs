@@ -53,6 +53,8 @@ pub(crate) use published::Change;
 pub(crate) use published::PUBLISHED;
 pub use published::Publishing;
 pub(crate) use published::Row;
+#[cfg(test)]
+pub(crate) use published::{WITHDRAWN, WITHDRAWN_SECS};
 pub use volume::{DIAGRAM_BYTES, within_volumes};
 
 use frames::{MESSAGE_BYTES, fit, json_size, walls_within};

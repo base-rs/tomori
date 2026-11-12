@@ -901,7 +901,7 @@ fn layout_tools(change: &Value) -> [Value; 2] {
     [
         json!({
             "name": "create_layout",
-            "description": "Build a layout of walls in one step, for everyone in your space, when someone asks you to visualise or lay out information: walls, from 1 to 6, each with your own id for it, a short name of letters, digits, - and _, and columns, rows, scale or width, aspect or slot_width and slot_height, radius and tilt, as add_wall takes them; every wall after the first has attach, { to, edge, align }, to an earlier wall by your id, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, and without a size of its own fills that edge, so that a 1 by 1 beside a 2 by 2 is as tall as it. They snap together as one group, reading as one board, curved as the first unless they say otherwise. place, looking, near or front, with a name or for whoever asked, by default looking, stands it where that person is looking or in front of them, as near as it takes to read every slot. Refused whole if any of it cannot be built, such as beyond the walls or slots an environment takes. It returns each wall's name and slots: fill each slot it should hold with a panel block's place: wall NAME slot N, a code block's place=\"wall NAME slot N\" or show_image's place, then tell everyone what you built. Use as few walls as the information needs.",
+            "description": "Build a layout of walls in one step, for everyone in your space, when someone asks you to visualise or lay out information: walls, from 1 to 6, each with your own id for it, a short name of letters, digits, - and _, and columns, rows, scale or width, aspect or slot_width and slot_height, radius and tilt, as add_wall takes them; every wall after the first has attach, { to, edge, align }, to an earlier wall by your id, across its left, right, top or bottom edge, aligned at its start, middle or end, by default start, and without a size of its own fills that edge, so that a 1 by 1 beside a 2 by 2 is as tall as it. They snap together as one group, reading as one board, curved as the first unless they say otherwise. Each wall may have context, a list of settings as copy_panel takes them, each a parameter the environment declares or time, with one of value, live_minutes, or from and to, instants with their offset from UTC, which the environment's panels on it show, such as one wall for each critical window of an incident. place, looking, near or front, with a name or for whoever asked, by default looking, stands it where that person is looking or in front of them, as near as it takes to read every slot. Refused whole if any of it cannot be built, such as beyond the walls or slots an environment takes. It returns each wall's name and slots: fill each slot it should hold with a panel block's place: wall NAME slot N, a code block's place=\"wall NAME slot N\" or show_image's place, then tell everyone what you built. Use as few walls as the information needs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -924,6 +924,7 @@ fn layout_tools(change: &Value) -> [Value; 2] {
                                 "radius": { "type": "number", "minimum": 0, "maximum": crate::stage::LONGEST_RADIUS },
                                 "tilt": { "type": "number", "minimum": tomori_protocol::wall::TILTS.0, "maximum": tomori_protocol::wall::TILTS.1 },
                                 "attach": attach_schema(),
+                                "context": context_schema(0),
                             },
                             "required": ["id"],
                         },
@@ -1011,6 +1012,7 @@ async fn call(
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
         "contexts" => session.and_then(|session| hub.tool_contexts(session).map(structured)),
         "set_context" => session.and_then(|session| set_context(hub, session, arguments)),
+        "copy_panel" => session.and_then(|session| copy_panel(hub, session, arguments)),
         "create_layout" => session.and_then(|session| create_layout(hub, session, arguments)),
         "remove_layout" => session.and_then(|session| remove_layout(hub, session, arguments)),
         "add_wall" => session.and_then(|session| add_wall(hub, session, arguments)),
@@ -1341,7 +1343,7 @@ fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value,
 
 /// The `contexts` and `set_context` tools' definitions, apart from the rest so that the list's macro stays within its
 /// recursion limit. See `design/panel-context.md`.
-fn context_tools(read: &Value, change: &Value) -> [Value; 2] {
+fn context_tools(read: &Value, change: &Value) -> [Value; 3] {
     let parameter_bytes = tomori_environment::CONTEXT_ID_BYTES;
     [
         json!({
@@ -1369,14 +1371,27 @@ fn context_tools(read: &Value, change: &Value) -> [Value; 2] {
             },
             "annotations": change,
         }),
+        json!({
+            "name": "copy_panel",
+            "description": "Copy one of your space's environment's panels with a context of its own, for everyone in the space, as someone asks, such as \"show me this chart for every region\" or \"keep this one for EU-WEST1 on the left wall\": panel, by its identity or title as panels lists it, one that depends on a context, as contexts says; context, a list of at least one setting, each a parameter it depends on, as contexts lists them, or time, with one of value, one of the parameter's choices where it has any, live_minutes, from 1 to 10080, or from and to, instants with their offset from UTC, such as 2026-11-12T02:20:00Z, never a time of day alone, the copy keeping the panel's own settings beside them, and refused where it would show just what the panel shows; and place, where the copy goes, as move_panel takes it, by default the wall the panel is on. The copy is an instance the environment keeps showing in that context, under an id Tomori gives it, as ~7, at most 8 in a space; everyone sees its chips, a notice on the status wall says what you copied, and it is thrown away, as any panel, when no longer wanted. Only when someone in the space asks; then say in a sentence what you copied, and where.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "context": context_schema(1),
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["panel", "context"],
+            },
+            "annotations": change,
+        }),
     ]
 }
 
 /// The `set_context` tool: one of `wall` and `panel`, `parameter`, and one of `value`, `live_minutes`, `from` and `to`
 /// together, and `follow` true.
 fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
-    use crate::hub::agent_context::{Target, parse_instant};
-    use crate::stage::context::Setting;
+    use crate::hub::agent_context::Target;
     let target = match (
         optional_identifier(arguments, "wall")?,
         optional_identifier(arguments, "panel")?,
@@ -1385,6 +1400,19 @@ fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Val
         (None, Some(panel)) => Target::Panel(panel.to_owned()),
         _ => return Err("Say either wall or panel, one of them.".to_owned()),
     };
+    let (parameter, setting) = context_setting(arguments, true)?;
+    hub.agent_set_context(session, target, parameter, setting)
+        .map(structured)
+}
+
+/// The setting `arguments` say: its `parameter`, and one of `value`, `live_minutes`, `from` and `to` together, or,
+/// where `follows` lets it, `follow` true, for none.
+fn context_setting(
+    arguments: Arguments<'_>,
+    follows: bool,
+) -> Result<(&str, Option<crate::stage::context::Setting>), String> {
+    use crate::hub::agent_context::parse_instant;
+    use crate::stage::context::Setting;
     let parameter = text(arguments, "parameter")?;
     crate::limits::check(parameter, tomori_environment::CONTEXT_ID_BYTES, "parameter")?;
     let value = optional_identifier(arguments, "value")?;
@@ -1399,7 +1427,7 @@ fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Val
     };
     let from = optional_identifier(arguments, "from")?;
     let to = optional_identifier(arguments, "to")?;
-    let follow = flag(arguments, "follow")?;
+    let follow = follows && flag(arguments, "follow")?;
     let setting = match (value, minutes, from, to, follow) {
         (Some(value), None, None, None, false) => Some(Setting::Fixed {
             value: value.to_owned(),
@@ -1410,13 +1438,79 @@ fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Val
             to_ms: parse_instant(to, "to")?,
         }),
         (None, None, None, None, true) => None,
-        _ => {
+        _ if follows => {
             return Err(
                 "Say one of value, live_minutes, from and to together, or follow true.".to_owned(),
             );
         }
+        _ => {
+            return Err(
+                "Each setting of a context says one of value, live_minutes, or from and to together."
+                    .to_owned(),
+            );
+        }
     };
-    hub.agent_set_context(session, target, parameter, setting)
+    Ok((parameter, setting))
+}
+
+/// The settings of a context, `context`, a list in `arguments`, each fixing a parameter, at most one for each parameter
+/// and time; none where it is not given.
+fn context_settings(
+    arguments: Arguments<'_>,
+) -> Result<Vec<(String, crate::stage::context::Setting)>, String> {
+    let Some(context) = arguments
+        .get("context")
+        .filter(|context| !context.is_null())
+    else {
+        return Ok(Vec::new());
+    };
+    let items = context
+        .as_array()
+        .filter(|items| items.len() <= crate::stage::context::SETTINGS)
+        .ok_or("context is a list of at most 4 settings, each of a parameter or time.")?;
+    let mut settings: Vec<(String, crate::stage::context::Setting)> = Vec::new();
+    for item in items {
+        let item = arguments.item("context", item);
+        let (parameter, setting) = context_setting(item, false)?;
+        if settings.iter().any(|(set, _)| set == parameter) {
+            return Err("context sets each parameter once.".to_owned());
+        }
+        settings.push((
+            parameter.to_owned(),
+            setting.expect("only follow gives none"),
+        ));
+    }
+    Ok(settings)
+}
+
+/// The schema of a context's settings, at least `least` of them, as `copy_panel` and each wall of `create_layout` take
+/// them.
+fn context_schema(least: usize) -> Value {
+    json!({
+        "type": "array",
+        "minItems": least,
+        "maxItems": crate::stage::context::SETTINGS,
+        "items": {
+            "type": "object",
+            "properties": {
+                "parameter": { "type": "string", "maxLength": tomori_environment::CONTEXT_ID_BYTES },
+                "value": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "live_minutes": { "type": "integer", "minimum": 1, "maximum": crate::stage::context::LIVE_MINUTES },
+                "from": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                "to": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+            },
+            "required": ["parameter"],
+        },
+    })
+}
+
+/// The `copy_panel` tool: a `panel`, a `context` of settings and, optionally, a `place`.
+fn copy_panel(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
+    let panel = text(arguments, "panel")?;
+    crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
+    let place = optional_identifier(arguments, "place")?;
+    let settings = context_settings(arguments)?;
+    hub.agent_copy_panel(session, panel, place, settings)
         .map(structured)
 }
 
@@ -1550,12 +1644,14 @@ fn create_layout(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<V
                 Some((to, edge, align))
             }
         };
+        let context = context_settings(wall)?;
         planned.push(crate::stage::Planned {
             id,
             layout,
             width,
             sized,
             attach,
+            context,
         });
     }
     hub.agent_create_layout(session, place, planned)

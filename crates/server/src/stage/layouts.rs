@@ -21,6 +21,9 @@ pub(crate) struct Planned {
     pub width: Option<f32>,
     pub sized: bool,
     pub attach: Option<(String, Edge, Align)>,
+    /// Its context's settings, each fixing a parameter, or time, for every panel of its environment on it that does not
+    /// fix it itself. See `design/panel-context.md`.
+    pub context: Vec<(String, super::context::Setting)>,
 }
 
 /// How far each of `wall`'s slots may be from the eyes of whoever it is for, at `eyes`, and still be read: within

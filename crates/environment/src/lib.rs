@@ -47,7 +47,7 @@ pub use action::{
 };
 pub use context::{
     Binding, CONTEXT_CHOICES, CONTEXT_ID_BYTES, CONTEXT_LABEL_CHARS, CONTEXT_PARAMETERS,
-    CONTEXT_VALUE_CHARS, Context, ContextParameter, TIME, Time, valid_context_id,
+    CONTEXT_VALUE_CHARS, Context, ContextParameter, TIME, Time, is_instance, valid_context_id,
 };
 
 pub use zone::{

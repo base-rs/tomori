@@ -26,6 +26,22 @@ pub const CONTEXT_CHOICES: usize = 16;
 /// chart but shows a time, as a list of events.
 pub const TIME: &str = "time";
 
+/// Whether `id` names an instance the server made of one of a side's panels, as `~7`: a `~` and 1 to 9 digits, which
+/// [`crate::valid_panel_id`] refuses, so that a side never names one of its own panels so, and makes no instance
+/// itself; it only publishes to, and retracts, an instance the server told it of ([`crate::Intent::context`]).
+///
+/// ```
+/// use tomori_environment::is_instance;
+///
+/// assert!(is_instance("~7"));
+/// assert!(!is_instance("latency") && !is_instance("~") && !is_instance("~x") && !is_instance("~1234567890"));
+/// ```
+pub fn is_instance(id: &str) -> bool {
+    id.strip_prefix('~').is_some_and(|digits| {
+        (1..=9).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 /// Whether `id` is one a side may declare a parameter by: 1 to [`CONTEXT_ID_BYTES`] ASCII letters, digits, `-` and
 /// `_`, as a panel's id, but never [`TIME`], which is Tomori's.
 ///
@@ -135,6 +151,7 @@ pub struct Context {
     panel: String,
     bindings: Vec<(String, Binding)>,
     time: Time,
+    of: Option<String>,
 }
 
 impl Context {
@@ -144,7 +161,37 @@ impl Context {
             panel: panel.into(),
             bindings,
             time,
+            of: None,
         }
+    }
+
+    /// The instance `panel` of the side's panel `of`, an id the server minted, as [`Context::is_instance`] says, bound
+    /// as `bindings` and `time` say: the side publishes under `panel` what `of` shows in that context, kept updated, and
+    /// retracts it once it has no more use for it. See `design/panel-context.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Binding, Context, Time};
+    ///
+    /// let copy = Context::instance("~7", "latency", vec![("region".into(), Binding::Fixed("EU-WEST1".into()))], Time::Follows);
+    /// assert_eq!((copy.panel(), copy.of()), ("~7", Some("latency")));
+    /// assert_eq!(Context::new("latency", Vec::new(), Time::Follows).of(), None);
+    /// ```
+    pub fn instance(
+        panel: impl Into<String>,
+        of: impl Into<String>,
+        bindings: Vec<(String, Binding)>,
+        time: Time,
+    ) -> Self {
+        Self {
+            of: Some(of.into()),
+            ..Self::new(panel, bindings, time)
+        }
+    }
+
+    /// The side's own panel this is an instance of, by its id, for an instance the server made, as with the agent's
+    /// `copy_panel`; none for one of the side's own panels.
+    pub fn of(&self) -> Option<&str> {
+        self.of.as_deref()
     }
 
     /// The side's id for the panel, as it published it.
@@ -217,6 +264,15 @@ mod tests {
             (Some(&context), 3)
         );
         assert_eq!(crate::Intent::new(3, "{}").context(), None);
+        let copy = Context::instance("~7", "latency", Vec::new(), Time::Follows);
+        assert_eq!(
+            (copy.panel(), copy.of(), context.of()),
+            ("~7", Some("latency"), None)
+        );
+        assert!(
+            is_instance("~7") && !is_instance("~") && !is_instance("~a") && !is_instance("latency")
+        );
+        assert!(!is_instance("~1234567890"));
         let panel = crate::Panel::text("latency", "Latency", "").depends_on(["region"]);
         assert_eq!(panel.depends(), ["region"]);
     }

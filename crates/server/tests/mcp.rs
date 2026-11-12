@@ -437,6 +437,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "set_wall",
             "contexts",
             "set_context",
+            "copy_panel",
             "add_wall",
             "remove_wall",
             "create_layout",

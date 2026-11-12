@@ -35,6 +35,7 @@ fn wall(id: &str, (columns, rows): (u32, u32), scale: f32) -> Planned {
         width: None,
         sized: true,
         attach: None,
+        context: Vec::new(),
     }
 }
 

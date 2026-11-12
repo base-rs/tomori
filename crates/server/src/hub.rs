@@ -1363,7 +1363,8 @@ impl HubState {
             let before = same.then(|| told.contexts.get(id)).flatten();
             let changed = match before {
                 Some(before) => before != context,
-                None => !context.follows(),
+                // An instance is told whatever its context, as its side publishes nothing to it until it is.
+                None => !context.follows() || context.of().is_some(),
             };
             if changed {
                 let delivered = self.sides.deliver(
@@ -3029,6 +3030,7 @@ impl Hub {
         self.sweep_proximity(now);
         self.sweep_zones(now);
         self.sweep_present();
+        self.sweep_withdrawn(crate::cards::unix_now());
         // Such as after a closed space was forgotten.
         self.keep();
     }

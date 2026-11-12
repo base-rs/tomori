@@ -402,6 +402,17 @@ impl Hub {
             if !record.stage.retract(&outlet.environment, id) {
                 return Ok(());
             }
+            // Its copies say it was withdrawn, and are taken away a while later, as the hub sweeps.
+            let withdrawn =
+                record
+                    .stage
+                    .withdraw(&outlet.environment, id, crate::cards::unix_now());
+            if withdrawn > 0 {
+                log::info!(
+                    "Panel {id} of space {} was withdrawn, and with it {withdrawn} of its copies.",
+                    outlet.space
+                );
+            }
             // A status panel waiting for the slot it freed takes it.
             record
                 .stage

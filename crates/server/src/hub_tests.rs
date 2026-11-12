@@ -5389,6 +5389,25 @@ fn contexts_lists_every_stored_setting_of_walls_hidden_and_panels_resting_too() 
             .set_panel_context(&walls, &pods, "region", Some(fixed("AP-SOUTH1")))
             .unwrap();
     }
+    // A copy of it, an instance, with its own setting.
+    let pods = hub
+        .lock()
+        .space(&id)
+        .unwrap()
+        .stage
+        .view("s", &hub.environments().walls("yard"), 0)
+        .panels[0]
+        .id
+        .clone();
+    let copied = hub
+        .agent_copy_panel(
+            "session",
+            &pods,
+            None,
+            vec![("region".into(), fixed("US-EAST1"))],
+        )
+        .unwrap();
+    let instance = copied["instance"].as_str().unwrap().to_owned();
     // The yard now declaring one wall, the other's setting is kept and listed as not shown.
     hub.set_environments(Environments::new([
         crate::environments::Environment::new("sky", "Sky"),
@@ -5407,20 +5426,241 @@ fn contexts_lists_every_stored_setting_of_walls_hidden_and_panels_resting_too() 
             "settings": [{"parameter": "region", "value": "EU-WEST1", "shown": true}],
         }])
     );
-    // Its panel resting, as its side's run ended, its setting is listed with it.
+    // Its panel resting, as its side's run ended, its setting is listed with it, and so is its copy's.
     {
         let mut state = hub.lock();
         state.space_mut(&id).unwrap().stage.rest("yard");
     }
     let read = hub.tool_contexts("session").unwrap();
     let panels = read["panels"].as_array().unwrap();
-    assert_eq!(panels.len(), 1);
+    assert_eq!(panels.len(), 2);
+    assert_eq!(panels[1]["id"], serde_json::json!(instance));
+    assert_eq!(panels[1]["instance_of"], "pods");
     assert_eq!(panels[0]["id"], "pods");
     assert_eq!(panels[0]["resting"], true);
     assert_eq!(
         panels[0]["settings"],
         serde_json::json!([{"parameter": "region", "value": "AP-SOUTH1", "shown": false, "note": "not shown: the environment doesn't declare it now"}])
     );
+}
+
+/// A yard whose side records every intent and declares a region and a pod, with a list of pods on its second wall,
+/// which is fixed to the region EU-WEST1, and the agent's tools served.
+struct CopyYard {
+    hub: Arc<Hub>,
+    _jobs: async_channel::Receiver<Job>,
+    seen: Arc<Mutex<Vec<tomori_environment::Intent>>>,
+    id: String,
+    _commands: async_channel::Receiver<SpaceCommand>,
+    outlet: SpaceOutlet,
+    pods: String,
+    start: Instant,
+}
+
+fn copy_yard() -> CopyYard {
+    let (hub, jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([
+                crate::EnvironmentWall::new(upright([3.0, 1.4, -4.0])),
+                crate::EnvironmentWall::new(upright([-3.0, 1.4, -4.0]))
+                    .with_grid(tomori_protocol::Grid::from((2, 2))),
+            ])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    hub.channel_set_context(&outlet, copy_parameters(), start)
+        .unwrap();
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::text("pods", "Pods", "- pod-7")
+            .depends_on(["region", "pod"])
+            .on_wall(1, None),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let pods = {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        record
+            .stage
+            .set_wall_context(
+                &walls,
+                "environment-1",
+                "region",
+                Some(copy_fixed("EU-WEST1")),
+            )
+            .unwrap();
+        record.stage.view("s", &walls, 0).panels[0].id.clone()
+    };
+    CopyYard {
+        hub,
+        _jobs: jobs,
+        seen,
+        id,
+        _commands: commands,
+        outlet,
+        pods,
+        start,
+    }
+}
+
+fn copy_parameters() -> Vec<tomori_environment::ContextParameter> {
+    vec![
+        tomori_environment::ContextParameter::new("region", "Region", "US-EAST1"),
+        tomori_environment::ContextParameter::new("pod", "Pod", "pod-7"),
+    ]
+}
+
+fn copy_fixed(value: &str) -> crate::stage::context::Setting {
+    crate::stage::context::Setting::Fixed {
+        value: value.into(),
+    }
+}
+
+/// An instance is told to its side as it is copied, and again, its wall's settings and all, to a side started again,
+/// even where what it is bound to follows everything.
+#[test]
+fn a_copy_is_told_to_its_side_as_it_is_made_and_again_with_its_wall_s_settings_once_it_rests() {
+    use tomori_environment::Binding;
+    let CopyYard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        outlet,
+        pods,
+        start,
+    } = copy_yard();
+    let fixed = copy_fixed;
+    let parameters = copy_parameters;
+    let from = seen.lock().unwrap().len();
+    let copied = hub
+        .agent_copy_panel("session", &pods, None, vec![("pod".into(), fixed("pod-9"))])
+        .unwrap();
+    let instance = copied["instance"].as_str().unwrap().to_owned();
+    // Told as it is made, by nobody, of its panel, bound by its own setting and its wall's.
+    let told = |from: usize| {
+        eventually_in("the side is told the copy", || {
+            seen.lock().unwrap()[from..].iter().any(|intent| {
+                intent
+                    .context()
+                    .is_some_and(|context| context.panel() == instance)
+            })
+        });
+        let seen = seen.lock().unwrap();
+        let intent = seen[from..]
+            .iter()
+            .rev()
+            .find(|intent| {
+                intent
+                    .context()
+                    .is_some_and(|context| context.panel() == instance)
+            })
+            .unwrap()
+            .clone();
+        (intent.participant(), intent.context().unwrap().clone())
+    };
+    let (by, context) = told(from);
+    assert_eq!(by, 0);
+    assert_eq!(context.of(), Some("pods"));
+    assert_eq!(
+        context.binding("pod"),
+        Some(&Binding::Fixed("pod-9".into()))
+    );
+    assert_eq!(
+        context.binding("region"),
+        Some(&Binding::Fixed("EU-WEST1".into()))
+    );
+    // Its side's run ends and another starts, told nothing yet: the copy, resting, is told again just so.
+    let started = |hub: &Arc<Hub>| {
+        let mut state = hub.lock();
+        *state.space_mut(&id).unwrap().told.borrow_mut() = Told::default();
+        state.touch_projection(&id);
+    };
+    hub.lock().space_mut(&id).unwrap().stage.rest("yard");
+    hub.channel_set_context(&outlet, parameters(), start + Duration::from_secs(1))
+        .unwrap();
+    let from = seen.lock().unwrap().len();
+    started(&hub);
+    assert_eq!(told(from).1, context);
+    // A run that declares neither, so that the copy follows everything it is told of: it is told all the same.
+    hub.channel_set_context(&outlet, Vec::new(), start + Duration::from_secs(2))
+        .unwrap();
+    let from = seen.lock().unwrap().len();
+    started(&hub);
+    let (_, bare) = told(from);
+    assert!(bare.follows(), "{bare:?}");
+    assert_eq!(bare.of(), Some("pods"));
+}
+
+/// A copy whose panel its side withdraws says so, takes no more updates, and is taken away once its grace runs out,
+/// its side told it was dismissed.
+#[test]
+fn a_copy_of_a_panel_withdrawn_says_so_and_is_taken_away_as_the_hub_sweeps() {
+    use crate::stage::{WITHDRAWN, WITHDRAWN_SECS};
+    let CopyYard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        outlet,
+        pods,
+        start,
+    } = copy_yard();
+    let copied = hub
+        .agent_copy_panel(
+            "session",
+            &pods,
+            None,
+            vec![("pod".into(), copy_fixed("pod-9"))],
+        )
+        .unwrap();
+    let (copy, instance) = (
+        copied["panel"].as_str().unwrap().to_owned(),
+        copied["instance"].as_str().unwrap().to_owned(),
+    );
+    let title = || {
+        let state = hub.lock();
+        state
+            .space(&id)
+            .unwrap()
+            .stage
+            .view("s", &hub.environments().walls("yard"), 0)
+            .panel(&copy)
+            .map(|panel| panel.title.clone())
+    };
+    assert_eq!(title(), Some("Pods".to_owned()));
+    hub.channel_retract_at(&outlet, "pods", start + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(title(), Some(format!("Pods{WITHDRAWN}")));
+    // Too soon, it stays; its grace run out, it is taken away, and its side told so, by nobody.
+    hub.sweep_withdrawn(crate::cards::unix_now());
+    assert!(title().is_some());
+    let from = seen.lock().unwrap().len();
+    hub.sweep_withdrawn(crate::cards::unix_now() + WITHDRAWN_SECS);
+    assert_eq!(title(), None);
+    assert!(moves_from(&seen, from, 1).contains(&(
+        instance,
+        0,
+        tomori_environment::PanelPlace::Dismissed
+    )));
 }
 
 #[test]
