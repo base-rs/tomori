@@ -77,7 +77,13 @@ pub struct Player {
 /// The ambience's thread: what tells it, and the thread, which ends once that goes.
 struct Ambience {
     commands: mpsc::Sender<engine::Command>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only tests join the thread; elsewhere it ends on its own as its commands go"
+        )
+    )]
     thread: std::thread::JoinHandle<()>,
 }
 
