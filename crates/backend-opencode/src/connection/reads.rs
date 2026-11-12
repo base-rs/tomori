@@ -61,17 +61,19 @@ pub(super) struct ResyncResult {
 /// time, or the read fails, since a space must not open on any of them
 /// incomplete. Its workers are listed for the rest of the time: a family too
 /// large to walk in time is returned in part, with the walk to go on with.
-#[allow(clippy::too_many_arguments)]
 async fn bounded_snapshot<S: Timers>(
-    client: &Client<'_>,
-    resolved: &Resolved,
+    service: Service<'_, '_, S>,
     id: &str,
     modes: Modes,
     local: &Cancellation,
-    cancellation: &Cancellation,
-    timers: &S,
     on_messages: impl FnOnce(),
 ) -> tomori_backend::Result<(Snapshot, Option<api::FamilyWalk>)> {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     let deadline = timers.now() + SNAPSHOT_TIMEOUT;
     // The connection's cancellation ends the wait early, and so the read.
     let expired = || async {
@@ -174,7 +176,6 @@ pub(super) fn finish_snapshot(
 }
 
 /// Start a snapshot a session asked for, isolated from the event dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn schedule_snapshot<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
@@ -182,11 +183,9 @@ pub(super) fn schedule_snapshot<'a, S: Timers>(
     id: String,
     identity: &Arc<AtomicU64>,
     reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) {
+    let Service { cancellation, .. } = service;
     let Some(registration) = registrations
         .get_mut(&id)
         .filter(|registration| Arc::ptr_eq(&registration.events.worker_epoch, identity))
@@ -223,16 +222,9 @@ pub(super) fn schedule_snapshot<'a, S: Timers>(
     let mark = registration.opening.mark.clone();
     let sequence = sequence.clone();
     snapshots.push(Box::pin(async move {
-        let result = bounded_snapshot(
-            client,
-            resolved,
-            &id,
-            modes,
-            &local,
-            cancellation,
-            timers,
-            move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
-        )
+        let result = bounded_snapshot(service, &id, modes, &local, move || {
+            mark.store(sequence.load(Ordering::Acquire), Ordering::Release)
+        })
         .await;
         let (result, rest) = match result {
             Ok((snapshot, rest)) => (Ok(snapshot), rest),
@@ -254,16 +246,18 @@ pub(super) fn schedule_snapshot<'a, S: Timers>(
 /// snapshot, so a slow session never holds up another or the event stream.
 /// The read also lists the directory's agents and the session's current one,
 /// which a restarted service may report differently.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn start_resyncs<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     resyncs: &mut ResyncFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     let now = timers.now();
     let mut ids: Vec<_> = registrations
         .iter()
@@ -303,16 +297,9 @@ pub(super) fn start_resyncs<'a, S: Timers>(
             let (result, modes) = futures_lite::future::zip(
                 async {
                     let reading = local.child();
-                    let result = bounded_snapshot(
-                        client,
-                        resolved,
-                        &id,
-                        current,
-                        &reading,
-                        cancellation,
-                        timers,
-                        move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
-                    )
+                    let result = bounded_snapshot(service, &id, current, &reading, move || {
+                        mark.store(sequence.load(Ordering::Acquire), Ordering::Release)
+                    })
                     .await;
                     listing.cancel();
                     let (result, rest) = match result {
@@ -581,11 +568,14 @@ pub(super) fn due_discoveries(
 pub(super) fn start_discoveries<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     discoveries: &mut DiscoveryFutures<'a>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     let free = MAX_DISCOVERIES.saturating_sub(discoveries.len());
     for id in due_discoveries(registrations, timers.now(), free) {
         let registration = registrations.get_mut(&id).expect("listed above");
@@ -663,11 +653,14 @@ pub(super) fn finish_discovery(
 pub(super) fn start_restores<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     restores: &mut RestoreFutures<'a>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     for (id, registration) in registrations.iter_mut() {
         if restores.len() >= MAX_RESYNCS {
             break;
@@ -741,11 +734,14 @@ type WorkerRecords = (Vec<Value>, Vec<Value>, Vec<Value>);
 pub(super) fn start_activity_syncs<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     activities: &mut ActivityFutures<'a>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     let room = MAX_RESYNCS.saturating_sub(activities.len());
     let due = registrations.iter_mut().filter(|(_, registration)| {
         !registration.activity_in_flight

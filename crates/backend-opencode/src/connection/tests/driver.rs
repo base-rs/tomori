@@ -865,10 +865,12 @@ fn perform(port: u16, registrations: &mut HashMap<String, Registration>, command
             registrations,
             &mut snapshots,
             &sequence,
-            client,
-            resolved,
-            cancellation,
-            scheduler,
+            Service {
+                client,
+                resolved,
+                cancellation,
+                timers: scheduler,
+            },
         );
         assert!(snapshots.is_empty());
         if let Some(request) = request
@@ -1128,20 +1130,24 @@ fn reads_again_and_restores_start_only_as_many_as_are_allowed() {
             &mut registrations,
             &mut resyncs,
             &sequence,
-            client,
-            resolved,
-            cancellation,
-            scheduler,
+            Service {
+                client,
+                resolved,
+                cancellation,
+                timers: scheduler,
+            },
         );
         assert_eq!(resyncs.len(), MAX_RESYNCS);
         let mut restores = FuturesUnordered::new();
         start_restores(
             &mut registrations,
             &mut restores,
-            client,
-            resolved,
-            cancellation,
-            scheduler,
+            Service {
+                client,
+                resolved,
+                cancellation,
+                timers: scheduler,
+            },
         );
         assert_eq!(restores.len(), MAX_RESYNCS);
     });
@@ -1212,10 +1218,12 @@ fn restore(
         start_restores(
             &mut registrations,
             &mut restores,
-            client,
-            resolved,
-            cancellation,
-            &timers,
+            Service {
+                client,
+                resolved,
+                cancellation,
+                timers: &timers,
+            },
         );
         restores.next().await.unwrap()
     })

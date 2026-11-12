@@ -104,18 +104,20 @@ pub(super) type RequestFutures<'a> =
 /// once; for the others this returns the request for the loop to perform, whose result, if
 /// it needs the registrations, the loop applies with [`complete`]. A command
 /// that waited for this connection is dropped if its caller has given up.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_command<'a, S: Timers>(
     command: Command,
     held: bool,
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, S>,
 ) -> Option<Request<'a>> {
+    let Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    } = service;
     // A caller that gave up while OpenCode was unreachable no longer wants
     // its command performed, such as a session created for nobody.
     if held && abandoned(&command) {
@@ -138,10 +140,7 @@ pub(super) fn prepare_command<'a, S: Timers>(
                 id,
                 &identity,
                 reply,
-                client,
-                resolved,
-                cancellation,
-                timers,
+                service,
             );
             return None;
         }
