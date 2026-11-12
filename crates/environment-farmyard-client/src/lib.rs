@@ -172,9 +172,16 @@ mod tests {
         for surface in surfaces {
             match surface.navmesh() {
                 Some(mesh) => {
-                    // The beach's flat shingle among it, a little above the meadow, as high as it is drawn.
+                    // But the beach's shingle among it, from the meadow's level down the bank to the water's edge and
+                    // into its shallows, as high as it is drawn.
+                    let beach = tomori_environment_farmyard::beach::height;
+                    let lowest = tomori_environment_farmyard::beach::water_level()
+                        - tomori_environment_farmyard::beach::SHALLOWS;
                     assert!(mesh.triangles().iter().flatten().all(|corner| {
                         (-1e-6..=trail::LIFT + trail::EDGE + 1e-6).contains(&corner.y)
+                            || beach(Vec2::new(corner.x, corner.z)).is_some_and(|shingle| {
+                                (shingle - corner.y).abs() < 1e-4 && corner.y > lowest - 1e-4
+                            })
                     }))
                 }
                 None => assert!((0.0..0.009).contains(&surface.height())),
@@ -659,7 +666,13 @@ mod tests {
                 .iter()
                 .any(|surface| surface.contains(point.with_y(surface.height())))
         };
-        // No surface reaches the river's water, its banks within the spread of its surface, or the pool and its rim.
+        // No surface reaches the river's water, its banks within the spread of its surface, or the pool and its rim, but
+        // the beach's, down to the water's edge and into its shallows, no deeper than ankle-deep.
+        let shallows = |point: Vec3| {
+            use tomori_environment_farmyard::beach;
+            beach::height(Vec2::new(point.x, point.z))
+                .is_some_and(|shingle| shingle > beach::water_level() - beach::SHALLOWS - 1e-3)
+        };
         let line = layout::river_line(8);
         for (index, middle) in line.iter().enumerate() {
             let after = line[(index + 1).min(line.len() - 1)];
@@ -671,7 +684,7 @@ mod tests {
                 let offset =
                     across * step as f32 / 12.0 * (layout::RIVER_HALF_WIDTH + backdrop::SPREAD);
                 let point = Vec3::new(middle.x + offset.x, middle.y, middle.z + offset.y);
-                assert!(!walkable(point), "{point}");
+                assert!(!walkable(point) || shallows(point), "{point}");
             }
         }
         let pool = layout::POOL;

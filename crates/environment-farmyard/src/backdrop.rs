@@ -284,39 +284,61 @@ pub fn drawn_ground(point: Vec2) -> Option<f32> {
         })
 }
 
-/// The foothills' ground, a ring of flat triangles from just beyond the fence to the ridge: pasture near the yard,
-/// native bush on the foothills, grey shingle along the river and about the pool, and rock where it is steep, as at
-/// the waterfall's cliff.
-fn foothills(shapes: &mut Shapes) {
+/// The foothills' ground as it is drawn: each of its cells' two triangles, ring by ring and segment by segment, with
+/// the ring and segment of its cell.
+pub fn ground_triangles() -> Vec<((usize, usize), [Vec3; 3])> {
     let grid: Vec<Vec<Vec3>> = (0..RINGS.len())
         .map(|ring| (0..SEGMENTS).map(|segment| vertex(ring, segment)).collect())
         .collect();
+    let mut triangles = Vec::with_capacity((RINGS.len() - 1) * SEGMENTS * 2);
     for ring in 0..RINGS.len() - 1 {
         for segment in 0..SEGMENTS {
             let next = (segment + 1) % SEGMENTS;
             let (a, b) = (grid[ring][segment], grid[ring][next]);
             let (c, d) = (grid[ring + 1][next], grid[ring + 1][segment]);
-            let triangles = cell((ring, segment), [a, b, c, d]);
-            for corners in triangles {
-                let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
-                let normal = (corners[1] - corners[0])
-                    .cross(corners[2] - corners[0])
-                    .normalize();
-                let at = Vec2::new(middle.x, middle.z);
-                let radius = at.distance(BACKDROP_CENTRE);
-                let wet = layout::nearest_river(at).1 < RIVER_HALF_WIDTH + 2.4
-                    || at.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS + 0.8;
-                let color = if normal.y.abs() < 0.6 {
-                    colors::ROCK
-                } else if wet {
-                    colors::SHINGLE
-                } else if radius < 19.0 + scatter(((ring * SEGMENTS + segment) * 2) as u32) * 4.0 {
-                    palette::GRASS
-                } else {
-                    colors::BUSH
-                };
-                facing(shapes, &corners, Vec3::Y, color);
+            for corners in cell((ring, segment), [a, b, c, d]) {
+                triangles.push(((ring, segment), corners));
             }
+        }
+    }
+    triangles
+}
+
+/// The foothills' ground, a ring of flat triangles from just beyond the fence to the ridge: pasture near the yard,
+/// native bush on the foothills, grey shingle along the river and about the pool, and rock where it is steep, as at
+/// the waterfall's cliff; and, where the beach is, its own triangles cut along the beach's outline, the part within
+/// it the beach's shingle ([`crate::beach::shingle`]).
+fn foothills(shapes: &mut Shapes) {
+    let beach = crate::beach::outline();
+    for (index, ((ring, segment), corners)) in ground_triangles().into_iter().enumerate() {
+        let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
+        let normal = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .normalize();
+        let at = Vec2::new(middle.x, middle.z);
+        let radius = at.distance(BACKDROP_CENTRE);
+        let wet = layout::nearest_river(at).1 < RIVER_HALF_WIDTH + 2.4
+            || at.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS + 0.8;
+        let color = if normal.y.abs() < 0.6 {
+            colors::ROCK
+        } else if wet {
+            colors::SHINGLE
+        } else if radius < 19.0 + scatter(((ring * SEGMENTS + segment) * 2) as u32) * 4.0 {
+            palette::GRASS
+        } else {
+            colors::BUSH
+        };
+        let (within, beyond) = crate::shapes::cut(&corners, &beach);
+        for part in beyond {
+            facing(shapes, &part, Vec3::Y, color);
+        }
+        if let Some(part) = within {
+            facing(
+                shapes,
+                &part,
+                Vec3::Y,
+                crate::beach::shingle(index as u32 + 1),
+            );
         }
     }
 }

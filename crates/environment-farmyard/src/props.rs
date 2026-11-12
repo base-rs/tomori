@@ -442,13 +442,13 @@ fn yard() -> (Shapes, Shapes) {
     let mut shapes = Shapes::new();
     let mut glass = Shapes::new();
     // The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
-    // open, and the packed earth inside the fence, a little above it.
-    crate::backdrop::facing(
-        &mut shapes,
-        &crate::backdrop::meadow(),
-        Vec3::Y,
-        palette::GRASS,
-    );
+    // open, cut along the beach's outline, the part within it the beach's shingle; and the packed earth inside the
+    // fence, a little above it.
+    let (beach, meadow) = crate::shapes::cut(&crate::backdrop::meadow(), &crate::beach::outline());
+    let meadow = meadow.into_iter().map(|part| (part, palette::GRASS));
+    for (part, color) in meadow.chain(beach.map(|part| (part, crate::beach::shingle(0)))) {
+        crate::backdrop::facing(&mut shapes, &part, Vec3::Y, color);
+    }
     let fence = layout::FENCE;
     shapes.ground(|shapes| {
         shapes.polygon(
@@ -569,7 +569,10 @@ mod tests {
             }
             for (other, other_low, other_high, other_face) in &flats[index + 1..] {
                 let overlaps = low.cmplt(*other_high).all() && other_low.cmplt(*high).all();
-                if overlaps && face != other_face {
+                // The meadow's parts, cut along the beach's outline from one flat polygon, meet rather than overlap.
+                let meadow =
+                    *height == crate::backdrop::MEADOW && *other == crate::backdrop::MEADOW;
+                if overlaps && face != other_face && !meadow {
                     assert!(
                         (height - other).abs() >= 0.001,
                         "{height} {other} {low} {high}"

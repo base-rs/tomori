@@ -1275,6 +1275,158 @@ fn a_little_dolmen_of_the_beach_s_building_stones_is_drawn_standing_on_its_shing
     });
 }
 
+/// The beach's stones as its server side settles them, and four of them laid in the river by the beach, in its dam
+/// reach, by a hand that takes each and lets it go just above the river's bed: three big ones in the shallows, standing
+/// out of the water, and a small slab in the channel's middle, under it. With each laid stone, its number and where it
+/// rests.
+fn beach_with_stones_in_the_water() -> (Vec<crate::stones::Shown>, Vec<(usize, Vec3)>) {
+    use tomori_environment_farmyard::beach;
+    use tomori_physics::message::{LetGo, Take};
+    use tomori_physics::world::World;
+    use tomori_physics::{Encoded, Placement, Precision, Seen, Side};
+    let big: Vec<usize> = (0..beach::RIVER)
+        .filter(|index| beach::big(*index) && beach::kind(*index) != beach::Kind::Slab)
+        .collect();
+    let small = (0..beach::RIVER)
+        .find(|index| !beach::big(*index) && beach::kind(*index) == beach::Kind::Slab)
+        .unwrap();
+    let channel = (0..=400)
+        .map(|step| beach::NEAR + 10.0 * step as f32 / 400.0)
+        .min_by(|a, b| {
+            let from = |out: f32| layout::nearest_river(beach::at(out, 0.6)).1;
+            from(*a).total_cmp(&from(*b))
+        })
+        .unwrap();
+    // The big ones in a line out from the water's edge, as a dam is begun.
+    let laid = [
+        (big[0], beach::at(beach::FAR - 0.25, 0.2)),
+        (big[1], beach::at(beach::FAR, 0.15)),
+        (big[2], beach::at(beach::FAR + 0.25, 0.1)),
+        (small, beach::at(channel, 0.6)),
+    ];
+    let mut world = World::new(
+        beach::settings(),
+        beach::colliders(),
+        beach::waters(),
+        beach::bodies(),
+    )
+    .unwrap();
+    assert!(world.settle(10.0));
+    for (stone, point) in laid {
+        let body = stone as u32;
+        let lowest = beach::stone(stone)
+            .iter()
+            .map(|corner| corner.y)
+            .fold(f32::INFINITY, f32::min);
+        let bed = tomori_environment_farmyard::backdrop::drawn_ground(point).unwrap();
+        let at = Placement::at(Vec3::new(point.x, bed + 0.002 - lowest, point.y));
+        let seen = |hand: Placement| Seen {
+            head: hand.position + Vec3::new(-0.3, 1.2, 0.0),
+            hands: [Some(hand), Some(hand)],
+        };
+        let take = Take {
+            body,
+            epoch: world.epoch(body).unwrap(),
+            hand: Side::Right,
+            offset: Encoded::default(),
+        };
+        let epoch = world
+            .take(1, &take, Some(&seen(world.placement(body).unwrap())))
+            .unwrap();
+        let letting = LetGo {
+            body,
+            epoch,
+            at: at.encoded(Precision::Rest),
+            velocity: [0.0; 3],
+            spin: [0.0; 3],
+            clock: 0,
+        };
+        world.let_go(1, &letting, Some(&seen(at))).unwrap();
+    }
+    for _ in 0..(8 * 4) {
+        world.step(0.25);
+    }
+    let shown = world
+        .bodies()
+        .map(|body| crate::stones::Shown {
+            stone: body as usize,
+            transform: world.placement(body).unwrap().matrix(),
+        })
+        .collect();
+    let rested = laid
+        .iter()
+        .map(|(stone, _)| (*stone, world.placement(*stone as u32).unwrap().position))
+        .collect();
+    (shown, rested)
+}
+
+#[test]
+fn stones_laid_in_the_river_by_the_beach_stand_out_of_its_shallows_or_lie_under_its_water() {
+    use tomori_environment_farmyard::beach;
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let mut farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        let (stones, laid) = beach_with_stones_in_the_water();
+        // Standing on the beach's slope, where it is walked, looking down to the water's edge and the stones in it.
+        let standing = beach::at(3.4, -0.9);
+        let ground = tomori_environment_farmyard::walkable::height_at(standing).unwrap();
+        let eye = Vec3::new(standing.x, ground + 1.6, standing.y);
+        let level = beach::water_level();
+        let look = beach::at(beach::FAR + 0.3, 0.3);
+        let view = (eye, Vec3::new(look.x, level, look.y));
+        let mut drawn = |stones: Vec<crate::stones::Shown>| {
+            farmyard.animate(
+                &device,
+                &queue,
+                &crate::client::Drawn {
+                    stones,
+                    chickens: Vec::new(),
+                    sticks: Vec::new(),
+                },
+            );
+            capture_sized(&device, &queue, &farmyard, 4, view, picture())
+        };
+        let without = drawn(Vec::new());
+        let pixels = drawn(stones);
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_DAM_PREVIEW") {
+            image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone())
+                .unwrap()
+                .save(path)
+                .unwrap();
+        }
+        // Each big stone in the shallows stands out of the water, its top seen over the water there without it; the
+        // small slab in the channel's middle lies wholly under the water, which is drawn over it.
+        for (stone, at) in &laid[..3] {
+            let (_, tall) = beach::size(*stone);
+            let top = *at + Vec3::Y * tall * 0.35;
+            assert!(top.y > level, "stone {stone}");
+            let seen = seen_at(view, top);
+            assert!(
+                (about(&pixels, seen) - about(&without, seen)).abs() > 10.0,
+                "stone {stone}: {} {}",
+                about(&pixels, seen),
+                about(&without, seen)
+            );
+        }
+        let (slab, under) = laid[3];
+        let (_, thick) = beach::size(slab);
+        assert!(under.y + thick < level, "{under}");
+        let seen = seen_at(view, under);
+        assert!((about(&pixels, seen) - about(&without, seen)).abs() < 1.0);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
 #[test]
 fn each_stone_is_an_instance_of_the_stones_model_showing_only_its_own() {
     let shown = [

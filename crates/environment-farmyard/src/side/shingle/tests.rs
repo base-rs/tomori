@@ -8,6 +8,7 @@ use glam::Quat;
 use super::*;
 use tomori_environment::Presence;
 use tomori_physics::message::{Intent, LetGo, Take};
+use tomori_physics::world::World;
 use tomori_physics::{Body, Encoded, Placement, Precision, SILENT, Side};
 use tomori_protocol::Pose;
 
@@ -127,8 +128,113 @@ fn a_stone_taken_within_reach_and_thrown_is_said_to_move_at_most_twenty_times_a_
     );
     assert!(updates > 10, "{updates}");
     assert!(rested);
-    // In the river now, it is soaking, to go back to the beach a minute on.
-    assert!(shingle.world().moving());
+    // In the river's dam reach now, where it rests, it stays, as part of a dam, rather than soaking to go back.
+    let at = shingle.world().placement(0).unwrap().position;
+    assert!(beach::waters()[0].contains(at) && beach::stays(at), "{at}");
+    assert!(!shingle.world().moving());
+}
+
+/// The middle of the river's channel `along` the beach from its middle, on the ground, where it is deepest.
+fn in_river(along: f32) -> glam::Vec2 {
+    let out = (0..=400)
+        .map(|step| beach::NEAR + 10.0 * step as f32 / 400.0)
+        .min_by(|a, b| {
+            let from = |out: f32| crate::layout::nearest_river(beach::at(out, along)).1;
+            from(*a).total_cmp(&from(*b))
+        })
+        .unwrap();
+    beach::at(out, along)
+}
+
+#[test]
+fn stones_laid_in_the_dam_reach_stay_while_one_resting_in_the_river_beyond_it_goes_back() {
+    // Two stones laid in the dam reach, one in the shallows by the beach and one in the channel's middle, and one in
+    // the river downstream of the dam reach, each let go a couple of millimetres above the river's bed.
+    let level = beach::water_level();
+    let places = [
+        (2, beach::at(beach::FAR - 0.15, 0.3)),
+        (4, in_river(-0.4)),
+        (6, in_river(beach::DAM_ALONG + 2.0)),
+    ];
+    let mut world = World::new(
+        beach::settings(),
+        beach::colliders(),
+        beach::waters(),
+        beach::bodies(),
+    )
+    .unwrap();
+    assert!(world.settle(10.0));
+    for (stone, point) in places {
+        let lowest = beach::stone(stone)
+            .iter()
+            .map(|corner| corner.y)
+            .fold(f32::INFINITY, f32::min);
+        let bed = crate::backdrop::drawn_ground(point).unwrap();
+        assert!(bed < level - 0.03, "{point}");
+        let body = stone as u32;
+        let at = Placement::at(glam::Vec3::new(point.x, bed + 0.002 - lowest, point.y));
+        // Seen with a hand on it where it lies, and then with that hand where it is let go.
+        let seen = |hand: Placement| tomori_physics::Seen {
+            head: hand.position + glam::Vec3::new(-0.3, 1.2, 0.0),
+            hands: [Some(hand), Some(hand)],
+        };
+        let epoch = world
+            .take(
+                1,
+                &Take {
+                    body,
+                    epoch: world.epoch(body).unwrap(),
+                    hand: Side::Right,
+                    offset: Encoded::default(),
+                },
+                Some(&seen(world.placement(body).unwrap())),
+            )
+            .unwrap();
+        let Intent::LetGo(letting) =
+            serde_json::from_str(&let_go(body, epoch, at, [0.0; 3])).unwrap()
+        else {
+            unreachable!()
+        };
+        world.let_go(1, &letting, Some(&seen(at))).unwrap();
+    }
+    // Each comes to rest in the water, partly under it, where it was let go.
+    let mut returned = Vec::new();
+    for _ in 0..(5 * 4) {
+        returned.extend(world.step(0.25).returning.into_iter().map(|back| back.body));
+    }
+    let laid: Vec<Placement> = places
+        .iter()
+        .map(|(stone, _)| world.placement(*stone as u32).unwrap())
+        .collect();
+    for ((stone, point), at) in places.iter().zip(&laid) {
+        assert!(
+            (at.position.with_y(0.0) - glam::Vec3::new(point.x, 0.0, point.y)).length() < 0.05,
+            "stone {stone} at {}",
+            at.position
+        );
+        let low = beach::stone(*stone)
+            .iter()
+            .map(|corner| at.transform_point(*corner).y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(low < level, "stone {stone} is not in the water");
+    }
+    assert!(beach::stays(laid[0].position) && beach::stays(laid[1].position));
+    assert!(!beach::stays(laid[2].position));
+    // A minute and more on, the stones in the dam reach still lie where they were laid, and the one beyond it has gone
+    // back to where it began on the beach, fading out and in, and only it.
+    for _ in 0..(70 * 4) {
+        returned.extend(world.step(0.25).returning.into_iter().map(|back| back.body));
+    }
+    assert_eq!(returned, [6]);
+    for ((stone, _), at) in places.iter().zip(&laid).take(2) {
+        assert_eq!(
+            world.placement(*stone as u32).unwrap(),
+            *at,
+            "stone {stone}"
+        );
+    }
+    assert!(world.at_home(6, 0.05));
+    assert!(!world.moving());
 }
 
 #[test]

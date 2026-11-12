@@ -3,7 +3,7 @@
 
 //! Low-poly shapes, built in code, as the farmyard's scenery is: each face flat, with a normal and a colour of its own, a
 //! little varied face by face, so that the facets read as a hand-made model's do.
-use glam::{Quat, Vec3, Vec4};
+use glam::{Quat, Vec2, Vec3, Vec4};
 use tomori_assets::Primitive;
 
 /// A triangle list under construction, of flat faces.
@@ -221,9 +221,170 @@ impl Shapes {
     }
 }
 
+/// The part of the flat, convex polygon `corners` where `side` is no less than nothing, `side` being linear across it,
+/// as how far a point is to one side of a line on the ground, or above a height: its corners there, and a corner where
+/// each of its edges crosses, found along the edge; fewer than three if none of it is.
+pub fn clipped(corners: &[Vec3], side: impl Fn(Vec3) -> f32) -> Vec<Vec3> {
+    let mut kept = Vec::with_capacity(corners.len() + 1);
+    for (index, corner) in corners.iter().enumerate() {
+        let next = corners[(index + 1) % corners.len()];
+        let (here, there) = (side(*corner), side(next));
+        if here >= 0.0 {
+            kept.push(*corner);
+        }
+        // Crossing between them, rather than at either, which is kept already.
+        if (here > 0.0 && there < 0.0) || (here < 0.0 && there > 0.0) {
+            kept.push(corner.lerp(next, here / (here - there)));
+        }
+    }
+    kept
+}
+
+/// How far `point` is inside the edge of the convex `outline` on the ground from `from` to `to`, by its winding: more
+/// than nothing within it, less beyond.
+fn inside(outline: &[Vec2], from: Vec2, to: Vec2, point: Vec3) -> f32 {
+    let winding: f32 = (0..outline.len())
+        .map(|index| outline[index].perp_dot(outline[(index + 1) % outline.len()]))
+        .sum();
+    (to - from).perp_dot(Vec2::new(point.x, point.z) - from) * winding.signum()
+}
+
+/// Whether the polygon `corners` is a face rather than a sliver: three corners or more, enclosing a square
+/// centimetre or more seen from above.
+fn face(corners: &[Vec3]) -> bool {
+    let flat: Vec<Vec2> = corners
+        .iter()
+        .map(|corner| Vec2::new(corner.x, corner.z))
+        .collect();
+    let area: f32 = (0..flat.len())
+        .map(|index| flat[index].perp_dot(flat[(index + 1) % flat.len()]))
+        .sum::<f32>()
+        .abs()
+        * 0.5;
+    corners.len() >= 3 && area > 1e-4
+}
+
+/// The flat, convex polygon `corners` cut along the edges of the convex `outline` on the ground: the part within it,
+/// if any, and the parts beyond it, each convex, so that together they are the polygon, and none overlaps another.
+pub fn cut(corners: &[Vec3], outline: &[Vec2]) -> (Option<Vec<Vec3>>, Vec<Vec<Vec3>>) {
+    let mut within = corners.to_vec();
+    let mut beyond = Vec::new();
+    for index in 0..outline.len() {
+        let (from, to) = (outline[index], outline[(index + 1) % outline.len()]);
+        let side = |point: Vec3| inside(outline, from, to, point);
+        let outside = clipped(&within, |point| -side(point));
+        if face(&outside) {
+            beyond.push(outside);
+        }
+        within = clipped(&within, side);
+        // None of it within: the polygon whole, rather than cut along lines that miss the outline.
+        if !face(&within) {
+            return (None, vec![corners.to_vec()]);
+        }
+    }
+    (Some(within), beyond)
+}
+
+/// The triangles a flat, convex polygon is drawn in, a fan about its first corner, each wound as it is.
+pub fn fan(corners: &[Vec3]) -> impl Iterator<Item = [Vec3; 3]> + '_ {
+    (1..corners.len().saturating_sub(1))
+        .map(|index| [corners[0], corners[index], corners[index + 1]])
+}
+
+/// The triangle `corners`, wound anticlockwise seen from above, so that it faces up.
+pub fn upward([a, b, c]: [Vec3; 3]) -> [Vec3; 3] {
+    if (b - a).cross(c - a).y < 0.0 {
+        [a, c, b]
+    } else {
+        [a, b, c]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_polygon_is_cut_along_an_outline_into_the_part_within_and_the_parts_beyond() {
+        let square = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 1.0, 0.0),
+            Vec3::new(2.0, 1.0, 2.0),
+            Vec3::new(0.0, 0.0, 2.0),
+        ];
+        let area = |corners: &[Vec3]| -> f32 {
+            fan(corners)
+                .map(|[a, b, c]| {
+                    (Vec2::new(b.x - a.x, b.z - a.z))
+                        .perp_dot(Vec2::new(c.x - a.x, c.z - a.z))
+                        .abs()
+                        * 0.5
+                })
+                .sum()
+        };
+        // An outline across its middle, either way round: the part within it and the two either side, which together
+        // are the square, each corner on its plane.
+        let outline = [
+            Vec2::new(0.5, -1.0),
+            Vec2::new(1.5, -1.0),
+            Vec2::new(1.5, 3.0),
+            Vec2::new(0.5, 3.0),
+        ];
+        let reversed: Vec<Vec2> = outline.iter().rev().copied().collect();
+        for outline in [&outline[..], &reversed] {
+            let (within, beyond) = cut(&square, outline);
+            let within = within.unwrap();
+            assert!((area(&within) - 2.0).abs() < 1e-5);
+            assert_eq!(beyond.len(), 2);
+            assert!((beyond.iter().map(|part| area(part)).sum::<f32>() - 2.0).abs() < 1e-5);
+            for corner in within.iter().chain(beyond.iter().flatten()) {
+                assert!((corner.y - corner.x * 0.5).abs() < 1e-6, "{corner}");
+            }
+            assert!(
+                within
+                    .iter()
+                    .all(|corner| (0.5 - 1e-6..=1.5 + 1e-6).contains(&corner.x))
+            );
+        }
+        // An outline it lies wholly within, or wholly beyond.
+        let around = [
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(3.0, -1.0),
+            Vec2::new(3.0, 3.0),
+            Vec2::new(-1.0, 3.0),
+        ];
+        let (within, beyond) = cut(&square, &around);
+        assert_eq!(within.unwrap(), square);
+        assert!(beyond.is_empty());
+        let away = around.map(|corner| corner + Vec2::X * 10.0);
+        let (within, beyond) = cut(&square, &away);
+        assert!(within.is_none());
+        assert_eq!(beyond, [square.to_vec()]);
+        // Below a height, by the same clipping.
+        let low = clipped(&square, |point| 0.5 - point.y);
+        assert!((area(&low) - 2.0).abs() < 1e-5);
+        assert_eq!(fan(&square).count(), 2);
+        assert_eq!(fan(&[]).count(), 0);
+        // Beside the outline, but within none of it, whole.
+        let beside = [
+            Vec2::new(1.0, 2.5),
+            Vec2::new(3.0, 2.5),
+            Vec2::new(3.0, 3.0),
+            Vec2::new(1.0, 3.0),
+        ];
+        let (within, beyond) = cut(&square, &beside);
+        assert!(within.is_none());
+        assert_eq!(beyond, [square.to_vec()]);
+        // Either way round, it faces up.
+        for triangle in [
+            [square[0], square[2], square[1]],
+            [square[0], square[1], square[2]],
+        ] {
+            let [a, b, c] = upward(triangle);
+            assert!((b - a).cross(c - a).y > 0.0);
+            assert_eq!(a, square[0]);
+        }
+    }
 
     #[test]
     fn faces_are_flat_and_face_outwards() {
