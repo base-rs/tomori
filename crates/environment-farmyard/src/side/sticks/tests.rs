@@ -436,6 +436,10 @@ fn a_stick_let_go_in_the_pool_floats_and_goes_back_on_its_log_after_a_while() {
         pool.y
     );
     assert!(campsite::in_pool(&floating));
+    // Its marshmallow, the end it floats down by, is under the water, so a burning one goes out.
+    assert!(campsite::doused(
+        campsite::Pose::of(&floating).marshmallow()
+    ));
     assert!(sticks.report().sticks[1].floating);
     // A minute later, it fades back to its log.
     let (_, later) = run(&mut sticks, &[], later, (campsite::RETURNS / 1000) as f32);
