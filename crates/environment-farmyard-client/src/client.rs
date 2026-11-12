@@ -3,7 +3,8 @@
 
 //! The farmyard's client side, for one space: the flock as its server side shares it, each chicken with its controller,
 //! moved on by the farmyard's clock, which it reads from the server's messages; the campsite's marshmallow sticks, which
-//! a participant takes with either grip, toasts over the fire and puts back; the beach's stones, which a participant
+//! a participant takes with either grip, toasts over the fire and puts back, and its logs, which they put on the fire,
+//! which grows and crackles the more for them; the beach's stones, which a participant
 //! takes with either grip, carries, throws and stacks; what the ray points at; the notices it asks for as a participant points at a
 //! chicken and looks away; the clucks, clacks and splashes it hears; and what its scenery draws.
 use std::sync::Arc;
@@ -21,11 +22,13 @@ use tomori_environment_farmyard::controller::ChickenController;
 use tomori_environment_farmyard::flock::{self, Event, Intent, MOST, PER_CHICKEN, State};
 use tomori_environment_farmyard::{beach, campsite};
 
-/// What the farmyard's scenery draws this frame: each chicken, posed and placed, each of the campsite's sticks, and each
-/// of the beach's stones.
+/// What the farmyard's scenery draws this frame: each chicken, posed and placed, each of the campsite's sticks and
+/// logs, how big its fire is drawn, and each of the beach's stones.
 pub struct Drawn {
     pub chickens: Vec<Instance>,
     pub sticks: Vec<crate::campsite::Shown>,
+    pub logs: Vec<crate::campsite::ShownLog>,
+    pub fire: f32,
     pub stones: Vec<crate::stones::Shown>,
 }
 
@@ -317,7 +320,8 @@ impl ClientSide for FarmyardClient {
         for intent in self.point(input.pointed, input.head, input.now) {
             output = output.with_intent(intent);
         }
-        // The campsite's sticks: those this participant takes with either hand, toasts and lets go.
+        // The campsite's sticks and logs: those this participant takes with either hand, toasts or puts on the fire, and
+        // lets go.
         for intent in self.sticks.update(
             input.grab.iter().chain(&input.left_grab),
             input.participant,
@@ -342,7 +346,11 @@ impl ClientSide for FarmyardClient {
         for (sound, at) in self.landed.drain(..) {
             output = output.with_sound(sound, at);
         }
-        // A stick or stone passed from one hand to the other is felt on the hand that took it.
+        // The fire crackles the more the bigger it is.
+        for (sound, at) in self.sticks.crackles(clock) {
+            output = output.with_sound(sound, at);
+        }
+        // A stick, log or stone passed from one hand to the other is felt on the hand that took it.
         for side in self.sticks.passed().into_iter().chain(self.stones.passed()) {
             output = output.with_pass(side);
         }
@@ -352,6 +360,9 @@ impl ClientSide for FarmyardClient {
         let sticks = self
             .sticks
             .shown(&input.hands, &input.left_hands, input.now, clock);
+        let logs = self
+            .sticks
+            .logs_shown(&input.hands, &input.left_hands, input.now, clock);
         output.drawing(Arc::new(Drawn {
             chickens: self
                 .controllers
@@ -359,6 +370,8 @@ impl ClientSide for FarmyardClient {
                 .map(|controller| controller.instance().clone())
                 .collect(),
             sticks,
+            logs,
+            fire: self.sticks.drawn_size(),
             stones,
         }))
     }

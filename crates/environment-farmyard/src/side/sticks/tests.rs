@@ -119,7 +119,10 @@ fn the_sticks_settle_on_their_log_and_then_cost_nothing() {
         assert_eq!(sticks.toast(index), 0.0);
     }
     let shared = sticks.shared();
-    assert_eq!(shared.sticks.bodies.len(), campsite::STICKS);
+    assert_eq!(
+        shared.sticks.bodies.len(),
+        campsite::STICKS + campsite::LOGS
+    );
     assert_eq!(shared.toast, [0.0; campsite::STICKS]);
     let (events, _) = run(&mut sticks, &[], now, 2.0);
     assert!(events.is_empty(), "{events:?}");
@@ -537,13 +540,13 @@ fn an_empty_campsite_puts_its_sticks_back_after_an_hour() {
 }
 
 #[test]
-fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
+fn the_agent_is_told_of_the_bonfire_the_fireside_log_and_each_stick_and_may_inspect_them() {
     let now = Instant::now();
     let mut sticks = Sticks::new(now);
     taken(&mut sticks, 2, now);
     let report = sticks.report();
     let objects = report.describe();
-    assert_eq!(objects.len(), campsite::STICKS + 1);
+    assert_eq!(objects.len(), campsite::STICKS + 3);
     let (id, reference, description, at) = &objects[0];
     assert_eq!(
         (id.as_str(), reference.as_str()),
@@ -551,7 +554,30 @@ fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
     );
     assert!(description.contains("bonfire"));
     assert_eq!(*at, Some(campsite::heart()));
-    for (index, (id, reference, description, at)) in objects[1..].iter().enumerate() {
+    // The woodpile, every log on it.
+    let (id, reference, description, _) = &objects[1];
+    assert_eq!(
+        (id.as_str(), reference.as_str()),
+        ("woodpile", "campsite/woodpile")
+    );
+    assert!(description.contains(&format!(
+        "{} of its {} logs",
+        campsite::LOGS,
+        campsite::LOGS
+    )));
+    // The fireside log, on its seat, which pointing at seats one.
+    let (id, reference, description, at) = &objects[2];
+    assert_eq!(
+        (id.as_str(), reference.as_str()),
+        ("fireside-log", "campsite/fireside-log")
+    );
+    assert!(tomori_environment::valid_reference(reference));
+    assert!(description.contains("seat") && description.contains("pointing at it"));
+    let (seat, _, _, radius) = campsite::fireside();
+    assert_eq!(*at, Some(seat + Vec3::Y * campsite::seat_top(radius)));
+    let log = report.inspect("campsite/fireside-log").unwrap();
+    assert_eq!(log["kind"], "log seat");
+    for (index, (id, reference, description, at)) in objects[3..].iter().enumerate() {
         assert_eq!(*id, format!("stick-{index}"));
         assert_eq!(*reference, format!("campsite/stick-{index}"));
         assert!(tomori_environment::valid_reference(reference));
@@ -568,15 +594,17 @@ fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
     }
     let lying = Report {
         sticks: vec![Said::default()],
+        ..Report::default()
     };
-    assert!(lying.describe()[1].2.contains("lying"));
+    assert!(lying.describe()[3].2.contains("lying"));
     let floating = Report {
         sticks: vec![Said {
             floating: true,
             ..Said::default()
         }],
+        ..Report::default()
     };
-    assert!(floating.describe()[1].2.contains("floating in the pool"));
+    assert!(floating.describe()[3].2.contains("floating in the pool"));
     let bonfire = report.inspect("campsite/bonfire").unwrap();
     assert_eq!(bonfire["kind"], "bonfire");
     let stick = report.inspect("campsite/stick-2").unwrap();
@@ -590,8 +618,235 @@ fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
     assert_eq!(report.inspect("campsite/stick-9"), None);
     assert_eq!(report.inspect("campsite/stick-x"), None);
     assert_eq!(report.inspect("hen/pip"), None);
-    // Its takings are logged as sticks.
+    // Its takings are logged as sticks and logs.
     assert_eq!((NOUN.one)(campsite::body(3)), "stick 3");
+    assert_eq!((NOUN.one)(campsite::log_body(5)), "log 5");
     assert_eq!((NOUN.one)(7), "body 7");
-    assert_eq!(sticks.loose().world().bodies().count(), campsite::STICKS);
+    assert_eq!(
+        sticks.loose().world().bodies().count(),
+        campsite::STICKS + campsite::LOGS
+    );
+}
+
+fn take_log(index: usize, epoch: u32) -> String {
+    serde_json::to_string(&Intent::Take(Take {
+        body: campsite::log_body(index),
+        epoch,
+        hand: Side::Right,
+        offset: Placement::IDENTITY.encoded(Precision::Rest),
+    }))
+    .unwrap()
+}
+
+fn let_go_log(index: usize, epoch: u32, at: Placement) -> String {
+    serde_json::to_string(&Intent::LetGo(LetGo {
+        body: campsite::log_body(index),
+        epoch,
+        at: at.encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    }))
+    .unwrap()
+}
+
+/// Log `index`, taken from where it lies by participant 3's right hand there, at `now`, and let go at `at`, unmoving,
+/// their hand there.
+fn carried(sticks: &mut Sticks, index: usize, at: Placement, now: Instant) {
+    let body = campsite::log_body(index);
+    let lies = sticks.world().placement(body).unwrap();
+    let epoch = sticks.world().epoch(body).unwrap();
+    assert!(sticks.ask(3, &take_log(index, epoch), &[holding(3, lies, now)]));
+    assert_eq!(sticks.world().held(body).map(|held| held.by), Some(3));
+    assert!(sticks.ask(3, &let_go_log(index, epoch + 1, at), &[holding(3, at, now)]));
+    assert_eq!(sticks.world().held(body), None);
+}
+
+/// Over the fire, a little above its embers, lying across it.
+fn over_the_fire(turn: f32) -> Placement {
+    Placement::new(FIRE + Vec3::Y * 0.35, Quat::from_rotation_y(turn))
+}
+
+#[test]
+fn the_woodpile_s_logs_rest_stacked_where_they_were_laid_and_never_creep_nor_tip() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    assert!(!sticks.world().moving());
+    // Each log where it was laid, crossed on the pair beneath, to within a few millimetres and a degree.
+    for index in 0..campsite::LOGS {
+        let body = campsite::log_body(index);
+        let at = sticks.world().placement(body).unwrap();
+        let laid = campsite::log_home(index);
+        assert!(
+            at.position.distance(laid.position) < 0.005,
+            "{index}: {at:?} {laid:?}"
+        );
+        assert!(at.rotation.angle_between(laid.rotation) < 0.02, "{index}");
+        assert!(sticks.world().at_home(body, campsite::RACKED));
+        assert_eq!(sticks.burnt(index), 0.0);
+    }
+    // For ten simulated minutes nothing moves and nothing is said: every log stays put to the bit.
+    let before: Vec<Placement> = (0..campsite::LOGS)
+        .map(|index| sticks.world().placement(campsite::log_body(index)).unwrap())
+        .collect();
+    let mut at = now;
+    for _ in 0..600 {
+        at += Duration::from_secs(1);
+        assert_eq!(sticks.update(&[], at, 0), None);
+    }
+    for (index, placement) in before.iter().enumerate() {
+        let after = sticks.world().placement(campsite::log_body(index)).unwrap();
+        assert_eq!(after, *placement, "{index}");
+    }
+    // Its stone and its logs, solid, beyond the ring participants walk round the fire.
+    let report = sticks.report();
+    assert_eq!(
+        (report.piled, report.burning, report.elsewhere),
+        (campsite::LOGS, 0, 0)
+    );
+    assert_eq!(sticks.size(), 0.0);
+}
+
+#[test]
+fn a_log_put_in_the_fire_burns_making_the_fire_bigger_up_to_its_biggest_and_nobody_takes_it_back() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    // The top log, let go over the fire, falls into it, catches, and feeds it.
+    carried(&mut sticks, 7, over_the_fire(0.3), now);
+    let (events, now) = rest(&mut sticks, now, 10.0);
+    assert!(sticks.burnt(7) > 0.0);
+    assert!(events.iter().any(|event| {
+        event
+            .burnt
+            .iter()
+            .any(|burnt| burnt.body == campsite::log_body(7) && burnt.burnt > 0.0)
+    }));
+    let report = sticks.report();
+    assert_eq!((report.piled, report.burning), (campsite::LOGS - 1, 1));
+    assert!(report.describe()[0].2.contains("a log burning on it"));
+    // Burning, it is nobody's to take, nor let go of, as nobody holds it.
+    let lies = sticks.world().placement(campsite::log_body(7)).unwrap();
+    let epoch = sticks.world().epoch(campsite::log_body(7)).unwrap();
+    assert!(sticks.ask(3, &take_log(7, epoch), &[holding(3, lies, now)]));
+    assert_eq!(sticks.world().held(campsite::log_body(7)), None);
+    assert!(sticks.ask(3, &let_go_log(7, epoch, lies), &[holding(3, lies, now)]));
+    assert_eq!(sticks.world().epoch(campsite::log_body(7)), Some(epoch));
+    // Over the time it catches, the fire grows by its fuel, less what it dies back meanwhile, and says so as it does.
+    let (events, now) = run(&mut sticks, &[], now, campsite::CATCH + 1.0);
+    let grown = sticks.size();
+    let most = campsite::FUEL - campsite::CATCH / campsite::DIES_BACK;
+    assert!(grown > most - 0.08 && grown <= most + 1e-3, "{grown}");
+    let said: Vec<f32> = events.iter().filter_map(|event| event.size).collect();
+    assert!(
+        said.len() > 5 && said.windows(2).all(|pair| pair[1] > pair[0]),
+        "{said:?}"
+    );
+    assert!((said.last().unwrap() - grown).abs() < campsite::FUEL * 0.1);
+    // Three more logs, one after another, make it as big as it grows, and no bigger.
+    let (mut now, mut events) = (now, Vec::new());
+    for (index, turn) in [(6, 1.2), (5, 2.0), (4, 2.8)] {
+        carried(&mut sticks, index, over_the_fire(turn), now);
+        let (rested, at) = rest(&mut sticks, now, 10.0);
+        assert!(sticks.burnt(index) > 0.0, "{index}");
+        let (ran, at) = run(&mut sticks, &[], at, 2.0);
+        events.extend(rested.into_iter().chain(ran));
+        now = at;
+    }
+    let (ran, now) = run(&mut sticks, &[], now, campsite::CATCH);
+    events.extend(ran);
+    let said: Vec<f32> = events.iter().filter_map(|event| event.size).collect();
+    assert_eq!(said.iter().copied().fold(0.0, f32::max), 1.0, "{said:?}");
+    assert!(sticks.size() > 0.98);
+    assert_eq!(sticks.shared().size, sticks.size());
+    let report = sticks.report();
+    assert_eq!(report.burning, 4);
+    let bonfire = &report.describe()[0].2;
+    assert!(bonfire.contains("blazing") && bonfire.contains("4 logs burning on it"));
+    let inspected = report.inspect("campsite/woodpile").unwrap();
+    assert_eq!(
+        (&inspected["on_the_pile"], &inspected["burning"]),
+        (
+            &serde_json::json!(campsite::LOGS - 4),
+            &serde_json::json!(4)
+        )
+    );
+    assert_eq!(
+        report.inspect("campsite/bonfire").unwrap()["looks"],
+        "blazing"
+    );
+    // A marshmallow held well beyond where a fire at its default toasts it toasts by the big fire.
+    let far = campsite::heart_at(1.0) + Vec3::X * 0.9;
+    assert_eq!(campsite::heat(far), 0.0);
+    let epoch = taken(&mut sticks, 0, now);
+    let _ = epoch;
+    let hand = toasting(far);
+    let ada = holding(3, hand, now);
+    (_, _) = run(&mut sticks, &[ada], now, 2.0);
+    assert!(sticks.toast(0) > 0.0);
+}
+
+#[test]
+fn a_burnt_log_comes_back_to_the_woodpile_and_the_fire_dies_back_to_its_default() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    carried(&mut sticks, 6, over_the_fire(1.0), now);
+    let (_, now) = rest(&mut sticks, now, 10.0);
+    assert!(sticks.burnt(6) > 0.0);
+    // It chars and shrinks as it burns, said as it goes, and once burnt away fades back onto the woodpile, fresh.
+    let (events, now) = run(&mut sticks, &[], now, campsite::BURN);
+    let burnt: Vec<f32> = events
+        .iter()
+        .flat_map(|event| &event.burnt)
+        .map(|burnt| burnt.burnt)
+        .collect();
+    assert!(burnt.len() > 20, "{burnt:?}");
+    let returning: Vec<_> = events
+        .iter()
+        .flat_map(|event| &event.sticks.returning)
+        .collect();
+    assert_eq!(returning.len(), 1);
+    assert_eq!(returning[0].body, campsite::log_body(6));
+    assert_eq!(*burnt.last().unwrap(), 0.0);
+    let (_, now) = rest(&mut sticks, now, 5.0);
+    assert_eq!(sticks.burnt(6), 0.0);
+    let report = sticks.report();
+    assert_eq!((report.piled, report.burning), (campsite::LOGS, 0));
+    // The fire dies back to its default over a few minutes, without more wood, and says so, then nothing more.
+    assert!(sticks.size() > 0.0);
+    let (events, now) = run(&mut sticks, &[], now, campsite::DIES_BACK * campsite::FUEL);
+    assert_eq!(sticks.size(), 0.0);
+    assert_eq!(
+        events.iter().filter_map(|event| event.size).next_back(),
+        Some(0.0)
+    );
+    let (events, _) = run(&mut sticks, &[], now, 5.0);
+    assert!(events.is_empty(), "{events:?}");
+}
+
+#[test]
+fn a_log_lying_about_the_fire_stays_and_one_carried_off_goes_back_on_the_woodpile() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    // Put down on the clearing beside the fire, it lies there for anyone to put on it.
+    let beside = Placement::at(FIRE + Vec3::new(1.0, 0.3, 0.6));
+    carried(&mut sticks, 7, beside, now);
+    let (_, now) = rest(&mut sticks, now, 10.0);
+    let lies = sticks.world().placement(campsite::log_body(7)).unwrap();
+    assert!(lies.position.distance(beside.position) < 0.6);
+    assert_eq!(sticks.burnt(7), 0.0);
+    assert_eq!(sticks.report().elsewhere, 1);
+    let (events, now) = run(&mut sticks, &[], now, 3.0);
+    assert!(events.is_empty());
+    // Carried off along the trail, beyond reach of the fire, it fades back onto the woodpile.
+    let away = Placement::at(FIRE + Vec3::new(campsite::DROP_REACH + 1.0, 0.4, 1.5));
+    carried(&mut sticks, 6, away, now);
+    let (events, _) = rest(&mut sticks, now, 10.0);
+    assert!(
+        events
+            .iter()
+            .flat_map(|event| &event.sticks.returning)
+            .any(|returning| returning.body == campsite::log_body(6))
+    );
+    let report = sticks.report();
+    assert_eq!((report.piled, report.elsewhere), (campsite::LOGS - 1, 1));
 }

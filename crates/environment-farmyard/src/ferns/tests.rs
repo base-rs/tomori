@@ -484,9 +484,9 @@ fn the_ferns_are_modest_for_the_quest() {
         .map(|eyes| triangles(Some(eyes)))
         .max()
         .unwrap();
-    assert_eq!(most, 22_724, "the count the documentation gives");
+    assert_eq!(most, 22_796, "the count the documentation gives");
     assert!(most <= BUDGET);
-    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 17_555);
+    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 17_431);
     assert!(triangles(None) > BUDGET * 3 / 2);
     assert_eq!((ferns().len(), bush().len()), (152, 40));
 }

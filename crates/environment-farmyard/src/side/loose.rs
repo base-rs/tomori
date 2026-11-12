@@ -128,7 +128,7 @@ impl Loose {
     }
 
     /// `line`, logged, unless too many have been lately.
-    fn log(&mut self, line: String) {
+    pub(crate) fn log(&mut self, line: String) {
         if let Some(line) = self.logged.line(line, Instant::now()) {
             log::info!("{line}");
         }

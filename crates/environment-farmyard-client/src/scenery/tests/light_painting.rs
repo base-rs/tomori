@@ -101,6 +101,8 @@ fn a_burning_marshmallow_writes_tomori_in_the_air_fresh_and_warm_where_it_is_and
             stones: Vec::new(),
             chickens: Vec::new(),
             sticks: Vec::new(),
+            logs: Vec::new(),
+            fire: 0.0,
         };
         farmyard.animate(&device, &queue, &none);
         let without = capture_sized(&device, &queue, &farmyard, 4, view, picture());
@@ -125,6 +127,8 @@ fn a_burning_marshmallow_writes_tomori_in_the_air_fresh_and_warm_where_it_is_and
             stones: Vec::new(),
             chickens: Vec::new(),
             sticks: vec![stick],
+            logs: Vec::new(),
+            fire: 0.0,
         };
         farmyard.animate(&device, &queue, &drawn);
         let with = capture_sized(&device, &queue, &farmyard, 4, view, picture());

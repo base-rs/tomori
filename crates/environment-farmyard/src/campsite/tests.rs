@@ -78,11 +78,19 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
             );
         }
         assert!(views.iter().all(|(from, to)| !solid.blocks(*from, *to)));
-        // Out of every plant's crown, round about its trunk, as far as it reaches.
+        // Out of every plant's crown, round about its trunk, as far as it reaches; but for a tree fern's, beneath it, its
+        // crown high overhead and its trunk well clear, as the fireside log lies beneath a ponga's.
+        let mut bush = crate::ferns::bush().into_iter();
         for plant in backdrop::plants() {
             let (reach, _) = plant.size();
+            let fern = (plant.kind == backdrop::Kind::Fern).then(|| bush.next().unwrap().solids());
+            let beneath = fern.is_some_and(|fern| {
+                let trunk = Vec2::new(fern[0].low[0], fern[0].low[2]);
+                let trunk = (trunk + Vec2::new(fern[0].high[0], fern[0].high[2])) * 0.5;
+                apart(&solid, trunk) > 1.0 && solid.high[1] + 1.8 < fern[1].low[1]
+            });
             assert!(
-                apart(&solid, ground(plant.at)) > reach,
+                apart(&solid, ground(plant.at)) > reach || beneath,
                 "{solid:?} {plant:?}"
             );
         }
@@ -100,10 +108,53 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
     }
     // The second seat across the fire from the lookout's, low enough to sit on, facing the fire along it.
     let (middle, along, length, radius) = seat();
-    assert!((1.2..1.6).contains(&ground(middle).distance(fire)));
+    assert!((1.5..1.8).contains(&ground(middle).distance(fire)));
     assert!((0.35..0.5).contains(&seat_top(radius)));
     assert!((1.0..1.6).contains(&length));
     assert!(along.dot((fire - ground(middle)).normalize()).abs() < 0.2);
+}
+
+#[test]
+fn the_fireside_log_lies_between_the_fire_and_the_pool_facing_the_fire_and_seats_whoever_points_at_it()
+ {
+    let fire = ground(FIRE);
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let (middle, along, length, radius) = fireside();
+    // Between the fire and the pool, a step beyond the ring participants walk round the fire, lying across the way to
+    // the pool, so that one sitting on it faces the fire; low enough to sit on.
+    assert!((1.5..1.8).contains(&ground(middle).distance(fire)));
+    assert!(ground(middle).distance(pool) < fire.distance(pool) - 1.4);
+    assert!(along.dot((pool - fire).normalize()).abs() < 1e-4);
+    assert!((0.35..0.5).contains(&seat_top(radius)));
+    assert!((1.0..1.6).contains(&length));
+    // On the ground beneath its chocks, which rises towards the pool: none higher than it lies, nor much lower.
+    for end in [-0.32, 0.32] {
+        let at = ground(middle) + along * length * end;
+        let beneath = backdrop::drawn_ground(at)
+            .unwrap_or(backdrop::MEADOW)
+            .max(trail::CLEARING_HEIGHT);
+        assert!(
+            beneath <= middle.y + 1e-5 && beneath > middle.y - 0.04,
+            "{at}"
+        );
+    }
+    // Solid, to the agent and to where participants stand, and to the sticks, which rest on it as on the other seats.
+    let solid = Solid::new(furniture()[2].0, furniture()[2].1);
+    assert!(solid.contains((middle + Vec3::Y * seat_top(radius) * 0.5).to_array()));
+    assert_eq!(colliders().len(), 1 + 3 + PIT_STONES as usize + 2);
+    // Whoever points at it arrives sitting on it: on the ground beneath its seat, a little before its middle, facing the
+    // fire, from anywhere within reach.
+    let (arrival, facing) = seated();
+    assert!(arrival.distance(middle) < radius);
+    assert!((arrival - middle).dot(FIRE - middle) > 0.0);
+    let towards = (FIRE - arrival) * Vec3::new(1.0, 0.0, 1.0);
+    assert!(facing.normalize().dot(towards.normalize()) > 0.999);
+    let [target] = targets();
+    assert_eq!(
+        (target.name, target.foot, target.arrival, target.within),
+        ("Fireside log", middle, arrival, None)
+    );
+    assert!(target.radius < length * 0.5 && target.height > seat_top(radius));
 }
 
 #[test]
@@ -340,9 +391,9 @@ fn a_stick_is_a_light_body_of_its_rod_and_marshmallow_drawn_as_it_collides() {
     assert!((widest - MARSHMALLOW.1).abs() < 1e-5);
     // Bodies of their own numbers, which name their sticks, of dry wood, lighter than water, so that they float.
     let bodies = bodies();
-    assert_eq!(bodies.len(), STICKS);
+    assert_eq!(bodies.len(), STICKS + LOGS);
     const { assert!(DENSITY < 1_000.0) };
-    for (index, body) in bodies.iter().enumerate() {
+    for (index, body) in bodies[..STICKS].iter().enumerate() {
         assert_eq!(body.id, super::body(index));
         assert_eq!(super::index(body.id), Some(index));
         assert_eq!(body.check(), Ok(()));
@@ -361,9 +412,9 @@ fn what_the_sticks_rest_on_is_drawn_and_within_the_physics_limits() {
     assert!(colliders.iter().all(Static::valid));
     let triangles: usize = colliders.iter().map(Static::triangles).sum();
     assert!(triangles <= tomori_physics::STATIC_TRIANGLES, "{triangles}");
-    // The ground about the fire as it is drawn, with its clearing, both log seats, the fire's ring of stones and its
-    // bonfire.
-    assert_eq!(colliders.len(), 1 + 2 + PIT_STONES as usize + 1);
+    // The ground about the fire as it is drawn, with its clearing, the three log seats, the fire's ring of stones, its
+    // bonfire and the woodpile's stone.
+    assert_eq!(colliders.len(), 1 + 3 + PIT_STONES as usize + 2);
     // The pool's water, below the campsite, within its reach, which takes back what rests in it.
     let pool = &waters()[0];
     assert_eq!(pool.returns_after, Some(RETURNS));
@@ -442,6 +493,10 @@ fn a_burnt_marshmallow_burns_on_out_of_the_heat_for_a_while_and_goes_out_or_unde
     assert_eq!(burns(10.0, BLACK, away, f32::NAN), 10.0);
     assert_eq!(burns(10.0, BLACK, away, -1.0), 10.0);
     assert_eq!(burns(f32::INFINITY, BLACK, away, 0.1), 0.0);
+    // Beyond a small fire's heat, it catches in a big one's, which reaches further.
+    let further = heart_at(1.0) + Vec3::X * 0.9;
+    assert_eq!(burns(0.0, BLACK, further, 0.1), 0.0);
+    assert_eq!(burns_at(0.0, BLACK, further, 0.1, 1.0), BURNS);
     assert_eq!(burns(BURNS * 2.0, BLACK, away, 0.0), BURNS);
 }
 
@@ -509,7 +564,8 @@ fn a_stick_that_comes_to_rest_stays_where_it_lies_or_goes_back_on_its_log() {
 
 #[test]
 fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() {
-    // An event says the sticks' bodies and how toasted those that changed are, and nothing of either it need not.
+    // An event says the sticks' bodies and how toasted those that changed are, and nothing of either it need not, nor
+    // of the fire's size or the logs' burning, which say nothing unchanged.
     let event = Event {
         clock: 5,
         sticks: Update::default(),
@@ -517,6 +573,8 @@ fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() 
             body: body(1),
             toast: 0.5,
         }],
+        size: None,
+        burnt: Vec::new(),
     };
     let text = serde_json::to_string(&event).unwrap();
     assert_eq!(
@@ -604,4 +662,180 @@ fn the_campsite_and_its_sticks_are_low_poly_and_the_anchor_stands_beyond_the_fir
     assert!(place.at.y > FLAMES + 1.0);
     assert!(trail::from_middle(ground(place.towards)) < 1e-3);
     assert_eq!(place.notify_within, None);
+}
+
+#[test]
+fn a_bigger_fire_toasts_from_further_off_and_by_default_toasts_as_it_always_did() {
+    // By default, toasting is as it was: the heart where it was, hottest a hand's breadth about it, nothing beyond 0.6 m.
+    assert_eq!(heart_at(0.0), heart());
+    assert_eq!(flames(0.0), SMALL);
+    const { assert!(SMALL < 1.0 && BIG > 1.0) };
+    for offset in [0.0, 0.3, 0.5, 0.59, 0.7] {
+        let at = heart() + Vec3::X * offset;
+        assert_eq!(heat_at(at, 0.0), heat(at));
+        assert_eq!(toasted_at(0.1, at, 3.0, 0.0), toasted(0.1, at, 3.0));
+    }
+    // At its biggest, its flames twice as big, its heart higher and its heat reaching twice as far.
+    assert_eq!(flames(1.0), BIG);
+    assert_eq!(reach(1.0), 2.0);
+    assert!(heart_at(1.0).y > heart().y + 0.4);
+    assert!(heat_at(heart_at(1.0) + Vec3::X * 0.3, 1.0) > 0.999);
+    let far = heart_at(1.0) + Vec3::X * 1.0;
+    assert!(heat_at(far, 1.0) > 0.0 && heat(far) == 0.0);
+    assert_eq!(heat_at(heart_at(1.0) + Vec3::X * 1.21, 1.0), 0.0);
+    assert!(burning_at(BLACK, far, 1.0) && !burning(BLACK, far));
+    // In between, between them; and nonsense is its default.
+    assert!(heat_at(far, 0.5) < heat_at(far, 1.0));
+    assert_eq!(flames(f32::NAN), SMALL);
+    assert_eq!(flames(3.0), BIG);
+}
+
+#[test]
+fn a_log_in_the_fire_burns_away_feeding_it_and_the_fire_dies_back_without_more() {
+    // A log burns away over BURN seconds, catching over the first CATCH of them, which feed the fire.
+    assert_eq!(burnt(0.0, BURN), 1.0);
+    assert!((burnt(0.25, BURN * 0.5) - 0.75).abs() < 1e-6);
+    assert_eq!(burnt(0.5, f32::NAN), 0.5);
+    assert!(!catching(0.0));
+    assert!(catching(1e-3) && catching((CATCH - 0.1) / BURN));
+    assert!(!catching((CATCH + 0.1) / BURN));
+    // One log catching grows it by its fuel, less what it dies back meanwhile; three, past its biggest, to its biggest.
+    let one = grown(0.0, 1, CATCH);
+    assert!((one - (FUEL - CATCH / DIES_BACK)).abs() < 1e-5);
+    assert_eq!(grown(0.0, 3, CATCH), 1.0);
+    // Without more wood, it dies back from its biggest to its default over DIES_BACK, and no further.
+    assert!((grown(1.0, 0, DIES_BACK * 0.5) - 0.5).abs() < 1e-5);
+    assert_eq!(grown(1.0, 0, DIES_BACK), 0.0);
+    assert_eq!(grown(0.0, 0, 60.0), 0.0);
+    assert_eq!(grown(f32::NAN, 0, 1.0), 0.0);
+    assert_eq!(grown(0.5, 0, f32::NAN), 0.5);
+    assert_eq!(
+        (unit(0.4), unit(2.0), unit(-1.0), unit(f32::NAN)),
+        (0.4, 1.0, 0.0, 0.0)
+    );
+    // As it burns it chars, glows and shrinks.
+    assert_eq!((log_shade(0.0), log_shade(0.05), log_shade(0.5)), (0, 1, 2));
+    assert_eq!(charred(0.0), 1.0);
+    assert!((charred(1.0) - 0.3).abs() < 1e-6);
+    assert_eq!(charred(f32::NAN), 1.0);
+    // What the agent is told it looks like.
+    assert_eq!(blaze(0.0), "burning low");
+    assert_eq!(blaze(0.3), "burning well");
+    assert_eq!(blaze(0.5), "burning high");
+    assert_eq!(blaze(1.0), "blazing");
+}
+
+#[test]
+fn the_woodpile_s_logs_are_light_bodies_crossed_on_a_flat_stone_beside_the_fire() {
+    // Each log a six-sided body of dry wood, a hand's span across and held in one hand, its faces of four corners
+    // flat beneath it and on top.
+    let hull = log_hull();
+    assert_eq!(hull.len(), LOG_SIDES as usize * 2);
+    let flat = hull
+        .iter()
+        .filter(|point| (point.y - log_depth() * 0.5).abs() < 1e-6)
+        .count();
+    assert_eq!(flat, 4);
+    let mass = DENSITY * 3.0 * 3f32.sqrt() / 2.0 * LOG_RADIUS * LOG_RADIUS * LOG_LENGTH;
+    assert!((1.0..3.0).contains(&mass), "{mass}");
+    let bodies = bodies();
+    for (index, body) in bodies[STICKS..].iter().enumerate() {
+        assert_eq!(body.id, log_body(index));
+        assert_eq!(log_index(body.id), Some(index));
+        assert_eq!(super::index(body.id), None);
+        assert_eq!(body.check(), Ok(()));
+        assert_eq!(body.home, log_home(index));
+    }
+    assert_eq!(log_index(FIRST_LOG - 1), None);
+    assert_eq!(log_index(log_body(LOGS)), None);
+    assert!(FIRST_LOG > super::body(STICKS));
+    // Stacked in crossed pairs, each pair on the one beneath, on the stone's flat top.
+    let (least, greatest) = pile_stone();
+    for index in 0..LOGS {
+        let home = log_home(index);
+        let layer = (index / 2) as f32;
+        let bottom = home.position.y - log_depth() * 0.5;
+        assert!(
+            (bottom - (greatest.y + log_depth() * layer)).abs() < 0.002,
+            "{index}"
+        );
+        let along = home.rotation * Vec3::X;
+        let across = if (index / 2) % 2 == 0 {
+            Vec3::Z
+        } else {
+            Vec3::X
+        };
+        assert!(along.dot(across).abs() > 0.999, "{index}");
+        // Over the stone.
+        assert!(home.position.x > least.x && home.position.x < greatest.x);
+        assert!(home.position.z > least.z && home.position.z < greatest.z);
+    }
+    // Its stone on the ground, its top above all of it, beside the fire, beyond the ring participants walk round it,
+    // apart from the seats and clear of where a log goes back or burns.
+    let pile = woodpile();
+    let fire = ground(FIRE);
+    let middle = ground(pile);
+    assert!((1.5..2.0).contains(&middle.distance(fire)));
+    let inner = [least, greatest]
+        .iter()
+        .flat_map(|a| [least, greatest].map(|b| Vec2::new(a.x, b.z)))
+        .map(|corner| corner.distance(fire))
+        .fold(f32::INFINITY, f32::min);
+    assert!(inner > 1.25, "{inner}");
+    for at in [Pose::racked(0).butt, fireside().0] {
+        assert!(ground(at).distance(middle) > 1.0);
+    }
+    assert!(!in_fire(&log_home(0)));
+    assert!(!log_goes_back(&log_home(0)));
+    // A solid, to the agent and to where participants stand, as tall as its stack.
+    let solid = Solid::new(furniture()[1].0, furniture()[1].1);
+    assert!(solid.contains((log_home(LOGS - 1).position).to_array()));
+}
+
+#[test]
+fn a_log_lying_in_the_fire_burns_one_carried_off_goes_back_and_one_by_the_fire_stays() {
+    let lying = |at: Vec3, yaw: f32| Placement::new(at, Quat::from_rotation_y(yaw));
+    // On the embers, or across the stones with its end among them, the fire takes it.
+    assert!(in_fire(&lying(FIRE + Vec3::Y * 0.1, 0.0)));
+    assert!(in_fire(&lying(FIRE + Vec3::new(0.55, 0.12, 0.0), 0.0)));
+    // Alongside the stones, held above the flames, or nowhere, it does not.
+    assert!(!in_fire(&lying(
+        FIRE + Vec3::new(0.55, 0.12, 0.0),
+        std::f32::consts::FRAC_PI_2
+    )));
+    assert!(!in_fire(&lying(FIRE + Vec3::Y * 1.0, 0.0)));
+    assert!(!in_fire(&lying(Vec3::NAN, 0.0)));
+    // About the fire it stays; carried off beyond its reach, or nowhere, it goes back on the woodpile.
+    assert!(!log_goes_back(&lying(
+        FIRE + Vec3::new(1.2, 0.05, 0.5),
+        0.3
+    )));
+    assert!(log_goes_back(&lying(
+        FIRE + Vec3::new(DROP_REACH + 0.5, 0.0, 0.0),
+        0.3
+    )));
+    assert!(log_goes_back(&lying(Vec3::NAN, 0.0)));
+}
+
+#[test]
+fn a_log_is_drawn_as_it_collides_in_each_of_its_shades() {
+    let model = log_model();
+    let hull = log_hull();
+    for shade in 0..LOG_SHADES {
+        let node = model
+            .nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some(log_node(shade).as_str()))
+            .unwrap();
+        for corner in &model.meshes[node.mesh.unwrap()].primitives[0].positions {
+            assert!(
+                hull.iter().any(|point| point.distance(*corner) < 1e-5),
+                "{corner}"
+            );
+        }
+    }
+    // Glowing, it is drawn with the embers' material.
+    let glowing = &model.nodes[2];
+    let material = model.meshes[glowing.mesh.unwrap()].primitives[0].material;
+    assert!(model.materials[material.unwrap()].emissive.length() > 0.5);
 }

@@ -72,8 +72,8 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     });
     let first: State = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
     let objects = kept.objects.lock().unwrap()[0].clone();
-    // Each hen, then the beach, and the campsite's bonfire and its sticks.
-    assert_eq!(objects.len(), first.chickens.len() + 2 + campsite::STICKS);
+    // Each hen, then the beach, and the campsite's bonfire, its woodpile, its fireside log and its sticks.
+    assert_eq!(objects.len(), first.chickens.len() + 4 + campsite::STICKS);
     assert_eq!(objects[first.chickens.len()].id(), "beach");
     assert_eq!(objects[first.chickens.len() + 1].id(), "bonfire");
     assert_eq!(objects[0].id(), "chicken-0");
@@ -133,7 +133,8 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
             .is_some_and(|reference| reference.starts_with("hen/"));
         assert_eq!(object.offers().is_empty(), !hen, "{}", object.id());
     }
-    // The bonfire and the sticks say how far they reach, as a diagram's line to one rings it.
+    // The bonfire, the woodpile, the fireside log and the sticks say how far they reach, as a diagram's line to one
+    // rings it; the bonfire as much further as it grows.
     let extent = |reference: &str| {
         objects
             .iter()
@@ -147,6 +148,15 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
     assert_eq!(
         extent("campsite/stick-2"),
         Some(crate::campsite::STICK_EXTENT)
+    );
+    assert_eq!(
+        extent("campsite/woodpile"),
+        Some(crate::campsite::PILE * std::f32::consts::SQRT_2)
+    );
+    assert_eq!(extent("campsite/fireside-log"), Some(0.6));
+    assert_eq!(
+        crate::campsite::extent("campsite/bonfire", 1.0),
+        crate::campsite::FIRE_EXTENT * 2.0
     );
     let reference = objects[0].reference().unwrap().to_owned();
     // Taken on a hen standing about at the start, she pecks, announced to everyone; the agent is told it was done.
@@ -370,7 +380,10 @@ fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_
     // Its state has every stick, at rest on its log, fresh, beside the flock.
     let first: serde_json::Value = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
     let shared = campsite::shared(&first);
-    assert_eq!(shared.sticks.bodies.len(), campsite::STICKS);
+    assert_eq!(
+        shared.sticks.bodies.len(),
+        campsite::STICKS + campsite::LOGS
+    );
     assert!(
         shared
             .sticks

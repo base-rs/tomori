@@ -167,6 +167,8 @@ pub struct Loose<S> {
     astray: BTreeMap<u32, (Instant, u32)>,
     /// The hands that took a body from the other hand since this was last asked, which feel it.
     passed: Vec<Side>,
+    /// The bodies nobody may take for now, as the side says, as a log burning in the campsite's fire.
+    kept: std::collections::BTreeSet<u32>,
     shapes: PhantomData<S>,
 }
 
@@ -179,6 +181,7 @@ impl<S> Default for Loose<S> {
             drawn: BTreeMap::new(),
             astray: BTreeMap::new(),
             passed: Vec::new(),
+            kept: std::collections::BTreeSet::new(),
             shapes: PhantomData,
         }
     }
@@ -250,11 +253,18 @@ impl<S: Shapes> Loose<S> {
         }
     }
 
+    /// The bodies nobody may take for now, `kept`, as the side says, as a log burning in the campsite's fire: neither
+    /// pointed at nor reached for until it says otherwise.
+    pub fn keep(&mut self, kept: impl IntoIterator<Item = u32>) {
+        self.kept = kept.into_iter().collect();
+    }
+
     /// Whether body `body` may be taken: nobody holds it, as far as this client knows, or the server side says this
     /// participant does though no hand of theirs does, as when their letting go of it was lost, which it takes again;
-    /// and it is not on its way back.
+    /// it is not on its way back; and it is not kept.
     fn free(&self, body: u32) -> bool {
         !self.mirror.returning(body)
+            && !self.kept.contains(&body)
             && self
                 .mirror
                 .held(body)
