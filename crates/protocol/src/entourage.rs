@@ -19,7 +19,7 @@
 //! // Summoned by someone seated, their eyes 1 m up, the agent stands high enough for its wall beneath it.
 //! assert_eq!(entourage::summoned_height(1.0, entourage::FLOOR), entourage::LOWEST_AGENT);
 //! ```
-use crate::projection::layout::{ARC_SCALE, SLOT_SIZE, rotate};
+use crate::projection::layout::{ARC_SCALE, SLOT_SIZE};
 use crate::{Pose, Wall};
 
 /// The floor participants stand on, in a space's coordinates: home's, at its origin.
@@ -151,15 +151,8 @@ pub fn slot_corners(wall: &Wall) -> Vec<[f32; 3]> {
     wall.slot_frames()
         .iter()
         .flat_map(|slot| {
-            let at = slot.pose(&frame);
-            let right = rotate(at.orientation, [1.0, 0.0, 0.0]);
-            let up = rotate(at.orientation, [0.0, 1.0, 0.0]);
-            let [width, height] = slot.size;
-            [-1.0f32, 1.0].map(|side| {
-                std::array::from_fn(|axis| {
-                    at.position[axis] + right[axis] * side * width / 2.0 + up[axis] * height / 2.0
-                })
-            })
+            let [_, _, left, right] = slot.corners(&frame);
+            [left, right]
         })
         .collect()
 }

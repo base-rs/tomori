@@ -177,10 +177,42 @@ impl SlotFrame {
             orientation: multiply(wall.orientation, [0.0, sin, 0.0, cos]),
         }
     }
+
+    /// Its four corners in the space, for a wall at `wall`, as it is turned and tilted: bottom left, bottom right, top
+    /// left and top right, as seen from in front.
+    pub fn corners(&self, wall: &Pose) -> [[f32; 3]; 4] {
+        let at = self.pose(wall);
+        let right = rotate(at.orientation, [1.0, 0.0, 0.0]);
+        let up = rotate(at.orientation, [0.0, 1.0, 0.0]);
+        let [width, height] = self.size;
+        let corner = |across: f32, rise: f32| {
+            std::array::from_fn(|axis| {
+                at.position[axis]
+                    + right[axis] * across * width / 2.0
+                    + up[axis] * rise * height / 2.0
+            })
+        };
+        [
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(-1.0, 1.0),
+            corner(1.0, 1.0),
+        ]
+    }
 }
 
-/// `vector` turned by the unit quaternion `rotation`.
-pub(crate) fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
+/// `vector` turned by the quaternion `rotation`, normalised first, or not turned where it is all zeroes.
+///
+/// ```
+/// use tomori_protocol::wall::rotate;
+///
+/// // A quarter turn about the vertical takes +Z to +X.
+/// let quarter = [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2];
+/// let [x, _, z] = rotate(quarter, [0.0, 0.0, 1.0]);
+/// assert!((x - 1.0).abs() < 1e-6 && z.abs() < 1e-6);
+/// assert_eq!(rotate([0.0; 4], [1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]);
+/// ```
+pub fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
     let length = (x * x + y * y + z * z + w * w).sqrt();
     let [x, y, z, w] = if length > 0.0 {
         [x / length, y / length, z / length, w / length]

@@ -3,54 +3,16 @@
 
 //! Where a wall's slots stand, as the boxes the agent's spot and the beside placement keep clear of. See
 //! `design/projection.md`.
-use tomori_protocol::{Pose, Wall};
+use tomori_protocol::Wall;
 
-/// `vector` turned by the quaternion `rotation`.
-pub(crate) fn rotate([x, y, z, w]: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
-    let length = (x * x + y * y + z * z + w * w).sqrt().max(f32::EPSILON);
-    let (x, y, z, w) = (x / length, y / length, z / length, w / length);
-    // v + 2w(q × v) + 2q × (q × v)
-    let cross = |a: [f32; 3], b: [f32; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let q = [x, y, z];
-    let t = cross(q, vector).map(|value| 2.0 * value);
-    let u = cross(q, t);
-    std::array::from_fn(|axis| vector[axis] + w * t[axis] + u[axis])
-}
-
-/// The middle and four corners of `slot`, on a wall standing at `wall`, as it is turned: bottom left, bottom right,
-/// top left and top right.
-fn corners(slot: &tomori_protocol::wall::SlotFrame, wall: &Pose) -> ([f32; 3], [[f32; 3]; 4]) {
-    let at = slot.pose(wall);
-    let right = rotate(at.orientation, [1.0, 0.0, 0.0]);
-    let up = rotate(at.orientation, [0.0, 1.0, 0.0]);
-    let [width, height] = slot.size;
-    let corner = |across: f32, rise: f32| {
-        std::array::from_fn(|axis| {
-            at.position[axis] + right[axis] * across * width / 2.0 + up[axis] * rise * height / 2.0
-        })
-    };
-    (
-        at.position,
-        [
-            corner(-1.0, -1.0),
-            corner(1.0, -1.0),
-            corner(-1.0, 1.0),
-            corner(1.0, 1.0),
-        ],
-    )
-}
+pub(crate) use tomori_protocol::wall::rotate;
 
 /// The box about each slot of `wall`, where it stands, tilted as it tilts, aligned with the space's axes.
 pub(crate) fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
+    let frame = wall.frame();
     wall.slot_frames().into_iter().map(move |slot| {
-        let (middle, corners) = corners(&slot, &wall.frame());
-        corners
+        let middle = slot.pose(&frame).position;
+        slot.corners(&frame)
             .into_iter()
             .fold((middle, middle), |(low, high), corner| {
                 (
@@ -64,7 +26,7 @@ pub(crate) fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> +
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tomori_protocol::{TOMORI_WALL, WallKind, WallShape};
+    use tomori_protocol::{Pose, TOMORI_WALL, WallKind, WallShape};
 
     #[test]
     fn a_vector_turns_with_its_quaternion_and_a_wall_s_boxes_stand_about_its_slots_as_it_tilts() {
