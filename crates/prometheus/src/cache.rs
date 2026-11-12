@@ -904,7 +904,6 @@ fn weigh_labels(labels: &Labels) -> usize {
             .sum::<usize>()
 }
 
-#[allow(clippy::ptr_arg)]
 /// The memory `series` take: the vector's allocation, and each series' labels and points' allocation.
 fn weigh_series(series: &Vec<Series>) -> usize {
     size_of::<Vec<Series>>()
@@ -917,7 +916,6 @@ fn weigh_series(series: &Vec<Series>) -> usize {
             .sum::<usize>()
 }
 
-#[allow(clippy::ptr_arg)]
 fn weigh_warnings(warnings: &Vec<String>) -> usize {
     size_of::<Vec<String>>()
         + warnings.capacity() * size_of::<String>()
