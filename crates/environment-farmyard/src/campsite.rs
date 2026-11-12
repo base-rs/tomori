@@ -52,7 +52,7 @@ pub fn extent(reference: &str, size: f32) -> f32 {
 /// The middle of the campsite's clearing of packed earth is [`FIRE`], and this its radius.
 pub const CLEARING: f32 = 1.65;
 /// How far where participants stand at the campsite stays from the backdrop's middle, at most, so that from there the
-/// whole backdrop is within the headset's far plane, a metre short of it: three quarters of a metre beyond the trail's
+/// whole backdrop is within its 50 m bound from the eyes, a metre short of it: three quarters of a metre beyond the trail's
 /// [`trail::REACH`] and its two metres, as nowhere nearer has room for a fire with seats about it that participants
 /// walk all the way round.
 pub const REACH: f32 = 12.75;

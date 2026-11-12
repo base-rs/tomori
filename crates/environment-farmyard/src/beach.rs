@@ -138,8 +138,8 @@ pub const WALKED: f32 = trail::FOOT + 0.02;
 /// the ground's own faces within it, as they are drawn ([`ground_faces`]), from just beyond the foot of the trail's edge
 /// ([`WALKED`]) down the bank to the water's edge and a little into the shallows, where the river is no more than
 /// [`SHALLOWS`] deep, so that a dam is built standing in the water. All of it slopes less than the 30° Tomori walks.
-/// From its lower slope the foothills' outer rings across the yard, more than 50 m away and deep in the haze, are
-/// beyond the headset's far plane, as they are from the waterfall rock.
+/// From its lower slope the foothills' outer rings across the yard, deep in the haze, are a little beyond the
+/// backdrop's 50 m bound from the eyes, as they are from the waterfall rock.
 pub fn ground() -> Vec<[Vec3; 3]> {
     let walked = [
         at(WALKED, -HALF_WIDTH),

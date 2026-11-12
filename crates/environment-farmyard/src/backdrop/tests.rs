@@ -5,7 +5,7 @@ use super::*;
 use crate::trail;
 
 /// Where the eyes may be: above every corner of the ground participants land on, in the yard, along the trail and
-/// round its clearings, and of the way out through the gate; but the upper terrace's, from which the far plane is
+/// round its clearings, and of the way out through the gate; but the upper terrace's, from which the bound is
 /// checked as it is from the waterfall rock ([`beyond_from_the_terrace`]), and the campsite's clearing, from which it is
 /// checked a metre short of it rather than two ([`campsite_eyes`]).
 fn eyes() -> Vec<Vec3> {
@@ -25,15 +25,15 @@ fn eyes() -> Vec<Vec3> {
         .collect()
 }
 
-/// From `eye`, `position` is within the far plane, 2 m short of it, or else, from the beach's slope down to the river,
-/// on the foothills' outer rings across the yard from it, or the bush on them, 46 m and more away, deep in the haze,
-/// within the far plane or less than 1.5 m beyond it, where it cuts them off, as from the waterfall rock.
+/// From `eye`, `position` is within the backdrop's bound, 2 m short of it, or else, from the beach's slope down to the
+/// river, on the foothills' outer rings across the yard from it, or the bush on them, 46 m and more away, deep in the
+/// haze, within the bound or less than 1.5 m beyond it, as from the waterfall rock.
 fn beyond_from_the_beach(eye: Vec3, position: Vec3) {
     // The eyes stand as high above the beach's slope as above the yard.
     let ground = Vec2::new(eye.x, eye.z);
     let eye = eye + Vec3::Y * crate::beach::height(ground).unwrap_or(0.0).min(0.0);
     let distance = eye.distance(position);
-    if distance < FAR - 2.0 {
+    if distance < BOUND - 2.0 {
         return;
     }
     let at = Vec2::new(position.x, position.z) - BACKDROP_CENTRE;
@@ -43,19 +43,19 @@ fn beyond_from_the_beach(eye: Vec3, position: Vec3) {
             && at.length() > 30.0
             && at.dot(towards) < 0.0
             && distance > 46.0
-            && distance < FAR + 1.5,
+            && distance < BOUND + 1.5,
         "{eye} {position}: {distance} m, {} m out",
         at.length()
     );
 }
 
 /// From the eyes of one standing on the waterfall rock, which is 8 m beyond the trail's reach of the backdrop's middle,
-/// `position` is within the far plane, or else one of the foothills' outer rings across the yard from it, which the
-/// far plane cuts off, 46 m and more away, deep in the haze.
+/// `position` is within the backdrop's bound, or else one of the foothills' outer rings across the yard from it, beyond
+/// the bound, 46 m and more away, deep in the haze.
 fn beyond_from_the_rock(position: Vec3) {
     let rock = layout::WATERFALL_ROCK + Vec3::Y * tomori_environment::sightlines::EYES;
     let distance = rock.distance(position);
-    if distance >= FAR - 2.0 {
+    if distance >= BOUND - 2.0 {
         let at = Vec2::new(position.x, position.z) - BACKDROP_CENTRE;
         let towards = Vec2::new(rock.x, rock.z) - BACKDROP_CENTRE;
         assert!(at.length() > 26.0 && at.dot(towards) < 0.0, "{position}");
@@ -75,12 +75,12 @@ fn terrace_eyes() -> Vec<Vec3> {
 }
 
 /// From the eyes of one standing anywhere on the upper terrace, 7 m above the pool and 13 m beyond the trail's reach of
-/// the backdrop's middle, `position` is within the far plane, or else, as from the rock, the foothills' rings across
-/// the yard from it, 18 m and more from its middle, which the far plane cuts off, 46 m and more away, deep in the haze.
+/// the backdrop's middle, `position` is within the backdrop's bound, or else, as from the rock, the foothills' rings
+/// across the yard from it, 18 m and more from its middle, beyond the bound, 46 m and more away, deep in the haze.
 fn beyond_from_the_terrace(eyes: &[Vec3], position: Vec3) {
     for eye in eyes {
         let distance = eye.distance(position);
-        if distance >= FAR - 2.0 {
+        if distance >= BOUND - 2.0 {
             let at = Vec2::new(position.x, position.z) - BACKDROP_CENTRE;
             let towards = Vec2::new(eye.x, eye.z) - BACKDROP_CENTRE;
             assert!(
@@ -114,8 +114,9 @@ fn beyond_fence(point: Vec2) -> f32 {
         .length()
 }
 
-/// The headset's far plane: nothing nearer is cut off.
-const FAR: f32 = 50.0;
+/// How near the eyes the backdrop is laid out to stand, from anywhere participants stand: the headset's far plane when it
+/// was laid out, and now, as every client draws out to 2 km, the bound that keeps it compact and within its haze.
+const BOUND: f32 = 50.0;
 
 /// Whether `point` is on the campsite's clearing, off the trail.
 fn at_the_campsite(point: Vec2) -> bool {
@@ -148,19 +149,19 @@ fn campsite_eyes() -> Vec<Vec3> {
 }
 
 #[test]
-fn the_backdrop_stands_within_the_far_plane_from_where_participants_stand_at_the_campsite() {
+fn the_backdrop_stands_within_its_bound_from_where_participants_stand_at_the_campsite() {
     // Most of a metre short of it rather than two, as the campsite stands a little further out than the trail.
     let eyes = campsite_eyes();
     assert!(eyes.len() > 60);
     let foothills = model();
     for eye in &eyes {
         for position in &foothills.meshes[0].primitives[0].positions {
-            assert!(eye.distance(*position) < FAR - 1.0, "{eye} {position}");
+            assert!(eye.distance(*position) < BOUND - 1.0, "{eye} {position}");
         }
         for plant in plants() {
             let (_, height) = plant.size();
             assert!(
-                eye.distance(plant.at + Vec3::Y * height) < FAR - 1.0,
+                eye.distance(plant.at + Vec3::Y * height) < BOUND - 1.0,
                 "{plant:?}"
             );
         }
@@ -168,12 +169,12 @@ fn the_backdrop_stands_within_the_far_plane_from_where_participants_stand_at_the
 }
 
 #[test]
-fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
+fn the_backdrop_stands_beyond_the_fence_within_its_bound() {
     let eyes = eyes();
     let terrace = terrace_eyes();
     assert!(terrace.len() > 30);
     // The foothills' ground: none of it within 2.5 m of the fence, its edge level with the meadow, and all of it within
-    // the far plane from anywhere participants land, in the yard and along the trail.
+    // the backdrop's bound from anywhere participants land, in the yard and along the trail.
     let foothills = model();
     let ground = &foothills.meshes[0].primitives[0];
     for position in &ground.positions {
@@ -223,7 +224,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
     assert_eq!(super::ground(BACKDROP_CENTRE), 0.0);
     assert_eq!(super::ground(Vec2::new(5.0, 1.6)), 0.0);
     // Every plant at least 3 m beyond the fence, standing on the ground, none in the way in through the gate nor on the
-    // trail, and its top within the far plane.
+    // trail, and its top within the backdrop's bound.
     let mut bush = crate::ferns::bush().into_iter();
     for plant in plants() {
         let (reach, height) = plant.size();
@@ -274,7 +275,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
         assert!(base.y <= super::ground(at));
     }
     // Only where plants may stand: not in the yard, the river, the pool, on the cliff, in the gate's way or beyond the
-    // far plane.
+    // backdrop's bound.
     for (point, reach) in [
         (layout::BACKDROP_CENTRE, 1.0),
         (Vec2::new(layout::RIVER[7].x, layout::RIVER[7].z), 1.0),

@@ -40,7 +40,7 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
         "{fire}"
     );
     // Outside the fence, on the level meadow, where participants stand within its reach of the backdrop's middle, so
-    // that from there the backdrop stands within the far plane, as the backdrop's own tests check.
+    // that from there the backdrop stands within its 50 m bound, as the backdrop's own tests check.
     for (middle, radius) in standing() {
         assert!(
             middle.distance(BACKDROP_CENTRE) + radius < REACH,

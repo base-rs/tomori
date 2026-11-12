@@ -6,7 +6,7 @@ Beside the trail where it passes the river, by the `riverbank` viewpoint, a shin
 
 The beach is the ground itself, with nothing laid over it. `outline()` cuts the yard's meadow (`props.rs`) and the foothills' faces (`backdrop::ground_triangles`) along it, with `shapes::cut`, and the parts within it, `ground_faces()`, are drawn in `shingle(seed)`, a stony grey-brown, face by face. `height(point)` is how high they are there, the ground as drawn, or `None` beyond the beach. `model()` draws only its `PEBBLES`, `pebbles()`, low pyramids a few centimetres across, sunk a little into the ground, which nothing rests on or walks round.
 
-`ground()` is what participants walk, which the farmyard's `walkable` derives its ground from: the faces from `WALKED`, just beyond the foot of the trail's edge, down the bank to the water's edge and into the shallows, no deeper than `SHALLOWS`, 6 cm, none steeper than 20°. From its lower slope the foothills' outer rings across the yard are up to a metre and a half beyond the headset's far plane, deep in the haze, as from the waterfall rock, which the backdrop's tests allow.
+`ground()` is what participants walk, which the farmyard's `walkable` derives its ground from: the faces from `WALKED`, just beyond the foot of the trail's edge, down the bank to the water's edge and into the shallows, no deeper than `SHALLOWS`, 6 cm, none steeper than 20°. From its lower slope the foothills' outer rings across the yard are up to a metre and a half beyond the backdrop's 50 m bound, deep in the haze, as from the waterfall rock, which the backdrop's tests allow.
 
 ## Its stones
 

@@ -6,7 +6,7 @@ A walking trail loops round the outside of the fence: out through the gate, alon
 
 `trail::centreline()` is the loop, smoothed through `WAYPOINTS`, `STEPS` points to each, the first at the gate; `trail::frame(index)` gives a point of it, the way along it and the way out of the loop. Its track is `WIDTH`, 1.2 m, from crest to crest, all of it walkable. It keeps:
 
-- **within `REACH`**, 11.5 m of the backdrop's middle, so that the whole backdrop stands within the headset's 50 m far plane, 2 m short of it, from anywhere on it, as from the yard; which is why the foothills' last ring is at 36 m. That is also inside the foothills' first ring, so it lies on the level meadow.
+- **within `REACH`**, 11.5 m of the backdrop's middle, so that the whole backdrop stands within its 50 m bound from the eyes, 2 m short of it, from anywhere on it, as from the yard; which is why the foothills' last ring is at 36 m. That is also inside the foothills' first ring, so it lies on the level meadow.
 - **clear of the river's banks and the pool's rim** (`backdrop::BANKS`, `RIM`), on the higher ground beside the river's channel, above its water, so that it never climbs down into it: the river within 7 m of its middle for 12 m and more, the waterfall, the pool and the rock seen from the lookout.
 - **clear of the fence**, its inner edge at least 0.9 m from it, of the pines and of the bush, and out of the views the backdrop keeps open.
 

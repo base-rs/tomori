@@ -14,7 +14,7 @@
 //! waterfall rock from the lookout, or at the lookout's seat from the rock, takes them there ([`targets`]). Its
 //! stations, viewpoints and the rock are named anchors ([`places`]), and its posts, its seat and the rock are solids
 //! ([`solids`]). It stays within [`REACH`] of the backdrop's middle, so that the
-//! whole backdrop stands within the headset's far plane from it, and clear of the river's banks, the pool's rim, the
+//! whole backdrop stands within its 50 m bound from it, and clear of the river's banks, the pool's rim, the
 //! pines, the bush and the fence. See the crate's `context/trail.md`.
 use std::f32::consts::TAU;
 
@@ -43,8 +43,8 @@ pub const HEIGHT: f32 = LIFT;
 pub const CLEARING_HEIGHT: f32 = LIFT - 0.006;
 /// The height of the yard's earth, which the way out begins on inside the gate.
 pub const EARTH: f32 = 0.0;
-/// How far from the backdrop's middle every part of the trail stays, so that everything of the backdrop stands within the
-/// headset's far plane, 2 m short of it, from anywhere on it, as from the yard.
+/// How far from the backdrop's middle every part of the trail stays, so that everything of the backdrop stands within its
+/// 50 m bound from the eyes, 2 m short of it, from anywhere on it, as from the yard.
 pub const REACH: f32 = 11.5;
 
 /// The points the trail's loop is smoothed through, in order: from the gate, along the front to the right, down the

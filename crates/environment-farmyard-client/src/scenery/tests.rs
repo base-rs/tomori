@@ -424,7 +424,7 @@ fn the_chickens_are_drawn_where_their_client_side_shows_them() {
     });
 }
 
-/// The backdrop's pictures: wide, through the headset's 50 m far plane.
+/// The backdrop's pictures: wide, through a 50 m far plane, as the headset's was when they were first taken.
 const PICTURE: (u32, u32) = (1280, 800);
 
 fn picture() -> (u32, u32, Mat4) {

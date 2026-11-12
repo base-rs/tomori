@@ -6,12 +6,13 @@
 //! yard's right side through grey shingle, native bush, tree ferns, cabbage trees, podocarps and flax, and, beyond, the
 //! ranges, bluer and hazier with distance, their highest peaks under snow.
 //!
-//! What is near enough to walk towards, within the headset's far plane, 50 m from the eyes, is built here in code, in
-//! the yard's low-poly style and palette: the foothills' ground as one model ([`model`]), the plants as a model for each
-//! kind, placed where [`plants`] says, deterministically, so that every client draws the same bush, but its tree ferns,
-//! which are drawn as the ferns near the trail are ([`crate::ferns::bush`]). The ranges stand
-//! beyond the far plane, so they are directions rather than places ([`ranges`]), which the scenery draws at the sky's
-//! depth, behind everything; and the water is drawn by the scenery's own shader, which moves it ([`water`]). Where the
+//! What is near enough to walk towards is built here in code, laid out within 50 m of the eyes from anywhere
+//! participants stand, which was the headset's far plane when it was laid out and is now the bound that keeps it compact
+//! and within its haze, as every client draws out to 2 km: the foothills' ground as one model ([`model`]), the plants as
+//! a model for each kind, in the yard's low-poly style and palette, placed where [`plants`] says, deterministically, so
+//! that every client draws the same bush, but its tree ferns, which are drawn as the ferns near the trail are
+//! ([`crate::ferns::bush`]). The ranges stand far beyond that bound, so they are directions rather than places
+//! ([`ranges`]), which the scenery draws at the sky's depth, behind everything; and the water is drawn by the scenery's own shader, which moves it ([`water`]). Where the
 //! river, the waterfall and the bush are is in [`layout`], which [`layout::sounds`] names for ambient sound. See the
 //! crate's `context/backdrop.md`.
 use std::f32::consts::{PI, TAU};
@@ -31,7 +32,7 @@ pub const BUDGET: usize = 22_000;
 
 /// How far from [`BACKDROP_CENTRE`] each ring of the foothills' ground is: the first just beyond the fence's corners,
 /// at the meadow's level, the cliff's foot and lip among them ([`layout::CLIFF`]), and the upper cliff's behind the
-/// terrace ([`layout::UPPER_CLIFF`]), and the last within 50 m of the eyes, the headset's far plane, from anywhere
+/// terrace ([`layout::UPPER_CLIFF`]), and the last within the backdrop's 50 m bound from the eyes, from anywhere
 /// participants land in the yard.
 pub const RINGS: [f32; 17] = [
     11.5, 13.0, 14.5, 16.0, 17.5, 19.0, 20.5, 22.0, 23.5, 25.0, 26.5, 28.5, 29.5, 30.5, 32.5, 34.5,
@@ -969,8 +970,8 @@ pub fn open(point: Vec2, reach: f32, height: f32) -> bool {
 }
 
 /// Whether a plant reaching `reach` about `point` on the ground, `height` tall, may stand there: on the foothills'
-/// ground, well beyond the fence, out of the way in through the gate, within the far plane, and leaving the backdrop
-/// [`open`].
+/// ground, well beyond the fence, out of the way in through the gate, within the backdrop's 50 m bound, and leaving the
+/// backdrop [`open`].
 pub fn clear(point: Vec2, reach: f32, height: f32) -> bool {
     let radius = point.distance(BACKDROP_CENTRE);
     let gate = point.y > 4.0 && point.x.abs() < 6.0 + reach && radius < 26.0;
@@ -1326,7 +1327,7 @@ pub fn stones() -> Vec<Stone> {
     placed
 }
 
-/// A point of the ranges beyond the far plane: which way it is, its colour lit by the moon, and how far it fades into
+/// A point of the ranges, far beyond the backdrop's 50 m bound: which way it is, its colour lit by the moon, and how far it fades into
 /// the sky's colour that way, for the haze of its distance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Far {

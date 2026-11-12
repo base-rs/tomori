@@ -291,7 +291,7 @@ mod tests {
             );
         }
         // Nor on the seat across it, nor among the sticks leaning on it, nor beyond the clearing towards the pool, where
-        // the far side of the backdrop would be beyond the far plane.
+        // the far side of the backdrop would be beyond its 50 m bound.
         let (seat, ..) = campsite::seat();
         assert_eq!(height_at(Vec2::new(seat.x, seat.z)), None);
         let pose = campsite::Pose::racked(0);
