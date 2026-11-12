@@ -147,15 +147,13 @@ mod tests {
                 (arrived, moving(sent as f32 * interval / 1000.0))
             })
             .peekable();
-        let mut latest = None;
+        // The first arrives before the first frame.
+        let mut hand = moving(0.0);
         for frame in 0..360 {
             let now = frame as f32 * interval + 7.0;
-            while sends.peek().is_some_and(|(at, _)| *at <= now) {
-                latest = sends.next().map(|(_, hand)| hand);
+            while let Some((_, arrived)) = sends.next_if(|(at, _)| *at <= now) {
+                hand = arrived;
             }
-            let Some(hand) = latest else {
-                continue;
-            };
             let at = start + Duration::from_secs_f32(now / 1000.0);
             given.push(hand);
             drawn.push(relayed.update(at, vec![(4, hand)])[0].1);
