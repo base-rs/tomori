@@ -7,7 +7,8 @@
 //! everything, where nothing nearer covers it, and the ranges at the sky's depth; the trail round the outside of the fence, and the river's stones; the ferns
 //! about the trail, drawn with a shader of their own that sways them in the breeze; the stations' plaques, their text drawn from the renderer's glyph atlas; the campsite by the pool, its bonfire's flames
 //! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
-//! marshmallow sticks where its client side shows them; all of it growing out of the space through the reveal sphere as
+//! marshmallow sticks where its client side shows them, and the trails of light their burning marshmallows paint in
+//! the air (see [`crate::embers`]); all of it growing out of the space through the reveal sphere as
 //! the space's environment does. Once a frame, what neither eye can see of its models, ferns and plaques is culled.
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,8 @@ use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
 use wgpu::util::DeviceExt;
+
+use crate::embers::{self, EmberVertex, Embers};
 
 use tomori_environment_farmyard::backdrop::{self, Kind};
 use tomori_environment_farmyard::beach;
@@ -247,8 +250,16 @@ impl Clock {
     /// The time it says, in seconds, for a scenery made at `made`.
     pub fn seconds(self, made: Instant) -> f32 {
         match self {
-            Clock::Running => made.elapsed().as_secs_f32() % 900.0,
+            Clock::Running => (made.elapsed().as_secs_f64() % crate::embers::WRAP) as f32,
             Clock::Held(seconds) => seconds,
+        }
+    }
+
+    /// As [`Clock::seconds`], unwrapped.
+    pub fn elapsed(self, made: Instant) -> f64 {
+        match self {
+            Clock::Running => made.elapsed().as_secs_f64(),
+            Clock::Held(seconds) => f64::from(seconds),
         }
     }
 }
@@ -476,13 +487,14 @@ impl Fire {
         }
     }
 
-    /// Light the marshmallows at `burning`, and only those, after the bonfire's flames.
-    fn burn(&mut self, queue: &wgpu::Queue, burning: &[Vec3]) {
+    /// Light the marshmallows `burning`, each stick's index and where its marshmallow is, and only those, after the
+    /// bonfire's flames.
+    fn burn(&mut self, queue: &wgpu::Queue, burning: &[(usize, Vec3)]) {
         let flames: Vec<FireVertex> = burning
             .iter()
             .take(campsite::STICKS)
             .enumerate()
-            .flat_map(|(index, at)| alight(*at, index as f32 * 1.7))
+            .flat_map(|(index, (_, at))| alight(*at, index as f32 * 1.7))
             .collect();
         if !flames.is_empty() {
             queue.write_buffer(
@@ -498,6 +510,78 @@ impl Fire {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.count, 0..1);
+    }
+}
+
+/// The trails burning marshmallows paint in the air ([`Embers`]): every one in one ring, in one buffer, written as they
+/// are laid, drawn in one draw, or two as the ring wraps, glowing.
+struct Trails {
+    pipeline: wgpu::RenderPipeline,
+    vertices: wgpu::Buffer,
+    embers: Embers,
+}
+
+impl Trails {
+    fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
+        let device = target.device;
+        let shader = device.create_shader_module(wgpu::include_wgsl!("embers.wgsl"));
+        let pipeline = blended(
+            target,
+            layout,
+            &shader,
+            ("ember_vertex", "ember_fragment"),
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<EmberVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4],
+            })],
+            (false, wgpu::CompareFunction::Less),
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            }),
+            "Farmyard embers",
+        );
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Farmyard embers"),
+            size: (size_of::<EmberVertex>() * embers::QUADS * 6) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            vertices,
+            embers: Embers::new(),
+        }
+    }
+
+    /// Take what the trails laid since last to the GPU.
+    fn upload(&mut self, queue: &wgpu::Queue) {
+        for range in self.embers.written() {
+            if !range.is_empty() {
+                queue.write_buffer(
+                    &self.vertices,
+                    (size_of::<EmberVertex>() * range.start) as u64,
+                    bytemuck::cast_slice(&self.embers.vertices()[range]),
+                );
+            }
+        }
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let drawn = self.embers.drawn();
+        if drawn.iter().all(|range| range.is_empty()) {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        for range in drawn.into_iter().filter(|range| !range.is_empty()) {
+            pass.draw(range, 0..1);
+        }
     }
 }
 
@@ -985,6 +1069,7 @@ pub struct Farmyard {
     campsite: Drawn,
     sticks: Drawn,
     fire: Fire,
+    trails: Trails,
     ferns: Ferns,
     /// The beach's shingle, and its stones where its client side last showed them.
     beach: Drawn,
@@ -1084,6 +1169,7 @@ impl Farmyard {
         );
         let stones = Drawn::placed(device, target.queue, &models, &stones(), &[]);
         let fire = Fire::new(target, &pipeline_layout);
+        let trails = Trails::new(target, &pipeline_layout);
         let ferns = Ferns::new(target, &pipeline_layout);
         Self {
             sky,
@@ -1101,11 +1187,18 @@ impl Farmyard {
             campsite,
             sticks,
             fire,
+            trails,
             ferns,
             beach: shingle,
             stones,
             reveal: None,
         }
+    }
+
+    /// The trails burning marshmallows paint in the air, to draw one as if by hand, for pictures and measures; what is
+    /// painted is drawn from the next [`Scenery::animate`].
+    pub fn embers_mut(&mut self) -> &mut Embers {
+        &mut self.trails.embers
     }
 
     /// Draw closed models' parts without their back faces, as by default, or with them, `false`, to compare.
@@ -1187,13 +1280,18 @@ impl Scenery for Farmyard {
             &mut self.stones.batch,
             &stone_instances(&drawn.stones),
         );
-        let burning: Vec<Vec3> = drawn
+        let burning: Vec<(usize, Vec3)> = drawn
             .sticks
             .iter()
             .filter(|stick| stick.burning)
-            .map(|stick| stick.marshmallow)
+            .map(|stick| (stick.index, stick.marshmallow))
             .collect();
         self.fire.burn(queue, &burning);
+        // The trails their marshmallows paint in the air, by the clock the shader ages them by.
+        self.trails
+            .embers
+            .update(self.clock.elapsed(self.made), &burning);
+        self.trails.upload(queue);
         let Some(first) = drawn.chickens.first() else {
             return;
         };
@@ -1281,7 +1379,7 @@ impl Scenery for Farmyard {
             view_projection: scene_to_clip.to_cols_array(),
             eye: self::eye(scene_to_clip).extend(1.0).to_array(),
             haze: self.haze,
-            time: [seconds, 0.0, 0.0, 0.0],
+            time: [seconds, embers::WRAP as f32, 0.0, 0.0],
             moon: lit.sun_direction.normalize_or_zero().extend(0.0).to_array(),
             moonlight: lit.sun.extend(0.0).to_array(),
             sky: lit.sky.extend(0.0).to_array(),
@@ -1333,8 +1431,10 @@ impl Scenery for Farmyard {
         pass.set_pipeline(&self.sky);
         pass.draw(0..3, 0..1);
         backdrop.ranges.draw(pass);
-        // The bonfire's flames last, added to what is behind them, writing no depth.
+        // The bonfire's flames last, and the trails of burning marshmallows, added to what is behind them, writing no
+        // depth.
         self.fire.draw(pass);
+        self.trails.draw(pass);
     }
 
     fn draw_translucent(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {

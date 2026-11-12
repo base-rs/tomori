@@ -18,6 +18,7 @@ use super::*;
 use tomori_environment_farmyard::trail;
 
 mod culling;
+mod light_painting;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 200;
@@ -241,7 +242,16 @@ fn workbench() -> (Vec3, Vec3) {
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["fern.wgsl", "fire.wgsl", "sky.wgsl", "water.wgsl"]);
+    assert_eq!(
+        names,
+        [
+            "embers.wgsl",
+            "fern.wgsl",
+            "fire.wgsl",
+            "sky.wgsl",
+            "water.wgsl"
+        ]
+    );
     for (name, source) in files {
         test_gpu::validate_wgsl(&name, &source);
     }
@@ -648,6 +658,9 @@ fn a_running_clock_says_the_time_since_the_scenery_was_made_and_a_held_one_its_m
     let made = std::time::Instant::now();
     assert!(Clock::Running.seconds(made) < 60.0);
     assert_eq!(Clock::Held(2.5).seconds(made), 2.5);
+    // And unwrapped, as the embers' trails are laid by.
+    assert!(Clock::Running.elapsed(made) < 60.0);
+    assert_eq!(Clock::Held(2.5).elapsed(made), 2.5);
 }
 
 /// Where the trail is seen from, as `(eye, target)`: along it on the yard's right side, by the river, towards the second

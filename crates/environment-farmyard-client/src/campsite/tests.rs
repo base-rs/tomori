@@ -546,3 +546,130 @@ fn a_stick_on_its_way_back_fades_out_as_toasted_as_it_was_and_in_on_its_log_fres
     assert_eq!(back.transform, campsite::drawn(&to));
     assert_eq!(back.shade, 0);
 }
+
+#[test]
+fn a_burnt_marshmallow_catches_in_the_fire_burns_on_out_of_it_for_a_while_and_goes_out_or_in_the_pool()
+ {
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|shared| {
+        shared.sticks.bodies[3].held = held_by(9);
+        shared.toast[3] = campsite::BLACK;
+        shared.sticks.bodies[1].held = held_by(8);
+        shared.toast[1] = campsite::BROWN;
+    }));
+    let start = Instant::now();
+    let frame = Duration::from_millis(100);
+    // In the fire, the black one catches and the brown one, toasting, does not.
+    let shown = sticks.shown(&[(9, over_the_fire()), (8, over_the_fire())], &[], start, 0);
+    assert!(shown[3].burning);
+    assert!(!shown[1].burning);
+    assert_eq!(shown[3].index, 3);
+    // Carried two metres from the fire, it burns on for as long as it may, and then goes out.
+    let away = Hand::new(
+        over_the_fire().position + Vec3::X * 2.0,
+        over_the_fire().orientation,
+    );
+    let mut now = start;
+    let mut alight = Duration::ZERO;
+    for _ in 0..(campsite::BURNS as usize * 10 + 20) {
+        now += frame;
+        let shown = sticks.shown(&[(9, away), (8, away)], &[], now, 0);
+        assert_eq!(campsite::heat(shown[3].marshmallow), 0.0);
+        assert!(!shown[1].burning);
+        if shown[3].burning {
+            alight += frame;
+        }
+    }
+    let burned = alight.as_secs_f32();
+    assert!((burned - campsite::BURNS).abs() <= 0.15, "{burned}");
+    // Back in the fire, it catches again; and plunged into the pool, it goes out at once.
+    now += frame;
+    assert!(sticks.shown(&[(9, over_the_fire())], &[], now, 0)[3].burning);
+    let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD;
+    let along = Vec3::new(0.0, -0.6, 1.0).normalize();
+    let under = tomori_environment_farmyard::layout::POOL - Vec3::Y * 0.1;
+    let pool = Hand::new(
+        under - along * reach,
+        Quat::from_rotation_arc(Vec3::NEG_Z, along),
+    );
+    now += frame;
+    let shown = sticks.shown(&[(9, pool)], &[], now, 0);
+    assert!(shown[3].marshmallow.distance(under) < 1e-3);
+    assert!(!shown[3].burning);
+    // Lifted out of the water, it stays out.
+    now += frame;
+    assert!(!sticks.shown(&[(9, away)], &[], now, 0)[3].burning);
+}
+
+#[test]
+fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bring_drawn_behind_the_clock()
+ {
+    use tomori_physics::message::Snapshot;
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|shared| shared.toast[2] = campsite::BLACK));
+    let body = campsite::body(2);
+    // Thrown out of the fire by someone else at 2 m/s, its marshmallow from over the heart of the fire, a snapshot
+    // every twentieth of a second.
+    let velocity = Vec3::new(2.0, 0.0, 0.0);
+    let along = Quat::from_rotation_y(0.4);
+    let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::STICK_LENGTH * 0.5;
+    let thrown = |clock: u64| {
+        let seconds = clock.saturating_sub(1_000) as f32 / 1000.0;
+        let marshmallow = campsite::heart() + velocity * seconds;
+        Placement::new(marshmallow - along * Vec3::NEG_Z * reach, along)
+    };
+    let mut embers = crate::embers::Embers::new();
+    let start = Instant::now();
+    let mut sent = 1_000;
+    let mut drawn = Vec::new();
+    for clock in (1_000..1_700).step_by(14) {
+        while sent <= clock {
+            sticks.changed(
+                &Event {
+                    clock: sent,
+                    sticks: Update {
+                        moving: vec![Snapshot::new(body, &thrown(sent), Precision::Moving)],
+                        ..Update::default()
+                    },
+                    toast: Vec::new(),
+                },
+                sent,
+            );
+            sent += 50;
+        }
+        let now = start + Duration::from_millis(clock - 1_000);
+        let shown = sticks.shown(&[], &[], now, clock);
+        let stick = shown[2];
+        // Drawn where its snapshots put it, a tenth of a second behind the clock, and burning all the way.
+        let expected = Pose::of(&thrown(clock.saturating_sub(tomori_physics::DELAY))).marshmallow();
+        assert!(stick.marshmallow.distance(expected) < 2e-3, "{clock}");
+        assert!(stick.burning, "{clock}");
+        let burning: Vec<_> = shown
+            .iter()
+            .filter(|stick| stick.burning)
+            .map(|stick| (stick.index, stick.marshmallow))
+            .collect();
+        embers.update((clock - 1_000) as f64 / 1000.0, &burning);
+        drawn.push(stick.marshmallow);
+    }
+    // Its trail runs along where it was drawn, from the fire, every point on its way, joined, up to where it is drawn.
+    let ribbon: Vec<_> = embers
+        .glowing()
+        .filter(|quad| quad[0].kind() == crate::embers::Kind::Ribbon)
+        .map(|quad| (quad[0].at(), quad[2].at()))
+        .collect();
+    assert!(ribbon.len() > 60, "{}", ribbon.len());
+    for (from, to) in &ribbon {
+        for point in [from, to] {
+            let off = (*point - campsite::heart())
+                .cross(velocity.normalize())
+                .length();
+            assert!(off < 2e-3, "{point}");
+        }
+    }
+    for pair in ribbon.windows(2) {
+        assert_eq!(pair[0].1, pair[1].0);
+    }
+    assert!(ribbon[0].0.distance(drawn[0]) < 1e-4);
+    assert!(ribbon.last().unwrap().1.distance(*drawn.last().unwrap()) < crate::embers::SPACING);
+}
