@@ -28,8 +28,9 @@ pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple William
 /// about the campsite's fire; turning in snaps; between the yard and the lookout at the trail's far end by a pair of
 /// teleport pads; onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat; and up to
 /// the terrace above the waterfall by pointing at the falling water from the rock, and back down onto the rock by
-/// pointing at the cairn by its lip, each pointed at only from near it. See Tomori's `design/locomotion.md` and
-/// `tomori-environment-farmyard`'s `context/trail.md` and `context/terrace.md`.
+/// pointing at the cairn by its lip, each pointed at only from near it; and onto the campsite's fireside log, seated,
+/// on the ground beneath its seat, by pointing at it. See Tomori's `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`,
+/// `context/terrace.md` and `context/campsite.md`.
 pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
     use tomori_scene::locomotion::{Locomotion, Pad, Surface, Target};
     let mut surfaces = vec![Surface::mesh(
@@ -49,10 +50,17 @@ pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
                 )
             }),
     );
+    // Beneath the fireside log's seat, where its target seats whoever points at it.
+    let (seated, _) = tomori_environment_farmyard::campsite::seated();
+    surfaces.push(Surface::disc(
+        seated,
+        tomori_environment_farmyard::campsite::SEAT,
+    ));
     let pads = trail::pads().map(|pad| Pad::at(pad.centre).named(pad.name).facing(pad.facing));
     let targets = trail::targets()
         .into_iter()
         .chain(tomori_environment_farmyard::terrace::targets())
+        .chain(tomori_environment_farmyard::campsite::targets())
         .map(|target| {
             let object = Target::object(target.foot, target.radius, target.height)
                 .arriving(target.arrival)
@@ -178,7 +186,9 @@ mod tests {
         // terrace's floor, at its own height above the waterfall.
         assert_eq!(
             surfaces.len(),
-            1 + trail::way_out().len() + tomori_environment_farmyard::campsite::standing().len()
+            1 + trail::way_out().len()
+                + tomori_environment_farmyard::campsite::standing().len()
+                + 1
         );
         for surface in surfaces {
             match surface.navmesh() {
@@ -201,7 +211,11 @@ mod tests {
                                 && (0.0..0.06).contains(&corner.y))
                     }))
                 }
-                None => assert!((0.0..0.009).contains(&surface.height())),
+                // But the fireside log's seat, on the ground as it rises beneath it.
+                None => assert!(
+                    (0.0..0.009).contains(&surface.height())
+                        || surface.height() == tomori_environment_farmyard::campsite::seated().0.y
+                ),
             }
         }
         let on = |point: Vec2| {
@@ -471,6 +485,14 @@ mod tests {
                             )) < tomori_environment_farmyard::campsite::CLEARING,
                     ),
                     (
+                        "gained: the fireside log's seat",
+                        old.is_none() && {
+                            let (seated, _) = tomori_environment_farmyard::campsite::seated();
+                            point.distance(Vec2::new(seated.x, seated.z))
+                                <= tomori_environment_farmyard::campsite::SEAT
+                        },
+                    ),
+                    (
                         "gained: the beach's shingle",
                         old.is_none()
                             && tomori_environment_farmyard::beach::height(point)
@@ -506,7 +528,8 @@ mod tests {
                 "lost: trail's posts, seat and rock",
                 "lost: undrawn clearing",
                 "gained: the beach's shingle",
-                "gained: the campsite's clearing, round its fire"
+                "gained: the campsite's clearing, round its fire",
+                "gained: the fireside log's seat"
             ]
             .contains(kind)),
             "{kinds:?}"
@@ -721,19 +744,21 @@ mod tests {
                 assert!(!walkable(point), "{point}");
             }
         }
-        // Four targets, used as the profile is carried into a space, where participants arrive at home, within its
+        // Five targets, used as the profile is carried into a space, where participants arrive at home, within its
         // bounds: the rock, arriving on its top, as high as it is drawn, facing the waterfall; the lookout's seat,
-        // arriving on the trail before it, facing the pool; and the upper terrace's two, the waterfall and its cairn.
+        // arriving on the trail before it, facing the pool; the upper terrace's two, the waterfall and its cairn; and the
+        // campsite's fireside log.
         let arrival = tomori_protocol::Pose::at(layout::ARRIVAL.to_array())
             .facing_towards(layout::ARRIVAL_FACING.to_array());
         let carriage = tomori_scene::anchors::Anchor::carriage(&arrival).unwrap();
         let carried = profile.carried(&carriage);
         assert_eq!(carried.pads().count(), 1);
         let targets: Vec<_> = carried.targets().collect();
-        assert_eq!(targets.len(), 4);
+        assert_eq!(targets.len(), 5);
         for (index, target) in targets.iter().enumerate() {
-            // The rock's and the lookout's within 20 m of home, as before the terrace; the terrace's within 30 m.
-            let bound = if index < 2 {
+            // The rock's, the lookout's and the fireside log's within 20 m of home, as before the terrace; the terrace's
+            // within 30 m.
+            let bound = if index < 2 || index == 4 {
                 19.9
             } else {
                 tomori_scene::anchors::REACH - 1.0
@@ -815,6 +840,77 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn the_fireside_log_is_reached_by_pointing_at_it_and_seats_one_on_it_facing_the_fire() {
+        use glam::{Vec2, Vec3};
+        use tomori_environment_farmyard::{campsite, walkable};
+        use tomori_scene::locomotion::Locomotion;
+        use tomori_scene::pointing::Ray;
+
+        use super::{layout, trail};
+        let profile = super::locomotion();
+        let Locomotion::Teleport { surfaces, .. } = &profile else {
+            unreachable!("the farmyard teleports");
+        };
+        let target = profile
+            .targets()
+            .find(|target| target.name() == Some("Fireside log"))
+            .unwrap();
+        let (middle, along, length, radius) = campsite::fireside();
+        let (arrival, _) = campsite::seated();
+        // Pointed at along most of its length, from its foot to above its seat, but not beyond its ends, nor over the ring
+        // participants walk about the fire, so that a teleport aimed there lands there.
+        assert_eq!(target.foot(), middle);
+        assert!(target.height() > campsite::seat_top(radius) && target.height() < 0.7);
+        let fire = Vec2::new(campsite::FIRE.x, campsite::FIRE.z);
+        let along = Vec3::new(along.x, 0.0, along.y);
+        assert!(target.over(middle + along * (length * 0.5 - 0.15)));
+        assert!(!target.over(middle + along * (length * 0.5 + 0.05)));
+        for degree in 0..360 {
+            let turn = (degree as f32).to_radians();
+            let ring = fire + Vec2::new(turn.sin(), turn.cos()) * 1.0;
+            assert!(!target.over(Vec3::new(ring.x, 0.0, ring.y)), "{ring}");
+        }
+        // From anywhere about the fire or along the trail by it, a ray to the log's seat meets no surface before it.
+        let seat = middle + Vec3::Y * campsite::seat_top(radius);
+        let lookout = trail::frame(trail::VIEWPOINTS[1].2).0;
+        for from in [
+            fire + Vec2::new(0.0, 1.0),
+            fire + Vec2::new(-1.0, 0.2),
+            lookout,
+        ] {
+            assert!(target.reached_from(Vec3::new(from.x, 1.6, from.y)));
+            let eyes = Vec3::new(from.x, 1.6, from.y);
+            let ray = Ray::new(eyes, seat - eyes).unwrap();
+            for along in 0..=40 {
+                let at = ray.at(eyes.distance(seat) * along as f32 / 40.0);
+                assert!(
+                    surfaces.iter().all(|surface| surface
+                        .height_at(at)
+                        .is_none_or(|floor| floor < at.y - 0.05)),
+                    "{from} {at}"
+                );
+            }
+        }
+        // It seats one on the log, facing the fire: on the small disc of ground beneath its seat, a little before its
+        // middle, beyond the walkable ground, and a backstep from there, away from the fire, steps nowhere.
+        assert_eq!(target.arrival(), arrival);
+        assert!(!target.arrives_on_top());
+        assert!(arrival.distance(middle) < radius);
+        assert!((arrival - middle).dot(campsite::FIRE - middle) > 0.0);
+        assert_eq!(walkable::height_at(Vec2::new(arrival.x, arrival.z)), None);
+        assert!(surfaces.iter().any(|surface| surface.contains(arrival)));
+        let facing = |yaw: f32| Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+        let towards = ((campsite::FIRE - arrival) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+        assert!(facing(target.yaw().unwrap()).dot(towards) > 0.999);
+        assert_eq!(
+            profile.backstep(arrival + Vec3::Y * 1.2, towards, arrival.y),
+            None
+        );
+        // And it is within the space's bounds of where participants arrive, as the rock is.
+        assert!((arrival - layout::ARRIVAL).abs().max_element() < 19.9);
+    }
+
     #[test]
     fn the_upper_terrace_is_reached_only_by_pointing_at_the_waterfall_from_its_rock_and_left_by_its_cairn()
      {
@@ -909,7 +1005,7 @@ mod tests {
         let place = |at: Vec3| carriage.place(at);
         let carried = profile.carried(&carriage);
         let targets: Vec<_> = carried.targets().collect();
-        assert_eq!(targets.len(), 4);
+        assert_eq!(targets.len(), 5);
         let (up, down) = (targets[2], targets[3]);
         assert_eq!(
             (up.name(), down.name()),

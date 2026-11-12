@@ -60,7 +60,31 @@ pub fn seat() -> (Vec3, Vec2, f32, f32) {
     )
 }
 
-/// The height of the top of a log seat of `radius`, which lies on chocks.
+/// How far from [`FIRE`] the fireside log lies, towards the pool.
+pub const FIRESIDE: f32 = 1.65;
+
+/// The fireside log, a third log seat, between the fire and the pool, across the fire from the trail, facing the fire:
+/// its middle, on the ground as drawn there, the way it lies, how long it is and its radius, as [`seat`] gives the
+/// second's. Participants come to sit on it by pointing at it ([`targets`]).
+pub fn fireside() -> (Vec3, Vec2, f32, f32) {
+    let fire = Vec2::new(FIRE.x, FIRE.z);
+    let towards = (Vec2::new(layout::POOL.x, layout::POOL.z) - fire).normalize();
+    let at = fire + towards * FIRESIDE;
+    let along = towards.perp();
+    let length = 1.2;
+    // On the higher of the ground beneath its chocks, which rises gently towards the pool, so that neither floats.
+    let ground = [-0.32f32, 0.32]
+        .into_iter()
+        .map(|end| {
+            backdrop::drawn_ground(at + along * length * end)
+                .unwrap_or(backdrop::MEADOW)
+                .max(trail::CLEARING_HEIGHT)
+        })
+        .fold(f32::NEG_INFINITY, f32::max);
+    (Vec3::new(at.x, ground, at.y), along, length, 0.18)
+}
+
+/// The height of the top of a log seat of `radius`, which lies on chocks, above the ground it lies on.
 pub fn seat_top(radius: f32) -> f32 {
     radius * 2.0 + 0.04
 }
@@ -425,7 +449,7 @@ fn log_ends((middle, along, length, radius): (Vec3, Vec2, f32, f32)) -> Vec<Vec3
 }
 
 /// What the sticks rest on: the ground about the fire, the trail's track and the campsite's clearing, as they are drawn,
-/// and the pool's bed, one grid of heights; both log seats; the ring of stones about the fire; and the bonfire.
+/// and the pool's bed, one grid of heights; the three log seats; the ring of stones about the fire; and the bonfire.
 pub fn colliders() -> Vec<Static> {
     let fire = Vec2::new(FIRE.x, FIRE.z);
     let spacing = 0.5;
@@ -448,7 +472,7 @@ pub fn colliders() -> Vec<Static> {
     // One surface, the clearing's height in it, rather than the clearing's own triangles over it, which a stick lying
     // across both would creep on as they disagree by a millimetre.
     let mut colliders = vec![Static::heights(corner, spacing, columns, &heights)];
-    for log in [trail::seat(), seat()] {
+    for log in [trail::seat(), seat(), fireside()] {
         colliders.push(Static::convex(log_ends(log)));
     }
     colliders.extend((0..PIT_STONES).map(|stone| {
@@ -636,7 +660,7 @@ pub fn ground() -> Vec<[Vec3; 3]> {
 }
 
 /// What stands about the fire, as `(least, greatest)` corners, which participants, the agent, walls and panels keep
-/// clear of: the log seat across it with the sticks leaning on it.
+/// clear of: the log seat across it with the sticks leaning on it, and the fireside log.
 pub fn furniture() -> Vec<([f32; 3], [f32; 3])> {
     let mut solids = Vec::new();
     let (middle, along, length, radius) = seat();
@@ -652,6 +676,13 @@ pub fn furniture() -> Vec<([f32; 3], [f32; 3])> {
         }
     }
     solids.push(([low.x, 0.0, low.z], high.to_array()));
+    // The fireside log.
+    let (middle, along, length, radius) = fireside();
+    let along = Vec3::new(along.x, 0.0, along.y);
+    let ends = [middle + along * length * 0.5, middle - along * length * 0.5];
+    let low = ends[0].min(ends[1]) - Vec3::new(radius, 0.0, radius);
+    let high = ends[0].max(ends[1]) + Vec3::new(radius, seat_top(radius), radius);
+    solids.push(([low.x, middle.y - 0.05, low.z], high.to_array()));
     solids
 }
 
@@ -690,6 +721,37 @@ pub fn place() -> trail::Place {
         towards: Vec3::new(point.x, 2.3, point.y),
         notify_within: None,
     }
+}
+
+/// How far about where participants arrive on the fireside log ([`seated`]) they stand, a small disc of ground beneath
+/// its seat that the client declares, so that a target may take them there.
+pub const SEAT: f32 = 0.2;
+
+/// Where on the fireside log participants arrive, seated, on the ground beneath its seat, a little before its middle,
+/// towards the fire, so that one sitting where they are sits on it, their eyes where one sitting on it has them, facing
+/// the fire; and which way they face.
+pub fn seated() -> (Vec3, Vec3) {
+    let (middle, ..) = fireside();
+    let towards = ((FIRE - middle) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+    let arrival = middle + towards * 0.12;
+    (arrival, (FIRE - arrival) * Vec3::new(1.0, 0.0, 1.0))
+}
+
+/// The campsite's teleport target: the fireside log, pointed at, along most of its length and from its chocks up to a
+/// little above its top, from anywhere within reach, taking one to sit on it, facing the fire ([`seated`]), on the
+/// small disc of ground beneath its seat ([`SEAT`]), which no walkable ground reaches.
+pub fn targets() -> [trail::TargetPlace; 1] {
+    let (middle, _, length, radius) = fireside();
+    let (arrival, facing) = seated();
+    [trail::TargetPlace {
+        foot: middle,
+        radius: length * 0.5 - 0.1,
+        height: seat_top(radius) + 0.1,
+        arrival,
+        name: "Fireside log",
+        facing,
+        within: None,
+    }]
 }
 
 /// The colours of the campsite: its clearing's earth, its stones, the ash in its pit, its logs' bark and cut ends, and
@@ -870,25 +932,27 @@ fn build(shapes: &mut Shapes, embers: &mut Shapes) {
             FIRE + Vec3::new(turn.sin(), 0.0, turn.cos()) * (0.12 + scatter(coal + 9870) * 0.12);
         embers.cone(at + Vec3::Y * lift, 0.035, 0.035, 4, colors::EMBER);
     }
-    // The second log seat, on two chocks, as the lookout's is.
-    let (middle, along, length, radius) = seat();
-    let along = Vec3::new(along.x, 0.0, along.y);
-    let centre = middle + Vec3::Y * (radius + 0.04);
-    log(
-        shapes,
-        (centre - along * length * 0.5, centre + along * length * 0.5),
-        radius,
-        8,
-        (palette::BARK * 1.2, palette::WOOD),
-    );
-    for end in [-0.32, 0.32] {
-        let chock = middle + along * length * end;
-        shapes.cuboid(
-            chock + Vec3::Y * 0.04,
-            Vec3::new(0.06, 0.04, radius * 0.9),
-            Quat::from_rotation_arc(Vec3::X, along),
-            palette::DARK_WOOD,
+    // The second log seat and the fireside log, each on two chocks, as the lookout's is, sunk a little into the ground
+    // where it rises beneath them.
+    for (middle, along, length, radius) in [seat(), fireside()] {
+        let along = Vec3::new(along.x, 0.0, along.y);
+        let centre = middle + Vec3::Y * (radius + 0.04);
+        log(
+            shapes,
+            (centre - along * length * 0.5, centre + along * length * 0.5),
+            radius,
+            8,
+            (palette::BARK * 1.2, palette::WOOD),
         );
+        for end in [-0.32, 0.32] {
+            let chock = middle + along * length * end;
+            shapes.cuboid(
+                chock + Vec3::Y * 0.02,
+                Vec3::new(0.06, 0.06, radius * 0.9),
+                Quat::from_rotation_arc(Vec3::X, along),
+                palette::DARK_WOOD,
+            );
+        }
     }
 }
 

@@ -18,6 +18,8 @@
 
 - For environments: `tomori-environment-farmyard`'s `campsite` gains `BURNS`, `burns` and `doused`; its client crate gains the `embers` module, `scenery::Clock::elapsed` and `Farmyard::embers_mut`, and `campsite::Shown` gains `index`, **breaking** for code that builds it.
 
+- **A fireside log to sit on.** The campsite has a third log, between the fire and the pool, facing the fire. Point at it and pull the trigger to jump there, sitting on it facing the fire; stand up and you're standing at it. The agent knows where it is. The farmyard's version is now 12, so an earlier client shows the grid there. See `design/farmyard.md`.
+
 - **Walk all the way round the campfire.** In the farmyard, you can now walk, and land, all the way round the campsite's fire, between its ring of stones and the logs about it; the log the marshmallow sticks lean on is a step further back to make room. The agent follows you round it too. See `design/farmyard.md`.
 
 - **Bigger marshmallows.** The campsite's marshmallows are twice as big, 9 cm long, on the end of each stick, and they toast at the same distances from the flames as before; a burnt one's flame is twice as big too. The sticks rest a little further back on their log so they don't tip off it, and a stick dropped in the pool floats and comes back after a minute as before. See `design/farmyard.md`.

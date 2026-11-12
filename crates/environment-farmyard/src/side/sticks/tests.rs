@@ -537,13 +537,13 @@ fn an_empty_campsite_puts_its_sticks_back_after_an_hour() {
 }
 
 #[test]
-fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
+fn the_agent_is_told_of_the_bonfire_the_fireside_log_and_each_stick_and_may_inspect_them() {
     let now = Instant::now();
     let mut sticks = Sticks::new(now);
     taken(&mut sticks, 2, now);
     let report = sticks.report();
     let objects = report.describe();
-    assert_eq!(objects.len(), campsite::STICKS + 1);
+    assert_eq!(objects.len(), campsite::STICKS + 2);
     let (id, reference, description, at) = &objects[0];
     assert_eq!(
         (id.as_str(), reference.as_str()),
@@ -551,7 +551,19 @@ fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
     );
     assert!(description.contains("bonfire"));
     assert_eq!(*at, Some(campsite::heart()));
-    for (index, (id, reference, description, at)) in objects[1..].iter().enumerate() {
+    // The fireside log, on its seat, which pointing at seats one.
+    let (id, reference, description, at) = &objects[1];
+    assert_eq!(
+        (id.as_str(), reference.as_str()),
+        ("fireside-log", "campsite/fireside-log")
+    );
+    assert!(tomori_environment::valid_reference(reference));
+    assert!(description.contains("seat") && description.contains("pointing at it"));
+    let (seat, _, _, radius) = campsite::fireside();
+    assert_eq!(*at, Some(seat + Vec3::Y * campsite::seat_top(radius)));
+    let log = report.inspect("campsite/fireside-log").unwrap();
+    assert_eq!(log["kind"], "log seat");
+    for (index, (id, reference, description, at)) in objects[2..].iter().enumerate() {
         assert_eq!(*id, format!("stick-{index}"));
         assert_eq!(*reference, format!("campsite/stick-{index}"));
         assert!(tomori_environment::valid_reference(reference));
@@ -569,14 +581,14 @@ fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
     let lying = Report {
         sticks: vec![Said::default()],
     };
-    assert!(lying.describe()[1].2.contains("lying"));
+    assert!(lying.describe()[2].2.contains("lying"));
     let floating = Report {
         sticks: vec![Said {
             floating: true,
             ..Said::default()
         }],
     };
-    assert!(floating.describe()[1].2.contains("floating in the pool"));
+    assert!(floating.describe()[2].2.contains("floating in the pool"));
     let bonfire = report.inspect("campsite/bonfire").unwrap();
     assert_eq!(bonfire["kind"], "bonfire");
     let stick = report.inspect("campsite/stick-2").unwrap();

@@ -72,8 +72,8 @@ fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
     });
     let first: State = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
     let objects = kept.objects.lock().unwrap()[0].clone();
-    // Each hen, then the beach, and the campsite's bonfire and its sticks.
-    assert_eq!(objects.len(), first.chickens.len() + 2 + campsite::STICKS);
+    // Each hen, then the beach, and the campsite's bonfire, its fireside log and its sticks.
+    assert_eq!(objects.len(), first.chickens.len() + 3 + campsite::STICKS);
     assert_eq!(objects[first.chickens.len()].id(), "beach");
     assert_eq!(objects[first.chickens.len() + 1].id(), "bonfire");
     assert_eq!(objects[0].id(), "chicken-0");

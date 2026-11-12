@@ -78,11 +78,19 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
             );
         }
         assert!(views.iter().all(|(from, to)| !solid.blocks(*from, *to)));
-        // Out of every plant's crown, round about its trunk, as far as it reaches.
+        // Out of every plant's crown, round about its trunk, as far as it reaches; but for a tree fern's, beneath it, its
+        // crown high overhead and its trunk well clear, as the fireside log lies beneath a ponga's.
+        let mut bush = crate::ferns::bush().into_iter();
         for plant in backdrop::plants() {
             let (reach, _) = plant.size();
+            let fern = (plant.kind == backdrop::Kind::Fern).then(|| bush.next().unwrap().solids());
+            let beneath = fern.is_some_and(|fern| {
+                let trunk = Vec2::new(fern[0].low[0], fern[0].low[2]);
+                let trunk = (trunk + Vec2::new(fern[0].high[0], fern[0].high[2])) * 0.5;
+                apart(&solid, trunk) > 1.0 && solid.high[1] + 1.8 < fern[1].low[1]
+            });
             assert!(
-                apart(&solid, ground(plant.at)) > reach,
+                apart(&solid, ground(plant.at)) > reach || beneath,
                 "{solid:?} {plant:?}"
             );
         }
@@ -104,6 +112,49 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
     assert!((0.35..0.5).contains(&seat_top(radius)));
     assert!((1.0..1.6).contains(&length));
     assert!(along.dot((fire - ground(middle)).normalize()).abs() < 0.2);
+}
+
+#[test]
+fn the_fireside_log_lies_between_the_fire_and_the_pool_facing_the_fire_and_seats_whoever_points_at_it()
+ {
+    let fire = ground(FIRE);
+    let pool = Vec2::new(POOL.x, POOL.z);
+    let (middle, along, length, radius) = fireside();
+    // Between the fire and the pool, a step beyond the ring participants walk round the fire, lying across the way to
+    // the pool, so that one sitting on it faces the fire; low enough to sit on.
+    assert!((1.5..1.8).contains(&ground(middle).distance(fire)));
+    assert!(ground(middle).distance(pool) < fire.distance(pool) - 1.4);
+    assert!(along.dot((pool - fire).normalize()).abs() < 1e-4);
+    assert!((0.35..0.5).contains(&seat_top(radius)));
+    assert!((1.0..1.6).contains(&length));
+    // On the ground beneath its chocks, which rises towards the pool: none higher than it lies, nor much lower.
+    for end in [-0.32, 0.32] {
+        let at = ground(middle) + along * length * end;
+        let beneath = backdrop::drawn_ground(at)
+            .unwrap_or(backdrop::MEADOW)
+            .max(trail::CLEARING_HEIGHT);
+        assert!(
+            beneath <= middle.y + 1e-5 && beneath > middle.y - 0.04,
+            "{at}"
+        );
+    }
+    // Solid, to the agent and to where participants stand, and to the sticks, which rest on it as on the other seats.
+    let solid = Solid::new(furniture()[1].0, furniture()[1].1);
+    assert!(solid.contains((middle + Vec3::Y * seat_top(radius) * 0.5).to_array()));
+    assert_eq!(colliders().len(), 1 + 3 + PIT_STONES as usize + 1);
+    // Whoever points at it arrives sitting on it: on the ground beneath its seat, a little before its middle, facing the
+    // fire, from anywhere within reach.
+    let (arrival, facing) = seated();
+    assert!(arrival.distance(middle) < radius);
+    assert!((arrival - middle).dot(FIRE - middle) > 0.0);
+    let towards = (FIRE - arrival) * Vec3::new(1.0, 0.0, 1.0);
+    assert!(facing.normalize().dot(towards.normalize()) > 0.999);
+    let [target] = targets();
+    assert_eq!(
+        (target.name, target.foot, target.arrival, target.within),
+        ("Fireside log", middle, arrival, None)
+    );
+    assert!(target.radius < length * 0.5 && target.height > seat_top(radius));
 }
 
 #[test]
@@ -361,9 +412,9 @@ fn what_the_sticks_rest_on_is_drawn_and_within_the_physics_limits() {
     assert!(colliders.iter().all(Static::valid));
     let triangles: usize = colliders.iter().map(Static::triangles).sum();
     assert!(triangles <= tomori_physics::STATIC_TRIANGLES, "{triangles}");
-    // The ground about the fire as it is drawn, with its clearing, both log seats, the fire's ring of stones and its
+    // The ground about the fire as it is drawn, with its clearing, the three log seats, the fire's ring of stones and its
     // bonfire.
-    assert_eq!(colliders.len(), 1 + 2 + PIT_STONES as usize + 1);
+    assert_eq!(colliders.len(), 1 + 3 + PIT_STONES as usize + 1);
     // The pool's water, below the campsite, within its reach, which takes back what rests in it.
     let pool = &waters()[0];
     assert_eq!(pool.returns_after, Some(RETURNS));

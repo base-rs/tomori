@@ -84,9 +84,9 @@ pub struct Report {
 }
 
 impl Report {
-    /// What the space's agent is told of the campsite: the bonfire, and each stick, how toasted its marshmallow is and
-    /// where it is, each with its identity, reference and where it stands, but a stick in someone's hand, which only
-    /// their presence says.
+    /// What the space's agent is told of the campsite: the bonfire, the fireside log, and each stick, how toasted its
+    /// marshmallow is and where it is, each with its identity, reference and where it stands, but a stick in someone's
+    /// hand, which only their presence says.
     pub fn describe(&self) -> Vec<(String, String, String, Option<Vec3>)> {
         let mut objects = vec![(
             "bonfire".to_owned(),
@@ -94,6 +94,15 @@ impl Report {
             "the campsite's bonfire, crackling in its ring of stones beside the pool lookout's log seat".to_owned(),
             Some(campsite::heart()),
         )];
+        let (seat, _, _, radius) = campsite::fireside();
+        objects.push((
+            "fireside-log".to_owned(),
+            "campsite/fireside-log".to_owned(),
+            "the fireside log, a seat between the campfire and the pool, facing the fire; pointing at it takes \
+             someone to sit on it"
+                .to_owned(),
+            Some(seat + Vec3::Y * campsite::seat_top(radius)),
+        ));
         objects.extend(self.sticks.iter().enumerate().map(|(index, stick)| {
             let place = match stick {
                 Said {
@@ -119,6 +128,14 @@ impl Report {
     /// The details of what it describes as `reference`, for the space's agent: the bonfire, or a stick, how toasted
     /// it is, who holds it, by their number, and whether it is on its log.
     pub fn inspect(&self, reference: &str) -> Option<serde_json::Value> {
+        if reference == "campsite/fireside-log" {
+            let (seat, _, _, radius) = campsite::fireside();
+            return Some(serde_json::json!({
+                "kind": "log seat",
+                "at": (seat + Vec3::Y * campsite::seat_top(radius)).to_array(),
+                "faces": "the campfire",
+            }));
+        }
         if reference == "campsite/bonfire" {
             return Some(serde_json::json!({
                 "kind": "bonfire",

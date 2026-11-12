@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 11)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 12)]);
 /// ```
 pub fn builder() -> Builder {
     let farmyard = Environment::new(
@@ -166,7 +166,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 11)
+                ("farmyard", "Farmyard", 12)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
