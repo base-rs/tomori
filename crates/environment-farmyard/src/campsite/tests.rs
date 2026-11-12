@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::backdrop::RIM;
-use crate::layout::{BACKDROP_CENTRE, POOL};
+use crate::layout::{self, BACKDROP_CENTRE, POOL};
 use tomori_environment::sightlines::Solid;
 
 fn ground(point: Vec3) -> Vec2 {
@@ -20,11 +20,8 @@ fn boxes() -> Vec<Solid> {
 
 /// How far apart, across the ground, a box and a point are.
 fn apart(solid: &Solid, point: Vec2) -> f32 {
-    let (low, high) = (
-        Vec2::new(solid.low[0], solid.low[2]),
-        Vec2::new(solid.high[0], solid.high[2]),
-    );
-    (low - point).max(point - high).max(Vec2::ZERO).length()
+    layout::Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]])
+        .distance(point)
 }
 
 #[test]

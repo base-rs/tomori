@@ -139,7 +139,7 @@ fn every_fern_stands_on_the_ground_off_where_anyone_stands_or_walks_and_out_of_t
             if about(at, reach).into_iter().any(walked) {
                 assert!(low >= OVERHEAD, "{fern:?}");
             }
-            assert!(beyond_fence(at) >= reach - 0.5, "{fern:?}");
+            assert!(FENCE.distance(at) >= reach - 0.5, "{fern:?}");
             assert!((2.0..7.0).contains(&height), "{fern:?}");
         } else {
             assert!(from_standing(at) <= 5.0, "{fern:?}");

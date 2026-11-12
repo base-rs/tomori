@@ -504,11 +504,11 @@ pub fn beside() -> Vec<([f32; 3], [f32; 3])> {
                 .map(|solid| (solid.low, solid.high)),
         )
         .filter(|(low, high)| {
-            let (low, high) = (Vec2::new(low[0], low[2]), Vec2::new(high[0], high[2]));
+            let solid = layout::Footprint::new([low[0], low[2]], [high[0], high[2]]);
             let rock = Vec2::new(layout::WATERFALL_ROCK.x, layout::WATERFALL_ROCK.z);
             line.iter()
                 .chain([&rock])
-                .any(|point| (low - *point).max(*point - high).max(Vec2::ZERO).length() < BESIDE)
+                .any(|point| solid.distance(*point) < BESIDE)
         })
         .collect()
 }

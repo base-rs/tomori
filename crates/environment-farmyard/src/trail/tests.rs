@@ -5,14 +5,6 @@ use super::*;
 use crate::backdrop::{BANKS, RIM};
 use crate::layout::{FENCE, Footprint, POOL};
 
-/// How far `point` is beyond the fence, on the ground, or nothing inside it.
-fn beyond_fence(point: Vec2) -> f32 {
-    (FENCE.low - point)
-        .max(point - FENCE.high)
-        .max(Vec2::ZERO)
-        .length()
-}
-
 /// The edges of the trail's band, either side of each point of its middle.
 fn band() -> Vec<Vec2> {
     (0..centreline().len())
@@ -79,10 +71,10 @@ fn the_trail_loops_round_the_outside_of_the_fence_past_the_river_on_the_level_me
             middle.distance(layout::BACKDROP_CENTRE) + radius < REACH,
             "{middle}"
         );
-        assert!(beyond_fence(middle) > radius + 0.5, "{middle}");
+        assert!(FENCE.distance(middle) > radius + 0.5, "{middle}");
     }
     for point in &line {
-        assert!(beyond_fence(*point) > HALF + 0.9, "{point}");
+        assert!(FENCE.distance(*point) > HALF + 0.9, "{point}");
     }
     for (low, high) in super::solids() {
         let footprint = Footprint::new([low[0], low[2]], [high[0], high[2]]);
@@ -394,10 +386,10 @@ fn its_posts_and_seat_keep_the_backdrop_s_views_open_and_its_places_have_room() 
         assert!(place.at.distance(place.towards) > 0.5);
         // Clear of every solid by 0.4 m about it, or a metre and more above it, as a station's above the seat.
         for solid in &solids {
-            let low = Vec2::new(solid.low[0], solid.low[2]);
-            let high = Vec2::new(solid.high[0], solid.high[2]);
             let at = Vec2::new(place.at.x, place.at.z);
-            let apart = (low - at).max(at - high).max(Vec2::ZERO).length();
+            let apart =
+                Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]])
+                    .distance(at);
             assert!(
                 apart >= 0.4 || place.at.y >= solid.high[1] + 1.0,
                 "{} {solid:?}",
@@ -466,7 +458,7 @@ fn the_trail_is_one_model_drawn_above_the_meadow_and_beyond_the_fence_the_same_e
         assert!(position.y > -0.006, "{position}");
         let at = Vec2::new(position.x, position.z);
         assert!(
-            beyond_fence(at) > 0.0 || at.y >= FENCE.high.y - 1e-4,
+            FENCE.distance(at) > 0.0 || at.y >= FENCE.high.y - 1e-4,
             "{position}"
         );
         assert!(

@@ -27,7 +27,7 @@ use tomori_environment::sightlines::Solid;
 
 use crate::backdrop::{self, BANKS, RIM};
 use crate::campsite;
-use crate::layout::{self, FENCE, POOL};
+use crate::layout::{self, FENCE, Footprint, POOL};
 use crate::props::scatter;
 use crate::trail;
 
@@ -842,14 +842,6 @@ pub fn solids() -> Vec<Solid> {
         .collect()
 }
 
-/// How far `point` is beyond the fence, on the ground, or nothing inside it.
-fn beyond_fence(point: Vec2) -> f32 {
-    (FENCE.low - point)
-        .max(point - FENCE.high)
-        .max(Vec2::ZERO)
-        .length()
-}
-
 /// How far `point` is, on the ground, from anywhere participants stand or walk outside the yard: the trail's band and its
 /// edges, the way out through the gate, the clearings beside it, the campsite's clearing, the beach's shingle and the
 /// waterfall rock's top; and, with the yard, from the fence.
@@ -877,7 +869,7 @@ pub fn from_standing(point: Vec2) -> f32 {
         campsite,
         crate::beach::from_beach(point),
         rock,
-        beyond_fence(point),
+        FENCE.distance(point),
     ]
     .into_iter()
     .fold(f32::INFINITY, f32::min)
@@ -1059,11 +1051,9 @@ pub fn taken(at: Vec2, solids: &[Solid]) -> u64 {
     let near: Vec<&Solid> = solids
         .iter()
         .filter(|solid| {
-            let (low, high) = (
-                Vec2::new(solid.low[0], solid.low[2]),
-                Vec2::new(solid.high[0], solid.high[2]),
-            );
-            (low - at).max(at - high).max(Vec2::ZERO).length() < 3.5
+            Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]])
+                .distance(at)
+                < 3.5
         })
         .collect();
     let mut taken = 0;
@@ -1156,7 +1146,7 @@ fn judged(
     let reach = extent.crown.0 * scale;
     let trunk = extent.trunk.0 * scale;
     let footing = if tree { trunk } else { reach };
-    let fence = beyond_fence(point);
+    let fence = FENCE.distance(point);
     let fenced = if tree {
         fence < (reach - 0.5).max(trunk + 0.4)
     } else {
@@ -1177,11 +1167,7 @@ fn judged(
     let cliff =
         across < 6.0 + reach && along > layout::CLIFF[0] - 0.5 && along < layout::CLIFF[1] + 6.0;
     let board = layout::noticeboard();
-    let by_board = (board.low - point)
-        .max(point - board.high)
-        .max(Vec2::ZERO)
-        .length()
-        < reach + 1.0;
+    let by_board = board.distance(point) < reach + 1.0;
     if river < bank || pool < rim || cliff || by_board {
         return Err("water, cliff or board");
     }
@@ -1248,11 +1234,9 @@ fn judged(
     let by_anchor = context.clusters.iter().any(|(at, ..)| {
         let flat = Vec2::new(at.x, at.z);
         solids.iter().any(|solid| {
-            let (low, high) = (
-                Vec2::new(solid.low[0], solid.low[2]),
-                Vec2::new(solid.high[0], solid.high[2]),
-            );
-            (low - flat).max(flat - high).max(Vec2::ZERO).length() < 0.45
+            Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]])
+                .distance(flat)
+                < 0.45
                 && at.y < solid.high[1] + 1.0
         })
     });
@@ -1369,7 +1353,7 @@ fn kinds(tree: bool, point: Vec2, seed: u32) -> [Kind; 3] {
         .1
         .min(point.distance(Vec2::new(POOL.x, POOL.z)) - layout::POOL_RADIUS);
     if tree {
-        let first = if beyond_fence(point) < 3.0 {
+        let first = if FENCE.distance(point) < 3.0 {
             Kind::Wheki
         } else if water < 7.0 && chance < 0.6 {
             Kind::Mamaku
