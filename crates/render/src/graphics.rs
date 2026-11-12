@@ -135,7 +135,10 @@ pub(crate) fn camera(scene_to_clip: Mat4, haze: Haze, height: u32) -> [f32; 28] 
 
 /// The layout of an eye's camera, [`camera`], which Tomori's cubes, its controllers, its signs and arrival's labels are
 /// drawn with, read by their fragments too for the haze.
-pub(crate) fn camera_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(crate) fn camera_layout(
+    device: &wgpu::Device,
+    views: crate::multiview::Views,
+) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("eye camera layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -144,14 +147,15 @@ pub(crate) fn camera_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(CAMERA_SIZE),
+                min_binding_size: crate::multiview::Uniforms::binding_size(CAMERA_SIZE, views),
             },
             count: None,
         }],
     })
 }
 
-/// An eye's camera buffer, for [`camera`].
+/// An eye's camera buffer, for [`camera`], for the tests' own passes of one view.
+#[cfg(test)]
 pub(crate) fn camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("eye camera"),
@@ -164,28 +168,45 @@ pub(crate) fn camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
 /// The samples per pixel the headset and desktop window draw with unless told otherwise: 4, for multisample anti-aliasing.
 pub const SAMPLES: u32 = 4;
 
-/// `requested` samples per pixel if `adapter` can draw both `format` and the scene's depth with them, or else 1, which draws without multisampling.
+/// `requested` samples per pixel if `adapter` can draw both `format` and the scene's depth with them; or else, for 2, 4
+/// if it can; or else 1, which draws without multisampling.
 ///
-/// Only 1 and 4 are offered: they are the counts wgpu allows without adapter-specific format features, which the headset's device does not enable.
+/// 1 and 4 are the counts wgpu allows without adapter-specific format features; 2, which the headset offers so that both
+/// eyes drawn in one pass fit the tiled GPU's bins as one eye at 4 does, is drawn only by a device made with
+/// [`ADAPTER_SAMPLES`], as the headset's is where 2 is asked for.
 pub fn supported_samples(
     adapter: &wgpu::Adapter,
     format: wgpu::TextureFormat,
     requested: u32,
 ) -> u32 {
-    let supported = |format: wgpu::TextureFormat| {
-        adapter
-            .get_texture_format_features(format)
-            .flags
-            .sample_count_supported(SAMPLES)
+    let supported = |count: u32| {
+        [format, wgpu::TextureFormat::Depth32Float]
+            .iter()
+            .all(|format| {
+                adapter
+                    .get_texture_format_features(*format)
+                    .flags
+                    .sample_count_supported(count)
+            })
     };
-    if requested >= SAMPLES && supported(format) && supported(wgpu::TextureFormat::Depth32Float) {
-        SAMPLES
-    } else {
-        1
-    }
+    let preferred: &[u32] = match requested {
+        2 => &[2, SAMPLES],
+        requested if requested >= SAMPLES => &[SAMPLES],
+        _ => &[],
+    };
+    preferred
+        .iter()
+        .copied()
+        .find(|count| supported(*count))
+        .unwrap_or(1)
 }
 
-/// The samples per pixel asked for by `value`, such as the headset's `tomori.msaa` intent extra: `4` or `on` for multisample anti-aliasing, `1`, `0` or `off` for none, and [`SAMPLES`] when absent or not understood.
+/// The feature a device is made with to draw with samples a pixel other than 1 and 4, such as 2: the adapter's own format
+/// features.
+pub const ADAPTER_SAMPLES: wgpu::Features =
+    wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+
+/// The samples per pixel asked for by `value`, such as the headset's `tomori.msaa` intent extra or `TOMORI_MSAA` for `tomori --xr`: `4` or `on` for multisample anti-aliasing, `2` for half as many samples, `1`, `0` or `off` for none, and [`SAMPLES`] when absent or not understood.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn requested_samples(value: Option<&str>) -> u32 {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -193,10 +214,11 @@ pub fn requested_samples(value: Option<&str>) -> u32 {
     };
     match value.to_ascii_lowercase().as_str() {
         "0" | "1" | "off" => 1,
+        "2" => 2,
         "4" | "on" => SAMPLES,
         _ => {
             log::warn!(
-                "Multisampling {value:?} is not 1, 4, on or off; using {SAMPLES} samples per pixel."
+                "Multisampling {value:?} is not 1, 2, 4, on or off; using {SAMPLES} samples per pixel."
             );
             SAMPLES
         }
@@ -244,15 +266,22 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
-    cameras: [wgpu::Buffer; 2],
-    camera_bindings: [wgpu::BindGroup; 2],
-    depth: [wgpu::TextureView; 2],
+    /// How many views each eye's pass draws: one, each eye in a pass of its own, or both by multiview. See
+    /// `design/rendering.md`.
+    views: crate::multiview::Views,
+    /// Why each eye has a pass of its own where both were asked to be drawn in one, if they were.
+    single: Option<String>,
+    /// The eyes' cameras, and their binding for each pass.
+    cameras: crate::multiview::Uniforms,
+    camera_bindings: Vec<wgpu::BindGroup>,
+    /// Each pass's depth, of two layers where one pass draws both eyes.
+    depth: Vec<wgpu::TextureView>,
     /// Samples per pixel in each eye's scene pass; above 1, the pass draws into `multisampled` and resolves into the eye's target. With the format, for resizing, which only desktop windows do.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     samples: u32,
     #[cfg_attr(target_os = "android", allow(dead_code))]
     format: wgpu::TextureFormat,
-    multisampled: Option<[wgpu::TextureView; 2]>,
+    multisampled: Option<Vec<wgpu::TextureView>>,
     scene: Vec<Instance>,
     vertex_count: u32,
     controllers: Controllers,
@@ -377,22 +406,88 @@ impl Renderer {
         samples: u32,
         sceneries: &crate::scenery::Sceneries,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("oriented swarm instances"),
-            source: wgpu::ShaderSource::Wgsl(oriented_shader().into()),
-        });
-        let camera_layout = camera_layout(device);
-        let cameras = std::array::from_fn(|_| camera_buffer(device));
-        let camera_bindings = std::array::from_fn(|eye| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("eye camera binding"),
-                layout: &camera_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: cameras[eye].as_entire_binding(),
-                }],
+        Self::with_views(
+            device,
+            queue,
+            format,
+            width,
+            height,
+            samples,
+            sceneries,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Renderer::with_sceneries`], drawing `views` a pass: with [`Views::Both`](crate::multiview::Views::Both),
+    /// both eyes in one pass, by multiview, into two-layer targets, where `device` has multiview and every scenery
+    /// registered draws both views; otherwise each eye in a pass of its own, as [`Self::views`] then says. See
+    /// `design/rendering.md`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_views(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+        sceneries: &crate::scenery::Sceneries,
+        views: crate::multiview::Views,
+    ) -> Self {
+        let glyphs = crate::glyphs::SharedGlyphs::new(device);
+        let mut single = (views == crate::multiview::Views::Both)
+            .then(|| crate::multiview::unsupported(device, samples))
+            .flatten()
+            .map(str::to_owned);
+        let views = crate::multiview::usable(device, views, samples);
+        let target = |views| {
+            crate::scenery::Target::new(
+                device,
+                queue,
+                format,
+                width,
+                height,
+                samples,
+                glyphs.clone(),
+            )
+            .with_views(views)
+        };
+        // Every scenery is made for the views asked for; if one cannot draw them, each eye has a pass of its own, and
+        // every scenery is made again for one view.
+        let mut made = sceneries.create(&target(views));
+        let views = match made.iter().find(|(_, scenery)| scenery.views() != views) {
+            Some((environment, _)) => {
+                single = Some(format!(
+                    "the scenery of {} draws one view",
+                    environment.id()
+                ));
+                drop(made);
+                made = sceneries.create(&target(crate::multiview::Views::One));
+                crate::multiview::Views::One
+            }
+            None => views,
+        };
+        let shader = crate::multiview::shader(
+            device,
+            "oriented swarm instances",
+            &oriented_shader(),
+            views,
+        );
+        let camera_layout = camera_layout(device, views);
+        let cameras = crate::multiview::Uniforms::new(device, "eye camera", CAMERA_SIZE, views);
+        let camera_bindings = cameras
+            .buffers()
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("eye camera binding"),
+                    layout: &camera_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
             })
-        });
+            .collect();
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("swarm pipeline layout"),
             bind_group_layouts: &[Some(&camera_layout)],
@@ -443,7 +538,7 @@ impl Renderer {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
         let mesh = cube();
@@ -458,41 +553,42 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let depth = Self::depth_views(device, width, height, samples);
-        let multisampled = Self::multisampled_views(device, format, width, height, samples);
-        let controllers = Controllers::new(device, queue, format, &camera_layout, samples);
-        let glyphs = crate::glyphs::SharedGlyphs::new(device);
-        let workspace = crate::workspace_graphics::WorkspaceGraphics::new(
+        let depth = Self::depth_views(device, width, height, samples, views);
+        let multisampled = Self::multisampled_views(device, format, width, height, samples, views);
+        let controllers =
+            Controllers::with_views(device, queue, format, &camera_layout, samples, views);
+        let workspace = crate::workspace_graphics::WorkspaceGraphics::with_views(
             device,
             format,
             &camera_layout,
             glyphs.glyphs(),
             samples,
+            views,
         );
-        let arrival = crate::arrival_graphics::ArrivalLabels::new(
+        let arrival = crate::arrival_graphics::ArrivalLabels::with_views(
             device,
             format,
             &camera_layout,
             glyphs.glyphs(),
             samples,
+            views,
         );
-        let panels = crate::ui_panel::Pipeline::shared(device, format, &glyphs, samples);
+        let panels = crate::ui_panel::Pipeline::with_views(device, format, &glyphs, samples, views);
         let solids = crate::solids::Solids::new(device);
-        let images =
-            crate::panel_images::PanelImages::new(device, format, samples, panels.transforms());
-        let blink_pipeline = blink_pipeline(device, format, samples);
-        let target = crate::scenery::Target::new(
+        let images = crate::panel_images::PanelImages::with_views(
             device,
-            queue,
             format,
-            width,
-            height,
             samples,
-            glyphs.clone(),
+            panels.transforms(),
+            views,
         );
-        let created = sceneries.create(&target);
+        let blink_pipeline = blink_pipeline(device, format, samples, views);
+        let mut profiler =
+            // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
+            crate::profiler::Profiler::new(device, queue, !cfg!(target_os = "android"));
+        profiler.set_views(views);
         let mut world = tomori_world::World::new();
-        let (submitted, scenery_roots) = Submitted::new(&mut world, created.len());
+        let (submitted, scenery_roots) = Submitted::new(&mut world, made.len());
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
@@ -503,7 +599,7 @@ impl Renderer {
             pads: Vec::new(),
             blink: 0.0,
             blink_pipeline,
-            sceneries: created,
+            sceneries: made,
             environments: sceneries.environments(),
             avatar_sceneries: sceneries.avatar_sceneries(),
             avatar: None,
@@ -512,6 +608,8 @@ impl Renderer {
             pipeline,
             vertices,
             instances,
+            views,
+            single,
             cameras,
             camera_bindings,
             depth,
@@ -535,8 +633,7 @@ impl Renderer {
             panels_seen: (0, 0),
             shown: Vec::with_capacity(MAX_INSTANCES + PEOPLE_INSTANCES),
             cubes_culled: false,
-            // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
-            profiler: crate::profiler::Profiler::new(device, queue, !cfg!(target_os = "android")),
+            profiler,
             solids,
             people: Vec::with_capacity(PEOPLE_INSTANCES),
             figures: Vec::with_capacity(MOST_PEOPLE),
@@ -672,7 +769,7 @@ impl Renderer {
         crate::ui_panel::Panel::new(device, &self.panels, capacity)
     }
 
-    /// Each eye's multisampled color target, which its scene pass resolves into the eye's own target; none for a single sample.
+    /// Each pass's multisampled color target, which it resolves into the eyes' own targets; none for a single sample.
     ///
     /// Like the depth views, these are cleared at the start of the pass and discarded at its end, so they are transient: a tiling GPU, such as the Quest's, keeps their samples in tile memory and need never back them with memory of their own.
     fn multisampled_views(
@@ -681,26 +778,18 @@ impl Renderer {
         width: u32,
         height: u32,
         samples: u32,
-    ) -> Option<[wgpu::TextureView; 2]> {
+        views: crate::multiview::Views,
+    ) -> Option<Vec<wgpu::TextureView>> {
         (samples > 1).then(|| {
-            std::array::from_fn(|_| {
-                device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("eye multisampled color"),
-                        size: wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: samples,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage: TRANSIENT,
-                        view_formats: &[],
-                    })
-                    .create_view(&Default::default())
-            })
+            crate::multiview::attachments(
+                device,
+                "eye multisampled color",
+                format,
+                (width, height),
+                samples,
+                TRANSIENT,
+                views,
+            )
         })
     }
 
@@ -709,32 +798,36 @@ impl Renderer {
         width: u32,
         height: u32,
         samples: u32,
-    ) -> [wgpu::TextureView; 2] {
-        std::array::from_fn(|_| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("eye depth"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: samples,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Depth32Float,
-                    usage: TRANSIENT,
-                    view_formats: &[],
-                })
-                .create_view(&Default::default())
-        })
+        views: crate::multiview::Views,
+    ) -> Vec<wgpu::TextureView> {
+        crate::multiview::attachments(
+            device,
+            "eye depth",
+            wgpu::TextureFormat::Depth32Float,
+            (width, height),
+            samples,
+            TRANSIENT,
+            views,
+        )
+    }
+
+    /// How many views each eye's pass draws: one, each eye's pass its own, or both, by multiview, into targets of two
+    /// layers, as [`Self::encode`] is then given.
+    pub fn views(&self) -> crate::multiview::Views {
+        self.views
+    }
+
+    /// Why each eye has a pass of its own where both were asked to be drawn in one: the device cannot, or a scenery
+    /// draws one view; none where they were not asked to be, or are.
+    pub fn single_view(&self) -> Option<&str> {
+        self.single.as_deref()
     }
 
     #[cfg(any(not(target_os = "android"), test))]
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.depth = Self::depth_views(device, width, height, self.samples);
+        self.depth = Self::depth_views(device, width, height, self.samples, self.views);
         self.multisampled =
-            Self::multisampled_views(device, self.format, width, height, self.samples);
+            Self::multisampled_views(device, self.format, width, height, self.samples, self.views);
         for (_, scenery) in &mut self.sceneries {
             scenery.resize(device, width, height);
         }
@@ -840,8 +933,19 @@ impl Renderer {
                     self.size.1,
                     self.samples,
                     self.glyphs.clone(),
-                );
+                )
+                .with_views(self.views);
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create(&target))) {
+                    // One that cannot draw the renderer's views is not drawn, and the swarm shows in its place.
+                    Ok(scenery) if scenery.views() != self.views => {
+                        log::warn!(
+                            "The avatar {} draws {} where this renderer draws {}: the swarm shows instead",
+                            shown.avatar,
+                            scenery.views().name(),
+                            self.views.name()
+                        );
+                        self.give_up_avatar(shown.avatar);
+                    }
                     Ok(scenery) => {
                         self.avatar =
                             Some((shown.avatar.to_owned(), shown.space.to_owned(), scenery));
@@ -1158,8 +1262,10 @@ impl Renderer {
         scene_to_space: Mat4,
         panels: &[(&crate::ui_panel::Panel, Mat4)],
     ) -> Encoded {
-        assert_eq!(targets.len(), matrices.len());
-        assert!((1..=2).contains(&targets.len()));
+        assert!((1..=2).contains(&matrices.len()));
+        // A target for each eye, or, drawing both in one pass, one of two layers for both.
+        assert_eq!(targets.len(), self.views.passes(matrices.len()));
+        assert!(self.views == crate::multiview::Views::One || matrices.len() == 2);
         // The glyphs that this frame's meshes were built with, which may be new.
         self.glyphs.glyphs().sync(device, queue);
         // What the eyes see: once, before either is drawn, everything that neither can see is culled, against one frustum
@@ -1167,7 +1273,8 @@ impl Renderer {
         let tally = self.cull(queue, matrices, scene_to_space, panels);
         // The GPU's timestamps of frames it has finished are read back as they are mapped.
         let _ = device.poll(wgpu::PollType::Poll);
-        let profiled = self.profiler.begin(targets.len());
+        let passes = targets.len();
+        let profiled = self.profiler.begin(passes);
         self.profiler.tally(tally);
         self.tally = tally;
         let glyphs = self.glyphs.binding();
@@ -1177,8 +1284,9 @@ impl Renderer {
         let multisampled = self.multisampled.as_ref();
         // Which panels either eye may see, in the frame step's order.
         let visible = self.world.seen(self.submitted.panels);
-        for eye in 0..targets.len() {
-            let scene_to_clip = matrices[eye] * scene_to_space;
+        // Each eye's uniforms, and the scenery's passes of its own for it, before the passes that draw it.
+        for (eye, seen_by) in matrices.iter().enumerate() {
+            let scene_to_clip = *seen_by * scene_to_space;
             if let Some(scenery) = self.scenery() {
                 // The scenery draws in the environment's own coordinates, carried into the space's, and is told where
                 // each eye is in them.
@@ -1197,14 +1305,13 @@ impl Renderer {
                 );
                 scenery.encode(&mut encoder, eye);
             }
-            // Separate buffers are important: two writes to one buffer before
-            // submission would make both eyes use the right-eye transform. Everything is hazed as the environment's
-            // scenery is, in its coordinates, which its carriage moves without stretching, so that distances are the
-            // same in the space's.
+            // Each eye's camera is written to a place of its own: two writes to one place before submission would make
+            // both eyes use the right eye's. Everything is hazed as the environment's scenery is, in its coordinates,
+            // which its carriage moves without stretching, so that distances are the same in the space's.
             let haze = self.haze(crate::scenery::eye(scene_to_clip));
-            queue.write_buffer(
-                &self.cameras[eye],
-                0,
+            self.cameras.write(
+                queue,
+                eye,
                 bytemuck::cast_slice(&camera(scene_to_clip, haze, self.size.1)),
             );
             // Each panel's model is in the same space as the eyes' matrices.
@@ -1212,6 +1319,15 @@ impl Renderer {
             for ((panel, model), _) in panels.iter().zip(visible).filter(|(_, seen)| **seen) {
                 panel.prepare_seen(queue, eye, &seen, *model);
             }
+        }
+        // Each eye's pass, or one pass drawing both, by multiview, which orders what is drawn back to front once, as
+        // seen from between the eyes, where each eye's pass orders it as that eye sees it.
+        for eye in 0..passes {
+            let seen = match self.views {
+                crate::multiview::Views::One => matrices[eye],
+                crate::multiview::Views::Both => (matrices[0] + matrices[1]) * 0.5,
+            };
+            let scene_to_clip = seen * scene_to_space;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eye"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1243,7 +1359,7 @@ impl Renderer {
                 }),
                 timestamp_writes: self.profiler.pass(profiled, eye),
                 occlusion_query_set: None,
-                multiview_mask: None,
+                multiview_mask: self.views.mask(),
             });
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw(&mut pass, eye);
@@ -1269,7 +1385,7 @@ impl Renderer {
             // corners. Each opaque enough to hide what is behind it then writes its backing's depth where it is itself
             // opaque enough, so that what is behind it is hidden though drawn after it.
             let signs = self.workspace.order(scene_to_clip);
-            let ahead = |model: &Mat4| (matrices[eye] * *model).w_axis.w;
+            let ahead = |model: &Mat4| (seen * *model).w_axis.w;
             let (mut sign, mut panel) = (0, 0);
             let mut drawing_panels = false;
             while sign < signs.len() || panel < panels.len() {
@@ -1493,11 +1609,9 @@ fn blink_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     samples: u32,
+    views: crate::multiview::Views,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("blink"),
-        source: wgpu::ShaderSource::Wgsl(BLINK_SHADER.into()),
-    });
+    let shader = crate::multiview::shader(device, "blink", BLINK_SHADER, views);
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("blink pipeline layout"),
         bind_group_layouts: &[],
@@ -1542,7 +1656,7 @@ fn blink_pipeline(
             count: samples,
             ..Default::default()
         },
-        multiview_mask: None,
+        multiview_mask: views.mask(),
         cache: None,
     })
 }
@@ -3052,8 +3166,10 @@ mod tests {
         for off in ["0", "1", "off", "Off"] {
             assert_eq!(requested_samples(Some(off)), 1, "{off:?}");
         }
-        // Counts wgpu doesn't allow without adapter-specific features, and nonsense, keep the default.
-        for other in ["2", "8", "lots"] {
+        // Half as many, for both eyes in one pass on a tiled GPU.
+        assert_eq!(requested_samples(Some("2")), 2);
+        // Counts the renderer doesn't offer, and nonsense, keep the default.
+        for other in ["8", "lots"] {
             assert_eq!(requested_samples(Some(other)), SAMPLES, "{other:?}");
         }
     }
@@ -3075,6 +3191,9 @@ mod tests {
                     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
                     assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
                     assert_eq!(supported_samples(&adapter, format, 1), 1);
+                    // 2 where the adapter draws it, or else 4.
+                    assert!([2, 4].contains(&supported_samples(&adapter, format, 2)));
+                    assert_eq!(supported_samples(&adapter, format, 0), 1);
                     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let texture = device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("headset test swapchain image"),

@@ -92,15 +92,52 @@ pub fn joints(joints: &xr::HandJointLocations) -> [Joint; hands::JOINT_COUNT] {
     })
 }
 
-/// The size of each eye's image: the largest the runtime recommends for either eye, so that one two-layer image holds both.
-pub fn eye_size(views: &[xr::ViewConfigurationView]) -> (u32, u32) {
+/// The size of each eye's image: the largest the runtime recommends for either eye, so that one two-layer image holds both,
+/// `scale` times as wide and as high (see [`resolution`]), at most as large as the runtime allows for either.
+pub fn eye_size(views: &[xr::ViewConfigurationView], scale: f32) -> (u32, u32) {
     let largest = |size: fn(&xr::ViewConfigurationView) -> u32| {
         views.iter().map(size).max().unwrap_or_default()
     };
+    let most = |size: fn(&xr::ViewConfigurationView) -> u32| {
+        views.iter().map(size).min().unwrap_or_default()
+    };
+    let scaled =
+        |recommended: u32, most: u32| ((recommended as f32 * scale).round() as u32).min(most);
     (
-        largest(|view| view.recommended_image_rect_width),
-        largest(|view| view.recommended_image_rect_height),
+        scaled(
+            largest(|view| view.recommended_image_rect_width),
+            most(|view| view.max_image_rect_width),
+        ),
+        scaled(
+            largest(|view| view.recommended_image_rect_height),
+            most(|view| view.max_image_rect_height),
+        ),
     )
+}
+
+/// The least and greatest scale of each eye's image over the runtime's recommendation that [`resolution`] allows: from
+/// half, to twice as wide and high, four times the pixels, beyond which the eyes' attachments grow past what the
+/// headset's memory and GPU sensibly hold.
+pub const RESOLUTIONS: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+
+/// The scale of each eye's image over the runtime's recommendation asked for by `value`, as the headset's
+/// `tomori.resolution` intent extra or `TOMORI_RESOLUTION` for `tomori --xr`: such as `1.23` for about the Quest 3's
+/// panels' own pixels, 2064 × 2208, within [`RESOLUTIONS`]; 1 when absent or not understood.
+pub fn resolution(value: Option<&str>) -> f32 {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return 1.0;
+    };
+    match value.parse::<f32>() {
+        Ok(scale) if RESOLUTIONS.contains(&scale) => scale,
+        _ => {
+            log::warn!(
+                "Ignored resolution {value:?}: use a scale from {} to {}",
+                RESOLUTIONS.start(),
+                RESOLUTIONS.end()
+            );
+            1.0
+        }
+    }
 }
 
 /// The sRGB colour format to draw into, of the swapchain formats the runtime offers.
@@ -365,10 +402,27 @@ mod tests {
             max_swapchain_sample_count: 4,
         };
         assert_eq!(
-            eye_size(&[view(1680, 1700), view(1600, 1760)]),
+            eye_size(&[view(1680, 1700), view(1600, 1760)], 1.0),
             (1680, 1760)
         );
-        assert_eq!(eye_size(&[]), (0, 0));
+        assert_eq!(eye_size(&[], 1.0), (0, 0));
+        // Scaled, about the Quest 3's own pixels, and at most what the runtime allows.
+        assert_eq!(eye_size(&[view(1680, 1760)], 1.23), (2066, 2165));
+        assert_eq!(eye_size(&[view(1680, 1760)], 2.0), (3360, 3520));
+        assert_eq!(eye_size(&[view(3000, 1760)], 2.0), (4096, 3520));
+    }
+
+    #[test]
+    fn the_resolution_is_a_scale_of_the_recommendation_within_reason() {
+        assert_eq!(resolution(None), 1.0);
+        assert_eq!(resolution(Some(" ")), 1.0);
+        assert_eq!(resolution(Some("1.23")), 1.23);
+        assert_eq!(resolution(Some(" 1.5 ")), 1.5);
+        assert_eq!(resolution(Some("0.5")), 0.5);
+        assert_eq!(resolution(Some("2")), 2.0);
+        for ignored in ["0.4", "2.1", "high", "NaN"] {
+            assert_eq!(resolution(Some(ignored)), 1.0, "{ignored:?}");
+        }
     }
 
     #[test]

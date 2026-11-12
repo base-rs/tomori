@@ -8,14 +8,16 @@ struct Camera {
     // Where the eye is.
     eye: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 // Whether a ray from `origin` along unit `direction` meets the reveal sphere; clouds, like the sky, are seen through it.
-fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
-    if camera.reveal.w < 0.0 { return true; }
-    let offset = origin - camera.reveal.xyz;
+// Given the reveal sphere rather than the camera: no shader gives a function a uniform's struct by value.
+fn sees_reveal(reveal: vec4<f32>, origin: vec3<f32>, direction: vec3<f32>) -> bool {
+    if reveal.w < 0.0 { return true; }
+    let offset = origin - reveal.xyz;
     let b = dot(offset, direction);
-    let c = dot(offset, offset) - camera.reveal.w * camera.reveal.w;
+    let c = dot(offset, offset) - reveal.w * reveal.w;
     return c <= 0.0 || (b <= 0.0 && b * b >= c);
 }
 
@@ -27,7 +29,8 @@ struct RayVertex {
 }
 
 @vertex
-fn ray_vertex(@builtin(vertex_index) index: u32) -> RayVertex {
+fn ray_vertex(/* view_index */ @builtin(vertex_index) index: u32) -> RayVertex {
+    let camera = cameras[0u /* view */];
     let points = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
     let ndc = points[index];
     let near = camera.inverse_view_projection * vec4<f32>(ndc, 0.0, 1.0);

@@ -11,6 +11,7 @@ mod builder;
 #[cfg(not(target_os = "android"))]
 mod cli;
 mod foveation;
+mod multiview;
 mod vulkan;
 mod xr;
 mod xr_types;
@@ -210,6 +211,8 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             let samples = android_samples(&android);
             let foveation = android_foveation(&android);
             let panel_lod = android_panel_lod(&android);
+            let multiview = android_multiview(&android);
+            let resolution = android_resolution(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_panel_lod(panel_lod);
             conversation.set_drawable(sceneries.environments());
@@ -224,6 +227,8 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
                 &platform,
                 samples,
                 foveation,
+                multiview,
+                resolution,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
@@ -274,6 +279,30 @@ fn android_panel_lod(android: &android::Android) -> tomori_scene::projection::Pa
             None
         });
     tomori_scene::projection::PanelLod::parse(value.as_deref())
+}
+
+/// The scale of each eye's image over the runtime's recommendation: the intent extra `tomori.resolution`, as with `am start -e tomori.resolution 1.23`, and 1 when absent; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_resolution(android: &android::Android) -> f32 {
+    let value = android
+        .intent_extra("tomori.resolution")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.resolution intent extra: {error:#}");
+            None
+        });
+    xr_types::resolution(value.as_deref())
+}
+
+/// Whether the headset draws both eyes in one pass: the intent extra `tomori.multiview`, as with `am start -e tomori.multiview on`: `off` by default, for each eye in a pass of its own, which the Quest 3's GPU draws quicker, `on` for both in one where the GPU and every scenery can, or `right-first` for each in its own, the right eye's first; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_multiview(android: &android::Android) -> multiview::Request {
+    let value = android
+        .intent_extra("tomori.multiview")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.multiview intent extra: {error:#}");
+            None
+        });
+    multiview::Request::parse(value.as_deref())
 }
 
 /// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.

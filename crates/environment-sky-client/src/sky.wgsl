@@ -8,14 +8,16 @@ struct Camera {
     // Where the eye is.
     eye: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 // Whether a ray from `origin` along unit `direction` meets the reveal sphere, as distant sky is seen through it.
-fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
-    if camera.reveal.w < 0.0 { return true; }
-    let offset = origin - camera.reveal.xyz;
+// Given the reveal sphere rather than the camera: no shader gives a function a uniform's struct by value.
+fn sees_reveal(reveal: vec4<f32>, origin: vec3<f32>, direction: vec3<f32>) -> bool {
+    if reveal.w < 0.0 { return true; }
+    let offset = origin - reveal.xyz;
     let b = dot(offset, direction);
-    let c = dot(offset, offset) - camera.reveal.w * camera.reveal.w;
+    let c = dot(offset, offset) - reveal.w * reveal.w;
     return c <= 0.0 || (b <= 0.0 && b * b >= c);
 }
 
@@ -51,12 +53,13 @@ fn night(direction: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn sky_fragment(in: SkyVertex) -> @location(0) vec4<f32> {
+fn sky_fragment(/* view_index */ in: SkyVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let near_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
     let far_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.99, 1.0);
     let origin = near_h.xyz / near_h.w;
     let direction = normalize(far_h.xyz / far_h.w - origin);
-    if !sees_reveal(origin, direction) { discard; }
+    if !sees_reveal(camera.reveal, origin, direction) { discard; }
     let moon_direction = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let separation = length(direction - moon_direction);
     let disc = 1.0 - smoothstep(0.039, 0.042, separation);
@@ -97,12 +100,14 @@ struct SceneryVertex {
 
 @vertex
 fn scenery_vertex(
+    /* view_index */
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) emission: f32,
     @location(4) light_uv: vec2<f32>,
 ) -> SceneryVertex {
+    let camera = cameras[0u /* view */];
     var out: SceneryVertex;
     out.position = camera.view_projection * vec4<f32>(position, 1.0);
     out.normal = normal;
@@ -144,19 +149,22 @@ fn moon_visibility(position: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 @fragment
-fn scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
-    return shade(in);
+fn scenery_fragment(/* view_index */ in: SceneryVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
+    return shade(camera.haze, camera.eye.xyz, in);
 }
 
 // The scenery inside the reveal sphere only. Shaded first, since shadows take derivatives.
 @fragment
-fn revealed_scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
-    let color = shade(in);
+fn revealed_scenery_fragment(/* view_index */ in: SceneryVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
+    let color = shade(camera.haze, camera.eye.xyz, in);
     if camera.reveal.w >= 0.0 && distance(in.world_position, camera.reveal.xyz) > camera.reveal.w { discard; }
     return color;
 }
 
-fn shade(in: SceneryVertex) -> vec4<f32> {
+// Hazed by `haze` with distance from the eye at `eye`: given the camera's fields rather than the camera.
+fn shade(haze: vec4<f32>, eye: vec3<f32>, in: SceneryVertex) -> vec4<f32> {
     let moon = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let normal = normalize(in.normal);
     let visibility = moon_visibility(in.world_position, normal);
@@ -166,5 +174,5 @@ fn shade(in: SceneryVertex) -> vec4<f32> {
     let direct = 0.52 * max(dot(normal, moon), 0.0) * visibility;
     let light = vec3<f32>(ambient + direct) + baked.rgb;
     let color = in.color * mix(light, vec3<f32>(1.0), in.emission);
-    return vec4<f32>(hazed(color, camera.haze, distance(in.world_position, camera.eye.xyz)), 1.0);
+    return vec4<f32>(hazed(color, haze, distance(in.world_position, eye)), 1.0);
 }
