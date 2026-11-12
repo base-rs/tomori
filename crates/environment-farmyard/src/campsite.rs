@@ -37,6 +37,18 @@ pub const PIT_STONES: u32 = 11;
 pub const FLAMES: f32 = 0.75;
 /// How far the fire reaches from its heart, as a diagram's line to it rings it: its pit of stones, and a little more.
 pub const FIRE_EXTENT: f32 = PIT + 0.13;
+
+/// How far what the agent is told of as `reference` reaches from where it is said to be, as a diagram's line to it
+/// rings it, with the fire at `size`: the bonfire [`FIRE_EXTENT`], as much further as its flames have grown
+/// ([`reach`]); the woodpile to its stone's corners; the fireside log half its length; and a stick [`STICK_EXTENT`].
+pub fn extent(reference: &str, size: f32) -> f32 {
+    match reference {
+        "campsite/bonfire" => FIRE_EXTENT * reach(size),
+        "campsite/woodpile" => PILE * std::f32::consts::SQRT_2,
+        "campsite/fireside-log" => fireside().2 * 0.5,
+        _ => STICK_EXTENT,
+    }
+}
 /// The middle of the campsite's clearing of packed earth is [`FIRE`], and this its radius.
 pub const CLEARING: f32 = 1.65;
 /// How far where participants stand at the campsite stays from the backdrop's middle, at most, so that from there the

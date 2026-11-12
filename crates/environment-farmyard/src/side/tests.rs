@@ -133,7 +133,8 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
             .is_some_and(|reference| reference.starts_with("hen/"));
         assert_eq!(object.offers().is_empty(), !hen, "{}", object.id());
     }
-    // The bonfire and the sticks say how far they reach, as a diagram's line to one rings it.
+    // The bonfire, the woodpile, the fireside log and the sticks say how far they reach, as a diagram's line to one
+    // rings it; the bonfire as much further as it grows.
     let extent = |reference: &str| {
         objects
             .iter()
@@ -147,6 +148,15 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
     assert_eq!(
         extent("campsite/stick-2"),
         Some(crate::campsite::STICK_EXTENT)
+    );
+    assert_eq!(
+        extent("campsite/woodpile"),
+        Some(crate::campsite::PILE * std::f32::consts::SQRT_2)
+    );
+    assert_eq!(extent("campsite/fireside-log"), Some(0.6));
+    assert_eq!(
+        crate::campsite::extent("campsite/bonfire", 1.0),
+        crate::campsite::FIRE_EXTENT * 2.0
     );
     let reference = objects[0].reference().unwrap().to_owned();
     // Taken on a hen standing about at the start, she pecks, announced to everyone; the agent is told it was done.

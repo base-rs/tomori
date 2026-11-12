@@ -292,13 +292,10 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                     .with_reference(reference)
                     .at(at.to_array()),
             );
-            objects.extend(sticks.report().describe().into_iter().map(
+            let report = sticks.report();
+            objects.extend(report.describe().into_iter().map(
                 |(id, reference, description, at)| {
-                    let extent = if reference == "campsite/bonfire" {
-                        crate::campsite::FIRE_EXTENT
-                    } else {
-                        crate::campsite::STICK_EXTENT
-                    };
+                    let extent = crate::campsite::extent(&reference, report.size);
                     let object = Object::new(id, description)
                         .with_reference(reference)
                         .with_extent(extent);
