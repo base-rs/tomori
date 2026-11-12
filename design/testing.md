@@ -4,7 +4,7 @@ This describes the test coverage Tomori's workspace must keep.
 
 ## Requirement
 
-Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true` passes on current stable Rust, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it, and the main branch requires `test-result`. The target is 100%, never a lower floor.
+Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true` passes on current stable Rust, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it for every pull request and push to main, and the main branch requires `test-result`. The merge queue, which tests each pull request again merged with those ahead of it, runs the tests without coverage instrumentation, as the pull request has passed the gate on its own. The target is 100%, never a lower floor.
 
 Uncovered code gets a test, or is removed if nothing needs it. A branch that only a race could take is restructured, so that whether it runs does not depend on timing. Bake does not count regions inside `unreachable!`, which is left only where the types or an immediately preceding check rule the branch out, with a comment saying why.
 
@@ -30,6 +30,8 @@ Every test in the workspace, including those in `tests/` directories and the exa
 
 The last regions find as many bugs as the first ones, and they expose dead code. A lower floor makes people test code they don't care about whenever someone else's change lowers the total. With 100%, each change brings its own tests. Some code can't run in GitHub CI, such as the headset's OpenXR calls. An exclusion that names its file and reason, in the crate it belongs to, keeps that visible and reviewable, where scattered markers would not. Agreed with the maintainer in November 2026 in [#55](https://github.com/base-rs/tomori/issues/55); see the proposal in [#111](https://github.com/base-rs/tomori/pull/111).
 
+Instrumentation takes most of the Test workflow's time, and every pull request has passed the gate before it is queued, so the merge queue only checks that the merged workspace builds and passes; the push to main that follows runs the gate again, so that a combination of pull requests that leaves a region uncovered shows there. The maintainer chose this in November 2026.
+
 CI runs on Linux, but the maintainers also develop on Macs, where a test that fails or hangs for a reason of the platform's hides the failures that matter.
 
 ## Scope
@@ -38,7 +40,7 @@ Every workspace member's code, including its inline tests and the `bake/` packag
 
 ## Validation
 
-- `cargo bake test:coverage --all-targets true` passes in CI. Its report lists each excluded file with its reason and its size, in regions and lines.
+- `cargo bake test:coverage --all-targets true` passes in CI, for every pull request and push to main. Its report lists each excluded file with its reason and its size, in regions and lines.
 - A change that adds or widens an exclusion is reviewed as lowering the target would be. Its file must hold only device or platform calls, its reason must say what cannot run, and no logic may have moved into it.
 - Search the source for `coverage(off)` and `cfg(coverage)`: there is neither.
 - `cargo test --workspace` on macOS passes, opening no window, when run by hand (CI does not check it). Every `ignore` in a test names its reason, and none applies on Linux unless the test needs something CI does not have.
