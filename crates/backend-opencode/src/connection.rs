@@ -156,8 +156,10 @@ const DISCONNECTED: &str = "Lost the connection to OpenCode; reconnecting.";
 
 /// A worker replacement carries the snapshot epoch under which it was queued.
 /// Other events retain their original ordering and are never invalidated.
+/// Each is boxed, since a resynchronization's snapshot is far larger than the
+/// rest.
 pub(crate) enum QueuedEvent {
-    Ordinary(Event),
+    Ordinary(Box<Event>),
     Workers {
         pending: Arc<Mutex<PendingWorkers>>,
         watermark: Arc<AtomicU64>,
@@ -167,7 +169,7 @@ pub(crate) enum QueuedEvent {
 impl QueuedEvent {
     pub(crate) fn into_current(self) -> Option<Event> {
         match self {
-            Self::Ordinary(event) => Some(event),
+            Self::Ordinary(event) => Some(*event),
             Self::Workers { pending, watermark } => {
                 let mut pending = pending
                     .lock()
@@ -275,9 +277,9 @@ impl RegistrationEvents {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            Some(reason) => Ok(QueuedEvent::Ordinary(Event::Closed {
+            Some(reason) => Ok(QueuedEvent::Ordinary(Box::new(Event::Closed {
                 reason: Some(reason),
-            })),
+            }))),
             None => Err(async_channel::RecvError),
         }
     }
@@ -350,7 +352,7 @@ impl Events {
 
     /// Attempt delivery without blocking the shared dispatcher.
     pub fn deliver(&self, event: Event) -> bool {
-        match self.tx.try_send(QueuedEvent::Ordinary(event)) {
+        match self.tx.try_send(QueuedEvent::Ordinary(Box::new(event))) {
             Ok(()) => true,
             Err(async_channel::TrySendError::Full(_)) => {
                 // Ordinary events cannot be reconstructed reliably. Closing
@@ -394,7 +396,9 @@ impl Events {
 
     /// Retryable state events are allowed to wait for ordinary channel space.
     fn try_deliver_state(&self, event: Event) -> bool {
-        self.tx.try_send(QueuedEvent::Ordinary(event)).is_ok()
+        self.tx
+            .try_send(QueuedEvent::Ordinary(Box::new(event)))
+            .is_ok()
     }
 
     fn mark_ordinary_incomplete(&self) {
@@ -1125,6 +1129,13 @@ impl Registration {
         Ok(())
     }
 
+    /// Follow the session to the directory `snapshot` says it is in, if it says, so that its agents are listed where it is now.
+    fn follow(&mut self, snapshot: &Snapshot) {
+        if let Some(directory) = &snapshot.directory {
+            directory.clone_into(&mut self.directory);
+        }
+    }
+
     /// Install a snapshot read for a session. The first is the initial state
     /// the space opens with: the events held since the session was registered
     /// are delivered after it, as after a reconnection, except those it
@@ -1264,6 +1275,11 @@ pub enum Command {
         directory: String,
         server: tomori_backend::ToolServer,
         reply: async_channel::Sender<tomori_backend::Result<()>>,
+    },
+    /// The directory the session `id` is in now, as its record says.
+    Locate {
+        id: String,
+        reply: async_channel::Sender<tomori_backend::Result<Option<String>>>,
     },
     /// Remove the MCP server `name` from `directory`; one OpenCode does not have is already removed.
     UnregisterTools {
@@ -1650,6 +1666,9 @@ fn refuse(command: Command, error: tomori_backend::Error) {
         Command::Snapshot { reply, .. } => {
             let _ = reply.try_send(Err(error));
         }
+        Command::Locate { reply, .. } => {
+            let _ = reply.try_send(Err(error));
+        }
         Command::Prompt { reply, .. }
         | Command::Interrupt { reply, .. }
         | Command::Decide { reply, .. }
@@ -1676,6 +1695,7 @@ fn abandoned(command: &Command) -> bool {
         Command::Create { reply, .. } => reply.is_closed(),
         Command::Attach { reply, .. } => reply.is_closed(),
         Command::Snapshot { reply, .. } => reply.is_closed(),
+        Command::Locate { reply, .. } => reply.is_closed(),
         Command::Prompt { reply, .. }
         | Command::Interrupt { reply, .. }
         | Command::Decide { reply, .. }
@@ -2470,6 +2490,7 @@ fn command_session(command: &Command) -> Option<&str> {
         Command::Sessions { .. }
         | Command::Create { .. }
         | Command::Snapshot { .. }
+        | Command::Locate { .. }
         | Command::RegisterTools { .. }
         | Command::UnregisterTools { .. }
         | Command::Close { .. }
@@ -2655,6 +2676,7 @@ fn finish_snapshot(registrations: &mut HashMap<String, Registration>, completed:
                     ));
                 }
                 registration.install(&mut snapshot)?;
+                registration.follow(&snapshot);
                 // The workers not found in time are discovered in the
                 // background; the space opens knowing its list is incomplete.
                 registration.continue_discovery(rest);
@@ -2959,6 +2981,7 @@ fn finish_resync(
         }
         registration.merge_workers(std::mem::take(&mut snapshot.workers), &resync.changes)?;
         registration.remove_missing(&completed.missing, &resync.changes);
+        registration.follow(&snapshot);
         // The workers not found in time are discovered in the background.
         registration.continue_discovery(rest);
         Ok(snapshot)
@@ -3607,6 +3630,14 @@ fn dispatch_events_at(
         && let Some(registration) = registrations.get_mut(&session_id)
     {
         registration.event_revision = registration.event_revision.wrapping_add(1);
+        // A session moved lists the agents of where it is now.
+        if value.get("type").and_then(Value::as_str) == Some("session.moved")
+            && let Some(directory) = value
+                .get("data")
+                .and_then(|data| wire::moved_to(data, &session_id))
+        {
+            directory.clone_into(&mut registration.directory);
+        }
         if let Some(agent) = wire::agent_switched(&value, &session_id) {
             if registration.modes.current.as_deref() != Some(agent.as_str()) {
                 registration.modes.current = Some(agent);
@@ -4139,6 +4170,14 @@ fn prepare_command<'a, S: Timers>(
             let _ = reply.try_send(result);
             None
         }),
+        Command::Locate { id, reply } => Box::pin(async move {
+            let result = api::session_info(client, resolved, &id, cancellation)
+                .await
+                .map(|info| api::session_directory(&info).map(str::to_owned))
+                .map_err(map_failure);
+            let _ = reply.try_send(result);
+            None
+        }),
         Command::UnregisterTools {
             directory,
             name,
@@ -4221,11 +4260,7 @@ fn prepare_command<'a, S: Timers>(
                         return None;
                     }
                 };
-                let session_directory = info
-                    .get("location")
-                    .and_then(|location| location.get("directory"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let session_directory = api::session_directory(&info).unwrap_or_default();
                 if session_directory != directory {
                     let _ = reply.try_send(Err(tomori_backend::Error::new(
                         tomori_backend::ErrorKind::NotFound,
@@ -4714,6 +4749,7 @@ fn snapshot(
     running_evidence(&mut workers, active);
     Snapshot {
         title: parts.title.clone(),
+        directory: parts.directory.clone(),
         modes,
         busy,
         messages,
@@ -8119,6 +8155,11 @@ mod tests {
         // An existing session is attached, and instruction entries of a session no space is bound to are forgotten.
         let attached = block_on(backend.attach("existing", "/tmp")).unwrap();
         assert_eq!(attached.id(), "existing");
+        // Where it is now is where its record says.
+        assert_eq!(
+            block_on(backend.locate("existing")),
+            Ok(Some("/tmp".to_owned()))
+        );
         let invalid =
             block_on(backend.forget_instructions("gone", vec!["Tomori".into()])).unwrap_err();
         assert_eq!(invalid.kind, ErrorKind::Invalid);
@@ -8152,26 +8193,36 @@ mod tests {
                 .contains_key("existing")
         );
         // Tomori's MCP server is registered for a directory, with its headers, without OAuth, and removed again; removing
-        // one OpenCode does not have is already done, and a refusal is said.
+        // one OpenCode does not have is already done, and a refusal is said. Another server there is never touched.
         let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp")
             .with_header("Authorization", "Bearer tomori_secret");
+        let other = (
+            "/api/experimental/mcp/github?location%5Bdirectory%5D=%2Fwork%2Fa%20b".to_owned(),
+            json!({"type": "local", "command": ["github-mcp"]}),
+        );
+        shared.update(|state| {
+            state.mcp.insert(other.0.clone(), other.1.clone());
+        });
         block_on(backend.register_tools("/work/a b", &server)).unwrap();
         let path = "/api/experimental/mcp/tomori?location%5Bdirectory%5D=%2Fwork%2Fa%20b";
         assert_eq!(
             shared.state.lock().unwrap().mcp,
-            BTreeMap::from([(
-                path.to_owned(),
-                json!({
-                    "type": "remote",
-                    "url": "http://127.0.0.1:9/mcp",
-                    "headers": {"Authorization": "Bearer tomori_secret"},
-                    "oauth": false,
-                })
-            )])
+            BTreeMap::from([
+                other.clone(),
+                (
+                    path.to_owned(),
+                    json!({
+                        "type": "remote",
+                        "url": "http://127.0.0.1:9/mcp",
+                        "headers": {"Authorization": "Bearer tomori_secret"},
+                        "oauth": false,
+                    })
+                )
+            ])
         );
         block_on(backend.unregister_tools("/work/a b", "tomori")).unwrap();
         block_on(backend.unregister_tools("/work/a b", "tomori")).unwrap();
-        assert!(shared.state.lock().unwrap().mcp.is_empty());
+        assert_eq!(shared.state.lock().unwrap().mcp, BTreeMap::from([other]));
         shared.update(|state| state.failing_mcp = true);
         let failed = block_on(backend.register_tools("/work/a b", &server)).unwrap_err();
         assert_eq!(failed.message, "lost");
@@ -9958,6 +10009,88 @@ mod tests {
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
         drop(service);
+    }
+
+    /// A session's directory is read with it, and where it is now is said by
+    /// its record when asked; a move of it, but of no other session, is
+    /// reported as its new directory, whose agents it lists from then on; and
+    /// reading it again after a move missed says where it is now.
+    #[test]
+    fn a_session_s_directory_is_read_with_it_and_its_moves_are_reported() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let (id, events) = create_session(&commands);
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        assert_eq!(snapshot.directory.as_deref(), Some("/tmp"));
+        let locate = |id: &str| {
+            let id = id.to_owned();
+            block_on(commands.reply_with(|reply| Command::Locate { id, reply }))
+        };
+        assert_eq!(locate(&id), Ok(Some("/tmp".to_owned())));
+
+        let watched = watch(&events);
+        service.send(json!({"type":"session.moved","data":{"sessionID":"other","location":{"directory":"/elsewhere"}}}));
+        service.send(json!({"type":"session.moved","data":{"sessionID":"s1","location":{"directory":"/work/moved"},"projectID":"p","subpath":""}}));
+        let moved = Event::DirectoryChanged {
+            directory: "/work/moved".into(),
+        };
+        let seen = until(&watched, "the move", |event| *event == moved);
+        assert_eq!(seen, [moved]);
+
+        // Its record moves with it, and so does what reading it says.
+        shared.update(|state| {
+            let mut record = fake_record("s1");
+            record["location"]["directory"] = json!("/work/again");
+            state.records.insert("s1".into(), record);
+        });
+        assert_eq!(locate(&id), Ok(Some("/work/again".to_owned())));
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        assert_eq!(snapshot.directory.as_deref(), Some("/work/again"));
+        // A record without a directory says it cannot tell, and a session that is gone is not found.
+        shared.update(|state| {
+            let mut record = fake_record("s1");
+            record["location"] = json!({});
+            state.records.insert("s1".into(), record);
+        });
+        assert_eq!(locate(&id), Ok(None));
+        assert_eq!(
+            locate("missing").map_err(|error| error.kind),
+            Err(tomori_backend::ErrorKind::NotFound)
+        );
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    #[test]
+    fn a_moved_session_lists_the_agents_of_where_it_is_now() {
+        let mut registrations = HashMap::new();
+        let _events = insert_registration(&mut registrations, "s".into(), "/old", Modes::default());
+        let _other =
+            insert_registration(&mut registrations, "other".into(), "/old", Modes::default());
+        dispatch_events(
+            &json!({"type":"session.moved","data":{"sessionID":"s","location":{"directory":"/new"}}}).to_string(),
+            &mut registrations,
+        );
+        assert_eq!(registrations["s"].directory, "/new");
+        assert_eq!(registrations["other"].directory, "/old");
+        // A move naming no directory leaves it where it was, and a snapshot naming one moves it.
+        dispatch_events(
+            &json!({"type":"session.moved","data":{"sessionID":"s","location":{}}}).to_string(),
+            &mut registrations,
+        );
+        assert_eq!(registrations["s"].directory, "/new");
+        let registration = registrations.get_mut("s").unwrap();
+        registration.follow(&Snapshot::default());
+        assert_eq!(registration.directory, "/new");
+        registration.follow(&Snapshot {
+            directory: Some("/newer".into()),
+            ..Snapshot::default()
+        });
+        assert_eq!(registration.directory, "/newer");
     }
 
     /// While the rest of a family is discovered in the background, worker
@@ -12282,6 +12415,7 @@ mod tests {
                 name: "tomori".into(),
                 reply,
             }),
+            answer(|reply| Command::Locate { id: id(), reply }),
         ]
     }
 
@@ -12652,6 +12786,7 @@ mod tests {
             busy: Some(false),
             has_parent: false,
             title: None,
+            directory: None,
         };
         let snapshot = snapshot(
             parts,

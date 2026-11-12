@@ -381,7 +381,7 @@ fn what_a_driver_reports_for_a_space_that_has_gone_is_dropped() {
     assert_eq!(hub.instructions_due("gone"), (Vec::new(), false));
     hub.space_ended("gone", None);
     hub.restore_failed("gone", "lost".to_owned(), true);
-    assert!(!hub.bound("gone", "session".to_owned(), Snapshot::default()));
+    assert!(!hub.bound("gone", "session".to_owned(), "/tmp", Snapshot::default()));
     hub.agent_gap("gone", 1);
     assert_eq!(hub.pace_speech("gone", Instant::now()), None);
     hub.speech_failed("gone", "silent".to_owned());
@@ -1752,7 +1752,7 @@ fn nothing_is_bound_once_the_server_is_stopping() {
     let (hub, _jobs) = hub();
     let id = stopped(&hub, Snapshot::default());
     hub.stopping();
-    assert!(!hub.bound(&id, "session".to_owned(), Snapshot::default()));
+    assert!(!hub.bound(&id, "session".to_owned(), "/tmp", Snapshot::default()));
 }
 
 #[test]
@@ -3068,7 +3068,7 @@ fn a_restored_space_runs_its_server_side_only_once_bound_to_its_session_again() 
     assert_eq!(hub.server_sides.alive(), 0);
 
     // Bound to its session again, a space runs its side.
-    assert!(hub.bound(&kept, "session".to_owned(), Snapshot::default()));
+    assert!(hub.bound(&kept, "session".to_owned(), "/tmp", Snapshot::default()));
     assert_eq!(hub.server_sides.alive(), 1);
     assert!(hub.server_sides.is_current(&kept, 0));
 
@@ -7920,6 +7920,8 @@ mod patches;
 mod placing;
 #[path = "hub_tests/proximity.rs"]
 mod proximity;
+#[path = "hub_tests/relocating.rs"]
+mod relocating;
 #[path = "hub_tests/timers.rs"]
 mod timers;
 #[path = "hub_tests/volumes.rs"]

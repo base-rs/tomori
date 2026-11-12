@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Tomori's tools follow a moved session.** A space whose OpenCode session is moved to another directory, as with OpenCode's session move after a repository moves on disk, now follows it: Tomori's tools are removed from the old directory and registered for the new one, so that the agent keeps them, whether it moved while the server ran or while it was stopped, even from a directory that no longer exists. The server logs the move, and the space shows its new directory. See `design/mcp.md`.
+
+- For backends: `tomori-backend`'s `Snapshot` gains `directory`, where the session is now, **breaking** for code that builds it without `..`; `Event` gains `DirectoryChanged`, **breaking** for code that matches it exhaustively; and `Backend` gains `locate`, which says by default that it cannot tell.
+
 - **The agent reaches everything an environment describes.** The agent can now inspect and act on any object an environment describes, up to 1,024, not only the first 32, so a terminal's id no longer comes and goes as other objects push it past the cut, and an object you point at is always described to the agent, however many others there are. `presence` now lists, as `objects`, the 32 that matter most to whoever spoke: what you point at, what you look at and what is near you or in view, then what was lately pointed at, inspected or acted on, then the environment's own order. That list stays the same through each of the agent's turns, so it doesn't shift as things move. See `design/environments.md` and `design/mcp.md`.
 
 - For environments: `tomori-environment`'s `OBJECT_LIMIT` is now 1,024 rather than 32, and every object a side describes within it is pointed at, inspected and acted on whatever order it comes in, so a side no longer needs to put the objects that matter first.

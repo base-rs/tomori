@@ -155,6 +155,14 @@ impl Backend for OpenCode {
             .await
     }
 
+    async fn locate(&self, id: &str) -> Result<Option<String>> {
+        let commands = self.connection()?;
+        let id = id.to_owned();
+        commands
+            .reply_with(move |reply| connection::Command::Locate { id, reply })
+            .await
+    }
+
     async fn delete_session(&self, id: &str) -> Result<()> {
         let commands = self.connection()?;
         let id = id.to_owned();

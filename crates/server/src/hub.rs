@@ -6098,8 +6098,15 @@ impl Hub {
             .last_mut()
             .expect("pushed above")
             .stamp_active(crate::cards::unix_now());
-        // Tomori's tools are registered for its directory, if they are not already.
-        self.tools_due(state.shutting_down, &request.backend, &request.directory);
+        // Tomori's tools are registered for its directory, where the agent says its session is, if they are not already.
+        let directory = state
+            .spaces
+            .last()
+            .expect("pushed above")
+            .model
+            .directory
+            .clone();
+        self.tools_due(state.shutting_down, &request.backend, &directory);
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
         // The environment's server side, if it has one, runs for the space from when it is bound.
@@ -6283,8 +6290,14 @@ impl Hub {
         restores
     }
 
-    /// Bind the space `id`, listed again after a restart, to its session. Returns false, binding nothing, once shutdown has begun: the caller must close the session.
-    pub(crate) fn bound(&self, id: &str, session: String, snapshot: Snapshot) -> bool {
+    /// Bind the space `id`, listed again after a restart, to its session, in `directory`, where it was attached, which may not be where it was kept, since the agent may have moved it, and then where its snapshot says it is. Returns false, binding nothing, once shutdown has begun: the caller must close the session.
+    pub(crate) fn bound(
+        &self,
+        id: &str,
+        session: String,
+        directory: &str,
+        snapshot: Snapshot,
+    ) -> bool {
         let mut state = self.lock();
         if state.shutting_down {
             return false;
@@ -6292,6 +6305,8 @@ impl Hub {
         let Some(record) = state.space_mut(id) else {
             return false;
         };
+        let kept = record.model.directory.clone();
+        record.model.follow_directory(directory);
         record.model.bind(session, snapshot);
         log::info!(
             "Space {id} {:?} is bound again to {} session {}.",
@@ -6306,6 +6321,11 @@ impl Hub {
         self.reconcile_server_sides(&mut state);
         let model = &state.space(id).expect("found above").model;
         self.tools_due(state.shutting_down, &model.backend, &model.directory);
+        // Moved while the server was stopped, its tools are removed from where it was.
+        if model.directory != kept {
+            tools::moved(id, &kept, &model.directory);
+            self.tools_due(state.shutting_down, &model.backend, &kept);
+        }
         state.pump(id);
         state.touch_space(id);
         drop(state);
@@ -6441,6 +6461,7 @@ impl Hub {
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
         let title = record.model.title.clone();
+        let directory = record.model.directory.clone();
         // The agent working in the space keeps when it was last active, written again at most once a minute.
         let active =
             crate::space::is_activity(&event) && record.stamp_active(crate::cards::unix_now());
@@ -6454,6 +6475,18 @@ impl Hub {
             );
         }
         let replies = record.model.take_projected();
+        // Following its session, which the agent moved, the space is in its new directory: Tomori's tools go with it,
+        // removed from where it was, unless another space is open there, and it is kept across a restart.
+        let relocated = record.model.directory != directory;
+        if relocated {
+            tools::moved(space, &directory, &record.model.directory);
+            self.tools_due(shutting_down, &record.model.backend, &directory);
+            self.tools_due(
+                shutting_down,
+                &record.model.backend,
+                &record.model.directory,
+            );
+        }
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
@@ -6488,7 +6521,7 @@ impl Hub {
         }
         // The space's attention may have changed.
         self.recount(&mut state);
-        if retitled || active {
+        if retitled || relocated || active {
             drop(state);
             self.keep();
         }

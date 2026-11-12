@@ -95,6 +95,8 @@ pub struct SpaceModel {
     /// The session's own title, as the backend last reported it, cleaned, if it has.
     session_title: Option<String>,
     pub backend: String,
+    /// The directory its session is in, which the space follows when the agent moves the session; see
+    /// [`Self::follow_directory`].
     pub directory: String,
     /// The environment the space is bound to, the same for every participant, which an owner may change.
     pub environment: String,
@@ -847,6 +849,12 @@ fn noted<'a>(notes: impl DoubleEndedIterator<Item = &'a str>) -> Option<String> 
     (!kept.is_empty()).then(|| format!("[{}]", kept.join("; ")))
 }
 
+/// Whether a space follows its session to `directory`, which the backend reports: one that is empty, not absolute, or
+/// longer than [`limits::DIRECTORY_BYTES`] is not a directory the space can name.
+fn followed(directory: &str) -> bool {
+    std::path::Path::new(directory).is_absolute() && directory.len() <= limits::DIRECTORY_BYTES
+}
+
 impl SpaceModel {
     pub fn new(
         id: String,
@@ -863,6 +871,11 @@ impl SpaceModel {
             .map(|entry| worker(entry, &session))
             .collect();
         let session_title = snapshot.title.as_deref().and_then(limits::session_title);
+        // Where the agent says the session is, if it says, over where it was asked to be.
+        let directory = snapshot
+            .directory
+            .filter(|reported| followed(reported))
+            .unwrap_or(directory);
         let mut model = Self {
             id,
             // The session's own title, where the backend reports it, which the space follows from the start.
@@ -980,10 +993,14 @@ impl SpaceModel {
             workers_incomplete: _,
             modes,
             title,
+            directory,
         } = snapshot;
-        // The session may have been renamed while the space could not hear of it.
+        // The session may have been renamed, or moved, while the space could not hear of it.
         if let Some(title) = title {
             self.follow(&title);
+        }
+        if let Some(directory) = directory {
+            self.follow_directory(&directory);
         }
         // The agent keeps a message's text in its records only once the message ends, so a message read again while
         // it is still being written may list less text than the space already shows. Keep what the space has; the
@@ -1340,6 +1357,18 @@ impl SpaceModel {
             Ok(()) if all => self.instructions_error = None,
             Ok(()) => {}
         }
+    }
+
+    /// Take `directory`, which the backend reports as the one the session is in now, as the space's, as the agent
+    /// names it, so that Tomori's tools are registered where the agent looks for them. A directory that is empty, not
+    /// absolute, or longer than [`limits::DIRECTORY_BYTES`] is ignored. Returns whether the space's directory changed.
+    /// See `design/mcp.md`.
+    pub fn follow_directory(&mut self, directory: &str) -> bool {
+        if !followed(directory) || self.directory == directory {
+            return false;
+        }
+        directory.clone_into(&mut self.directory);
+        true
     }
 
     /// Take `title`, which the backend reports as the session's own, as the space's title too, unless someone renamed
@@ -1725,6 +1754,11 @@ impl SpaceModel {
             Event::TitleChanged { title } => {
                 if !self.closed {
                     self.follow(&title);
+                }
+            }
+            Event::DirectoryChanged { directory } => {
+                if !self.closed {
+                    self.follow_directory(&directory);
                 }
             }
             Event::Closed { reason } => {
@@ -3614,6 +3648,7 @@ mod tests {
                 workers_incomplete: None,
                 modes: Modes::default(),
                 title: None,
+                directory: None,
             },
         });
         let state = space.state(Vec::new(), "");

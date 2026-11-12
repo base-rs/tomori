@@ -1540,12 +1540,34 @@ async fn run_restored<S: Timers>(
         );
         return;
     };
-    let Some(directory) = resolve(scheduler, &places, &directory, cancellation).await else {
+    // The agent may have moved the session while the server was stopped, perhaps from a directory that is gone: it is
+    // bound where the agent says it is now, as the agent names it, which the space follows, once that is found within
+    // the workspace roots, as the kept directory is otherwise, or if the agent cannot say. See `design/mcp.md`.
+    let located = match found.locate(&session).await {
+        Ok(Some(now)) if now != directory => {
+            log::info!("Space {id}'s session is now in {now}, rather than {directory}.");
+            Some(now)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            log::debug!("Could not tell where space {id}'s session is now: {error}");
+            None
+        }
+    };
+    let Some(resolved) = resolve(
+        scheduler,
+        &places,
+        located.as_deref().unwrap_or(&directory),
+        cancellation,
+    )
+    .await
+    else {
         if !cancellation.is_cancelled() {
             hub.restore_failed(&id, DIRECTORY_UNAVAILABLE.to_owned(), false);
         }
         return;
     };
+    let directory = located.unwrap_or(resolved);
     let Some(slot) = places.slots.acquire() else {
         hub.restore_failed(&id, places.slots.full_error(), false);
         return;
@@ -1584,7 +1606,7 @@ async fn run_restored<S: Timers>(
             return;
         }
     };
-    if !hub.bound(&id, session.id(), snapshot) {
+    if !hub.bound(&id, session.id(), &directory, snapshot) {
         // The server began shutting down while the session was bound again.
         if let Err(error) = session.close().await {
             log::warn!("Closing a session bound during shutdown failed: {error}");

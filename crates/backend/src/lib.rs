@@ -387,6 +387,11 @@ pub struct Snapshot {
     /// shown by its new title once bound again. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The directory the session is in now, as the agent records it, when the backend can read it; `None` otherwise. A
+    /// session the agent moved, such as with OpenCode's session move, is followed there, so that Tomori's tools are
+    /// registered where its agent now looks for them. See `design/mcp.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 
 /// A fact reported by a session, in order.
@@ -492,6 +497,11 @@ pub enum Event {
     TitleChanged {
         title: String,
     },
+    /// The session moved to `directory`, as when its user moved it with OpenCode's session move. The space follows
+    /// it, and Tomori's tools move with it. See `design/mcp.md`.
+    DirectoryChanged {
+        directory: String,
+    },
     /// The session ended and produces no more events.
     Closed {
         reason: Option<String>,
@@ -574,6 +584,14 @@ pub trait Backend: Send + Sync {
         id: &str,
         directory: &str,
     ) -> impl Future<Output = Result<Self::Session>> + Send;
+
+    /// The directory the session `id` is in now, as the agent records it, which may not be where it was when a space
+    /// was bound to it, since the agent may move a session; `None` when the backend cannot tell. The server binds a
+    /// space listed again after a restart where its session is now. See `design/mcp.md`.
+    fn locate(&self, id: &str) -> impl Future<Output = Result<Option<String>>> + Send {
+        let _ = id;
+        std::future::ready(Ok(None))
+    }
 
     /// Remove the instruction entries `keys` from the session `id`, which no space is bound to any more, as when the
     /// server forgets a closed space. A key the session does not have is not an error. A session the backend has bound

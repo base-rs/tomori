@@ -181,6 +181,13 @@ impl Going {
     }
 }
 
+/// Say that the session of the space `space` moved from `from` to `to`, whose tools follow it there. See `design/mcp.md`.
+pub(super) fn moved(space: &str, from: &str, to: &str) {
+    log::info!(
+        "Space {space}'s session moved from {from} to {to}; Tomori's tools are re-registered there."
+    );
+}
+
 impl Hub {
     /// Register `server` for every directory with a space whose backend takes tools, from now on, and tell each space's agent about it in its instructions. See `design/mcp.md`.
     pub(crate) fn serve_tools(&self, server: ToolServer) {
@@ -236,21 +243,29 @@ impl Hub {
         self.tools.changed.listen()
     }
 
-    /// The next registration due, if any: Tomori's MCP server is registered in a directory while a space bound there is open, and removed once none is.
+    /// The next registration due, if any: Tomori's MCP server is registered in a directory while a space bound there is open, and removed once none is. Removals go first, so that one from a directory a session moved from, which may name the same place as where it moved to, such as through a symbolic link, never undoes the registration where it is now.
     pub(crate) fn next_registration(&self) -> Option<Registration> {
-        let (backend, directory) = self
-            .tools
-            .due
-            .lock()
-            .expect("never left poisoned")
-            .pop_first()?;
         let state = self.lock();
-        let open = state.spaces.iter().any(|record| {
-            record.model.backend == backend
-                && record.model.directory == directory
-                && !record.restoring
-                && !record.model.is_closed()
-        });
+        let open = |backend: &str, directory: &str| {
+            state.spaces.iter().any(|record| {
+                record.model.backend == backend
+                    && record.model.directory == directory
+                    && !record.restoring
+                    && !record.model.is_closed()
+            })
+        };
+        let (backend, directory) = {
+            let mut due = self.tools.due.lock().expect("never left poisoned");
+            let removal = due
+                .iter()
+                .find(|(backend, directory)| !open(backend, directory))
+                .cloned();
+            match removal {
+                Some(removal) => due.take(&removal).expect("found above"),
+                None => due.pop_first()?,
+            }
+        };
+        let open = open(&backend, &directory);
         let server = open
             .then(|| {
                 self.tools
