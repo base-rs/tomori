@@ -622,8 +622,14 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
     let mut sticks = Sticks::new();
     sticks.share(&shared(|shared| shared.toast[2] = campsite::BLACK));
     let body = campsite::body(2);
-    // Thrown out of the fire by someone else at 2 m/s, its marshmallow from over the heart of the fire, a snapshot
-    // every twentieth of a second.
+    // Held by someone else, then thrown out of the fire at 2 m/s, its marshmallow from over the heart of the fire, a
+    // snapshot every twentieth of a second, the first as the side says they let go.
+    let held = Held {
+        by: 9,
+        hand: tomori_physics::Side::Right,
+        offset: Default::default(),
+    };
+    sticks.changed(&holding(2, 1, Some(held)), 900);
     let velocity = Vec3::new(2.0, 0.0, 0.0);
     let along = Quat::from_rotation_y(0.4);
     let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::STICK_LENGTH * 0.5;
@@ -643,6 +649,12 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
                     clock: sent,
                     sticks: Update {
                         moving: vec![Snapshot::new(body, &thrown(sent), Precision::Moving)],
+                        holding: holding(2, 2, None)
+                            .sticks
+                            .holding
+                            .into_iter()
+                            .filter(|_| sent == 1_000)
+                            .collect(),
                         ..Update::default()
                     },
                     toast: Vec::new(),

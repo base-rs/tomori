@@ -267,6 +267,12 @@ impl World {
         (self.steps as f64 * self.settings.step as f64 * 1000.0) as u64
     }
 
+    /// How far behind what it was stepped to it has simulated, in seconds: less than a step, which it is said to have
+    /// reached once it has, so that where it says what moves is was so that long before it was last stepped.
+    pub fn behind(&self) -> f32 {
+        self.remainder
+    }
+
     /// Move on by `seconds`, at most a quarter of a second, in steps of its settings' step, and say what changed since it
     /// last said: where what moves is, at most [`SNAPSHOT_RATE`] times a second, what came to rest, changed hands or
     /// struck something.

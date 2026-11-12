@@ -105,8 +105,11 @@ pub struct Loose {
     /// When it last stepped, and when it last said what changed.
     stepped: Instant,
     said: Option<Instant>,
-    /// What changed that it has not yet said.
+    /// What changed that it has not yet said, and when what moves was where it says.
     pending: Update,
+    moved: Instant,
+    /// How long before it last said what changed what moves was where that said, in milliseconds.
+    behind: u64,
     /// The lines it may still log.
     pub(crate) logged: Logged,
     /// The bodies let go since they were last asked for, as participants let go of them.
@@ -122,6 +125,8 @@ impl Loose {
             stepped: now,
             said: None,
             pending: Update::default(),
+            moved: now,
+            behind: 0,
             logged: Logged::new(noun.many, now),
             released: Vec::new(),
         }
@@ -276,11 +281,19 @@ impl Loose {
     }
 
     /// Move on to `now`, and what to say of what changed: whatever has not been said, once at least a snapshot's
-    /// interval has passed since it last said, so that it says at most [`SNAPSHOT_RATE`] a second.
+    /// interval has passed since it last said, so that it says at most [`SNAPSHOT_RATE`] a second. See
+    /// [`Loose::behind`] for when what moves was where it says.
     pub fn update(&mut self, now: Instant) -> Option<Update> {
         let elapsed = now.saturating_duration_since(self.stepped).as_secs_f32();
         self.stepped = now;
-        self.pending.merge(self.world.step(elapsed));
+        let stepped = self.world.step(elapsed);
+        if !stepped.moving.is_empty() {
+            // Its simulation reaches only whole steps, short of `now`.
+            self.moved = now
+                .checked_sub(Duration::from_secs_f32(self.world.behind()))
+                .unwrap_or(now);
+        }
+        self.pending.merge(stepped);
         let interval = Duration::from_millis(1000 / SNAPSHOT_RATE as u64);
         let due = self
             .said
@@ -289,7 +302,20 @@ impl Loose {
             return None;
         }
         self.said = Some(now);
+        self.behind = if self.pending.moving.is_empty() {
+            0
+        } else {
+            now.saturating_duration_since(self.moved).as_millis() as u64
+        };
         Some(std::mem::take(&mut self.pending))
+    }
+
+    /// How long before the update it last said what moves was where that said, in milliseconds, by which a side says
+    /// it sooner on its clock than it says it, so that clients draw it moving between where it was when it was there:
+    /// as long as the simulation was short of the time it was stepped to, and as long since it was stepped there, should
+    /// the update not have been due then.
+    pub fn behind(&self) -> u64 {
+        self.behind
     }
 }
 

@@ -57,7 +57,8 @@ pub const PULL_TIME: f32 = 0.25;
 pub const SILENT: u64 = 3_000;
 /// How far behind the clock a client draws what moves, in milliseconds, so that it interpolates between snapshots.
 pub const DELAY: u64 = 100;
-/// How long the holder's foresight of what they let go blends into the server's placements, in milliseconds.
+/// How long a client blends in what moves where it draws a body, as the server's first placement after the holder's
+/// foresight or one later than [`DELAY`], in milliseconds, so that nothing jumps.
 pub const BLEND: u64 = 150;
 /// How long a body taken back fades out where it is, in milliseconds, before it is put where it returns to, at once,
 /// and fades in there for as long again: so that it is never seen on its way.
