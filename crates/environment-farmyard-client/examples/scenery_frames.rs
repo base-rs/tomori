@@ -4,8 +4,9 @@
 //! How long the farmyard's scenery takes the GPU to draw, as the headset draws it: two passes, one for each of a Quest
 //! 3's eyes, each 1,680 × 1,760 with 4× multisampling resolved in the pass, from the rendering proposal's four
 //! viewpoints, by the GPU's timestamps: culled against both eyes as the renderer culls it, and, to compare, without
-//! culling, with closed models' back faces drawn, and with neither, the four taken in turn frame by frame after a few
-//! seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a
+//! culling, with closed models' back faces drawn, with neither, and culled with four burning marshmallows' trails
+//! glowing before the eyes, as many as the ring holds, the five taken in turn frame by frame after a few seconds'
+//! warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a
 //! number for another count, and then a configuration's name, such as `culled`, to time it alone, as a frame that
 //! culls what the last culled writes nothing. Run by hand on a desktop GPU, not on CI's lavapipe; see
 //! `design/rendering.md`.
@@ -18,6 +19,7 @@ use std::time::Instant;
 use glam::{Mat4, Quat, Vec3};
 use tomori_assets::Library;
 use tomori_environment_farmyard_client::coop::Coop;
+use tomori_environment_farmyard_client::embers::{self, Embers};
 use tomori_environment_farmyard_client::layout;
 use tomori_environment_farmyard_client::scenery::{Clock, Farmyard};
 use tomori_environment_farmyard_client::trail;
@@ -25,6 +27,8 @@ use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_scene::scene::headset::{Fov, View, view_projection};
 
 const SIZE: (u32, u32) = (1680, 1760);
+/// The time the scenery is drawn at.
+const CLOCK: f32 = 2.0;
 /// How long the GPU is kept busy before anything is timed.
 const WARM: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -92,21 +96,50 @@ fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
     ]
 }
 
+/// Four burning marshmallows' trails, swung in loops at 2 m/s for as long as a trail glows, a metre and a half before
+/// eyes at `middle` facing `heading`: as many quads as the ring holds, all glowing.
+fn paint(embers: &mut Embers, middle: Vec3, heading: f32) {
+    let facing = Quat::from_rotation_y(heading);
+    let ahead = facing * Vec3::NEG_Z;
+    let right = facing * Vec3::X;
+    embers.clear();
+    for index in 0..4 {
+        let centre = middle + ahead * 1.5 + right * (index as f32 - 1.5) * 0.3 - Vec3::Y * 0.2;
+        let seconds = embers::LIFE * 0.95;
+        let steps = 400;
+        let path: Vec<Vec3> = (0..=steps)
+            .map(|step| {
+                // Loops 0.3 m across, about 2 m/s.
+                let turn = step as f32 / steps as f32 * seconds * 6.7 + index as f32;
+                centre + right * turn.cos() * 0.15 + Vec3::Y * (turn * 1.3).sin() * 0.15
+            })
+            .collect();
+        embers.paint(
+            index,
+            &path,
+            f64::from(seconds) / f64::from(steps),
+            f64::from(CLOCK),
+        );
+    }
+}
+
 fn main() {
     let frames: usize = std::env::args()
         .nth(1)
         .and_then(|count| count.parse().ok())
         .unwrap_or(600);
-    // Each configuration: whether it culls against the eyes, and whether closed parts' back faces are culled.
+    // Each configuration: whether it culls against the eyes, whether closed parts' back faces are culled, and whether
+    // four burning marshmallows' trails, as long as the ring holds, glow before the eyes.
     let only = std::env::args().nth(2);
     let configurations: Vec<_> = [
-        ("culled", true, true),
-        ("frustum only", true, false),
-        ("back faces only", false, true),
-        ("neither", false, false),
+        ("culled", true, true, false),
+        ("frustum only", true, false, false),
+        ("back faces only", false, true, false),
+        ("neither", false, false, false),
+        ("culled, with trails", true, true, true),
     ]
     .into_iter()
-    .filter(|(name, _, _)| only.as_deref().is_none_or(|only| only == *name))
+    .filter(|(name, ..)| only.as_deref().is_none_or(|only| only == *name))
     .collect();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -160,9 +193,9 @@ fn main() {
         tomori_render::glyphs::SharedGlyphs::new(&device),
     );
     let mut farmyard =
-        Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(2.0));
+        Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(CLOCK));
     // The flock out, as its client side shows it a little after it is made.
-    {
+    let drawn = {
         use tomori_scene::client_side::{ClientSide, Input};
         let chicken = tomori_environment_farmyard::chicken::Chicken::shared().expect("the hen");
         let flock = tomori_environment_farmyard::flock::Flock::new(
@@ -181,8 +214,9 @@ fn main() {
             vec![tomori_scene::channel::Update::State(state)],
             epoch + std::time::Duration::from_millis(400),
         ));
-        farmyard.animate(&device, &queue, output.drawn.unwrap().as_ref());
-    }
+        output.drawn.unwrap()
+    };
+    farmyard.animate(&device, &queue, drawn.as_ref());
     let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("Scenery frames"),
         ty: wgpu::QueryType::Timestamp,
@@ -211,7 +245,13 @@ fn main() {
         while gpu.iter().any(|times| times.len() < frames) {
             let which = frame % configurations.len();
             frame += 1;
-            let (_, culled, back_faces) = configurations[which];
+            let (_, culled, back_faces, trails) = configurations[which];
+            if trails {
+                paint(farmyard.embers_mut(), middle, facing);
+            } else {
+                farmyard.embers_mut().clear();
+            }
+            farmyard.animate(&device, &queue, drawn.as_ref());
             let started = Instant::now();
             farmyard.set_back_faces_culled(back_faces);
             tallies[which] = farmyard.cull(
@@ -274,7 +314,7 @@ fn main() {
             times.sort_by(f64::total_cmp);
             times[times.len() / 2]
         };
-        for (which, (configuration, _, _)) in configurations.iter().enumerate() {
+        for (which, (configuration, ..)) in configurations.iter().enumerate() {
             let tally = tallies[which];
             println!(
                 "{name}, {configuration}: GPU {:.4} ms for both eyes, CPU {:.4} ms to cull and encode; an eye: {} drawn, {} culled, {} draws, {} triangles",

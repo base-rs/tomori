@@ -421,6 +421,31 @@ fn a_marshmallow_toasts_over_the_heart_of_the_fire_from_white_to_golden_brown_an
 }
 
 #[test]
+fn a_burnt_marshmallow_burns_on_out_of_the_heat_for_a_while_and_goes_out_or_under_the_water() {
+    let away = heart() + Vec3::X * 2.0;
+    // Caught in the heat, it may burn on for as long as it burns.
+    assert_eq!(burns(0.0, BLACK, heart(), 0.1), BURNS);
+    assert_eq!(burns(3.0, 1.0, heart(), 0.1), BURNS);
+    // Out of it, less and less, and then not at all.
+    assert!((burns(BURNS, BLACK, away, 1.5) - (BURNS - 1.5)).abs() < 1e-5);
+    assert_eq!(burns(1.0, BLACK, away, 2.0), 0.0);
+    // Never unlit beyond the heat, nor unless it is black, nor under the pool's water.
+    assert_eq!(burns(0.0, BLACK, away, 0.1), 0.0);
+    assert_eq!(burns(BURNS, BROWN, heart(), 0.1), 0.0);
+    assert_eq!(burns(BURNS, f32::NAN, heart(), 0.1), 0.0);
+    let under = layout::POOL - Vec3::Y * 0.05;
+    assert!(doused(under));
+    assert!(!doused(layout::POOL + Vec3::Y * 0.05));
+    assert!(!doused(away));
+    assert_eq!(burns(BURNS, BLACK, under, 0.1), 0.0);
+    // Nonsense takes nothing off it, or puts it out.
+    assert_eq!(burns(10.0, BLACK, away, f32::NAN), 10.0);
+    assert_eq!(burns(10.0, BLACK, away, -1.0), 10.0);
+    assert_eq!(burns(f32::INFINITY, BLACK, away, 0.1), 0.0);
+    assert_eq!(burns(BURNS * 2.0, BLACK, away, 0.0), BURNS);
+}
+
+#[test]
 fn a_marshmallow_held_in_the_heat_toasts_by_how_near_and_how_long() {
     // Ten seconds over the heart of the fire, half way; twice as long, to black and beyond, but never past 1.
     assert!((toasted(0.0, heart(), 10.0) - TOAST_RATE * 10.0).abs() < 1e-6);

@@ -10,6 +10,7 @@
 pub mod ambience;
 pub mod campsite;
 pub mod client;
+pub mod embers;
 pub mod loose;
 pub mod scenery;
 pub mod stones;

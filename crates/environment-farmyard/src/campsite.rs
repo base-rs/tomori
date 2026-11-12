@@ -246,9 +246,44 @@ pub fn looks(toast: f32) -> &'static str {
     }
 }
 
-/// Whether a marshmallow toasted `toast` at `at` is alight: black, and still in the fire's heat.
+/// Whether a marshmallow toasted `toast` at `at` catches, or burns on as long as it can: black, in the fire's heat. Out
+/// of it, it burns on as [`burns`] says.
 pub fn burning(toast: f32, at: Vec3) -> bool {
     toast >= BLACK && heat(at) > 0.0
+}
+
+/// How long a marshmallow that has caught burns on out of the fire's heat, in seconds, before it goes out: long enough
+/// to write a few words in the air with it, as with an ember on a stick, which the client crate draws as its trail.
+pub const BURNS: f32 = 45.0;
+
+/// How long a marshmallow toasted `toast`, at `at`, burns on, `seconds` after it would have burned on for `left`, as
+/// each client draws it: for [`BURNS`] while it is [`burning`] in the fire's heat, and less as it is out of it, until it
+/// goes out on its own, or at once under the pool's water; and never unless it is black.
+pub fn burns(left: f32, toast: f32, at: Vec3, seconds: f32) -> f32 {
+    if burning(toast, at) {
+        return BURNS;
+    }
+    if toast.is_nan() || toast < BLACK {
+        return 0.0;
+    }
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    };
+    let left = if left.is_finite() {
+        (left - seconds).max(0.0)
+    } else {
+        0.0
+    };
+    if doused(at) { 0.0 } else { left.min(BURNS) }
+}
+
+/// Whether `point` is under the pool's water, which puts out a burning marshmallow.
+pub fn doused(point: Vec3) -> bool {
+    point.y < layout::POOL.y
+        && Vec2::new(point.x - layout::POOL.x, point.z - layout::POOL.z).length()
+            < layout::POOL_RADIUS
 }
 
 /// How far toasting `toast` goes at `at` in `seconds`, as the side computes it from where the holder's hand holds the

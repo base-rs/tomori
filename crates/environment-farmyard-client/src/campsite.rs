@@ -37,9 +37,10 @@ const EASE: f32 = 0.25;
 /// The longest frame the foresight toasts over, in seconds.
 const FRAME_MOST: f32 = 0.1;
 
-/// A stick as it is drawn this frame: where, the shade of its marshmallow and whether it burns.
+/// A stick as it is drawn this frame: which, where, the shade of its marshmallow and whether it burns.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shown {
+    pub index: usize,
     pub transform: Mat4,
     pub marshmallow: Vec3,
     pub shade: usize,
@@ -95,13 +96,15 @@ impl Shapes for Rack {
 
 /// The sticks as this client shows them: their bodies, how toasted the server side says each is, this participant's
 /// foresight of those they hold, how toasted each on its way back was as it began, which it is drawn as fading out,
-/// the server side having said its marshmallow fresh, and when they were last drawn.
+/// the server side having said its marshmallow fresh, how long each marshmallow burns on, as this client draws it, and
+/// when they were last drawn.
 #[derive(Clone, Debug, Default)]
 pub struct Sticks {
     loose: Loose<Rack>,
     toast: Vec<f32>,
     foreseen: BTreeMap<u32, f32>,
     leaving: BTreeMap<u32, f32>,
+    flames: BTreeMap<u32, f32>,
     last: Option<Instant>,
 }
 
@@ -265,11 +268,18 @@ impl Sticks {
                             * drawn
                     }
                 };
+                let index = Rack::number(body) as usize;
+                let flame = self.flames.entry(body).or_default();
+                *flame = match fade {
+                    Fade::Whole => campsite::burns(*flame, toast, marshmallow, seconds),
+                    _ => 0.0,
+                };
                 Shown {
+                    index,
                     transform,
                     marshmallow,
                     shade: campsite::shade(toast),
-                    burning: fade == Fade::Whole && campsite::burning(toast, marshmallow),
+                    burning: *flame > 0.0,
                 }
             })
             .collect()
