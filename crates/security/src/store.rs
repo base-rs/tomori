@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -303,13 +304,29 @@ fn write(path: &Path, entries: &[Entry]) -> io::Result<()> {
     write_private(path, text.as_bytes())
 }
 
-/// Write `contents` to `path` through a temporary file readable only by its user, so that the file is never partly written or readable by others.
+/// Write `contents` to `path` through a temporary file readable only by its user, so that the file is never partly written or readable by others. Each write has a temporary file of its own beside `path`, so that writes of the same file at once, from this process or another, never share one; the last renamed is the one kept.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("tmp");
-    let mut file = private(&temporary)?;
-    fault::run(Operation::Write, &temporary, || file.write_all(contents))?;
-    fault::run(Operation::Sync, &temporary, || file.sync_all())?;
-    fs::rename(&temporary, path)
+    write_through(path, &temporary(path), contents)
+}
+
+/// The temporary file for one write of `path`: its name, this process's identifier and a number no other write in this process has, ending in `.tmp` so that what an interrupted write leaves can be recognised and removed, as the image store's sweep does.
+fn temporary(path: &Path) -> PathBuf {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{name}.{}.{write}.tmp", std::process::id()))
+}
+
+/// Write `contents` to `path` through the file `temporary`, removing it if the write fails, so that failed writes leave nothing behind.
+fn write_through(path: &Path, temporary: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = private(temporary)?;
+    let written = fault::run(Operation::Write, path, || file.write_all(contents))
+        .and_then(|()| fault::run(Operation::Sync, path, || file.sync_all()))
+        .and_then(|()| fs::rename(temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    written
 }
 
 /// Create (or truncate) a file readable and writable only by its user. A file left from before, such as a temporary file of a write that was interrupted, keeps the mode it was created with, which opening does not change, so its mode is set too.
@@ -375,11 +392,11 @@ mod tests {
         create_private_directory(&directory).unwrap();
         assert!(!shared_directory(&directory).unwrap());
         let path = directory.join("kept.json");
-        // A temporary file an interrupted write left, readable by everyone.
-        let temporary = path.with_extension("tmp");
+        // A temporary file an interrupted write left, readable by everyone, as when a process with the same identifier wrote before.
+        let temporary = temporary(&path);
         fs::write(&temporary, "old").unwrap();
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
-        write_private(&path, b"new").unwrap();
+        write_through(&path, &temporary, b"new").unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -621,6 +638,53 @@ mod tests {
         }
     }
 
+    fn files(directory: &Path) -> Vec<String> {
+        let mut files: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn writes_of_one_file_at_once_all_succeed_and_leave_it_whole() {
+        let directory = directory("concurrent");
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("image.png");
+        // Each thread writes contents of its own, long enough that writes overlap, several times.
+        let contents: Vec<Vec<u8>> = (0..8u8).map(|thread| vec![thread; 256 * 1024]).collect();
+        std::thread::scope(|scope| {
+            for contents in &contents {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        write_private(path, contents).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(contents.contains(&fs::read(&path).unwrap()));
+        assert_eq!(files(&directory), ["image.png"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_file_is_beside_its_file_and_ends_in_tmp() {
+        let path = Path::new("state").join("tokens.json");
+        let (first, second) = (temporary(&path), temporary(&path));
+        assert_ne!(first, second);
+        for temporary in [first, second] {
+            assert_eq!(temporary.parent(), path.parent());
+            let name = temporary.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with(&format!("tokens.json.{}.", std::process::id()))
+                    && name.ends_with(".tmp"),
+                "{name}"
+            );
+        }
+    }
+
     fn names(store: &TokenStore) -> Vec<String> {
         store
             .entries()
@@ -646,16 +710,17 @@ mod tests {
         let store = TokenStore::open(&directory).unwrap();
         let (kept, _) = store.issue("kept", Grant::Owner).unwrap();
         let path = directory.join(TOKENS_FILE);
-        let temporary = path.with_extension("tmp");
         let written = fs::read_to_string(&path).unwrap();
+        // Nothing is left beside the store but the store and its lock: a failed write removes its temporary file.
         let unchanged = || {
             assert_eq!(names(&store), ["kept"]);
             assert_eq!(fs::read_to_string(&path).unwrap(), written);
+            assert_eq!(files(&directory), ["tokens.json", "tokens.lock"]);
         };
         for (operation, at) in [
             (Operation::Lock, path.with_extension("lock")),
-            (Operation::Write, temporary.clone()),
-            (Operation::Sync, temporary.clone()),
+            (Operation::Write, path.clone()),
+            (Operation::Sync, path.clone()),
         ] {
             let _failing = fault::inject(operation, &at);
             let message = format!("injected {operation:?} failure");
@@ -670,13 +735,16 @@ mod tests {
             unchanged();
         }
 
-        // A failed write leaves its temporary file, which the next write replaces. The temporary file cannot be created where a directory has its name.
-        fs::remove_file(&temporary).unwrap();
+        // The temporary file cannot be created where a directory has its name, and the store is not replaced where a directory has the store's.
+        let temporary = temporary(&path);
         fs::create_dir(&temporary).unwrap();
-        let error = store.issue("lost", Grant::Owner).err().unwrap();
-        assert!(io_kind(&error).is_some(), "{error}");
-        unchanged();
+        assert!(write_through(&path, &temporary, b"lost").is_err());
         fs::remove_dir(&temporary).unwrap();
+        let unreplaced = directory.join("unreplaced");
+        fs::create_dir(&unreplaced).unwrap();
+        assert!(write_private(&unreplaced, b"lost").is_err());
+        fs::remove_dir(&unreplaced).unwrap();
+        unchanged();
 
         // Once writing works again, so do changes, and they keep the earlier token.
         store.issue("added", Grant::Owner).unwrap();

@@ -455,6 +455,8 @@ fn the_store_keeps_images_by_hash_and_sweeps_those_no_panel_shows() {
     // Sweeping keeps what panels show, what is new, and what is not an image.
     fs::write(images.join("notes.txt"), b"kept").unwrap();
     fs::write(images.join(format!("{}.tmp", second.image.hash)), b"left").unwrap();
+    let left = images.join(format!("{}.png.1234.5.tmp", second.image.hash));
+    fs::write(&left, b"left").unwrap();
     let shown = BTreeSet::from([first.image.hash.clone()]);
     store.sweep(shown.clone());
     assert!(images.join(format!("{}.png", second.image.hash)).exists());
@@ -462,6 +464,7 @@ fn the_store_keeps_images_by_hash_and_sweeps_those_no_panel_shows() {
     assert!(file.exists() && images.join("notes.txt").exists());
     assert!(!images.join(format!("{}.png", second.image.hash)).exists());
     assert!(!images.join(format!("{}.tmp", second.image.hash)).exists());
+    assert!(!left.exists());
     assert!(store.get(&second.image.hash).is_none());
     // The same images shown again sweep nothing; none shown, everything old goes.
     store.sweep(shown);

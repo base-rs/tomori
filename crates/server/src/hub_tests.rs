@@ -597,9 +597,16 @@ impl Store {
         Self { directory, tokens }
     }
 
-    /// Make every later write fail, by taking the name of the file each write goes through.
+    /// Make every later change fail, by taking the name of the lock file each change opens.
     fn refuse_writes(&self) {
-        std::fs::create_dir(self.directory.join("tokens.tmp")).unwrap();
+        let lock = self.directory.join("tokens.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir(lock).unwrap();
+    }
+
+    /// Let changes be made again.
+    fn allow_writes(&self) {
+        std::fs::remove_dir(self.directory.join("tokens.lock")).unwrap();
     }
 }
 
@@ -1771,7 +1778,9 @@ fn spaces_kept_are_listed_once_and_a_store_that_refuses_them_is_said() {
     assert_eq!(hub.status().spaces.len(), 1);
     // A store that cannot be written keeps what it had, and says why.
     log::set_max_level(log::LevelFilter::Trace);
-    std::fs::create_dir(directory.join("spaces.tmp")).unwrap();
+    // A directory where the record is, which no write can replace.
+    std::fs::remove_file(directory.join("spaces.json")).unwrap();
+    std::fs::create_dir(directory.join("spaces.json")).unwrap();
     stopped(&hub, Snapshot::default());
     assert_eq!(store.spaces().len(), 1);
     assert_eq!(store.spaces()[0].id, id);
@@ -2393,7 +2402,7 @@ fn a_name_that_cannot_be_kept_is_not_changed() {
         finished(&say_name(&hub, &quest, "Ada")),
         Some(Err("Your name could not be kept. Try again.".to_owned()))
     );
-    std::fs::remove_dir(store.directory.join("tokens.tmp")).unwrap();
+    store.allow_writes();
 
     // A token revoked meanwhile keeps no name.
     store.tokens.revoke(&entry.id).unwrap();

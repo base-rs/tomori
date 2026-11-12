@@ -355,8 +355,8 @@ mod tests {
             );
         }
         std::fs::remove_file(&state).unwrap();
-        // A store whose writes are refused.
-        std::fs::create_dir_all(state.join("tokens.tmp")).unwrap();
+        // A store that cannot be changed, since its lock file cannot be opened where a directory has its name.
+        std::fs::create_dir_all(state.join("tokens.lock")).unwrap();
         let error = run_in(&state, &["mint", "--owner", "--name", "Ada"]).unwrap_err();
         assert!(error.starts_with("Could not issue the token"), "{error}");
         let error = run_in(&state, &["revoke", "abc"]).unwrap_err();

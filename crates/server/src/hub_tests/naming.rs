@@ -346,7 +346,7 @@ fn a_name_that_cannot_be_kept_changes_nothing() {
     assert_eq!(store.tokens.entry(&id).unwrap().name, "Samuel");
     assert!(quest.read().is_empty());
     // A token revoked while its holder is still connected is renamed no more.
-    std::fs::remove_dir(store.directory.join("tokens.tmp")).unwrap();
+    store.allow_writes();
     assert!(
         store
             .tokens
