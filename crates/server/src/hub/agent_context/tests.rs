@@ -83,3 +83,25 @@ fn settings_and_chips_are_told_as_the_agent_reads_them() {
         json!({"parameter": "time", "label": "Time", "setting": "fixed"})
     );
 }
+
+#[test]
+fn a_chip_s_value_is_said_in_words_and_instants_in_utc() {
+    assert_eq!(
+        spoken(&ContextValue::Text {
+            text: "EU-WEST1".into()
+        }),
+        "EU-WEST1"
+    );
+    assert_eq!(
+        spoken(&ContextValue::Live { minutes: 30 }),
+        "the last 30 minutes"
+    );
+    assert_eq!(
+        spoken(&ContextValue::Window {
+            from_ms: 1_794_450_000_000,
+            to_ms: 1_794_451_800_000
+        }),
+        "2026-11-12T02:20:00Z to 2026-11-12T02:50:00Z, UTC"
+    );
+    assert_eq!(spoken(&ContextValue::Unknown), "");
+}

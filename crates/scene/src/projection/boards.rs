@@ -235,18 +235,36 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
         canvas: Some(std::sync::Arc::new(canvas)),
         model: Some(frame * Mat4::from_scale(Vec3::splat(scale))),
     }];
-    if labelled(wall, walls) {
+    // Its group's label, where it is its group's labelled wall, and its own context's chips, after the label or alone.
+    let shown = labelled(wall, walls);
+    // No wider than its own board, from where its label is indented.
+    let pixel = thick;
+    let room = (((own.right - own.left) / pixel) as usize)
+        .saturating_sub(LABEL_INDENT + 2 * WALL_PADDING.0)
+        / crate::ui_text::CELL_WIDTH;
+    let today = super::chips::today();
+    let chips = super::chips::lay(&wall.context, room, 0, 0, today);
+    if shown || !chips.cells.is_empty() {
         // Indented as a wall alone indents it, from its board's top left, at its group's largest scale.
         let (text, color) = wall_label(wall);
-        let pixel = thick;
-        let mut label = Canvas::new(crate::ui_text::width(&text), pixel);
+        let mut cells = if shown {
+            Row::text(&text, Style::bold(color), crate::ui_text::width(&text)).cells
+        } else {
+            Vec::new()
+        };
+        let mut shapes = Vec::new();
+        if !chips.cells.is_empty() {
+            let at = if cells.is_empty() { 0 } else { cells.len() + 2 };
+            let laid = super::chips::lay(&wall.context, room.saturating_sub(at), at, 0, today);
+            cells.resize(at, (' ', Style::plain(color)));
+            cells.extend(laid.cells);
+            shapes = laid.shapes;
+        }
+        let mut label = Canvas::new(cells.len(), pixel);
         label.padding = (0, 0);
         label.background = [0.0; 4];
-        label.rows = vec![Row::text(
-            &text,
-            Style::bold(color),
-            crate::ui_text::width(&text),
-        )];
+        label.rows = vec![Row::new(cells)];
+        label.shapes = shapes;
         let (width, height) = label.size();
         let left = own.left + (LABEL_INDENT + WALL_PADDING.0) as f32 * pixel;
         let top = own.top - WALL_PADDING.1 as f32 * pixel;

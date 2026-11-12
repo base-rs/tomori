@@ -155,3 +155,67 @@ fn an_edge_s_border_is_what_no_wall_covers() {
     assert!(uncovered((0.0, 1.0), &[(0.0, 0.9995)]).is_empty());
     assert_eq!(uncovered((0.0, 1.0), &[(2.0, 3.0)]), [(0.0, 1.0)]);
 }
+
+#[test]
+fn a_wall_of_a_group_shows_its_own_context_s_chips_after_its_label_or_alone() {
+    use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+    let chip = |value: &str| {
+        vec![ContextChip::new(
+            "region",
+            "Region",
+            ContextValue::Text { text: value.into() },
+            ContextSetting::Fixed,
+        )]
+    };
+    let (two, big) = pair();
+    let (two, big) = (
+        two.with_context(chip("EU-WEST1")),
+        big.with_context(chip("AP-SOUTH1")),
+    );
+    let walls = [&two, &big];
+    let text = |wall: &Wall| -> Vec<String> {
+        sheets(wall, Mat4::IDENTITY, &walls)[1..]
+            .iter()
+            .map(|sheet| sheet.canvas.as_deref().unwrap().rows[0].plain())
+            .collect()
+    };
+    // The labelled wall, its label and then its chips; the other, its chips alone, each on its own backing.
+    assert_eq!(text(&two), ["WALL   Region EU-WEST1 "]);
+    assert_eq!(text(&big), [" Region AP-SOUTH1 "]);
+    let label = sheets(&big, Mat4::IDENTITY, &walls);
+    // A fixed chip, filled and outlined.
+    assert_eq!(label[1].canvas.as_deref().unwrap().shapes.len(), 2);
+    // Without a context, the other draws nothing more.
+    let (two, big) = pair();
+    assert_eq!(sheets(&big, Mat4::IDENTITY, &[&two, &big]).len(), 1);
+}
+
+#[test]
+fn a_wall_of_a_group_s_chips_stand_within_its_board() {
+    use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+    let long = |parameter: &str| {
+        ContextChip::new(
+            parameter,
+            "A long label",
+            ContextValue::Text {
+                text: "A value as long as one may be".into(),
+            },
+            ContextSetting::Inherited,
+        )
+    };
+    let (two, big) = pair();
+    let two = two.with_context(vec![long("a"), long("b"), long("c")]);
+    let walls = [&two, &big];
+    let own = board(&two, &walls);
+    let label = sheets(&two, Mat4::IDENTITY, &walls)[1].clone();
+    let canvas = label.canvas.as_deref().unwrap();
+    let pixel = PIXEL * group_scale(&two, &walls);
+    let left = own.left + (LABEL_INDENT + WALL_PADDING.0) as f32 * pixel;
+    assert!(
+        left + canvas.size().0 <= own.right + 1e-4,
+        "{} past {}",
+        left + canvas.size().0,
+        own.right
+    );
+    assert!(canvas.rows[0].plain().starts_with("WALL"));
+}

@@ -1194,3 +1194,176 @@ fn at_most_eight_charts_link_to_one_pointed_at() {
         (1..16).contains(&index)
     }));
 }
+
+/// A panel's and a wall's context shows as chips, drawn with their faces, which pointing at a chip names by its
+/// parameter, as the ray moves over the face, without laying anything out or drawing it again.
+#[test]
+fn chips_show_a_panel_s_and_a_wall_s_context_and_the_ray_names_the_chip_it_meets() {
+    use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+    let region = |value: &str, setting| {
+        ContextChip::new(
+            "region",
+            "Region",
+            ContextValue::Text { text: value.into() },
+            setting,
+        )
+    };
+    let time = ContextChip::new(
+        "time",
+        "Time",
+        ContextValue::Live { minutes: 15 },
+        ContextSetting::Follows,
+    );
+    let chart = crate::chart::fixtures::pressure();
+    let mut shown = projection(vec![
+        Panel::new("pods", "Pods", "- pod-7", on("wall-1", 0))
+            .with_context(vec![region("EU-WEST1", ContextSetting::Fixed)]),
+        Panel::new("chart", "Pressure", chart.summary(), on("wall-1", 1))
+            .with_chart(chart)
+            .with_context(vec![
+                region("EU-WEST1", ContextSetting::Inherited),
+                time.clone(),
+            ]),
+        Panel::new("plain", "Plain", "x", on("wall-1", 2)),
+        // A code panel, as only the agent shows, which a server never gives a context: were it given one, it draws no
+        // chips and none is named.
+        Panel::new("code", "main.rs", "fn main() {}", on("wall-1", 3))
+            .with_code(Code::new("rust", 1))
+            .with_context(vec![region("EU-WEST1", ContextSetting::Fixed)]),
+    ]);
+    shown.walls[1] = shown.walls[1]
+        .clone()
+        .with_context(vec![region("EU-WEST1", ContextSetting::Fixed)]);
+    shown.walls[0] = shown.walls[0].clone().with_context(vec![time]);
+    let mut projector = Projector::default();
+    let output = projector.update(input(&shown, HOME, None));
+    let row = |projector: &Projector, panel: &str| projector.faces[panel].sizes[0].chips.row;
+    // Below its title, its chips before its metadata where both fit, or else on a row of their own below it.
+    let pods = face(&projector, "pods");
+    let pods_row = row(&projector, "pods");
+    assert!(
+        pods.rows[pods_row].plain().starts_with(" Region EU-WEST1 "),
+        "{:?}",
+        pods.rows[pods_row].plain()
+    );
+    assert!(matches!(pods.shapes[0], crate::shapes::Shape::Rect { .. }));
+    let chart = face(&projector, "chart");
+    let at = row(&projector, "chart");
+    assert!(
+        chart.rows[at].plain().contains("EU-WEST1"),
+        "{}",
+        chart.rows[at].plain()
+    );
+    assert!(!face(&projector, "plain").rows[1].plain().starts_with(' '));
+    assert!(projector.faces["plain"].sizes[0].chips.spans.is_empty());
+    assert!(projector.faces["code"].sizes[0].chips.spans.is_empty());
+    assert!(!face(&projector, "code").plain().contains("EU-WEST1"));
+    // The flat wall's board after its label, and the curved Tomori wall's label.
+    let rows: Vec<String> = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_deref())
+        .filter(|canvas| !canvas.rows.is_empty())
+        .map(|canvas| canvas.rows[0].plain())
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("WALL   Region EU-WEST1")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("TOMORI   Time last 15 min")),
+        "{rows:?}"
+    );
+    // The ray from home through a place on the chart's face, in font pixels inside its padding.
+    let walls: Vec<(&Wall, Mat4)> = shown
+        .walls
+        .iter()
+        .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
+        .collect();
+    let towards = |projector: &Projector, panel: &str, [x, y]: [f32; 2]| {
+        let (panel_model, _) = projector
+            .stands(shown.panel(panel).unwrap(), &walls)
+            .unwrap();
+        let canvas = face(projector, panel);
+        let (width, height) = canvas.size();
+        let local = Vec3::new(
+            (x + canvas.padding.0 as f32) * canvas.pixel - width / 2.0,
+            height / 2.0 - (y + canvas.padding.1 as f32) * canvas.pixel,
+            0.0,
+        );
+        Ray::new(HOME, panel_model.transform_point3(local) - HOME)
+    };
+    let cell = |column: f32, row: f32| [column * CELL_WIDTH as f32, row * CELL_HEIGHT as f32];
+    let counted = counts();
+    let chip = |projector: &mut Projector, panel: &str, at: [f32; 2]| {
+        let ray = towards(projector, panel, at);
+        projector.update(input(&shown, HOME, ray)).chip
+    };
+    let on = at as f32 + 0.5;
+    let spans = projector.faces["chart"].sizes[0].chips.spans.clone();
+    let middle = |index: usize| (spans[index].1 + spans[index].2) as f32 / 2.0;
+    assert_eq!(
+        chip(&mut projector, "chart", cell(middle(0), on)),
+        Some("region".to_owned())
+    );
+    assert_eq!(
+        chip(&mut projector, "chart", cell(middle(1), on)),
+        Some("time".to_owned())
+    );
+    // Between them, on the title, below them and on a panel without chips, none.
+    assert_eq!(
+        chip(&mut projector, "chart", cell(spans[0].2 as f32 + 0.5, on)),
+        None
+    );
+    assert_eq!(chip(&mut projector, "chart", cell(middle(0), 0.5)), None);
+    assert_eq!(
+        chip(&mut projector, "chart", cell(middle(0), on + 1.0)),
+        None
+    );
+    assert_eq!(chip(&mut projector, "plain", cell(1.0, 1.5)), None);
+    assert_eq!(chip(&mut projector, "code", cell(2.0, 1.5)), None);
+    assert_eq!(chip(&mut projector, "code", cell(2.0, 2.5)), None);
+    let pods_on = pods_row as f32 + 0.5;
+    assert_eq!(
+        chip(&mut projector, "pods", cell(2.0, pods_on)),
+        Some("region".to_owned())
+    );
+    assert_eq!(counts(), counted, "nothing laid out or drawn again");
+}
+
+/// A curved wall's chips, and a wall's of a group, never stand beyond the wall, however long they are.
+#[test]
+fn a_curved_wall_s_chips_stand_within_its_row_of_slots() {
+    use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+    let long = |parameter: &str| {
+        ContextChip::new(
+            parameter,
+            "A long label",
+            ContextValue::Text {
+                text: "A value as long as one may be".into(),
+            },
+            ContextSetting::Fixed,
+        )
+    };
+    let mut shown = projection(Vec::new());
+    shown.walls[0] = shown.walls[0]
+        .clone()
+        .with_context(vec![long("a"), long("b"), long("c")]);
+    let mut projector = Projector::default();
+    let output = projector.update(input(&shown, HOME, None));
+    let label = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_deref())
+        .find(|canvas| !canvas.rows.is_empty() && canvas.rows[0].plain().starts_with("TOMORI"))
+        .expect("the Tomori wall is labelled");
+    let most = super::super::arc_columns(&shown.walls[0]);
+    assert!(label.columns <= most, "{} columns of {most}", label.columns);
+    assert!(
+        label.rows[0].plain().contains("A long"),
+        "{}",
+        label.rows[0].plain()
+    );
+}

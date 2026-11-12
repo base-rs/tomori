@@ -1885,6 +1885,7 @@ impl SpaceModel {
                 node,
                 edge,
                 world_edge,
+                chip,
                 ..
             } if panel.len() <= limits::IDENTIFIER_BYTES => {
                 let row = row
@@ -1904,6 +1905,10 @@ impl SpaceModel {
                                 .filter(|node| node.len() <= tomori_protocol::diagram::ID_BYTES),
                             edge: *edge,
                             world_edge: *world_edge,
+                            // A chip is named by its parameter, which is dropped where it is longer than any.
+                            chip: chip
+                                .as_deref()
+                                .filter(|chip| chip.len() <= tomori_environment::CONTEXT_ID_BYTES),
                         },
                     )?,
                 }))
@@ -5222,8 +5227,11 @@ mod tests {
                 let edge = at
                     .edge
                     .map_or(String::new(), |edge| format!(" along {edge}"));
+                let chip = at
+                    .chip
+                    .map_or(String::new(), |chip| format!(" chip {chip}"));
                 format!(
-                    "panel \"Status\"{}{across}{node}{edge}",
+                    "panel \"Status\"{}{across}{node}{edge}{chip}",
                     at.row.unwrap_or_default()
                 )
             })
@@ -5279,6 +5287,26 @@ mod tests {
         assert_eq!(
             chart.as_deref(),
             Some("[Pointing at panel \"Status\" at 6000]")
+        );
+        // So is the chip pointed at, by its parameter, dropped where it is longer than any.
+        let chip = |parameter: &str| {
+            space
+                .attended_with(
+                    &tomori_protocol::Resource::panel_chip("panel-1", parameter),
+                    None,
+                    None,
+                    &describe,
+                    &|_| None,
+                )
+                .map(|attended| context("fake", &[attended], &[]).unwrap())
+        };
+        assert_eq!(
+            chip("region").as_deref(),
+            Some("[Pointing at panel \"Status\" chip region]")
+        );
+        assert_eq!(
+            chip(&"r".repeat(tomori_environment::CONTEXT_ID_BYTES + 1)).as_deref(),
+            Some("[Pointing at panel \"Status\"]")
         );
         // So are a volume's node, by its id, dropped where it is longer than any, and its edge, by its index.
         let volume = |node: &str, edge: Option<u16>| {

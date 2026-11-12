@@ -39,8 +39,12 @@ struct Faces {
     board: Kept<Wall>,
     /// A curved wall's slot board, by its frame's colour and its slots' cells.
     slot: Kept<([f32; 4], Cells)>,
-    /// A curved wall's label, by its kind and name.
-    label: Kept<(WallKind, Option<String>)>,
+    /// A curved wall's label, by its kind, name and context's chips.
+    label: Kept<(
+        WallKind,
+        Option<String>,
+        Vec<tomori_protocol::context::ContextChip>,
+    )>,
     /// A flat wall's of a group, its board and its label each with where it stands from the wall's frame.
     group: Kept<Group, Vec<(Arc<Canvas>, Mat4)>>,
     /// The outline of a slot of its, by the slot's cells.
@@ -130,8 +134,10 @@ impl WallFaces {
     pub(super) fn label(&mut self, wall: &Wall) -> Arc<Canvas> {
         kept(
             &mut self.of(wall).label,
-            |(kind, name)| *kind == wall.kind && *name == wall.name,
-            || (wall.kind, wall.name.clone()),
+            |(kind, name, context)| {
+                *kind == wall.kind && *name == wall.name && *context == wall.context
+            },
+            || (wall.kind, wall.name.clone(), wall.context.clone()),
             |_| drawn(arc_label(wall)),
         )
     }

@@ -49,7 +49,7 @@ pub const TABLE_COLUMNS: usize = 60;
 /// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m. Walls
 /// are laid out in it, as `tomori_protocol::wall` lays them out for the server and every client alike.
 pub const PIXEL: f32 = layout::PIXEL;
-const PADDING: (usize, usize) = (6, 5);
+pub(crate) const PADDING: (usize, usize) = (6, 5);
 
 /// A code panel's face, in cells: a title, a row of its language, length and age, a rule, its rows of code, each line
 /// after its number, and a row saying what there is above and below them.
@@ -655,14 +655,25 @@ fn text_face(
     canvas.border = border;
     let total = lines.len();
     let scroll = scroll.min(total.saturating_sub(body_count));
-    let mut about = about(panel);
+    let about = about(panel);
+    let mut told = about.clone();
     if let Some(position) = list::position(&panel.rows, lines, (scroll, body_count)) {
-        about = format!("{position} · {about}");
+        told = format!("{position} · {about}");
     }
+    // Its context's chips, where it has any, before its metadata or on a row of their own, as laid out for its face.
+    let (metadata, rule, chips) = chips::header(
+        &panel.context,
+        (
+            &[crate::ui_text::Span::new(about, Style::plain(DIM))],
+            &[crate::ui_text::Span::new(told, Style::plain(DIM))],
+        ),
+        columns,
+        chips::today(),
+    );
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),
-        Row::text(&about, Style::plain(DIM), columns),
-        Mark::Rule.row(columns, Style::plain(DIM)),
+        metadata,
+        rule,
     ];
     let mut body = shown(lines, scroll, body_count);
     if total > scroll + body_count
@@ -675,7 +686,14 @@ fn text_face(
     body.resize_with(body_count, Default::default);
     rows.extend(body.into_iter().map(|line| Row::new(line.cells)));
     canvas.rows = rows;
-    canvas.shapes = list::shapes(panel, lines, (scroll, body_count), columns, marked);
+    canvas.shapes = chips.shapes;
+    canvas.shapes.extend(list::shapes(
+        panel,
+        lines,
+        (scroll, body_count),
+        columns,
+        marked,
+    ));
     canvas
         .shapes
         .extend(scroll_bar(columns, body_count, total, scroll));
@@ -1005,25 +1023,37 @@ fn wall_face(wall: &Wall) -> Canvas {
     let border = wall_border(wall);
     canvas.border = Some(border);
     let label = Row::text(&label, Style::bold(color), columns);
-    canvas.rows = vec![Row::new(
+    let mut cells: Vec<crate::ui_text::Cell> =
         std::iter::repeat_n((' ', Style::plain(color)), LABEL_INDENT / CELL_WIDTH)
             .chain(label.cells)
             .take(columns)
-            .collect(),
-    )];
+            .collect();
+    // Its context's chips, where it has settings of its own, along its top edge after its label.
+    let at = cells.len() + 2;
+    let chips = chips::lay(
+        &wall.context,
+        columns.saturating_sub(at),
+        at,
+        0,
+        chips::today(),
+    );
+    if !chips.cells.is_empty() {
+        cells.extend([(' ', Style::plain(color)); 2]);
+        cells.extend(chips.cells);
+    }
+    canvas.rows = vec![Row::new(cells)];
     canvas.rows.resize(rows, Row::default());
-    canvas.shapes = (0..grid.slots())
-        .map(|slot| {
-            let (left, top, width, height) = wall.slot_rect(slot);
-            Shape::rect(
-                left - WALL_PADDING.0 as f32,
-                top - WALL_PADDING.1 as f32,
-                width,
-                height,
-                SLOT,
-            )
-        })
-        .collect();
+    canvas.shapes = chips.shapes;
+    canvas.shapes.extend((0..grid.slots()).map(|slot| {
+        let (left, top, width, height) = wall.slot_rect(slot);
+        Shape::rect(
+            left - WALL_PADDING.0 as f32,
+            top - WALL_PADDING.1 as f32,
+            width,
+            height,
+            SLOT,
+        )
+    }));
     canvas
 }
 
@@ -1051,15 +1081,39 @@ const ARC_LABEL_DROP: f32 = 0.04;
 /// A curved wall's label, below the middle of its row of slots.
 fn arc_label(wall: &Wall) -> Canvas {
     let (label, color) = wall_label(wall);
-    let mut canvas = Canvas::new(crate::ui_text::width(&label), PIXEL);
+    let labelled = crate::ui_text::width(&label);
+    let mut cells = Row::text(&label, Style::bold(color), labelled).cells;
+    // Its context's chips, where it has settings of its own, after its label, no wider than the wall's row of slots.
+    let room = arc_columns(wall).saturating_sub(labelled + 2);
+    let chips = chips::lay(&wall.context, room, labelled + 2, 0, chips::today());
+    if !chips.cells.is_empty() {
+        cells.extend([(' ', Style::plain(color)); 2]);
+        cells.extend(chips.cells);
+    }
+    let mut canvas = Canvas::new(cells.len(), PIXEL);
     canvas.padding = (CELL_WIDTH, 2);
     canvas.background = [0.01, 0.02, 0.04, 0.5];
-    canvas.rows = vec![Row::text(
-        &label,
-        Style::bold(color),
-        crate::ui_text::width(&label),
-    )];
+    canvas.rows = vec![Row::new(cells)];
+    canvas.shapes = chips.shapes;
     canvas
+}
+
+/// How many cells of a curved wall's label fit across its row of slots, from its leftmost slot's edge to its
+/// rightmost's, as the slots stand along its arc, so that its chips never stand beyond it.
+fn arc_columns(wall: &Wall) -> usize {
+    let (left, right) = wall
+        .slot_frames()
+        .iter()
+        .map(|slot| {
+            (
+                slot.position[0] - slot.size[0] / 2.0,
+                slot.position[0] + slot.size[0] / 2.0,
+            )
+        })
+        .fold((f32::MAX, f32::MIN), |(left, right), (from, to)| {
+            (left.min(from), right.max(to))
+        });
+    ((right - left).max(0.0) / (CELL_WIDTH as f32 * PIXEL)) as usize
 }
 
 /// The most characters of the name an environment gives its wall that a client draws as its label.
@@ -1912,6 +1966,7 @@ impl Default for Hold {
 pub struct Left {
     pub pointed: Option<(String, f32, Vec3)>,
     pub item: Option<u32>,
+    pub chip: Option<String>,
     pub part: Option<Part>,
     pub placed: Option<(String, Target)>,
     pub preview: Option<(String, u32)>,
@@ -1925,6 +1980,7 @@ pub struct Left {
 struct Told {
     pointed: Option<(String, f32, Vec3)>,
     item: Option<u32>,
+    chip: Option<String>,
     part: Option<Part>,
     placed: Option<(String, Target)>,
     end: Option<Vec3>,
@@ -1941,6 +1997,9 @@ pub struct Output {
     pub pointed: Option<(String, f32, Vec3)>,
     /// The line of the body of the panel pointed at that the list item the ray meets begins on, as [`item_at`] finds it.
     pub item: Option<u32>,
+    /// The chip of the context of the panel pointed at that the ray meets, by its parameter, which words begun now
+    /// name. See `design/panel-context.md`.
+    pub chip: Option<String>,
     /// The node or edge of the volume pointed at that the ray meets, which words begun now name. See
     /// `design/diagrams.md`.
     pub part: Option<Part>,
@@ -2375,6 +2434,9 @@ impl Projector {
                 let scroll = self.scroll(&panel.id);
                 self.faces_for(panel).item(fit, model, scroll, point)
             });
+            told[side].chip = pointed.and_then(|(panel, model, fit, _, point)| {
+                self.faces_for(panel).chip(fit, model, point)
+            });
             let met = pointed
                 .zip(hand.ray)
                 .and_then(|((panel, model, fit, ..), ray)| self.meet(panel, model, fit, &ray))
@@ -2585,6 +2647,7 @@ impl Projector {
             }) {
                 told[side].pointed = None;
                 told[side].item = None;
+                told[side].chip = None;
                 told[side].part = None;
             }
             // A squeeze pulls off the panel pointed at, unless something nearer takes it, or the other hand carries it.
@@ -2793,6 +2856,7 @@ impl Projector {
             part: left.part.filter(|_| left.pointed.is_some()),
             pointed: left.pointed,
             item: left.item,
+            chip: left.chip.clone(),
             placed: left.placed,
             preview: preview(&self.aim.left),
             end: left.end,
@@ -2802,6 +2866,7 @@ impl Projector {
         output.part = right.part.filter(|_| right.pointed.is_some());
         output.pointed = right.pointed;
         output.item = right.item;
+        output.chip = right.chip.clone();
         output.placed = right.placed;
         output.preview = preview(&self.aim.right);
         output.end = right.end;
@@ -3385,6 +3450,7 @@ fn newest(projection: &Projection) -> HashMap<&str, &str> {
 
 mod boards;
 mod chart;
+pub mod chips;
 pub mod editing;
 mod faces;
 mod image;

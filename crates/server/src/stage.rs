@@ -2779,6 +2779,7 @@ impl Stage {
             node,
             edge,
             world_edge,
+            chip,
         } = at;
         let shown = self.view("", walls, now);
         let panel = shown.panel(panel)?;
@@ -2851,6 +2852,26 @@ impl Stage {
             details.push_str(&format!(
                 "; shows: \"{}\"",
                 crate::space::one_line(&panel.body.replace('\n', ", "), blocks::BODY_CHARS)
+            ));
+        }
+        // The chip of its context pointed at, what it shows and where that comes from, in quotes, as the environment's
+        // text.
+        if let Some(chip) =
+            chip.and_then(|chip| panel.context.iter().find(|shown| shown.parameter == chip))
+        {
+            use tomori_protocol::context::ContextSetting;
+            let value = crate::hub::agent_context::spoken(&chip.value);
+            let from = match chip.setting {
+                ContextSetting::Fixed => "fixed by its own setting",
+                ContextSetting::Inherited => "inherited from its wall",
+                _ => "following the environment",
+            };
+            details.push_str(&format!(
+                "; pointing at its chip: \"{}\", {from}",
+                crate::space::one_line(
+                    &format!("{}: {value}", chip.label),
+                    blocks::META_VALUE_CHARS
+                )
             ));
         }
         if let (Some(chart), Some(across)) = (&panel.chart, across) {
@@ -3006,6 +3027,8 @@ pub(crate) struct Pointed<'a> {
     pub edge: Option<u16>,
     /// A volume's world edge, by its index.
     pub world_edge: Option<u16>,
+    /// The chip of its context pointed at, by its parameter. See `design/panel-context.md`.
+    pub chip: Option<&'a str>,
 }
 
 /// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the
