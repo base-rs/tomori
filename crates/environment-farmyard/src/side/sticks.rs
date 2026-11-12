@@ -40,7 +40,9 @@ const TOAST_STEP_MOST: f32 = 0.25;
 
 /// Where the hand that holds `held` is, as the server last saw it in `presence`: its controller's grip pose; or, where
 /// the server has not seen it, as on the desktop, which carries what it holds before the eyes, half a metre before the
-/// head and a little below, facing as the head does.
+/// head and a little below, facing as the head does. None where the hand is not a placement at all, or is farther than
+/// [`tomori_physics::REACH`] from the head, as a stick is let go no farther: so that a client saying its hand is in the
+/// fire from across the campsite toasts nothing.
 pub fn hand(presence: &[Presence], held: &Held) -> Option<Placement> {
     let presence = presence
         .iter()
@@ -59,7 +61,9 @@ pub fn hand(presence: &[Presence], held: &Held) -> Option<Placement> {
         Some(pose) => placed(pose),
         None => placed(&presence.head).then(&Placement::at(Vec3::new(0.0, -0.2, -0.5))),
     };
-    hand.valid().then_some(hand)
+    let head = Vec3::from(presence.head.position);
+    let near = head.distance(hand.position) <= tomori_physics::REACH;
+    (hand.valid() && near).then_some(hand)
 }
 
 /// What the agent is told of one stick: how toasted it is, who holds it, whether it is back on its log, and where its

@@ -214,6 +214,24 @@ fn the_first_to_take_a_stick_holds_it_and_its_marshmallow_toasts_where_their_han
     );
     let in_left = hand(std::slice::from_ref(&seen), &left).unwrap();
     assert_eq!(in_left.position, over.position);
+    // A hand said to be in the fire from farther than an arm's length from the head, or nowhere at all, toasts nothing.
+    for (head, hand_at) in [
+        (head + Vec3::X * 3.0, over.position),
+        (head, Vec3::NAN),
+        (Vec3::NAN, over.position),
+    ] {
+        let unsound = Presence::new(
+            3,
+            tomori_protocol::Pose::at(head.to_array()),
+            Some(tomori_protocol::Pose::at(hand_at.to_array())),
+            Some(tomori_protocol::Pose::at(hand_at.to_array())),
+            later,
+        );
+        assert_eq!(hand(std::slice::from_ref(&unsound), &left), None);
+        let before = sticks.toast(1);
+        run(&mut sticks, &[unsound], later, 1.0);
+        assert_eq!(sticks.toast(1), before);
+    }
     let _ = epoch;
 }
 
