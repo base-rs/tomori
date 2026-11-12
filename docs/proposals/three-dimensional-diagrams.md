@@ -1,6 +1,6 @@
 # Proposal: Three-Dimensional Diagrams
 
-Status: **proposal**, November 2026, for the maintainer's decision. Nothing here is implemented, and nothing of it is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence. It was written against `origin/main` at `1aa32a71` (#371).
+Status: **approved by the maintainer**, November 2026, with the decisions below, which this text now follows. Nothing here is implemented yet, and nothing of it is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence. It was written against `origin/main` at `1aa32a71` (#371).
 
 It builds on projection's walls, panels, placement forms, ids, versions and compare-and-swap, revisions and patches, and the limits each client states (`design/projection.md`, #284, #289); chart panels and their summary for older clients (#267); pointing at a list's rows and items (`design/panel-actions.md`, #297, #298); the content scale of a wall (#313); the ray, its unified end and each hand's own ray, trigger and grip (`design/interaction.md`, `design/responders.md`, `docs/proposals/two-handed-pointing.md`, #354); depth ordering, the shared shapes and the faces kept across frames (`design/rendering.md`), and the rendering proposal being written beside this one (`proposal-rendering`: bounds and culling); the glyph atlas (`design/text.md`); Tomori's MCP tools (`design/mcp.md`); and glTF assets (`design/assets.md`). It takes up what agent projection's extension (#82) calls the `tomori-scene` structure format and its `show_diagram` tool, and the graph layout of the shared code toolkit (#147), and the structure views the GitHub and code proposal asks for (`docs/proposals/github-and-code-environments.md`, #152).
 
@@ -10,6 +10,15 @@ Spoken by the maintainer from the headset, November 2026:
 
 > We've got a lot of good two-dimensional visualisations (images, graphs, text), but we don't have a way for you to talk about the organisation of systems that might be better presented in three dimensions. I wonder if the panel is the right kind of container. A panel is two-dimensional, but it could be three-dimensional and contain geometry. Or you could create geometry like panels with expressed connections between them: here is the renderer module, here is the octree module, and they talk through this mechanism; two spheres in 3D with the connections between them. I don't know where we start: you'd need a mechanism to express that geometry, whether programmatic to start with or a scene description language. The common factor might be WebGPU, but that's pretty low level. I'm open to thoughts.
 
+## The maintainer's decisions
+
+1. **A volume is a kind of panel with depth**, not a separate sibling container (section 2).
+2. **Both ways to write it:** a Mermaid-like `diagram` block the agent writes in its replies, and the `show_diagram` and `update_diagram` tools, which report errors in the same turn (section 3). Whether a plain `mermaid` block also becomes a volume is not decided; it stays a code panel.
+3. **Default place as panels do today:** onto the wall the asker is looking at if they are near enough, else floating beside them (sections 2 and 8).
+4. **Moving nodes by hand: yes**, in stage 3, with two-handed carry; the layout settles around a dragged node and remembers its pin (sections 4, 7 and 10).
+
+The other open questions keep this proposal's recommendation until they are decided (see the end).
+
 ## Recommendation in brief
 
 - **A volume is a kind of panel, not a sibling of one.** It is a panel whose face is a box rather than a rectangle: it goes on a wall's slot, floats, is carried, docked, swapped, thrown away, kept with the space, updated by its id and versioned exactly as a text, chart or image panel is, and counts against the same bounds. What is new is its depth, a size of its own, its geometry, and pointing at its parts. A separate container would have to duplicate nearly all of `projection.md`; a panel kind inherits it, as charts and images did.
@@ -18,7 +27,8 @@ Spoken by the maintainer from the headset, November 2026:
 - **The server lays it out, once, deterministically, and keeps the layout.** Layered for pipelines and dependency graphs, radial for a hub and its spokes, force-directed for everything else, each in 3D and seeded from the nodes' ids rather than a random number, and each started from the previous version's positions, so that a node added settles in beside its neighbours and nothing else moves more than it must. Clients draw positions they are sent and lay nothing out, so every participant sees the same diagram by construction.
 - **Drawn from a handful of instanced solids, ribbons and billboarded labels**, all from shared primitives and the shared atlas, a volume's mesh built once for its version and moved by one matrix, within a triangle and instance budget, culled by its bounds.
 - **Pointing names a node or an edge to the agent**, as a list's row is named today: `[Pointing at node "Octree" (id octree) in diagram "Renderer" …]`. The trigger shows a node's detail and its neighbours for the participant alone; on a collapsed group it opens it for everyone. The agent highlights nodes and edges as it explains, by linking to them in what it says, each highlight shown as the sentence holding it is spoken.
-- **Staged:** (1) static volumes from a `diagram` block and `show_diagram`, layered and force layouts, carried and placed as panels, pointing that names nodes and edges; (2) updates by id that keep the layout stable, groups that collapse and open, radial layout, highlighting while speaking, and `update_diagram`; (3) a volume's own size, scaled with two hands and walked into, and its text handle; (4) glTF models and 3D charts inside volumes, and environments' stands and volumes of their own.
+- **Placed as panels are:** onto the wall someone is looking at if they are near enough, else floating beside them.
+- **Staged:** (1) static volumes from a `diagram` block and `show_diagram`, layered and force layouts, carried and placed as panels, pointing that names nodes and edges; (2) updates by id that keep the layout stable, groups that collapse and open, radial layout, highlighting while speaking, and `update_diagram`; (3) a volume's own size, scaled with two hands and walked into, its text handle, and single nodes moved by hand with two-handed carry, the layout settling around a dragged node and remembering its pin; (4) glTF models and 3D charts inside volumes, and environments' stands and volumes of their own.
 
 ## What exists today
 
@@ -74,7 +84,7 @@ The maintainer asked whether the panel is the right container. It is, extended b
 
 **On a wall: a relief in its slot.** In a slot it stands on the slot's plane, its back there and its front at most half the slot's height in front of it, its width and height the slot's, its diagram scaled to fit, the slot drawn with a dark backing plate behind it so that the slot reads as a shallow display case. Since walls are read from in front, a relief keeps its depth readable as the head moves and stays clear of the wall's handles. A slot is small for a diagram, about 60 by 36 cm on a flat wall, so in a slot only the labels of its most important nodes show (section 8); a big wall, or a slot of a larger scale, shows more. Pulled off, it grows to its floating size, as a text panel grows to fit its text, and put back it shrinks into the slot again.
 
-**Floating: a model on a table.** By default a volume floats as `beside` places a panel, but nearer, 1.3 m from the eyes, and lower, its middle 25 cm below them, so that one looks a little down into it, as at a model on a table, which shows its depth better than one level with the eyes. A faint round tray beneath it, as wide as it, grounds it and is where the grip takes it when the ray meets nothing else of it. Its title stands on a small label above it, facing the viewer.
+**Floating: a model on a table.** By default a volume goes where a panel goes (section 8): onto the wall its asker is looking at if they are near enough, else floating. Floating, it stands where `beside` places a panel, but nearer, 1.3 m from the eyes, and lower, its middle 25 cm below them, so that one looks a little down into it, as at a model on a table, which shows its depth better than one level with the eyes. A faint round tray beneath it, as wide as it, grounds it and is where the grip takes it when the ray meets nothing else of it. Its title stands on a small label above it, facing the viewer.
 
 **Older clients and other surfaces.** A volume's body is a text outline of its diagram, which the server writes, as a chart panel's is a summary: its groups as headings, its nodes as list items with their details, and its edges as `Renderer → Octree: queries`. A client that knows no diagrams, the console, and a server's own clients stating no volumes (section 5) draw that, so nothing older breaks and nothing is bumped.
 
@@ -270,7 +280,8 @@ Why the tool is the better path for a large diagram, and the block for a quick o
 - every node already placed starts where it was, and is held there by a spring as strong as the rest of the layout's forces together, so that it moves only as far as the change needs;
 - a node added starts at the mean of its neighbours' positions, or beside its group, and settles from there;
 - layered layout keeps each rank's previous order as its tie-break and adds new nodes where the barycentre puts them;
-- a change that would move any node more than a third of the volume's width says so in its warnings, with `relayout` to lay it out afresh where the agent wants that.
+- a change that would move any node more than a third of the volume's width says so in its warnings, with `relayout` to lay it out afresh where the agent wants that;
+- a node a participant has dragged (stage 3) is pinned where it was let go, kept with the panel, and held there through every later layout until it is unpinned or `relayout` is asked for.
 
 Clients ease each node from its old position to its new over 0.4 seconds, so that a change reads as growth rather than a jump. Two participants or the agent changing a diagram at once are ordered as any panel's changes are (section 5).
 
@@ -309,7 +320,7 @@ An edge is named by its ends and label, `edge "Frame step → projection::faces:
 
 **The trigger and A.** On a node, they show its **focus**, for the participant alone, nothing of it sent: its neighbours and the edges between them stay bright, everything else dims to a fifth, and its detail stands on a small card beside it, so that someone can trace one module's connections through a crowded diagram. Again on the same node, or B, ends it. On a collapsed group, they open it for everyone (`SetGroupOpen`); on an open group's label, they close it. A participant's own focus is like their scroll: it never moves what anyone else sees.
 
-**The grip** carries a volume as it carries a panel, by any of its nodes, edges or its tray; the right stick pushes, pulls and turns it, its click squares it, B throws it away, and it docks in a slot by nearness, as `projection.md` says. Moving a single node by hand is left open (below).
+**The grip** carries a volume as it carries a panel, by any of its nodes, edges or its tray; the right stick pushes, pulls and turns it, its click squares it, B throws it away, and it docks in a slot by nearness, as `projection.md` says. Moving a single node by hand comes in stage 3, by the maintainer's decision: with two-handed carry, one grip holds the volume and the other takes a node, the layout settling around the dragged node as it moves and pinning it where it is let go (section 4).
 
 **The agent highlights while it speaks.** A highlight brightens the nodes and edges named, rings them, dims the rest to half and shows an optional note, for everyone. The agent makes one by linking to a node in what it says, as Markdown it already writes:
 
@@ -321,7 +332,7 @@ Speech reads the link's text, the transcript shows it, and Tomori takes each `di
 
 ## 8. Placement and size
 
-**The `place:` forms are a panel's.** `near`, `looking`, `beside`, `front`, `wall WALL`, `wall WALL slot N` and `anchor NAME`, in a block's header or the tools' `place`, work as `projection.md` says, with the defaults of section 2: floating beside and a little below whoever asked, rather than on the wall they looked at, since a volume in a slot is a reduced view of it. An `anchor` places it in the anchor's cluster, so that an environment's workbench can hold the diagram being discussed there.
+**The `place:` forms are a panel's.** `near`, `looking`, `beside`, `front`, `wall WALL`, `wall WALL slot N` and `anchor NAME`, in a block's header or the tools' `place`, work as `projection.md` says, with a panel's default, by the maintainer's decision: onto the wall whoever asked is looking at if they are near enough, as a relief in its slot, else floating beside and a little below them, as a model on a table (section 2). An `anchor` places it in the anchor's cluster, so that an environment's workbench can hold the diagram being discussed there.
 
 **Its own size.** Stage 3 gives a volume a scale of its own, `Panel::scale`, the space's, from a quarter to six times, kept with it, changed last-writer-wins as placing is, and by the agent's `update_diagram` `scale`, or `size: desk`, `table` or `room`, 0.5, 1 and 5. Two hands on a volume (#354's stage 3) scale it by the spread between the grips, as they size a wall's slots, in steps of 5%, with a readout of its width. Grown to a room, it can be walked through: the floating bound holds it within 20 m of the space's middle, its labels grow with it, and its nodes become things to stand beside, which is the GitHub proposal's "stand in the crate graph" experiment. The floating panel scaling #354 left open is then answered for volumes; text panels can follow or not.
 
@@ -347,7 +358,7 @@ Each stage keeps every test passing, changes nothing for a space without volumes
 
 1. **Static volumes.** The model, the `diagram` block and `show_diagram`, with their warnings; layered and force layouts, deterministic, with golden tests; `Panel::diagram`, `Hello::diagrams`, `Limits::volumes` and `nodes`, and the outline for older clients; the solids, ribbons and labels, built once for a version, with the budget's render test; floating and in a slot as a relief; carried, docked, thrown away and kept as panels are; pointing that names nodes and edges to the agent; focus with the trigger. The agent's instructions gain a paragraph saying when a diagram helps (organisation, flows, dependencies), that it describes structure and Tomori lays it out, and to keep it under about thirty nodes.
 2. **Diagrams that grow.** Updates by id laid out from where they stand, with easing; `update_diagram` and reading a volume back through `panels`; groups that collapse and open, and `layer` groups as floors; radial and grid layouts; highlights as live data, set by the tool and by `diagram:` links timed to speech.
-3. **Size.** A volume's own scale, desk to room, two-handed scaling with #354's stage 3, walking into a large one, the level of detail by distance, and the text handle for a floating volume's content scale.
+3. **Size and hands.** A volume's own scale, desk to room, two-handed scaling with #354's stage 3, walking into a large one, the level of detail by distance, and the text handle for a floating volume's content scale; single nodes moved by hand with two-handed carry, the layout settling around a dragged node and remembering its pin.
 4. **Richer content.** glTF models as nodes, by digest, from the asset studio's GLBs or an environment's assets, loaded under `assets.md`'s limits; 3D charts in a volume, bar towers over two categories and scatter in three dimensions, as a `chart3d` beside `diagram`; environments publishing volumes onto their walls and declaring **stands**, a workbench or a plinth on which volumes rest as panels rest on a notice board; and, only if the declarative form proves too limited, a programmatic one (section 11).
 
 ## 11. Later: a programmatic form
@@ -364,10 +375,15 @@ If structures turn up that a graph does not describe, such as a floor plan, a ti
 
 ## Open questions for the maintainer
 
-- **A panel kind or a sibling?** This proposal argues that a volume is a panel with depth. Is that the shape you want, or do you see volumes diverging from panels enough to want them apart from the start?
-- **The syntax.** A Mermaid-shaped body with Tomori's own shapes, attributes and `~~>`, or YAML, or only the JSON tool? Should a plain `mermaid` block also become a volume, rather than a code panel of its text?
-- **Default place.** Floating beside and a little below the asker, as a model on a table, or onto the wall they look at, as panels go?
-- **Who changes a diagram.** Should participants move single nodes by hand, kept as pinned positions the layout then respects, or only the agent, through the description?
+Decided (see [the maintainer's decisions](#the-maintainers-decisions)):
+
+- **A panel kind or a sibling?** **Decided: a panel kind**, a panel with depth.
+- **The syntax.** **Decided: both**, the Mermaid-shaped `diagram` block and the `show_diagram` and `update_diagram` tools, which report errors in the same turn. A plain `mermaid` block stays a code panel for now.
+- **Default place.** **Decided: as panels go today**, onto the wall the asker is looking at if near enough, else floating beside them.
+- **Who changes a diagram.** **Decided: participants move single nodes by hand** in stage 3, with two-handed carry, the layout settling around a dragged node and remembering its pin.
+
+Still open, each keeping this proposal's recommendation until decided:
+
 - **Focus and highlight.** Is a participant's focus right as their own, unseen by others, and the agent's highlight as everyone's?
 - **Highlights in speech.** Are `diagram:` links in the agent's prose the right way to point while speaking, or should highlights come only from `update_diagram`?
 - **Motion.** Should flow edges' pulses be stilled by a per-device setting, as the Feedback setting is kept on the device?
