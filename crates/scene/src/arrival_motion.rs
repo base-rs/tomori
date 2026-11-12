@@ -302,6 +302,15 @@ impl Motion {
                     .iter()
                     .any(|object| identity(&object.key) == entry.identity)
         });
+        let change = Change {
+            before: before.as_ref(),
+            after,
+            entered: entered.as_ref(),
+            centre: self.centre,
+            wait,
+            ring_replaced,
+            reveal_start: (self.reveal.start - now).max(0.0),
+        };
         let mut previous = std::mem::take(&mut self.entries);
         let mut entries = Vec::with_capacity(target.objects.len() + previous.len());
         for object in &target.objects {
@@ -311,16 +320,7 @@ impl Motion {
                 .iter()
                 .position(|entry| entry.identity == identity)
                 .map(|index| previous.remove(index));
-            let plan = arriving(
-                before.as_ref(),
-                after,
-                object,
-                &identity,
-                entered.as_ref(),
-                self.centre,
-                wait,
-                ring_replaced,
-            );
+            let plan = change.arriving(object, &identity);
             let mut track = match &existing {
                 Some(entry) => entry.track,
                 None => Track::at(plan.pose),
@@ -333,11 +333,10 @@ impl Motion {
                 leaving: false,
             });
         }
-        let reveal_start = (self.reveal.start - now).max(0.0);
         for mut entry in previous {
             if !entry.leaving {
                 let current = entry.track.value(now);
-                let plan = leaving(before.as_ref(), after, &entry, current, reveal_start);
+                let plan = change.leaving(&entry, current);
                 entry
                     .track
                     .retarget(now, plan.pose, None, plan.delay, plan.duration);
@@ -466,103 +465,122 @@ fn place(entry: &Entry, pose: Pose) -> Object {
     }
 }
 
-/// How `object` comes into its place on going from `before` to `after`: where it starts if it wasn't shown, and when it moves.
-#[allow(clippy::too_many_arguments)]
-fn arriving(
-    before: Option<&Stage>,
-    after: &Stage,
-    object: &Object,
-    identity: &Key,
-    entered: Option<&Key>,
+/// A change of the scene shown, from `before` to `after`, as each object's plan needs it.
+struct Change<'a> {
+    before: Option<&'a Stage>,
+    after: &'a Stage,
+    /// The space that was entered, while leaving it.
+    entered: Option<&'a Key>,
+    /// Where the environment of the space entered grew from.
     centre: Vec3,
+    /// How long the environment of a space being left has yet to shrink.
     wait: f32,
+    /// Whether a creation ring replaces another.
     ring_replaced: bool,
-) -> Plan {
-    let position = object.position;
-    let dim = object.dim;
-    match (before, after) {
-        // Leaving a space: its environment shrinks back into its object, which then returns to its place as the rest come back.
-        (Some(Stage::Entered { .. }), _) if Some(identity) == entered => Plan {
-            pose: Pose::hidden(centre, 0.0),
-            via: Some(Pose {
-                position: centre,
-                presence: 1.0,
-                dim: 0.0,
-            }),
-            delay: wait * 0.6,
-            duration: SERVER,
-        },
-        (Some(Stage::Entered { .. }), _) => Plan::new(
-            Pose::hidden(recede(position), dim),
-            wait * 0.6 + SERVER * 0.4,
-            SERVER * 0.6,
-        ),
-        // The chosen server glides straight to the centre of the view, where it stays; its spaces spread out from it once it is there, so nothing crosses its path.
-        (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => match object.kind {
-            Kind::Connected => Plan::new(Pose::hidden(CENTRE, 0.0), 0.0, GLIDE),
-            _ => Plan::new(
-                Pose::hidden(CENTRE, dim),
-                SPREAD_DELAY,
-                SERVER - SPREAD_DELAY,
-            ),
-        },
-        // Back to the servers: the reverse. Once the spaces have folded in, the connected server glides straight back to its place while the others grow again.
-        (Some(Stage::Lobby | Stage::Joining(_)), Stage::Servers) => {
-            Plan::new(Pose::hidden(position, dim), SERVER - GLIDE, GLIDE)
-        }
-        (_, Stage::Joining(key)) if key == &object.key => {
-            Plan::new(Pose::hidden(position, dim), 0.0, APPROACH_TIME)
-        }
-        // A join that didn't happen: everything comes back from where it receded.
-        (Some(Stage::Joining(_)), _) => {
-            Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
-        }
-        // A creation ring grows out of the create object.
-        _ if object.kind == Kind::Choice => Plan::new(
-            Pose::hidden(CREATE, dim),
-            if ring_replaced { RING * 0.3 } else { 0.0 },
-            RING,
-        ),
-        // Anything else appears in place, or moves, as lists change.
-        _ => Plan::new(Pose::hidden(position, dim), 0.0, RING),
-    }
+    /// How long until the environment of a space being entered starts to grow.
+    reveal_start: f32,
 }
 
-/// How an object that `after` no longer shows leaves: where it goes, and when.
-fn leaving(
-    before: Option<&Stage>,
-    after: &Stage,
-    entry: &Entry,
-    current: Pose,
-    reveal_start: f32,
-) -> Plan {
-    let position = current.position;
-    let dim = current.dim;
-    match (before, after) {
-        // The other servers shrink and fade where they are.
-        (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => {
-            Plan::new(Pose::hidden(position, dim), 0.0, GLIDE)
-        }
-        // Back to the servers, the spaces fold into the connected server at the centre before it leaves.
-        (_, Stage::Servers) => Plan::new(Pose::hidden(CENTRE, dim), 0.0, SERVER - SPREAD_DELAY),
-        // The space entered shrinks into its environment as that starts to grow.
-        (
-            _,
-            Stage::Entered {
-                space: Some(space), ..
+impl Change<'_> {
+    /// How `object` comes into its place on going from `before` to `after`: where it starts if it wasn't shown, and when it moves.
+    fn arriving(&self, object: &Object, identity: &Key) -> Plan {
+        let Self {
+            before,
+            after,
+            entered,
+            centre,
+            wait,
+            ring_replaced,
+            ..
+        } = *self;
+        let position = object.position;
+        let dim = object.dim;
+        match (before, after) {
+            // Leaving a space: its environment shrinks back into its object, which then returns to its place as the rest come back.
+            (Some(Stage::Entered { .. }), _) if Some(identity) == entered => Plan {
+                pose: Pose::hidden(centre, 0.0),
+                via: Some(Pose {
+                    position: centre,
+                    presence: 1.0,
+                    dim: 0.0,
+                }),
+                delay: wait * 0.6,
+                duration: SERVER,
             },
-        ) if &entry.identity == space => Plan::new(
-            Pose::hidden(position, 0.0),
-            reveal_start + REVEAL * 0.1,
-            REVEAL * 0.35,
-        ),
-        // Joining or entering a space, everything else recedes.
-        (_, Stage::Joining(_) | Stage::Entered { .. }) => {
-            Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
+            (Some(Stage::Entered { .. }), _) => Plan::new(
+                Pose::hidden(recede(position), dim),
+                wait * 0.6 + SERVER * 0.4,
+                SERVER * 0.6,
+            ),
+            // The chosen server glides straight to the centre of the view, where it stays; its spaces spread out from it once it is there, so nothing crosses its path.
+            (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => match object.kind {
+                Kind::Connected => Plan::new(Pose::hidden(CENTRE, 0.0), 0.0, GLIDE),
+                _ => Plan::new(
+                    Pose::hidden(CENTRE, dim),
+                    SPREAD_DELAY,
+                    SERVER - SPREAD_DELAY,
+                ),
+            },
+            // Back to the servers: the reverse. Once the spaces have folded in, the connected server glides straight back to its place while the others grow again.
+            (Some(Stage::Lobby | Stage::Joining(_)), Stage::Servers) => {
+                Plan::new(Pose::hidden(position, dim), SERVER - GLIDE, GLIDE)
+            }
+            (_, Stage::Joining(key)) if key == &object.key => {
+                Plan::new(Pose::hidden(position, dim), 0.0, APPROACH_TIME)
+            }
+            // A join that didn't happen: everything comes back from where it receded.
+            (Some(Stage::Joining(_)), _) => {
+                Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
+            }
+            // A creation ring grows out of the create object.
+            _ if object.kind == Kind::Choice => Plan::new(
+                Pose::hidden(CREATE, dim),
+                if ring_replaced { RING * 0.3 } else { 0.0 },
+                RING,
+            ),
+            // Anything else appears in place, or moves, as lists change.
+            _ => Plan::new(Pose::hidden(position, dim), 0.0, RING),
         }
-        // A creation ring folds back into the create object.
-        _ if entry.object.kind == Kind::Choice => Plan::new(Pose::hidden(CREATE, dim), 0.0, RING),
-        _ => Plan::new(Pose::hidden(position, dim), 0.0, SETTLE),
+    }
+
+    /// How an object that `after` no longer shows leaves: where it goes, and when.
+    fn leaving(&self, entry: &Entry, current: Pose) -> Plan {
+        let Self {
+            before,
+            after,
+            reveal_start,
+            ..
+        } = *self;
+        let position = current.position;
+        let dim = current.dim;
+        match (before, after) {
+            // The other servers shrink and fade where they are.
+            (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => {
+                Plan::new(Pose::hidden(position, dim), 0.0, GLIDE)
+            }
+            // Back to the servers, the spaces fold into the connected server at the centre before it leaves.
+            (_, Stage::Servers) => Plan::new(Pose::hidden(CENTRE, dim), 0.0, SERVER - SPREAD_DELAY),
+            // The space entered shrinks into its environment as that starts to grow.
+            (
+                _,
+                Stage::Entered {
+                    space: Some(space), ..
+                },
+            ) if &entry.identity == space => Plan::new(
+                Pose::hidden(position, 0.0),
+                reveal_start + REVEAL * 0.1,
+                REVEAL * 0.35,
+            ),
+            // Joining or entering a space, everything else recedes.
+            (_, Stage::Joining(_) | Stage::Entered { .. }) => {
+                Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
+            }
+            // A creation ring folds back into the create object.
+            _ if entry.object.kind == Kind::Choice => {
+                Plan::new(Pose::hidden(CREATE, dim), 0.0, RING)
+            }
+            _ => Plan::new(Pose::hidden(position, dim), 0.0, SETTLE),
+        }
     }
 }
 

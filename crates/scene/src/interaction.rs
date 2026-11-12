@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)] // Produced on Quest; also exercised by desktop tests.
 pub enum SessionActivity {
     #[default]
     Unselected,
@@ -18,7 +17,6 @@ pub enum SessionActivity {
 
 /// Agent speech on this device: whether it is playing, live or played again, and how loud it is, even while muted locally, as the client's player measures it. See `design/speech.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[allow(dead_code)]
 pub struct SpeechActivity {
     pub pending: bool,
     pub playing: bool,
@@ -74,7 +72,6 @@ impl Visual {
 }
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct Inputs {
     pub session: SessionActivity,
     pub speech: SpeechActivity,
@@ -92,7 +89,6 @@ const READY_SETTLE: f32 = 0.8;
 
 /// A small settling interval avoids a one-frame ready flash at hand-offs, and a hold keeps the swarm speaking through the pauses in speech.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct Signals {
     ready_for: f32,
     /// How much longer the swarm speaks, once speech has stopped playing.
@@ -102,7 +98,6 @@ pub struct Signals {
 }
 
 impl Signals {
-    #[allow(dead_code)]
     pub fn update(&mut self, input: Inputs, dt: f32) -> Visual {
         let step = dt.clamp(0.0, 0.1);
         // Speaking follows speech playing on this device, rather than the session, which is often idle while its reply is still being heard.
