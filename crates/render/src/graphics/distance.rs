@@ -249,7 +249,10 @@ fn the_swarm_is_hazed_as_the_scenery_is_at_every_distance() {
         });
         let mut hazy =
             Renderer::with_sceneries(&device, &queue, format, size.0, size.1, 1, &sceneries);
-        hazy.set_environment(Environment::new("hazy"));
+        hazy.set_scenery(crate::arrival_motion::Scenery {
+            environment: Environment::new("hazy"),
+            reveal: None,
+        });
         let mut clear = Renderer::new(&device, &queue, format, size.0, size.1);
         let fov = 1.0f32;
         let eye = glam::Vec3::new(0.0, 1.6, 10.0);
@@ -294,20 +297,13 @@ fn the_swarm_is_hazed_as_the_scenery_is_at_every_distance() {
     });
 }
 
-/// The linear value of an sRGB channel, `0` to `1`.
+/// The linear value of an sRGB channel, `0` to `1`, by the sRGB curve's power, whose linear toe, below a 25th, differs
+/// from it by far less than the tolerance here.
 fn linear(channel: f32) -> f32 {
-    if channel <= 0.04045 {
-        channel / 12.92
-    } else {
-        ((channel + 0.055) / 1.055).powf(2.4)
-    }
+    ((channel + 0.055) / 1.055).powf(2.4)
 }
 
-/// The sRGB channel of a linear value, `0` to `1`.
+/// The sRGB channel of a linear value, `0` to `1`, by the same power.
 fn encoded(value: f32) -> f32 {
-    if value <= 0.0031308 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
+    1.055 * value.powf(1.0 / 2.4) - 0.055
 }
