@@ -435,7 +435,7 @@ fn a_stick_let_go_in_the_pool_floats_and_goes_back_on_its_log_after_a_while() {
         "{floating:?}, the water at {}",
         pool.y
     );
-    assert!(campsite::in_pool(floating.position));
+    assert!(campsite::in_pool(&floating));
     assert!(sticks.report().sticks[1].floating);
     // A minute later, it fades back to its log.
     let (_, later) = run(&mut sticks, &[], later, (campsite::RETURNS / 1000) as f32);

@@ -331,6 +331,17 @@ impl World {
         Some((water, under))
     }
 
+    /// The water `body` resting at `at` soaks in, if any: the water its middle is in, or, lighter than the water, the
+    /// water it floats in, its middle within its outline and some of it below the surface, though its middle be above
+    /// it, as that of a stick floating with a big marshmallow on its end is.
+    fn soaks_in(&self, body: &Body, at: &Placement) -> Option<&Water> {
+        self.water(at.position).or_else(|| {
+            self.submerged(body, at)
+                .map(|(water, _)| water)
+                .filter(|water| body.density < water.density)
+        })
+    }
+
     /// One step.
     fn advance(&mut self) {
         let gravity = self.settings.gravity;
@@ -430,7 +441,7 @@ impl World {
             }
             Motion::Resting => {
                 let returns = self
-                    .water(at.position)
+                    .soaks_in(&self.entries[index].body, &at)
                     .and_then(|water| water.returns_after);
                 if let (Some(after), Some(since)) = (returns, self.entries[index].soaking)
                     && clock >= since + after
@@ -481,7 +492,7 @@ impl World {
     fn rest(&mut self, index: usize, at: Placement) {
         let encoded = at.encoded(Precision::Rest);
         let returns = self
-            .water(at.position)
+            .soaks_in(&self.entries[index].body, &at)
             .is_some_and(|water| water.returns_after.is_some());
         let clock = self.clock();
         let entry = &mut self.entries[index];

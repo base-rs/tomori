@@ -203,11 +203,13 @@ pub(crate) fn bonfire() -> Vec<FireVertex> {
     vertices
 }
 
-/// The little flame of a marshmallow that burns, at `marshmallow`, the middle of its marshmallow.
+/// The little flame of a marshmallow that burns, at `marshmallow`, the middle of its marshmallow: as tall as about two
+/// and a half of it and a little wider than it is long, so that it grows with it.
 pub(crate) fn alight(marshmallow: Vec3, phase: f32) -> [FireVertex; 9] {
+    let (length, radius) = campsite::MARSHMALLOW;
     tongue(
-        marshmallow - Vec3::Y * campsite::MARSHMALLOW.1 * 0.6,
-        (0.11, 0.05),
+        marshmallow - Vec3::Y * radius * 0.6,
+        (length * 2.4, length * 1.1),
         phase,
         (
             glam::Vec4::new(1.0, 0.7, 0.25, 1.4),

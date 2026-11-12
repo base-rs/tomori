@@ -1509,6 +1509,101 @@ fn a_body_lighter_than_water_floats_on_it_and_comes_to_rest_there() {
 }
 
 #[test]
+fn a_body_floating_with_its_middle_above_the_water_soaks_in_it_and_goes_home_but_a_stone_beside_it_does_not()
+ {
+    // A pool a metre deep, which takes back what rests in it after a second; a plank of wood hanging 10 cm below its
+    // middle, as a stick's middle is above the water when it floats with its marshmallow down; and a stone on a ledge
+    // beside the pool, its foot in the water and its middle out of it.
+    let bed = Static::cuboid(
+        Vec3::new(-3.0, -2.0, -3.0),
+        Vec3::new(3.0, -1.0, 3.0),
+        Quat::IDENTITY,
+    );
+    let ledge = Static::cuboid(
+        Vec3::new(1.0, -1.0, -0.5),
+        Vec3::new(2.0, -0.02, 0.5),
+        Quat::IDENTITY,
+    );
+    let outline = vec![
+        Vec2::new(-3.0, -3.0),
+        Vec2::new(3.0, -3.0),
+        Vec2::new(3.0, 3.0),
+        Vec2::new(-3.0, 3.0),
+    ];
+    let plank: Vec<Vec3> = (0..8)
+        .map(|corner| {
+            let sign = |bit: u32| if corner & bit == 0 { -1.0 } else { 1.0 };
+            Vec3::new(sign(1) * 0.3, sign(2) * 0.02 - 0.1, sign(4) * 0.05)
+        })
+        .collect();
+    let home = Placement::at(Vec3::new(-1.0, 0.5, 0.0));
+    let stone = Placement::at(Vec3::new(1.5, 0.08, 0.0));
+    let pebble_body = Body::convex(2, pebble(2, 0.1, 0.06)).at(stone);
+    let mut world = World::new(
+        Settings::default(),
+        vec![bed, ledge],
+        vec![Water::below(0.0, outline).returning(1_000)],
+        vec![
+            Body::convex(1, plank).with_density(600.0).at(home),
+            pebble_body.clone(),
+        ],
+    )
+    .unwrap();
+    world.settle(5.0);
+    let lying = world.placement(2).unwrap();
+    assert!(
+        lying.position.y > 0.0 && pebble_body.lowest(&lying) < 0.0,
+        "{lying:?}"
+    );
+    let let_go = LetGo {
+        body: 1,
+        epoch: 0,
+        at: Placement::at(Vec3::new(-1.0, 0.3, 0.0)).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    let seen = Seen {
+        head: Vec3::new(-1.0, 1.0, 0.5),
+        hands: [None, Some(Placement::at(Vec3::new(-1.0, 0.3, 0.0)))],
+    };
+    let take = Take {
+        body: 1,
+        epoch: 0,
+        hand: Side::Right,
+        offset: Encoded::default(),
+    };
+    let epoch = world.take(3, &take, Some(&seen)).unwrap();
+    world
+        .let_go(3, &LetGo { epoch, ..let_go }, Some(&seen))
+        .unwrap();
+    // It floats, its middle above the surface, and rests there, soaking, and then goes home.
+    let mut rested = None;
+    for _ in 0..(60 * 10) {
+        let update = world.step(1.0 / 60.0);
+        if update.rested.iter().any(|snapshot| snapshot.body() == 1) {
+            rested = world.placement(1);
+            break;
+        }
+    }
+    let rested = rested.expect("it rests afloat");
+    assert!(rested.position.y > 0.05, "{rested:?}");
+    assert!(world.moving());
+    let (updates, _) = until_rest(&mut world, 10.0);
+    assert!(updates.iter().any(|update| !update.returning.is_empty()));
+    assert!(
+        world
+            .placement(1)
+            .unwrap()
+            .position
+            .distance(world.home(1).unwrap().position)
+            < 0.03
+    );
+    // The stone, its foot in the water and its middle out, stays.
+    assert_eq!(world.placement(2).unwrap(), lying);
+}
+
+#[test]
 fn a_grabbable_body_sent_home_fades_there_and_rests_without_falling() {
     let hook = Body::convex(1, pebble(1, 0.1, 0.04))
         .kinematic()

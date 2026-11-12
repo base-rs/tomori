@@ -344,7 +344,7 @@ impl Sticks {
                         racked: placement.zip(world.home(body)).is_some_and(|(at, home)| {
                             at.position.distance(home.position) <= campsite::RACKED
                         }),
-                        floating: placement.is_some_and(|at| campsite::in_pool(at.position)),
+                        floating: placement.is_some_and(|at| campsite::in_pool(&at)),
                         at: placement.map(|at| campsite::Pose::of(&at).marshmallow()),
                     }
                 })
