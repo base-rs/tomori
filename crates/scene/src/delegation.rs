@@ -47,6 +47,32 @@ pub const POINTING_RADIUS: f32 = 0.3;
 /// on a balcony, is as easy to hold as one 3 m away. See `design/interaction.md`.
 pub const POINTING_REACH: f32 = 3.0;
 
+/// What points at a worker besides its flock, for one whose middle is at `anchor` and whose sign is drawn `drawn` times
+/// its own size, standing in its own place straight above it: its leader, from its middle up to its sign, and its sign,
+/// as far as the tallest reaches and as wide as the widest, however it turns; each with its middle. See
+/// `design/interaction.md`.
+pub fn sign_shapes(anchor: Vec3, drawn: f32) -> [(Vec3, Shape); 2] {
+    let lift = SIGN_LIFT * drawn;
+    let top = SIGN_TOP * drawn;
+    [
+        (lift / 2.0, LEADER_HALF * drawn, lift / 2.0),
+        ((lift + top) / 2.0, SIGN_HALF * drawn, (top - lift) / 2.0),
+    ]
+    .map(|(middle, across, up)| {
+        let center = anchor + Vec3::Y * middle;
+        (
+            center,
+            Shape::Box {
+                center,
+                half_extents: Vec3::new(across, up, across),
+            },
+        )
+    })
+}
+
+/// How far either side of a sign's leader the ray points at it, in metres, at the sign's own size.
+const LEADER_HALF: f32 = 0.06;
+
 /// How near a worker's anchor at `center` a ray from `origin` must pass to point at it: [`POINTING_RADIUS`], or, beyond
 /// [`POINTING_REACH`], as much more as keeps the same angle.
 pub fn pointing_radius(origin: Vec3, center: Vec3) -> f32 {
@@ -353,10 +379,38 @@ pub struct Station {
     /// How many workers its sign stands for, gathered into a cluster's "+N more" sign, or 0 for its own worker's.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub more: usize,
+    /// How much larger than one within [`SIGN_REACH`] of whoever it faces its sign is drawn, where its cluster draws its
+    /// signs at one size, as a ring does ([`tomori_protocol::cluster::Cluster::sign_size`]); or else, `None`, as far
+    /// beyond that as it stands from them ([`sign_scale`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// Whether this client's either ray points at its worker, its leader or its sign, which are drawn highlighted
+    /// together. See `design/interaction.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub highlighted: bool,
 }
 
 fn is_zero(more: &usize) -> bool {
     *more == 0
+}
+
+/// How far from whoever it faces a sign is drawn at its own size, in metres: the default arc's radius, within about the
+/// distance its text is comfortable to read from (see `design/text.md`); beyond it, a sign is drawn larger in
+/// proportion, so that it reads as one on the arc does.
+pub const SIGN_REACH: f32 = tomori_protocol::cluster::ARC_RADIUS;
+/// How far above its worker's middle a sign's bottom edge stands, at its own size, in metres: clear of its flock and
+/// completed cube, its leader hanging between.
+pub const SIGN_LIFT: f32 = 0.3;
+/// How far above its worker's middle the top of the tallest sign stands, at its own size, in metres: its lift and six
+/// rows of title, its state's row and its plate's margins.
+pub const SIGN_TOP: f32 = 0.63;
+/// How far from its upright a sign reaches, however it turns, at its own size, in metres: half of the widest sign.
+pub const SIGN_HALF: f32 = 0.5;
+
+/// How much larger the sign of a station at `station` is drawn than one within [`SIGN_REACH`] of whoever's eyes, at
+/// `facing`, it faces: 1 within it, and in proportion to the station's distance from them, horizontally, beyond.
+pub fn sign_scale(station: [f32; 3], facing: [f32; 3]) -> f32 {
+    ((station[0] - facing[0]).hypot(station[2] - facing[2]) / SIGN_REACH).max(1.0)
 }
 
 /// Where the eyes are at home, which a station's sign faces unless the agent is summoned.
@@ -388,8 +442,41 @@ impl Station {
             && self.scale.is_finite()
             && (0.1..=1.0).contains(&self.scale)
             && self.more <= MAX_WORKERS
+            && self
+                .size
+                .is_none_or(|size| size.is_finite() && (1.0..=MOST_SIGN_SIZE).contains(&size))
+    }
+
+    /// How large its sign is drawn, as a share of one within [`SIGN_REACH`] of whoever it faces: as large as its
+    /// cluster draws it, or as far beyond that as it stands, and smaller in a compact cluster.
+    pub fn drawn(&self) -> f32 {
+        drawn(self.size, self.position, self.facing, self.scale)
     }
 }
+
+/// How large the sign of a station at `position` is drawn, facing whoever's eyes are at `facing`, as a share of one
+/// within [`SIGN_REACH`] of them: `size`, its cluster's, or else as far beyond that as it stands, and `scale` of that in
+/// a compact cluster.
+fn drawn(size: Option<f32>, position: [f32; 3], facing: [f32; 3], scale: f32) -> f32 {
+    let size = size.filter(|size| size.is_finite()).map_or_else(
+        || sign_scale(position, facing),
+        |size| size.clamp(1.0, MOST_SIGN_SIZE),
+    );
+    size * compact_scale(scale)
+}
+
+/// How large a sign is drawn in a cluster that draws it at `scale` of its size, as a share of its full size: within 0.1
+/// and 1.
+pub fn compact_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(0.1, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The most a cluster draws its signs larger than at reading distance: as one 100 m away, the farthest a station stands.
+const MOST_SIGN_SIZE: f32 = 100.0 / SIGN_REACH;
 
 struct Worker {
     slot: usize,
@@ -408,6 +495,9 @@ struct Worker {
     place: Vec3,
     /// How large its sign is drawn, as a share of its full size: smaller in a compact cluster.
     scale: f32,
+    /// How much larger than at reading distance its cluster draws every sign, where it draws them at one size, as a
+    /// ring does.
+    size: Option<f32>,
     /// Whether it is gathered into its cluster's "+N more" sign, rather than standing in a slot of its own.
     more: bool,
     /// The cluster anchor it stands at, by name, as the server seats it, or `None` for home.
@@ -816,9 +906,11 @@ impl Scene {
         for (id, at, slot) in placed_again {
             let placing = Placing::new(&id, slot);
             let (spot, _) = self.spot(at.as_deref(), &placing, false);
+            let size = self.size_at(at.as_deref());
             let worker = self.workers.get_mut(&id).expect("a live worker");
             worker.place = spot.position;
             worker.scale = spot.scale;
+            worker.size = size;
             worker.more = spot.more;
         }
     }
@@ -992,16 +1084,17 @@ impl Scene {
             panicked |= panic;
             // Placed in the order of their slots, so those placed stay in that order.
             placed.push(Placed::new(id, slot, state, spot.position));
-            spots.push((id.to_owned(), spot));
+            spots.push((id.to_owned(), spot, self.size_at(at)));
         }
         // Each glides there, its flock and its sign with it.
-        for (id, spot) in spots {
+        for (id, spot, size) in spots {
             let worker = self
                 .workers
                 .get_mut(&id)
                 .expect("each live worker was placed");
             worker.place = spot.position;
             worker.scale = spot.scale;
+            worker.size = size;
             worker.more = spot.more;
         }
         self.give_up(panicked);
@@ -1027,19 +1120,25 @@ impl Scene {
     }
 
     /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
-    /// sphere a little larger than its flock, as from within [`POINTING_REACH`]. Workers leaving cannot be pointed at.
-    /// [`Self::point`] tests the same, its sphere growing with the distance beyond that.
+    /// sphere a little larger than its flock, as from within [`POINTING_REACH`], and its leader and sign above it
+    /// ([`sign_shapes`]). Workers leaving cannot be pointed at. [`Self::point`] tests the same, its sphere growing with
+    /// the distance beyond that.
     #[cfg(test)]
     pub fn targets(&self) -> Vec<Target<String>> {
         self.workers
             .iter()
             .filter(|(_, worker)| worker.retired.is_none())
-            .map(|(id, worker)| Target {
-                key: id.clone(),
-                shape: Shape::Sphere {
+            .flat_map(|(id, worker)| {
+                let flock = Shape::Sphere {
                     center: worker.anchor,
                     radius: POINTING_RADIUS,
-                },
+                };
+                std::iter::once(flock)
+                    .chain(sign_shapes(worker.anchor, self.drawn(worker)).map(|(_, shape)| shape))
+                    .map(|shape| Target {
+                        key: id.clone(),
+                        shape,
+                    })
             })
             .collect()
     }
@@ -1056,18 +1155,42 @@ impl Scene {
     /// is highlighted.
     pub fn point_with(&mut self, side: Side, ray: Option<Ray>) -> Option<&str> {
         // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
+        // How far along the ray, which worker, and where the ray ends on it.
         let mut hit: Option<(f32, &str, Vec3)> = None;
         if let Some(ray) = ray {
             for (id, worker) in &self.workers {
+                if worker.retired.is_some() {
+                    continue;
+                }
                 let shape = Shape::Sphere {
                     center: worker.anchor,
                     radius: pointing_radius(ray.origin, worker.anchor),
                 };
-                if worker.retired.is_none()
-                    && let Some(distance) = shape.intersect(&ray)
+                // Among its flock, where the ray passes nearest its anchor, rather than where it enters the sphere.
+                let flock = shape.intersect(&ray).map(|distance| {
+                    let along = (worker.anchor - ray.origin)
+                        .dot(ray.direction)
+                        .max(distance);
+                    (distance, ray.at(along))
+                });
+                // Or its leader or its sign, standing straight above it, the ray ending where it passes their upright,
+                // as a sign faces whoever looks at it.
+                let sign = sign_shapes(worker.anchor, self.drawn(worker))
+                    .into_iter()
+                    .filter_map(|(center, shape)| {
+                        let distance = shape.intersect(&ray)?;
+                        let along = (center - ray.origin).dot(ray.direction).max(distance);
+                        Some((distance, ray.at(along)))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let met = [flock, sign]
+                    .into_iter()
+                    .flatten()
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some((distance, point)) = met
                     && hit.is_none_or(|(nearest, _, _)| distance < nearest)
                 {
-                    hit = Some((distance, id, worker.anchor));
+                    hit = Some((distance, id, point));
                 }
             }
         }
@@ -1077,10 +1200,8 @@ impl Scene {
             dial.is_some_and(|(distance, _)| hit.is_none_or(|(nearest, ..)| distance < nearest));
         self.pointed_timer[side] = timer;
         let hit = hit.filter(|_| !timer);
-        // The ray ends among the worker's flock, where it passes nearest its anchor, rather than where it enters the pointing sphere.
-        self.hit_point[side] = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
-            ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
-        });
+        // The ray ends among the worker's flock, or on its leader or sign.
+        self.hit_point[side] = hit.map(|(_, _, point)| point);
         if timer {
             self.hit_point[side] = dial.map(|(_, point)| point);
         }
@@ -1095,6 +1216,34 @@ impl Scene {
             self.highlighted[side] = hit.map(str::to_owned);
         }
         self.highlighted[side].as_deref()
+    }
+
+    /// How much larger than at reading distance `worker`'s sign is drawn, as its cluster draws it: one size for a ring's,
+    /// or else as far beyond reading distance as it stands, as [`Station::drawn`] says of its station.
+    fn drawn(&self, worker: &Worker) -> f32 {
+        drawn(
+            worker.size,
+            worker.anchor.to_array(),
+            self.audience.to_array(),
+            worker.scale,
+        )
+    }
+
+    /// How much larger than at reading distance the cluster at the anchor `at`, `None` for home, draws every sign, where
+    /// it draws them at one size, as a ring does: its named anchor's cluster, or home's, unless a registered placement
+    /// places its workers.
+    fn size_at(&self, at: Option<&str>) -> Option<f32> {
+        match at {
+            Some(name) => self
+                .named
+                .get(name)
+                .and_then(|(cluster, _)| cluster.sign_size()),
+            None => self
+                .placement
+                .is_none()
+                .then(|| self.cluster.sign_size())
+                .flatten(),
+        }
     }
 
     /// Where the last [`Self::point`] met the worker it highlights, or the dial, or `None` when it met neither.
@@ -1540,6 +1689,9 @@ impl Scene {
                 opacity,
                 scale: worker.scale,
                 more: 0,
+                size: worker.size,
+                // Its sign and leader are highlighted with its flock.
+                highlighted: pointed,
             };
             if worker.more {
                 // Gathered into the "+N more" sign, it has none of its own.
@@ -1903,6 +2055,7 @@ impl Scene {
                     anchor,
                     place: anchor,
                     scale: spot.scale,
+                    size: self.size_at(self.seats.get(id).and_then(|(at, _)| at.as_deref())),
                     more: spot.more,
                     at: self.seats.get(id).and_then(|(at, _)| at.clone()),
                     particles,
@@ -2965,6 +3118,8 @@ mod tests {
             opacity: 0.4,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         assert!(station.valid());
         let encoded = serde_json::to_string(&station).unwrap();
@@ -5069,7 +5224,8 @@ mod space_tests {
         let (a, b) = (anchor(&scene, "a"), anchor(&scene, "b"));
         let eye = Vec3::new(0.0, 1.6, 0.0);
         let at = |target: Vec3| Ray::new(eye, target - eye);
-        assert_eq!(scene.targets().len(), 2);
+        // Each worker's flock, leader and sign.
+        assert_eq!(scene.targets().len(), 6);
         // Pointing tests what the targets describe.
         // Including a ray through both, which points at the nearer.
         let through = Ray::new(a + (a - b), b - a);
@@ -5108,8 +5264,67 @@ mod space_tests {
         let only_b = space(vec![worker("b", None, WorkerState::Running)]);
         show(&mut scene, &mut workers, Some((&only_b, true)));
         assert!(scene.workers["a"].retired.is_some());
-        assert_eq!(scene.targets().len(), 1);
+        assert_eq!(scene.targets().len(), 3);
         assert_ne!(scene.point(at(a)), Some("a"));
+    }
+
+    #[test]
+    fn a_worker_pointed_at_by_its_flock_leader_or_sign_highlights_all_three_for_either_hand() {
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        let both = space(vec![
+            worker("a", None, WorkerState::Running),
+            worker("b", None, WorkerState::Running),
+        ]);
+        show(&mut scene, &mut workers, Some((&both, true)));
+        let station = |scene: &Scene, id: &str| {
+            scene
+                .stations()
+                .iter()
+                .find(|station| station.id == id)
+                .unwrap()
+                .clone()
+        };
+        let highlighted = |scene: &Scene| ["a", "b"].map(|id| station(scene, id).highlighted);
+        assert_eq!(highlighted(&scene), [false, false]);
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let at = |target: Vec3| Ray::new(eye, target - eye);
+        let a = station(&scene, "a");
+        let (anchor, drawn) = (Vec3::from_array(a.position), a.drawn());
+        // Its flock, its leader half way up to its sign, and its sign's middle each point at it, the ray ending there.
+        for (target, part) in [
+            (anchor, "flock"),
+            (anchor + Vec3::Y * (SIGN_LIFT * drawn / 2.0), "leader"),
+            (
+                anchor + Vec3::Y * ((SIGN_LIFT + SIGN_TOP) * drawn / 2.0),
+                "sign",
+            ),
+        ] {
+            assert_eq!(scene.point(at(target)), Some("a"), "{part}");
+            assert!(
+                scene.hit_point().unwrap().distance(target) < SIGN_HALF * drawn,
+                "{part}"
+            );
+            show(&mut scene, &mut workers, Some((&both, true)));
+            // Its sign and leader are drawn highlighted with its flock; the other's are not.
+            assert_eq!(highlighted(&scene), [true, false], "{part}");
+        }
+        // Above its tallest sign, nothing.
+        assert_eq!(
+            scene.point(at(anchor + Vec3::Y * (SIGN_TOP * drawn + 0.3))),
+            None
+        );
+        show(&mut scene, &mut workers, Some((&both, true)));
+        assert_eq!(highlighted(&scene), [false, false]);
+        // Each hand highlights what it points at, and only that.
+        let b = Vec3::from_array(station(&scene, "b").position);
+        scene.point_with(Side::Right, at(anchor));
+        scene.point_with(Side::Left, at(b));
+        show(&mut scene, &mut workers, Some((&both, true)));
+        assert_eq!(highlighted(&scene), [true, true]);
+        scene.point_with(Side::Right, None);
+        show(&mut scene, &mut workers, Some((&both, true)));
+        assert_eq!(highlighted(&scene), [false, true]);
     }
 
     #[test]

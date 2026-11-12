@@ -52,11 +52,14 @@ struct Sign {
     /// Whether it stands in its own place, straight above its station, its post hanging below it, rather than moved
     /// aside or up, its post drawn down to its station.
     own: bool,
-    /// How much larger it is drawn than one within [`SIGN_REACH`] of whoever it faces.
+    /// How much larger it is drawn than one within [`tomori_scene::delegation::SIGN_REACH`] of whoever it faces.
     scale: f32,
     /// For a timer's dial rather than a worker, its state, whose symbol its pill shows, and how many rows its name
     /// takes, the rows after them, its schedule and condition, drawn muted. See `design/timers.md`.
     timer: Option<(TimerState, usize)>,
+    /// Whether its worker is pointed at, in this client, when it is drawn outlined and brighter, its leader too, as its
+    /// flock is. See `design/interaction.md`.
+    highlighted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -823,7 +826,7 @@ fn station_panel(
     let right = [normal[2], 0.0, -normal[0]];
     // Beyond reading distance from them, drawn larger in proportion, so that it reads as one there does; in a compact
     // cluster, smaller as its worker's footprint is.
-    let scale = sign_scale(station.position, station.facing) * compact(station);
+    let scale = station.drawn();
     let pixel = SIGN_PIXEL * scale;
     let lines = label_lines(&station.title, state_text);
     // As wide as its widest row, its title's or its pill's, so that its rows stand centred above its worker.
@@ -853,6 +856,7 @@ fn station_panel(
             own: position == station.position,
             scale,
             timer: None,
+            highlighted: station.highlighted,
         }),
         rule: None,
     }
@@ -933,6 +937,7 @@ fn dial_panel(dial: &Dial, viewer: Option<[f32; 3]>) -> Panel {
             own: true,
             scale,
             timer: Some((dial.state, named)),
+            highlighted: false,
         }),
         rule: None,
     }
@@ -942,12 +947,9 @@ fn dial_panel(dial: &Dial, viewer: Option<[f32; 3]>) -> Panel {
 const MORE_ACCENT: [f32; 3] = [0.7, 0.75, 0.85];
 
 /// How large `station`'s sign is drawn, as a share of its full size, as its cluster says: within 0.1 and 1.
+#[cfg(test)]
 fn compact(station: &Station) -> f32 {
-    if station.scale.is_finite() {
-        station.scale.clamp(0.1, 1.0)
-    } else {
-        1.0
-    }
+    tomori_scene::delegation::compact_scale(station.scale)
 }
 
 /// The fewest cells across a sign, so that one with a short title is still a sign rather than a tag.
@@ -992,7 +994,7 @@ fn label_lines(title: &str, status: &str) -> Vec<String> {
 }
 
 /// How far above its own place a sign may rise to clear the others, in metres: nine of the default arc's closest rows,
-/// 0.55 m apart, whose signs never overlap; more for a sign drawn larger (see [`sign_scale`]).
+/// 0.55 m apart, whose signs never overlap; more for a sign drawn larger (see [`Station::drawn`]).
 const SIGN_HIGHEST: f32 = 4.95;
 /// How much further than it must a sign rises to clear another, in metres, so that rounding never leaves it short.
 const SIGN_SLACK: f32 = 0.001;
@@ -1010,27 +1012,17 @@ const SIGN_SPREAD: f32 = std::f32::consts::FRAC_PI_6;
 const SIGN_APART: [f32; 2] = [0.5, 1.0];
 /// How far above its station a sign's bottom edge stands in its own place, clear of its worker's flock and completed
 /// cube, its post hanging between; more for a sign drawn larger.
-const SIGN_LIFT: f32 = 0.3;
+const SIGN_LIFT: f32 = tomori_scene::delegation::SIGN_LIFT;
 /// How far behind its place a sign stands, in metres, from whoever it faces: so that its worker, whose flock reaches
 /// about 0.13 m about its middle, reads in front of the sign's leader and the dot that ends it, its anchor.
 const SIGN_BEHIND: f32 = 0.06;
 /// How near, along the ground, whoever a sign faces may stand to it before it faces whoever the agent faces instead, in
 /// metres: as someone standing beneath it, whose bearing from it would swing with every sway.
 const SIGN_NEAREST: f32 = 0.2;
-/// How large a sign's font pixel is, in metres, within [`SIGN_REACH`] of home.
+/// How large a sign's font pixel is, in metres, within [`tomori_scene::delegation::SIGN_REACH`] of home.
 const SIGN_PIXEL: f32 = 0.0038;
-/// How far from whoever it faces a sign is drawn at [`SIGN_PIXEL`], in metres: the default arc's radius, so that its
-/// signs are as they were, within about the distance their text is comfortable to read from (see `design/text.md`);
-/// beyond it, as about an agent's home across a yard or on a balcony, a sign is drawn larger in proportion, the same
-/// image at the same sharpness, so that it reads as one on the arc does.
-const SIGN_REACH: f32 = 3.2;
-
-/// How much larger the sign of a station at `station` is drawn than one within [`SIGN_REACH`] of whoever's eyes, at
-/// `facing`, it faces, and its rows, columns and lift spaced: 1 within it, and in proportion to the station's distance
-/// from them, horizontally, beyond.
-fn sign_scale(station: [f32; 3], facing: [f32; 3]) -> f32 {
-    ((station[0] - facing[0]).hypot(station[2] - facing[2]) / SIGN_REACH).max(1.0)
-}
+#[cfg(test)]
+use tomori_scene::delegation::{SIGN_REACH, sign_scale};
 
 /// Where each station's sign stands: above its own station, wherever it stands, as the default arc and an environment's
 /// placement put it; or, when another sign is already within [`SIGN_APART`] of that, straight above it, only as far as
@@ -1058,7 +1050,7 @@ impl LabelPlacement {
                 .binary_search_by(|s| s.id.as_str().cmp(id.as_str()))
                 .is_ok_and(|index| {
                     let station = stations[index];
-                    self.1.get(id) == Some(&(station.position, station.facing, compact(station)))
+                    self.1.get(id) == Some(&(station.position, station.facing, station.drawn()))
                 })
         };
         let kept: std::collections::BTreeSet<String> =
@@ -1073,8 +1065,8 @@ impl LabelPlacement {
         }
         let own = glam::Vec3::from_array(station.position);
         let viewer = glam::Vec3::new(station.facing[0], 0.0, station.facing[2]);
-        // Spaced as it is drawn: larger far off, smaller in a compact cluster.
-        let scale = sign_scale(station.position, station.facing) * compact(station);
+        // Spaced as it is drawn: larger far off, or as its cluster draws it, and smaller in a compact cluster.
+        let scale = station.drawn();
         let from = own - viewer;
         // The angle about whoever it faces between columns, a column apart at the station's distance, or half a turn
         // nearer.
@@ -1091,11 +1083,7 @@ impl LabelPlacement {
             beside + glam::Vec3::Y * rise
         };
         // How far apart its sign and another must stand, as the larger of the two is drawn.
-        let apart = |id: &String| {
-            scale.max(self.1.get(id).map_or(1.0, |(station, facing, compact)| {
-                sign_scale(*station, *facing) * compact
-            }))
-        };
+        let apart = |id: &String| scale.max(self.1.get(id).map_or(1.0, |(_, _, drawn)| *drawn));
         let clear = |candidate: &glam::Vec3| {
             self.0.iter().all(|(id, other)| {
                 let apart = apart(id);
@@ -1129,7 +1117,7 @@ impl LabelPlacement {
         self.0.insert(station.id.clone(), position);
         self.1.insert(
             station.id.clone(),
-            (station.position, station.facing, compact(station)),
+            (station.position, station.facing, station.drawn()),
         );
         position
     }
@@ -1403,6 +1391,12 @@ const LEADER_WIDTH: f32 = 1.3;
 const LEADER_DOT: f32 = 2.6;
 const SIGN_LEADER: f32 = -0.006;
 const SIGN_PLATE: f32 = -0.004;
+/// How much brighter a sign, its leader and its dot are drawn while its worker is pointed at, as its flock is drawn paler;
+/// how far its dark plate is tinted towards its state's colour then; and how wide, in font pixels, the border about its
+/// plate's edge is.
+const HIGHLIGHT: f32 = 1.15;
+const HIGHLIGHT_TINT: f32 = 0.1;
+const OUTLINE_WIDTH: f32 = 1.0;
 const SIGN_PILL: f32 = -0.002;
 const SIGN_TEXT: f32 = 0.0;
 /// The most vertices a sign's leader and its dot take.
@@ -1417,17 +1411,46 @@ const SIGN_BOW: f32 = 0.05;
 fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
     let start = mesh.len();
     let p = panel.pixel;
-    let color = |rgb: [f32; 3], alpha: f32| [rgb[0], rgb[1], rgb[2], alpha * panel.opacity];
+    // Pointed at, everything on it is drawn brighter, as its flock is.
+    let lit = if sign.highlighted { HIGHLIGHT } else { 1.0 };
+    let color = |rgb: [f32; 3], alpha: f32| {
+        [
+            (rgb[0] * lit).min(1.0),
+            (rgb[1] * lit).min(1.0),
+            (rgb[2] * lit).min(1.0),
+            alpha * panel.opacity,
+        ]
+    };
     let width = (panel.columns * 9) as f32;
     let rows = panel.lines.len();
     let height = (rows * 11) as f32;
     // The plate, first, so that it is the surface.
+    // Pointed at, its plate is tinted towards its state's colour, so that so dark a plate is seen to brighten.
+    let plate_rgb = if sign.highlighted {
+        std::array::from_fn(|index| PLATE[index] + panel.accent[index] * HIGHLIGHT_TINT)
+    } else {
+        PLATE
+    };
+    // Pointed at, a thin border in its state's colour about its plate's edge, so that which sign is its flock's is
+    // plain: its plate drawn over a plate a little larger, in that colour, both its surface.
+    if sign.highlighted {
+        let border = Shape::Rect {
+            x: -PLATE_MARGIN[0] - OUTLINE_WIDTH,
+            y: -PLATE_MARGIN[1] - OUTLINE_WIDTH,
+            width: width + 2.0 * (PLATE_MARGIN[0] + OUTLINE_WIDTH),
+            height: height + 2.0 * (PLATE_MARGIN[1] + OUTLINE_WIDTH),
+            color: color(panel.accent, 0.9),
+            radius: PLATE_RADIUS + OUTLINE_WIDTH,
+            outline: None,
+        };
+        shape(mesh, &border, p, SIGN_PLATE);
+    }
     let plate = Shape::Rect {
         x: -PLATE_MARGIN[0],
         y: -PLATE_MARGIN[1],
         width: width + 2.0 * PLATE_MARGIN[0],
         height: height + 2.0 * PLATE_MARGIN[1],
-        color: color(PLATE, 1.0),
+        color: color(plate_rgb, 1.0),
         radius: PLATE_RADIUS,
         outline: None,
     };
@@ -1524,11 +1547,17 @@ fn leader_mesh(panel: &Panel, sign: &Sign, opacity: f32, mesh: &mut Vec<Vertex>)
     let up = (from - to) / length;
     let across = up.cross(towards).try_normalize().unwrap_or(right);
     let out = across.cross(up);
+    // Pointed at, brighter and plainer, as its sign and flock are.
+    let (lit, leader, dot) = if sign.highlighted {
+        (HIGHLIGHT, 0.8, 1.0)
+    } else {
+        (1.0, 0.55, 0.85)
+    };
     let accent = |alpha: f32| {
         [
-            panel.accent[0],
-            panel.accent[1],
-            panel.accent[2],
+            (panel.accent[0] * lit).min(1.0),
+            (panel.accent[1] * lit).min(1.0),
+            (panel.accent[2] * lit).min(1.0),
             alpha * opacity,
         ]
     };
@@ -1538,13 +1567,13 @@ fn leader_mesh(panel: &Panel, sign: &Sign, opacity: f32, mesh: &mut Vec<Vertex>)
         from: [0.0, 0.0],
         to: [0.0, -length / p],
         width: LEADER_WIDTH,
-        color: accent(0.55),
+        color: accent(leader),
     }
     .pieces(&mut pieces);
     Shape::Disc {
         centre: [0.0, 0.0],
         radius: LEADER_DOT,
-        color: accent(0.85),
+        color: accent(dot),
     }
     .pieces(&mut pieces);
     for piece in pieces {
@@ -1789,6 +1818,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let full = station_panel(&station, station.position, State::Running, None);
         let small = Station {
@@ -1899,6 +1930,8 @@ mod tests {
                 opacity: 1.0,
                 scale: 1.0,
                 more: 0,
+                size: None,
+                highlighted: false,
             };
             let sign = station_panel(&station, station.position, State::Completed, None);
             assert_eq!(
@@ -2013,6 +2046,8 @@ mod tests {
                         opacity: 1.0,
                         scale: 1.0,
                         more: 0,
+                        size: None,
+                        highlighted: false,
                     })
                     .collect();
                 let mut placements = LabelPlacement::default();
@@ -2126,6 +2161,8 @@ mod tests {
                         opacity: 1.0,
                         scale: 1.0,
                         more: 0,
+                        size: None,
+                        highlighted: false,
                     },
                     position,
                     State::Unknown,
@@ -2151,6 +2188,8 @@ mod tests {
             position,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let mut placements = LabelPlacement::default();
         // Placed by an environment off the default arc, or near home, a sign stands above its own station.
@@ -2226,6 +2265,8 @@ mod tests {
             position,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         // 64 at one spot 2 m ahead, and 64 at one spot just ahead of home, where columns cannot part them.
         for spot in [[0.0, 1.2, -2.0], [0.0, 1.2, -0.3]] {
@@ -2253,6 +2294,74 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_whose_worker_is_pointed_at_is_outlined_and_drawn_brighter_its_leader_too() {
+        let station = |highlighted: bool| Station {
+            facing: crate::delegation::HOME_EYES,
+            id: "w".into(),
+            title: "Pointed at".into(),
+            state: State::Running,
+            opacity: 1.0,
+            position: [1.0, 1.4, -3.0],
+            scale: 1.0,
+            more: 0,
+            size: None,
+            highlighted,
+        };
+        // Its plate, the rest of it, and its leader's line and dot, which are drawn in its state's colour, faint.
+        let draw = |highlighted: bool| {
+            let station = station(highlighted);
+            let panel = station_panel(&station, station.position, State::Running, None);
+            assert_eq!(panel.sign.as_ref().unwrap().highlighted, highlighted);
+            let mut mesh = Vec::new();
+            let surface = panel_mesh(&panel, &mut mesh);
+            let accent = panel.accent;
+            let leader: Vec<Vertex> = mesh[surface..]
+                .iter()
+                .filter(|v| {
+                    v.position[1]
+                        < panel.origin[1] - (panel.lines.len() * 11 + 4) as f32 * panel.pixel
+                })
+                .copied()
+                .collect();
+            (
+                mesh[..surface].to_vec(),
+                mesh[surface..].to_vec(),
+                leader,
+                accent,
+            )
+        };
+        let (plate, rest, leader, accent) = draw(false);
+        let (lit_plate, lit_rest, lit_leader, _) = draw(true);
+        // Its border: a plate a little larger beneath its own, in its state's colour, reaching an outline's width further,
+        // and its antialiased edge with it.
+        let extent = |plate: &[Vertex]| {
+            let ys = plate.iter().map(|v| v.position[1]);
+            ys.clone().fold(f32::NEG_INFINITY, f32::max) - ys.fold(f32::INFINITY, f32::min)
+        };
+        let pixel = SIGN_PIXEL;
+        let grown = extent(&lit_plate) - extent(&plate);
+        assert!(
+            grown >= 2.0 * OUTLINE_WIDTH * pixel - 1e-5 && grown <= 4.0 * OUTLINE_WIDTH * pixel,
+            "{grown}"
+        );
+        let bright = |v: &Vertex| v.color[0] + v.color[1] + v.color[2];
+        assert!(lit_plate.iter().any(|v| {
+            (0..3).all(|i| (v.color[i] - (accent[i] * HIGHLIGHT).min(1.0)).abs() < 1e-4)
+                && v.color[3] > 0.85
+        }));
+        // Its plate, tinted towards that colour, its text and pill, and its leader, all brighter.
+        let darkest = |plate: &[Vertex]| plate.iter().map(bright).fold(f32::INFINITY, f32::min);
+        assert!(darkest(&lit_plate) > darkest(&plate) + 0.05);
+        let total = |vertices: &[Vertex]| vertices.iter().map(bright).sum::<f32>();
+        assert_eq!(rest.len(), lit_rest.len());
+        assert!(total(&lit_rest) > total(&rest) * 1.05);
+        assert!(!leader.is_empty() && leader.len() == lit_leader.len());
+        let alpha = |vertices: &[Vertex]| vertices.iter().map(|v| v.color[3]).sum::<f32>();
+        assert!(alpha(&lit_leader) > alpha(&leader) * 1.15);
+        assert!(total(&lit_leader) > total(&leader) * 1.05);
+    }
+
+    #[test]
     fn a_sign_moved_off_its_own_place_keeps_a_post_down_to_its_station() {
         let station = Station {
             facing: crate::delegation::HOME_EYES,
@@ -2263,6 +2372,8 @@ mod tests {
             position: [0.0, 1.2, -3.0],
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         // Where its leader ends: the lowest point of its mesh, its dot about the station's middle.
         let leader_end = |sign: [f32; 3], viewer: Option<[f32; 3]>| {
@@ -2441,6 +2552,8 @@ mod tests {
                     position,
                     scale: 1.0,
                     more: 0,
+                    size: None,
+                    highlighted: false,
                 })
                 .collect();
             let mut placements = LabelPlacement::default();
@@ -2574,6 +2687,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let full = test_layout(&workspace, std::slice::from_ref(&station), 0, 0)
             .0
@@ -2810,6 +2925,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         station_panel(&station, position, state, None)
     }
@@ -2860,6 +2977,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let panel = test_layout(&workspace, &[old_snapshot], 0, 0).0.remove(0);
         assert_eq!(panel.lines[1], "Error");
@@ -2946,6 +3065,8 @@ mod tests {
                 opacity: 1.0,
                 scale: 1.0,
                 more: 0,
+                size: None,
+                highlighted: false,
             };
             assert!(
                 test_layout(&workspace, &[station], 0, 0)
@@ -3090,6 +3211,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         for (at, viewer) in [
             ([0.0, 1.4, -2.7], [2.0, 1.6, -1.0]),
@@ -3399,6 +3522,8 @@ mod tests {
                     opacity: 1.0,
                     scale: 1.0,
                     more: 0,
+                    size: None,
+                    highlighted: false,
                 };
                 // Rendering fixture deliberately exercises a centered arbitrary
                 // plane. Real placement is tested separately with 128 labels below.
@@ -3899,6 +4024,8 @@ mod tests {
                         opacity: 1.0,
                         scale: 1.0,
                         more: 0,
+                        size: None,
+                        highlighted: false,
                     })
                     .collect();
                 graphics.update(&device, &queue, &Workspace::default(), &stations, None);
@@ -4028,6 +4155,8 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let sign = station_panel(&station, station.position, State::Completed, None);
         let card = Panel {
@@ -4121,6 +4250,8 @@ mod tests {
                 position: HomeArc::at(Anchor::AGENT, EYES, slot).to_array(),
                 scale: 1.0,
                 more: 0,
+                size: None,
+                highlighted: false,
             })
             .collect();
         let middle = glam::Vec3::new(0.0, 1.2, -3.2);
@@ -4250,6 +4381,8 @@ mod tests {
                     position: HomeArc::at(origin, audience, slot).to_array(),
                     scale: 1.0,
                     more: 0,
+                    size: None,
+                    highlighted: false,
                 })
                 .collect();
             let centre = stations
@@ -4366,6 +4499,8 @@ mod tests {
                     position: HomeArc::at(origin, audience, slot).to_array(),
                     scale: 1.0,
                     more: 0,
+                    size: None,
+                    highlighted: false,
                 })
                 .collect();
             let mut placements = LabelPlacement::default();
@@ -4455,10 +4590,13 @@ mod tests {
     }
 
     #[test]
-    fn in_a_ring_every_sign_rises_straight_above_its_worker_clear_of_the_others_in_any_order() {
+    fn in_a_ring_each_layer_s_signs_stand_at_one_height_above_its_swarms_and_below_the_next() {
         use tomori_protocol::cluster::{Anchor, Cluster, Formation, HOME};
-        // The farmyard's home ring, as `presence` reported it when its sixth worker's sign leaned off to one side, and a
-        // whole ring before home facing it.
+        // How far about its middle a worker's flock reaches, and how much clearer than that every sign and leader keeps.
+        const FLOCK: f32 = 0.13;
+        const MARGIN: f32 = 0.02;
+        // The farmyard's home ring, as `presence` reported it when a lower worker's leader ran up through the swarm above
+        // it to its sign; a whole ring before home facing it; and one across a yard, whose signs are drawn larger.
         let rings = [
             Anchor::new(
                 HOME,
@@ -4470,29 +4608,44 @@ mod tests {
                 tomori_protocol::Pose::at([0.0, 1.4, -3.5])
                     .facing_towards(crate::delegation::HOME_EYES),
             ),
+            Anchor::new(
+                HOME,
+                tomori_protocol::Pose::at([1.0, 1.5, -7.0])
+                    .facing_towards(crate::delegation::HOME_EYES),
+            ),
         ];
+        // Titles of one to six rows, the most a sign shows.
         let titles = [
-            "Centre home ring on workbench",
-            "Smoother agent turning and gliding",
-            "Debug following during replies",
-            "Farmyard NZ mountains and bush",
-            "Ambient environment audio with ducking",
-            "Restore swarm flight on join/leave",
+            "Centre home ring on workbench".to_owned(),
+            "Wide words ".repeat(14),
+            "Smoother agent turning and gliding".to_owned(),
+            "Debug following during replies, and then the farmyard's mountains and bush".to_owned(),
+            "Ambient audio".to_owned(),
+            "Restore swarm flight on join/leave".to_owned(),
         ];
         let mut seed = 0x5eed_u64;
         for anchor in rings {
             let cluster = Cluster::new(&anchor.with_formation(Formation::Ring));
-            for count in 1..=14 {
+            let size = cluster.sign_size();
+            assert!(size.is_some());
+            for count in 1..=18 {
                 let slots = cluster.slots(count);
-                // Placed in order of their identifiers, which need not be their slots': in slot order, its reverse,
+                // One sign for those gathered into the "+N more", where its slot stands.
+                let gathered = slots.iter().filter(|slot| slot.more).count();
+                let standing: Vec<_> = slots
+                    .iter()
+                    .filter(|slot| !slot.more)
+                    .chain(slots.iter().find(|slot| slot.more))
+                    .collect();
+                // Placed in the order of their identifiers, which need not be their slots': in slot order, its reverse
                 // and shuffled.
-                for order in 0..40 {
-                    let mut ids: Vec<usize> = (0..count).collect();
+                for order in 0..8 {
+                    let mut ids: Vec<usize> = (0..standing.len()).collect();
                     match order {
                         0 => {}
                         1 => ids.reverse(),
                         _ => {
-                            for i in (1..count).rev() {
+                            for i in (1..ids.len()).rev() {
                                 seed = seed
                                     .wrapping_mul(6_364_136_223_846_793_005)
                                     .wrapping_add(1_442_695_040_888_963_407);
@@ -4500,18 +4653,20 @@ mod tests {
                             }
                         }
                     }
-                    let stations: Vec<Station> = slots
+                    let stations: Vec<Station> = standing
                         .iter()
                         .enumerate()
-                        .map(|(slot, place)| Station {
+                        .map(|(index, place)| Station {
                             facing: crate::delegation::HOME_EYES,
-                            id: format!("w-{:02}", ids[slot]),
-                            title: titles[slot % titles.len()].into(),
+                            id: format!("w-{:02}", ids[index]),
+                            title: titles[index % titles.len()].clone(),
                             state: State::Running,
                             position: place.position,
                             opacity: 1.0,
                             scale: place.scale,
-                            more: 0,
+                            more: if place.more { gathered } else { 0 },
+                            size,
+                            highlighted: false,
                         })
                         .collect();
                     let mut placements = LabelPlacement::default();
@@ -4524,45 +4679,117 @@ mod tests {
                         &mut placements,
                         None,
                     );
-                    assert_eq!(panels.len(), count);
-                    for panel in &panels {
-                        let sign = panel.sign.as_ref().unwrap();
-                        let station = stations.iter().find(|s| s.id == sign.source_id).unwrap();
-                        // Its leader, from the middle of its plate's bottom edge to its dot, hangs straight down.
-                        let right = glam::Vec3::from_array(sign.right);
-                        let bottom = glam::Vec3::from_array(panel.origin)
-                            + right * ((panel.columns * 9) as f32 * panel.pixel / 2.0)
-                            - glam::Vec3::Y
-                                * ((panel.lines.len() * 11) as f32 + PLATE_MARGIN[1])
-                                * panel.pixel;
-                        let dot = glam::Vec3::from_array(sign.station)
-                            - glam::Vec3::from_array(sign.towards) * SIGN_BEHIND;
-                        let leader = bottom - dot;
-                        let lean = leader.with_y(0.0).length().atan2(leader.y).to_degrees();
-                        assert!(
-                            lean < 1.0,
-                            "{count} workers, order {order}: {} leans {lean}°",
-                            station.title
-                        );
-                        let at = placements.0[&station.id];
-                        assert_eq!([at[0], at[2]], [station.position[0], station.position[2]]);
-                        assert!(at[1] <= station.position[1] + SIGN_HIGHEST * 2.0);
+                    assert_eq!(panels.len(), stations.len());
+                    // Each sign's worker, its plate's axis, reach about it, bottom and top, and its leader's ends.
+                    struct Drawn {
+                        worker: glam::Vec3,
+                        axis: glam::Vec3,
+                        reach: f32,
+                        low: f32,
+                        high: f32,
+                        bottom: glam::Vec3,
+                        dot: glam::Vec3,
                     }
-                    // None reaches another, as the larger of two is drawn.
-                    for (a, first) in stations.iter().enumerate() {
-                        for second in &stations[a + 1..] {
-                            let apart = [first, second]
-                                .map(|s| sign_scale(s.position, s.facing) * compact(s))
-                                .into_iter()
+                    let drawn: Vec<Drawn> = panels
+                        .iter()
+                        .map(|panel| {
+                            let sign = panel.sign.as_ref().unwrap();
+                            let worker = glam::Vec3::from_array(sign.station);
+                            let label =
+                                format!("{count} workers, order {order}, {}", sign.source_id);
+                            // In its own place, straight above its worker, never risen or moved aside.
+                            assert!(sign.own, "{label}");
+                            let mut mesh = Vec::new();
+                            let surface = panel_mesh(panel, &mut mesh);
+                            let plate = &mesh[..surface];
+                            let right = glam::Vec3::from_array(sign.right);
+                            let width = (panel.columns * 9) as f32 * panel.pixel;
+                            let axis = glam::Vec3::from_array(panel.origin)
+                                + right * (width / 2.0)
+                                + glam::Vec3::from_array(sign.normal) * SIGN_BEHIND;
+                            let reach = plate
+                                .iter()
+                                .map(|v| {
+                                    (glam::Vec3::from_array(v.position) - axis)
+                                        .with_y(0.0)
+                                        .length()
+                                })
                                 .fold(0.0, f32::max);
-                            let [p, q] = [first, second]
-                                .map(|s| glam::Vec3::from_array(placements.0[&s.id]));
+                            let low = plate
+                                .iter()
+                                .map(|v| v.position[1])
+                                .fold(f32::INFINITY, f32::min);
+                            let high = plate
+                                .iter()
+                                .map(|v| v.position[1])
+                                .fold(f32::NEG_INFINITY, f32::max);
+                            let bottom = glam::Vec3::from_array(panel.origin)
+                                + right * (width / 2.0)
+                                - glam::Vec3::Y
+                                    * ((panel.lines.len() * 11) as f32 + PLATE_MARGIN[1])
+                                    * panel.pixel;
+                            let dot = worker - glam::Vec3::from_array(sign.towards) * SIGN_BEHIND;
+                            // Its leader hangs straight down to its worker, a short way, clear of its own flock.
+                            let leader = bottom - dot;
+                            let lean = leader.with_y(0.0).length().atan2(leader.y).to_degrees();
+                            assert!(lean < 0.1, "{label}: leans {lean}°");
+                            assert!(low >= worker.y + FLOCK, "{label}");
+                            Drawn {
+                                worker,
+                                axis,
+                                reach,
+                                low,
+                                high,
+                                bottom,
+                                dot,
+                            }
+                        })
+                        .collect();
+                    for (index, sign) in drawn.iter().enumerate() {
+                        let label = format!("{count} workers, order {order}, sign {index}");
+                        for (other, them) in drawn
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, _)| *other != index)
+                        {
+                            // The signs of one layer stand at one height.
+                            if (sign.worker.y - them.worker.y).abs() < 1e-4 {
+                                assert!(
+                                    (sign.bottom.y - them.bottom.y).abs() < 1e-4,
+                                    "{label}, {other}"
+                                );
+                            }
+                            // Never reaching another, turned any way.
+                            let apart = (sign.axis - them.axis).with_y(0.0).length();
                             assert!(
-                                (p.y - q.y).abs() >= SIGN_APART[0] * apart
-                                    || (p.x - q.x).hypot(p.z - q.z) >= SIGN_APART[1] * apart,
-                                "{count} workers, order {order}: {} and {}",
-                                first.title,
-                                second.title
+                                sign.high < them.low
+                                    || them.high < sign.low
+                                    || apart > sign.reach + them.reach,
+                                "{label} reaches sign {other}"
+                            );
+                            // In a column, swarm, sign, swarm, sign: a sign reaching over a worker above it stands below
+                            // its flock.
+                            let beside = (sign.axis - them.worker).with_y(0.0).length();
+                            if beside <= sign.reach + FLOCK + MARGIN
+                                && them.worker.y > sign.worker.y
+                            {
+                                assert!(
+                                    sign.high + MARGIN <= them.worker.y - FLOCK,
+                                    "{label} reaches the flock of {other}"
+                                );
+                            }
+                            // Its leader passes clear of every other flock and sign.
+                            let (from, to) = (sign.dot.y, sign.bottom.y);
+                            let nearest = them.worker.y.clamp(from, to);
+                            let off = (sign.dot.with_y(nearest) - them.worker).length();
+                            assert!(
+                                off > FLOCK + MARGIN,
+                                "{label}'s leader passes the flock of {other}"
+                            );
+                            let across = (sign.dot - them.axis).with_y(0.0).length();
+                            assert!(
+                                to < them.low || them.high < from || across > them.reach + MARGIN,
+                                "{label}'s leader passes sign {other}"
                             );
                         }
                     }

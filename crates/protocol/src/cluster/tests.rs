@@ -433,6 +433,43 @@ fn a_ring_stands_evenly_about_the_agent_the_sides_first_clear_of_it() {
 }
 
 #[test]
+fn a_ring_s_signs_are_drawn_one_size_and_its_places_and_layers_spaced_by_it() {
+    // Within reading distance at its nearest place, its signs are drawn at their own size, as the arc's are; the arc
+    // has none of its own.
+    assert_eq!(Cluster::new(&ringed()).sign_size(), Some(1.0));
+    assert_eq!(
+        Cluster::new(&ringed().with_formation(Formation::Arc)).sign_size(),
+        None
+    );
+    // Across a yard, 9 m off, every one is drawn as large as one at its nearest place, 7.6 m off, and its places and
+    // layers stand as much further apart.
+    let far = Cluster::new(
+        &Anchor::new(
+            HOME,
+            Pose::at([0.0, 1.5, -9.0]).facing_towards([0.0, 1.6, 0.0]),
+        )
+        .with_formation(Formation::Ring),
+    );
+    let size = far.sign_size().unwrap();
+    assert!((size - (9.0 - RING) / ARC_RADIUS).abs() < 1e-4, "{size}");
+    let slots = far.slots(far.arrange(1).capacity().unwrap());
+    for (index, slot) in slots.iter().enumerate() {
+        let reach = WORKER.width.hypot(WORKER.depth) * size * slot.scale;
+        for other in &slots[index + 1..] {
+            let apart =
+                (slot.position[0] - other.position[0]).hypot(slot.position[2] - other.position[2]);
+            let above = (slot.position[1] - other.position[1]).abs();
+            assert!(
+                apart >= reach - 1e-3 || above >= WORKER.height * size * slot.scale - 1e-4,
+                "{index}: {apart} {above}"
+            );
+        }
+    }
+    let (low, high) = far.reach(&slots[0]);
+    assert!((high[1] - low[1] - WORKER.height * size).abs() < 1e-4);
+}
+
+#[test]
 fn a_ring_in_room_rises_as_its_height_allows_and_where_it_holds_none_the_room_s_steps_stand() {
     // Room for one row: seven at full size, then eleven compact, then the sign.
     let low = Cluster::new(&ringed().with_extent(4.0, 1.0, 4.0));
