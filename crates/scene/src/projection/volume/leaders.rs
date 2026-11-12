@@ -36,6 +36,9 @@ const BEAD: f32 = 0.006;
 const FLOW: f32 = 0.25;
 const BEADS: usize = 4;
 const CONE: (f32, f32) = (0.008, 0.025);
+/// The most dashes or dots a leader is drawn with, spaced further apart along a longer one, so that a line to something
+/// far off costs no more than one a few metres long.
+const PIECES: f32 = 64.0;
 /// How bright a leader is drawn: its volume seen alone, with more than [`FEW`] leaders, at half strength, and its mark at
 /// a third; dimmed to a fifth while the participant focuses on another node.
 const ALONE: (f32, f32) = (0.5, 1.0 / 3.0);
@@ -249,18 +252,22 @@ impl Leader {
         let length = path_length(path);
         match self.style {
             Style::Dashed => {
+                // At most [`PIECES`] dashes, each as long against its gap as near.
+                let stretch = (length / (PIECES * (DASH.0 + DASH.1))).max(1.0);
+                let (dash, gap) = (DASH.0 * stretch, DASH.1 * stretch);
                 let mut at = 0.0;
                 while at < length {
                     let (from, to) = (
                         point_along(path, at),
-                        point_along(path, (at + DASH.0).min(length)),
+                        point_along(path, (at + dash).min(length)),
                     );
                     tube(from, to, radius(from), colour, out);
-                    at += DASH.0 + DASH.1;
+                    at += dash + gap;
                 }
             }
             Style::Dotted => {
-                let mut at = DOT / 2.0;
+                let spacing = DOT.max(length / PIECES);
+                let mut at = spacing / 2.0;
                 while at < length {
                     let point = point_along(path, at);
                     out.push(Instance {
@@ -270,7 +277,7 @@ impl Leader {
                         basis: Mat3::IDENTITY,
                         colour,
                     });
-                    at += DOT;
+                    at += spacing;
                 }
             }
             _ => {

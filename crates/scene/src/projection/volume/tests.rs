@@ -665,6 +665,27 @@ fn a_few_leaders_are_drawn_in_full_and_the_ray_meets_one_along_its_line_or_at_it
 }
 
 #[test]
+fn a_leader_to_something_far_off_is_drawn_with_no_more_dashes_or_dots_than_a_near_one() {
+    for (style, solid) in [
+        (Style::Dashed, Solid::Tube),
+        (Style::Dotted, Solid::Diamond),
+    ] {
+        let count = |at: [f32; 3]| {
+            let (mesh, model) = pointing(
+                vec![target("far", Kind::Object, at, Mark::Unmarked)],
+                &[(style, Arrow::None)],
+            );
+            let mut instances = Vec::new();
+            mesh.instances(model, None, 0.0, Vec3::ZERO, &mut instances);
+            counted(&instances, solid)
+        };
+        let (near, far) = (count([1.0, 0.5, -1.5]), count([0.0, 0.0, -900.0]));
+        assert!(near > 4, "{style:?}: {near}");
+        assert!(far <= 65, "{style:?}: {far}");
+    }
+}
+
+#[test]
 fn a_leader_ends_on_its_mark_nearest_where_it_comes_from() {
     use tomori_protocol::world::Frame;
     let mut board = target("board", Kind::Wall, [0.0, 1.5, -4.0], Mark::ByKind);
