@@ -1514,7 +1514,8 @@ pub struct Projector {
     turn: usize,
     /// The wall taken hold of, its handles, and a wall carried.
     editor: editing::Editor,
-    /// The Tomori wall travelling with the agent, and how far folded it is this frame, from 0, unfolded, to 1.
+    /// The Tomori wall travelling, as an older server moves it, and how far folded it is this frame, from 0, unfolded,
+    /// to 1.
     travel: travel::Travel,
     fold: f32,
     /// What this participant marks of the space's lists: the choosable row the ray points at, and the one just chosen.
@@ -1635,7 +1636,7 @@ impl Projector {
         };
         self.lay_out(projection);
         self.keep_meshes(projection);
-        // The Tomori wall travelling with the agent folds, travels and unfolds; meanwhile nothing is put on it by hand,
+        // The Tomori wall an older server moves folds, travels and unfolds; meanwhile nothing is put on it by hand,
         // nor is it taken hold of, and a wall the editor held lets go of it, as of a wall no longer shown. See
         // `design/projection.md`.
         let travelling = self.travel.follow(projection, input.now);
@@ -2541,7 +2542,7 @@ impl Projector {
         }
     }
 
-    /// Whether the Tomori wall is travelling with the agent, folded or folding.
+    /// Whether the Tomori wall is travelling, as an older server moves it, folded or folding.
     pub fn travelling(&self) -> bool {
         self.travel.travelling()
     }

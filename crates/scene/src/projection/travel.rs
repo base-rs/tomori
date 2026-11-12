@@ -1,11 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The Tomori wall travelling with the agent: when the server moves it within the same space and environment, as when
-//! a participant summons the agent and its wall goes with it, or sends it home, it folds up where it stood, its slots
-//! and their panels collapsing into a small bundle, travels to where it now stands, and unfolds there. Everyone sees
-//! the same, since each client follows the same projection; a wall that appears elsewhere, as a space is joined or
-//! changes environment, stands there at once. See `design/projection.md`.
+//! The Tomori wall moved within its space: when a server moves it within the same space and environment, as an older
+//! server did when a participant summoned the agent and its wall went with it, or sent it home, it folds up where it
+//! stood, its slots and their panels collapsing into a small bundle, travels to where it now stands, and unfolds there.
+//! Everyone sees the same, since each client follows the same projection; a wall that appears elsewhere, as a space is
+//! joined or changes environment, stands there at once. Today's server never moves it, as the Tomori wall is the
+//! space's status wall and stays where its environment stands it, so this is seen only with an older server. See
+//! `design/projection.md`.
 use std::time::Instant;
 
 use glam::{Mat4, Quat, Vec3};
@@ -98,8 +100,8 @@ pub struct Travel {
 impl Travel {
     /// Follow `projection` at `now`: where the Tomori wall is drawn and how far folded it is, from 0 to 1, while it
     /// travels, or none while it stands where the projection says. A move within the same space and environment sets
-    /// it travelling, from where it is drawn and as folded as it is, so that a summons that follows another turns it
-    /// round smoothly; elsewhere it stands where it is at once.
+    /// it travelling, from where it is drawn and as folded as it is, so that a move that follows another, as an older
+    /// server's summons did, turns it round smoothly; elsewhere it stands where it is at once.
     pub fn follow(&mut self, projection: &Projection, now: Instant) -> Option<(Pose, f32)> {
         let Some(wall) = projection.walls.iter().find(|wall| wall.id == TOMORI_WALL) else {
             *self = Self::default();
