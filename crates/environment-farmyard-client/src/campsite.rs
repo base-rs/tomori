@@ -149,36 +149,34 @@ impl Sticks {
     /// What `ray` meets first of the campsite: a free stick it passes near, which the grip takes, or the bonfire, each
     /// with how far along the ray; nothing until the server side has said what there is.
     pub fn pick(&self, ray: &Ray) -> Option<Picked> {
-        if self.toast.is_empty() {
-            return None;
-        }
-        self.loose
-            .pick(ray)
-            .into_iter()
-            .chain(self.bonfire(ray))
-            .min_by(|a, b| a.distance.total_cmp(&b.distance))
-    }
-
-    /// Where `ray` meets the bonfire, if it does.
-    fn bonfire(&self, ray: &Ray) -> Option<Picked> {
-        Shape::Sphere {
-            center: campsite::heart(),
-            radius: 0.35,
-        }
-        .intersect(ray)
-        .map(|distance| Picked::new("bonfire", "the bonfire", distance))
+        self.nearest(ray, |loose| loose.pick(ray))
     }
 
     /// What the ray of the hand `side` meets first of the campsite, as [`Sticks::pick`] does, or the stick this
     /// participant holds in their other hand, which its grip passes to it.
     pub fn pick_by(&self, side: Side, ray: &Ray) -> Option<Picked> {
+        self.nearest(ray, |loose| loose.pick_by(side, ray))
+    }
+
+    /// What `ray` meets first of the stick `stick` finds of the loose bodies and the bonfire; nothing until the server
+    /// side has said what there is.
+    fn nearest(
+        &self,
+        ray: &Ray,
+        stick: impl FnOnce(&Loose<Rack>) -> Option<Picked>,
+    ) -> Option<Picked> {
         if self.toast.is_empty() {
             return None;
         }
-        self.loose
-            .pick_by(side, ray)
+        let bonfire = Shape::Sphere {
+            center: campsite::heart(),
+            radius: 0.35,
+        }
+        .intersect(ray)
+        .map(|distance| Picked::new("bonfire", "the bonfire", distance));
+        stick(&self.loose)
             .into_iter()
-            .chain(self.bonfire(ray))
+            .chain(bonfire)
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
 

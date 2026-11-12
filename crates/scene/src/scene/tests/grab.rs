@@ -67,10 +67,6 @@ impl crate::client_side::ClientSide for Stick {
         })
     }
 
-    fn within_reach(&self, hand: Vec3) -> Option<String> {
-        (self.takes && hand.distance(HANDLE) < 0.1).then(|| "stick".to_owned())
-    }
-
     fn update(&mut self, input: crate::client_side::Input<'_>) -> crate::client_side::Output {
         self.left
             .lock()
