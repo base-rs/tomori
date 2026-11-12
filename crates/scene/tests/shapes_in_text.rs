@@ -37,9 +37,9 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "the pointer the server writes before a list's highlighted row, which is found to be left out, not drawn",
     ),
     (
-        "scene/src/projection/editing.rs",
+        "scene/src/projection/editing/faces.rs",
         "●◠",
-        "the knob's icon on its handle and in the hint, and the curve in its readout",
+        "the knob's icon on its handle, and the curve in its readout",
     ),
     (
         "client-desktop/src/console.rs",
