@@ -91,7 +91,11 @@ pub fn from_floor(point: Vec2) -> f32 {
     if contains(point) {
         return 0.0;
     }
-    let outline = outline();
+    from_outline(&outline(), point)
+}
+
+/// How far `point`, on the ground, is from the nearest edge of `outline`, within it or beyond.
+fn from_outline(outline: &[Vec2], point: Vec2) -> f32 {
     (0..outline.len())
         .map(|index| {
             let (from, to) = (outline[index], outline[(index + 1) % outline.len()]);
@@ -102,14 +106,96 @@ pub fn from_floor(point: Vec2) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// The point of the floor its faces fan from to its edge, along the waterfall's way and across it: one from which every
-/// edge of its outline is seen from within, so that the fan covers the floor once and nothing beyond it.
-pub const FAN: (f32, f32) = (26.5, 6.0);
+/// How far apart the floor's corners are, about: its outline's edges are cut into pieces no longer, and its corners
+/// within lie on a lattice of even triangles this far apart, along the waterfall's way and across it, so that its faces
+/// are even in size and shape, with no corner that many meet at.
+pub const SPACING: f32 = 0.6;
 
-/// [`FAN`], on the ground.
-fn middle() -> Vec2 {
-    let (along, across) = FAN;
-    on_fall(along, across)
+/// How far from its edge, by [`SPACING`], the lattice's corners within the floor stay, so that none crowds a corner of
+/// the edge into a sliver.
+const MARGIN: f32 = 0.55;
+
+/// The floor's edge: its outline, each edge cut evenly into pieces of [`SPACING`] or less, on the ground, in order,
+/// which its faces and its sides share, so that they meet corner to corner.
+pub fn edge() -> Vec<Vec2> {
+    let outline = outline();
+    (0..outline.len())
+        .flat_map(|index| {
+            let (from, to) = (outline[index], outline[(index + 1) % outline.len()]);
+            let pieces = (from.distance(to) / SPACING).ceil().max(1.0) as usize;
+            (0..pieces).map(move |piece| from.lerp(to, piece as f32 / pieces as f32))
+        })
+        .collect()
+}
+
+/// The floor's faces, on the ground: a constrained Delaunay triangulation
+/// of its edge ([`edge`]) and of the corners of a lattice of even triangles [`SPACING`] apart within it, refined so that
+/// no angle of any face is less than 25°, its edge's pieces kept whole.
+pub fn faces() -> Vec<[Vec2; 3]> {
+    use spade::{
+        AngleLimit, ConstrainedDelaunayTriangulation, Point2, RefinementParameters, Triangulation,
+    };
+    let edge = edge();
+    let outline = outline();
+    // The lattice, its rows across the waterfall's way, each a half step along from the one before.
+    let (low, high) = OUTLINE.iter().fold(
+        (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+        |(low, high), (along, across)| {
+            let at = Vec2::new(*along, *across);
+            (low.min(at), high.max(at))
+        },
+    );
+    let row = SPACING * 3f32.sqrt() * 0.5;
+    let rows = ((high.x - low.x) / row).ceil() as usize;
+    let columns = ((high.y - low.y) / SPACING).ceil() as usize + 1;
+    let within = (0..=rows)
+        .flat_map(|step| (0..=columns).map(move |column| (step, column)))
+        .map(|(step, column)| {
+            let shift = if step % 2 == 0 { 0.0 } else { 0.5 };
+            on_fall(
+                low.x + step as f32 * row,
+                low.y + (column as f32 + shift) * SPACING,
+            )
+        })
+        .filter(|point| contains(*point) && from_outline(&outline, *point) > SPACING * MARGIN);
+    let points: Vec<Point2<f64>> = edge
+        .iter()
+        .copied()
+        .chain(within)
+        .map(|point| Point2::new(point.x as f64, point.y as f64))
+        .collect();
+    let constraints = (0..edge.len())
+        .map(|index| [index, (index + 1) % edge.len()])
+        .collect();
+    let mut triangulation: ConstrainedDelaunayTriangulation<Point2<f64>> =
+        ConstrainedDelaunayTriangulation::bulk_load_cdt(points, constraints)
+            .expect("the floor's corners are finite and its edge does not cross itself");
+    let refined = triangulation.refine(
+        RefinementParameters::new()
+            .with_angle_limit(AngleLimit::from_deg(25.0))
+            .keep_constraint_edges()
+            .exclude_outer_faces(true),
+    );
+    let outer: std::collections::HashSet<_> = refined.excluded_faces.into_iter().collect();
+    triangulation
+        .inner_faces()
+        .filter(|face| !outer.contains(&face.fix()))
+        .map(|face| {
+            face.positions()
+                .map(|point| Vec2::new(point.x as f32, point.y as f32))
+        })
+        .collect()
+}
+
+/// The shade of the floor about `point`, on the ground: moss, but in patches of stone where its moss is worn away.
+fn shade(point: Vec2) -> Vec3 {
+    let wave =
+        (point.x * 1.3 + point.y * 0.7).sin() + (point.y * 1.1 - point.x * 0.8 + 1.9).sin() * 0.8;
+    if wave > 1.0 {
+        paints::STONE
+    } else {
+        paints::MOSS
+    }
 }
 
 /// The colours of the terrace: its floor, moss and stone, and its flat rock and cairn, paler where worn.
@@ -142,37 +228,23 @@ pub const ARRIVAL: (f32, f32) = (26.4, 4.6);
 /// The floor, the flat rock and the cairn's shapes.
 fn shapes() -> Shapes {
     let mut shapes = Shapes::new();
-    let outline = outline();
-    let middle = middle();
+    let edge = edge();
     let lift = |point: Vec2, height: f32| Vec3::new(point.x, height, point.y);
-    // The floor, fanned from its middle to each edge, halved, each face a shade of moss or stone of its own.
+    // The floor, in even faces, each moss or stone as the floor is about it, a little lighter or darker than the next.
     shapes.ground(|shapes| {
-        for (index, corner) in outline.iter().enumerate() {
-            let next = outline[(index + 1) % outline.len()];
-            let half = corner.lerp(next, 0.5);
-            for (face, (from, to)) in [(*corner, half), (half, next)].into_iter().enumerate() {
-                let seed = (index * 2 + face) as u32 + 18_000;
-                let color = if scatter(seed) < 0.3 {
-                    paints::STONE
-                } else {
-                    paints::MOSS
-                };
-                backdrop::facing(
-                    shapes,
-                    &[
-                        lift(middle, TERRACE),
-                        lift(from, TERRACE),
-                        lift(to, TERRACE),
-                    ],
-                    Vec3::Y,
-                    color * (0.85 + scatter(seed + 1) * 0.3),
-                );
-            }
+        for (index, [a, b, c]) in faces().into_iter().enumerate() {
+            let color = shade((a + b + c) / 3.0);
+            backdrop::facing(
+                shapes,
+                &[lift(a, TERRACE), lift(b, TERRACE), lift(c, TERRACE)],
+                Vec3::Y,
+                color * (0.94 + scatter(index as u32 + 18_000) * 0.12),
+            );
         }
     });
-    // Its sides, rock, down into the mountain.
-    for (index, corner) in outline.iter().enumerate() {
-        let next = outline[(index + 1) % outline.len()];
+    // Its sides, rock, down into the mountain, from each piece of its edge, which they share with the floor.
+    for (index, corner) in edge.iter().enumerate() {
+        let next = edge[(index + 1) % edge.len()];
         let outward = (next - *corner).perp() * -1.0;
         let outward = Vec3::new(outward.x, 0.0, outward.y);
         backdrop::facing(
