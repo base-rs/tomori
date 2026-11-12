@@ -420,17 +420,16 @@ pub enum TimeAxis {
 }
 
 impl TimeAxis {
-    /// It as a chart of `points` keeps it once cleaned: a live step from 1 ms to [`CHART_STEP_MS`], and a fixed window
-    /// that ends after it begins, within the years 0 to 9999, from [`CHART_EARLIEST_MS`] to [`CHART_INSTANT_MS`], and no wider than its points at
-    /// [`CHART_STEP_MS`] apart; none otherwise.
-    fn cleaned(self, points: u32) -> Option<Self> {
+    /// It as a chart keeps it once cleaned: a live step from 1 ms to [`CHART_STEP_MS`], and a fixed window that ends
+    /// after it begins, within the years 0 to 9999, from [`CHART_EARLIEST_MS`] to [`CHART_INSTANT_MS`], however few
+    /// points it has, as a week's window of a few points is still that window; none otherwise.
+    fn cleaned(self) -> Option<Self> {
         match self {
             Self::Live { step_ms } => (1..=CHART_STEP_MS).contains(&step_ms).then_some(self),
-            Self::Fixed { from_ms, to_ms } => (from_ms < to_ms
-                && from_ms >= CHART_EARLIEST_MS
-                && to_ms <= CHART_INSTANT_MS
-                && to_ms - from_ms <= i64::from(points - 1) * i64::from(CHART_STEP_MS))
-            .then_some(self),
+            Self::Fixed { from_ms, to_ms } => {
+                (from_ms < to_ms && from_ms >= CHART_EARLIEST_MS && to_ms <= CHART_INSTANT_MS)
+                    .then_some(self)
+            }
             Self::Unknown => None,
         }
     }
@@ -625,7 +624,7 @@ impl Chart {
         if let Some(status) = &mut self.status {
             status.text = one_line(&status.text, CHART_STATUS_CHARS);
         }
-        self.time = self.time.and_then(|time| time.cleaned(self.points));
+        self.time = self.time.and_then(TimeAxis::cleaned);
         Ok(self)
     }
 

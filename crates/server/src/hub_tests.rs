@@ -5663,6 +5663,81 @@ fn a_copy_of_a_panel_withdrawn_says_so_and_is_taken_away_as_the_hub_sweeps() {
     )));
 }
 
+/// A chart held to a window its side never answers for says, as the hub sweeps, that it has no data for it.
+#[test]
+fn a_chart_held_to_a_window_its_side_ignores_says_in_time_it_has_no_data() {
+    let CopyYard {
+        hub,
+        _jobs,
+        id,
+        _commands,
+        outlet,
+        start,
+        ..
+    } = copy_yard();
+    let chart = tomori_environment::chart::Chart::new(181)
+        .with_time(tomori_environment::chart::TimeAxis::Live { step_ms: 5_000 });
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::chart("latency", "Latency", chart).depends_on(["region"]),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let status = || {
+        let state = hub.lock();
+        let environments = hub.environments();
+        let view = state
+            .space(&id)
+            .unwrap()
+            .stage
+            .view("s", &environments.walls("yard"), 0);
+        let chart = view
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Latency")
+            .and_then(|panel| panel.chart.clone())
+            .unwrap();
+        chart.status.map(|status| status.text).unwrap_or_default()
+    };
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        let latency = record
+            .stage
+            .view("s", &walls, 0)
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Latency")
+            .unwrap()
+            .id
+            .clone();
+        let window = crate::stage::context::Setting::Window {
+            from_ms: 1_794_450_000_000,
+            to_ms: 1_794_451_800_000,
+        };
+        record
+            .stage
+            .set_panel_context(&walls, &latency, "time", Some(window))
+            .unwrap();
+    }
+    let now = crate::cards::unix_now();
+    hub.sweep_withdrawn(now);
+    assert!(
+        status().starts_with(crate::stage::held::WAITING),
+        "{}",
+        status()
+    );
+    hub.sweep_withdrawn(now + crate::stage::held::WAIT_SECS);
+    assert!(
+        status().starts_with(crate::stage::held::NO_DATA),
+        "{}",
+        status()
+    );
+}
+
 #[test]
 fn contexts_of_every_wall_and_panel_at_their_longest_are_cut_to_what_the_agent_reads() {
     use tomori_environment::ContextParameter;
