@@ -616,14 +616,13 @@ fn a_burnt_marshmallow_catches_in_the_fire_burns_on_out_of_it_for_a_while_and_go
 }
 
 #[test]
-fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bring_drawn_behind_the_clock()
- {
+fn another_s_burning_marshmallow_thrown_trails_unbroken_from_their_hand_on_its_snapshots() {
     use tomori_physics::message::Snapshot;
     let mut sticks = Sticks::new();
     sticks.share(&shared(|shared| shared.toast[2] = campsite::BLACK));
     let body = campsite::body(2);
-    // Held by someone else, then thrown out of the fire at 2 m/s, its marshmallow from over the heart of the fire, a
-    // snapshot every twentieth of a second, the first as the side says they let go.
+    // Held by someone else, swung through the fire, its marshmallow over its heart as they let go, and thrown on at
+    // 2 m/s, a snapshot every twentieth of a second, the first as the side says they let go.
     let held = Held {
         by: 9,
         hand: tomori_physics::Side::Right,
@@ -634,7 +633,7 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
     let along = Quat::from_rotation_y(0.4);
     let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::STICK_LENGTH * 0.5;
     let thrown = |clock: u64| {
-        let seconds = clock.saturating_sub(1_000) as f32 / 1000.0;
+        let seconds = (clock as f32 - 1_000.0) / 1000.0;
         let marshmallow = campsite::heart() + velocity * seconds;
         Placement::new(marshmallow - along * Vec3::NEG_Z * reach, along)
     };
@@ -642,7 +641,7 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
     let start = Instant::now();
     let mut sent = 1_000;
     let mut drawn = Vec::new();
-    for clock in (1_000..1_700).step_by(14) {
+    for clock in (860..1_700).step_by(14) {
         while sent <= clock {
             sticks.changed(
                 &Event {
@@ -665,22 +664,26 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
             );
             sent += 50;
         }
-        let now = start + Duration::from_millis(clock - 1_000);
-        let shown = sticks.shown(&[], &[], now, clock);
+        let now = start + Duration::from_millis(clock - 860);
+        // In their hand until they let go; then drawn on from there, where its snapshots put it carried to the clock,
+        // as fast as it moved in their hand, and burning all the way.
+        let hand = thrown(clock);
+        let hands = [(9, Hand::new(hand.position, hand.rotation))];
+        let shown = sticks.shown(if clock < 1_000 { &hands } else { &[] }, &[], now, clock);
         let stick = shown[2];
-        // Drawn where its snapshots put it, a tenth of a second behind the clock, and burning all the way.
-        let expected = Pose::of(&thrown(clock.saturating_sub(tomori_physics::DELAY))).marshmallow();
-        assert!(stick.marshmallow.distance(expected) < 2e-3, "{clock}");
+        let expected = Pose::of(&thrown(clock)).marshmallow();
+        // Foreseen falling from the frame it was last drawn in their hand, it is drawn within a centimetre.
+        assert!(stick.marshmallow.distance(expected) < 1e-2, "{clock}");
         assert!(stick.burning, "{clock}");
         let burning: Vec<_> = shown
             .iter()
             .filter(|stick| stick.burning)
             .map(|stick| (stick.index, stick.marshmallow))
             .collect();
-        embers.update((clock - 1_000) as f64 / 1000.0, &burning);
+        embers.update((clock - 860) as f64 / 1000.0, &burning);
         drawn.push(stick.marshmallow);
     }
-    // Its trail runs along where it was drawn, from the fire, every point on its way, joined, up to where it is drawn.
+    // Its trail runs along where it was drawn, from their hand, every point on its way, joined, up to where it is drawn.
     let ribbon: Vec<_> = embers
         .glowing()
         .filter(|quad| quad[0].kind() == crate::embers::Kind::Ribbon)
@@ -692,7 +695,7 @@ fn another_s_burning_marshmallow_thrown_trails_along_the_poses_its_snapshots_bri
             let off = (*point - campsite::heart())
                 .cross(velocity.normalize())
                 .length();
-            assert!(off < 2e-3, "{point}");
+            assert!(off < 1e-2, "{point}");
         }
     }
     for pair in ribbon.windows(2) {

@@ -51,6 +51,7 @@ pub mod playback;
 pub mod pointing;
 pub mod projection;
 pub mod recording;
+pub mod relayed;
 pub mod scene;
 pub mod shapes;
 pub mod sides;
