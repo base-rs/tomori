@@ -3340,4 +3340,6 @@ mod group_controls_tests;
 #[cfg(test)]
 mod snapping_tests;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;

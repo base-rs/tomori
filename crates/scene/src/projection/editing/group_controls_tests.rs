@@ -3,18 +3,10 @@
 
 //! A group's one grab bar, and the handles of a wall of a group, stand over none of its walls' slots, however the group
 //! is arranged and however far away it is seen.
+use super::test_support::{ADJUST, at, frame, shown};
 use super::*;
-use crate::arrival::HOME;
-use crate::projection::{Input as Frame, Projector};
+use crate::projection::Projector;
 use tomori_protocol::{Align, Edge, Join};
-
-const SNAPS: Rights = Rights {
-    adjust: true,
-    remove: false,
-    snap: true,
-    locks: false,
-    lock: false,
-};
 
 /// A wall of `columns` by `rows` at `scale`, someone added, its slots `aspect` times as wide as they are tall, or
 /// standard, curved at `radius` or flat.
@@ -393,47 +385,29 @@ fn a_wall_of_a_group_keeps_the_handles_of_an_edge_joined_along_the_opposite_one(
     assert!(restored > 0);
 }
 
-fn shown(walls: Vec<Wall>) -> Projection {
-    Projection::new("s", "sky").with_walls(walls)
-}
-
-fn frame<'a>(projection: &'a Projection, ray: Option<Ray>, grip: f32) -> Frame<'a> {
-    Frame {
-        projection: Some(projection),
-        ray,
-        grip: Some(grip),
-        viewer: Some(HOME),
-        active: true,
-        pointing: true,
-        nearer: f32::INFINITY,
-        stick: Vec2::ZERO,
-        straighten: false,
-        free: false,
-        controls: Controls::Controllers,
-        scroll: None,
-        rights: SNAPS,
-        surfaces: None,
-        left: crate::projection::Hold::default(),
-        now: Instant::now(),
-        dt: 1.0 / 72.0,
-    }
-}
-
-fn at(point: Vec3) -> Option<Ray> {
-    Ray::new(HOME, point - HOME)
-}
-
 #[test]
 fn the_group_s_bar_carries_the_group_and_a_wall_below_it_still_comes_out_alone() {
     let walls = stacked(ahead(2.5), 1.0);
     let all: Vec<&Wall> = walls.iter().collect();
-    let projection = shown(walls.clone());
+    let projection = shown(walls.clone(), vec![]);
     // The bar below the wide wall, the lowest, takes hold of it, and its group with it.
     let bar = group_bar(&walls[0], model(&walls[0].pose).unwrap(), &all).unwrap();
     assert!(group_bar(&walls[1], model(&walls[1].pose).unwrap(), &all).is_none());
     let mut projector = Projector::default();
-    projector.update(frame(&projection, at(bar.middle), 0.0));
-    projector.update(frame(&projection, at(bar.middle), 1.0));
+    projector.update(frame(
+        &projection,
+        at(bar.middle),
+        0.0,
+        ADJUST,
+        Instant::now(),
+    ));
+    projector.update(frame(
+        &projection,
+        at(bar.middle),
+        1.0,
+        ADJUST,
+        Instant::now(),
+    ));
     assert_eq!(projector.carried_wall(), Some("wall-1"));
     assert_eq!(projector.editor.members.len(), 2);
     // The wide wall below, taken hold of by an empty slot, is carried with its group, and pulled firmly towards the
@@ -442,11 +416,11 @@ fn the_group_s_bar_carries_the_group_and_a_wall_below_it_still_comes_out_alone()
         .unwrap()
         .transform_point3(Vec3::from_array(walls[0].slot_frames()[1].position));
     let mut projector = Projector::default();
-    projector.update(frame(&projection, at(slot), 1.0));
+    projector.update(frame(&projection, at(slot), 1.0, ADJUST, Instant::now()));
     assert_eq!(projector.carried_wall(), Some("wall-1"));
     assert_eq!(projector.editor.members.len(), 2);
     for _ in 0..40 {
-        let mut pull = frame(&projection, at(slot), 1.0);
+        let mut pull = frame(&projection, at(slot), 1.0, ADJUST, Instant::now());
         pull.stick = Vec2::new(0.0, -1.0);
         pull.dt = 0.02;
         projector.update(pull);
@@ -455,7 +429,7 @@ fn the_group_s_bar_carries_the_group_and_a_wall_below_it_still_comes_out_alone()
         }
     }
     assert!(projector.editor.detached);
-    let output = projector.update(frame(&projection, at(slot), 0.0));
+    let output = projector.update(frame(&projection, at(slot), 0.0, ADJUST, Instant::now()));
     assert_eq!(output.wall.unwrap().join, Some(Joining::Leave));
 }
 
@@ -607,10 +581,22 @@ fn a_group_s_bar_goes_to_its_lowest_left_wall_unlocked_below_every_slot_and_none
         }
     }
     // Squeezed, it takes hold of that wall, which is not carried, as the locked wall anchors its group.
-    let projection = shown(walls.clone());
+    let projection = shown(walls.clone(), vec![]);
     let mut projector = Projector::default();
-    projector.update(frame(&projection, at(bar.middle), 0.0));
-    projector.update(frame(&projection, at(bar.middle), 1.0));
+    projector.update(frame(
+        &projection,
+        at(bar.middle),
+        0.0,
+        ADJUST,
+        Instant::now(),
+    ));
+    projector.update(frame(
+        &projection,
+        at(bar.middle),
+        1.0,
+        ADJUST,
+        Instant::now(),
+    ));
     assert_eq!(projector.editing_wall(), Some("wall-2"));
     assert_eq!(projector.carried_wall(), None);
     // Every wall of it locked, it shows none.

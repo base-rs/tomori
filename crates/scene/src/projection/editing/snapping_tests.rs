@@ -1,18 +1,11 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use super::test_support::{ADJUST, at, frame, shown};
 use super::*;
 use crate::arrival::HOME;
 use crate::projection::{Input as Frame, Projector};
 use tomori_protocol::{Align, Edge, Join};
-
-const SNAPS: Rights = Rights {
-    adjust: true,
-    remove: false,
-    snap: true,
-    locks: false,
-    lock: false,
-};
 
 /// A wall of `columns` by `rows` at `scale`, someone added, at `pose`.
 fn wall(id: &str, pose: Pose, (columns, rows): (u32, u32), scale: f32) -> Wall {
@@ -55,42 +48,12 @@ fn swung(pose: Pose, angle: f32) -> Pose {
     }
 }
 
-fn shown(walls: Vec<Wall>) -> Projection {
-    Projection::new("s", "sky").with_walls(walls)
-}
-
-fn frame<'a>(projection: &'a Projection, ray: Option<Ray>, grip: f32, rights: Rights) -> Frame<'a> {
-    Frame {
-        projection: Some(projection),
-        ray,
-        grip: Some(grip),
-        viewer: Some(HOME),
-        active: true,
-        pointing: true,
-        nearer: f32::INFINITY,
-        stick: Vec2::ZERO,
-        straighten: false,
-        free: false,
-        controls: Controls::Controllers,
-        scroll: None,
-        rights,
-        surfaces: None,
-        left: crate::projection::Hold::default(),
-        now: Instant::now(),
-        dt: 1.0 / 72.0,
-    }
-}
-
 /// Where `wall`'s board is taken hold of, at the middle of its top margin, in the scene, standing at `pose`.
 fn grip_point(wall: &Wall, pose: &Pose) -> Vec3 {
     let (_, height) = wall.board().unwrap();
     model(pose)
         .unwrap()
         .transform_point3(Vec3::new(0.0, height / 2.0 - 0.005, 0.0))
-}
-
-fn at(point: Vec3) -> Option<Ray> {
-    Ray::new(HOME, point - HOME)
 }
 
 /// The hint drawn last, as text.
@@ -110,18 +73,18 @@ fn a_wall_carried_near_another_s_edge_outlines_where_it_snaps_and_let_go_snaps_t
     // Standing half a metre to the right of where it would snap, as far from home.
     let mut apart = big.clone();
     apart.pose = swung(snapped, -0.2);
-    let projection = shown(vec![two.clone(), apart.clone()]);
+    let projection = shown(vec![two.clone(), apart.clone()], vec![]);
     let mut projector = Projector::default();
     let start = at(grip_point(&apart, &apart.pose));
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     assert_eq!(projector.carried_wall(), Some("wall-2"));
     // Away from the other, nothing is outlined, and letting go leaves it here.
-    let output = projector.update(frame(&projection, start, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     assert!(!projector.editor.snapping());
     assert!(hint(&output).contains("leave it here"));
     // Brought within a few centimetres of where it snaps, with a tick, its slot outlined there and the hint saying so.
     let near = at(grip_point(&big, &snapped) + Vec3::new(0.03, 0.02, 0.0));
-    let output = projector.update(frame(&projection, near, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, near, 1.0, ADJUST, Instant::now()));
     assert!(projector.editor.snapping());
     assert!(output.wall_ticked);
     assert!(hint(&output).contains("snap it there"), "{}", hint(&output));
@@ -137,7 +100,7 @@ fn a_wall_carried_near_another_s_edge_outlines_where_it_snaps_and_let_go_snaps_t
         .count();
     assert_eq!(outline, 1);
     // Let go, it is sent beside the other, aligned at their tops, its group coming with it, and drawn where it snaps.
-    let output = projector.update(frame(&projection, near, 0.0, SNAPS));
+    let output = projector.update(frame(&projection, near, 0.0, ADJUST, Instant::now()));
     let change = output.wall.expect("a snap to send");
     assert_eq!(change.wall, "wall-2");
     assert_eq!(
@@ -157,25 +120,25 @@ fn a_wall_carried_near_another_s_edge_outlines_where_it_snaps_and_let_go_snaps_t
     let mut projector = Projector::default();
     let rights = Rights {
         snap: false,
-        ..SNAPS
+        ..ADJUST
     };
-    projector.update(frame(&projection, start, 1.0, rights));
-    projector.update(frame(&projection, near, 1.0, rights));
+    projector.update(frame(&projection, start, 1.0, rights, Instant::now()));
+    projector.update(frame(&projection, near, 1.0, rights, Instant::now()));
     assert!(!projector.editor.snapping());
-    let output = projector.update(frame(&projection, near, 0.0, rights));
+    let output = projector.update(frame(&projection, near, 0.0, rights, Instant::now()));
     assert_eq!(output.wall.unwrap().join, None);
 }
 
 #[test]
 fn a_wall_carried_carries_its_group_and_pulled_firmly_towards_the_participant_comes_out_alone() {
     let (two, big) = grouped();
-    let projection = shown(vec![two.clone(), big.clone()]);
+    let projection = shown(vec![two.clone(), big.clone()], vec![]);
     let mut projector = Projector::default();
     let start = at(grip_point(&big, &big.pose));
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     // Carried half a metre to the left, the other comes with it, standing as it stood from it.
     let left = at(grip_point(&big, &big.pose) - Vec3::X * 0.5);
-    let output = projector.update(frame(&projection, left, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, left, 1.0, ADJUST, Instant::now()));
     assert!(
         hint(&output).contains("take it out alone"),
         "{}",
@@ -192,7 +155,7 @@ fn a_wall_carried_carries_its_group_and_pulled_firmly_towards_the_participant_co
     assert!((u - was_u).abs() < 1e-3 && (y - was_y).abs() < 1e-3);
     assert!(depth.abs() < 1e-3 && turn.abs() < 1e-3);
     // Let go, the one carried is sent where it is, and the server moves its group; both are drawn there meanwhile.
-    let output = projector.update(frame(&projection, left, 0.0, SNAPS));
+    let output = projector.update(frame(&projection, left, 0.0, ADJUST, Instant::now()));
     let change = output.wall.unwrap();
     assert_eq!((change.wall.as_str(), change.join), ("wall-2", None));
     assert!(change.pose.is_some());
@@ -200,10 +163,10 @@ fn a_wall_carried_carries_its_group_and_pulled_firmly_towards_the_participant_co
     assert!(drawn[0].pose.position[0] < two.pose.position[0] - 0.1);
     // Carried again and pulled firmly towards the participant, it comes out with a tick, the other staying.
     let mut projector = Projector::default();
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     let mut ticked = false;
     for _ in 0..40 {
-        let mut pull = frame(&projection, start, 1.0, SNAPS);
+        let mut pull = frame(&projection, start, 1.0, ADJUST, Instant::now());
         pull.stick = Vec2::new(0.0, -1.0);
         pull.dt = 0.02;
         ticked |= projector.update(pull).wall_ticked;
@@ -212,13 +175,13 @@ fn a_wall_carried_carries_its_group_and_pulled_firmly_towards_the_participant_co
         }
     }
     assert!(projector.editor.detached && ticked);
-    let output = projector.update(frame(&projection, start, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     assert!(!hint(&output).contains("take it out alone"));
     let drawn = projector.editor.walls(&projection);
     assert_eq!(drawn[0].pose, two.pose);
     assert!(drawn[1].group.is_none() && drawn[1].joined.is_empty());
     // Let go, it leaves its group where it is.
-    let output = projector.update(frame(&projection, start, 0.0, SNAPS));
+    let output = projector.update(frame(&projection, start, 0.0, ADJUST, Instant::now()));
     let change = output.wall.unwrap();
     assert_eq!(change.join, Some(Joining::Leave));
     assert!(change.pose.is_some());
@@ -253,13 +216,13 @@ fn a_wall_pulled_out_of_its_group_snaps_elsewhere_alone() {
     let mut third = wall("wall-3", two.pose, (1, 1), 1.0);
     third.pose = group::attached_pose(&big, &third, Edge::Right, Align::Start).unwrap();
     third.pose = swung(third.pose, -0.025);
-    let projection = shown(vec![two.clone(), big.clone(), third.clone()]);
+    let projection = shown(vec![two.clone(), big.clone(), third.clone()], vec![]);
     let mut projector = Projector::default();
     let start = at(grip_point(&big, &big.pose));
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     // Pulled out, it stands in front of the walls, and snaps to none.
     for _ in 0..40 {
-        let mut pull = frame(&projection, start, 1.0, SNAPS);
+        let mut pull = frame(&projection, start, 1.0, ADJUST, Instant::now());
         pull.stick = Vec2::new(0.0, -1.0);
         pull.dt = 0.02;
         projector.update(pull);
@@ -272,15 +235,15 @@ fn a_wall_pulled_out_of_its_group_snaps_elsewhere_alone() {
     // alone.
     let carry = |projector: &Projector| projector.editor.carry.clone().unwrap();
     while carry(&projector).manipulation.distance() < carry(&projector).start - 1e-3 {
-        let mut push = frame(&projection, start, 1.0, SNAPS);
+        let mut push = frame(&projection, start, 1.0, ADJUST, Instant::now());
         push.stick = Vec2::new(0.0, 0.5);
         push.dt = 0.002;
         projector.update(push);
     }
     let right = at(grip_point(&big, &big.pose) + Vec3::X * 0.065);
-    projector.update(frame(&projection, right, 1.0, SNAPS));
+    projector.update(frame(&projection, right, 1.0, ADJUST, Instant::now()));
     assert!(projector.editor.snapping());
-    let output = projector.update(frame(&projection, right, 0.0, SNAPS));
+    let output = projector.update(frame(&projection, right, 0.0, ADJUST, Instant::now()));
     match output.wall.unwrap().join {
         Some(Joining::Attach { attach, alone }) => {
             assert!(alone);
@@ -341,11 +304,11 @@ fn a_wall_25_cm_off_and_turned_25_degrees_shows_where_it_snaps_lined_up_and_snap
     for degrees in [25.0, -25.0] {
         let mut apart = big.clone();
         apart.pose = turned(group::along(&two.pose, None, u + 0.25, y), degrees);
-        let projection = shown(vec![two.clone(), apart.clone()]);
+        let projection = shown(vec![two.clone(), apart.clone()], vec![]);
         let mut projector = Projector::default();
         let ray = at(grip_point(&apart, &apart.pose));
-        projector.update(frame(&projection, ray, 1.0, SNAPS));
-        let output = projector.update(frame(&projection, ray, 1.0, SNAPS));
+        projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
+        let output = projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
         assert!(projector.editor.snapping(), "{degrees}°");
         assert!(hint(&output).contains("snap it there"), "{}", hint(&output));
         // The ghost stands where it will snap, square in the other's plane, beside it.
@@ -355,7 +318,7 @@ fn a_wall_25_cm_off_and_turned_25_degrees_shows_where_it_snaps_lined_up_and_snap
         lined_up.pose = shown_at;
         assert!(same(&ghosts(&output), &outlined(&lined_up)));
         // Let go, it snaps there, drawn exactly where the ghost was, lined up with the other.
-        let output = projector.update(frame(&projection, ray, 0.0, SNAPS));
+        let output = projector.update(frame(&projection, ray, 0.0, ADJUST, Instant::now()));
         assert_eq!(
             output.wall.unwrap().join,
             Some(Joining::Attach {
@@ -378,15 +341,15 @@ fn a_wall_25_cm_off_and_turned_25_degrees_shows_where_it_snaps_lined_up_and_snap
     // Turned 25° by the stick as it is carried, from square, it snaps all the same.
     let mut apart = big.clone();
     apart.pose = turned(group::along(&two.pose, None, u + 0.2, y), -5.0);
-    let projection = shown(vec![two.clone(), apart.clone()]);
+    let projection = shown(vec![two.clone(), apart.clone()], vec![]);
     let mut projector = Projector::default();
     let ray = at(grip_point(&apart, &apart.pose));
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     for _ in 0..2 {
-        let mut flick = frame(&projection, ray, 1.0, SNAPS);
+        let mut flick = frame(&projection, ray, 1.0, ADJUST, Instant::now());
         flick.stick = Vec2::X;
         projector.update(flick);
-        projector.update(frame(&projection, ray, 1.0, SNAPS));
+        projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     }
     let preview = projector.editor.preview.clone().unwrap();
     let (.., turn) = group::on_surface(&two.pose, None, &preview.pose);
@@ -399,11 +362,11 @@ fn a_wall_25_cm_off_and_turned_25_degrees_shows_where_it_snaps_lined_up_and_snap
     // 35 cm beyond the edge, it snaps nowhere.
     let mut beyond = big.clone();
     beyond.pose = group::along(&two.pose, None, u + 0.35, y);
-    let projection = shown(vec![two.clone(), beyond.clone()]);
+    let projection = shown(vec![two.clone(), beyond.clone()], vec![]);
     let mut projector = Projector::default();
     let ray = at(grip_point(&beyond, &beyond.pose));
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
-    let output = projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
+    let output = projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     assert!(!projector.editor.snapping() && ghosts(&output).is_empty());
 }
 
@@ -413,14 +376,20 @@ fn a_snap_shown_is_held_a_little_beyond_where_it_is_first_shown() {
     let (u, y) = group::attached_offset(&two, &big, Edge::Right, Align::Start).unwrap();
     let mut apart = big.clone();
     apart.pose = group::along(&two.pose, None, u + 0.26, y);
-    let projection = shown(vec![two.clone(), apart.clone()]);
+    let projection = shown(vec![two.clone(), apart.clone()], vec![]);
     let mut projector = Projector::default();
     let grip = grip_point(&apart, &apart.pose);
     let right = right_of(&two);
-    projector.update(frame(&projection, at(grip), 1.0, SNAPS));
+    projector.update(frame(&projection, at(grip), 1.0, ADJUST, Instant::now()));
     // Where it is beyond the edge, `shift` from where it was taken.
     let mut carried = |shift: f32| {
-        let output = projector.update(frame(&projection, at(grip + right * shift), 1.0, SNAPS));
+        let output = projector.update(frame(
+            &projection,
+            at(grip + right * shift),
+            1.0,
+            ADJUST,
+            Instant::now(),
+        ));
         (projector.editor.snapping(), output.wall_ticked)
     };
     // Shown at 26 cm, as it was taken hold of; held at 34 cm; gone at 42 cm; not shown again at 34 cm, until within
@@ -446,17 +415,18 @@ fn of_two_neighbours_the_nearer_is_shown_and_the_one_shown_stays_until_the_other
     let (u, y) = group::attached_offset(&left, &middle, Edge::Right, Align::Start).unwrap();
     right.pose = group::along(&left.pose, None, 2.0 * u + 0.2, 0.0);
     middle.pose = group::along(&left.pose, None, u + 0.05, y);
-    let projection = shown(vec![left.clone(), middle.clone(), right.clone()]);
+    let projection = shown(vec![left.clone(), middle.clone(), right.clone()], vec![]);
     let mut projector = Projector::default();
     let grip = grip_point(&middle, &middle.pose);
     let across = right_of(&left);
-    projector.update(frame(&projection, at(grip), 1.0, SNAPS));
+    projector.update(frame(&projection, at(grip), 1.0, ADJUST, Instant::now()));
     let mut towards = |at_shift: f32| {
         let output = projector.update(frame(
             &projection,
             at(grip + across * (at_shift - 0.05)),
             1.0,
-            SNAPS,
+            ADJUST,
+            Instant::now(),
         ));
         let snap = projector.editor.snap.clone().unwrap();
         (snap.to, snap.snap.edge, output.wall_ticked)
@@ -495,12 +465,12 @@ fn a_curved_wall_carried_near_a_curved_one_snaps_onto_its_arc_at_its_radius() {
         group::along(&target.pose, Some(2.5), u + 0.12, y + 0.04),
         -12.0,
     );
-    let projection = shown(vec![target.clone(), carried.clone()]);
+    let projection = shown(vec![target.clone(), carried.clone()], vec![]);
     let mut projector = Projector::default();
     let ray = at(grip_point_curved(&carried));
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     assert_eq!(projector.carried_wall(), Some("wall-2"));
-    let output = projector.update(frame(&projection, ray, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     let snap = projector
         .editor
         .snap
@@ -515,7 +485,7 @@ fn a_curved_wall_carried_near_a_curved_one_snaps_onto_its_arc_at_its_radius() {
     let (_, _, depth, turn) = group::on_surface(&target.pose, Some(2.5), &on_arc.pose);
     assert!(depth.abs() < 1e-4 && turn.abs() < 1e-4);
     // Let go, it is drawn there, at that radius, until the server agrees.
-    projector.update(frame(&projection, ray, 0.0, SNAPS));
+    projector.update(frame(&projection, ray, 0.0, ADJUST, Instant::now()));
     let drawn = projector.editor.walls(&projection);
     let placed = drawn.iter().find(|wall| wall.id == "wall-2").unwrap();
     assert_eq!(placed.radius(), Some(2.5));
@@ -533,11 +503,11 @@ fn the_trigger_held_keeps_a_wall_carried_from_snapping_and_let_go_it_stays_where
     let (u, y) = group::attached_offset(&two, &big, Edge::Right, Align::Start).unwrap();
     let mut apart = big.clone();
     apart.pose = group::along(&two.pose, None, u + 0.1, y);
-    let projection = shown(vec![two.clone(), apart.clone()]);
+    let projection = shown(vec![two.clone(), apart.clone()], vec![]);
     let mut projector = Projector::default();
     let ray = at(grip_point(&apart, &apart.pose));
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
-    let output = projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
+    let output = projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     assert!(projector.editor.snapping());
     let rows = hint(&output);
     assert!(
@@ -547,7 +517,7 @@ fn the_trigger_held_keeps_a_wall_carried_from_snapping_and_let_go_it_stays_where
     // Held, nothing is outlined and the hint says it is left here.
     let free = |grip: f32| Frame {
         free: true,
-        ..frame(&projection, ray, grip, SNAPS)
+        ..frame(&projection, ray, grip, ADJUST, Instant::now())
     };
     let output = projector.update(free(1.0));
     assert!(!projector.editor.snapping() && ghosts(&output).is_empty());
@@ -556,7 +526,7 @@ fn the_trigger_held_keeps_a_wall_carried_from_snapping_and_let_go_it_stays_where
     let nearer = at(grip_point(&apart, &apart.pose) - right_of(&two) * 0.05);
     let moved = |grip: f32| Frame {
         free: true,
-        ..frame(&projection, nearer, grip, SNAPS)
+        ..frame(&projection, nearer, grip, ADJUST, Instant::now())
     };
     projector.update(moved(1.0));
     assert!(!projector.editor.snapping());
@@ -569,9 +539,9 @@ fn the_trigger_held_keeps_a_wall_carried_from_snapping_and_let_go_it_stays_where
     assert!((left - (u + 0.05)).abs() < 0.01, "{left}");
     // Let go of the trigger, it snaps again.
     let mut projector = Projector::default();
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     projector.update(free(1.0));
-    projector.update(frame(&projection, ray, 1.0, SNAPS));
+    projector.update(frame(&projection, ray, 1.0, ADJUST, Instant::now()));
     assert!(projector.editor.snapping());
     // The desktop window names its key.
     let keys = hint_with(
@@ -600,30 +570,30 @@ fn a_tilted_wall_snaps_upright_none_snaps_to_one_tilted_and_a_wall_of_a_group_ha
     // snaps: its slots are outlined there upright, as the group's walls stand, and let go, it is drawn so.
     let mut apart = big.clone().with_tilt(Some(20.0));
     apart.pose = swung(snapped, -0.2);
-    let projection = shown(vec![two.clone(), apart.clone()]);
+    let projection = shown(vec![two.clone(), apart.clone()], vec![]);
     let mut projector = Projector::default();
     let start = at(grip_point(&apart, &apart.frame()));
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     assert_eq!(projector.carried_wall(), Some("wall-2"));
     let near = at(grip_point(&big, &snapped) + Vec3::new(0.03, 0.02, 0.0));
-    let output = projector.update(frame(&projection, near, 1.0, SNAPS));
+    let output = projector.update(frame(&projection, near, 1.0, ADJUST, Instant::now()));
     assert!(projector.editor.snapping());
     assert!(same(&ghosts(&output), &outlined(&big)));
-    let output = projector.update(frame(&projection, near, 0.0, SNAPS));
+    let output = projector.update(frame(&projection, near, 0.0, ADJUST, Instant::now()));
     assert!(output.wall.unwrap().join.is_some());
     let drawn = projector.editor.walls(&projection);
     let shown_now = drawn.iter().find(|wall| wall.id == "wall-2").unwrap();
     assert_eq!(shown_now.tilt, None);
     // A wall carried near a tilted one snaps to nothing.
-    let projection = shown(vec![
-        two.clone().with_tilt(Some(20.0)),
-        apart.with_tilt(None),
-    ]);
+    let projection = shown(
+        vec![two.clone().with_tilt(Some(20.0)), apart.with_tilt(None)],
+        vec![],
+    );
     let mut projector = Projector::default();
     let start = at(grip_point(&big, &swung(snapped, -0.2)));
-    projector.update(frame(&projection, start, 1.0, SNAPS));
+    projector.update(frame(&projection, start, 1.0, ADJUST, Instant::now()));
     assert_eq!(projector.carried_wall(), Some("wall-2"));
-    projector.update(frame(&projection, near, 1.0, SNAPS));
+    projector.update(frame(&projection, near, 1.0, ADJUST, Instant::now()));
     assert!(!projector.editor.snapping());
     // A wall of a group stands upright, and so has no hinge; alone, it has one.
     let (two, big) = grouped();

@@ -1,19 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use super::test_support::{ADJUST, at, frame, shown};
 use super::*;
 use crate::arrival::HOME;
 use crate::projection::{Input as Frame, Projector};
 use crate::sides::Side;
 use tomori_protocol::{Panel, Place, TOMORI_WALL};
-
-const ADJUST: Rights = Rights {
-    adjust: true,
-    remove: false,
-    snap: true,
-    locks: false,
-    lock: false,
-};
 
 const OWNER: Rights = Rights {
     adjust: true,
@@ -41,45 +34,6 @@ fn tomori() -> Wall {
         Pose::upright_facing([0.0, 0.52, -2.3], [0.0, 0.52, 0.0]),
     )
     .with_shape(WallShape::Arc { radius: 2.3 })
-}
-
-fn shown(walls: Vec<Wall>, panels: Vec<Panel>) -> Projection {
-    Projection::new("s", "sky")
-        .with_walls(walls)
-        .with_panels(panels)
-}
-
-fn frame<'a>(
-    projection: &'a Projection,
-    ray: Option<Ray>,
-    grip: f32,
-    rights: Rights,
-    now: Instant,
-) -> Frame<'a> {
-    Frame {
-        projection: Some(projection),
-        ray,
-        grip: Some(grip),
-        viewer: Some(HOME),
-        active: true,
-        pointing: true,
-        nearer: f32::INFINITY,
-        stick: Vec2::ZERO,
-        straighten: false,
-        free: false,
-        controls: Controls::Controllers,
-        scroll: None,
-        rights,
-        surfaces: None,
-        left: crate::projection::Hold::default(),
-        now,
-        dt: 1.0 / 72.0,
-    }
-}
-
-/// A ray from home at `point`.
-fn at(point: Vec3) -> Option<Ray> {
-    Ray::new(HOME, point - HOME)
 }
 
 /// Where `handle` of `wall`, standing where it says, is drawn, seen from home.
