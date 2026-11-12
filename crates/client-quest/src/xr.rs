@@ -8,6 +8,7 @@
 use crate::{
     controller,
     feedback::Hand,
+    foveation::{self, Level, Map},
     frame_timing::{self, Segment},
     graphics::Renderer,
     hands,
@@ -37,6 +38,8 @@ pub fn run_desktop(
     run(
         &(),
         crate::graphics::SAMPLES,
+        // `TOMORI_FOVEATION`, as the headset's `tomori.foveation`; a desktop runtime without Meta's foveation draws as before.
+        foveation::Request::parse(std::env::var("TOMORI_FOVEATION").ok().as_deref()),
         || false,
         conversation,
         connection,
@@ -47,10 +50,11 @@ pub fn run_desktop(
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 
-/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot.
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot. `foveation` is the fixed foveation asked for, where the runtime and GPU can; see `design/rendering.md`.
 pub fn run(
     platform: &impl xr::PlatformInfo,
     samples: u32,
+    foveation: foveation::Request,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -86,6 +90,14 @@ pub fn run(
         supported.fb_haptic_amplitude_envelope,
         supported.fb_haptic_pcm
     );
+    let offered = foveation::Extensions::offered(&supported);
+    log::info!(
+        "OpenXR foveation extensions: FB={}, configuration={}, swapchain update state={}, Vulkan={}",
+        offered.foveation,
+        offered.configuration,
+        offered.update_state,
+        offered.vulkan
+    );
     ensure!(
         supported.khr_vulkan_enable2,
         "Runtime does not support XR_KHR_vulkan_enable2"
@@ -96,6 +108,8 @@ pub fn run(
     extensions.fb_render_model = supported.fb_render_model;
     extensions.ext_hand_tracking = supported.ext_hand_tracking;
     extensions.ext_user_presence = supported.ext_user_presence;
+    let foveation_extensions = offered.enabled(foveation);
+    foveation_extensions.enable(&mut extensions);
     #[cfg(target_os = "android")]
     {
         extensions.khr_android_create_instance = true;
@@ -131,7 +145,12 @@ pub fn run(
     let (width, height) = xr_types::eye_size(&views);
     // Declaration order matters: all XR session resources are dropped before
     // the wgpu-owned Vulkan device and instance.
-    let gpu = Gpu::new(&instance, system)?;
+    // The density map's device extension is enabled only for a runtime that can foveate, so that others' devices are as before.
+    let gpu = Gpu::new(&instance, system, foveation_extensions.maps())?;
+    let plan = foveation::Plan::new(foveation, gpu.density, foveation_extensions);
+    if let Err(why) = plan {
+        log::info!("Fixed foveation off: {why}");
+    }
     steps.done("GPU");
     if destroyed() {
         return Ok(());
@@ -146,7 +165,7 @@ pub fn run(
     log::info!("Recenterable reference space: {space_type:?}");
     let (vk_format, format) = xr_types::swapchain_format(&session.enumerate_swapchain_formats()?)
         .context("runtime has no supported sRGB color format")?;
-    let mut swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
+    let swapchain_info = xr::SwapchainCreateInfo {
         create_flags: xr::SwapchainCreateFlags::EMPTY,
         usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
         format: vk_format.as_raw() as u32,
@@ -156,7 +175,19 @@ pub fn run(
         face_count: 1,
         array_size: 2,
         mip_count: 1,
-    })?;
+    };
+    // Made for the runtime's density maps, at the level asked for, where it can give them; a runtime that cannot gives none, and Tomori's own is used.
+    let (mut swapchain, runtime_maps) = match plan {
+        Ok(plan) if plan.runtime => match foveated_swapchain(&session, &swapchain_info, plan.level)
+        {
+            Ok(made) => made,
+            Err(error) => {
+                log::warn!("Could not foveate the swapchain: {error:#}");
+                (session.create_swapchain(&swapchain_info)?, None)
+            }
+        },
+        _ => (session.create_swapchain(&swapchain_info)?, None),
+    };
     let images = gpu.import_images(&swapchain, format, width, height)?;
     steps.done("session");
     if destroyed() {
@@ -168,6 +199,37 @@ pub fn run(
         "Drawing {samples}x multisampled; transient attachments save memory: {:?}",
         gpu.adapter.get_info().transient_saves_memory
     );
+    // Before the renderer makes its pipelines, so that they are made against the eyes' passes with their density map.
+    let map = plan.ok().and_then(|plan| plan.map(runtime_maps.is_some()));
+    let mut foveated = map.and_then(|map| {
+        let level = foveation.level;
+        gpu.foveate(
+            level,
+            map,
+            &images,
+            runtime_maps.as_ref(),
+            vk_format,
+            samples,
+            width,
+            height,
+        )
+        .inspect_err(|error| log::warn!("Could not foveate the eyes: {error:#}"))
+        .ok()
+    });
+    let foveation_summary = foveation::summary(
+        foveation.level,
+        foveated.as_ref().map(|foveated| foveated.map),
+    );
+    if plan.is_ok() {
+        log::info!(
+            "Fixed {foveation_summary}{}",
+            runtime_maps
+                .as_ref()
+                .filter(|_| map == Some(Map::Runtime))
+                .map(|maps| format!(", {}x{} texels", maps.size.width, maps.size.height))
+                .unwrap_or_default()
+        );
+    }
     let mut renderer = Renderer::with_sceneries(
         &gpu.device,
         &gpu.queue,
@@ -303,6 +365,12 @@ pub fn run(
                 continue;
             }
         };
+        // Tomori's own density map is shaped about where each eye looks straight ahead, once they are first known.
+        if let Some(foveated) = &mut foveated
+            && let Err(error) = foveated.shape(&views)
+        {
+            log::warn!("Could not shape the density map: {error:#}");
+        }
         let hands = timer.time(Segment::Input, || {
             if focused {
                 input.sample_poses(
@@ -444,8 +512,14 @@ pub fn run(
                 log::info!("{summary}{}", slowest.unwrap_or_default());
             }
             // And what they cost the GPU, each eye's pass, and what they drew.
+            // With the foveation they were drawn at, and how many of the eyes' framebuffers were given their density map.
             if let Some(gpu) = renderer.gpu_summary() {
-                log::info!("{gpu}");
+                let framebuffers = foveated
+                    .as_ref()
+                    .map(|foveated| foveated.framebuffers())
+                    .map(|(eyes, other)| format!(" ({eyes} framebuffers, {other} others)"))
+                    .unwrap_or_default();
+                log::info!("{gpu}; {foveation_summary}{framebuffers}");
             }
         }
     }
@@ -464,6 +538,101 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// The eyes' swapchain made for the runtime's density maps, with its profile at `level` applied, static rather than dynamic, and the maps it then gives, if it gives one for every image.
+fn foveated_swapchain(
+    session: &xr::Session<xr::Vulkan>,
+    info: &xr::SwapchainCreateInfo<xr::Vulkan>,
+    level: Level,
+) -> Result<(
+    xr::Swapchain<xr::Vulkan>,
+    Option<crate::vulkan::RuntimeMaps>,
+)> {
+    use xr::sys::{self, Handle as _};
+    let instance = session.instance();
+    let fb = instance
+        .exts()
+        .fb_foveation
+        .as_ref()
+        .context("XR_FB_foveation")?;
+    let update = instance
+        .exts()
+        .fb_swapchain_update_state
+        .as_ref()
+        .context("XR_FB_swapchain_update_state")?;
+    let foveation = sys::SwapchainCreateInfoFoveationFB {
+        ty: sys::SwapchainCreateInfoFoveationFB::TYPE,
+        next: std::ptr::null_mut(),
+        flags: sys::SwapchainCreateFoveationFlagsFB::FRAGMENT_DENSITY_MAP,
+    };
+    let raw = sys::SwapchainCreateInfo {
+        ty: sys::SwapchainCreateInfo::TYPE,
+        next: (&raw const foveation).cast(),
+        create_flags: info.create_flags,
+        usage_flags: info.usage_flags,
+        format: info.format as i64,
+        sample_count: info.sample_count,
+        width: info.width,
+        height: info.height,
+        face_count: info.face_count,
+        array_size: info.array_size,
+        mip_count: info.mip_count,
+    };
+    let mut handle = sys::Swapchain::NULL;
+    check(unsafe { (instance.fp().create_swapchain)(session.as_raw(), &raw, &mut handle) })
+        .context("xrCreateSwapchain")?;
+    // SAFETY: made just now for this session.
+    let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
+    let level_info = sys::FoveationLevelProfileCreateInfoFB {
+        ty: sys::FoveationLevelProfileCreateInfoFB::TYPE,
+        next: std::ptr::null_mut(),
+        level: level.xr(),
+        vertical_offset: 0.0,
+        dynamic: sys::FoveationDynamicFB::DISABLED,
+    };
+    let profile_info = sys::FoveationProfileCreateInfoFB {
+        ty: sys::FoveationProfileCreateInfoFB::TYPE,
+        next: (&raw const level_info).cast_mut().cast(),
+    };
+    let mut profile = sys::FoveationProfileFB::NULL;
+    let applied = check(unsafe {
+        (fb.create_foveation_profile)(session.as_raw(), &profile_info, &mut profile)
+    })
+    .context("xrCreateFoveationProfileFB")
+    .and_then(|()| {
+        let state = sys::SwapchainStateFoveationFB {
+            ty: sys::SwapchainStateFoveationFB::TYPE,
+            next: std::ptr::null_mut(),
+            flags: sys::SwapchainStateFoveationFlagsFB::EMPTY,
+            profile,
+        };
+        let result =
+            unsafe { (update.update_swapchain)(swapchain.as_raw(), (&raw const state).cast()) };
+        // The swapchain keeps its state once updated, so the profile is no longer needed.
+        unsafe { (fb.destroy_foveation_profile)(profile) };
+        check(result).context("xrUpdateSwapchainFB")
+    });
+    if let Err(error) = applied {
+        log::warn!("Could not apply the foveation profile: {error:#}");
+        return Ok((swapchain, None));
+    }
+    let maps = crate::vulkan::runtime_maps(&swapchain).unwrap_or_else(|error| {
+        log::warn!("Could not read the runtime's density maps: {error:#}");
+        None
+    });
+    if maps.is_none() {
+        log::info!("The runtime gave no density map for the swapchain's images");
+    }
+    Ok((swapchain, maps))
+}
+
+fn check(result: xr::sys::Result) -> Result<()> {
+    if result.into_raw() < 0 {
+        Err(anyhow::anyhow!("{result}"))
+    } else {
+        Ok(())
+    }
 }
 
 /// After a turn of the frame loop, ask for the microphone or check its answer, if it is time; the platform's dialog is answered later, so this never waits for it.
