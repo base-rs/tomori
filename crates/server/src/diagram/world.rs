@@ -10,6 +10,7 @@
 //! shown or changed; following what moves comes in a later stage. See `design/diagrams.md`.
 use tomori_protocol::Pose;
 use tomori_protocol::diagram::{Diagram, Warning};
+use tomori_protocol::wall::rotate;
 use tomori_protocol::world::{Frame, Kind, Reference, State};
 
 use super::{Spot, length, normalised};
@@ -411,21 +412,6 @@ pub(super) fn part(graph: &super::Graph, spots: &mut [Spot], fixed: Option<usize
             break;
         }
     }
-}
-
-/// `vector` turned by the unit quaternion `rotation`.
-fn rotate(rotation: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
-    let [x, y, z, w] = rotation;
-    let cross = |a: [f32; 3], b: [f32; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let t = cross([x, y, z], vector).map(|value| value * 2.0);
-    let turned = cross([x, y, z], t);
-    [0, 1, 2].map(|axis| vector[axis] + t[axis] * w + turned[axis])
 }
 
 /// How near the middle of a volume's targets must be to whoever asked, in metres, for the volume to float between them,
