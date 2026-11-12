@@ -109,13 +109,7 @@ fn a_list_s_rows_show_their_tone_as_a_mark_and_its_highlighted_row_without_its_p
 fn a_list_draws_its_highlighted_row_on_a_bar_and_its_tones_and_values_as_strips_and_thin_bars() {
     let panel = queue();
     let lines = lines(&panel, COLUMNS);
-    let shapes = shapes(
-        &panel.rows,
-        &lines,
-        (0, BODY_ROWS),
-        COLUMNS,
-        Marked::default(),
-    );
+    let shapes = shapes(&panel, &lines, (0, BODY_ROWS), COLUMNS, Marked::default());
     // One bar, the highlighted row's, across the face.
     let width = (COLUMNS * CELL_WIDTH) as f32;
     assert_eq!(boxes(&shapes), [(HIGHLIGHTED, top(1), None)]);
@@ -160,16 +154,18 @@ fn a_list_draws_its_highlighted_row_on_a_bar_and_its_tones_and_values_as_strips_
     // A neutral row's value is drawn in the list's own blue.
     let mut neutral = panel.clone();
     neutral.rows[1].tone = Tone::Neutral;
-    let shapes = super::shapes(
-        &neutral.rows,
-        &lines,
-        (0, BODY_ROWS),
-        COLUMNS,
-        Marked::default(),
-    );
+    let shapes = super::shapes(&neutral, &lines, (0, BODY_ROWS), COLUMNS, Marked::default());
     assert!(strokes_of(&shapes).contains(&VALUE_NEUTRAL));
     // None for a panel without rows.
-    assert!(super::shapes(&[], &lines, (0, BODY_ROWS), COLUMNS, Marked::default()).is_empty());
+    let text = Panel::new(
+        "panel-2",
+        "",
+        "",
+        Place::Free {
+            pose: Pose::default(),
+        },
+    );
+    assert!(super::shapes(&text, &lines, (0, BODY_ROWS), COLUMNS, Marked::default()).is_empty());
 }
 
 impl super::Marked {
@@ -193,15 +189,7 @@ fn strokes_of(shapes: &[Shape]) -> Vec<Rgba> {
 fn the_row_pointed_at_is_outlined_on_a_fainter_bar_and_the_row_just_chosen_on_a_brighter_one() {
     let panel = queue();
     let lines = lines(&panel, COLUMNS);
-    let draw = |marked: Marked| {
-        boxes(&shapes(
-            &panel.rows,
-            &lines,
-            (0, BODY_ROWS),
-            COLUMNS,
-            marked,
-        ))
-    };
+    let draw = |marked: Marked| boxes(&shapes(&panel, &lines, (0, BODY_ROWS), COLUMNS, marked));
     // Pointed at, a row's bar is outlined; on the highlighted row, over its bar.
     assert_eq!(
         draw(Marked::hovering(2)),
@@ -689,4 +677,337 @@ fn a_change_of_only_rows_tones_and_values_draws_the_list_again_without_laying_it
     let mut none = panel.clone();
     none.rows.clear();
     assert!(!super::restyled(&none, &none.clone().with_version(9)));
+}
+
+/// The observers of a running system, as their environment lays them out as a table: a name, how busy each is, with
+/// its value under that column, the most it was and how long callers wait, `count` of them.
+fn observers(count: usize) -> Panel {
+    use tomori_protocol::{CellAlign, ListColumn};
+    let figures = |index: usize| {
+        let busy = (index * 37) % 101;
+        (
+            format!("observer-{index}"),
+            vec![
+                format!("observer-{index}"),
+                format!("{busy}%"),
+                format!("{}", busy * 3),
+                format!("{} ms", index * index),
+            ],
+            busy,
+        )
+    };
+    let rows: Vec<ListRow> = (0..count)
+        .map(|index| {
+            let (id, cells, busy) = figures(index);
+            let tone = match busy {
+                90.. => Tone::Bad,
+                60.. => Tone::Warn,
+                _ => Tone::Neutral,
+            };
+            ListRow::new(id, true)
+                .with_cells(cells)
+                .with_tone(tone)
+                .with_value(busy as f32 / 100.0)
+        })
+        .collect();
+    let body = (0..count)
+        .map(|index| format!("- {}", figures(index).1.join(" · ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Panel::new(
+        "panel-1",
+        "Observers",
+        body,
+        Place::Free {
+            pose: Pose::default(),
+        },
+    )
+    .with_rows(rows)
+    .with_columns(vec![
+        ListColumn::new("Name"),
+        ListColumn::new("Busy")
+            .aligned(CellAlign::Right)
+            .with_value(true),
+        ListColumn::new("Max").aligned(CellAlign::Right),
+        ListColumn::new("Wait").aligned(CellAlign::Right),
+    ])
+}
+
+#[test]
+fn a_list_laid_out_as_a_table_is_a_grid_under_its_header_numbers_right_aligned_and_marks_before_its_rows()
+ {
+    let panel = observers(3);
+    let lines = lines(&panel, COLUMNS);
+    assert_eq!(
+        texts(&lines),
+        [
+            "  Name       ▏Busy ▏Max ▏Wait",
+            "  ───────────────────────────",
+            "  observer-0 ▏  0% ▏  0 ▏0 ms",
+            "  observer-1 ▏ 37% ▏111 ▏1 ms",
+            "! observer-2 ▏ 74% ▏222 ▏4 ms",
+        ]
+    );
+    // The header and its rule are of no row, and each row's lines are its row's, by its place among them.
+    assert_eq!(
+        lines.iter().map(|line| line.item).collect::<Vec<_>>(),
+        [None, None, Some(0), Some(1), Some(2)]
+    );
+    assert!(lines.iter().all(|line| line.table.is_some()));
+    // The header is bold on its bar, its mark's cells on it too, and the mark is bold in its tone's colour.
+    assert!(
+        lines[0]
+            .cells
+            .iter()
+            .all(|(_, style)| style.background.is_some())
+    );
+    assert!(lines[0].cells[2].1.bold);
+    assert_eq!(lines[4].cells[0].1.color, crate::chart::tone(Tone::Warn));
+    assert!(lines[4].cells[0].1.bold);
+    // Every row's lines between columns are where the header's are, so that each figure is read down its column.
+    let between = |line: &Line| {
+        line.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, style))| style.mark == Some(Mark::Line))
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        lines
+            .iter()
+            .skip(2)
+            .all(|line| between(line) == between(&lines[0]))
+    );
+    // A list of no columns is laid out as before.
+    let mut plain = panel.clone();
+    plain.columns.clear();
+    assert!(
+        super::lines(&plain, COLUMNS)
+            .iter()
+            .all(|line| line.table.is_none())
+    );
+    // Without titles, there is no header; a row short of cells has them empty; and a cell or column past what a client
+    // lays out is left out.
+    let mut bare = panel.clone();
+    for column in &mut bare.columns {
+        column.title.clear();
+    }
+    bare.rows[1].cells.truncate(1);
+    bare.rows[0].cells[3] = String::new();
+    bare.rows[2].cells[0] = "x".repeat(60);
+    bare.columns[1].align = tomori_protocol::CellAlign::Centre;
+    let lines = super::lines(&bare, 80);
+    assert_eq!(lines[0].item, Some(0));
+    assert!(
+        texts(&lines)[0].ends_with("▏0%  ▏  0 ▏    "),
+        "{:?}",
+        texts(&lines)
+    );
+    let short = &texts(&lines)[1];
+    assert!(
+        short.starts_with("  observer-1 ") && short.ends_with(" ▏    ▏    ▏    "),
+        "{short}"
+    );
+    assert!(texts(&lines)[2].contains(&format!("{} ", "x".repeat(LIST_CELL_CHARS))));
+    let mut wide = panel.clone();
+    wide.columns = vec![tomori_protocol::ListColumn::new("C"); LIST_COLUMNS + 4];
+    for row in &mut wide.rows {
+        row.cells = vec!["1".into(); LIST_COLUMNS + 4];
+    }
+    let lines = super::lines(&wide, 80);
+    assert_eq!(between(&lines[0]).len(), LIST_COLUMNS - 1);
+}
+
+#[test]
+fn a_table_too_narrow_for_its_columns_is_a_card_of_title_and_cell_lines_for_each_row() {
+    let panel = observers(2);
+    let lines = lines(&panel, 20);
+    assert_eq!(
+        texts(&lines),
+        [
+            "  Name: observer-0",
+            "  Busy: 0%",
+            "  Max: 0",
+            "  Wait: 0 ms",
+            "  ──────────────────",
+            "  Name: observer-1",
+            "  Busy: 37%",
+            "  Max: 111",
+            "  Wait: 1 ms",
+        ]
+    );
+    assert_eq!(
+        lines.iter().map(|line| line.item).collect::<Vec<_>>(),
+        [
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1)
+        ]
+    );
+    // Each card is one row, its bar across all its lines, and its value under its last, across the face.
+    let mut marked = panel.clone();
+    marked.rows[1].highlighted = true;
+    let shapes = shapes(&marked, &lines, (0, BODY_ROWS), 20, Marked::default());
+    let bar = boxes(&shapes);
+    assert_eq!(bar, [(HIGHLIGHTED, top(5), None)]);
+    let values: Vec<_> = strokes(&shapes)
+        .into_iter()
+        .filter(|(_, _, color)| *color == VALUE_TRACK)
+        .map(|(from, to, _)| (from, to[0]))
+        .collect();
+    let width = (20 * CELL_WIDTH) as f32;
+    assert_eq!(
+        values,
+        [
+            ([VALUE_X, top(4) - VALUE_Y], width - VALUE_END),
+            ([VALUE_X, top(9) - VALUE_Y], width - VALUE_END)
+        ]
+    );
+}
+
+#[test]
+fn a_table_s_value_is_drawn_under_its_column_and_its_header_stays_as_it_scrolls() {
+    let panel = observers(30);
+    let lines = lines(&panel, COLUMNS);
+    let shapes = shapes(&panel, &lines, (0, BODY_ROWS), COLUMNS, Marked::default());
+    // Under the Busy column: from after the line before it to the space before the line after it.
+    let header = texts(&lines)[0].clone();
+    let line = |nth: usize| {
+        header
+            .chars()
+            .enumerate()
+            .filter(|(_, ch)| *ch == '▏')
+            .nth(nth)
+            .unwrap()
+            .0
+    };
+    let tracks: Vec<_> = strokes(&shapes)
+        .into_iter()
+        .filter(|(_, _, color)| *color == VALUE_TRACK)
+        .collect();
+    assert_eq!(tracks.len(), BODY_ROWS - 2);
+    let (from, to, _) = tracks[1];
+    assert_eq!(
+        from,
+        [((line(0) + 1) * CELL_WIDTH) as f32, top(4) - VALUE_Y]
+    );
+    assert_eq!(to[0], ((line(1) - 1) * CELL_WIDTH) as f32 - VALUE_END);
+    // Under the first column, from after the row's mark.
+    let mut first = panel.clone();
+    first.columns[1].value = false;
+    first.columns[0].value = true;
+    let shapes = super::shapes(&first, &lines, (0, BODY_ROWS), COLUMNS, Marked::default());
+    let (from, to, _) = strokes(&shapes)
+        .into_iter()
+        .find(|(_, _, color)| *color == VALUE_TRACK)
+        .unwrap();
+    assert_eq!(from[0], (MARK * CELL_WIDTH) as f32);
+    assert_eq!(to[0], ((line(0) - 1) * CELL_WIDTH) as f32 - VALUE_END);
+    // Scrolled, the header and its rule stay at the top, rows drawn below them, each row's bar where its lines are.
+    let mut marked = panel.clone();
+    marked.rows[12].highlighted = true;
+    let shown = crate::projection::shown(&lines, 10, BODY_ROWS);
+    assert_eq!(shown[0].cells, lines[0].cells);
+    assert_eq!(shown[2].item, Some(10));
+    let shapes = super::shapes(&marked, &lines, (10, BODY_ROWS), COLUMNS, Marked::default());
+    assert_eq!(boxes(&shapes), [(HIGHLIGHTED, top(4), None)]);
+    assert_eq!(
+        position(&panel.rows, &lines, (10, BODY_ROWS)).as_deref(),
+        Some(format!("rows 11–{} of 30", 10 + BODY_ROWS - 2).as_str())
+    );
+}
+
+#[test]
+fn a_table_s_row_is_pointed_at_and_chosen_by_its_place_as_a_list_s() {
+    use crate::projection::{PADDING, PIXEL, item_at, sized};
+    let panel = observers(30);
+    let (columns, body) = crate::projection::fit(&panel, Fit::SLOT);
+    let (_, height) = sized(columns, body);
+    let row = |line: usize| {
+        glam::Vec3::new(
+            -0.05,
+            height / 2.0 - (PADDING.1 as f32 + (3.5 + line as f32) * CELL_HEIGHT as f32) * PIXEL,
+            0.0,
+        )
+    };
+    let at = |scroll: usize, line: usize| {
+        item_at(&panel, glam::Mat4::IDENTITY, Fit::SLOT, scroll, row(line))
+    };
+    // The header and its rule name no row; the first row under them is the first, and scrolled, the row scrolled to.
+    assert_eq!(
+        (at(0, 0), at(0, 1), at(0, 2), at(0, 3)),
+        (None, None, Some(0), Some(1))
+    );
+    assert_eq!((at(10, 0), at(10, 2)), (None, Some(10)));
+    // The row on that line is the one a choice names, by its id.
+    assert_eq!(
+        panel.row_on(10).map(|row| row.id.as_str()),
+        Some("observer-10")
+    );
+}
+
+#[test]
+fn a_change_of_a_table_s_cells_lays_it_out_again_and_of_its_tones_only_draws_it_again() {
+    let panel = observers(3).with_version(1);
+    let mut cells = panel.clone().with_version(2);
+    cells.rows[0].cells[1] = "99%".into();
+    assert!(!super::restyled(&panel, &cells));
+    let mut toned = panel.clone().with_version(2);
+    toned.rows[0].tone = Tone::Bad;
+    toned.rows[1].value = Some(0.9);
+    assert!(super::restyled(&panel, &toned));
+    // Restyled in place, its marks are as laid out afresh.
+    let mut kept = super::lines(&panel, COLUMNS);
+    retone(&mut kept, &toned.rows);
+    assert_eq!(texts(&kept), texts(&super::lines(&toned, COLUMNS)));
+    let mut retitled = panel.clone().with_version(2);
+    retitled.columns[0].title = "Observer".into();
+    assert!(!super::restyled(&panel, &retitled));
+}
+
+#[test]
+fn a_table_s_row_that_wraps_has_its_value_under_its_column_on_its_last_line() {
+    let mut panel = observers(3);
+    panel.rows[1].cells[0] = "observer one, its name long".into();
+    let lines = lines(&panel, COLUMNS);
+    let text = texts(&lines);
+    // The row's name wraps within its column, its figures on its first line.
+    let rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.item == Some(1))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(rows.len() > 1, "{text:#?}");
+    let last = *rows.last().unwrap();
+    let header = &text[0];
+    let line = |nth: usize| {
+        header
+            .chars()
+            .enumerate()
+            .filter(|(_, ch)| *ch == '▏')
+            .nth(nth)
+            .unwrap()
+            .0
+    };
+    let shapes = shapes(&panel, &lines, (0, BODY_ROWS), COLUMNS, Marked::default());
+    let tracks: Vec<_> = strokes(&shapes)
+        .into_iter()
+        .filter(|(_, _, color)| *color == VALUE_TRACK)
+        .collect();
+    assert_eq!(tracks.len(), 3);
+    // Under its last line, from after the line before Busy to the space before the next, as the header's lines stand.
+    let (from, to, _) = tracks[1];
+    assert_eq!(
+        from,
+        [((line(0) + 1) * CELL_WIDTH) as f32, top(last + 1) - VALUE_Y]
+    );
+    assert_eq!(to[0], ((line(1) - 1) * CELL_WIDTH) as f32 - VALUE_END);
 }

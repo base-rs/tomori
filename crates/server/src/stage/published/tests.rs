@@ -1889,6 +1889,7 @@ fn a_row_s_tone_is_told_in_a_word_and_its_value_as_a_percentage() {
         choosable: false,
         tone,
         value,
+        cells: Vec::new(),
     };
     let words =
         [Tone::Neutral, Tone::Good, Tone::Warn, Tone::Bad].map(|tone| row(tone, None).tone_word());
@@ -1926,6 +1927,300 @@ fn the_largest_list_s_rows_with_tones_and_values_are_within_their_bound() {
     assert_eq!(panel.rows.len(), tomori_environment::ROW_LIMIT);
     let bytes = serde_json::to_vec(&panel.rows).unwrap().len();
     assert!(bytes <= 4096, "{bytes} bytes");
+}
+
+/// The observers of a running system, as its environment lays them out as a table: a name, how busy each is, with its
+/// value under that column, and how long callers wait.
+fn observers() -> (Vec<Row>, Vec<tomori_environment::Column>) {
+    use tomori_environment::Column;
+    let rows = vec![
+        Row::new("grpc", "")
+            .with_cells(["GRPC", "100%", "0 ms"])
+            .with_tone(Tone::Bad)
+            .with_value(1.0)
+            .with_reference("observer/grpc"),
+        Row::new("http", "")
+            .with_cells(["HTTP", "10%", "12 ms"])
+            .with_value(0.1),
+        // Its own text, which a client that draws no tables shows, and one cell left empty.
+        Row::new("jobs", "jobs · idle").with_cells(["Jobs", "", "0 ms"]),
+    ];
+    let columns = vec![
+        Column::new("Name"),
+        Column::number("Busy").with_value(),
+        Column::number("Wait"),
+    ];
+    (rows, columns)
+}
+
+#[test]
+fn a_list_laid_out_as_a_table_keeps_its_columns_and_cells_and_writes_its_body_from_them() {
+    use tomori_protocol::{CellAlign, ListColumn, ListRow};
+    let walls = yard();
+    let mut stage = Stage::default();
+    let (rows, columns) = observers();
+    let table = |rows: Vec<Row>, columns| {
+        publishing(
+            Panel::list("observers", "Observers", rows)
+                .with_columns(columns)
+                .highlighting("http"),
+        )
+    };
+    stage
+        .publish(&walls, table(rows.clone(), columns.clone()), 0)
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    // A client that draws no tables shows each row's text, written from its cells where the side gave none.
+    assert_eq!(
+        panel.body,
+        "- GRPC · 100% · 0 ms\n- **▸** HTTP · 10% · 12 ms\n- jobs · idle"
+    );
+    // One that does is sent its columns and each row's cells.
+    assert_eq!(
+        panel.columns,
+        [
+            ListColumn::new("Name"),
+            ListColumn::new("Busy")
+                .aligned(CellAlign::Right)
+                .with_value(true),
+            ListColumn::new("Wait").aligned(CellAlign::Right),
+        ]
+    );
+    let cells = |cells: &[&str]| cells.iter().map(|cell| (*cell).to_owned()).collect();
+    assert_eq!(
+        panel.rows,
+        [
+            ListRow::new("grpc", false)
+                .with_tone(Tone::Bad)
+                .with_value(1.0)
+                .with_cells(cells(&["GRPC", "100%", "0 ms"])),
+            ListRow::new("http", false)
+                .with_highlight(true)
+                .with_value(0.1)
+                .with_cells(cells(&["HTTP", "10%", "12 ms"])),
+            ListRow::new("jobs", false).with_cells(cells(&["Jobs", "", "0 ms"])),
+        ]
+    );
+    // Pointing at a row tells the agent its cells, each after its column's title, an empty one left out.
+    let describe = |line: u32| stage.describe(&walls, &panel.id, Some(line), 0).unwrap();
+    assert!(
+        describe(0).ends_with(
+            "; row 1 of 3, tone bad, at 100% of its limit, id yard:observer/grpc: \"Name: GRPC · Busy: 100% · Wait: 0 ms\")"
+        ),
+        "{}",
+        describe(0)
+    );
+    assert!(describe(2).ends_with("; row 3 of 3: \"Name: Jobs · Wait: 0 ms\")"));
+    assert_eq!(
+        stage.columns("yard", &panel.id).len(),
+        3,
+        "the columns, kept"
+    );
+    assert!(stage.columns("yard", "panel-none").is_empty());
+    // A change of a cell, or of a column, updates it in place; the same again changes nothing.
+    let mut changed = rows.clone();
+    changed[1] = Row::new("http", "").with_cells(["HTTP", "11%", "12 ms"]);
+    assert_eq!(
+        stage.publish(&walls, table(changed, columns.clone()), 0),
+        Ok(Change::Updated)
+    );
+    let mut retitled = columns.clone();
+    retitled[2] = tomori_environment::Column::number("Waits");
+    assert_eq!(
+        stage.publish(&walls, table(rows.clone(), retitled), 0),
+        Ok(Change::Updated)
+    );
+    assert_eq!(
+        stage.publish(&walls, table(rows.clone(), columns.clone()), 0),
+        Ok(Change::Updated)
+    );
+    assert_eq!(
+        stage.publish(&walls, table(rows, columns), 0),
+        Ok(Change::Unchanged)
+    );
+}
+
+#[test]
+fn a_table_s_cells_and_titles_are_cleaned_and_cut_and_rows_without_cells_show_their_text() {
+    use tomori_environment::{CELL_CHARS, COLUMN_TITLE_CHARS, Column, ROW_CHARS};
+    let long = "x".repeat(60);
+    let rows = vec![
+        // Cut to a cell's length, then within a row's, those past it empty.
+        Row::new("a", "").with_cells([long.as_str(), long.as_str(), long.as_str(), "d"]),
+        // Without cells, its text in its first; with every cell empty, its id.
+        Row::new("b", "b's text"),
+        Row::new("c", "").with_cells(["", " \n "]),
+        // Its cells on one line.
+        Row::new("d", "").with_cells(["one\ntwo", "  three  "]),
+    ];
+    let title = "T".repeat(40);
+    let columns = vec![
+        Column::new(title.as_str()),
+        Column::new(""),
+        Column::new(""),
+        Column::new(""),
+    ];
+    let published = publishing(Panel::list("t", "T", rows).with_columns(columns));
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage.publish(&walls, published, 0).unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    let cut = format!("{}…", "x".repeat(CELL_CHARS - 1));
+    let rest = format!("{}…", "x".repeat(ROW_CHARS - 2 * CELL_CHARS - 1));
+    assert_eq!(
+        panel.rows[0].cells,
+        [cut.clone(), cut.clone(), rest, String::new()]
+    );
+    assert_eq!(
+        panel.rows[0]
+            .cells
+            .iter()
+            .map(|cell| cell.chars().count())
+            .sum::<usize>(),
+        ROW_CHARS
+    );
+    assert_eq!(panel.rows[1].cells, ["b's text"]);
+    assert_eq!(panel.rows[2].cells, ["c", ""]);
+    assert_eq!(panel.rows[3].cells, ["one two", "three"]);
+    assert_eq!(
+        panel.columns[0].title,
+        format!("{}…", "T".repeat(COLUMN_TITLE_CHARS - 1))
+    );
+    // A row whose text is written from its cells, every one empty, shows its id.
+    assert_eq!(panel.body.split('\n').nth(2), Some("- c"));
+    // Rows with cells but no columns declared are a table without a header, as many columns as the widest row.
+    let walls = yard();
+    let mut stage = Stage::default();
+    let bare = Panel::list(
+        "bare",
+        "Bare",
+        vec![
+            Row::new("a", "").with_cells(["a", "1"]),
+            Row::new("b", "").with_cells(["b"]),
+        ],
+    );
+    stage.publish(&walls, publishing(bare), 0).unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(panel.columns, vec![tomori_protocol::ListColumn::new(""); 2]);
+    assert_eq!(panel.body, "- a · 1\n- b");
+    // Its row pointed at is told by its cells alone.
+    assert!(
+        stage
+            .describe(&walls, &panel.id, Some(0), 0)
+            .unwrap()
+            .ends_with("; row 1 of 2: \"a · 1\")")
+    );
+    // A table's cells together take no more characters than a body: rows past that are left out whole.
+    let walls = yard();
+    let mut stage = Stage::default();
+    let full = (0..tomori_environment::ROW_LIMIT)
+        .map(|index| {
+            Row::new(format!("r{index}"), "r").with_cells(["x".repeat(30), "y".repeat(30)])
+        })
+        .collect();
+    stage
+        .publish(&walls, publishing(Panel::list("full", "Full", full)), 0)
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(panel.rows.len(), crate::stage::blocks::BODY_CHARS / 60);
+    assert_eq!(panel.body.lines().count(), panel.rows.len());
+    // A list of no cells nor columns is no table.
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage
+        .publish(&walls, publishing(Panel::list("q", "Q", queue(2))), 0)
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert!(panel.columns.is_empty() && panel.rows.iter().all(|row| row.cells.is_empty()));
+}
+
+#[test]
+fn a_table_is_refused_past_its_columns_and_cells() {
+    use tomori_environment::{COLUMN_LIMIT, Column};
+    let refused = |panel: Panel| Publishing::new(panel).unwrap_err();
+    let many = || {
+        (0..=COLUMN_LIMIT)
+            .map(|at| Column::new(format!("c{at}")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        refused(Panel::list("t", "T", Vec::new()).with_columns(many())),
+        "A list panel has at most 8 columns."
+    );
+    let wide = Row::new("a", "").with_cells((0..=COLUMN_LIMIT).map(|at| at.to_string()));
+    assert_eq!(
+        refused(Panel::list("t", "T", vec![wide])),
+        "A row of a list panel has at most 8 cells."
+    );
+    let three = Row::new("a", "").with_cells(["1", "2", "3"]);
+    assert_eq!(
+        refused(
+            Panel::list("t", "T", vec![three])
+                .with_columns(vec![Column::new("A"), Column::new("B")])
+        ),
+        "A row has more cells than its list has columns."
+    );
+    assert_eq!(
+        refused(Panel::list("t", "T", Vec::new()).with_columns(vec![
+            Column::new("A").with_value(),
+            Column::new("B").with_value()
+        ])),
+        "At most one column of a list panel shows its rows' values."
+    );
+    assert_eq!(
+        refused(Panel::text("t", "T", "").with_columns(vec![Column::new("A")])),
+        "Only a list panel has columns."
+    );
+    // As many as it may have is taken.
+    let most = Row::new("a", "").with_cells((0..COLUMN_LIMIT).map(|at| at.to_string()));
+    assert!(
+        Publishing::new(
+            Panel::list("t", "T", vec![most]).with_columns(many()[..COLUMN_LIMIT].to_vec())
+        )
+        .is_ok()
+    );
+}
+
+/// A table as large as one can be, of the longest ids, its cells as many characters as its body holds, in every column,
+/// and every column's title as long as it may be, each character one JSON escapes in two, as a client is sent it: its
+/// rows within 8 KiB, so that 32 of them add 256 KiB at most to a projection, and within what the projection's fit
+/// counts for it, so that it is never measured short.
+#[test]
+fn the_largest_table_is_within_its_bound_and_what_a_projection_counts_for_it() {
+    use tomori_environment::{COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, ROW_LIMIT};
+    let walls = yard();
+    let mut stage = Stage::default();
+    let rows = (0..ROW_LIMIT)
+        .map(|index| {
+            Row::new(format!("{index:02}{}", "r".repeat(62)), "x")
+                .with_cells((0..COLUMN_LIMIT).map(|_| "\"".repeat(5)))
+                .choosable()
+                .with_tone(Tone::Warn)
+                .with_value(0.123)
+        })
+        .collect::<Vec<_>>();
+    let columns = (0..COLUMN_LIMIT)
+        .map(|_| Column::number("\"".repeat(COLUMN_TITLE_CHARS)))
+        .collect();
+    let highlighted = rows[7].id().to_owned();
+    stage
+        .publish(
+            &walls,
+            publishing(
+                Panel::list("queue", "Queue", rows)
+                    .with_columns(columns)
+                    .highlighting(&highlighted),
+            ),
+            0,
+        )
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(panel.rows.len(), ROW_LIMIT);
+    let bytes = serde_json::to_vec(&panel.rows).unwrap().len();
+    assert!(bytes <= 8 * 1024, "{bytes} bytes");
+    let whole = crate::stage::json_size(&panel);
+    let counted = crate::stage::most_bytes(&panel);
+    assert!(whole <= counted, "{whole} bytes, counted {counted}");
 }
 
 #[test]

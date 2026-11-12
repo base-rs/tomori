@@ -6,13 +6,19 @@
 //! and a mark in place of its bullet, a tick, an exclamation mark or a cross, so that it reads without telling colours
 //! apart, and its value as a thin bar under its text, in its tone; the choosable row this participant points at on a
 //! fainter bar, outlined, and the one they just chose on a brighter one. Its text is the body every client draws, so
-//! that a row wraps, scrolls and is pointed at as a list item is. See `design/panel-actions.md`.
-use tomori_protocol::{ListRow, Panel, chart::Tone};
+//! that a row wraps, scrolls and is pointed at as a list item is; or, for a list its environment laid out in columns
+//! ([`Panel::columns`]), a grid of its rows' cells under a header, laid out as a text panel's table is
+//! ([`crate::table`]), each row's mark in the cells before it and its value under its row or its column, or, where the
+//! face is too narrow for its columns, a card of `Title: cell` lines for each row. See `design/panel-actions.md`.
+use tomori_protocol::{CellAlign, LIST_CELL_CHARS, LIST_COLUMNS, ListRow, Panel, chart::Tone};
 
 use super::HIGHLIGHT;
-use crate::shapes::Shape;
-use crate::transcript::Line;
+use crate::shapes::{Mark, Shape};
+use crate::transcript::{Line, TEXT, TableRows};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Rgba, Style};
+
+/// The cells before each line of a list laid out as a table: its row's mark, on its first line, and a space.
+const MARK: usize = 2;
 
 /// The pointer the server writes before the highlighted row's text, which a client that draws the row's bar leaves out.
 const POINTER: &str = "- **▸** ";
@@ -84,6 +90,9 @@ impl RowMarks {
 /// pointer left out, as its bar shows it, and each row in a tone with its mark in place of its bullet, bold, in its
 /// tone's colour.
 pub(super) fn lines(panel: &Panel, columns: usize) -> Vec<Line> {
+    if !panel.columns.is_empty() {
+        return table(panel, columns);
+    }
     let body = panel
         .body
         .split('\n')
@@ -101,8 +110,83 @@ pub(super) fn lines(panel: &Panel, columns: usize) -> Vec<Line> {
     lines
 }
 
+/// The rows of `panel`, a list laid out as a table, `columns` wide: the first [`LIST_COLUMNS`] of its columns, a header of
+/// their titles where any has one, and each row's cells, each its first [`LIST_CELL_CHARS`] characters, laid out once as
+/// a text panel's table is, a grid where its columns fit, aligned as each says, and otherwise a card for each row, each
+/// line after [`MARK`] cells, where its row's first line has its mark.
+fn table(panel: &Panel, columns: usize) -> Vec<Line> {
+    use crate::markdown_lite::{Align, Inline, Table, Text};
+    let shown = &panel.columns[..panel.columns.len().min(LIST_COLUMNS)];
+    let text = |cell: &str| -> Text {
+        let cell: String = cell.chars().take(LIST_CELL_CHARS).collect();
+        if cell.is_empty() {
+            Vec::new()
+        } else {
+            vec![(cell, Inline::Plain)]
+        }
+    };
+    let titled = shown.iter().any(|column| !column.title.is_empty());
+    let table = Table {
+        align: shown
+            .iter()
+            .map(|column| match column.align {
+                CellAlign::Right => Align::Right,
+                CellAlign::Centre => Align::Centre,
+                _ => Align::Left,
+            })
+            .collect(),
+        header: if titled {
+            shown.iter().map(|column| text(&column.title)).collect()
+        } else {
+            Vec::new()
+        },
+        rows: panel
+            .rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .take(shown.len())
+                    .map(|cell| text(cell))
+                    .collect()
+            })
+            .collect(),
+    };
+    let laid = crate::table::lay_out(&table, columns.saturating_sub(MARK));
+    let span = TableRows {
+        start: 0,
+        header: laid.header,
+        end: laid.rows.len(),
+    };
+    let mut lines: Vec<Line> = laid
+        .rows
+        .into_iter()
+        .zip(laid.owners)
+        .map(|(cells, item)| {
+            let background = cells.first().and_then(|(_, style)| style.background);
+            let blank = (
+                ' ',
+                Style {
+                    background,
+                    ..Style::plain(TEXT)
+                },
+            );
+            let mut line = vec![blank; MARK];
+            line.extend(cells);
+            Line {
+                cells: line,
+                item,
+                table: Some(span),
+            }
+        })
+        .collect();
+    retone(&mut lines, &panel.rows);
+    lines
+}
+
 /// Mark each row of `rows` laid out as `lines` in its tone, in place of its bullet, or of the mark it had, on its first
-/// line: a neutral row with its bullet, as the body's list draws it.
+/// line: a neutral row with its bullet, as the body's list draws it, or, laid out as a table, in the first cell before
+/// it, a neutral row's empty.
 pub(super) fn retone(lines: &mut [Line], rows: &[ListRow]) {
     let mut last = None;
     for line in lines {
@@ -111,6 +195,28 @@ pub(super) fn retone(lines: &mut [Line], rows: &[ListRow]) {
         let Some(row) = line.item.and_then(|item| rows.get(item)) else {
             continue;
         };
+        if line.table.is_some() {
+            if first && let Some(cell) = line.cells.first_mut() {
+                let background = cell.1.background;
+                *cell = match mark(row.tone) {
+                    Some((mark, color)) => (
+                        mark,
+                        Style {
+                            background,
+                            ..Style::bold(color)
+                        },
+                    ),
+                    None => (
+                        ' ',
+                        Style {
+                            background,
+                            ..Style::plain(TEXT)
+                        },
+                    ),
+                };
+            }
+            continue;
+        }
         if let (true, Some(bullet)) = (
             first,
             line.cells
@@ -134,7 +240,8 @@ thread_local! {
 /// its lines are kept, only their marks changed, and its faces drawn again.
 pub(super) fn restyled(before: &Panel, after: &Panel) -> bool {
     let same = |a: &ListRow, b: &ListRow| {
-        (&a.id, a.choosable, a.highlighted) == (&b.id, b.choosable, b.highlighted)
+        (&a.id, a.choosable, a.highlighted, &a.cells)
+            == (&b.id, b.choosable, b.highlighted, &b.cells)
     };
     if after.rows.is_empty()
         || before.rows.len() != after.rows.len()
@@ -164,32 +271,43 @@ fn strip(tone: Tone) -> Option<Rgba> {
     mark(tone).map(|(_, color)| color)
 }
 
-/// The shapes that draw `rows` as rows, behind the text of the `count` lines of `lines` a face `columns` wide shows
-/// scrolled `scroll` lines down, in font pixels from its text's top-left corner: each row's bar, highlighted, pointed
-/// at or chosen as `marked` says, its tone's strip, and its value's bar under its last line, where that shows. None for
-/// a panel without rows.
+/// The shapes that draw `panel`'s rows as rows, behind the text of the `count` lines of `lines` a face `columns` wide
+/// shows scrolled `scroll` lines down, as [`super::shown`] shows them, in font pixels from its text's top-left corner:
+/// each row's bar, highlighted, pointed at or chosen as `marked` says, its tone's strip, and its value's bar under its
+/// last line, where that shows, under its whole row, or, laid out as a table's grid, under the cell of the column its
+/// environment chose for it. None for a panel without rows.
 pub(super) fn shapes(
-    rows: &[ListRow],
+    panel: &Panel,
     lines: &[Line],
     (scroll, count): (usize, usize),
     columns: usize,
     marked: Marked,
 ) -> Vec<Shape> {
+    let rows = &panel.rows;
     let mut shapes = Vec::new();
-    let end = lines.len().min(scroll + count);
+    let shown: Vec<usize> = super::shown_at(lines, scroll, count).collect();
     let width = (columns * CELL_WIDTH) as f32;
-    let mut at = scroll.min(end);
-    while at < end {
-        let start = at;
-        let item = lines[at].item;
-        while at < end && lines[at].item == item {
-            at += 1;
+    let valued = panel
+        .columns
+        .iter()
+        .take(LIST_COLUMNS)
+        .position(|column| column.value);
+    let mut place = 0;
+    while place < shown.len() {
+        let start = place;
+        let item = lines[shown[place]].item;
+        place += 1;
+        while place < shown.len()
+            && lines[shown[place]].item == item
+            && shown[place] == shown[place - 1] + 1
+        {
+            place += 1;
         }
         let Some((index, row)) = item.and_then(|item| rows.get(item).map(|row| (item, row))) else {
             continue;
         };
-        let top = ((3 + start - scroll) * CELL_HEIGHT) as f32;
-        let height = ((at - start) * CELL_HEIGHT) as f32;
+        let top = ((3 + start) * CELL_HEIGHT) as f32;
+        let height = ((place - start) * CELL_HEIGHT) as f32;
         let rect = |color: Rgba, outline: Option<f32>| Shape::Rect {
             x: -BAR_LEFT,
             y: top,
@@ -223,26 +341,55 @@ pub(super) fn shapes(
             });
         }
         // Under its last line, where that shows.
-        let ends = lines.get(at).is_none_or(|next| next.item != item);
+        let last = shown[place - 1];
+        let ends = lines.get(last + 1).is_none_or(|next| next.item != item);
         if let (Some(value), true) = (row.fraction(), ends) {
             let y = top + height - VALUE_Y;
-            let right = width - VALUE_END;
+            let (left, right) = valued
+                .and_then(|column| under(&lines[last], column))
+                .map_or((VALUE_X, width - VALUE_END), |(from, to)| {
+                    (
+                        (from * CELL_WIDTH) as f32,
+                        (to * CELL_WIDTH) as f32 - VALUE_END,
+                    )
+                });
             let fill = strip(row.tone).unwrap_or(VALUE_NEUTRAL);
             shapes.push(Shape::Stroke {
-                from: [VALUE_X, y],
+                from: [left, y],
                 to: [right, y],
                 width: VALUE_WIDTH,
                 color: VALUE_TRACK,
             });
             shapes.push(Shape::Stroke {
-                from: [VALUE_X, y],
-                to: [VALUE_X + (right - VALUE_X) * value, y],
+                from: [left, y],
+                to: [left + (right - left) * value, y],
                 width: VALUE_WIDTH,
                 color: fill,
             });
         }
     }
     shapes
+}
+
+/// The cells of `line`, a line of a list laid out as a table's grid, that its column `column` takes, from its first to
+/// past its last: from after the line before it, or the row's mark, to the space before the line after it, or the
+/// line's end. None where the grid has no such column, as a card's line has none but its first.
+fn under(line: &Line, column: usize) -> Option<(usize, usize)> {
+    let between: Vec<usize> = line
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, style))| style.mark == Some(Mark::Line))
+        .map(|(at, _)| at)
+        .collect();
+    let start = match column {
+        0 => MARK,
+        column => between.get(column - 1)? + 1,
+    };
+    let end = between.get(column).map_or(line.cells.len(), |at| {
+        at.saturating_sub(crate::table::GAP - 1)
+    });
+    (end > start).then_some((start, end))
 }
 
 /// Which rows of a list of `rows` laid out as `lines` show, `count` of them scrolled `scroll` lines down, as its
@@ -255,9 +402,13 @@ pub(super) fn position(
     if rows.is_empty() || lines.len() <= count {
         return None;
     }
-    let last = lines.len().min(scroll + count).saturating_sub(1);
-    let first = lines[scroll.min(last)].item?;
-    let last = lines[last].item?;
+    // A table's header, its rule and the rules between its cards are of no row, and say nothing of where it is.
+    let mut items = super::shown_at(lines, scroll, count)
+        .map(|at| &lines[at])
+        .filter(|line| line.item.is_some() || line.table.is_none())
+        .map(|line| line.item);
+    let first = items.next().flatten()?;
+    let last = items.last().unwrap_or(Some(first))?;
     Some(format!("rows {}–{} of {}", first + 1, last + 1, rows.len()))
 }
 

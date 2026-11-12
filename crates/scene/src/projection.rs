@@ -288,23 +288,30 @@ fn body_lines(panel: &Panel, columns: usize) -> Vec<Line> {
 /// has room for two rows below them; as the table's last row passes under them, what follows it pushes them up and away,
 /// so that every row scrolled moves what is shown by one.
 fn shown(lines: &[Line], scroll: usize, count: usize) -> Vec<Line> {
+    shown_at(lines, scroll, count)
+        .map(|at| lines[at].clone())
+        .collect()
+}
+
+/// Where each of the rows [`shown`] shows is among `lines`, in the order they are shown.
+fn shown_at(lines: &[Line], scroll: usize, count: usize) -> impl Iterator<Item = usize> {
     let end = lines.len().min(scroll + count);
     let pinned = lines
         .get(scroll)
         .and_then(|line| line.table)
         .filter(|table| table.header > 0 && scroll > table.start && table.header + 2 <= count);
-    match pinned {
+    let (header, body) = match pinned {
         Some(table) => {
             // How many of the header's rows show: all of them, or as many as there are of the table below the top.
             let header = table.header.min(table.end - scroll);
-            lines[table.start + table.header - header..table.start + table.header]
-                .iter()
-                .chain(&lines[(scroll + header).min(end)..end])
-                .cloned()
-                .collect()
+            (
+                table.start + table.header - header..table.start + table.header,
+                (scroll + header).min(end)..end,
+            )
         }
-        None => lines[scroll.min(end)..end].to_vec(),
-    }
+        None => (0..0, scroll.min(end)..end),
+    };
+    header.chain(body)
 }
 
 /// The line of `panel`'s body, from 0, that the list item `point` is on begins on, where the ray meets a text panel drawn
@@ -636,7 +643,7 @@ fn text_face(
     body.resize_with(body_count, Default::default);
     rows.extend(body.into_iter().map(|line| Row::new(line.cells)));
     canvas.rows = rows;
-    canvas.shapes = list::shapes(&panel.rows, lines, (scroll, body_count), columns, marked);
+    canvas.shapes = list::shapes(panel, lines, (scroll, body_count), columns, marked);
     canvas
         .shapes
         .extend(scroll_bar(columns, body_count, total, scroll));

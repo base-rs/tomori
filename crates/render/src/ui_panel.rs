@@ -905,6 +905,101 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_LIST_TABLE_PREVIEW` to a PNG path to save what this renders: an environment's observers laid out as a
+    /// table on a panel in a wall's slot, face on, its figures in columns under a header, numbers right-aligned, each
+    /// row's tone as a mark before it, its value under its Busy column, one highlighted and one pointed at.
+    #[test]
+    fn a_list_laid_out_as_a_table_is_drawn_in_columns_with_its_marks_and_values() {
+        use tomori_protocol::{CellAlign, ListColumn, ListRow, chart::Tone};
+        crate::test_gpu::with(|gpu| {
+            let rows: [(&str, &str, &str, &str, &str, Tone); 9] = [
+                ("grpc", "GRPC", "100%", "64", "0 ms", Tone::Bad),
+                ("http", "HTTP", "10%", "48", "12 ms", Tone::Neutral),
+                ("jobs", "Jobs", "1%", "16", "0 ms", Tone::Good),
+                ("kafka", "Kafka consumer", "74%", "32", "140 ms", Tone::Warn),
+                ("redis", "Redis", "0%", "8", "0 ms", Tone::Good),
+                (
+                    "mysql",
+                    "MySQL primary",
+                    "36%",
+                    "128",
+                    "3 ms",
+                    Tone::Neutral,
+                ),
+                ("search", "Search", "92%", "24", "1250 ms", Tone::Bad),
+                ("cache", "Cache", "5%", "8", "0 ms", Tone::Good),
+                ("mail", "Mail", "18%", "4", "9 ms", Tone::Neutral),
+            ];
+            let body = rows
+                .iter()
+                .map(|(_, name, busy, max, wait, _)| format!("- {name} · {busy} · {max} · {wait}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let panel = tomori_protocol::Panel::new(
+                "panel-1",
+                "Observers",
+                body,
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: 0,
+                },
+            )
+            .with_rows(
+                rows.iter()
+                    .enumerate()
+                    .map(|(index, (id, name, busy, max, wait, tone))| {
+                        let value = busy.trim_end_matches('%').parse::<f32>().unwrap() / 100.0;
+                        ListRow::new(*id, true)
+                            .with_highlight(index == 1)
+                            .with_tone(*tone)
+                            .with_value(value)
+                            .with_cells(vec![
+                                (*name).into(),
+                                (*busy).into(),
+                                (*max).into(),
+                                (*wait).into(),
+                            ])
+                    })
+                    .collect(),
+            )
+            .with_columns(vec![
+                ListColumn::new("Name"),
+                ListColumn::new("Busy")
+                    .aligned(CellAlign::Right)
+                    .with_value(true),
+                ListColumn::new("Max").aligned(CellAlign::Right),
+                ListColumn::new("Wait").aligned(CellAlign::Right),
+            ]);
+            let canvas = tomori_scene::projection::list_face(
+                &panel,
+                tomori_scene::projection::Fit::SLOT,
+                0,
+                (Some("kafka"), None),
+            );
+            let text: String = canvas
+                .rows
+                .iter()
+                .map(|row| row.cells.iter().map(|(ch, _)| *ch).collect::<String>() + "\n")
+                .collect();
+            assert!(text.contains("Name"), "{text}");
+            assert!(text.contains("100%"), "{text}");
+            let (image, _) = drawn_face_on(&gpu, &canvas, 2.3, 0.37);
+            crate::test_support::preview("TOMORI_LIST_TABLE_PREVIEW", &image);
+            let near = |color: [f32; 4]| {
+                let target = color.map(|channel| (channel.powf(1.0 / 2.2) * 255.0) as i32);
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        (0..3).all(|at| (i32::from(pixel.0[at]) - target[at]).abs() < 40)
+                    })
+                    .count()
+            };
+            let shown = [Tone::Good, Tone::Warn, Tone::Bad]
+                .map(|tone| near(tomori_scene::chart::tone(tone)) > 50);
+            assert_eq!(shown, [true; 3]);
+        });
+    }
+
     /// Set `TOMORI_TABLE_RULE_PREVIEW` to a PNG path to save what this renders: a table on a panel in a wall's slot, face
     /// on, at about the headset's resolution, its pixels off the screen's grid.
     #[test]

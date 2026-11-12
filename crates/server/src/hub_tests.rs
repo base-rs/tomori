@@ -4125,9 +4125,18 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
                     .choosable()
                     .with_tone(tomori_environment::chart::Tone::Warn)
                     .with_value(0.123)
+                    // As many characters of cells as a table holds of them all.
+                    .with_cells(vec!["\u{1F600}".repeat(10); 4])
             })
             .collect();
+        let columns = vec![
+            tomori_environment::Column::new(
+                "\u{1F600}".repeat(tomori_environment::COLUMN_TITLE_CHARS)
+            );
+            tomori_environment::COLUMN_LIMIT
+        ];
         tomori_environment::Panel::list(format!("list-{panel}"), "\u{1F600}".repeat(80), rows)
+            .with_columns(columns)
             .on_wall(panel as u32 % 2, None)
             .with_reference(format!("list/{panel}"))
     };
@@ -4216,8 +4225,8 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     });
     assert_eq!(excerpts, [false, true]);
     // It reads one whole by naming it: its rows, each with its id, its inspect id, its tone in a word, its value and its
-    // text, once, with neither its body nor its items, which say the same; the largest list there can be is 12 KB, 25 KB
-    // as sent.
+    // cells, once, with neither its body nor its items, which say the same; the largest table there can be, its cells
+    // as many characters as its body, is within what is read.
     let published = identities(&listed);
     let named = published[3].clone();
     let read = hub.tool_panels("session", Some(&named), 0).unwrap();
@@ -4226,7 +4235,9 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     assert_eq!(read.len(), 1);
     let rows = read[0]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), tomori_environment::ROW_LIMIT);
-    assert_eq!(rows[2]["text"], "\u{1F600}".repeat(38));
+    // A table's row by its cells, as many as the table's characters hold, in place of its text.
+    assert!(rows[2].get("text").is_none());
+    assert_eq!(rows[2]["cells"][0], "\u{1F600}".repeat(10));
     assert!(rows[2]["inspect_id"].as_str().unwrap().starts_with("yard:"));
     assert_eq!(rows[2]["highlighted"], false);
     assert_eq!(

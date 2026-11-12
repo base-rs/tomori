@@ -3,7 +3,7 @@
 
 //! Panels a server side publishes onto its environment's own walls, for everyone in its space: see [`Panel`] and
 //! [`crate::Space::publish`].
-use tomori_protocol::{Chart, chart::Tone};
+use tomori_protocol::{CellAlign, Chart, chart::Tone};
 
 use crate::{REFERENCE_BYTES, valid_reference};
 
@@ -44,6 +44,81 @@ pub const ROW_ID_BYTES: usize = REFERENCE_BYTES;
 /// The longest text of a row of a list panel, in characters, once the server has cleaned it onto one line: a longer one
 /// is cut to this many, followed by the `…` that marks it cut.
 pub const ROW_CHARS: usize = 80;
+
+/// The most columns of a list panel laid out as a table, [`Panel::with_columns`], or cells of one of its rows,
+/// [`Row::with_cells`]: one with more is refused.
+pub const COLUMN_LIMIT: usize = tomori_protocol::LIST_COLUMNS;
+
+/// The longest title of a list panel's column, in characters, once the server has cleaned it onto one line: a longer
+/// one is cut to this many, the last the `…` that marks it cut.
+pub const COLUMN_TITLE_CHARS: usize = 24;
+
+/// The longest cell of a row of a list panel, in characters, once the server has cleaned it onto one line, as a
+/// client lays out: a longer one is cut to this many, the last the `…` that marks it cut. A row's cells together take
+/// at most [`ROW_CHARS`], as its text does; those past that are cut, or left empty.
+pub const CELL_CHARS: usize = tomori_protocol::LIST_CELL_CHARS;
+
+/// A column of a list panel laid out as a table, [`Panel::with_columns`]: its title, which may be empty, a list whose
+/// every title is empty showing no header, how its cells are aligned, and whether each row's value is drawn as a bar
+/// under its cell rather than under the whole row. See `design/panel-actions.md`.
+///
+/// ```
+/// use tomori_environment::{CellAlign, Column};
+///
+/// let busy = Column::new("Busy").aligned(CellAlign::Right).with_value();
+/// assert_eq!((busy.title(), busy.align(), busy.has_value()), ("Busy", CellAlign::Right, true));
+/// assert_eq!(Column::number("Waiting").align(), CellAlign::Right);
+/// assert_eq!((Column::new("Name").align(), Column::new("Name").has_value()), (CellAlign::Left, false));
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Column {
+    title: String,
+    align: CellAlign,
+    value: bool,
+}
+
+impl Column {
+    /// The column `title`, its cells aligned left, as text reads.
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            align: CellAlign::Left,
+            value: false,
+        }
+    }
+
+    /// The column `title` of numbers, its cells aligned right, so that their digits line up.
+    pub fn number(title: impl Into<String>) -> Self {
+        Self::new(title).aligned(CellAlign::Right)
+    }
+
+    /// The column, its cells aligned as `align` says.
+    pub fn aligned(mut self, align: CellAlign) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// The column, under whose cell each row's value, [`Row::with_value`], is drawn as a thin bar, rather than under
+    /// the whole row: at most one column of a list has it.
+    pub fn with_value(mut self) -> Self {
+        self.value = true;
+        self
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn align(&self) -> CellAlign {
+        self.align
+    }
+
+    /// Whether each row's value is drawn under its cell.
+    pub fn has_value(&self) -> bool {
+        self.value
+    }
+}
 
 /// Whether `id` is one a side may name a row of a list panel by: 1 to [`ROW_ID_BYTES`] ASCII letters, digits, `-`,
 /// `_`, `.` and `/`, as a reference is, so that it can be told to the agent and named in a message as it is.
@@ -89,6 +164,7 @@ pub struct Row {
     choosable: bool,
     tone: Tone,
     value: Option<f32>,
+    cells: Vec<String>,
 }
 
 impl Row {
@@ -101,7 +177,37 @@ impl Row {
             choosable: false,
             tone: Tone::Neutral,
             value: None,
+            cells: Vec::new(),
         }
+    }
+
+    /// The row, with `cells`, one for each column of its list, in their order, for a list laid out as a table
+    /// ([`Panel::with_columns`]), so that each figure is read down its column: at most [`COLUMN_LIMIT`], and no more
+    /// than its list's columns, where it declares them; the server refuses more, saying why. Each is cleaned onto one
+    /// line and cut to [`CELL_CHARS`], and together they take at most [`ROW_CHARS`]; a table's cells together take at most
+    /// as many characters as a body, 1,200, rows past that left out whole, as rows past the body are. The row's text,
+    /// where it has one, is still what a client that draws no tables shows, and where it has none, the server writes it
+    /// from its cells, as `GRPC · 100% · 0 ms`. Cells are only shown: a side finds the row chosen by its id.
+    ///
+    /// ```
+    /// use tomori_environment::Row;
+    ///
+    /// let row = Row::new("grpc", "").with_cells(["GRPC", "100%", "0 ms"]);
+    /// assert_eq!(row.cells(), ["GRPC", "100%", "0 ms"]);
+    /// assert!(Row::new("grpc", "GRPC").cells().is_empty());
+    /// ```
+    pub fn with_cells<I, S>(mut self, cells: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cells = cells.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Its cells, for a list laid out as a table; none unless it says.
+    pub fn cells(&self) -> &[String] {
+        &self.cells
     }
 
     /// The row, which a participant may choose, pointing at it and pressing A, Enter in the desktop window, or pulling
@@ -196,6 +302,7 @@ pub struct Panel {
     reference: Option<String>,
     rows: Option<Vec<Row>>,
     highlighted: Option<String>,
+    columns: Vec<Column>,
 }
 
 impl Panel {
@@ -211,6 +318,7 @@ impl Panel {
             reference: None,
             rows: None,
             highlighted: None,
+            columns: Vec::new(),
         }
     }
 
@@ -248,6 +356,36 @@ impl Panel {
     pub fn highlighting(mut self, row: impl Into<String>) -> Self {
         self.highlighted = Some(row.into());
         self
+    }
+
+    /// The panel, a list laid out as a table of `columns`, under a header of their titles, each row's cells
+    /// ([`Row::with_cells`]) in their columns, so that each figure is read down its column rather than along each line:
+    /// at most [`COLUMN_LIMIT`], each title cleaned onto one line and cut to [`COLUMN_TITLE_CHARS`], and at most one
+    /// with a value; the server refuses more, saying why. A list whose rows have cells but which declares no columns is
+    /// a table without a header. Only a list panel has columns, and the server refuses any other's. A client that draws
+    /// no tables shows each row's text, as before; a panel too narrow for its columns shows each row as a line for each
+    /// cell, `Title: cell`. See `design/panel-actions.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Column, Panel, Row};
+    ///
+    /// let observers = Panel::list(
+    ///     "observers",
+    ///     "Observers",
+    ///     vec![Row::new("grpc", "").with_cells(["GRPC", "100%", "0 ms"]).with_value(1.0)],
+    /// )
+    /// .with_columns(vec![Column::new("Name"), Column::number("Busy").with_value(), Column::number("Wait")]);
+    /// assert_eq!(observers.columns().len(), 3);
+    /// assert!(Panel::list("queue", "Queue", Vec::new()).columns().is_empty());
+    /// ```
+    pub fn with_columns(mut self, columns: Vec<Column>) -> Self {
+        self.columns = columns;
+        self
+    }
+
+    /// Its columns, for a list laid out as a table; none unless it says.
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
     }
 
     /// The panel, on the environment's own wall `wall`, from 0 in the order it declares them, in `slot` if it is free.
@@ -387,6 +525,32 @@ mod tests {
         assert!(valid_row_id(&"a".repeat(ROW_ID_BYTES)));
         assert!(!valid_row_id(&"a".repeat(ROW_ID_BYTES + 1)));
         assert_eq!((ROW_LIMIT, ROW_ID_BYTES, ROW_CHARS), (30, 64, 80));
+    }
+
+    #[test]
+    fn a_table_s_columns_and_cells_are_what_it_was_given() {
+        let columns = vec![
+            Column::new("Name"),
+            Column::number("Busy").with_value(),
+            Column::new("State").aligned(CellAlign::Centre),
+        ];
+        let rows = vec![Row::new("grpc", "").with_cells(vec![String::from("GRPC"), "100%".into()])];
+        let table = Panel::list("observers", "Observers", rows).with_columns(columns.clone());
+        assert_eq!(table.columns(), columns.as_slice());
+        assert_eq!(table.rows().unwrap()[0].cells(), ["GRPC", "100%"]);
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| (column.title(), column.align(), column.has_value()))
+                .collect::<Vec<_>>(),
+            [
+                ("Name", CellAlign::Left, false),
+                ("Busy", CellAlign::Right, true),
+                ("State", CellAlign::Centre, false)
+            ]
+        );
+        assert!(Panel::text("rota", "Rota", "").columns().is_empty());
+        assert_eq!((COLUMN_LIMIT, COLUMN_TITLE_CHARS, CELL_CHARS), (8, 24, 32));
     }
 
     #[test]

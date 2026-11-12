@@ -52,9 +52,11 @@ pub use zone::{
 };
 
 pub use panel::{
-    PANEL_ID_BYTES, PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_panel_id,
-    valid_row_id,
+    CELL_CHARS, COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, PANEL_ID_BYTES, PANEL_LIMIT, Panel,
+    ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_panel_id, valid_row_id,
 };
+/// How a list panel's column aligns its cells, as [`Column::aligned`] takes it.
+pub use tomori_protocol::CellAlign;
 /// A chart panel's native chart, as [`Panel::chart`] takes it.
 pub use tomori_protocol::chart;
 /// A cluster anchor, as [`Space::place_anchor`] takes it.

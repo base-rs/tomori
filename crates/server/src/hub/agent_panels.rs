@@ -236,7 +236,9 @@ fn listed(
 
 /// `panel`, as `panels` describes the one panel the agent names: what [`summarized`] says of it, and what it shows,
 /// once: an environment's list its rows, each with its id, the id the agent may inspect it by, whether it is
-/// highlighted, its tone, in a word, its value against its limit, from 0 to 1, or null, and its text; any other text
+/// highlighted, its tone, in a word, its value against its limit, from 0 to 1, or null, and its text, and, of a list
+/// laid out as a table, its columns, each with its title, alignment and whether its rows' values are drawn under it,
+/// and each row's cells in place of its text; any other text
 /// or chart panel its body, as participants see it, and its list items; a code panel only its language, as before.
 fn detailed(
     projection: &Projection,
@@ -246,12 +248,13 @@ fn detailed(
     rows: Option<(&[crate::stage::Row], Option<&str>)>,
 ) -> Value {
     let mut described = summarized(projection, panel, updated, published);
+    let columns = &panel.columns;
     match rows {
         Some((rows, highlighted)) => {
             described["rows"] = rows
                 .iter()
                 .map(|row| {
-                    json!({
+                    let mut told = json!({
                         "id": row.id,
                         "inspect_id": row.reference.as_deref().map(|reference| {
                             crate::space::inspectable(&projection.environment, reference)
@@ -260,10 +263,33 @@ fn detailed(
                         "choosable": row.choosable,
                         "tone": row.tone_word().unwrap_or("neutral"),
                         "value": row.value.map(|value| (f64::from(value) * 1000.0).round() / 1000.0),
-                        "text": row.text,
-                    })
+                    });
+                    // A table's row by its cells, in place of its text, which only says them again for the clients
+                    // that draw no tables.
+                    if columns.is_empty() {
+                        told["text"] = json!(row.text);
+                    } else {
+                        told["cells"] = json!(row.cells);
+                    }
+                    told
                 })
                 .collect();
+            if !columns.is_empty() {
+                described["columns"] = columns
+                    .iter()
+                    .map(|column| {
+                        json!({
+                            "title": column.title,
+                            "align": match column.align {
+                                tomori_protocol::CellAlign::Right => "right",
+                                tomori_protocol::CellAlign::Centre => "centre",
+                                _ => "left",
+                            },
+                            "value": column.value,
+                        })
+                    })
+                    .collect();
+            }
         }
         None if panel.code.is_none() => {
             described["body"] = json!(panel.body);
