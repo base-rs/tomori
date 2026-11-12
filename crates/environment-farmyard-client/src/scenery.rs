@@ -9,7 +9,8 @@
 //! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
 //! marshmallow sticks where its client side shows them, and the trails of light their burning marshmallows paint in
 //! the air (see [`crate::embers`]); all of it growing out of the space through the reveal sphere as
-//! the space's environment does. Once a frame, what neither eye can see of its models, ferns and plaques is culled.
+//! the space's environment does. Its models, ferns and plaques, with their bounds, its lamps and its moonlight are
+//! submitted to the renderer's world, and once a frame what neither eye can see of them is culled.
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,6 +21,9 @@ use tomori_assets::bounds::{Aabb, Tally};
 use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
+use tomori_render::world::{
+    EnvironmentLight, Item, ItemId, Layer, Light, LightId, Mobility, RootId, World,
+};
 use wgpu::util::DeviceExt;
 
 use crate::embers::{self, EmberVertex, Embers};
@@ -300,31 +304,40 @@ pub fn lighting() -> Lighting {
 
 /// As [`lighting`], with the bonfire's light as it flickers at `seconds`, the fire at `size`.
 pub fn lighting_at(seconds: f32, size: f32) -> Lighting {
-    Lighting::new(
-        evening::MOON.normalize(),
-        evening::MOONLIGHT,
-        evening::SKY,
-        evening::GROUND,
-    )
-    .with_haze(Vec3::new(0.03, 0.033, 0.06), 0.0008)
-    .with_lamp(Lamp::new(layout::LANTERN, 6.0, palette::GLOW * 1.4))
-    .with_lamp(Lamp::new(layout::GATE_LANTERN, 4.5, palette::GLOW * 1.1))
-    .with_lamp(Lamp::new(
-        layout::workbench_lantern(),
-        3.5,
-        palette::GLOW * 1.2,
-    ))
-    .with_lamp(fire_lamp(seconds, size))
+    lanterns()
+        .into_iter()
+        .fold(
+            Lighting::new(
+                evening::MOON.normalize(),
+                evening::MOONLIGHT,
+                evening::SKY,
+                evening::GROUND,
+            )
+            .with_haze(Vec3::new(0.03, 0.033, 0.06), 0.0008),
+            Lighting::with_lamp,
+        )
+        .with_lamp(fire_lamp(seconds, size))
+}
+
+/// The lanterns, which never move: the coop's, the gate's and the workbench's.
+fn lanterns() -> [Lamp; 3] {
+    [
+        Lamp::new(layout::LANTERN, 6.0, palette::GLOW * 1.4),
+        Lamp::new(layout::GATE_LANTERN, 4.5, palette::GLOW * 1.1),
+        Lamp::new(layout::workbench_lantern(), 3.5, palette::GLOW * 1.2),
+    ]
 }
 
 /// Where the eye is, from its view and projection: the point every ray of the view begins from, as every scenery is
 /// told it.
 pub use tomori_render::scenery::eye;
 
-/// One model the farmyard draws, uploaded once, with its instances placed.
+/// One model the farmyard draws, uploaded once, with its instances placed, and the item it is in the render world, once
+/// submitted.
 struct Drawn {
     model: GpuModel,
     batch: Batch,
+    item: Option<ItemId>,
 }
 
 impl Drawn {
@@ -357,7 +370,33 @@ impl Drawn {
             })
             .collect();
         renderer.place(device, queue, &gpu, &mut batch, &instances);
-        Self { model: gpu, batch }
+        Self {
+            model: gpu,
+            batch,
+            item: None,
+        }
+    }
+
+    /// Add it to `world`, in `root`, if it is not there, and place each piece of it where its batch has it: once, if it is
+    /// static, or each frame, if it is dynamic and placed anew as it moves.
+    fn submit(&mut self, world: &mut World, root: RootId, mobility: Mobility) {
+        let item = match self.item.filter(|item| world.contains(*item)) {
+            Some(_) if mobility == Mobility::Static => return,
+            Some(item) => item,
+            None => *self
+                .item
+                .insert(world.add(Item::new(root, Layer::Opaque, mobility))),
+        };
+        world.place(item, self.batch.bounds());
+    }
+
+    /// Draw only what `views` says the eyes may see of it, as the world culled it, or, without a world, against its
+    /// frustum, and say how much it then draws.
+    fn cull(&mut self, queue: &wgpu::Queue, models: &Renderer, views: &Views<'_>) -> Tally {
+        match self.item.and_then(|item| views.seen(item)) {
+            Some(seen) => models.show(queue, &self.model, &mut self.batch, seen),
+            None => models.cull(queue, &self.model, &mut self.batch, views.frustum()),
+        }
     }
 }
 
@@ -630,13 +669,18 @@ struct Ferns {
     ferns: Vec<Fern>,
     /// Where each fern's heart is, found once, so that placing them each frame only measures how far each is.
     hearts: Vec<Vec3>,
-    /// Where each fern may be drawn, however it sways, and whether the eyes may see it this frame.
+    /// Where each fern may be drawn, however it sways, whether the eyes may see it this frame, and the item they are in
+    /// the render world, once submitted.
     bounds: Vec<Aabb>,
     seen: Vec<bool>,
-    /// How each fern was drawn when last placed, if it was, and each mesh's range of vertices with its range of
-    /// instances.
-    placed: Mutex<(Vec<Option<Detail>>, FernDraws)>,
+    item: Option<ItemId>,
+    /// How each fern was drawn when last placed, if it was, each mesh's range of vertices with its range of instances,
+    /// and how each would be drawn now, kept so that placing them allocates nothing unless that changes.
+    placed: Mutex<(Details, FernDraws, Details)>,
 }
+
+/// How each fern is drawn, in order: in which detail, or not at all.
+type Details = Vec<Option<Detail>>;
 
 /// Where `fern` may be drawn, in either detail, however it sways: about its foot, as far out as any point of its
 /// kind's meshes reaches whichever way it is turned, as high and as low, and as far again as the breeze sways its
@@ -705,15 +749,32 @@ impl Ferns {
             hearts: ferns.iter().map(Fern::heart).collect(),
             bounds: ferns.iter().map(fern_bounds).collect(),
             seen: vec![true; ferns.len()],
+            item: None,
             ferns,
-            placed: Mutex::new((Vec::new(), Vec::new())),
+            placed: Mutex::new((Vec::new(), Vec::new(), Vec::new())),
         }
     }
 
-    /// Draw only the ferns `views` may see, from the next [`Self::place`], and say how many it culled.
+    /// Add them to `world`, in `root`, once, each an instance, where it may be drawn however it sways.
+    fn submit(&mut self, world: &mut World, root: RootId) {
+        if self.item.is_some_and(|item| world.contains(item)) {
+            return;
+        }
+        let item = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+        world.place(item, self.bounds.iter().copied().map(Some));
+        self.item = Some(item);
+    }
+
+    /// Draw only the ferns `views` says the eyes may see, as the world culled them, or, without a world, against its
+    /// frustum, from the next [`Self::place`], and say how many it culled.
     fn cull(&mut self, views: &Views<'_>) -> Tally {
-        for (seen, bounds) in self.seen.iter_mut().zip(&self.bounds) {
-            *seen = views.sees(bounds);
+        match self.item.and_then(|item| views.seen(item)) {
+            Some(seen) => self.seen.copy_from_slice(seen),
+            None => {
+                for (seen, bounds) in self.seen.iter_mut().zip(&self.bounds) {
+                    *seen = views.sees(bounds);
+                }
+            }
         }
         let drawn = self.seen.iter().filter(|seen| **seen).count();
         Tally {
@@ -743,22 +804,25 @@ impl Ferns {
     /// Group the ferns the eyes may see by the mesh each is drawn with for eyes at `eyes`, writing their instances only
     /// when that changes.
     fn place(&self, queue: &wgpu::Queue, eyes: Vec3) {
-        let details: Vec<Option<Detail>> = self
-            .hearts
-            .iter()
-            .zip(&self.seen)
-            .map(|(heart, seen)| seen.then(|| Detail::seen(*heart, eyes)))
-            .collect();
         let mut placed = self
             .placed
             .lock()
             .expect("the ferns' placing is never poisoned");
-        if placed.0 == details && !placed.1.is_empty() {
+        let (last, draws, details) = &mut *placed;
+        details.clear();
+        details.extend(
+            self.hearts
+                .iter()
+                .zip(&self.seen)
+                .map(|(heart, seen)| seen.then(|| Detail::seen(*heart, eyes))),
+        );
+        if last == details && !draws.is_empty() {
             return;
         }
-        let (instances, draws) = fern_instances(&self.ferns, &details, &self.meshes);
+        let (instances, placed) = fern_instances(&self.ferns, details, &self.meshes);
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        *placed = (details, draws);
+        *draws = placed;
+        std::mem::swap(last, details);
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -989,8 +1053,9 @@ struct Plaques {
     glyphs: tomori_render::glyphs::SharedGlyphs,
     pipeline: Pipeline,
     plaques: Vec<(Panel, Arc<Canvas>, Mat4)>,
-    /// Whether the eyes may see each, this frame.
+    /// Whether the eyes may see each, this frame, and the item they are in the render world, once submitted.
     seen: Vec<bool>,
+    item: Option<ItemId>,
 }
 
 impl Plaques {
@@ -1011,15 +1076,43 @@ impl Plaques {
             glyphs: target.glyphs.clone(),
             pipeline,
             seen: vec![true; plaques.len()],
+            item: None,
             plaques,
         }
     }
 
-    /// Draw only the plaques `views` may see, and say how much they then draw.
+    /// Add them to `world`, in `root`, if they are not there, translucent, and place each where its text is now, each
+    /// frame, since its mesh grows as the glyphs it waits for are drawn.
+    fn submit(&mut self, world: &mut World, root: RootId) {
+        let item = match self.item.filter(|item| world.contains(*item)) {
+            Some(item) => item,
+            None => {
+                *self
+                    .item
+                    .insert(world.add(Item::new(root, Layer::Translucent, Mobility::Dynamic)))
+            }
+        };
+        world.place(
+            item,
+            self.plaques
+                .iter()
+                .map(|(panel, _, transform)| Some(panel.bounds().transformed(*transform))),
+        );
+    }
+
+    /// Draw only the plaques `views` says the eyes may see, as the world culled them, or, without a world, against its
+    /// frustum, and say how much they then draw.
     fn cull(&mut self, views: &Views<'_>) -> Tally {
+        match self.item.and_then(|item| views.seen(item)) {
+            Some(seen) => self.seen.copy_from_slice(seen),
+            None => {
+                for (seen, (panel, _, transform)) in self.seen.iter_mut().zip(&self.plaques) {
+                    *seen = views.sees(&panel.bounds().transformed(*transform));
+                }
+            }
+        }
         let mut tally = Tally::default();
-        for (seen, (panel, _, transform)) in self.seen.iter_mut().zip(&self.plaques) {
-            *seen = views.sees(&panel.bounds().transformed(*transform));
+        for (seen, (panel, _, _)) in self.seen.iter().zip(&self.plaques) {
             tally += if *seen {
                 Tally {
                     drawn: 1,
@@ -1113,6 +1206,8 @@ pub struct Farmyard {
     beach: Drawn,
     stones: Drawn,
     reveal: Option<(Vec3, f32)>,
+    /// The lamps it submitted to the render world: the lanterns, then the bonfire's, which flickers.
+    lamps: Vec<LightId>,
 }
 
 impl Farmyard {
@@ -1233,6 +1328,7 @@ impl Farmyard {
             beach: shingle,
             stones,
             reveal: None,
+            lamps: Vec::new(),
         }
     }
 
@@ -1376,6 +1472,7 @@ impl Scenery for Farmyard {
         let chickens = self.chickens.get_or_insert_with(|| Drawn {
             model: models.upload(device, queue, first.model()),
             batch: models.batch(device),
+            item: None,
         });
         models.place(
             device,
@@ -1384,6 +1481,73 @@ impl Scenery for Farmyard {
             &mut chickens.batch,
             &drawn.chickens,
         );
+    }
+
+    fn submit(&mut self, world: &mut World, root: RootId) {
+        let Self {
+            yard,
+            coop,
+            backdrop,
+            chickens,
+            campsite,
+            sticks,
+            logs,
+            beach,
+            stones,
+            ferns,
+            plaques,
+            lamps,
+            ..
+        } = self;
+        // What stays where it is, once, and what moves, each frame.
+        for drawn in [yard, coop, campsite, beach]
+            .into_iter()
+            .chain([
+                &mut backdrop.trail,
+                &mut backdrop.terrace,
+                &mut backdrop.foothills,
+            ])
+            .chain(&mut backdrop.plants)
+            .chain([&mut backdrop.stones, &mut backdrop.rock])
+        {
+            drawn.submit(world, root, Mobility::Static);
+        }
+        for drawn in chickens.as_mut().into_iter().chain([sticks, logs, stones]) {
+            drawn.submit(world, root, Mobility::Dynamic);
+        }
+        ferns.submit(world, root);
+        plaques.submit(world, root);
+        // The moonlight and the lanterns once, and the bonfire's light where it now flickers.
+        if lamps
+            .first()
+            .is_none_or(|lamp| world.light_mut(*lamp).is_none())
+        {
+            let lit = lighting();
+            world.set_environment(
+                root,
+                Some(EnvironmentLight {
+                    sun_direction: lit.sun_direction,
+                    sun: lit.sun,
+                    sky: lit.sky,
+                    ground: lit.ground,
+                    haze: lit.haze,
+                    haze_density: lit.haze_density,
+                }),
+            );
+            lamps.clear();
+            lamps.extend(lanterns().iter().map(|lamp| {
+                world.add_light(Light {
+                    mobility: Mobility::Static,
+                    ..Light::new(root, lamp.position, lamp.reach, lamp.color)
+                })
+            }));
+            lamps.push(world.add_light(Light::new(root, Vec3::ZERO, 0.0, Vec3::ZERO)));
+        }
+        let fire = fire_lamp(self.clock.seconds(self.made), self.fire_size);
+        let light = world
+            .light_mut(lamps[lanterns().len()])
+            .expect("the bonfire's light is submitted with the lanterns'");
+        (light.position, light.reach, light.color) = (fire.position, fire.reach, fire.color);
     }
 
     fn cull(&mut self, queue: &wgpu::Queue, views: &Views<'_>) -> Tally {
@@ -1402,7 +1566,6 @@ impl Scenery for Farmyard {
             plaques,
             ..
         } = self;
-        let frustum = views.frustum();
         let mut tally = Tally::default();
         for drawn in [Some(yard), Some(coop), chickens.as_mut()]
             .into_iter()
@@ -1414,12 +1577,13 @@ impl Scenery for Farmyard {
                 campsite,
                 beach,
                 &mut backdrop.trail,
+                &mut backdrop.terrace,
                 &mut backdrop.foothills,
             ])
             .chain(&mut backdrop.plants)
             .chain([&mut backdrop.stones, &mut backdrop.rock])
         {
-            tally += models.cull(queue, &drawn.model, &mut drawn.batch, frustum);
+            tally += drawn.cull(queue, models, views);
         }
         tally += ferns.cull(views);
         // The ferns are placed for the first eye, as they are again when it is prepared.

@@ -50,54 +50,113 @@ impl<'a> Target<'a> {
 /// Where the eye is in the scene, from its view and projection: the point every ray of the view begins from, or the
 /// scene's origin for a view that has none, such as an orthographic one, or that cannot be inverted.
 pub fn eye(scene_to_clip: Mat4) -> Vec3 {
-    let origin = scene_to_clip.inverse() * glam::Vec4::Z;
-    if origin.w.abs() > f32::EPSILON {
-        origin.truncate() / origin.w
-    } else {
-        Vec3::ZERO
-    }
+    tomori_world::eye(scene_to_clip)
 }
 
 /// What the eyes see this frame, in a scenery's own coordinates: each eye's view and projection, and one frustum
-/// holding all they see, which a scenery culls what it draws against, once, before its eyes are prepared. See
-/// `design/rendering.md`.
+/// holding all they see, which a scenery culls what it draws against, once, before its eyes are prepared; and, from the
+/// renderer, the render world it submitted to, which says what of that the eyes may see. See `design/rendering.md`.
 pub struct Views<'a> {
-    clips: &'a [Mat4],
-    frustum: Option<tomori_assets::bounds::Frustum>,
+    views: tomori_world::Views,
+    world: Option<(&'a tomori_world::World, tomori_world::RootId)>,
 }
 
 impl<'a> Views<'a> {
-    /// The eyes `clips`, each a view and projection, and the frustum enclosing them all.
+    /// The eyes `clips`, each a view and projection, at most [`tomori_world::EYES`], and the frustum enclosing them all,
+    /// without a render world.
     pub fn new(clips: &'a [Mat4]) -> Self {
         Self {
-            clips,
-            frustum: Some(tomori_assets::bounds::Frustum::enclosing(clips)),
+            views: tomori_world::Views::new(clips),
+            world: None,
         }
     }
 
     /// The eyes `clips`, with nothing to be culled, as when culling is turned off to compare.
     pub fn unculled(clips: &'a [Mat4]) -> Self {
         Self {
-            clips,
-            frustum: None,
+            views: tomori_world::Views::unculled(clips),
+            world: None,
+        }
+    }
+
+    /// The eyes in `root`'s coordinates in `world`, as it was last culled, and what of each item the eyes may see.
+    pub fn of(world: &'a tomori_world::World, root: tomori_world::RootId) -> Self {
+        Self {
+            views: *world.root_views(root),
+            world: Some((world, root)),
         }
     }
 
     /// Each eye's view and projection.
     pub fn clips(&self) -> &[Mat4] {
-        self.clips
+        self.views.clips()
     }
 
     /// The frustum enclosing every eye's, outside which nothing is seen, or none when nothing is to be culled.
     pub fn frustum(&self) -> Option<&tomori_assets::bounds::Frustum> {
-        self.frustum.as_ref()
+        self.views.frustum()
     }
 
     /// Whether anything of `bounds` may be seen: always, when nothing is to be culled.
     pub fn sees(&self, bounds: &tomori_assets::bounds::Aabb) -> bool {
-        self.frustum
-            .as_ref()
-            .is_none_or(|frustum| frustum.sees(bounds))
+        self.views.sees(bounds)
+    }
+
+    /// Which instances of `item`, which the scenery submitted, the eyes may see, as the render world culled them, or
+    /// none without a render world or for an item not in it, which a scenery then culls itself against
+    /// [`Self::frustum`].
+    pub fn seen(&self, item: tomori_world::ItemId) -> Option<&'a [bool]> {
+        self.world
+            .filter(|(world, _)| world.contains(item))
+            .map(|(world, _)| world.seen(item))
+    }
+
+    /// The render world the scenery submitted to, and its coordinates in it, if it was given one.
+    pub fn world(&self) -> Option<(&'a tomori_world::World, tomori_world::RootId)> {
+        self.world
+    }
+}
+
+/// A render world holding one scenery alone, culled as the renderer culls the scenery it draws: what it submits, then
+/// what the eyes may see of it, which it then draws. For a scenery's own tests and measures, without a renderer.
+pub struct Stage {
+    world: tomori_world::World,
+    root: tomori_world::RootId,
+}
+
+impl Default for Stage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Stage {
+    /// A world with one root, the scenery's, in the eyes' coordinates.
+    pub fn new() -> Self {
+        let mut world = tomori_world::World::new();
+        let root = world.add_root();
+        Self { world, root }
+    }
+
+    /// Have `scenery` submit what it draws, cull it against the eyes `clips`, or not, `culled` false, to compare, and
+    /// have `scenery` draw what the eyes may see, saying how much it then draws in each eye and how much it culled.
+    pub fn cull(
+        &mut self,
+        scenery: &mut dyn Scenery,
+        queue: &wgpu::Queue,
+        clips: &[Mat4],
+        culled: bool,
+    ) -> tomori_assets::bounds::Tally {
+        self.world.set_views(clips);
+        self.world.set_culling(culled);
+        scenery.submit(&mut self.world, self.root);
+        self.world.cull();
+        scenery.cull(queue, &Views::of(&self.world, self.root))
+    }
+
+    /// The world, as last culled, and the scenery's coordinates in it.
+    pub fn world(&self) -> (&tomori_world::World, tomori_world::RootId) {
+        (&self.world, self.root)
     }
 }
 
@@ -112,9 +171,15 @@ pub trait Scenery {
         _drawn: &(dyn std::any::Any + Send + Sync),
     ) {
     }
-    /// Once a frame, after [`Scenery::animate`] and before the eyes are prepared: draw only what `views`' frustum may
-    /// see, and say how much it then draws in each eye and how much it culled. By default it culls nothing and says
-    /// nothing, drawing everything as before. See `design/rendering.md`.
+    /// Once a frame, after [`Scenery::animate`] and before [`Scenery::cull`]: add what it draws to the render `world`,
+    /// in `root`, its own coordinates, which the renderer carries into the space's, once, and place again what moved, so
+    /// that the world culls it with everything else. By default it submits nothing, and culls in [`Scenery::cull`]
+    /// itself, if at all. See `design/rendering.md`.
+    fn submit(&mut self, _world: &mut tomori_world::World, _root: tomori_world::RootId) {}
+    /// Once a frame, after [`Scenery::submit`] and the render world's cull, and before the eyes are prepared: draw only
+    /// what `views` says the eyes may see, of what it submitted by [`Views::seen`], or of anything else against
+    /// [`Views::frustum`], and say how much it then draws in each eye and how much it culled. By default it culls nothing
+    /// and says nothing, drawing everything as before. See `design/rendering.md`.
     fn cull(&mut self, _queue: &wgpu::Queue, _views: &Views<'_>) -> tomori_assets::bounds::Tally {
         tomori_assets::bounds::Tally::default()
     }
@@ -413,6 +478,9 @@ pub mod test {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sceneries that submit what they draw to the renderer's world, and are culled by it.
+    mod submitting;
 
     /// A client side that shows nothing.
     struct Empty;

@@ -9,6 +9,7 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use tomori_scene::scene::headset::{Fov, View, view_projection};
 
 use super::*;
+use tomori_render::scenery::Stage;
 
 /// A Quest 3's eyes, about, each its own asymmetric frustum: 52° out, 41° in, 40° up and 50° down, 64 mm apart.
 fn quest_eyes(middle: Vec3, heading: f32) -> [Mat4; 2] {
@@ -117,6 +118,7 @@ fn culling_takes_away_nothing_either_eye_sees_from_the_farmyard_s_viewpoints() {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let size = (448, 424);
         let mut farmyard = with_hens(&device, &queue, size.0, size.1);
+        let mut stage = Stage::new();
         let mut culled_any = 0;
         for (name, eyes, facing) in viewpoints() {
             for turn in [0.0, FRAC_PI_2, PI] {
@@ -124,9 +126,9 @@ fn culling_takes_away_nothing_either_eye_sees_from_the_farmyard_s_viewpoints() {
                 let pictures = |farmyard: &Farmyard| {
                     clips.map(|clip| capture_clip(&device, &queue, farmyard, 4, clip, size))
                 };
-                farmyard.cull(&queue, &Views::unculled(&clips));
+                stage.cull(&mut farmyard, &queue, &clips, false);
                 let whole = pictures(&farmyard);
-                let tally = farmyard.cull(&queue, &Views::new(&clips));
+                let tally = stage.cull(&mut farmyard, &queue, &clips, true);
                 culled_any += tally.culled;
                 let culled = pictures(&farmyard);
                 // Nor do the closed models' back faces show anywhere.
@@ -172,12 +174,16 @@ fn the_census_of_what_the_farmyard_draws_from_its_viewpoints_keeps_its_budgets()
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut farmyard = with_hens(&device, &queue, 64, 64);
+        let mut stage = Stage::new();
         let print = std::env::var_os("TOMORI_FARMYARD_CENSUS").is_some();
         for (name, eyes, facing) in viewpoints() {
-            let census = |farmyard: &mut Farmyard, heading: f32| {
+            let mut census = |farmyard: &mut Farmyard, heading: f32| {
                 let clips = quest_eyes(eyes, heading);
-                let all = farmyard.cull(&queue, &Views::unculled(&clips));
-                let seen = farmyard.cull(&queue, &Views::new(&clips));
+                let all = stage.cull(farmyard, &queue, &clips, false);
+                // The render world culls exactly what the scenery culled itself against the eyes' frustum.
+                let itself = farmyard.cull(&queue, &Views::new(&clips));
+                let seen = stage.cull(farmyard, &queue, &clips, true);
+                assert_eq!(itself, seen);
                 (all, seen)
             };
             let (all, seen) = census(&mut farmyard, facing);

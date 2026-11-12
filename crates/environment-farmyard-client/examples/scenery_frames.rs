@@ -8,7 +8,8 @@
 //! glowing before the eyes, as many as the ring holds, the five taken in turn frame by frame after a few seconds'
 //! warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a
 //! number for another count, and then a configuration's name, such as `culled`, to time it alone, as a frame that
-//! culls what the last culled writes nothing. Run by hand on a desktop GPU, not on CI's lavapipe; see
+//! culls what the last culled writes nothing. It times the CPU too: culling, through a render world as the renderer
+//! culls, and culling and encoding both eyes. Run by hand on a desktop GPU, not on CI's lavapipe; see
 //! `design/rendering.md`.
 //!
 //! ```sh
@@ -23,7 +24,7 @@ use tomori_environment_farmyard_client::embers::{self, Embers};
 use tomori_environment_farmyard_client::layout;
 use tomori_environment_farmyard_client::scenery::{Clock, Farmyard};
 use tomori_environment_farmyard_client::trail;
-use tomori_render::scenery::{Scenery, Target, Views};
+use tomori_render::scenery::{Scenery, Stage, Target};
 use tomori_scene::scene::headset::{Fov, View, view_projection};
 
 const SIZE: (u32, u32) = (1680, 1760);
@@ -235,10 +236,12 @@ fn main() {
         mapped_at_creation: false,
     });
     let period = f64::from(queue.get_timestamp_period());
+    let mut stage = Stage::new();
     for (name, middle, facing) in viewpoints() {
         let clips = eyes(middle, facing);
         let mut gpu = vec![Vec::with_capacity(frames); configurations.len()];
         let mut cpu = vec![Vec::with_capacity(frames); configurations.len()];
+        let mut culls = vec![Vec::with_capacity(frames); configurations.len()];
         let mut tallies = vec![tomori_assets::bounds::Tally::default(); configurations.len()];
         let warming = Instant::now();
         let mut frame = 0;
@@ -254,14 +257,9 @@ fn main() {
             farmyard.animate(&device, &queue, drawn.as_ref());
             let started = Instant::now();
             farmyard.set_back_faces_culled(back_faces);
-            tallies[which] = farmyard.cull(
-                &queue,
-                &if culled {
-                    Views::new(&clips)
-                } else {
-                    Views::unculled(&clips)
-                },
-            );
+            // What it submits to the render world, culled there, then drawn as the world saw it, as the renderer does.
+            tallies[which] = stage.cull(&mut farmyard, &queue, &clips, culled);
+            let culling = started.elapsed();
             let mut encoder = device.create_command_encoder(&Default::default());
             for (eye, clip) in clips.iter().enumerate() {
                 farmyard.prepare_eye(&queue, eye, *clip, tomori_render::scenery::eye(*clip));
@@ -308,6 +306,7 @@ fn main() {
                 gpu[which]
                     .push(((ticks[1] - ticks[0]) + (ticks[3] - ticks[2])) as f64 * period / 1e6);
                 cpu[which].push(encoded.as_secs_f64() * 1e3);
+                culls[which].push(culling.as_secs_f64() * 1e3);
             }
         }
         let median = |times: &mut Vec<f64>| {
@@ -317,8 +316,9 @@ fn main() {
         for (which, (configuration, ..)) in configurations.iter().enumerate() {
             let tally = tallies[which];
             println!(
-                "{name}, {configuration}: GPU {:.4} ms for both eyes, CPU {:.4} ms to cull and encode; an eye: {} drawn, {} culled, {} draws, {} triangles",
+                "{name}, {configuration}: GPU {:.4} ms for both eyes, CPU {:.4} ms to cull and {:.4} ms to cull and encode; an eye: {} drawn, {} culled, {} draws, {} triangles",
                 median(&mut gpu[which]),
+                median(&mut culls[which]),
                 median(&mut cpu[which]),
                 tally.drawn,
                 tally.culled,

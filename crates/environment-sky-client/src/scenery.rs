@@ -3,11 +3,44 @@
 
 //! Sky as a scenery that `tomori-render` draws in each eye's pass, and its registration with a client's sceneries at Sky's identifier and version. See `design/environments.md`.
 use glam::{Mat4, Vec3};
-use tomori_render::scenery::{Sceneries, Scenery, Target};
+use tomori_render::scenery::{Sceneries, Scenery, Target, Views};
+use tomori_render::world::{Item, Layer, Mobility, RootId, Tally, World};
 
 use crate::Sky;
 
 impl Scenery for Sky {
+    /// Its platform and shrine, one static item, with the box about them, and its clouds, ray-marched in passes of their
+    /// own, an item in the sky's layer that is never culled.
+    fn submit(&mut self, world: &mut World, root: RootId) {
+        if self
+            .items
+            .is_some_and(|(platform, _)| world.contains(platform))
+        {
+            return;
+        }
+        let platform = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+        world.place(platform, [Some(self.bounds)]);
+        let clouds = world.add(Item::new(root, Layer::Sky, Mobility::Static).unculled());
+        world.place(clouds, [None]);
+        self.items = Some((platform, clouds));
+    }
+
+    /// Draw the platform and shrine only if the eyes may see them, as the world culled them, or, without a world, against
+    /// the eyes' frustum.
+    fn cull(&mut self, _queue: &wgpu::Queue, views: &Views<'_>) -> Tally {
+        self.shown = match self.items.and_then(|(platform, _)| views.seen(platform)) {
+            Some(seen) => seen.iter().any(|seen| *seen),
+            None => views.sees(&self.bounds),
+        };
+        let shown = usize::from(self.shown);
+        Tally {
+            drawn: shown,
+            culled: 1 - shown,
+            draws: shown,
+            triangles: shown * self.vertex_count as usize / 3,
+        }
+    }
+
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
         self.prepare_eye(queue, eye, scene_to_clip);
     }
@@ -121,6 +154,103 @@ mod tests {
             (Some("Main floor"), Some("Racks"))
         );
         assert_eq!(declared[0].1, floors);
+    }
+
+    #[test]
+    fn sky_s_platform_is_drawn_only_where_the_eyes_may_see_it() {
+        tomori_render::test_gpu::with(|gpu| {
+            let mut sky = Sky::new(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                16,
+                16,
+            );
+            let projection = glam::camera::rh::proj::directx::perspective(1.4, 1.0, 0.05, 2_000.0);
+            let looking = |from: Vec3, to: Vec3| {
+                projection * glam::camera::rh::view::look_at_mat4(from, to, Vec3::Y)
+            };
+            let towards = [looking(Vec3::new(0.0, 1.6, 6.0), Vec3::ZERO)];
+            let away = [looking(
+                Vec3::new(0.0, 1.6, 200.0),
+                Vec3::new(0.0, 1.6, 400.0),
+            )];
+            let mut stage = tomori_render::scenery::Stage::new();
+            let seen = stage.cull(&mut sky, &gpu.queue, &towards, true);
+            assert_eq!((seen.drawn, seen.culled, seen.draws), (1, 0, 1));
+            assert_eq!(seen.triangles, sky.vertex_count as usize / 3);
+            // Looking away, it is culled, and the clouds, which are never culled, are still drawn.
+            let culled = stage.cull(&mut sky, &gpu.queue, &away, true);
+            assert_eq!(
+                (culled.drawn, culled.culled, culled.draws, culled.triangles),
+                (0, 1, 0, 0)
+            );
+            assert!(!sky.shown);
+            // It is drawn so, the sky without the platform.
+            let texture = |format, usage| {
+                gpu.device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Sky culled eye"),
+                        size: wgpu::Extent3d {
+                            width: 16,
+                            height: 16,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            };
+            let color = texture(
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            let depth = texture(
+                wgpu::TextureFormat::Depth32Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            Scenery::prepare(&sky, &gpu.queue, 0, away[0]);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Sky culled eye"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                Scenery::draw(&sky, &mut pass, 0);
+            }
+            gpu.queue.submit([encoder.finish()]);
+            let (world, root) = stage.world();
+            assert_eq!(world.tally(root).drawn, 1);
+            // Unculled it is drawn, and given views without a world it culls itself alike.
+            assert_eq!(stage.cull(&mut sky, &gpu.queue, &away, false), seen);
+            assert_eq!(sky.cull(&gpu.queue, &Views::new(&away)), culled);
+            assert_eq!(sky.cull(&gpu.queue, &Views::new(&towards)), seen);
+        });
     }
 
     #[test]

@@ -12,6 +12,8 @@ cargo add tomori-render
 
 A scenery is made for a `scenery::Target`, built with `Target::new`, which carries the renderer's glyph atlas, `glyphs::SharedGlyphs`, for a scenery's own text, drawn with `ui_panel::Pipeline::shared`; `Scenery::prepare_eye` tells it where each eye is, from `scenery::eye`, and is `Scenery::prepare` by default.
 
+Once a frame, `Scenery::submit` adds what a scenery draws to the renderer's render world, `world`, a re-export of [`tomori-world`](https://crates.io/crates/tomori-world), in its own coordinates and with its bounds, and `Scenery::cull` then draws only what `scenery::Views::seen` says the eyes may see of it; `scenery::Stage` culls a scenery alone, for its tests. A scenery that submits nothing may cull itself against `Views::frustum`, or draw everything.
+
 The `test-gpu` feature adds the shared device for offscreen rendering tests and WGSL validation, for other crates' tests; they run on a GPU or on Mesa's lavapipe.
 
 Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).

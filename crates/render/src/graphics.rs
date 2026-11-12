@@ -253,6 +253,12 @@ pub struct Renderer {
     glyphs: crate::glyphs::SharedGlyphs,
     /// Whether what neither eye can see is culled, as it is unless a comparison turns it off.
     culling: bool,
+    /// What this frame draws, each in its own coordinates, Tomori's cubes and panels and what the scenery and the avatar
+    /// submit, and what the eyes may see of it. See `design/rendering.md`.
+    world: tomori_world::World,
+    submitted: Submitted,
+    /// Each registered scenery's coordinates in the world, by its place in `sceneries`, culled while it is drawn.
+    scenery_roots: Vec<tomori_world::RootId>,
     /// What the last frame drew in each eye, and how much it culled.
     tally: tomori_assets::bounds::Tally,
     /// The cubes drawn this frame, of [`Self::scene`], those the eyes may see, and whether the cubes' buffer holds only
@@ -262,6 +268,38 @@ pub struct Renderer {
     /// The GPU's time for each frame, and what each drew; see `design/rendering.md`.
     profiler: crate::profiler::Profiler,
     solids: crate::solids::Solids,
+}
+
+/// What the renderer itself submits to its world: the scene's coordinates within the space's, the cubes', and the
+/// avatar's, which is cleared when its scenery is dropped; and its two items, the cubes and the panels, in the space's
+/// coordinates, each instance one cube or panel.
+struct Submitted {
+    scene: tomori_world::RootId,
+    avatar: tomori_world::RootId,
+    cubes: tomori_world::ItemId,
+    panels: tomori_world::ItemId,
+}
+
+impl Submitted {
+    /// Its roots, and its items, in `world`, which also holds a root for each of `sceneries`.
+    fn new(world: &mut tomori_world::World, sceneries: usize) -> (Self, Vec<tomori_world::RootId>) {
+        use tomori_world::{Item, Layer, Mobility};
+        let space = world.add_root();
+        let scene = world.add_root();
+        let avatar = world.add_root();
+        let roots = (0..sceneries).map(|_| world.add_root()).collect();
+        let cubes = world.add(Item::new(scene, Layer::Opaque, Mobility::Dynamic));
+        let panels = world.add(Item::new(space, Layer::Translucent, Mobility::Dynamic));
+        (
+            Self {
+                scene,
+                avatar,
+                cubes,
+                panels,
+            },
+            roots,
+        )
+    }
 }
 
 /// Where a cube of Tomori's own may be drawn: the unit cube, scaled, turned by its basis and moved to its position.
@@ -434,6 +472,9 @@ impl Renderer {
             samples,
             glyphs.clone(),
         );
+        let created = sceneries.create(&target);
+        let mut world = tomori_world::World::new();
+        let (submitted, scenery_roots) = Submitted::new(&mut world, created.len());
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
@@ -444,7 +485,7 @@ impl Renderer {
             pads: Vec::new(),
             blink: 0.0,
             blink_pipeline,
-            sceneries: sceneries.create(&target),
+            sceneries: created,
             environments: sceneries.environments(),
             avatar_sceneries: sceneries.avatar_sceneries(),
             avatar: None,
@@ -469,6 +510,9 @@ impl Renderer {
             images,
             glyphs,
             culling: true,
+            world,
+            submitted,
+            scenery_roots,
             tally: Default::default(),
             shown: Vec::with_capacity(MAX_INSTANCES),
             cubes_culled: false,
@@ -481,6 +525,12 @@ impl Renderer {
     /// Cull what neither eye can see, as by default, or draw everything, `false`, to compare.
     pub fn set_culling(&mut self, culling: bool) {
         self.culling = culling;
+    }
+
+    /// The world the last frame was culled in.
+    #[cfg(test)]
+    pub(crate) fn world(&self) -> &tomori_world::World {
+        &self.world
     }
 
     /// What the last frame drew in each eye, and how much it culled: the scenery's and the avatar's, Tomori's cubes and
@@ -610,14 +660,6 @@ impl Renderer {
     }
 
     /// The scenery drawn now, if the environment has one.
-    fn scenery_mut(&mut self) -> Option<&mut Box<dyn crate::scenery::Scenery>> {
-        let environment = self.environment;
-        self.sceneries
-            .iter_mut()
-            .find(|(registered, _)| *registered == environment)
-            .map(|(_, scenery)| scenery)
-    }
-
     fn scenery(&self) -> Option<&dyn crate::scenery::Scenery> {
         self.sceneries
             .iter()
@@ -689,7 +731,7 @@ impl Renderer {
         shown: Option<&crate::avatar::Shown<'_>>,
     ) {
         let Some(shown) = shown else {
-            self.avatar = None;
+            self.drop_avatar();
             return;
         };
         let current = self
@@ -698,7 +740,7 @@ impl Renderer {
             .is_some_and(|(avatar, space, _)| avatar == shown.avatar && space == shown.space);
         if !current {
             // The previous one's resources go before the next one's are made.
-            self.avatar = None;
+            self.drop_avatar();
             let create = self
                 .avatar_sceneries
                 .iter()
@@ -728,10 +770,16 @@ impl Renderer {
                 scenery.animate(device, queue, drawn.as_ref())
             }));
             if animated.is_err() {
-                self.avatar = None;
+                self.drop_avatar();
                 self.give_up_avatar(shown.avatar);
             }
         }
+    }
+
+    /// Drop the avatar's scenery, with what it holds on the GPU and what it submitted to the world.
+    fn drop_avatar(&mut self) {
+        self.avatar = None;
+        self.world.clear(self.submitted.avatar);
     }
 
     /// Never make the scenery of the avatar `avatar` again, and tell the conversation, which shows the swarm in its
@@ -1028,14 +1076,9 @@ impl Renderer {
         assert!((1..=2).contains(&targets.len()));
         // The glyphs that this frame's meshes were built with, which may be new.
         self.glyphs.glyphs().sync(device, queue);
-        // What the eyes see: once, before either is drawn, everything that neither can see is culled, each against one
-        // frustum enclosing both. See `design/rendering.md`.
-        let both = tomori_assets::bounds::Frustum::enclosing(matrices);
-        let visible: Vec<bool> = panels
-            .iter()
-            .map(|(panel, model)| !self.culling || both.sees(&panel.bounds().transformed(*model)))
-            .collect();
-        let tally = self.cull(queue, matrices, scene_to_space, panels, &visible);
+        // What the eyes see: once, before either is drawn, everything that neither can see is culled, against one frustum
+        // enclosing both. See `design/rendering.md`.
+        let tally = self.cull(queue, matrices, scene_to_space, panels);
         // The GPU's timestamps of frames it has finished are read back as they are mapped.
         let _ = device.poll(wgpu::PollType::Poll);
         let profiled = self.profiler.begin(targets.len());
@@ -1046,6 +1089,8 @@ impl Renderer {
             label: Some("swarm frame"),
         });
         let multisampled = self.multisampled.as_ref();
+        // Which panels either eye may see, in the frame step's order.
+        let visible = self.world.seen(self.submitted.panels);
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
@@ -1078,7 +1123,7 @@ impl Renderer {
             );
             // Each panel's model is in the same space as the eyes' matrices.
             let seen = crate::ui_panel::Seen::new(matrices[eye], haze);
-            for ((panel, model), _) in panels.iter().zip(&visible).filter(|(_, seen)| **seen) {
+            for ((panel, model), _) in panels.iter().zip(visible).filter(|(_, seen)| **seen) {
                 panel.prepare_seen(queue, eye, &seen, *model);
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1200,57 +1245,90 @@ impl Renderer {
         }
     }
 
-    /// Cull, against one frustum enclosing all the eyes `matrices` see, what the scenery and the avatar draw and Tomori's
-    /// cubes, writing those seen for this frame, and say how much is drawn in each eye and culled, panels' with it.
+    /// Cull, against one frustum enclosing all the eyes `matrices` see, what the scenery and the avatar draw, Tomori's
+    /// cubes and `panels`, each submitted to the world in its own coordinates, writing the cubes seen for this frame, and
+    /// say how much is drawn in each eye and culled.
     fn cull(
         &mut self,
         queue: &wgpu::Queue,
         matrices: &[Mat4],
         scene_to_space: Mat4,
         panels: &[(&crate::ui_panel::Panel, Mat4)],
-        visible: &[bool],
     ) -> tomori_assets::bounds::Tally {
-        let culling = self.culling;
-        let views = |clips| {
-            if culling {
-                crate::scenery::Views::new(clips)
-            } else {
-                crate::scenery::Views::unculled(clips)
-            }
-        };
-        let scene: Vec<Mat4> = matrices
+        use crate::scenery::Views;
+        let environment = self.environment;
+        let current = self
+            .sceneries
             .iter()
-            .map(|matrix| *matrix * scene_to_space)
-            .collect();
-        let carried: Vec<Mat4> = scene.iter().map(|clip| *clip * self.carriage).collect();
-        let mut tally = tomori_assets::bounds::Tally::default();
-        if let Some(scenery) = self.scenery_mut() {
-            tally += scenery.cull(queue, &views(&carried));
+            .position(|(registered, _)| *registered == environment);
+        let Self {
+            world,
+            submitted,
+            scenery_roots,
+            sceneries,
+            avatar,
+            scene,
+            shown,
+            ..
+        } = self;
+        world.set_culling(self.culling);
+        world.set_views(matrices);
+        // The panels are in the space's coordinates, as the eyes are; the cubes and the avatar in the scene's; the
+        // environment's scenery in its own, carried into the scene's.
+        world.set_transform(submitted.scene, scene_to_space);
+        world.set_transform(submitted.avatar, scene_to_space);
+        world.set_active(submitted.avatar, avatar.is_some());
+        for (index, root) in scenery_roots.iter().enumerate() {
+            world.set_active(*root, Some(index) == current);
         }
-        if let Some((_, _, scenery)) = &mut self.avatar {
-            tally += scenery.cull(queue, &views(&scene));
+        world.place(
+            submitted.cubes,
+            scene.iter().map(|cube| Some(cube_bounds(cube))),
+        );
+        world.place(
+            submitted.panels,
+            panels
+                .iter()
+                .map(|(panel, model)| Some(panel.bounds().transformed(*model))),
+        );
+        let mut current = current.map(|index| (scenery_roots[index], &mut sceneries[index].1));
+        if let Some((root, scenery)) = &mut current {
+            world.set_transform(*root, scene_to_space * self.carriage);
+            scenery.submit(world, *root);
+        }
+        if let Some((_, _, scenery)) = avatar {
+            scenery.submit(world, submitted.avatar);
+        }
+        world.cull();
+        let mut tally = tomori_assets::bounds::Tally::default();
+        if let Some((root, scenery)) = current {
+            tally += scenery.cull(queue, &Views::of(world, root));
+        }
+        if let Some((_, _, scenery)) = avatar {
+            tally += scenery.cull(queue, &Views::of(world, submitted.avatar));
         }
         // Tomori's cubes, the swarm, workers, rings, pads and rays among them, in one draw.
-        let cubes = views(&scene);
-        self.shown.clear();
-        self.shown.extend(
-            self.scene
+        shown.clear();
+        shown.extend(
+            scene
                 .iter()
-                .filter(|cube| cubes.sees(&cube_bounds(cube))),
+                .zip(world.seen(submitted.cubes))
+                .filter(|(_, seen)| **seen)
+                .map(|(cube, _)| *cube),
         );
-        let culled = self.shown.len() != self.scene.len();
+        let culled = shown.len() != scene.len();
         if culled || self.cubes_culled {
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.shown));
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(shown));
         }
         self.cubes_culled = culled;
         tally += tomori_assets::bounds::Tally {
-            drawn: self.shown.len(),
-            culled: self.scene.len() - self.shown.len(),
+            drawn: shown.len(),
+            culled: scene.len() - shown.len(),
             draws: 1,
-            triangles: self.shown.len() * self.vertex_count as usize / 3,
+            triangles: shown.len() * self.vertex_count as usize / 3,
         };
         // The panels, each a draw of its face, and its backing's into depth.
-        for ((panel, _), seen) in panels.iter().zip(visible) {
+        for ((panel, _), seen) in panels.iter().zip(world.seen(submitted.panels)) {
             tally += if *seen {
                 tomori_assets::bounds::Tally {
                     drawn: 1,

@@ -28,6 +28,8 @@ tomori-assets = { version = "0.2.0", path = "../assets", default-features = fals
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 tomori-text = { version = "0.2.0", path = "../text" }
+# The render world, which Tomori's own things and the sceneries submit what they draw to, and which culls it.
+tomori-world = { version = "0.2.0", path = "../world" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 # The WGSL front end wgpu uses, at its version, to validate shaders in tests.
 naga = { version = "30.0.1", features = ["wgsl-in"], optional = true }
