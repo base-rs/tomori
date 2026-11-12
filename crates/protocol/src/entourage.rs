@@ -1,11 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! How the agent and its Tomori wall stand one above the other, at home and summoned, for the server, which stands
-//! them, and every client, which summons the agent, to agree on: the swarm above, the middle of the wall's row of slots
-//! [`BENEATH`] directly beneath the swarm's middle, facing the way the agent faces, with a clear gap between the
-//! swarm's lowest reach and the top of the row, and both clear of the floor. Seen from whoever the agent faces, the wall
-//! stands beneath the swarm, never behind it: [`seen_beneath`]. See `design/environments.md` and
+//! How the agent and the Tomori wall stand one above the other at the agent's home, and where the agent stands when it
+//! goes to someone, for the server, which stands them, and every client and environment, which test and draw them, to
+//! agree on: the swarm above, the middle of the wall's row of slots [`BENEATH`] directly beneath the swarm's middle,
+//! facing the way the agent faces, with a clear gap between the swarm's lowest reach and the top of the row, and both
+//! clear of the floor. Seen from whoever the agent faces, the wall stands beneath the swarm, never behind it:
+//! [`seen_beneath`]. Its name, and that of [`summoned`], are from when the wall and the workers travelled with the agent
+//! as it was summoned; nothing travels with it now, and the wall stays home. See `design/environments.md` and
 //! `design/projection.md`.
 //!
 //! ```

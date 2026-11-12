@@ -3,7 +3,7 @@
 
 //! Where spaces may run, and how many may run at once. See `design/workspaces.md`.
 //!
-//! There is no authentication yet, so every directory a client names is resolved, with symbolic links followed, and must be one of the server's workspace roots or lie beneath one. Every refusal looks the same to the client, so that the reply does not reveal whether a path exists or why it was refused.
+//! Only owners create spaces, but in `--auth open` mode anyone who can reach the server is one, and an owner's device can be lost or misused, so every directory a client names is resolved, with symbolic links followed, and must be one of the server's workspace roots or lie beneath one. Every refusal looks the same to the client, so that the reply does not reveal whether a path exists or why it was refused.
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

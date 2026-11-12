@@ -315,15 +315,16 @@ pub struct SpaceState {
     /// environment, which a client reads as the default layout. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Anchors::is_empty")]
     pub anchors: Anchors,
-    /// Where a participant summoned the agent to, in the space's coordinates, facing along its +Z, while it stands
-    /// there rather than at its home: absent while it is at home, as it is when the space opens and after the agent
-    /// or a participant sends it home. See `design/environments.md`.
+    /// Where the agent stands away from its home, in the space's coordinates, facing along its +Z, as it follows the
+    /// speaker or was called or asked to go there: absent while it is at home, as it is when the space opens and after
+    /// the agent or a participant sends it home. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summoned: Option<crate::Pose>,
-    /// While the agent is summoned, where the eyes were of whoever it was summoned to, in the space's coordinates: the
-    /// participant it faces, whom its entourage gathers about, its workers on their arc about them and the Tomori wall
-    /// at its travel spot before them. Absent while it is at home, where they gather about the eyes at home, and from
-    /// older servers, whose clients arrange the workers about the agent's home. See `design/environments.md`.
+    /// Sent only by older servers, while the agent was summoned: where the eyes were of whoever it was summoned to, in
+    /// the space's coordinates, whom its entourage gathered about, its workers on their arc about them. A server no
+    /// longer sends it, since nothing travels with the agent, and a client reads its absence, with
+    /// [`Self::movement`] sent, as the workers at home; whom the agent stands for is [`Self::partner`]. See
+    /// `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summoner: Option<[f32; 3]>,
     /// Whether the server keeps where a participant's trigger summons the agent to, taking
@@ -497,8 +498,8 @@ pub enum Renamer {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Anchors {
-    /// The agent's home: where the swarm's middle stands, its eye facing along the pose's +Z, until a participant
-    /// summons it elsewhere, and again once it is sent home.
+    /// The agent's home: where the swarm's middle stands, its eye facing along the pose's +Z, until it follows the
+    /// speaker or is called or asked elsewhere, and again once it is sent home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::Pose>,
     /// The middle of the workers' arrangement, which faces along the pose's +Z, towards whoever watches it, as the

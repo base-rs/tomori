@@ -264,7 +264,7 @@ impl Wall {
         (width * PIXEL * scale, height * PIXEL * scale)
     }
 
-    /// A flat wall's board, at scale 1, in text cells of 9 by 12 font pixels inside its padding of [`BOARD_PADDING`]:
+    /// A flat wall's board, at scale 1, in text cells of 9 by 12 font pixels inside its padding of 3 font pixels:
     /// its columns and rows, as a headset's canvas draws it.
     pub fn board_cells(&self) -> (usize, usize) {
         let (width, height) = board_pixels(self.grid(), self.slot_pixels());
