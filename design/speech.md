@@ -78,7 +78,7 @@ Also in November 2026, the maintainer found on the Quest 3 that held speech wait
 
 ## Scope
 
-The server's recognition and synthesis pipelines, the speakable-text filter and segmenter, the phonemizer and its normalization of text, the speech stream sent to clients and the spectator mixer, and how clients show the agent speaking, from their player in `tomori-client` to the swarm's signals in `tomori-scene`, and when it is the participant's turn and what speaking over the agent skips, in `tomori-scene`'s `turn.rs` and the conversation.
+The server's recognition and synthesis pipelines, the speakable-text filter and segmenter, the phonemizer and its normalization of text, the speech stream sent to clients, and how clients show the agent speaking, from their player in `tomori-client` to the swarm's signals in `tomori-scene`, and when it is the participant's turn and what speaking over the agent skips, in `tomori-scene`'s `turn.rs` and the conversation.
 
 ## Validation
 

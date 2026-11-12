@@ -53,4 +53,4 @@ Workspace layout and dependencies of client crates, the client core, the shared 
 - Check that the core builds for every client target, including `aarch64-linux-android`.
 - Inspect the server for logic that depends on a client's hardware rather than its reported capabilities.
 
-Whether the spectator client mixes audio itself, instead of the server mixing the spectator feed as `live-audio.md` currently requires, is a pending follow-up.
+The spectator client mixes audio itself, as every client does, rather than the server mixing a feed for it (see `live-audio.md` and `spectator.md`).

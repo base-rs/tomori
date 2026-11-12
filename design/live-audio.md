@@ -26,7 +26,7 @@ Each client mixes every incoming participant stream together with the space's ag
 
 What a participant records never plays back to them, through any gate. The server never relays a participant's audio to that participant, and a client also discards any audio attributed to its own participant number, in case a server does. The agent's speech is not the participant's own audio: its reply to a question they asked plays to them like everyone else.
 
-A client that shows who is speaking takes it from the audio its mixer actually plays, measured before local volume, so muting agent speech locally silences it without hiding that the agent is speaking. The server mixes the same sources once for the spectator feed.
+A client that shows who is speaking takes it from the audio its mixer actually plays, measured before local volume, so muting agent speech locally silences it without hiding that the agent is speaking. The spectator mixes for itself, as any client does: it receives the same streams and plays them through `tomori-client`'s player, placed as the participant it follows hears them (see `spectator.md`), and the server mixes nothing for it. The server's `mixer.rs`, ported from the bridge, is not used.
 
 Playback and mixing are real time: audio that arrives too late to play is dropped from playback rather than delayed or replayed. This does not apply to transcription: every `agent` frame reaches recognition, in order, and a gap in `agent` audio fails the utterance with a visible error, as `speech.md` requires.
 
@@ -51,7 +51,7 @@ In November 2026, speaking from the headset, the maintainer asked to free the le
 
 ## Scope
 
-Client audio capture and playback, the microphone gate, server routing and the spectator mixer.
+Client audio capture and playback, the spectator's among them, the microphone gate and server routing.
 
 ## Validation
 
