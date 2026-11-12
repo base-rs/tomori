@@ -1,8 +1,8 @@
 // The light a burning marshmallow paints in the air: a ribbon along the path it took, turned towards the eye about its
 // length, thin and yellow-white when fresh, widening and cooling through orange to dull red as it fades, with sparks
 // rising and embers falling off it, each a little disc turned towards the eye. Every quad is written once, with when it
-// was made, and aged here by the time; all of it glows, added to what is behind it, unlit, hazed with distance as the
-// models are, and drawn only inside the reveal sphere while the farmyard grows. See `embers.rs`, whose `LIFE`, widths
+// was made, and aged here by the time; all of it glows, added to what is behind it, unlit, hazed with distance as
+// everything is, and drawn only inside the reveal sphere while the farmyard grows. See `embers.rs`, whose `LIFE`, widths
 // and colours these follow.
 
 struct Camera {
@@ -113,12 +113,10 @@ fn ember_vertex(corner: Corner) -> Shaded {
             color = vec3<f32>(1.0, 0.36, 0.08) * fade * flicker;
         }
     }
-    let far = distance(world, camera.eye.xyz);
-    let haze = 1.0 - exp(-camera.haze.w * far * far);
     var out: Shaded;
     out.position = camera.view_projection * vec4<f32>(world, 1.0);
     out.world = world;
-    out.color = color * (1.0 - haze);
+    out.color = hazed_glow(color, camera.haze, distance(world, camera.eye.xyz));
     out.across = corner.shape.xy;
     return out;
 }

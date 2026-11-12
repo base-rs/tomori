@@ -231,8 +231,8 @@ impl crate::scenery::Scenery for Hazy {
 
     fn set_reveal(&mut self, _reveal: Option<(glam::Vec3, f32)>) {}
 
-    fn haze(&self) -> glam::Vec4 {
-        HAZE
+    fn haze(&self) -> tomori_assets::haze::Haze {
+        tomori_assets::haze::Haze::new(HAZE.truncate(), HAZE.w)
     }
 }
 

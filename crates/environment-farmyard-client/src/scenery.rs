@@ -36,6 +36,18 @@ use tomori_environment_farmyard::trail;
 use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
 use tomori_scene::ui_text::{Row, Style};
 
+/// A shader module of `$file`, one of the farmyard's, after the shared haze functions it fades what it draws by.
+macro_rules! shader {
+    ($file:literal) => {
+        wgpu::ShaderModuleDescriptor {
+            label: Some($file),
+            source: wgpu::ShaderSource::Wgsl(
+                tomori_assets::haze::shader(include_str!($file)).into(),
+            ),
+        }
+    };
+}
+
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
 /// read how the farmyard is lit, at its end, as its models are.
 #[repr(C)]
@@ -462,7 +474,7 @@ struct Fire {
 impl Fire {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(wgpu::include_wgsl!("fire.wgsl"));
+        let shader = device.create_shader_module(shader!("fire.wgsl"));
         let pipeline = blended(
             target,
             layout,
@@ -539,7 +551,7 @@ struct Trails {
 impl Trails {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(wgpu::include_wgsl!("embers.wgsl"));
+        let shader = device.create_shader_module(shader!("embers.wgsl"));
         let pipeline = blended(
             target,
             layout,
@@ -652,7 +664,7 @@ pub(crate) fn fern_bounds(fern: &Fern) -> Aabb {
 impl Ferns {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(wgpu::include_wgsl!("fern.wgsl"));
+        let shader = device.create_shader_module(shader!("fern.wgsl"));
         let pipeline = pipeline(
             target,
             layout,
@@ -882,7 +894,7 @@ impl Backdrop {
             &Arc::new(terrace::model()),
             Mat4::IDENTITY,
         );
-        let shader = device.create_shader_module(wgpu::include_wgsl!("water.wgsl"));
+        let shader = device.create_shader_module(shader!("water.wgsl"));
         let water: Vec<WaterVertex> = backdrop::water()
             .into_iter()
             .chain(backdrop::upper_water())
@@ -1033,9 +1045,17 @@ impl Plaques {
         }
     }
 
-    fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
+    /// Each plaque as `eye` sees it, through the farmyard's `haze`.
+    fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        eye: usize,
+        scene_to_clip: Mat4,
+        haze: tomori_assets::haze::Haze,
+    ) {
+        let seen = tomori_render::ui_panel::Seen::new(scene_to_clip, haze);
         for (panel, _, transform) in &self.plaques {
-            panel.prepare(queue, eye, scene_to_clip * *transform);
+            panel.prepare_seen(queue, eye, &seen, *transform);
         }
     }
 
@@ -1136,7 +1156,7 @@ impl Farmyard {
                 }],
             })
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let shader = device.create_shader_module(shader!("sky.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Farmyard sky"),
             bind_group_layouts: &[Some(&layout)],
@@ -1199,7 +1219,7 @@ impl Farmyard {
             coop,
             backdrop,
             plaques,
-            haze: lighting.haze.extend(lighting.haze_density).to_array(),
+            haze: tomori_assets::haze::Haze::from(&lighting).to_array(),
             clock,
             made: Instant::now(),
             chickens: None,
@@ -1297,8 +1317,9 @@ pub(crate) fn stick_instances(shown: &[crate::campsite::Shown]) -> Vec<Instance>
 }
 
 impl Scenery for Farmyard {
-    fn haze(&self) -> glam::Vec4 {
-        glam::Vec4::from_array(self.haze)
+    fn haze(&self) -> tomori_assets::haze::Haze {
+        let [red, green, blue, density] = self.haze;
+        tomori_assets::haze::Haze::new(Vec3::new(red, green, blue), density)
     }
 
     fn animate(
@@ -1421,7 +1442,12 @@ impl Scenery for Farmyard {
         }
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
-        self.plaques.prepare(queue, eye, scene_to_clip);
+        self.plaques.prepare(
+            queue,
+            eye,
+            scene_to_clip,
+            tomori_assets::haze::Haze::from(&lit),
+        );
         let inverse = scene_to_clip.inverse();
         let camera = SkyCamera {
             inverse_view_projection: if inverse.is_finite() {

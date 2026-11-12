@@ -76,7 +76,5 @@ fn water_fragment(in: Shaded) -> @location(0) vec4<f32> {
         let billow = sin(in.flow.x * 3.0 + time * 0.9) * sin(in.flow.y * 5.0 - time * 1.4) * 0.5 + 0.5;
         color = color * (0.8 + 0.3 * billow);
     }
-    let far = distance(in.world, camera.eye.xyz);
-    let haze = 1.0 - exp(-camera.haze.w * far * far);
-    return vec4<f32>(mix(color, camera.haze.rgb, haze), 1.0);
+    return vec4<f32>(hazed(color, camera.haze, distance(in.world, camera.eye.xyz)), 1.0);
 }

@@ -83,6 +83,13 @@ impl Lighting {
     }
 }
 
+impl From<&Lighting> for crate::haze::Haze {
+    /// The haze `lighting` lights its models with, which the rest of the scene is hazed by too.
+    fn from(lighting: &Lighting) -> Self {
+        Self::new(lighting.haze, lighting.haze_density)
+    }
+}
+
 impl Default for Lighting {
     /// A plain, even light from above, without haze or lamps.
     fn default() -> Self {
@@ -143,7 +150,7 @@ impl From<&Lighting> for LightingUniform {
             sun: lighting.sun.extend(0.0).to_array(),
             sky: lighting.sky.extend(0.0).to_array(),
             ground: lighting.ground.extend(0.0).to_array(),
-            haze: lighting.haze.extend(lighting.haze_density).to_array(),
+            haze: crate::haze::Haze::from(lighting).to_array(),
             lamps,
             count: [lighting.lamps.len().min(LAMPS) as u32, 0, 0, 0],
         }
@@ -465,7 +472,12 @@ impl Renderer {
                 ],
             })
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("model.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("model.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                crate::haze::shader(include_str!("model.wgsl")).into(),
+            ),
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Model pipeline layout"),
             bind_group_layouts: &[

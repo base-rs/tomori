@@ -108,7 +108,5 @@ fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0
         let towards = offset / max(distance, 0.0001);
         light += lamp.color.rgb * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
     }
-    let far = distance(in.world, camera.eye.xyz);
-    let haze = 1.0 - exp(-camera.haze.w * far * far);
-    return vec4<f32>(mix(albedo * light, camera.haze.rgb, haze), 1.0);
+    return vec4<f32>(hazed(albedo * light, camera.haze, distance(in.world, camera.eye.xyz)), 1.0);
 }

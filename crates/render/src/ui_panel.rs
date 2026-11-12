@@ -48,20 +48,8 @@ impl Pipeline {
         glyphs: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("ui_panel.wgsl"));
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("panel transform layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
-                },
-                count: None,
-            }],
-        });
+        let shader = device.create_shader_module(hazed_wgsl!("ui_panel.wgsl"));
+        let layout = transforms_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("panel pipeline layout"),
             bind_group_layouts: &[Some(&layout), Some(glyphs)],
@@ -138,6 +126,47 @@ const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     attributes: &ATTRIBUTES,
 };
 
+/// The bytes of a panel's uniform for an eye, as `ui_panel.wgsl` and `panel_image.wgsl` read it: its transform from its
+/// plane to clip space, its model from its plane to the eye's space, the scene's haze and where the eye is.
+const SEEN_SIZE: u64 = 160;
+
+/// How an eye sees the space its panels are in: its matrix from that space to its clip space, where it is in it, and the
+/// scene's haze, which the panels are faded by as everything else is. See `design/rendering.md`.
+#[derive(Clone, Copy, Debug)]
+pub struct Seen {
+    matrix: Mat4,
+    eye: glam::Vec3,
+    haze: tomori_assets::haze::Haze,
+}
+
+impl Seen {
+    /// The eye whose matrix from the panels' space to its clip space is `matrix`, through `haze`.
+    pub fn new(matrix: Mat4, haze: tomori_assets::haze::Haze) -> Self {
+        Self {
+            matrix,
+            eye: crate::scenery::eye(matrix),
+            haze,
+        }
+    }
+}
+
+/// The layout of a panel's uniform for an eye, [`Panel::prepare_seen`], which its fragments read too, for the haze.
+pub(crate) fn transforms_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("panel transform layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(SEEN_SIZE),
+            },
+            count: None,
+        }],
+    })
+}
+
 /// One panel's canvas on the GPU, with a transform for each eye.
 pub struct Panel {
     device: wgpu::Device,
@@ -173,7 +202,7 @@ impl Panel {
         let cameras = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("panel eye transform"),
-                size: 64,
+                size: SEEN_SIZE,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -356,13 +385,25 @@ impl Panel {
         pass.draw(0..6, 0..1);
     }
 
-    /// Write `eye`'s transform, from the panel's plane to clip space, before the pass that draws it.
+    /// Write `eye`'s transform, from the panel's plane to clip space, before the pass that draws it, without haze.
     pub fn prepare(&self, queue: &wgpu::Queue, eye: usize, transform: Mat4) {
-        queue.write_buffer(
-            &self.cameras[eye],
-            0,
-            bytemuck::cast_slice(&transform.to_cols_array()),
+        self.prepare_seen(
+            queue,
+            eye,
+            &Seen::new(transform, tomori_assets::haze::Haze::NONE),
+            Mat4::IDENTITY,
         );
+    }
+
+    /// Write how `eye` sees the panel, `seen`, with `model` from its plane to the space `seen` is in, before the pass
+    /// that draws it: its transform to clip space, and where it is from the eye, for the scene's haze.
+    pub fn prepare_seen(&self, queue: &wgpu::Queue, eye: usize, seen: &Seen, model: Mat4) {
+        let mut uniform = [0.0f32; 40];
+        uniform[..16].copy_from_slice(&(seen.matrix * model).to_cols_array());
+        uniform[16..32].copy_from_slice(&model.to_cols_array());
+        uniform[32..36].copy_from_slice(&seen.haze.to_array());
+        uniform[36..39].copy_from_slice(&seen.eye.to_array());
+        queue.write_buffer(&self.cameras[eye], 0, bytemuck::cast_slice(&uniform));
     }
 
     /// Draw for `eye`, with [`Pipeline::set`] already called on `pass` with `pipeline`, which it is again once drawn: the

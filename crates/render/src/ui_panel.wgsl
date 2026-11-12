@@ -1,4 +1,13 @@
-struct Camera { transform: mat4x4<f32> }
+struct Camera {
+    // From the panel's plane to clip space.
+    transform: mat4x4<f32>,
+    // From the panel's plane to the space the eye is in.
+    model: mat4x4<f32>,
+    // The scene's haze: its colour, and its density in its fourth component.
+    haze: vec4<f32>,
+    // Where the eye is.
+    eye: vec3<f32>,
+}
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
@@ -8,6 +17,7 @@ struct Output {
     @location(1) uv: vec2<f32>,
     // The same at every vertex of a quad, so not interpolated, which could take a join's 1 to just under it.
     @location(2) @interpolate(flat) weight: f32,
+    @location(3) world: vec3<f32>,
 }
 @vertex
 fn vs_main(
@@ -18,6 +28,7 @@ fn vs_main(
 ) -> Output {
     var out: Output;
     out.position = camera.transform * vec4<f32>(position, 0.0, 1.0);
+    out.world = (camera.model * vec4<f32>(position, 0.0, 1.0)).xyz;
     out.color = color;
     out.uv = uv;
     out.weight = weight;
@@ -62,7 +73,9 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
 }
 @fragment
 fn fs_main(in: Output) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
+    // Hazed as everything in the scene is; its coverage is made opacity by its own colour, so that text keeps its weight.
+    let color = hazed(in.color.rgb, camera.haze, distance(in.world, camera.eye));
+    return vec4<f32>(color, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
 }
 // How far back a backing's depth is written, in the depth buffer's units, so that a surface drawn later just behind it, as near as a panel carried over a wall's slot, is still drawn over it. Set from `occlusion::TIE`.
 override TIE: f32 = 0.0;

@@ -1,4 +1,10 @@
-struct Camera { matrix: mat4x4<f32> }
+struct Camera {
+    matrix: mat4x4<f32>,
+    // Where the eye is in the scene, in `xyz`.
+    eye: vec4<f32>,
+    // The scene's haze, the environment's: its colour, and its density in `w`, for `hazed`.
+    haze: vec4<f32>,
+}
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
@@ -8,6 +14,7 @@ struct VertexOut {
     @location(1) uv: vec2<f32>,
     // The same at every vertex of a quad, so not interpolated, which could take a join's 1 to just under it.
     @location(2) @interpolate(flat) weight: f32,
+    @location(3) world: vec3<f32>,
 }
 @vertex fn vs_main(
     @location(0) position: vec3<f32>,
@@ -20,6 +27,7 @@ struct VertexOut {
     out.color = color;
     out.uv = uv;
     out.weight = weight;
+    out.world = position;
     return out;
 }
 // As `ui_panel.wgsl`'s, which this must match: glyphs from the atlas's distance fields, box drawing and blocks grown to join, distant text averaged across the pixel, and filled quads from its solid block.
@@ -58,8 +66,10 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
     let light = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
     return mix(1.0 - pow(1.0 - covered, GAMMA), pow(covered, GAMMA), light);
 }
+// Hazed as everything in the scene is; its coverage is made opacity by its own colour, so that text keeps its weight.
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color.rgb, input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb));
+    let color = hazed(input.color.rgb, camera.haze, distance(input.world, camera.eye.xyz));
+    return vec4<f32>(color, input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb));
 }
 // How far back a backing's depth is written, in the depth buffer's units, so that a surface drawn later just behind it, as near as a panel carried over a wall's slot, is still drawn over it. Set from `occlusion::TIE`.
 override TIE: f32 = 0.0;
@@ -79,6 +89,7 @@ fn vs_occlude(
     out.color = color;
     out.uv = uv;
     out.weight = weight;
+    out.world = position;
     return out;
 }
 @fragment

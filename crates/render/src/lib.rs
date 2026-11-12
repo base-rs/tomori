@@ -4,6 +4,22 @@
 //! Tomori's wgpu renderers and shaders, shared by the headset, the desktop window and the spectator: the swarm and its workers, arrival, the panels, the controllers' models and the sceneries registered with it, and [`scene_graphics::draw`], which applies a [`tomori_scene::scene::Frame`] to the [`graphics::Renderer`].
 //!
 //! It holds no window, device or platform code: each client creates its own device and targets, and hands them to the renderer. Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
+/// A shader module of `$file`, one of this crate's, after the shared haze functions, `tomori_assets::haze`, which it
+/// fades what it draws by. See `design/rendering.md`.
+macro_rules! hazed_wgsl {
+    ($file:literal) => {
+        wgpu::ShaderModuleDescriptor {
+            label: Some($file),
+            source: wgpu::ShaderSource::Wgsl(
+                tomori_assets::haze::shader(include_str!($file)).into(),
+            ),
+        }
+    };
+}
+
+/// The scene's haze, shared by every pipeline that draws in the world, this crate's and its sceneries'.
+pub use tomori_assets::haze;
+
 pub mod arrival_graphics;
 pub mod controller;
 pub mod controller_graphics;
@@ -14,6 +30,8 @@ pub mod panel_images;
 pub mod profiler;
 pub mod scene_graphics;
 pub mod scenery;
+#[cfg(test)]
+mod shared_haze;
 pub mod solids;
 #[cfg(any(test, feature = "test-gpu"))]
 pub mod test_gpu;

@@ -132,19 +132,7 @@ fn only_a_png_within_the_largest_side_is_decoded() {
 
 /// The images' pipeline, drawing into `format`, for panels' transforms bound as a panel's are.
 fn images_into(device: &wgpu::Device, format: wgpu::TextureFormat) -> PanelImages {
-    let transforms = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("test transforms"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(64),
-            },
-            count: None,
-        }],
-    });
+    let transforms = crate::ui_panel::transforms_layout(device);
     PanelImages::new(device, format, 1, &transforms)
 }
 

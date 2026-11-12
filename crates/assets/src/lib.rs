@@ -23,6 +23,7 @@
 pub mod animation;
 pub mod bounds;
 mod gltf;
+pub mod haze;
 mod instance;
 mod library;
 mod model;

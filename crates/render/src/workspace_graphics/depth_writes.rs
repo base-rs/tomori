@@ -124,26 +124,15 @@ fn a_transparent_corner_margin_or_outside_never_hides_a_translucent_wall_drawn_a
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
-                },
-                count: None,
-            }],
-        });
+        let camera_layout = crate::graphics::camera_layout(&device);
         use wgpu::util::DeviceExt;
         let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(
-                &glam::camera::rh::proj::directx::orthographic(-1.0, 1.0, -1.0, 1.0, 0.05, 50.0)
-                    .to_cols_array(),
-            ),
+            contents: bytemuck::cast_slice(&crate::graphics::camera(
+                glam::camera::rh::proj::directx::orthographic(-1.0, 1.0, -1.0, 1.0, 0.05, 50.0),
+                tomori_assets::haze::Haze::NONE,
+                1,
+            )),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -157,7 +146,7 @@ fn a_transparent_corner_margin_or_outside_never_hides_a_translucent_wall_drawn_a
         let glyphs = crate::glyphs::Glyphs::new(&device);
         let graphics = WorkspaceGraphics::new(&device, format, &camera_layout, &glyphs, 1);
         // As every surface wrote depth before, over its whole quad, whatever its coverage: none is discarded.
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../workspace.wgsl"));
+        let shader = device.create_shader_module(hazed_wgsl!("../workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&camera_layout), Some(glyphs.layout())],

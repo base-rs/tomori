@@ -276,7 +276,7 @@ fn tomori_s_cubes_are_hazed_as_the_farmyard_s_models_are() {
         assert!(lit.haze_density > 0.0);
         assert_eq!(
             target(&device, &queue, 1).haze(),
-            lit.haze.extend(lit.haze_density)
+            tomori_assets::haze::Haze::from(&lit)
         );
     });
 }

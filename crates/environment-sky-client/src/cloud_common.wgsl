@@ -3,6 +3,10 @@ struct Camera {
     inverse_view_projection: mat4x4<f32>,
     // Centre and radius of the sphere Sky is drawn inside; a negative radius fills the world.
     reveal: vec4<f32>,
+    // Sky's haze: its colour, and its density in its fourth component.
+    haze: vec4<f32>,
+    // Where the eye is.
+    eye: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 

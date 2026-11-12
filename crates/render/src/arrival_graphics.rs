@@ -562,7 +562,7 @@ impl ArrivalLabels {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
+        let shader = device.create_shader_module(hazed_wgsl!("workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("arrival labels layout"),
             bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
@@ -1647,21 +1647,7 @@ mod tests {
             ..Default::default()
         };
         crate::test_gpu::with(|gpu| {
-            let camera_layout =
-                gpu.device
-                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: None,
-                        entries: &[wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(64),
-                            },
-                            count: None,
-                        }],
-                    });
+            let camera_layout = crate::graphics::camera_layout(&gpu.device);
             let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
             let mut labels = ArrivalLabels::new(
                 &gpu.device,
