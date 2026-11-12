@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Tomori's cubes seen from afar: a particle is drawn at least a pixel across, and the swarm keeps its light from 2 m to
-//! 20 m, rather than fading into the dark as it once did. Set `TOMORI_SWARM_DISTANCE_PREVIEW` to a PNG path to see the
-//! swarm at each distance. See `design/rendering.md`.
+//! Tomori's cubes seen from afar: a particle is drawn at least a pixel across, the swarm keeps its light from 2 m to 20 m,
+//! rather than fading into the dark as it once did, and it is hazed as the environment's scenery is, by its haze alone.
+//! Set `TOMORI_SWARM_DISTANCE_PREVIEW` to a PNG path to see the swarm at each distance. See `design/rendering.md`.
 use super::*;
 use crate::test_gpu;
 
@@ -53,9 +53,6 @@ fn target(device: &wgpu::Device, (width, height): (u32, u32)) -> wgpu::Texture {
         view_formats: &[],
     })
 }
-
-/// How much of a cube's own colour the fade with distance leaves at least, as `swarm.wgsl` says.
-const FADE_FLOOR: f32 = 0.9;
 
 #[test]
 fn a_particle_far_away_is_drawn_a_pixel_across_adding_the_light_it_would() {
@@ -125,12 +122,12 @@ fn a_particle_far_away_is_drawn_a_pixel_across_adding_the_light_it_would() {
             "{near} pixels for a side of {side}"
         );
         // Far, where it would span half a pixel and might fall between pixels' samples, it is drawn a pixel across
-        // and dimmed as it grew, adding about the light it would: what it adds near, by the area it covers, faded by
-        // at most a tenth.
+        // and dimmed as it grew, adding about the light it would: what it adds near, by the area it covers, with no
+        // haze, as there is no scenery.
         assert!((0.4..0.6).contains(&spans(13.0)));
         let (far, far_light) = particle(13.0);
         assert!((1..=4).contains(&far), "{far} pixels");
-        let expected = near_light * (spans(13.0) / side).powi(2) * FADE_FLOOR / (-0.025f32).exp();
+        let expected = near_light * (spans(13.0) / side).powi(2);
         assert!(
             (far_light / expected - 1.0).abs() < 0.35,
             "{far_light} far, {expected} expected"
@@ -204,8 +201,8 @@ fn the_swarm_keeps_its_light_from_2_to_20_metres() {
             );
         }
         crate::test_support::preview("TOMORI_SWARM_DISTANCE_PREVIEW", &sheet);
-        // Its light, in all, is about the same from 5 m to 20 m, within a fifth, where the fade once took nearly all of it
-        // by 10 m; at 2 m it is more, as the cloud's nearer side is nearer still and its cubes' sides are seen, but 5 m
+        // Its light, in all, is about the same from 5 m to 20 m, within a fifth, where its own fade once took nearly all of
+        // it by 10 m; at 2 m it is more, as the cloud's nearer side is nearer still and its cubes' sides are seen, but 5 m
         // keeps well over half of it, where the fade once took half by itself.
         let [near, five, ten, twenty] = light[..] else {
             unreachable!()
@@ -219,4 +216,98 @@ fn the_swarm_keeps_its_light_from_2_to_20_metres() {
         );
         assert!(pollster::block_on(scope.pop()).is_none());
     });
+}
+
+/// A scenery that draws nothing, hazed by [`HAZE`].
+struct Hazy;
+
+/// A thick haze of a colour of its own, so that how much of it a cube takes shows at a few metres.
+const HAZE: glam::Vec4 = glam::Vec4::new(0.6, 0.3, 0.1, 0.1);
+
+impl crate::scenery::Scenery for Hazy {
+    fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
+
+    fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
+
+    fn set_reveal(&mut self, _reveal: Option<(glam::Vec3, f32)>) {}
+
+    fn haze(&self) -> glam::Vec4 {
+        HAZE
+    }
+}
+
+#[test]
+fn the_swarm_is_hazed_as_the_scenery_is_at_every_distance() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let size = (256, 256);
+        let texture = target(&device, size);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut sceneries = crate::scenery::Sceneries::empty();
+        sceneries.register("hazy", |_| {
+            Box::new(Hazy) as Box<dyn crate::scenery::Scenery>
+        });
+        let mut hazy =
+            Renderer::with_sceneries(&device, &queue, format, size.0, size.1, 1, &sceneries);
+        hazy.set_environment(Environment::new("hazy"));
+        let mut clear = Renderer::new(&device, &queue, format, size.0, size.1);
+        let fov = 1.0f32;
+        let eye = glam::Vec3::new(0.0, 1.6, 10.0);
+        let camera = glam::camera::rh::proj::directx::perspective(fov, 1.0, 0.05, 200.0)
+            * glam::camera::rh::view::look_at_mat4(eye, eye - glam::Vec3::Z, glam::Vec3::Y);
+        // The middle of one particle's near face, `distance` ahead, as `renderer` draws it, in linear RGB.
+        let seen = |renderer: &mut Renderer, distance: f32| {
+            let mut swarm = Swarm::default();
+            swarm.agents = vec![crate::swarm::Agent {
+                position: eye - glam::Vec3::Z * distance,
+                velocity: glam::Vec3::ZERO,
+            }];
+            let image = capture(&device, &queue, renderer, &texture, size, &swarm, camera);
+            let pixel = image.get_pixel(size.0 / 2, size.1 / 2);
+            glam::Vec3::from_array(std::array::from_fn(|channel| {
+                linear(f32::from(pixel[channel]) / 255.0)
+            }))
+        };
+        // Near enough that it is drawn as large as it is, the haze takes from it what it takes from the scenery's
+        // models, `1 - exp(-density d²)` of it at `d` from the eye, more with each metre.
+        let mut taken = Vec::new();
+        for distance in [1.0f32, 2.0, 3.0] {
+            let own = seen(&mut clear, distance);
+            let hazed = seen(&mut hazy, distance);
+            let far = distance - 0.014;
+            let haze = 1.0 - (-HAZE.w * far * far).exp();
+            let expected = own.lerp(HAZE.truncate(), haze);
+            for channel in 0..3 {
+                let (drawn, expected) = (encoded(hazed[channel]), encoded(expected[channel]));
+                assert!(
+                    (drawn - expected).abs() <= 2.0 / 255.0,
+                    "{distance} m: {hazed} drawn, {own} unhazed, {haze} haze"
+                );
+            }
+            taken.push(haze);
+        }
+        assert!(
+            taken.windows(2).all(|pair| pair[1] > pair[0] + 0.1),
+            "{taken:?}"
+        );
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// The linear value of an sRGB channel, `0` to `1`.
+fn linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The sRGB channel of a linear value, `0` to `1`.
+fn encoded(value: f32) -> f32 {
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
 }

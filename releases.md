@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- **The agent and its workers stay bright at a distance.** Across the farmyard, the agent's swarm, its workers and their satellites no longer fade to dark as you walk away from them: they keep their light, about as bright at 20 m as at 5 m, rather than turning darker than the workbench beside them, and their particles stay at least a pixel across, so the cloud doesn't thin out. Up close they look as before. See `design/rendering.md`.
+- **The agent and its workers stay bright at a distance.** Across the farmyard, the agent's swarm, its workers and their satellites no longer fade to dark as you walk away from them: they fade only into the environment's haze, as the workbench beside them does, rather than turning darker than it, and their particles stay at least a pixel across, so the cloud doesn't thin out. See `design/rendering.md`.
+
+- For environments: `tomori-render`'s `Scenery` gains `haze`, the haze Tomori's own cubes are hazed by over the scenery, none by default.
 
 - **Diagrams that point at the world.** A diagram's steps can now point at things around you: in a marshmallow recipe, step one, "find the fire", has a line curving out of the diagram to the bonfire, ringed where it ends, and step two one to a stick. The agent binds a short name to a thing as its tools name it, an object, an anchor, a wall, a panel, a worker, a person or itself, and Tomori finds it within your space alone, never anyone elsewhere or where someone was last seen, and tells the agent at once what each named, or what it could not find and what it may have meant. The lines are faint until you press the trigger on their step, which brightens its own and labels where they end; point at one as you speak and the agent is told both its ends. `place: near references` stands the diagram between you and what it points at. Where things are is taken as the diagram is shown; following what moves comes later. An older headset lists the lines in the diagram's outline. See `design/diagrams.md`.
 

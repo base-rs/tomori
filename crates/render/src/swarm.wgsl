@@ -1,7 +1,12 @@
 // Tomori's own cubes: the swarm, workers, satellites, rings, pads, rays and volumes' solids, each an instance of a unit
-// cube, self-lit. See `design/rendering.md`.
+// cube, self-lit, and hazed as the environment's scenery is. See `design/rendering.md`.
 struct Camera {
     view_projection: mat4x4<f32>,
+    // Where the eye is in the scene, in `xyz`.
+    eye: vec4<f32>,
+    // The environment's haze, as its scenery's models are hazed: its colour, and its density in `w`, by which what is `d`
+    // from the eye fades into it by `1 - exp(-density d²)`; none without a scenery.
+    haze: vec4<f32>,
     // Half the view's height in pixels: the pixels across one unit of normalised device coordinates.
     pixels: f32,
 }
@@ -11,15 +16,12 @@ struct Camera {
 // samples of a pixel and goes missing, thinning the cloud it is part of; grown, it is dimmed by as much as its area grew,
 // so that it adds the light it would, rather than more.
 const SMALLEST: f32 = 1.0;
-// How much of a cube's own colour is left at most in the fade with distance: the fade darkens what is near by depth, as
-// before, but never by more than this, so that the swarm and the workers keep their light across a yard.
-const FADE_FLOOR: f32 = 0.9;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) distance: f32,
+    @location(2) world: vec3<f32>,
 }
 
 // How many times larger a cube of `scale` at `position` is drawn so that its largest side spans at least `SMALLEST`
@@ -46,16 +48,18 @@ fn vs_main(
     let grown = growth(position, scale);
     let drawn = scale * grown;
     var out: VertexOutput;
-    out.clip_position = camera.view_projection * vec4<f32>(position + vertex * drawn, 1.0);
+    let world = position + vertex * drawn;
+    out.clip_position = camera.view_projection * vec4<f32>(world, 1.0);
     out.normal = normal;
     out.color = color / (grown * grown);
-    out.distance = out.clip_position.w;
+    out.world = world;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let light = 0.5 + 0.5 * max(dot(normalize(in.normal), normalize(vec3<f32>(0.4, 0.8, 0.5))), 0.0);
-    let fade = max(exp(-0.025 * in.distance * in.distance), FADE_FLOOR);
-    return vec4<f32>(mix(vec3<f32>(0.006, 0.009, 0.025), in.color * light, fade), 1.0);
+    let far = distance(in.world, camera.eye.xyz);
+    let haze = 1.0 - exp(-camera.haze.w * far * far);
+    return vec4<f32>(mix(in.color * light, camera.haze.rgb, haze), 1.0);
 }

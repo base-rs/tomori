@@ -31,7 +31,15 @@ impl Scenery for Sky {
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         Sky::resize(self, device, width, height);
     }
+
+    fn haze(&self) -> glam::Vec4 {
+        HAZE
+    }
 }
+
+/// The haze `sky.wgsl` fades Sky's scenery into, which Tomori's own cubes are hazed by alike: the horizon's colour, and
+/// in `w` its density.
+const HAZE: glam::Vec4 = glam::Vec4::new(0.018, 0.027, 0.06, 0.00025);
 
 /// Tomori's moonlit sky, for `target`.
 pub fn scenery(target: &Target) -> Box<dyn Scenery> {
@@ -59,6 +67,16 @@ pub fn register(sceneries: &mut Sceneries) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_haze_is_the_one_sky_s_scenery_is_hazed_by() {
+        let shader = include_str!("sky.wgsl");
+        assert!(shader.contains(&format!("exp(-{} * in.distance * in.distance)", HAZE.w)));
+        assert!(shader.contains(&format!(
+            "mix(color, vec3<f32>({}, {}, {}), haze)",
+            HAZE.x, HAZE.y, HAZE.z
+        )));
+    }
 
     #[test]
     fn sky_is_registered_at_its_identity_and_declares_no_locomotion() {
@@ -128,6 +146,7 @@ mod tests {
             assert_eq!(created.len(), 1);
             let (environment, mut sky) = created.into_iter().next().unwrap();
             assert_eq!(environment.id(), crate::ID);
+            assert_eq!(sky.haze(), HAZE);
             sky.set_reveal(Some((Vec3::ZERO, 1.0)));
             sky.resize(&gpu.device, 16, 16);
             sky.prepare(&gpu.queue, 0, Mat4::IDENTITY);

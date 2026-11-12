@@ -1161,6 +1161,10 @@ pub(crate) fn stick_instances(shown: &[crate::campsite::Shown]) -> Vec<Instance>
 }
 
 impl Scenery for Farmyard {
+    fn haze(&self) -> glam::Vec4 {
+        glam::Vec4::from_array(self.haze)
+    }
+
     fn animate(
         &mut self,
         device: &wgpu::Device,
