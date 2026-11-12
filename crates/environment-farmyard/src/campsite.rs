@@ -35,6 +35,8 @@ pub const PIT: f32 = 0.42;
 pub const PIT_STONES: u32 = 11;
 /// How high the flames reach above the pit, which the fire's solid stands to.
 pub const FLAMES: f32 = 0.75;
+/// How far the fire reaches from its heart, as a diagram's line to it rings it: its pit of stones, and a little more.
+pub const FIRE_EXTENT: f32 = PIT + 0.13;
 /// The middle of the campsite's clearing of packed earth is [`FIRE`], and this its radius.
 pub const CLEARING: f32 = 1.65;
 /// How far where participants stand at the campsite stays from the backdrop's middle, at most, so that from there the
@@ -73,6 +75,8 @@ pub const STICK_RADIUS: f32 = 0.011;
 pub const HOLD: f32 = 0.15;
 pub const MARSHMALLOW: (f32, f32) = (0.09, 0.038);
 pub const MARSHMALLOW_INSET: f32 = 0.0625;
+/// How far a stick reaches from where it is described, its middle, as a diagram's line to it rings it.
+pub const STICK_EXTENT: f32 = STICK_LENGTH / 2.0;
 
 /// Where a stick is: its butt, and the way along it from its butt to its tip, a unit vector.
 #[derive(Clone, Copy, Debug, PartialEq)]

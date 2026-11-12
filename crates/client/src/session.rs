@@ -324,6 +324,8 @@ async fn exchange(
             images: true,
             // And draws volumes where its session states it draws some.
             diagrams: options.limits.volumes > 0,
+            // And their world edges, the leader lines from their nodes to things in the space, with them.
+            world_edges: options.limits.volumes > 0,
             // And applies patches to the projection, where its session does, which it hands on as any other message.
             projection_patches: options.projection_patches,
             live_panels: options.projection_patches && options.live_panels,

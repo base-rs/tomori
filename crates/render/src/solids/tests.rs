@@ -89,6 +89,7 @@ fn drawn(diagram: &Diagram, count: usize) -> Vec<Drawn> {
                 * Mat4::from_scale(Vec3::splat(0.001)),
             focus: None,
             time: 0.5,
+            viewer: Vec3::ZERO,
         })
         .collect()
 }

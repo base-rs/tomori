@@ -2778,6 +2778,7 @@ impl Stage {
             across,
             node,
             edge,
+            world_edge,
         } = at;
         let shown = self.view("", walls, now);
         let panel = shown.panel(panel)?;
@@ -2799,7 +2800,7 @@ impl Stage {
         let part = panel
             .diagram
             .as_deref()
-            .and_then(|diagram| volume::part(diagram, node, edge));
+            .and_then(|diagram| volume::part(diagram, node, edge, world_edge));
         let named = if panel.title.is_empty() {
             let start = panel.body.lines().next().unwrap_or_default();
             format!(
@@ -2994,7 +2995,8 @@ impl Stage {
 }
 
 /// Where on a panel a participant pointed, as their client named it: the line of its body a list item begins on, a
-/// list's row by its id, where across a chart's time axis, and a volume's node by its id or edge by its index.
+/// list's row by its id, where across a chart's time axis, and a volume's node by its id, or its edge or world edge by
+/// its index.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Pointed<'a> {
     pub line: Option<u32>,
@@ -3002,6 +3004,8 @@ pub(crate) struct Pointed<'a> {
     pub across: Option<u16>,
     pub node: Option<&'a str>,
     pub edge: Option<u16>,
+    /// A volume's world edge, by its index.
+    pub world_edge: Option<u16>,
 }
 
 /// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the

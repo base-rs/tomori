@@ -133,6 +133,21 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
             .is_some_and(|reference| reference.starts_with("hen/"));
         assert_eq!(object.offers().is_empty(), !hen, "{}", object.id());
     }
+    // The bonfire and the sticks say how far they reach, as a diagram's line to one rings it.
+    let extent = |reference: &str| {
+        objects
+            .iter()
+            .find(|object| object.reference() == Some(reference))
+            .and_then(Object::extent)
+    };
+    assert_eq!(
+        extent("campsite/bonfire"),
+        Some(crate::campsite::FIRE_EXTENT)
+    );
+    assert_eq!(
+        extent("campsite/stick-2"),
+        Some(crate::campsite::STICK_EXTENT)
+    );
     let reference = objects[0].reference().unwrap().to_owned();
     // Taken on a hen standing about at the start, she pecks, announced to everyone; the agent is told it was done.
     let ticket = inbox.act(3, &reference, "peck", r#"{"pecks":2}"#).unwrap();

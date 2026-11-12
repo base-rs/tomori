@@ -294,7 +294,14 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
             );
             objects.extend(sticks.report().describe().into_iter().map(
                 |(id, reference, description, at)| {
-                    let object = Object::new(id, description).with_reference(reference);
+                    let extent = if reference == "campsite/bonfire" {
+                        crate::campsite::FIRE_EXTENT
+                    } else {
+                        crate::campsite::STICK_EXTENT
+                    };
+                    let object = Object::new(id, description)
+                        .with_reference(reference)
+                        .with_extent(extent);
                     match at {
                         Some(at) => object.at(at.to_array()),
                         None => object,

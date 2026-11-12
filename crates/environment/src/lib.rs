@@ -527,8 +527,14 @@ pub struct Object {
     description: String,
     reference: Option<String>,
     position: Option<[f32; 3]>,
+    extent: Option<f32>,
     offers: Vec<String>,
 }
+
+/// The least and the most an object reaches from its middle, in metres, as [`Object::with_extent`] says it, and what it
+/// is taken to without one.
+pub const EXTENT_LIMITS: (f32, f32) = (0.05, 3.0);
+pub const DEFAULT_EXTENT: f32 = 0.15;
 
 /// The longest reference of an object, in bytes: a longer one is left out, and the object described without it.
 pub const REFERENCE_BYTES: usize = 64;
@@ -599,6 +605,7 @@ impl Object {
             description: description.into(),
             reference: None,
             position: None,
+            extent: None,
             offers: Vec::new(),
         }
     }
@@ -662,6 +669,26 @@ impl Object {
     /// Where it stands, in the environment's own coordinates, if the side says.
     pub fn position(&self) -> Option<[f32; 3]> {
         self.position
+    }
+
+    /// This object, `radius` metres across from its middle, as a diagram's leader line to it rings it: from
+    /// [`EXTENT_LIMITS`]'s least to its most, the server holding one beyond them to them and leaving out one that is not
+    /// finite. Without it, an object is taken as [`DEFAULT_EXTENT`]. See `design/diagrams.md`.
+    ///
+    /// ```
+    /// use tomori_environment::Object;
+    ///
+    /// let fire = Object::new("bonfire", "the campsite's bonfire").with_extent(0.6);
+    /// assert_eq!(fire.extent(), Some(0.6));
+    /// ```
+    pub fn with_extent(mut self, radius: f32) -> Self {
+        self.extent = Some(radius);
+        self
+    }
+
+    /// How far it reaches from its middle, in metres, if the side says.
+    pub fn extent(&self) -> Option<f32> {
+        self.extent
     }
 }
 

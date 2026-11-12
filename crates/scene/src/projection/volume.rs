@@ -144,6 +144,8 @@ pub struct Mesh {
     flows: Vec<usize>,
     /// Each node's detail card, for a node with a detail, which the participant focusing on it sees beside it.
     cards: Vec<Option<Arc<Canvas>>>,
+    /// Its world edges to things here, drawn in the space.
+    leaders: Vec<leaders::Leader>,
 }
 
 /// A node's or an edge's colour, as the palette has it.
@@ -329,6 +331,7 @@ impl Mesh {
             .collect();
         Self {
             cards,
+            leaders: leaders::Leader::of(&diagram),
             source: source.clone(),
             diagram,
             parts,
@@ -349,9 +352,40 @@ impl Mesh {
         &self.diagram
     }
 
-    /// How many solids it draws, flows' beads besides.
+    /// How many solids it draws, flows' beads besides, but its leaders, which are drawn afresh each frame.
     pub fn solids(&self) -> usize {
         self.parts.len() + self.flows.len() * BEADS
+    }
+
+    /// How many leaders it draws, a world edge each to a thing here.
+    pub fn leaders(&self) -> usize {
+        self.leaders.len()
+    }
+
+    /// The world edge its leader `index` draws, by its index among its diagram's world edges, which a u16 holds, as at
+    /// most [`tomori_protocol::diagram::WORLD_EDGES`] are drawn.
+    pub fn world_edge(&self, index: usize) -> u16 {
+        self.leaders
+            .get(index)
+            .map_or(0, |leader| leader.edge as u16)
+    }
+
+    /// The node its leader `index` comes from, whose focus that leader's focus is.
+    pub fn leader_node(&self, index: usize) -> Option<usize> {
+        self.leaders.get(index).map(|leader| leader.node)
+    }
+
+    /// Each leader's path in the space, drawn with `model`, from its node's surface to its mark.
+    fn leader_paths(&self, model: Mat4) -> Vec<Vec<Vec3>> {
+        let (scale, ..) = model.to_scale_rotation_translation();
+        self.leaders
+            .iter()
+            .map(|leader| {
+                let (at, radius) = self.nodes[leader.node];
+                let out = leaders::out_of(model, self.diagram.extent, leader.target());
+                leader.path(model.transform_point3(at), radius * scale.x, out)
+            })
+            .collect()
     }
 
     /// How many labels it draws.
@@ -359,8 +393,9 @@ impl Mesh {
         self.labels.len()
     }
 
-    /// The node or edge `ray` meets first, in the volume drawn with `model`, from its own millimetres into the scene,
-    /// and how far along the ray: a node by its bounds, an edge within [`EDGE_REACH`] of its path.
+    /// The node, edge or leader `ray` meets first, in the volume drawn with `model`, from its own millimetres into the
+    /// scene, and how far along the ray: a node by its bounds, an edge within [`EDGE_REACH`] of its path, and a leader
+    /// within it of its line or its mark, in the space.
     pub fn hit(&self, model: Mat4, ray: &Ray) -> Option<(Met, f32)> {
         let inverse = model.inverse();
         let origin = inverse.transform_point3(ray.origin);
@@ -394,12 +429,37 @@ impl Mesh {
                 }
             }
         }
+        for (index, (leader, path)) in self
+            .leaders
+            .iter()
+            .zip(self.leader_paths(model))
+            .enumerate()
+        {
+            let mark = leader.mark_path().unwrap_or_default();
+            for found in [leaders::met(&path, ray), leaders::met(&mark, ray)]
+                .into_iter()
+                .flatten()
+            {
+                take(Met::Leader(index), found);
+            }
+        }
         best
     }
 
     /// The labels it draws with `model`, each turned about the vertical to face `viewer`, sized as the volume is drawn,
     /// what the participant does not focus on, `focus`, dimmed.
     pub fn sheets(&self, model: Mat4, viewer: Vec3, focus: Option<usize>, sheets: &mut Vec<Sheet>) {
+        // A leader's label stands at its target, while it is drawn in full.
+        for (index, (leader, path)) in self
+            .leaders
+            .iter()
+            .zip(self.leader_paths(model))
+            .enumerate()
+        {
+            if leaders::strength(&self.leaders, index, focus).0 >= 1.0 {
+                sheets.push(leader.sheet(leader.label_at(path[0]), viewer));
+            }
+        }
         let scale = label_scale(model);
         for label in &self.labels {
             if focus.is_some() && !self.lit(label.owner, focus) {
@@ -457,8 +517,30 @@ impl Mesh {
     }
 
     /// Its solids drawn with `model`, from its own millimetres into the scene, `time` seconds into the flows' movement,
-    /// what the participant does not focus on, `focus`, dimmed: each a unit solid moved, turned and scaled.
-    pub fn instances(&self, model: Mat4, focus: Option<usize>, time: f32, out: &mut Vec<Instance>) {
+    /// what the participant does not focus on, `focus`, dimmed: each a unit solid moved, turned and scaled; and its
+    /// leaders, in the space, as seen from `viewer`.
+    pub fn instances(
+        &self,
+        model: Mat4,
+        focus: Option<usize>,
+        time: f32,
+        viewer: Vec3,
+        out: &mut Vec<Instance>,
+    ) {
+        for (index, (leader, path)) in self
+            .leaders
+            .iter()
+            .zip(self.leader_paths(model))
+            .enumerate()
+        {
+            leader.instances(
+                &path,
+                viewer,
+                time,
+                leaders::strength(&self.leaders, index, focus),
+                out,
+            );
+        }
         let (scale, rotation, translation) = model.to_scale_rotation_translation();
         let turn = Mat3::from_quat(rotation);
         let mut push =
@@ -504,11 +586,13 @@ impl Mesh {
     }
 }
 
-/// What the ray meets of a volume: a node or an edge, by its index.
+/// What the ray meets of a volume: a node, an edge or a leader, the line of a world edge to a thing in the space, by its
+/// index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Met {
     Node(usize),
     Edge(usize),
+    Leader(usize),
 }
 
 /// How large a volume's labels are drawn with `model`, as the volume is: smaller with it, to [`LEAST_LABEL`] of their
@@ -734,13 +818,15 @@ pub fn placed(panel: &Panel, diagram: &Diagram, fit: Fit) -> Mat4 {
 }
 
 /// A volume as a frame draws it: what it draws, kept across frames, from its own millimetres into the scene, the node
-/// the participant focuses on, and how far into the flows' movement it is. See `design/diagrams.md`.
+/// the participant focuses on, how far into the flows' movement it is, and where the viewer is, whose distance its
+/// leaders keep their width for. See `design/diagrams.md`.
 #[derive(Clone, Debug)]
 pub struct Drawn {
     pub mesh: Arc<Mesh>,
     pub model: Mat4,
     pub focus: Option<usize>,
     pub time: f32,
+    pub viewer: Vec3,
 }
 
 impl PartialEq for Drawn {
@@ -750,15 +836,19 @@ impl PartialEq for Drawn {
             && self.model == other.model
             && self.focus == other.focus
             && self.time == other.time
+            && self.viewer == other.viewer
     }
 }
 
 impl Drawn {
     /// Its solids in the scene.
     pub fn instances(&self, out: &mut Vec<Instance>) {
-        self.mesh.instances(self.model, self.focus, self.time, out);
+        self.mesh
+            .instances(self.model, self.focus, self.time, self.viewer, out);
     }
 }
+
+mod leaders;
 
 #[cfg(test)]
 mod tests;

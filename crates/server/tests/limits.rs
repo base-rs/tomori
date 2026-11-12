@@ -124,6 +124,7 @@ fn an_oversized_hello_is_refused() {
             speech_held: false,
             images: false,
             diagrams: false,
+            world_edges: false,
             projection_patches: false,
             live_panels: false,
             limits: None,

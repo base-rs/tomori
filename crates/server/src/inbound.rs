@@ -213,6 +213,7 @@ mod tests {
             speech_held: true,
             images: true,
             diagrams: true,
+            world_edges: false,
             projection_patches: true,
             live_panels: true,
             limits: Some(tomori_protocol::Limits::MOST),

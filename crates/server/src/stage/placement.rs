@@ -40,6 +40,10 @@ pub enum Placement {
     /// `anchor NAME`: floating in the cluster of the cluster anchor of that name, as `presence` lists them, a member of
     /// it while it floats there.
     Anchor(String),
+    /// `near references`: for a volume whose diagram points at things in the world, between whoever asked and those
+    /// things, or by them where they are far off; for any other panel, or one whose things are none of them here, beside
+    /// whoever asked. See `design/diagrams.md`.
+    NearReferences,
 }
 
 impl Placement {
@@ -55,6 +59,7 @@ impl Placement {
     /// wall added wall 1 -> Wall("added wall 1", None)
     /// wall added wall 1 slot 2 -> Wall("added wall 1", Some(2))
     /// anchor rack/a12 -> Anchor("rack/a12")
+    /// near references -> NearReferences
     /// ```
     pub fn parse(value: &str) -> Option<Self> {
         let value = tomori_protocol::text::one_line(value, PLACE_CHARS);
@@ -65,6 +70,7 @@ impl Placement {
         };
         let named = (!rest.is_empty()).then(|| rest.to_owned());
         match form.to_ascii_lowercase().as_str() {
+            "near" if rest.eq_ignore_ascii_case("references") => Some(Self::NearReferences),
             "near" | "nearest" => Some(Self::Near(named)),
             "looking" | "look" => Some(Self::Looking(named)),
             "front" => Some(Self::Front(named)),

@@ -75,13 +75,26 @@ impl Content {
         }
     }
 
-    /// Lay its diagram out, if it is a volume, from where `previous`, the diagram it changes, stood: its body then its
-    /// outline, and its metadata how many warnings it has, while it has any.
-    pub fn lay_out(&mut self, previous: Option<&Diagram>) {
+    /// Resolve its diagram's world references, if it is a volume, against `things`, the space's: what the agent is told
+    /// each resolved to, a line each, and, among its warnings, those that name nothing here. See `design/diagrams.md`.
+    pub(crate) fn resolve(&mut self, things: &crate::diagram::world::Things) -> Vec<String> {
+        let Some(diagram) = self.diagram.as_mut() else {
+            return Vec::new();
+        };
+        let (told, warnings) = crate::diagram::world::resolve(diagram, things);
+        self.warnings
+            .extend(warnings.iter().map(ToString::to_string));
+        told
+    }
+
+    /// Lay its diagram out, if it is a volume, from where `previous`, the diagram it changes, stood, its nodes pointing
+    /// at things in the world pulled towards them where it stands at `pose`: its body then its outline, and its metadata
+    /// how many warnings it has, while it has any.
+    pub fn lay_out(&mut self, previous: Option<&Diagram>, pose: Option<&tomori_protocol::Pose>) {
         let Some(diagram) = self.diagram.as_mut() else {
             return;
         };
-        let warnings = crate::diagram::lay_out(diagram, previous);
+        let warnings = crate::diagram::lay_out(diagram, previous, pose);
         self.warnings
             .extend(warnings.iter().map(ToString::to_string));
         self.body = blocks::clean_body(&diagram.outline());
@@ -137,14 +150,17 @@ impl Stage {
 /// The most edges of a node pointed at the agent is told of, beyond which they are counted.
 const NODE_EDGES: usize = 8;
 
-/// The node `node`, by its id, or else the edge at `edge` of `diagram`, as the agent is told of one pointed at: what it
-/// is called, such as `node "Octree" (id octree)` or `edge "Renderer → Octree: queries" (edge 3)`, and what it says of
-/// it, its shape, group, edges, detail and reference, or its style, every piece of text in quotes and cleaned onto one
-/// line, as it is the agent's own and may be from what it read. `None` where it names neither.
+/// The node `node`, by its id, or else the world edge at `world_edge` or the edge at `edge` of `diagram`, as the agent is
+/// told of one pointed at: what it is called, such as `node "Octree" (id octree)`, `world edge "1. Find the fire → The
+/// bonfire: here" (world edge 0)` or `edge "Renderer → Octree: queries" (edge 3)`, and what it says of it, its shape,
+/// group, edges, detail and reference, both ends of a world edge, as the agent named them, or an edge's style, every
+/// piece of text in quotes and cleaned onto one line, as it is the agent's own and may be from what it read. `None`
+/// where it names none of them.
 pub(crate) fn part(
     diagram: &Diagram,
     node: Option<&str>,
     edge: Option<u16>,
+    world_edge: Option<u16>,
 ) -> Option<(String, String)> {
     use tomori_protocol::diagram::{Shape, Style};
     let clean = |text: &str, limit: usize| crate::space::one_line(text, limit);
@@ -191,6 +207,21 @@ pub(crate) fn part(
                 };
                 Some(format!("{way} {}{label}", clean(&other.label, 32)))
             })
+            // And what it points at in the world, by its reference.
+            .chain(
+                diagram
+                    .world_edges
+                    .iter()
+                    .filter(|edge| usize::from(edge.from) == index)
+                    .filter_map(|edge| diagram.world.get(usize::from(edge.to)))
+                    .map(|target| {
+                        format!(
+                            "to {} \"{}\"",
+                            target.reference.kind.name(),
+                            clean(&target.reference.name, tomori_protocol::world::NAME_BYTES)
+                        )
+                    }),
+            )
             .collect();
         if !edges.is_empty() {
             let more = edges.len().saturating_sub(NODE_EDGES);
@@ -212,6 +243,23 @@ pub(crate) fn part(
         let named = format!("node \"{}\" (id {})", clean(&found.label, 32), found.id);
         return Some((named, about));
     }
+    if let Some(index) = world_edge.map(usize::from)
+        && let Some(name) = diagram.world_edge_name(index, false)
+    {
+        // Both its ends: its node, as the agent wrote it, and what it points at, as the agent named it.
+        let found = &diagram.world_edges[index];
+        let node = &diagram.nodes[usize::from(found.from)];
+        let target = &diagram.world[usize::from(found.to)];
+        return Some((
+            format!("world edge \"{}\" (world edge {index})", clean(&name, 96)),
+            format!(
+                "from node {} to {} \"{}\"",
+                node.id,
+                target.reference.kind.name(),
+                clean(&target.reference.name, tomori_protocol::world::NAME_BYTES)
+            ),
+        ));
+    }
     let index = usize::from(edge?);
     let name = diagram.edge_name(index)?;
     let found = &diagram.edges[index];
@@ -229,9 +277,15 @@ pub(crate) fn part(
 }
 
 /// `panels`, as a client is sent them: the diagrams of as many volumes as it states it draws, and of as many nodes
-/// together, the first in order, and every other volume as its outline, a text panel, as a client that draws none is
-/// sent every one.
-pub fn within_volumes(panels: Vec<Panel>, diagrams: bool, limits: &Limits) -> Vec<Panel> {
+/// together, the first in order, without their world edges unless it draws them, `world_edges`, and every other volume
+/// as its outline, a text panel, as a client that draws none is sent every one. Either way, the outline lists the world
+/// edges.
+pub fn within_volumes(
+    panels: Vec<Panel>,
+    diagrams: bool,
+    world_edges: bool,
+    limits: &Limits,
+) -> Vec<Panel> {
     let (mut volumes, mut nodes) = (0, 0);
     panels
         .into_iter()
@@ -241,6 +295,12 @@ pub fn within_volumes(panels: Vec<Panel>, diagrams: bool, limits: &Limits) -> Ve
                 if diagrams && volumes < limits.volumes && nodes + count <= limits.nodes {
                     volumes += 1;
                     nodes += count;
+                    if !world_edges && !diagram.world.is_empty() {
+                        let mut plain = (**diagram).clone();
+                        plain.world.clear();
+                        plain.world_edges.clear();
+                        panel.diagram = Some(Box::new(plain));
+                    }
                 } else {
                     panel.diagram = None;
                 }

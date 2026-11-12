@@ -415,6 +415,7 @@ fn a_client_draws_a_diagram_within_bounds_whatever_it_is_sent() {
             .collect(),
         groups,
         extent: [u16::MAX, 10, 10],
+        ..Diagram::default()
     }
     .bounded();
     assert_eq!(
@@ -539,4 +540,278 @@ fn what_cannot_be_named_is_left_out_quietly() {
     diagram.edges.push(Edge::new(9, 0));
     assert_eq!(diagram.outline(), "- a\n- b\n\n**Edges**\n- a → b");
     assert_eq!(diagram.edge_name(1), None);
+}
+
+#[test]
+fn world_edges_point_at_their_references_whichever_way_they_were_written() {
+    let (diagram, warnings) = parse(concat!(
+        "fire := object farmyard:campsite/bonfire [The bonfire]\n",
+        "me := agent\n",
+        "a[1. Find the fire] --> fire : here\n",
+        "fire --> b[2. Warm up]\n",
+        "fire <-- c[3. Leave]\n",
+        "d[4. Watch] <--> fire\n",
+        "e[5. Mind it] --- fire\n",
+        "me ==> a\n",
+    ));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let ways: Vec<(u16, u16, Arrow)> = diagram
+        .world_edges
+        .iter()
+        .map(|edge| (edge.from, edge.to, edge.direction))
+        .collect();
+    assert_eq!(
+        ways,
+        [
+            (0, 0, Arrow::Forward),
+            (1, 0, Arrow::Back),
+            (2, 0, Arrow::Forward),
+            (3, 0, Arrow::Both),
+            (4, 0, Arrow::None),
+            (0, 1, Arrow::Back),
+        ]
+    );
+    assert_eq!(diagram.world_edges[5].style, Style::Thick);
+    // The outline lists each, with what it refers to, so that a client drawing none still says it.
+    assert_eq!(
+        diagram.outline(),
+        "- 1. Find the fire\n- 2. Warm up\n- 3. Leave\n- 4. Watch\n- 5. Mind it\n\n**Edges**\n\
+         - 1. Find the fire → The bonfire (farmyard:campsite/bonfire): here\n\
+         - 2. Warm up ← The bonfire (farmyard:campsite/bonfire)\n\
+         - 3. Leave → The bonfire (farmyard:campsite/bonfire)\n\
+         - 4. Watch ↔ The bonfire (farmyard:campsite/bonfire)\n\
+         - 5. Mind it — The bonfire (farmyard:campsite/bonfire)\n\
+         - 1. Find the fire ← agent"
+    );
+    assert_eq!(diagram.world_edge_name(9, false), None);
+    // Whatever a server sent, a world edge whose ends are not there is named nothing.
+    let mut sent = diagram.clone();
+    sent.world_edges = vec![Edge::new(40, 0), Edge::new(0, 40)];
+    assert_eq!(
+        (
+            sent.world_edge_name(0, false),
+            sent.world_edge_name(1, false)
+        ),
+        (None, None)
+    );
+    // From a node whose id is too long to be one, nothing.
+    let (long, warnings) = parse(&format!(
+        "fire := anchor home\n{} --> fire\n",
+        "n".repeat(40)
+    ));
+    assert!(long.world_edges.is_empty());
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    // Unlabelled, a target is named by what it refers to, once.
+    let (diagram, _) = parse("lookout := anchor pool-lookout\na --> lookout\n");
+    assert_eq!(
+        diagram.world_edge_name(0, true).as_deref(),
+        Some("a → pool-lookout")
+    );
+}
+
+#[test]
+fn a_binding_is_kept_apart_from_the_nodes_and_warned_of_where_they_meet() {
+    let (diagram, warnings) = parse(concat!(
+        "a --> fire\n",
+        "fire := object farmyard:campsite/bonfire\n",
+        "stick := object farmyard:campsite/stick-2\n",
+        "stick := object farmyard:campsite/stick-3\n",
+        "stick := object farmyard:campsite/stick-2\n",
+        "stick[A stick] --> b\n",
+        "stick --> seat\n",
+        "seat := anchor pool-lookout\n",
+        "turn --> stik\n",
+        "1nvalid! := anchor home\n",
+    ));
+    assert_eq!(
+        texts(&warnings),
+        [
+            "line 2: \"fire\" is a node already, so it is not bound to object farmyard:campsite/bonfire: bind a name before the edges that use it",
+            "line 4: \"stick\" is bound already, to object farmyard:campsite/stick-2; the first kept",
+            "line 6: \"stick\" is a world reference, not a node: give its label on its := line",
+            "line 8: \"seat\" is a node already, so it is not bound to anchor pool-lookout: bind a name before the edges that use it",
+            "line 9: \"stik\" is not a node or a world reference; made a box called stik (did you mean stick?)",
+            "line 10: cannot read \"! := anchor home\" as an edge",
+        ]
+    );
+    // `stick --> seat` is a world edge from a node called seat, declared before seat could be bound.
+    assert_eq!(diagram.world.len(), 1);
+    assert!(diagram.nodes.iter().any(|node| node.id == "seat"));
+    let (_, warnings) = parse(
+        "seat := anchor pool-lookout
+",
+    );
+    assert_eq!(
+        texts(&warnings),
+        [
+            "line 1: \"seat\" is bound to anchor pool-lookout but no edge uses it, so nothing points at it"
+        ]
+    );
+    let (_, warnings) = parse("x := anchor home\ny := anchor yard\nx --> y\n");
+    assert_eq!(
+        texts(&warnings[..1]),
+        [
+            "line 3: the edge from x to y is left out: an edge to a thing in the world comes from a node"
+        ]
+    );
+    assert_eq!(texts(&warnings[1..]).len(), 2);
+    // An invalid id, as the builder is given it.
+    let mut builder = Builder::new();
+    assert!(!builder.reference(
+        "no spaces",
+        Reference::new(Kind::Anchor, "home"),
+        Binding::default()
+    ));
+}
+
+#[test]
+fn world_references_and_their_edges_are_bounded() {
+    let mut body = String::new();
+    for index in 0..REFERENCES + 2 {
+        body.push_str(&format!("r{index} := anchor place-{index}\n"));
+    }
+    for index in 0..REFERENCES + 2 {
+        body.push_str(&format!("step{index} --> r{index}\n"));
+    }
+    // Ten to the first, past the most to one reference, and three more to the second, past the most of all.
+    for index in 0..10 {
+        body.push_str(&format!("m{index} --> r0\n"));
+    }
+    for index in 0..3 {
+        body.push_str(&format!("p{index} --> r1\n"));
+    }
+    let (diagram, warnings) = parse(&body);
+    assert_eq!(diagram.world.len(), REFERENCES);
+    assert_eq!(diagram.world_edges.len(), WORLD_EDGES);
+    assert_eq!(
+        diagram
+            .world_edges
+            .iter()
+            .filter(|edge| edge.to == 0)
+            .count(),
+        REFERENCE_EDGES
+    );
+    assert_eq!(
+        texts(&warnings),
+        [
+            format!(
+                "world references {} to {} left out, with their edges: at most {REFERENCES}",
+                REFERENCES + 1,
+                REFERENCES + 2
+            ),
+            format!("2 world edges left out: at most {WORLD_EDGES}"),
+            format!("3 world edges left out: at most {REFERENCE_EDGES} to one world reference"),
+        ]
+    );
+    // Past what is read to choose from, they are only counted, as are those from nodes past the most kept.
+    let mut body = String::from("r := anchor home\n");
+    for index in 0..WORLD_DRAFTS + 3 {
+        body.push_str(&format!("n{index} --> r\n"));
+    }
+    let (diagram, warnings) = parse(&body);
+    assert_eq!(diagram.nodes.len(), NODES);
+    assert_eq!(diagram.world_edges.len(), REFERENCE_EDGES);
+    assert!(texts(&warnings).contains(&"3 world edges left out: at most 24".to_owned()));
+}
+
+#[test]
+fn the_tool_s_world_list_binds_references_as_a_block_does() {
+    let (diagram, warnings) = Diagram::from_json(&serde_json::json!({
+        "world": [
+            {"id": "fire", "kind": "object", "name": "farmyard:campsite/bonfire", "label": "The bonfire", "mark": "halo", "colour": "amber"},
+            {"id": "me", "kind": "agent"},
+            {"id": "lookout", "kind": "place", "name": "pool-lookout"},
+            {"id": "nowhere", "kind": "anchor"},
+            {"id": "odd", "kind": "anchor", "name": "home", "mark": "glow"},
+        ],
+        "nodes": [{"id": "step", "label": "1. Find the fire"}, {"id": "fire", "label": "Not a node"}],
+        "edges": [
+            {"from": "step", "to": "fire", "label": "here"},
+            {"from": "me", "to": "step"},
+            {"from": "missing", "to": "lookout"},
+            {"from": "step", "to": "odd"},
+        ],
+    }))
+    .unwrap();
+    assert_eq!(
+        texts(&warnings),
+        [
+            "world reference lookout: \"place\" is not a kind: an object, anchor, wall, panel, worker, person or agent; taken as whatever the name names",
+            "world reference nowhere is left out: it names nothing",
+            "world reference odd: \"glow\" is not a mark: a ring, halo, outline or none",
+            "\"fire\" is a world reference, not a node: give its label on its := line",
+            "\"missing\" is not a node; made a box called missing",
+        ]
+    );
+    assert_eq!(diagram.world.len(), 4);
+    assert_eq!(
+        (
+            diagram.world[0].label.as_str(),
+            diagram.world[0].mark,
+            diagram.world[0].colour
+        ),
+        ("The bonfire", Mark::Halo, Some(Colour::Amber))
+    );
+    assert_eq!(diagram.world[2].reference.kind, Kind::Unknown);
+    assert_eq!(diagram.world_edges.len(), 4);
+    assert!(
+        Diagram::from_json(&serde_json::json!({"world": {"id": "x"}}))
+            .unwrap_err()
+            .contains("world must be a list")
+    );
+}
+
+#[test]
+fn world_edges_have_a_compact_wire_format_and_are_bounded_as_a_client_draws_them() {
+    let (mut diagram, _) = parse("fire := object farmyard:campsite/bonfire\na --> fire : here\n");
+    let json = serde_json::to_value(&diagram).unwrap();
+    assert_eq!(
+        json["world"],
+        serde_json::json!([{"id": "fire", "reference": {"kind": "object", "name": "farmyard:campsite/bonfire"}, "state": "unknown", "radius": f64::from(crate::world::DEFAULT_RADIUS)}])
+    );
+    assert_eq!(
+        json["world_edges"],
+        serde_json::json!([{"from": 0, "to": 0, "label": "here", "direction": "forward", "style": "solid"}])
+    );
+    let back: Diagram = serde_json::from_value(json).unwrap();
+    assert_eq!(back, diagram);
+    // Whatever a server sent: at most so many targets, every world edge between a node and one of them, without
+    // waypoints, its weight held and its label cut.
+    let target = diagram.world[0].clone();
+    diagram.world = vec![target; REFERENCES + 3];
+    diagram.world[0].label = "l".repeat(80);
+    let mut edge = diagram.world_edges[0].clone();
+    edge.via = vec![[1, 2, 3]];
+    edge.weight = 9;
+    edge.label = "e".repeat(80);
+    diagram.world_edges = vec![edge.clone(), Edge::new(5, 0), Edge::new(0, 40)]
+        .into_iter()
+        .chain(std::iter::repeat_n(edge, WORLD_EDGES + 5))
+        .collect();
+    let bounded = diagram.bounded();
+    assert_eq!(bounded.world.len(), REFERENCES);
+    assert_eq!(
+        bounded.world[0].label.chars().count(),
+        crate::world::LABEL_CHARS + 1
+    );
+    assert_eq!(bounded.world_edges.len(), WORLD_EDGES);
+    assert!(bounded.world_edges.iter().all(|edge| edge.via.is_empty()
+        && edge.weight == WEIGHTS
+        && edge.label.chars().count() == EDGE_LABEL_CHARS + 1));
+}
+
+#[test]
+fn a_reference_s_attributes_are_set_once_each() {
+    let mut binding = Binding::default();
+    binding.set("label", "First").unwrap();
+    binding.set("title", "Second").unwrap();
+    binding.set("mark", "ring").unwrap();
+    binding.set("colour", "teal").unwrap();
+    binding.set("color", "red").unwrap();
+    assert_eq!(binding.label.as_deref(), Some("First"));
+    assert_eq!(binding.colour, Some(Colour::Teal));
+    assert_eq!(
+        binding.set("colour", "mauve").unwrap_err(),
+        "\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white"
+    );
 }

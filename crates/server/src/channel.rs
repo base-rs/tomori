@@ -61,6 +61,9 @@ pub struct Described {
     pub reference: Option<String>,
     /// Where it stands, in the space's coordinates, where the side said and it is within bounds once carried there.
     pub position: Option<[f32; 3]>,
+    /// How far it reaches from its middle, in metres, within [`tomori_environment::EXTENT_LIMITS`], as the side said,
+    /// or else [`tomori_environment::DEFAULT_EXTENT`].
+    pub extent: f32,
     /// The names of the actions it offers, each one [`tomori_environment::valid_action_name`] takes, at most
     /// [`tomori_environment::OFFER_LIMIT`], none twice, and none without a reference.
     pub offers: Vec<String>,
@@ -257,6 +260,15 @@ pub fn objects(
             description: crate::space::one_line(object.description(), DESCRIPTION_LIMIT),
             reference,
             position,
+            extent: object.extent().filter(|extent| extent.is_finite()).map_or(
+                tomori_environment::DEFAULT_EXTENT,
+                |extent| {
+                    extent.clamp(
+                        tomori_environment::EXTENT_LIMITS.0,
+                        tomori_environment::EXTENT_LIMITS.1,
+                    )
+                },
+            ),
             offers,
         });
     }
@@ -837,11 +849,38 @@ mod tests {
                 description: "a lamp (lit) by the 'gate'".to_owned(),
                 reference: Some("lamp/1".to_owned()),
                 position: Some([2.0, 0.5, -2.0]),
+                extent: tomori_environment::DEFAULT_EXTENT,
                 offers: Vec::new(),
             }
         );
         // Out of bounds, it is described without a position.
         assert_eq!(kept[1].position, None);
+        // How far each reaches, held to its bounds, and as much as an object reaches without one, or one not finite.
+        let reaching = objects(
+            [Some(0.6), Some(9.0), Some(0.0), Some(f32::NAN), None]
+                .into_iter()
+                .enumerate()
+                .map(|(index, extent)| {
+                    let object = Object::new(format!("o-{index}"), "a thing");
+                    match extent {
+                        Some(extent) => object.with_extent(extent),
+                        None => object,
+                    }
+                })
+                .collect(),
+            Some,
+        );
+        let extents: Vec<f32> = reaching.iter().map(|object| object.extent).collect();
+        assert_eq!(
+            extents,
+            [
+                0.6,
+                tomori_environment::EXTENT_LIMITS.1,
+                tomori_environment::EXTENT_LIMITS.0,
+                tomori_environment::DEFAULT_EXTENT,
+                tomori_environment::DEFAULT_EXTENT,
+            ]
+        );
         // Cut, and marked as cut.
         assert_eq!(kept[1].description.chars().count(), DESCRIPTION_LIMIT + 1);
         assert!(kept[1].description.ends_with('…'));

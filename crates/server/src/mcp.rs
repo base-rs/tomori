@@ -1648,13 +1648,13 @@ async fn show_image(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Resul
 fn show_diagram_tool() -> Value {
     json!({
         "name": "show_diagram",
-        "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Give nodes, edges and groups, or source, the body of a diagram block. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
+        "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Give nodes, edges and groups, or source, the body of a diagram block. To point from a step at something in the space, such as the fire a recipe's first step needs, bind a short id to it in world, by its kind and the name your tools give it, and use that id as an edge's end: Tomori draws a line from the node to the thing, and place near references stands the diagram between whoever asked and those things. world in the answer says what each resolved to. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line." },
                 "id": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Your own id for it, 1 to 32 letters, digits, - and _, by which a later call or diagram block updates it." },
-                "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for show_image; by default, where whoever asked was looking, if near enough, or else beside them." },
+                "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for show_image, or near references, between whoever asked and the things in world it points at; by default, where whoever asked was looking, if near enough, or else beside them." },
                 "layout": { "type": "string", "maxLength": 64, "description": "layered with down, up, right, left or away, for anything with a direction, or force, for anything without; by default layered down." },
                 "nodes": {
                     "type": "array",
@@ -1702,7 +1702,24 @@ fn show_diagram_tool() -> Value {
                         "required": ["id"],
                     },
                 },
-                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges and groups, a diagram block's body, as a Mermaid flowchart's: a[Box], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, and @{ size: 3, colour: teal, detail: \"…\" }." },
+                "world": {
+                    "type": "array",
+                    "maxItems": tomori_protocol::diagram::REFERENCES,
+                    "description": "Things already in the space that edges may point at, each bound to a short id an edge names as its from or to.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ., not a node's." },
+                            "kind": { "type": "string", "enum": ["object", "anchor", "wall", "panel", "worker", "person", "agent"] },
+                            "name": { "type": "string", "maxLength": tomori_protocol::world::NAME_BYTES, "description": "As your tools name it: an object's id, such as farmyard:campsite/bonfire, an anchor's name, a wall's or panel's id or title, a worker's title or session, a person's handle, such as Samuel#11; none for agent." },
+                            "label": { "type": "string", "maxLength": 256, "description": "What its end is labelled with; by default, its own name." },
+                            "mark": { "type": "string", "enum": ["ring", "halo", "outline", "none"] },
+                            "colour": { "type": "string", "maxLength": 16 },
+                        },
+                        "required": ["id", "kind"],
+                    },
+                },
+                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges, groups and world, a diagram block's body, as a Mermaid flowchart's: a[Box], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, @{ size: 3, colour: teal, detail: \"…\" }, and fire := object farmyard:campsite/bonfire [The bonfire] to bind fire to a thing in the space." },
             },
         },
         "annotations": {
@@ -1785,6 +1802,7 @@ fn show_diagram(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Va
         "id": shown.slug,
         "updated": shown.updated,
         "size": shown.size,
+        "world": shown.world,
         "warnings": warnings,
         "next": if shown.warnings.is_empty() {
             "Everyone in the space sees it now. Say in a sentence what it shows, since it is not read aloud."

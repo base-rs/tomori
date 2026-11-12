@@ -46,6 +46,7 @@ mod layouts;
 mod pairing_window;
 mod provenance;
 pub(crate) mod tools;
+mod world;
 #[cfg(all(test, feature = "speech"))]
 pub(crate) use following::STALLED as SPEECH_STALLED;
 pub(crate) use following::home as agent_home;
@@ -637,6 +638,9 @@ struct ConnectionRecord {
     /// Whether the client said in Hello that it draws volumes, sent their diagrams within its limits. See
     /// `design/diagrams.md`.
     diagrams: bool,
+    /// Whether the client said in Hello that it draws volumes' world edges, sent their targets with them. See
+    /// `design/diagrams.md`.
+    world_edges: bool,
     /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
     /// `design/projection.md`.
     patches: bool,
@@ -3472,6 +3476,7 @@ impl Hub {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 patches: false,
                 live_panels: false,
                 limits: Limits::TODAY,
@@ -3714,6 +3719,7 @@ impl Hub {
                 speech_held,
                 images,
                 diagrams,
+                world_edges,
                 projection_patches,
                 live_panels,
                 limits,
@@ -3727,6 +3733,7 @@ impl Hub {
                     record.speech_held = speech_held;
                     record.images = images;
                     record.diagrams = diagrams;
+                    record.world_edges = world_edges;
                     record.patches = projection && projection_patches;
                     record.live_panels = record.patches && live_panels;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
@@ -6638,10 +6645,35 @@ impl Hub {
         let mut state = self.lock();
         let people = state.heads(space);
         let carried = state.carried(space, Instant::now());
+        let environments = self.environments();
+        // What volumes' world references name, as the space has them as they are projected, where any has one.
+        let referring = replies.iter().any(|(contents, _)| {
+            contents.iter().any(|(content, _)| {
+                content
+                    .diagram
+                    .as_ref()
+                    .is_some_and(|diagram| !diagram.world.is_empty())
+            })
+        });
+        let things = state
+            .space(space)
+            .filter(|_| referring)
+            .map(|record| {
+                let walls = environments.walls(&record.model.environment);
+                let projection = record.stage.view(space, &walls, crate::cards::unix_now());
+                state.world_things(
+                    space,
+                    &environments,
+                    &projection,
+                    &carried,
+                    None,
+                    Instant::now(),
+                )
+            })
+            .unwrap_or_default();
         let Some(record) = state.space_mut(space) else {
             return;
         };
-        let environments = self.environments();
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let solids = record.panel_solids(&environments);
@@ -6654,18 +6686,8 @@ impl Hub {
             let placed = contents
                 .into_iter()
                 .map(|(mut content, place)| {
-                    // A volume is laid out as it is projected, from where the one it changes stood, if it changes one.
-                    if content.diagram.is_some() {
-                        let previous = content
-                            .slug
-                            .as_deref()
-                            .and_then(|slug| record.stage.named_diagram(walls.environment, slug));
-                        content.lay_out(previous);
-                    }
-                    warned.push(crate::stage::Content {
-                        warnings: std::mem::take(&mut content.warnings),
-                        ..content.clone()
-                    });
+                    // A volume's world references are resolved before it is placed, which may stand it near them.
+                    content.resolve(&things);
                     // A placement that names someone who has not reported, or a wall or anchor not here, is as none.
                     let said = place.and_then(|place| {
                         let before = match &place {
@@ -6675,27 +6697,52 @@ impl Hub {
                             }
                             _ => 0,
                         };
-                        record
-                            .panel_destination(
-                                &environments,
-                                &place,
-                                before,
-                                origin.as_ref(),
-                                &people,
-                                &projection,
-                                &solids,
-                            )
-                            .ok()
+                        match (&place, content.diagram.as_deref()) {
+                            (crate::stage::Placement::NearReferences, Some(diagram)) => {
+                                Some(world::near_references(
+                                    diagram,
+                                    origin.as_ref(),
+                                    &projection,
+                                    &solids,
+                                ))
+                            }
+                            _ => record
+                                .panel_destination(
+                                    &environments,
+                                    &place,
+                                    before,
+                                    origin.as_ref(),
+                                    &people,
+                                    &projection,
+                                    &solids,
+                                )
+                                .ok(),
+                        }
                     });
                     // A block with the id of a panel someone is carrying updates it in their hand, where it stays.
-                    let held = content
+                    let named = content
                         .slug
                         .as_deref()
-                        .and_then(|slug| record.stage.named(walls.environment, slug))
-                        .is_some_and(|id| carried.contains(&id));
+                        .and_then(|slug| record.stage.named(walls.environment, slug));
+                    let held = named.as_ref().is_some_and(|id| carried.contains(id));
                     let placed = said.is_some() && !held;
                     let to = said.unwrap_or_else(|| {
                         crate::presence::by_default(origin.as_ref(), &projection, &solids)
+                    });
+                    // A volume is laid out as it is projected, from where the one it changes stood, if it changes one,
+                    // as it will stand.
+                    if content.diagram.is_some() {
+                        let previous = content
+                            .slug
+                            .as_deref()
+                            .and_then(|slug| record.stage.named_diagram(walls.environment, slug));
+                        let standing = named.as_deref().and_then(|id| projection.panel(id));
+                        let pose = world::volume_pose(&to, placed, standing, &projection);
+                        content.lay_out(previous, pose.as_ref());
+                    }
+                    warned.push(crate::stage::Content {
+                        warnings: std::mem::take(&mut content.warnings),
+                        ..content.clone()
                     });
                     (content, to, placed)
                 })
@@ -7337,11 +7384,11 @@ impl Hub {
                     projection = Arc::new(plain);
                 }
                 // And each volume past what it draws, or every one, if it draws none, as its outline.
-                let (diagrams, limits) = state
+                let (diagrams, world_edges, limits) = state
                     .connections
                     .get(&connection)
-                    .map_or((false, Limits::TODAY), |record| {
-                        (record.diagrams, record.limits)
+                    .map_or((false, false, Limits::TODAY), |record| {
+                        (record.diagrams, record.world_edges, record.limits)
                     });
                 if projection
                     .panels
@@ -7349,7 +7396,8 @@ impl Hub {
                     .any(|panel| panel.diagram.is_some())
                 {
                     let mut plain = (*projection).clone();
-                    plain.panels = crate::stage::within_volumes(plain.panels, diagrams, &limits);
+                    plain.panels =
+                        crate::stage::within_volumes(plain.panels, diagrams, world_edges, &limits);
                     projection = Arc::new(plain);
                 }
                 let live = state
@@ -7470,6 +7518,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7575,6 +7624,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7650,6 +7700,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7692,6 +7743,7 @@ mod tests {
                     speech_held: false,
                     images: false,
                     diagrams: false,
+                    world_edges: false,
                     projection_patches: false,
                     live_panels: false,
                     limits: None,
@@ -7897,6 +7949,7 @@ mod tests {
                 speech_held: false,
                 images: false,
                 diagrams: false,
+                world_edges: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::chart::Colour;
 use crate::text::one_line;
+use crate::world::{Kind, Mark, Reference, Target};
 
 mod parse;
 pub use parse::parse;
@@ -47,6 +48,12 @@ pub const NODE_MM: f32 = 60.0;
 pub const EXTENT_MM: u16 = 30_000;
 /// The most warnings told, beyond which they are counted.
 pub const WARNINGS: usize = 8;
+/// The most world references of a diagram, its world edges, and its world edges to any one reference.
+pub const REFERENCES: usize = 16;
+pub const WORLD_EDGES: usize = 24;
+pub const REFERENCE_EDGES: usize = 8;
+/// The most world edges read to choose the kept from, beyond which they are only counted.
+const WORLD_DRAFTS: usize = WORLD_EDGES * PAIR_EDGES;
 
 /// What a node looks like. On the wire its name in lower case; one a client does not know is a box.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +344,15 @@ pub struct Diagram {
     /// Its width, height and depth.
     #[serde(default)]
     pub extent: [u16; 3],
+    /// The things in the world it refers to, at most [`REFERENCES`], each by the short name its edges use, as the
+    /// server resolved them. A client that does not draw world edges is sent none. See `design/diagrams.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub world: Vec<Target>,
+    /// Its world edges, at most [`WORLD_EDGES`], each from the node at its `from` to the target at its `to`, by their
+    /// indices among [`Self::nodes`] and [`Self::world`], its arrow forward where it points at the target: drawn in the
+    /// space as a leader line from the node to the thing, without waypoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub world_edges: Vec<Edge>,
 }
 
 fn one() -> u8 {
@@ -571,6 +587,57 @@ pub struct Builder {
     strict: bool,
     /// How many nodes, edges and groups were left out past their bounds, and the first left out of each.
     over: [(usize, usize); 3],
+    /// Each world reference declared, in the order declared, with the line it was declared on, and its place among them
+    /// by its id.
+    references: Vec<(Target, Option<usize>)>,
+    reference_index: std::collections::BTreeMap<String, usize>,
+    /// The world edges read, at most [`WORLD_DRAFTS`], each with its line; those past it are only counted.
+    world_edges: Vec<(EdgeDraft, Option<usize>)>,
+    world_past: usize,
+}
+
+/// What a world reference's line or object sets beside its kind and name: its label and its attributes, `mark` and
+/// `colour`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Binding {
+    pub label: Option<String>,
+    pub mark: Option<Mark>,
+    pub colour: Option<Colour>,
+}
+
+impl Binding {
+    /// Set the attribute `key` to `value`, as `@{ key: value }` or the tool's JSON says it, or say why not, which leaves
+    /// it as it was.
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "label" | "title" | "name" => {
+                self.label.get_or_insert_with(|| value.to_owned());
+            }
+            "mark" => {
+                let mark = Mark::parse(value).ok_or_else(|| {
+                    format!(
+                        "\"{}\" is not a mark: a ring, halo, outline or none",
+                        clean(value)
+                    )
+                })?;
+                self.mark.get_or_insert(mark);
+            }
+            "colour" | "color" => {
+                let colour = colour(value).ok_or_else(|| {
+                    format!("\"{}\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white", clean(value))
+                })?;
+                self.colour.get_or_insert(colour);
+            }
+            other => {
+                return Err(format!(
+                    "\"{}\" is not an attribute of a world reference: mark or colour",
+                    clean(other)
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Builder {
@@ -604,14 +671,70 @@ impl Builder {
         self.layout = layout;
     }
 
+    /// Bind `id` to the thing in the world `reference` names, with what `binding` sets, as `fire := object
+    /// farmyard:campsite/bonfire [The bonfire]` does, so that edges to `id` are world edges. Returns whether it is bound:
+    /// an id that is not valid, or that names a node already, is skipped, saying so, and a second binding of one id
+    /// keeps the first.
+    pub fn reference(&mut self, id: &str, reference: Reference, binding: Binding) -> bool {
+        if !valid_id(id) {
+            self.warn(format!(
+                "\"{}\" is not a world reference's id: from 1 to {ID_BYTES} letters, digits, -, _ and .",
+                clean(id)
+            ));
+            return false;
+        }
+        if self.has_node(id) {
+            self.warn(format!(
+                "\"{id}\" is a node already, so it is not bound to {reference}: bind a name before the edges that use it"
+            ));
+            return false;
+        }
+        if let Some(&at) = self.reference_index.get(id) {
+            let known = &self.references[at].0.reference;
+            if *known != reference {
+                let known = known.to_string();
+                self.warn(format!(
+                    "\"{id}\" is bound already, to {known}; the first kept"
+                ));
+            }
+            return true;
+        }
+        let mut target = Target::new(id, reference);
+        target.label = binding
+            .label
+            .as_deref()
+            .map(|label| one_line(label, crate::world::LABEL_CHARS).trim().to_owned())
+            .unwrap_or_default();
+        target.mark = binding.mark.unwrap_or_default();
+        target.colour = binding.colour;
+        self.reference_index
+            .insert(id.to_owned(), self.references.len());
+        self.references.push((target, self.line));
+        true
+    }
+
+    /// Whether `id` is bound to a thing in the world.
+    pub fn is_reference(&self, id: &str) -> bool {
+        self.reference_index.contains_key(id)
+    }
+
     /// Declare the node `id`, or add to it the attributes it does not have yet, in `group`, by its index, where it is
-    /// in none yet. Returns whether it is a node: an id that is not valid is skipped, saying so.
+    /// in none yet. Returns whether it is a node: an id that is not valid, or bound to a thing in the world, is skipped,
+    /// saying so where it was given attributes.
     pub fn node(&mut self, id: &str, attributes: Attributes, group: Option<usize>) -> bool {
         if !valid_id(id) {
             self.warn(format!(
                 "\"{}\" is not a node's id: from 1 to {ID_BYTES} letters, digits, -, _ and .",
                 clean(id)
             ));
+            return false;
+        }
+        if self.is_reference(id) {
+            if attributes != Attributes::default() {
+                self.warn(format!(
+                    "\"{id}\" is a world reference, not a node: give its label on its := line"
+                ));
+            }
             return false;
         }
         match self.index.get(id) {
@@ -647,6 +770,17 @@ impl Builder {
 
     /// An edge, as `edge` says it, its ends declared where they are not yet, in `group` where they are in none.
     pub fn edge(&mut self, edge: EdgeDraft, group: Option<usize>) {
+        match (self.is_reference(&edge.from), self.is_reference(&edge.to)) {
+            (true, true) => {
+                self.warn(format!(
+                    "the edge from {} to {} is left out: an edge to a thing in the world comes from a node",
+                    edge.from, edge.to
+                ));
+                return;
+            }
+            (true, false) | (false, true) => return self.world_edge(edge, group),
+            (false, false) => {}
+        }
         if self.edges_full() {
             self.edge_past();
             return;
@@ -668,13 +802,45 @@ impl Builder {
         }
     }
 
-    /// Warn where a block mentions `id`, which names no node yet, though one's id is close to it, as a misspelling.
+    /// A world edge, one of whose ends is bound to a thing in the world, its other declared as a node where it is not
+    /// yet, in `group` where it is in none.
+    fn world_edge(&mut self, edge: EdgeDraft, group: Option<usize>) {
+        if self.world_edges.len() >= WORLD_DRAFTS {
+            self.world_past += 1;
+            return;
+        }
+        let node = if self.is_reference(&edge.from) {
+            &edge.to
+        } else {
+            &edge.from
+        };
+        if self.strict && !self.has_node(node) && valid_id(node) {
+            self.warn(format!(
+                "\"{}\" is not a node; made a box called {}{}",
+                clean(node),
+                node,
+                self.close(node)
+            ));
+        }
+        if self.node(&node.clone(), Attributes::default(), group) {
+            self.world_edges.push((edge, self.line));
+        }
+    }
+
+    /// Warn where a block mentions `id`, which names no node or world reference yet, though one's id is close to it, as
+    /// a misspelling.
     pub fn mentioned(&mut self, id: &str) {
         if !self.has_node(id)
+            && !self.is_reference(id)
             && let Some(close) = self.closest(id)
         {
+            let what = if self.is_reference(&close) {
+                "a node or a world reference"
+            } else {
+                "a node"
+            };
             self.warn(format!(
-                "\"{id}\" is not a node; made a box called {id} (did you mean {close}?)"
+                "\"{id}\" is not {what}; made a box called {id} (did you mean {close}?)"
             ));
         }
     }
@@ -694,6 +860,7 @@ impl Builder {
         self.nodes
             .iter()
             .map(|(known, ..)| known)
+            .chain(self.references.iter().map(|(target, _)| &target.id))
             .find(|known| {
                 // Ids that differ only in the number they end with, as leaf1 and leaf2, are not misspellings.
                 let stem = |id: &str| id.trim_end_matches(|c: char| c.is_ascii_digit()).len();
@@ -874,6 +1041,7 @@ impl Builder {
                 });
             }
         }
+        let (world, world_edges) = self.world(&nodes, &mut warnings);
         (
             Diagram {
                 layout: self.layout,
@@ -881,9 +1049,101 @@ impl Builder {
                 edges,
                 groups,
                 extent: [0; 3],
+                world,
+                world_edges,
             },
             warnings,
         )
+    }
+
+    /// The world references kept, at most [`REFERENCES`], and the world edges between `nodes` and them, at most
+    /// [`WORLD_EDGES`] and [`REFERENCE_EDGES`] to any one, each pointing at its reference where its arrow did, warning in
+    /// `warnings` of what was left out and of each reference no edge uses.
+    fn world(&mut self, nodes: &[Node], warnings: &mut Vec<Warning>) -> (Vec<Target>, Vec<Edge>) {
+        let kept = self.references.len().min(REFERENCES);
+        if self.references.len() > REFERENCES {
+            warnings.push(Warning {
+                line: None,
+                text: format!(
+                    "world references {} to {} left out, with their edges: at most {REFERENCES}",
+                    REFERENCES + 1,
+                    self.references.len()
+                ),
+            });
+        }
+        let mut edges: Vec<Edge> = Vec::new();
+        let (mut past, mut crowded) = (self.world_past, 0);
+        for (draft, _) in &self.world_edges {
+            // Its node, its reference, and whether it was written from the reference.
+            let (node, reference, back) = match self.reference_index.get(&draft.from) {
+                Some(&reference) => (&draft.to, reference, true),
+                None => (&draft.from, self.reference_index[&draft.to], false),
+            };
+            let Some(node) = nodes.iter().position(|kept| kept.id == *node) else {
+                continue;
+            };
+            if reference >= kept {
+                continue;
+            }
+            if edges.len() == WORLD_EDGES {
+                past += 1;
+                continue;
+            }
+            if edges
+                .iter()
+                .filter(|edge| usize::from(edge.to) == reference)
+                .count()
+                >= REFERENCE_EDGES
+            {
+                crowded += 1;
+                continue;
+            }
+            // Both fit in a u16, as at most [`NODES`] and [`REFERENCES`] are kept.
+            let mut edge = Edge::new(node as u16, reference as u16);
+            edge.label = one_line(&draft.label, EDGE_LABEL_CHARS).trim().to_owned();
+            edge.direction = match (back, draft.direction) {
+                (true, Arrow::Forward) => Arrow::Back,
+                (true, Arrow::Back) => Arrow::Forward,
+                (_, direction) => direction,
+            };
+            edge.style = draft.style;
+            edge.colour = draft.colour;
+            edge.weight = draft.weight.clamp(1, WEIGHTS);
+            edges.push(edge);
+        }
+        if past > 0 {
+            warnings.push(Warning {
+                line: None,
+                text: format!("{past} world edges left out: at most {WORLD_EDGES}"),
+            });
+        }
+        if crowded > 0 {
+            warnings.push(Warning {
+                line: None,
+                text: format!(
+                    "{crowded} world edges left out: at most {REFERENCE_EDGES} to one world reference"
+                ),
+            });
+        }
+        let world: Vec<Target> = self
+            .references
+            .iter()
+            .take(kept)
+            .enumerate()
+            .map(|(index, (target, line))| {
+                if !edges.iter().any(|edge| usize::from(edge.to) == index) {
+                    warnings.push(Warning {
+                        line: *line,
+                        text: format!(
+                            "\"{}\" is bound to {} but no edge uses it, so nothing points at it",
+                            target.id, target.reference
+                        ),
+                    });
+                }
+                target.clone()
+            })
+            .collect();
+        (world, edges)
     }
 }
 
@@ -896,8 +1156,16 @@ fn cut_bytes(text: &str, limit: usize) -> String {
     text[..end].to_owned()
 }
 
-/// How many single characters must be inserted, removed or changed to make `a` into `b`.
-fn edits(a: &str, b: &str) -> usize {
+/// How many single characters must be inserted, removed or changed to make `a` into `b`, by which a misspelt name is
+/// matched to the one meant.
+///
+/// ```
+/// use tomori_protocol::diagram::edits;
+///
+/// assert_eq!(edits("stik", "stick"), 1);
+/// assert_eq!(edits("bonfire", "bonfire"), 0);
+/// ```
+pub fn edits(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut row: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.chars().enumerate() {
@@ -965,6 +1233,36 @@ impl Diagram {
                 kind,
                 parent,
             );
+        }
+        for thing in list("world")? {
+            let id = text(&thing, "id").unwrap_or_default();
+            let kind = text(&thing, "kind").map_or(Kind::Unknown, |kind| {
+                Kind::parse(&kind).unwrap_or_else(|| {
+                    builder.warn(format!(
+                        "world reference {}: \"{}\" is not a kind: an object, anchor, wall, panel, worker, person or agent; taken as whatever the name names",
+                        clean(&id),
+                        clean(&kind)
+                    ));
+                    Kind::Unknown
+                })
+            });
+            let name = text(&thing, "name").unwrap_or_default();
+            if name.trim().is_empty() && kind != Kind::Agent {
+                builder.warn(format!(
+                    "world reference {} is left out: it names nothing",
+                    clean(&id)
+                ));
+                continue;
+            }
+            let mut binding = Binding::default();
+            for key in ["label", "mark", "colour", "color"] {
+                if let Some(value) = text(&thing, key)
+                    && let Err(why) = binding.set(key, &value)
+                {
+                    builder.warn(format!("world reference {}: {why}", clean(&id)));
+                }
+            }
+            builder.reference(&id, Reference::new(kind, &name), binding);
         }
         for node in list("nodes")? {
             let id = text(&node, "id").unwrap_or_default();
@@ -1099,6 +1397,11 @@ impl Diagram {
                     format!("- {} {arrow} {}: {}", from.label, to.label, edge.label)
                 })
             })
+            .chain(
+                (0..self.world_edges.len())
+                    .filter_map(|index| self.world_edge_name(index, true))
+                    .map(|name| format!("- {name}")),
+            )
             .collect();
         if !edges.is_empty() {
             sections.push(format!("**Edges**\n{}", edges.join("\n")));
@@ -1136,7 +1439,64 @@ impl Diagram {
             edge.label = one_line(&edge.label, EDGE_LABEL_CHARS);
         }
         diagram.extent = diagram.extent.map(|side| side.min(EXTENT_MM));
+        diagram.world.truncate(REFERENCES);
+        diagram.world = diagram.world.iter().map(Target::bounded).collect();
+        let world = diagram.world.len();
         diagram
+            .world_edges
+            .retain(|edge| usize::from(edge.from) < nodes && usize::from(edge.to) < world);
+        diagram.world_edges.truncate(WORLD_EDGES);
+        for edge in &mut diagram.world_edges {
+            edge.via.clear();
+            edge.weight = edge.weight.clamp(1, WEIGHTS);
+            edge.label = one_line(&edge.label, EDGE_LABEL_CHARS);
+        }
+        diagram
+    }
+
+    /// The world edge at `index`, as it is named: `"1. Find the fire → The bonfire: here"`, its node's label, an arrow
+    /// its way, its target's label and its label, and, `with_reference`, what the target refers to after its label, as
+    /// `The bonfire (farmyard:campsite/bonfire)`, as the outline lists it.
+    ///
+    /// ```
+    /// use tomori_protocol::diagram::parse;
+    ///
+    /// let (diagram, _) = parse("fire := object farmyard:campsite/bonfire [The bonfire]\nstep[1. Find the fire] --> fire : here\n");
+    /// assert_eq!(diagram.world_edge_name(0, false).unwrap(), "1. Find the fire → The bonfire: here");
+    /// assert_eq!(
+    ///     diagram.world_edge_name(0, true).unwrap(),
+    ///     "1. Find the fire → The bonfire (farmyard:campsite/bonfire): here"
+    /// );
+    /// ```
+    pub fn world_edge_name(&self, index: usize, with_reference: bool) -> Option<String> {
+        let edge = self.world_edges.get(index)?;
+        let node = self.nodes.get(usize::from(edge.from))?;
+        let target = self.world.get(usize::from(edge.to))?;
+        let name = &target.reference.name;
+        let label = if !target.label.is_empty() {
+            target.label.as_str()
+        } else if !name.is_empty() {
+            name.as_str()
+        } else {
+            target.reference.kind.name()
+        };
+        let arrow = match edge.direction {
+            Arrow::Forward => "→",
+            Arrow::Back => "←",
+            Arrow::Both => "↔",
+            Arrow::None => "—",
+        };
+        let reference = if with_reference && !name.is_empty() && name != label {
+            format!(" ({name})")
+        } else {
+            String::new()
+        };
+        let suffix = if edge.label.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", edge.label)
+        };
+        Some(format!("{} {arrow} {label}{reference}{suffix}", node.label))
     }
 
     /// The index of the node `id`, if it has one.

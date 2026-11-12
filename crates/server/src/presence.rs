@@ -348,6 +348,33 @@ fn slots(wall: &Wall) -> Vec<Rectangle> {
         .collect()
 }
 
+/// Where the panel in `wall`'s slot `slot` stands, facing as the slot faces, and its width and height, as a diagram's
+/// leader line to it lights its frame; `None` for a slot it does not have. See `design/diagrams.md`.
+pub(crate) fn slot_frame(wall: &Wall, slot: u32) -> Option<(Pose, [f32; 2])> {
+    let standing = wall.frame();
+    wall.slot_frames()
+        .get(slot as usize)
+        .map(|frame| (frame.pose(&standing), [frame.size[0], frame.size[1]]))
+}
+
+/// Where `wall` stands and how large it is, as a diagram's leader line to it lights its frame: its frame, and its
+/// board's size, or else the span of its slots about its middle.
+pub(crate) fn wall_frame(wall: &Wall) -> (Pose, [f32; 2]) {
+    let standing = wall.frame();
+    if let Some(board) = wall.board() {
+        return (standing, [board.0, board.1]);
+    }
+    let right = rotate(standing.orientation, [1.0, 0.0, 0.0]);
+    let up = rotate(standing.orientation, [0.0, 1.0, 0.0]);
+    let (mut across, mut high) = (0.0f32, 0.0f32);
+    for slot in slots(wall) {
+        let offset = sub(slot.middle, standing.position);
+        across = across.max(dot(offset, right).abs() + slot.half.0);
+        high = high.max(dot(offset, up).abs() + slot.half.1);
+    }
+    (standing, [across * 2.0, high * 2.0])
+}
+
 /// Where the middle of each of `wall`'s slots is, in the space's scene coordinates, as the server takes it to be when it
 /// tells a space's agent what people look at and where walls are: where clients draw a panel in it.
 ///
@@ -1241,6 +1268,12 @@ pub(crate) fn which_wall(
                 "anchor names no wall: say which wall, or looking or near someone.".to_owned(),
             );
         }
+        Placement::NearReferences => {
+            return Err(
+                "near references names no wall: say which wall, or looking or near someone."
+                    .to_owned(),
+            );
+        }
     };
     let head = head_of(name.as_deref(), asker, people)?;
     // The wall they are looking at, if they are, or else the one nearest them; there is always the status wall.
@@ -1291,6 +1324,8 @@ pub(crate) fn destination(
         Placement::Looking(name) => looking_at(&whose(name)?, projection, solids),
         Placement::Front(name) => in_front(&whose(name)?),
         Placement::Beside(name) => beside(&whose(name)?, solids),
+        // The hub stands a volume near what it points at; anything else goes beside whoever asked.
+        Placement::NearReferences => beside(&whose(&None)?, solids),
         // The hub finds a slot at an anchor, as only it knows the space's anchors.
         Placement::Anchor(name) => {
             return Err(format!("There is no anchor called {name:?} here."));
