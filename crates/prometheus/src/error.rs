@@ -24,8 +24,10 @@ pub enum Error {
     Invalid(String),
     /// The source could not be reached, or the exchange failed part way, such as on a connection the source had just closed.
     Transport(String),
-    /// The call did not finish within the client's time-out.
+    /// The source did not answer within the request's time-out, which began once the request had a slot.
     Timeout(Duration),
+    /// No slot came free within the request's time-out, because the client's other requests held every one: the request was never sent, and the source is not to blame. See [`Builder::concurrency`](crate::Builder::concurrency).
+    Queued(Duration),
     /// The source answered with an HTTP status other than success, and not with Prometheus's own error, with an excerpt of its answer and the `retry-after` it gave, if any, as for a 429 or a 503.
     Status {
         status: u16,
@@ -73,6 +75,11 @@ impl fmt::Display for Error {
             Self::Timeout(timeout) => write!(
                 formatter,
                 "Prometheus did not answer within {:.1} seconds",
+                timeout.as_secs_f64()
+            ),
+            Self::Queued(timeout) => write!(
+                formatter,
+                "no request slot came free within {:.1} seconds: the client's other requests to Prometheus held them all",
                 timeout.as_secs_f64()
             ),
             Self::Status { status, detail, .. } => {
@@ -239,6 +246,10 @@ mod tests {
             (
                 Error::Timeout(Duration::from_millis(1500)),
                 "Prometheus did not answer within 1.5 seconds",
+            ),
+            (
+                Error::Queued(Duration::from_millis(1500)),
+                "no request slot came free within 1.5 seconds: the client's other requests to Prometheus held them all",
             ),
             (
                 Error::Status {

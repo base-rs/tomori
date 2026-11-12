@@ -12,7 +12,7 @@ Build a `Client` in an environment's server side, which runs on a thread of its 
 
 ```rust,no_run
 use std::time::Duration;
-use tomori_prometheus::{Client, Error, LabelFilter, Range, Timestamp, Token};
+use tomori_prometheus::{Call, Client, Error, LabelFilter, Range, Timestamp, Token};
 
 fn main() -> Result<(), Error> {
     // The application's own token source, such as a command that prints an identity token.
@@ -27,6 +27,7 @@ fn main() -> Result<(), Error> {
         .token_source(token)
         .labels(LabelFilter::only(["namespace", "pod"]))
         .timeout(Duration::from_secs(15))
+        .concurrency(4)
         .build()?;
 
     // Evaluate every query of one poll at the same instant, so that they agree.
@@ -36,8 +37,10 @@ fn main() -> Result<(), Error> {
         println!("{} {}: {}", sample.metric["namespace"], sample.metric["pod"], sample.point.value);
     }
 
+    // A slow read of the whole fleet, with a longer time-out of its own, leaving a slot for quick reads on other threads.
+    let fleet = Call::new().timeout(Duration::from_secs(60)).background();
     let range = Range::new(at - Duration::from_secs(3600), at, Duration::from_secs(60));
-    for series in client.query_range("up", range)?.data {
+    for series in client.query_range_with("up", range, fleet)?.data {
         println!("{:?}: {} points", series.metric, series.points.len());
     }
     Ok(())
