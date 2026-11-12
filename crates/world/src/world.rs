@@ -319,10 +319,11 @@ impl World {
         let entry = self.items.get_mut(item.0).expect("an item placed is here");
         entry.bounds.clear();
         entry.bounds.extend(bounds);
-        entry.about = entry
-            .bounds
-            .iter()
-            .try_fold(Aabb::EMPTY, |about, bounds| Some(about.union((*bounds)?)));
+        // A box that is not all numbers may be seen, but would vanish from a union, so the item has none about it.
+        entry.about = entry.bounds.iter().try_fold(Aabb::EMPTY, |about, bounds| {
+            let bounds = (*bounds)?;
+            (bounds.is_empty() || bounds.is_finite()).then(|| about.union(bounds))
+        });
         entry.seen.clear();
         entry.seen.resize(entry.bounds.len(), true);
         let item = entry.item;

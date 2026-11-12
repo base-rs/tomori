@@ -108,6 +108,16 @@ fn what_neither_eye_sees_is_culled_whether_it_is_static_or_dynamic() {
         );
         world.cull();
         assert_eq!(world.seen(odd), [true, true, false, false], "{mobility:?}");
+        // Without an instance that may be anywhere, one not all numbers is still seen beside one behind the eyes.
+        world.place(
+            odd,
+            [
+                Some(behind),
+                Some(Aabb::new(Vec3::ONE, Vec3::splat(f32::NAN))),
+            ],
+        );
+        world.cull();
+        assert_eq!(world.seen(odd), [false, true], "{mobility:?}");
     }
     // A dynamic item whose instances are all behind the eyes is culled whole, and one that opts out never is.
     let away = world.add(Item::new(root, Layer::Opaque, Mobility::Dynamic));
