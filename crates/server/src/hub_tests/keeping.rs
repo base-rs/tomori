@@ -7,7 +7,9 @@
 //! closer, nor once its reply is over, nor while pinned, moving only when asked, or for a visitor; waiting its dwell
 //! only for someone new; and serving a huddle from where it stands while the speaker moves within it. See
 //! `design/environments.md`.
-use super::following::{ADA, agent, cancel, following, heard, last_state, level, press, release};
+use super::following::{
+    ADA, agent, arrived, cancel, following, heard, last_state, level, press, release,
+};
 use super::*;
 use crate::follow::CONVERSATION;
 use crate::hub::following::{COMMIT, DWELL, POLL, RESTLESS, SETTLE, TALKED};
@@ -31,15 +33,6 @@ fn sent(hub: &Hub, commands: &async_channel::Receiver<SpaceCommand>, space: &str
         })
         .expect("given");
     hub.space_sent(space, &key, Ok(()));
-}
-
-/// The agent of `space` has arrived where it glides to.
-fn arrived(hub: &Hub, space: &str) {
-    hub.lock()
-        .space_mut(space)
-        .unwrap()
-        .following
-        .backdate(Duration::from_secs(30));
 }
 
 /// `client` stands at `at`, looking towards `target`, level.

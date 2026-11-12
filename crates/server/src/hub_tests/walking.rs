@@ -7,18 +7,12 @@
 //! menu, leave, or after half an hour with nothing between them, its return home counting again from then; never for a
 //! visitor, nor where it stays home; and `presence` says whom it walks with. See `design/environments.md`.
 use super::anchors::yard;
+use super::following::{ADA, arrived, level};
 use super::*;
 use crate::follow::CONVERSATION;
 use crate::hub::following::{POLL, SETTLE, WALK_IDLE};
 use serde_json::json;
 use tomori_protocol::{AgentMovement, Movement};
-
-const ADA: [f32; 3] = [0.0, 1.6, 2.0];
-
-/// The horizontal distance between `a` and `b`.
-fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] - b[0]).hypot(a[2] - b[2])
-}
 
 /// Where the agent of `space` is summoned to.
 fn summoned(hub: &Hub, space: &str) -> Option<tomori_protocol::Pose> {
@@ -29,15 +23,6 @@ fn summoned(hub: &Hub, space: &str) -> Option<tomori_protocol::Pose> {
 fn agent(hub: &Hub, space: &str, now: Instant) -> serde_json::Value {
     let state = hub.lock();
     Hub::agent_report(&state, &hub.environments(), space, now)
-}
-
-/// The agent of `space` has arrived where it glides to.
-fn arrived(hub: &Hub, space: &str) {
-    hub.lock()
-        .space_mut(space)
-        .unwrap()
-        .following
-        .backdate(Duration::from_secs(30));
 }
 
 /// Whom the agent of `space` walks with, by their key.

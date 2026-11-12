@@ -89,6 +89,31 @@ pub(super) fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
     (a[0] - b[0]).hypot(a[2] - b[2])
 }
 
+/// Where the agent of `space` is summoned to.
+pub(super) fn summoned(hub: &Hub, space: &str) -> Option<[f32; 3]> {
+    hub.lock()
+        .space(space)
+        .unwrap()
+        .summoned
+        .map(|pose| pose.position)
+}
+
+/// The agent of `space` has arrived where it glides to.
+pub(super) fn arrived(hub: &Hub, space: &str) {
+    hub.lock()
+        .space_mut(space)
+        .unwrap()
+        .following
+        .backdate(Duration::from_secs(30));
+}
+
+/// Ada, an owner, has the space's agent follow the speaker, going home after 90 s.
+pub(super) fn follows(ada: &Client) {
+    ada.send(ClientMessage::SetAgentMovement {
+        movement: AgentMovement::new(Movement::Follow, Some(90)),
+    });
+}
+
 /// The space's state as `client` was last sent it.
 pub(super) fn last_state(client: &Client) -> Option<tomori_protocol::SpaceState> {
     client

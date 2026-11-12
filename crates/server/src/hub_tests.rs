@@ -7181,11 +7181,6 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     assert_eq!(summoned(&vic), None);
 }
 
-/// The horizontal distance between `a` and `b`.
-fn across(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] - b[0]).hypot(a[2] - b[2])
-}
-
 #[test]
 fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked_or_follows() {
     let (hub, _jobs) = hub();
@@ -7215,7 +7210,7 @@ fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked
             (record.summoned.expect("away"), record.partner)
         };
         assert!(
-            (across(summoned.position, eyes) - crate::follow::CONVERSATION).abs() < 1e-3,
+            (following::level(summoned.position, eyes) - crate::follow::CONVERSATION).abs() < 1e-3,
             "{summoned:?}"
         );
         // It stands for her, so that clients draw the swarm in near her.

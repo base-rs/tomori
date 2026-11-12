@@ -4,6 +4,7 @@
 //! Who comes near the space's anchors through the hub: a participant coming within an anchor's radius is told to its
 //! agent once, as Tomori's note, between its turns, or with participants' words; visitors and anchors without a radius
 //! tell nothing; and `presence` says each radius and who is within it. See `design/environments.md`.
+use super::following::{arrived, follows, level, summoned};
 use super::timers::{handed, take};
 use super::*;
 use serde_json::{Value, json};
@@ -259,36 +260,6 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
     ada.send(standing([0.0, 1.6, -6.0]));
     hub.sweep_proximity(Instant::now() + crate::proximity::COOLDOWN);
     assert!(!has_events(&hub, &space));
-}
-
-/// Ada, an owner, has the space's agent follow the speaker, going home after 90 s.
-fn follows(ada: &Client) {
-    ada.send(ClientMessage::SetAgentMovement {
-        movement: tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, Some(90)),
-    });
-}
-
-/// Where the agent of `space` is summoned to.
-fn summoned(hub: &Hub, space: &str) -> Option<[f32; 3]> {
-    hub.lock()
-        .space(space)
-        .unwrap()
-        .summoned
-        .map(|pose| pose.position)
-}
-
-/// The agent of `space` has arrived where it glides to.
-fn arrived(hub: &Hub, space: &str) {
-    hub.lock()
-        .space_mut(space)
-        .unwrap()
-        .following
-        .backdate(Duration::from_secs(30));
-}
-
-/// How far from `b` `a` is, across the floor.
-fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] - b[0]).hypot(a[2] - b[2])
 }
 
 /// The timer `status` fires every hour, by a clock at 09:17 UTC, with Ada present.

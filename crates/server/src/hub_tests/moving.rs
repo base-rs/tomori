@@ -6,19 +6,13 @@
 //! on its own moves; its mode, partner and return in `presence`; and the hand
 //! menu's **Tomori: stay here** and **Tomori: follow again**. See `design/mcp.md` and `design/environments.md`.
 use super::anchors::{rack, yard};
+use super::following::{ADA, follows, level, summoned};
 use super::*;
 use crate::follow::CONVERSATION;
 use crate::hub::following::COMMIT;
 use serde_json::json;
 use tomori_environment::{Object, Outlet};
 use tomori_protocol::{AgentMovement, Movement, Resource};
-
-const ADA: [f32; 3] = [0.0, 1.6, 2.0];
-
-/// The horizontal distance between `a` and `b`.
-fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] - b[0]).hypot(a[2] - b[2])
-}
 
 /// The angle, in degrees, between the level ways from `from` to `a` and to `b`.
 fn apart(from: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -28,15 +22,6 @@ fn apart(from: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
         .clamp(-1.0, 1.0)
         .acos()
         .to_degrees()
-}
-
-/// Where the agent of `space` is summoned to.
-fn summoned(hub: &Hub, space: &str) -> Option<[f32; 3]> {
-    hub.lock()
-        .space(space)
-        .unwrap()
-        .summoned
-        .map(|pose| pose.position)
 }
 
 /// What `presence` says of the agent.
@@ -54,13 +39,6 @@ fn press(client: &Client, utterance: &str, attention: Vec<Resource>) {
         titling: false,
         attention,
         seen: None,
-    });
-}
-
-/// Ada, an owner, has the space's agent follow the speaker, going home after 90 s.
-fn follows(ada: &Client) {
-    ada.send(ClientMessage::SetAgentMovement {
-        movement: AgentMovement::new(Movement::Follow, Some(90)),
     });
 }
 
