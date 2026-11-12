@@ -280,14 +280,14 @@ fn a_stick_let_go_falls_and_comes_to_rest_where_it_lies_as_toasted_as_it_was() {
 }
 
 #[test]
-fn a_stick_put_back_by_its_log_glides_onto_it_and_has_a_fresh_marshmallow() {
+fn a_stick_put_back_by_its_log_fades_onto_it_and_has_a_fresh_marshmallow() {
     let now = Instant::now();
     let mut sticks = Sticks::new(now);
     let epoch = taken(&mut sticks, 2, now);
     let over = holding(3, toasting(campsite::heart()), now);
     let (_, later) = run(&mut sticks, std::slice::from_ref(&over), now, 8.0);
     assert!(sticks.toast(2) > campsite::GOLDEN);
-    // Let go just above its log, it glides onto it, and once it rests there, its marshmallow is fresh, said at once.
+    // Let go just above its log, it fades out there and in on it, its marshmallow fresh, said as it begins its way.
     let (middle, ..) = campsite::seat();
     let at = Placement::at(middle + Vec3::new(0.0, 0.9, 0.0));
     let near = holding(3, at, later);
@@ -295,12 +295,22 @@ fn a_stick_put_back_by_its_log_glides_onto_it_and_has_a_fresh_marshmallow() {
     let (events, _) = rest(&mut sticks, later, 5.0);
     assert!(sticks.world().at_home(campsite::body(2), campsite::RACKED));
     assert_eq!(sticks.toast(2), 0.0);
-    assert!(events.iter().any(|event| {
-        event
+    let began = events
+        .iter()
+        .find(|event| {
+            event
+                .sticks
+                .returning
+                .iter()
+                .any(|returning| returning.body == campsite::body(2))
+        })
+        .unwrap();
+    assert!(
+        began
             .toast
             .iter()
             .any(|toasted| toasted.body == campsite::body(2) && toasted.toast == 0.0)
-    }));
+    );
     // The others never moved.
     for index in [0, 1, 3] {
         assert!(
@@ -379,7 +389,7 @@ fn a_stick_let_go_in_the_pool_floats_and_goes_back_on_its_log_after_a_while() {
     );
     assert!(campsite::in_pool(floating.position));
     assert!(sticks.report().sticks[1].floating);
-    // A minute later, it glides back to its log.
+    // A minute later, it fades back to its log.
     let (_, later) = run(&mut sticks, &[], later, (campsite::RETURNS / 1000) as f32);
     rest(&mut sticks, later, 10.0);
     assert!(sticks.world().at_home(campsite::body(1), campsite::RACKED));

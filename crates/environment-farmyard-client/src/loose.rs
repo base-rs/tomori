@@ -6,7 +6,8 @@
 //! `tomori-physics`'s mirror of them; those this participant holds, one in each hand, drawn from their own hand every
 //! frame, taken within reach of it or pulled to it along the ray, and let go, thrown as fast as the hand moved, foreseen
 //! until the server's snapshots take over; those the others hold, drawn from the hands their presence brings; and the
-//! sounds of those that land. What differs between them, their shapes, how a hand holds them and how they sound, is
+//! sounds of those that land; and those on their way back, fading out where they were and in where they return to, which
+//! nobody takes until they are there. What differs between them, their shapes, how a hand holds them and how they sound, is
 //! their [`Shapes`]. The client never simulates. See `design/physics.md`.
 use std::collections::{BTreeMap, VecDeque};
 use std::marker::PhantomData;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use tomori_physics::message::{Intent, LetGo, State, Take, Update};
-use tomori_physics::mirror::Mirror;
+use tomori_physics::mirror::{Fade, Mirror};
 use tomori_physics::{PULL, PULL_TIME, Placement, Precision, RELEASE_SPEED, RELEASE_SPIN};
 use tomori_scene::client_side::{Actions, Grab, Hand, Phase, Picked, Side, Sound};
 use tomori_scene::pointing::Ray;
@@ -215,7 +216,10 @@ impl<S: Shapes> Loose<S> {
                 self.mirror.held(held.body).map(|held| held.by),
             );
             let mine = by.is_some() && by == self.me;
-            if epoch == Some(held.epoch) && mine {
+            if !held.agreed && self.mirror.returning(held.body) {
+                // Taken as it began its way back, which the side refuses.
+                *holding = None;
+            } else if epoch == Some(held.epoch) && mine {
                 held.agreed = true;
             } else if held.agreed
                 || (by.is_some() && !mine)
@@ -227,11 +231,14 @@ impl<S: Shapes> Loose<S> {
     }
 
     /// Whether body `body` may be taken: nobody holds it, as far as this client knows, or the server side says this
-    /// participant does though no hand of theirs does, as when their letting go of it was lost, which it takes again.
+    /// participant does though no hand of theirs does, as when their letting go of it was lost, which it takes again;
+    /// and it is not on its way back.
     fn free(&self, body: u32) -> bool {
-        self.mirror
-            .held(body)
-            .is_none_or(|held| Some(held.by) == self.me)
+        !self.mirror.returning(body)
+            && self
+                .mirror
+                .held(body)
+                .is_none_or(|held| Some(held.by) == self.me)
             && self
                 .holding
                 .iter()
@@ -415,16 +422,17 @@ impl<S: Shapes> Loose<S> {
         intents
     }
 
-    /// Every body as it is drawn at `now`, the farmyard's clock at `clock`, by its number, with whether this participant
-    /// holds it: those this participant holds, in their hand; one another holds, in theirs, from `right` and `left`, their
-    /// hands by their numbers, or where it was last drawn; and the rest where the server side says they are.
+    /// Every body as it is drawn at `now`, the farmyard's clock at `clock`, by its number, with how much of it is drawn
+    /// and whether this participant holds it: those this participant holds, in their hand; one another holds, in theirs,
+    /// from `right` and `left`, their hands by their numbers, or where it was last drawn; and the rest where the server
+    /// side says they are, fading on their way back.
     pub fn placed(
         &mut self,
         right: &[(u32, Hand)],
         left: &[(u32, Hand)],
         now: Instant,
         clock: u64,
-    ) -> Vec<(u32, Placement, bool)> {
+    ) -> Vec<(u32, Placement, Fade, bool)> {
         let bodies: Vec<u32> = self.mirror.bodies().collect();
         bodies
             .into_iter()
@@ -454,7 +462,12 @@ impl<S: Shapes> Loose<S> {
                         .expect("a body nobody holds has a placement"),
                 };
                 self.drawn.insert(body, placement);
-                (body, placement, mine.is_some())
+                (
+                    body,
+                    placement,
+                    self.mirror.fade(body, clock),
+                    mine.is_some(),
+                )
             })
             .collect()
     }

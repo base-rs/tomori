@@ -933,3 +933,76 @@ mod played {
         }
     }
 }
+
+#[test]
+fn a_stone_on_its_way_back_shrinks_where_it_was_and_grows_where_it_returns_to_and_is_nobody_s_to_take()
+ {
+    let mut stones = shared();
+    let start = Instant::now();
+    let (from, to) = (
+        lying(0),
+        lying(1).then(&Placement::at(Vec3::new(0.0, 0.0, 0.4))),
+    );
+    let back = Update {
+        returning: vec![tomori_physics::message::Returning {
+            body: 0,
+            from: from.encoded(Precision::Rest),
+            to: to.snapped(Precision::Rest).encoded(Precision::Rest),
+        }],
+        ..Default::default()
+    };
+    // Taken just as it began its way back, which the side refuses: given up as soon as its way back is said.
+    let hand = hand_at(from.position);
+    stones.update(
+        [&grab(0, hand, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        1_000,
+    );
+    assert!(stones.holding[1].is_some());
+    stones.changed(1_000, &back, 1_010);
+    assert!(stones.holding[1].is_none());
+    // On its way, it is neither pointed at nor within reach, and a grip on it takes nothing.
+    let down = Ray::new(from.position + Vec3::Y * 1.5, Vec3::NEG_Y).unwrap();
+    assert_ne!(
+        stones.pick(&down).map(|picked| picked.object),
+        Some("stone-0".to_owned())
+    );
+    assert_ne!(
+        stones.within_reach(from.position),
+        Some("stone-0".to_owned())
+    );
+    assert!(
+        stones
+            .update(
+                [&grab(0, hand, Phase::Began, Side::Right)].into_iter(),
+                Some(5),
+                start,
+                1_050
+            )
+            .is_empty()
+    );
+    // Drawn smaller where it was, then, at once, larger where it returns to, and whole there.
+    let drawn = |stones: &mut Stones, clock: u64| {
+        let shown = stones.shown(&[], &[], start, clock)[0];
+        let scale = shown.transform.x_axis.truncate().length();
+        (shown.transform.w_axis.truncate(), scale)
+    };
+    let (at, scale) = drawn(&mut stones, 1_100 + tomori_physics::FADE / 2);
+    assert!(
+        at.distance(from.position) < 1e-4 && (scale - 0.5).abs() < 1e-3,
+        "{at} {scale}"
+    );
+    let (at, scale) = drawn(&mut stones, 1_100 + tomori_physics::FADE * 3 / 2);
+    assert!(
+        at.distance(to.position) < 1e-3 && (scale - 0.5).abs() < 1e-3,
+        "{at} {scale}"
+    );
+    let (at, scale) = drawn(&mut stones, 1_100 + tomori_physics::FADE * 2);
+    assert!(
+        at.distance(to.position) < 1e-3 && (scale - 1.0).abs() < 1e-4,
+        "{at} {scale}"
+    );
+    // Back, it is anyone's to take.
+    assert_eq!(stones.within_reach(to.position), Some("stone-0".to_owned()));
+}
