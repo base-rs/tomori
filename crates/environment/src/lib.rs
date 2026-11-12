@@ -510,8 +510,10 @@ pub const UPDATE_BURST: u32 = 60;
 /// often their client reports it.
 pub const PRESENCE_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The most objects a side describes with [`Space::describe`] that the server keeps: those after are left out.
-pub const OBJECT_LIMIT: usize = 32;
+/// The most objects a side describes with [`Space::describe`] that the server keeps: those after are left out. Any
+/// object kept may be pointed at, and, by its reference, inspected and acted on; the server lists fewer to the space's
+/// agent at once, those most relevant to whoever spoke, whatever order the side describes them in.
+pub const OBJECT_LIMIT: usize = 1024;
 
 /// The longest identity of an object, in bytes: the server leaves out an object whose identity is longer, or empty.
 pub const IDENTITY_LIMIT: usize = 128;
@@ -1099,9 +1101,10 @@ impl Space {
 
     /// Describe the objects a participant can point at in the space, replacing those described before, so that the
     /// server can tell the space's agent what a participant points at as they speak. The server keeps at most
-    /// [`OBJECT_LIMIT`], 32, each identity at most [`IDENTITY_LIMIT`], 128 bytes, and each description cleaned and cut
-    /// to [`DESCRIPTION_LIMIT`], 200 characters, with its reference, if it has one that [`valid_reference`] takes, of
-    /// at most [`REFERENCE_BYTES`], which the agent may inspect it by (see [`Space::inspect_with`]).
+    /// [`OBJECT_LIMIT`], 1,024, any of which may be pointed at, inspected and acted on, whatever their order, each
+    /// identity at most [`IDENTITY_LIMIT`], 128 bytes, and each description cleaned and cut to [`DESCRIPTION_LIMIT`],
+    /// 200 characters, with its reference, if it has one that [`valid_reference`] takes, of at most
+    /// [`REFERENCE_BYTES`], which the agent may inspect it by (see [`Space::inspect_with`]).
     pub fn describe(&self, objects: Vec<Object>) -> Result<()> {
         self.outlet.describe(objects)
     }
@@ -1641,7 +1644,7 @@ mod tests {
     fn the_limits_a_side_keeps_within_are_those_the_design_states() {
         assert_eq!(STATE_LIMIT, 64 * 1024);
         assert_eq!(EVENT_LIMIT, 4 * 1024);
-        assert_eq!(OBJECT_LIMIT, 32);
+        assert_eq!(OBJECT_LIMIT, 1024);
         assert_eq!(IDENTITY_LIMIT, 128);
         assert_eq!(DESCRIPTION_LIMIT, 200);
         assert_eq!(REFERENCE_BYTES, 64);

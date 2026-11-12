@@ -11,7 +11,7 @@ use tomori_environment::{Action, Choice, Intent, Outcome, Parameter};
 
 /// A side that answers each action as the reference it is taken on says: done, refused, or never; keeping every
 /// intent it is handed.
-struct Answering(Arc<Mutex<Vec<Intent>>>);
+pub(super) struct Answering(pub(super) Arc<Mutex<Vec<Intent>>>);
 
 impl tomori_environment::ServerSide for Answering {
     fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
@@ -73,7 +73,7 @@ fn declared() -> Vec<Action> {
 
 /// What the yard describes: Pip, who offers every action, Rosie and Slow, who offer pecking, and a post, which offers
 /// none.
-fn described() -> Vec<tomori_environment::Object> {
+pub(super) fn described() -> Vec<tomori_environment::Object> {
     vec![
         tomori_environment::Object::new("chicken-1", "Pip, a hen")
             .with_reference("hen/pip")
@@ -88,18 +88,18 @@ fn described() -> Vec<tomori_environment::Object> {
     ]
 }
 
-struct Yard {
-    hub: Arc<Hub>,
+pub(super) struct Yard {
+    pub(super) hub: Arc<Hub>,
     _jobs: async_channel::Receiver<Job>,
-    space: String,
-    commands: async_channel::Receiver<SpaceCommand>,
-    outlet: SpaceOutlet,
-    ada: Client,
+    pub(super) space: String,
+    pub(super) commands: async_channel::Receiver<SpaceCommand>,
+    pub(super) outlet: SpaceOutlet,
+    pub(super) ada: Client,
 }
 
 /// A hub serving tools, whose space is in the yard, its side answering, with what it declares and describes, an
 /// action's answer waited for 0.2 seconds, and Ada in it.
-fn yard(side: impl tomori_environment::ServerSide + 'static) -> Yard {
+pub(super) fn yard(side: impl tomori_environment::ServerSide + 'static) -> Yard {
     let (hub, jobs) = hub_waiting();
     hub.set_environments(Environments::new([
         crate::environments::Environment::new("sky", "Sky"),
@@ -143,7 +143,7 @@ fn yard(side: impl tomori_environment::ServerSide + 'static) -> Yard {
 }
 
 /// The result of calling the tool `name` with `arguments`, as the space's agent.
-fn call(hub: &Hub, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+pub(super) fn call(hub: &Hub, name: &str, arguments: serde_json::Value) -> serde_json::Value {
     futures_lite::future::block_on(crate::mcp::handle(
         hub,
         &serde_json::json!({
@@ -160,7 +160,12 @@ fn call(hub: &Hub, name: &str, arguments: serde_json::Value) -> serde_json::Valu
 }
 
 /// The agent takes `action` on `id` with `parameters`, and is answered.
-fn act(hub: &Hub, id: &str, action: &str, parameters: serde_json::Value) -> serde_json::Value {
+pub(super) fn act(
+    hub: &Hub,
+    id: &str,
+    action: &str,
+    parameters: serde_json::Value,
+) -> serde_json::Value {
     call(
         hub,
         "act",
@@ -169,13 +174,13 @@ fn act(hub: &Hub, id: &str, action: &str, parameters: serde_json::Value) -> serd
 }
 
 /// What a result refuses, saying why.
-fn refused(result: &serde_json::Value) -> String {
+pub(super) fn refused(result: &serde_json::Value) -> String {
     assert_eq!(result["isError"], true, "{result}");
     result["content"][0]["text"].as_str().unwrap().to_owned()
 }
 
 /// What a result says.
-fn said(result: &serde_json::Value) -> serde_json::Value {
+pub(super) fn said(result: &serde_json::Value) -> serde_json::Value {
     assert!(result.get("structuredContent").is_some(), "{result}");
     result["structuredContent"].clone()
 }

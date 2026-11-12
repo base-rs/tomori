@@ -25,8 +25,12 @@ pub struct Channel {
     pub version: u32,
     /// The state for whoever joins.
     pub state: Option<Payload>,
-    /// The objects the side described: each identity, its description, cleaned, and its reference, if it has one.
-    pub objects: Vec<Described>,
+    /// The objects the side described, every one it publishes now within [`OBJECT_LIMIT`]: each identity, its
+    /// description, cleaned, and its reference, if it has one. Pointing, `inspect` and `act` look an object up among
+    /// all of them; only the agent's ambient list, [`crate::ambient`], is cut shorter.
+    pub objects: Objects,
+    /// What the agent's ambient list is ranked by, and the list as last ranked. See [`crate::ambient`].
+    pub ambient: crate::ambient::Ambient,
     /// How many more changes to the panels it publishes it may make, once it has made one.
     pub publishes: Option<Publishes>,
     /// The newest update of each panel it published that came too soon to be made, made as soon as it may be, so that
@@ -91,7 +95,8 @@ impl Channel {
             environment: environment.to_owned(),
             version,
             state: None,
-            objects: Vec::new(),
+            objects: Objects::default(),
+            ambient: crate::ambient::Ambient::default(),
             publishes: None,
             pending: Vec::new(),
             refused: std::collections::VecDeque::new(),
@@ -120,14 +125,58 @@ impl Channel {
 
     /// The object `id`, if the side described it.
     pub fn describe(&self, id: &str) -> Option<&Described> {
-        self.objects.iter().find(|object| object.id == id)
+        self.objects.get(id)
     }
 
     /// The object the side describes now with `reference`, if any.
     pub fn referenced(&self, reference: &str) -> Option<&Described> {
-        self.objects
-            .iter()
-            .find(|object| object.reference.as_deref() == Some(reference))
+        self.objects.referenced(reference)
+    }
+}
+
+/// The objects a side describes, as the server keeps them, in the order it described them, each found by its identity
+/// and its reference without a search, since there may be [`OBJECT_LIMIT`] of them.
+///
+/// At most [`OBJECT_LIMIT`], 1,024, are kept, each at most an identity of [`IDENTITY_LIMIT`], 128 bytes, a description
+/// of [`DESCRIPTION_LIMIT`] characters, 800 bytes at most, a reference of 64 bytes and
+/// [`tomori_environment::OFFER_LIMIT`] names of 32, with an index of the identity and reference: about 2 KB each, and 2
+/// MB for a binding at the worst.
+#[derive(Debug, Default)]
+pub struct Objects {
+    listed: Vec<Described>,
+    ids: std::collections::HashMap<String, usize>,
+    references: std::collections::HashMap<String, usize>,
+}
+
+impl Objects {
+    /// The object `id`, if there is one.
+    pub fn get(&self, id: &str) -> Option<&Described> {
+        self.ids.get(id).map(|index| &self.listed[*index])
+    }
+
+    /// Where the object `id` is among them, if there is one.
+    pub fn index(&self, id: &str) -> Option<usize> {
+        self.ids.get(id).copied()
+    }
+
+    /// Where the object with `reference` is among them, if there is one.
+    pub fn reference_index(&self, reference: &str) -> Option<usize> {
+        self.references.get(reference).copied()
+    }
+
+    /// The object with `reference`, if there is one.
+    pub fn referenced(&self, reference: &str) -> Option<&Described> {
+        self.references
+            .get(reference)
+            .map(|index| &self.listed[*index])
+    }
+}
+
+impl std::ops::Deref for Objects {
+    type Target = [Described];
+
+    fn deref(&self) -> &[Described] {
+        &self.listed
     }
 }
 
@@ -160,24 +209,23 @@ fn payload(text: &str, limit: usize, what: &str) -> Result<Payload, String> {
 pub fn objects(
     described: Vec<tomori_environment::Object>,
     carry: impl Fn([f32; 3]) -> Option<[f32; 3]>,
-) -> Vec<Described> {
-    let mut kept: Vec<Described> = Vec::new();
+) -> Objects {
+    let mut kept = Objects::default();
     for object in described {
         let id = object.id();
-        if id.is_empty() || id.len() > IDENTITY_LIMIT || kept.iter().any(|known| known.id == id) {
+        if id.is_empty() || id.len() > IDENTITY_LIMIT || kept.ids.contains_key(id) {
             continue;
         }
-        if kept.len() == OBJECT_LIMIT {
+        if kept.listed.len() == OBJECT_LIMIT {
+            log::debug!(
+                "An environment described more objects than the {OBJECT_LIMIT} the server keeps."
+            );
             break;
         }
         let reference = object
             .reference()
             .filter(|reference| tomori_environment::valid_reference(reference))
-            .filter(|reference| {
-                !kept
-                    .iter()
-                    .any(|known| known.reference.as_deref() == Some(*reference))
-            })
+            .filter(|reference| !kept.references.contains_key(*reference))
             .map(str::to_owned);
         if reference.is_none() && object.reference().is_some() {
             log::debug!(
@@ -199,7 +247,12 @@ pub fn objects(
                 }
             }
         }
-        kept.push(Described {
+        let index = kept.listed.len();
+        kept.ids.insert(id.to_owned(), index);
+        if let Some(reference) = &reference {
+            kept.references.insert(reference.clone(), index);
+        }
+        kept.listed.push(Described {
             id: id.to_owned(),
             description: crate::space::one_line(object.description(), DESCRIPTION_LIMIT),
             reference,

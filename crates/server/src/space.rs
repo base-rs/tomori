@@ -190,6 +190,8 @@ pub struct SpaceModel {
     events: crate::events::EventQueue,
     /// When the agent's turn last ended, after which a prompt of notes alone waits a quiet moment.
     quiet_since: Option<std::time::Instant>,
+    /// How many of the agent's turns have ended, which tells one turn from the next. See [`SpaceModel::turns`].
+    turns: u64,
     /// The participant the notes alone given the agent last were about, while they are its latest input. See
     /// [`SpaceModel::noted`].
     noted: Option<String>,
@@ -915,6 +917,7 @@ impl SpaceModel {
             timers: crate::timers::Timers::default(),
             events: crate::events::EventQueue::default(),
             quiet_since: None,
+            turns: 0,
             noted: None,
             watch: crate::watch::Watch::default(),
         };
@@ -1140,9 +1143,16 @@ impl SpaceModel {
     /// The agent's turn ended; it counts as a reply nobody heard if it completed one while nobody was in the space.
     fn turn_ended(&mut self) {
         self.quiet_since = Some(std::time::Instant::now());
+        self.turns += 1;
         if std::mem::take(&mut self.unheard) && self.unattended.is_none() {
             self.unattended = Some(Attention::Reply);
         }
+    }
+
+    /// How many of the agent's turns have ended: the same number throughout a turn, so that what is decided once in a
+    /// turn, such as the agent's ambient list of an environment's objects (see [`crate::ambient`]), stays as it was.
+    pub fn turns(&self) -> u64 {
+        self.turns
     }
 
     /// Whether the backend reported reconnecting and has not yet read the session again.

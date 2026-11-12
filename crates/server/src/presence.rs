@@ -250,7 +250,7 @@ fn rotate(rotation: [f32; 4], vector: Vec3) -> Vec3 {
 }
 
 /// The way `pose` faces: its -Z, as a head looks and an OpenXR aim pose points.
-fn forward(pose: &Pose) -> Vec3 {
+pub(crate) fn forward(pose: &Pose) -> Vec3 {
     rotate(pose.orientation, [0.0, 0.0, -1.0])
 }
 
@@ -270,7 +270,7 @@ fn round(value: f32, places: i32) -> f64 {
     (f64::from(value) * factor).round() / factor
 }
 
-fn position(at: Vec3) -> Value {
+pub(crate) fn position(at: Vec3) -> Value {
     json!(at.map(|axis| round(axis, 2)))
 }
 
@@ -1529,6 +1529,40 @@ pub(crate) fn anchors(
         })
         .collect();
     json!(listed)
+}
+
+/// The agent's ambient list of the objects of `environment`, `listed` by their index in `objects`, as `presence` tells
+/// them: each one's description, the id `inspect` and `act` take for it where it has a reference, and where it stands
+/// where its side says; with how many its side describes in all, and, where that is more, that those not listed are
+/// pointed at, inspected and acted on all the same. See [`crate::ambient`].
+pub(crate) fn objects(
+    objects: &crate::channel::Objects,
+    listed: &[usize],
+    environment: &str,
+) -> Value {
+    let told: Vec<Value> = listed
+        .iter()
+        .map(|index| {
+            let object = &objects[*index];
+            let mut told = json!({ "description": object.description });
+            if let Some(reference) = &object.reference {
+                told["id"] = json!(crate::space::inspectable(environment, reference));
+            }
+            if let Some(at) = object.position {
+                told["position"] = position(at);
+            }
+            told
+        })
+        .collect();
+    let mut said = json!({ "listed": told, "total": objects.len() });
+    if objects.len() > listed.len() {
+        said["note"] = json!(format!(
+            "The {} of the {} objects the environment describes that matter most to whoever spoke: what they pointed at, looked at, and stood near or saw, then what was lately pointed at, inspected or acted on. Any of the others is described to you when someone points at it, and inspect and act take its id all the same.",
+            listed.len(),
+            objects.len()
+        ));
+    }
+    said
 }
 
 /// How the `presence` tool's numbers are to be read.
