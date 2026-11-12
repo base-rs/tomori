@@ -268,7 +268,8 @@ jobs:
         run: cargo install bake --locked
       - name: Reject hand edits to the generated release notes
         env:
-          BAKE_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # A pull request's checkout merges it into its base branch as that is now, the merge's first parent; the event's base SHA can be older, from when the pull request was opened, and would count the base branch's own commits since.
+          BAKE_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.merge_group.base_sha }}
         run: cargo bake --locked releases:check "$BAKE_BASE"
 
   test-result:
