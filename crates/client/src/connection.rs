@@ -298,6 +298,104 @@ pub struct Connection {
     echo_test: Option<EchoTest>,
     /// The name each server, by its link's key, last called this participant, which a new connection to it suggests in place of the device's for the rest of this run: so that a name it does not keep, such as a visitor's, survives connecting again. Never written down. See `design/security.md`.
     names: HashMap<String, String>,
+    /// The longest part of a poll since [`Self::slowest`] was last asked.
+    slowest: Option<Slowest>,
+}
+
+/// The longest part of [`Connection::poll`] in a while, as [`Connection::slowest`] says: applying one event, by its kind,
+/// such as `ProjectionPatch`, carrying out one action, by its kind, such as `EndUtterance`, or the poll's own work
+/// before the events, `tick`, between them and the actions, `reopen`, or after the actions, `cues`. A headset logs it
+/// beside each minute's frame times, so that a long poll says what it was. See `design/rendering.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slowest {
+    pub what: Kind,
+    pub took: Duration,
+}
+
+impl Slowest {
+    /// Keep `what`, which took from `started` until now, if it is the slowest yet; returns now, when the next part starts.
+    fn keep(slowest: &mut Option<Self>, what: Kind, started: Instant) -> Instant {
+        let now = Instant::now();
+        let took = now.saturating_duration_since(started);
+        if slowest.is_none_or(|slowest| took > slowest.took) {
+            *slowest = Some(Self { what, took });
+        }
+        now
+    }
+}
+
+impl std::fmt::Display for Slowest {
+    /// As the log says it: `ProjectionPatch 4.21 ms`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} {:.2} ms",
+            self.what.name(),
+            self.took.as_secs_f64() * 1e3
+        )
+    }
+}
+
+/// What something is, by name, without allocating: an event, a message or an action by its variant's name, as its derived
+/// `Debug` begins, such as `ProjectionPatch`, formatting nothing of what it carries, or a part of a poll by the name it is
+/// given. A name is cut at 32 characters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Kind {
+    name: [u8; Kind::LONGEST],
+    length: usize,
+}
+
+impl Kind {
+    const LONGEST: usize = 32;
+
+    /// `value`'s variant, by name.
+    fn of(value: &dyn std::fmt::Debug) -> Self {
+        let mut kind = Self {
+            name: [0; Self::LONGEST],
+            length: 0,
+        };
+        // Formatting stops, with an error, at the first character after the name.
+        let _ = std::fmt::write(&mut kind, format_args!("{value:?}"));
+        kind
+    }
+
+    /// `event`, by kind: a message by its own.
+    fn event(event: &Event) -> Self {
+        match event {
+            Event::Message(message) => Self::of(message),
+            event => Self::of(event),
+        }
+    }
+
+    /// A part of a poll, by `name`.
+    fn named(name: &str) -> Self {
+        Self::of(&format_args!("{name}"))
+    }
+
+    /// What it is called.
+    pub fn name(&self) -> &str {
+        std::str::from_utf8(&self.name[..self.length]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for Kind {
+    /// Keep what is written while it is a name, failing at what is not.
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for byte in text.bytes() {
+            if !(byte.is_ascii_alphanumeric() || byte == b'_') || self.length == Self::LONGEST {
+                return Err(std::fmt::Error);
+            }
+            self.name[self.length] = byte;
+            self.length += 1;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Kind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.name())
+    }
 }
 
 /// Speech played again to this participant: a replay they asked for, or a catch-up on joining or returning.
@@ -1113,7 +1211,14 @@ impl Connection {
             placed: Scene::default(),
             echo_test: None,
             names: HashMap::new(),
+            slowest: None,
         }
+    }
+
+    /// The longest part of a poll since this was last asked, and what it was, or `None` if there was no poll. See
+    /// [`Slowest`].
+    pub fn slowest(&mut self) -> Option<Slowest> {
+        self.slowest.take()
     }
 
     /// Measure, each time the live microphone opens, how much of a probe the speaker plays it hears, and log it: `label` says how the microphone captures. Needs a quiet room. See `design/spatial-audio.md`.
@@ -1276,6 +1381,7 @@ impl Connection {
 
     /// Run once per frame: apply what the client received to `session`, and carry out what it asks for. Browsing, and the multicast lock it needs, stop while not `focused`, as does the microphone.
     pub fn poll(&mut self, focused: bool, session: &mut dyn Session) {
+        let mut started = Instant::now();
         if !focused {
             session.report(Report::Unfocused);
             // Stop the capture thread before processing any queued end or
@@ -1295,8 +1401,10 @@ impl Connection {
             now: Instant::now(),
             browsing,
         });
+        started = Slowest::keep(&mut self.slowest, Kind::named("tick"), started);
         let mut reopen = None;
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
+            let kind = Kind::event(&event);
             match &event {
                 Event::State(ConnectionState::Connected { certificate, .. }) => {
                     self.keep(*certificate)
@@ -1354,6 +1462,7 @@ impl Connection {
                 self.speaker.connected();
                 self.speaker.open();
             }
+            started = Slowest::keep(&mut self.slowest, kind, started);
         }
         if let Some(error) = self.voice.failure() {
             self.feedback
@@ -1363,7 +1472,10 @@ impl Connection {
         if let Some(reopen) = reopen {
             self.reopen(reopen, session);
         }
+        Slowest::keep(&mut self.slowest, Kind::named("reopen"), started);
+        // Each action is timed by its kind.
         self.perform(session);
+        let started = Instant::now();
         if self
             .client
             .as_ref()
@@ -1383,6 +1495,7 @@ impl Connection {
         session.report(Report::AgentSpeech { playing, level });
         self.listen_live();
         self.cue(session);
+        Slowest::keep(&mut self.slowest, Kind::named("cues"), started);
     }
 
     /// Cue what the server said about this participant's words and speech played again.
@@ -1485,6 +1598,7 @@ impl Connection {
 
     fn perform(&mut self, session: &mut dyn Session) {
         while let Some(action) = session.next_action() {
+            let (what, started) = (Kind::of(&action), Instant::now());
             match action {
                 Action::Connect(choice) => {
                     let mut key = choice
@@ -1663,6 +1777,7 @@ impl Connection {
                     self.store.remember_feedback(settings);
                 }
             }
+            Slowest::keep(&mut self.slowest, what, started);
         }
     }
 

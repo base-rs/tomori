@@ -264,13 +264,13 @@ pub fn run(
             continue;
         }
         controller_models.refresh(&gpu.device, &gpu.queue, &mut renderer);
-        let frame = waiter.wait()?;
+        let frame = timer.time(Segment::DisplayWait, || waiter.wait())?;
         let waited = Instant::now();
         refreshes.frame(
             frame.predicted_display_time.as_nanos(),
             frame.predicted_display_period.as_nanos(),
         );
-        stream.begin()?;
+        timer.time(Segment::Runtime, || stream.begin())?;
         let now = Instant::now();
         let dt = headset.tick(now);
         let focused = headset.focused();
@@ -364,7 +364,22 @@ pub fn run(
                 input.haptics.apply(&vibrator, hand, haptic);
             }
         });
-        // The frame's budget is the display's period for the CPU's work and the GPU's each, rather than for both one after the other: the last frame's rendering has had this frame's CPU work to finish in, and is waited for only now, so that at most one frame is on the GPU at once. A frame later than the display's refresh is shown again turned but not moved, so near things shake as the head moves; see `design/rendering.md`.
+        let image = timer.time(Segment::ImageWait, || -> Result<usize> {
+            let image = swapchain.acquire_image()? as usize;
+            swapchain.wait_image(xr::Duration::INFINITE)?;
+            Ok(image)
+        })?;
+        let encoded = timer.time(Segment::Render, || {
+            renderer.encode(
+                &gpu.device,
+                &gpu.queue,
+                &images[image].views,
+                &projections,
+                scene_to_space,
+                &panels.list(scene_to_space),
+            )
+        });
+        // The frame's budget is the display's period for the CPU's work and the GPU's each, rather than for both one after the other: the last frame's rendering has had all of this frame's CPU work, its eyes' draws encoded too, to finish in, and is waited for only to submit this frame's, so that at most one frame is on the GPU at once and the GPU waits for no more than the submission. A frame later than the display's refresh is shown again turned but not moved, so near things shake as the head moves; see `design/rendering.md`.
         if let Some(previous) = rendering.take() {
             timer
                 .time(Segment::GpuWait, || {
@@ -375,22 +390,9 @@ pub fn run(
                 })
                 .context("waiting for the last frame's XR rendering")?;
         }
-        let image = timer.time(Segment::ImageWait, || -> Result<usize> {
-            let image = swapchain.acquire_image()? as usize;
-            swapchain.wait_image(xr::Duration::INFINITE)?;
-            Ok(image)
-        })?;
-        rendering = Some(timer.time(Segment::Render, || {
-            renderer.render(
-                &gpu.device,
-                &gpu.queue,
-                &images[image].views,
-                &projections,
-                scene_to_space,
-                &panels.list(scene_to_space),
-            )
-        }));
+        rendering = Some(timer.time(Segment::Submit, || renderer.submit(&gpu.queue, encoded)));
         // The image goes back to XR once its commands are submitted to the session's queue, which the runtime's composition waits on, rather than once the GPU has finished them; rendering leaves it COLOR_ATTACHMENT_OPTIMAL, as the OpenXR Vulkan swapchain contract requires.
+        let released = Instant::now();
         swapchain.release_image()?;
         let projection_views: Vec<_> = located
             .iter()
@@ -420,6 +422,7 @@ pub fn run(
                 .space(&space)
                 .views(&projection_views)],
         )?;
+        timer.add(Segment::Runtime, released.elapsed());
         timer.add(Segment::Frame, waited.elapsed());
         frames += 1;
         timer.time(Segment::Microphone, || {
@@ -433,8 +436,12 @@ pub fn run(
                 xr_types::frame_summary(frames, &due, refreshes.take())
             );
             // What those frames cost this thread, beside their rate; see `design/rendering.md`.
+            // And the longest part of polling the connection, which says what a long poll was.
             if let Some(summary) = frame_times.summary() {
-                log::info!("{summary}");
+                let slowest = connection
+                    .slowest()
+                    .map(|slowest| format!("; slowest poll: {slowest}"));
+                log::info!("{summary}{}", slowest.unwrap_or_default());
             }
             // And what they cost the GPU, each eye's pass, and what they drew.
             if let Some(gpu) = renderer.gpu_summary() {

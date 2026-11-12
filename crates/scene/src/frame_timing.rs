@@ -2,9 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! What each frame costs the frame thread, summarized once a minute beside the frame rate, as
-//! `design/client-logging.md` allows: the whole frame and each part of it a client times, such as polling the
-//! connection, the frame step, the projector within it, the renderer's update and its encoding of the eyes' draws, the
-//! glyphs drawn into the atlas, and, apart, the waits for the GPU and the compositor, each as the mean, the 95th
+//! `design/client-logging.md` allows: the whole frame, how much of it was busy rather than waiting, and each part of it
+//! a client times, such as polling the connection, the frame step, the projector within it, the renderer's update and
+//! its encoding of the eyes' draws, the glyphs drawn into the atlas, and, apart, the waits for the GPU, the compositor
+//! and the display, each as the mean, the 95th
 //! percentile and the longest; and how many faces were drawn, meshes built and glyphs drawn a frame. The headset and the
 //! desktop window each keep one. See `design/rendering.md`.
 use std::cell::Cell;
@@ -14,8 +15,11 @@ use std::time::{Duration, Instant};
 /// drawn within whatever builds a mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Segment {
-    /// The whole frame: on the headset, from `xrWaitFrame` returning to `xrEndFrame` returning.
+    /// The whole frame: on the headset, from `xrWaitFrame` returning to `xrEndFrame` returning, the waits for the GPU
+    /// and the compositor within it.
     Frame,
+    /// The frame's own work, without the waits within it: the frame less them, counted by [`Timer::finish`].
+    Busy,
     /// Polling the connection, decoding what the server sent: patches and images among it.
     Poll,
     /// Asking for the microphone, or checking its answer.
@@ -36,19 +40,27 @@ pub enum Segment {
     Projection,
     /// Applying the frame to the renderer: uploading the faces it changed, among the rest.
     Draw,
-    /// Encoding and submitting the eyes' draws.
+    /// Encoding the eyes' draws, and on the desktop submitting them; the headset encodes them while the GPU still draws
+    /// the frame before.
     Render,
+    /// Submitting the eyes' draws, once the GPU has drawn the frame before: on the headset.
+    Submit,
+    /// Beginning and ending the frame with the runtime: `xrBeginFrame`, releasing the image and `xrEndFrame`.
+    Runtime,
     /// Drawing glyphs into the atlas, within whatever needed them.
     Glyphs,
     /// Waiting for the GPU to finish the previous frame.
     GpuWait,
     /// Waiting for the compositor to give back an image to draw into.
     ImageWait,
+    /// Waiting in `xrWaitFrame` for the runtime to start the frame, before it: on the headset.
+    DisplayWait,
 }
 
 impl Segment {
-    const ALL: [Segment; 15] = [
+    const ALL: [Segment; 19] = [
         Segment::Frame,
+        Segment::Busy,
         Segment::Poll,
         Segment::Microphone,
         Segment::Locate,
@@ -60,15 +72,19 @@ impl Segment {
         Segment::Projection,
         Segment::Draw,
         Segment::Render,
+        Segment::Submit,
+        Segment::Runtime,
         Segment::Glyphs,
         Segment::GpuWait,
         Segment::ImageWait,
+        Segment::DisplayWait,
     ];
 
     /// What the summary calls it.
     fn name(self) -> &'static str {
         match self {
             Segment::Frame => "frame",
+            Segment::Busy => "busy",
             Segment::Poll => "poll",
             Segment::Microphone => "microphone",
             Segment::Locate => "locate",
@@ -80,15 +96,21 @@ impl Segment {
             Segment::Projection => "projection",
             Segment::Draw => "draw",
             Segment::Render => "render",
+            Segment::Submit => "submit",
+            Segment::Runtime => "runtime",
             Segment::Glyphs => "glyphs",
             Segment::GpuWait => "gpu",
             Segment::ImageWait => "image",
+            Segment::DisplayWait => "display",
         }
     }
 
-    /// Whether it is a wait for the GPU or the compositor rather than work of the CPU's.
+    /// Whether it is a wait for the GPU, the compositor or the display rather than work of the CPU's.
     fn wait(self) -> bool {
-        matches!(self, Segment::GpuWait | Segment::ImageWait)
+        matches!(
+            self,
+            Segment::GpuWait | Segment::ImageWait | Segment::DisplayWait
+        )
     }
 }
 
@@ -139,7 +161,7 @@ pub fn take() -> Work {
 pub struct Sample {
     times: [Duration; Segment::ALL.len()],
     /// Which segments were timed, by their bit.
-    timed: u16,
+    timed: u32,
     pub faces: usize,
     pub meshes: usize,
     pub glyphs: usize,
@@ -194,9 +216,15 @@ impl Timer {
         self.sample.meshes += meshes;
     }
 
-    /// The frame's sample: what was timed, the projector's work since it started, and the glyphs drawn meanwhile.
+    /// The frame's sample: what was timed, the frame's busy time, the frame less the waits for the GPU and the compositor
+    /// within it, where the frame was timed, the projector's work since it started, and the glyphs drawn meanwhile.
     pub fn finish(mut self) -> Sample {
         let work = take();
+        if self.sample.timed & (1 << Segment::Frame as usize) != 0 {
+            let waited = self.sample.time(Segment::GpuWait) + self.sample.time(Segment::ImageWait);
+            let busy = self.sample.time(Segment::Frame).saturating_sub(waited);
+            self.sample.add(Segment::Busy, busy);
+        }
         self.sample.add(Segment::Projection, work.projection);
         self.sample.faces += work.faces;
         let (count, time) = tomori_text::atlas::drawn();
@@ -373,6 +401,7 @@ mod tests {
         let (work, waits) = line.split_once("; waits: ").unwrap();
         for name in [
             "frame",
+            "busy",
             "poll",
             "microphone",
             "locate",
@@ -384,6 +413,8 @@ mod tests {
             "projection",
             "draw",
             "render",
+            "submit",
+            "runtime",
             "glyphs",
         ] {
             assert!(
@@ -392,8 +423,26 @@ mod tests {
             );
         }
         assert!(
-            waits.starts_with("gpu 1.00/1.00/1.00, image 1.00/1.00/1.00;"),
+            waits.starts_with("gpu 1.00/1.00/1.00, image 1.00/1.00/1.00, display 1.00/1.00/1.00;"),
             "{line}"
+        );
+    }
+
+    #[test]
+    fn a_frame_is_busy_for_what_it_did_not_wait() {
+        let mut timer = Timer::start();
+        timer.add(Segment::Frame, Duration::from_millis(10));
+        timer.add(Segment::GpuWait, Duration::from_millis(3));
+        timer.add(Segment::ImageWait, Duration::from_millis(1));
+        timer.add(Segment::DisplayWait, Duration::from_millis(5));
+        assert_eq!(timer.finish().time(Segment::Busy), Duration::from_millis(6));
+        let mut timer = Timer::start();
+        timer.add(Segment::Step, Duration::from_millis(1));
+        let sample = timer.finish();
+        assert_eq!(
+            sample.timed & (1 << Segment::Busy as usize),
+            0,
+            "a frame not timed is not busy"
         );
     }
 
