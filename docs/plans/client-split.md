@@ -21,7 +21,6 @@
 **Open:**
 
 - **Environments' client halves** in the builder wait for the shared environment interface, [#75](https://github.com/base-rs/tomori/issues/75), as do Sky depending on `tomori-render` rather than through an adapter. The rest of #73's stage 3 is tracked there.
-- [#56](https://github.com/base-rs/tomori/issues/56), separating the spectator and the shared scene model from the Quest crate, is done by #144 and #160 but is still open.
 
 This covers:
 

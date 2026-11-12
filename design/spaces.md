@@ -1,6 +1,6 @@
 # Spaces
 
-This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document.
+This describes the Rust server, which replaced the legacy Node bridge in `bridge/`, and the headset client, which uses it. Changes to the bridge are not reviewed against this document.
 
 ## Requirement
 
