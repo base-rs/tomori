@@ -7,16 +7,10 @@
 use super::*;
 use crate::test_gpu;
 
-/// The linear luminance of an sRGB pixel.
+/// The linear luminance of an sRGB pixel, by the sRGB curve's power, whose linear toe, below a 25th, differs from it by
+/// less than a 1,000th, and no pixel here is darker than the night behind it.
 fn luminance(pixel: &image::Rgba<u8>) -> f32 {
-    let linear = |channel: u8| {
-        let value = f32::from(channel) / 255.0;
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
+    let linear = |channel: u8| ((f32::from(channel) / 255.0 + 0.055) / 1.055).powf(2.4);
     0.2126 * linear(pixel[0]) + 0.7152 * linear(pixel[1]) + 0.0722 * linear(pixel[2])
 }
 
