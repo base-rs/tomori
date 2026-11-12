@@ -3,7 +3,7 @@
 
 //! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by and at the environments' protocol versions, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] draws nothing but the built-in grid; each environment's client crate registers itself on it, as Tomori's own build, `crate::app::builder` behind the default `app` feature, registers Sky and the GitHub prototype for the `tomori` executable and APK.
 //!
-//! A scenery and its version are all of an environment's client side that a build registers until state synchronization ([#76](https://github.com/ioquatix/tomori/issues/76)) gives a client side more to present. A build's `Hello` lists the environments it registers, with their versions, so that its server offers it only those; see `design/environments.md`.
+//! A scenery and its version are all of an environment's client side that a build registers until state synchronization ([#76](https://github.com/base-rs/tomori/issues/76)) gives a client side more to present. A build's `Hello` lists the environments it registers, with their versions, so that its server offers it only those; see `design/environments.md`.
 use tomori_render::scenery::{Sceneries, Scenery, Target};
 use tomori_scene::{environment::Environment, locomotion::Locomotion};
 

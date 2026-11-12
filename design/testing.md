@@ -28,7 +28,7 @@ Every test in the workspace, including those in `tests/` directories and the exa
 
 ## Rationale
 
-The last regions find as many bugs as the first ones, and they expose dead code. A lower floor makes people test code they don't care about whenever someone else's change lowers the total. With 100%, each change brings its own tests. Some code can't run in GitHub CI, such as the headset's OpenXR calls. An exclusion that names its file and reason, in the crate it belongs to, keeps that visible and reviewable, where scattered markers would not. Agreed with the maintainer in November 2026 in [#55](https://github.com/ioquatix/tomori/issues/55); see the proposal in [#111](https://github.com/ioquatix/tomori/pull/111).
+The last regions find as many bugs as the first ones, and they expose dead code. A lower floor makes people test code they don't care about whenever someone else's change lowers the total. With 100%, each change brings its own tests. Some code can't run in GitHub CI, such as the headset's OpenXR calls. An exclusion that names its file and reason, in the crate it belongs to, keeps that visible and reviewable, where scattered markers would not. Agreed with the maintainer in November 2026 in [#55](https://github.com/base-rs/tomori/issues/55); see the proposal in [#111](https://github.com/base-rs/tomori/pull/111).
 
 CI runs on Linux, but the maintainers also develop on Macs, where a test that fails or hangs for a reason of the platform's hides the failures that matter.
 

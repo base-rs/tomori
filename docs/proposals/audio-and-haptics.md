@@ -2,23 +2,23 @@
 
 ## Status
 
-**Stage 1 is built; stages 2 and 3 are open.** November 2026. The user's decisions are recorded under [Decisions](#decisions). Stage 1 is now a requirement in `design/feedback.md` (sound cues and vibration) and `design/spatial-audio.md` (spatial playback, ducking and the first step of echo cancellation), with changes to `design/live-audio.md`, `design/spaces.md` and others, which take precedence over this document. The rest of this document is the proposal as it was put to the user, from [PR #101](https://github.com/ioquatix/tomori/pull/101), with its decisions added; its references to the code describe `main` before stage 1.
+**Stage 1 is built; stages 2 and 3 are open.** November 2026. The user's decisions are recorded under [Decisions](#decisions). Stage 1 is now a requirement in `design/feedback.md` (sound cues and vibration) and `design/spatial-audio.md` (spatial playback, ducking and the first step of echo cancellation), with changes to `design/live-audio.md`, `design/spaces.md` and others, which take precedence over this document. The rest of this document is the proposal as it was put to the user, from [PR #101](https://github.com/base-rs/tomori/pull/101), with its decisions added; its references to the code describe `main` before stage 1.
 
 **Built:**
 
-- **Feedback you can hear and feel:** the haptic action on both hands, the vocabulary of vibrations and procedurally synthesized sound cues, and the Feedback setting for each ([#107](https://github.com/ioquatix/tomori/pull/107), landed on `main` through #109).
-- **Spatial playback:** every voice placed in stereo, ducking the agent under people, and echo cancellation step A, the platform's canceller used properly with a measurement harness ([#109](https://github.com/ioquatix/tomori/pull/109)).
+- **Feedback you can hear and feel:** the haptic action on both hands, the vocabulary of vibrations and procedurally synthesized sound cues, and the Feedback setting for each ([#107](https://github.com/base-rs/tomori/pull/107), landed on `main` through #109).
+- **Spatial playback:** every voice placed in stereo, ducking the agent under people, and echo cancellation step A, the platform's canceller used properly with a measurement harness ([#109](https://github.com/base-rs/tomori/pull/109)).
 
 **Changed since the decisions:**
 
-- **No seats.** Decision 3 placed remote participants on a circle around the listener. Once travel came ([#181](https://github.com/ioquatix/tomori/pull/181)), that put someone who had travelled to meet the listener on a seat rather than where they stood. The maintainer decided instead on one shared space: every voice at its participant's head from presence, with travel local to each client and no seats anywhere ([#185](https://github.com/ioquatix/tomori/pull/185), which closed [#183](https://github.com/ioquatix/tomori/issues/183)). `design/spatial-audio.md` and `design/spaces.md` record this; the seats this document describes are superseded.
+- **No seats.** Decision 3 placed remote participants on a circle around the listener. Once travel came ([#181](https://github.com/base-rs/tomori/pull/181)), that put someone who had travelled to meet the listener on a seat rather than where they stood. The maintainer decided instead on one shared space: every voice at its participant's head from presence, with travel local to each client and no seats anywhere ([#185](https://github.com/base-rs/tomori/pull/185), which closed [#183](https://github.com/base-rs/tomori/issues/183)). `design/spatial-audio.md` and `design/spaces.md` record this; the seats this document describes are superseded.
 
 **Open:**
 
-- **Echo:** measuring the platform's canceller on the headset, step B's software canceller if it falls short, dropping the feedback warning, and ducking rather than silencing during push-to-talk once echo cancellation is verified (decision 7): [#187](https://github.com/ioquatix/tomori/issues/187).
-- **Per-participant volume and mute,** with levelling: [#188](https://github.com/ioquatix/tomori/issues/188).
-- **Worker voices:** short updates from their stations, in the agent's voice for now (decision 4): [#189](https://github.com/ioquatix/tomori/issues/189).
-- **Environment audio:** [#84](https://github.com/ioquatix/tomori/issues/84) and [#88](https://github.com/ioquatix/tomori/issues/88).
+- **Echo:** measuring the platform's canceller on the headset, step B's software canceller if it falls short, dropping the feedback warning, and ducking rather than silencing during push-to-talk once echo cancellation is verified (decision 7): [#187](https://github.com/base-rs/tomori/issues/187).
+- **Per-participant volume and mute,** with levelling: [#188](https://github.com/base-rs/tomori/issues/188).
+- **Worker voices:** short updates from their stations, in the agent's voice for now (decision 4): [#189](https://github.com/base-rs/tomori/issues/189).
+- **Environment audio:** [#84](https://github.com/base-rs/tomori/issues/84) and [#88](https://github.com/base-rs/tomori/issues/88).
 - **Richer haptics and sound:** amplitude-envelope and PCM haptics, an HRTF option for headphones, and an attention chime for other spaces. No issue yet.
 
 ## The request

@@ -1,6 +1,6 @@
 # `tomori-environment`
 
-The interface of a [Tomori](https://github.com/ioquatix/tomori) environment's server side: a program in the server that runs while a space is bound to its environment, with the space it runs for. It has no other dependency on the server, so that an environment's crate can be built without it.
+The interface of a [Tomori](https://github.com/base-rs/tomori) environment's server side: a program in the server that runs while a space is bound to its environment, with the space it runs for. It has no other dependency on the server, so that an environment's crate can be built without it.
 
 ## Usage
 
@@ -116,9 +116,9 @@ fn consoles(space: &Space) -> Result<()> {
 
 A side can also publish panels onto its environment's own walls, text, lists of rows it highlights by id, or live charts, by ids it chooses, with `Space::publish(Panel::chart("pressure", "Scaling pressure", chart))`, updating one in place by publishing it again and taking it away with `Space::retract`; the chart is `tomori_environment::chart::Chart`, a small bounded spec of evenly spaced points, a gap where nothing was measured.
 
-[Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
+[Making an Environment](context/making-an-environment.md) describes the crates an environment is made of, its common, server and client crates, and how applications register it. The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/base-rs/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/base-rs/tomori/blob/main/design/builders.md).
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-server`](https://crates.io/crates/tomori-server), which runs server sides in its spaces.

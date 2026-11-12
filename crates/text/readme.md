@@ -1,6 +1,6 @@
 # `tomori-text`
 
-The fonts that [Tomori](https://github.com/ioquatix/tomori)'s panels and labels are drawn with, and the signed-distance-field glyph atlas that they are drawn from, free of GPU code. [`tomori-scene`](https://crates.io/crates/tomori-scene) lays text out on its grid of cells with it, and [`tomori-render`](https://crates.io/crates/tomori-render) uploads the atlas into a texture and draws it.
+The fonts that [Tomori](https://github.com/base-rs/tomori)'s panels and labels are drawn with, and the signed-distance-field glyph atlas that they are drawn from, free of GPU code. [`tomori-scene`](https://crates.io/crates/tomori-scene) lays text out on its grid of cells with it, and [`tomori-render`](https://crates.io/crates/tomori-render) uploads the atlas into a texture and draws it.
 
 The atlas is filled on demand: the first time a character is drawn, its outline is rasterised and turned into a distance field in a tile of the atlas, which then never moves, so a mesh built from it stays valid. A shader draws the glyph's edge where the field crosses one half, which stays crisp and antialiased at any distance.
 
@@ -25,7 +25,7 @@ let glyph = tomori_text::atlas::glyph('語').expect("Noto Sans JP covers it");
 assert_eq!(glyph.advance, 1.0);
 ```
 
-Its interfaces change with the environment framework ([#77](https://github.com/ioquatix/tomori/issues/77)).
+Its interfaces change with the environment framework ([#77](https://github.com/base-rs/tomori/issues/77)).
 
 ## Licence
 
@@ -33,6 +33,6 @@ The code is under the [MIT License](license.md), and the bundled fonts under the
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-scene`](https://crates.io/crates/tomori-scene), which lays text out.
 - [`tomori-render`](https://crates.io/crates/tomori-render), which draws it.

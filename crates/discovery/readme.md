@@ -1,6 +1,6 @@
 # `tomori-discovery`
 
-Bonjour discovery of [Tomori](https://github.com/ioquatix/tomori) servers: a server advertises the service type `_tomori._tcp` with its protocol version, display name and counts, and a client browses for compatible servers. It uses DNS service discovery over multicast DNS, implemented in pure Rust by `mdns-sd`, with no async runtime.
+Bonjour discovery of [Tomori](https://github.com/base-rs/tomori) servers: a server advertises the service type `_tomori._tcp` with its protocol version, display name and counts, and a client browses for compatible servers. It uses DNS service discovery over multicast DNS, implemented in pure Rust by `mdns-sd`, with no async runtime.
 
 ## Usage
 
@@ -26,5 +26,5 @@ Servers whose protocol version differs from this build's are reported as incompa
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-client`](https://crates.io/crates/tomori-client), which re-exports this crate as `tomori_client::discovery`.

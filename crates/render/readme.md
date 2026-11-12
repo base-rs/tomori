@@ -1,6 +1,6 @@
 # `tomori-render`
 
-[Tomori](https://github.com/ioquatix/tomori)'s wgpu renderers and shaders, shared by the headset, the desktop window and the spectator: the swarm and its workers, arrival, the panels, the controllers' models, and `scene_graphics::draw`, which applies a [`tomori-scene`](https://crates.io/crates/tomori-scene) frame to the `graphics::Renderer`. It holds no window, device or platform code: each client creates its own device and targets, and hands them to the renderer.
+[Tomori](https://github.com/base-rs/tomori)'s wgpu renderers and shaders, shared by the headset, the desktop window and the spectator: the swarm and its workers, arrival, the panels, the controllers' models, and `scene_graphics::draw`, which applies a [`tomori-scene`](https://crates.io/crates/tomori-scene) frame to the `graphics::Renderer`. It holds no window, device or platform code: each client creates its own device and targets, and hands them to the renderer.
 
 ## Usage
 
@@ -14,7 +14,7 @@ A scenery is made for a `scenery::Target`, built with `Target::new`, which carri
 
 The `test-gpu` feature adds the shared device for offscreen rendering tests and WGSL validation, for other crates' tests; they run on a GPU or on Mesa's lavapipe.
 
-Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
+Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
 
 ## Licences
 
@@ -22,5 +22,5 @@ The Meta Quest Touch Plus controller models in `assets/controllers` are under th
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-scene`](https://crates.io/crates/tomori-scene), the frames it draws.

@@ -36,4 +36,4 @@ The crates share one version and are released together, so depend on the same ve
 - **A server:** run `tomori-server`, from `tomori-server-app`, or build one of your own on the `tomori-server` library, registering your own backends and environments through `tomori_server::Server::builder`; its Building a Tomori Server guide explains how. Its interface is not stable yet.
 - **An environment:** make a common crate for its identity, and server and client crates beside it, which applications register; `tomori-environment`'s Making an Environment guide explains how.
 
-The design documents in the [Tomori repository](https://github.com/ioquatix/tomori/tree/main/design) state the requirements these crates follow, such as `server.md` for the connection and `security.md` for authentication.
+The design documents in the [Tomori repository](https://github.com/base-rs/tomori/tree/main/design) state the requirements these crates follow, such as `server.md` for the connection and `security.md` for authentication.
