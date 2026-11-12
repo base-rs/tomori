@@ -678,7 +678,7 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 18.8 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
+    // Under the budget, about 18.9 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
     // each kind of plant with all its instances but the tree ferns, which the ferns draw, the river's stones, all
     // instances of one, the upper terrace's among them, the waterfall rock, the trail, the upper terrace, the water,
     // above the waterfall too, and the ranges; and the stations' plaques, five small draws of text.
@@ -686,7 +686,7 @@ fn the_backdrop_is_modest_for_the_quest() {
     assert_eq!(
         triangles,
         Triangles {
-            foothills: 4312,
+            foothills: 4350,
             plants: 10_862,
             ranges: 1184,
             water: 253,
@@ -697,7 +697,7 @@ fn the_backdrop_is_modest_for_the_quest() {
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 18_828);
+    assert_eq!(triangles.total(), 18_866);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the

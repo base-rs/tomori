@@ -550,12 +550,7 @@ fn foothills(shapes: &mut Shapes) {
                 facing(shapes, &part, Vec3::Y, color);
             }
             if let Some(part) = within {
-                facing(
-                    shapes,
-                    &part,
-                    Vec3::Y,
-                    crate::beach::shingle(index as u32),
-                );
+                facing(shapes, &part, Vec3::Y, crate::beach::shingle(index as u32));
             }
         }
     }
