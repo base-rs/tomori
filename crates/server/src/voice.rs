@@ -12,15 +12,11 @@
 //! With the space's speech setting `brief`, each assistant message speaks its first blocks, up to about [`BRIEF_CHARACTERS`], and leaves out the rest; the first message of a reply cut short says "More on the panel." instead, once per reply.
 
 /// About 20 seconds of speech: Kokoro's `af_heart` voice speaks about 15 characters of English a second. A brief message speaks whole blocks while they fit, then stops at the next block boundary; a block that starts within the first half of this, such as the paragraph after a short heading or lead-in, is cut at a sentence boundary instead, and the first block always speaks at least one sentence.
-#[cfg_attr(not(feature = "speech"), allow(dead_code))]
+#[cfg(any(feature = "speech", test))]
 pub const BRIEF_CHARACTERS: usize = 300;
 
-/// Spoken in place of the rest of a reply cut short by brief speech.
-#[cfg_attr(not(feature = "speech"), allow(dead_code))]
-pub const MORE_ON_THE_PANEL: &str = "More on the panel.";
-
 /// Which sentences of `blocks` a brief message speaks, given the characters `spent` on its earlier blocks, and whether it is cut there. Each block's sentences are returned, empty for those not spoken.
-#[cfg_attr(not(feature = "speech"), allow(dead_code))]
+#[cfg(any(feature = "speech", test))]
 fn brief(blocks: &[Vec<String>], spent: &mut usize, cut: &mut bool) -> Vec<Vec<String>> {
     let characters = |text: &String| text.chars().count();
     let mut spoken = Vec::new();
@@ -111,9 +107,12 @@ mod enabled {
         AudioChunk, Block, Error, Speakable, SpeakableOptions, Speech, SpeechEvent, Synthesizer,
     };
 
-    use super::{MORE_ON_THE_PANEL, SpeechMode};
+    use super::SpeechMode;
     use crate::hub::Hub;
     use crate::retention::{LEAD, SEGMENT_GAP};
+
+    /// Spoken in place of the rest of a reply cut short by brief speech.
+    const MORE_ON_THE_PANEL: &str = "More on the panel.";
 
     /// Frames per second of agent speech: 20 ms frames.
     const FRAMES_PER_SECOND: u32 = 50;
