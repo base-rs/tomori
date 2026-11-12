@@ -343,3 +343,42 @@ fn pointing_at_a_node_or_an_edge_names_it_to_the_agent_with_each_hand() {
         "{text}"
     );
 }
+
+#[test]
+fn a_volume_goes_onto_the_wall_whoever_asked_was_looking_at_or_else_floats_beside_them() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::drawing_volumes(&hub, "ada", 16, 1024);
+    ada.join(&space);
+    // A wall ahead of her, 1.8 m away, which she looks at as she asks.
+    ada.send(ClientMessage::AddWall {
+        pose: tomori_protocol::Pose::upright_facing([0.0, 1.5, -1.8], [0.0, 1.5, 0.0]),
+    });
+    let wall = ada.projection().walls.last().unwrap().id.clone();
+    ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.5, -1.8]));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    reply(&hub, &space, "m1", BLOCK);
+    let (shown, _) = volumes(&ada);
+    assert!(
+        matches!(&shown[0].place, tomori_protocol::Place::Wall { wall: on, .. } if *on == wall),
+        "{:?}",
+        shown[0].place
+    );
+    // Asked again looking away from every wall, its next goes beside her.
+    ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.5, 6.0]));
+    hub.drive_event(&space, Event::Idle);
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    reply(
+        &hub,
+        &space,
+        "m2",
+        &BLOCK.replace("id: renderer", "id: other"),
+    );
+    let (shown, _) = volumes(&ada);
+    assert!(matches!(
+        shown[1].place,
+        tomori_protocol::Place::Free { .. }
+    ));
+}

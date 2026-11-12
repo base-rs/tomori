@@ -10,8 +10,8 @@ use tomori_protocol::{ClientMessage, Place, ServerMessage, Wall};
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 720;
 
-/// Tomori's own architecture, as the agent might describe it.
-pub(crate) const ARCHITECTURE: &str = "```diagram\ntitle: How Tomori fits together\nid: tomori\nlayout: layered down\n---\nheadset[Headset]@{ colour: violet, detail: \"tomori-client-quest on a Quest 3\" }\ndesktop[Desktop window]@{ colour: violet }\nspectator[Spectator]@{ colour: violet }\nsubgraph server [tomori-server]\n  listener[Client listener]\n  hub((Hub))@{ size: 4, colour: teal, detail: \"Spaces and connections under one lock\" }\n  stage[Stage]@{ detail: \"Walls, panels, revisions and patches\" }\n  layout{{Diagram layout}}@{ colour: teal }\n  mcp[MCP endpoint]@{ detail: \"POST /mcp on loopback\" }\nend\nopencode[(OpenCode)]@{ colour: amber, size: 3 }\nenvironments[[Environments]]@{ colour: green, detail: \"Sky, the farmyard, GitHub\" }\nheadset <--> listener : frames\ndesktop <--> listener\nspectator --> listener\nlistener --> hub\nhub --> stage\nstage --> layout\nhub ==> opencode : prompts\nopencode ~~> hub : events\nopencode -.-> mcp : tools/call\nmcp --> hub\nhub --> environments\n```\n";
+/// Tomori's own architecture, as the agent might describe it: the demo of `design/diagrams.md`'s pull request.
+pub(crate) const ARCHITECTURE: &str = "```diagram\ntitle: How Tomori fits together\nid: tomori\nlayout: layered down\n---\nheadset[Headset]@{ colour: violet, detail: \"tomori-client-quest on a Quest 3: OpenXR, both eyes and hands\" }\ndesktop[Desktop window]@{ colour: violet, detail: \"tomori-client-desktop: the same scene in a window\" }\nspectator[Spectator]@{ colour: violet, detail: \"tomori-client-spectator: a view to share\" }\nsubgraph server [tomori-server]\n  listener[Client listener]@{ detail: \"TLS frames of up to 32 MiB, and patches of the projection\" }\n  hub((Hub))@{ size: 4, colour: teal, detail: \"Spaces, connections and their stages under one lock\" }\n  stage[Stage]@{ detail: \"Walls, panels and volumes, their versions and patches\" }\n  speech[Speech]@{ detail: \"Recognition, and the agent's speech a sentence at a time\" }\n  sides{{Server sides}}@{ detail: \"Each environment's server side, its state and intents\" }\n  mcp[MCP endpoint]@{ detail: \"POST /mcp on loopback, with a bearer token\" }\nend\nbackend[OpenCode backend]@{ detail: \"tomori-backend-opencode\" }\nopencode[(OpenCode)]@{ size: 3, colour: amber, detail: \"The agent's sessions and its sub-agents\" }\nsubgraph environments [Environments]\n  sky[[Sky]]@{ colour: green, detail: \"The grid and an open sky\" }\n  farmyard[[Farmyard]]@{ colour: green, detail: \"Hens, the beach's stones and the campsite\" }\n  github[[GitHub]]@{ colour: green, detail: \"Issues and pull requests as cards\" }\nend\nheadset <--> listener : frames\ndesktop <--> listener\nspectator --> listener\nlistener --> hub\nhub --> stage\nhub --> speech\nstage ~~> listener : patches\nspeech ~~> listener : agent speech\nhub ==> backend : prompts\nbackend --> opencode : HTTP API\nopencode ~~> backend : events\nopencode -.-> mcp : tools/call\nmcp --> hub : acts on the space\nhub --> sides\nsides --> sky\nsides --> farmyard\nsides --> github\n```\n";
 
 /// The projection a server sends a client that draws volumes once its agent replied `reply`, with a wall to the right
 /// of home and Ada looking ahead.
@@ -84,7 +84,13 @@ fn a_volume_floats_as_the_server_placed_it_and_stands_in_a_slot_as_a_relief() {
         projected(&format!("Here is how it fits together.\n\n{ARCHITECTURE}"));
     let volume = projection.panels[0].clone();
     let diagram = volume.diagram.as_ref().expect("a volume, sent its diagram");
-    assert_eq!(diagram.nodes.len(), 10);
+    assert_eq!(diagram.nodes.len(), 14);
+    // Written cleanly, it has no warnings.
+    assert!(
+        volume.meta.iter().all(|meta| meta.key != "warnings"),
+        "{:?}",
+        volume.meta
+    );
     assert!(
         matches!(volume.place, Place::Free { .. }),
         "floating beside Ada, looking at no wall"

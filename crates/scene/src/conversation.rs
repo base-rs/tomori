@@ -13491,10 +13491,21 @@ mod tests {
             use tomori_protocol::{Limits, MOST_FRAME_BYTES};
             let longest = Limits::TODAY.with_frame_bytes(MOST_FRAME_BYTES as u32);
             let mut conversation = joined();
-            // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each.
-            assert_eq!(HEADSET_LIMITS, longest.with_projection(23, 138, 12, 90));
+            // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each; and sixteen
+            // volumes of 1,024 nodes together.
+            assert_eq!(
+                HEADSET_LIMITS,
+                longest
+                    .with_projection(23, 138, 12, 90)
+                    .with_volumes(16, 1024)
+            );
             assert_eq!(Session::limits(&conversation), HEADSET_LIMITS);
-            assert_eq!(DESKTOP_LIMITS, longest.with_projection(29, 174, 24, 180));
+            assert_eq!(
+                DESKTOP_LIMITS,
+                longest
+                    .with_projection(29, 174, 24, 180)
+                    .with_volumes(16, 1024)
+            );
             conversation.set_limits(DESKTOP_LIMITS);
             assert_eq!(Session::limits(&conversation), DESKTOP_LIMITS);
         }
