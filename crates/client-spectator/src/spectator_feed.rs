@@ -388,17 +388,15 @@ impl Feed {
                 // The view-projection: a perspective frustum from the head,
                 // right-handed, -Z forward, matching the XR convention.
                 let projection =
-                    glam::camera::rh::proj::directx::perspective(1.4, aspect, 0.05, 50.0)
-                        * head_matrix.inverse();
+                    tomori_scene::depth::perspective(1.4, aspect) * head_matrix.inverse();
                 let caption = self.caption_text(&self.following_name);
                 (projection, head_matrix, caption)
             }
             None => {
                 // No presence yet: a neutral view looking at the scene center.
                 let head_matrix = Mat4::from_translation(CENTER);
-                let projection =
-                    glam::camera::rh::proj::directx::perspective(1.4, aspect, 0.05, 50.0)
-                        * Mat4::from_translation(CENTER + Vec3::new(0.0, 0.0, 3.0));
+                let projection = tomori_scene::depth::perspective(1.4, aspect)
+                    * Mat4::from_translation(CENTER + Vec3::new(0.0, 0.0, 3.0));
                 let caption = self.caption_text(&self.following_name);
                 (projection, head_matrix, caption)
             }

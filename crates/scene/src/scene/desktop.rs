@@ -179,8 +179,7 @@ impl Head {
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective(60_f32.to_radians(), aspect, 0.05, 50.0)
-            * self.transform().inverse()
+        crate::depth::perspective(60_f32.to_radians(), aspect) * self.transform().inverse()
     }
 
     /// The ray from the eye through the cursor, as the right controller's aim on the headset.

@@ -1735,3 +1735,58 @@ fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
         }
     }
 }
+
+/// From anywhere within the space's bounds, everything the farmyard draws, its yard, its pines, its backdrop, the bush
+/// on its foothills among it, its trail, campsite, beach and water, and its upper terrace, is far within the far plane,
+/// and its haze has hidden it entirely, to a thousandth, at a tenth of the far plane, so that whichever way the head
+/// turns nothing far away is cut off: it fades into the haze.
+#[test]
+fn the_farmyard_fades_into_its_haze_long_before_the_far_plane() {
+    use tomori_scene::depth::FAR;
+    let mut points: Vec<Vec3> = Vec::new();
+    for model in [
+        backdrop::model(),
+        props::model(),
+        terrace::model(),
+        trail::model(),
+        campsite::model(),
+        beach::model(),
+        beach::stones_model(),
+    ] {
+        let instance = Instance::new(Arc::new(model));
+        for draw in instance.draws() {
+            for primitive in &instance.model().meshes[draw.mesh].primitives {
+                points.extend(
+                    primitive
+                        .positions
+                        .iter()
+                        .map(|at| draw.world.transform_point3(*at)),
+                );
+            }
+        }
+    }
+    points.extend(
+        backdrop::water()
+            .into_iter()
+            .chain(backdrop::upper_water())
+            .map(|point| point.position),
+    );
+    points.extend(
+        backdrop::plants()
+            .iter()
+            .map(|plant| plant.at + Vec3::Y * plant.size().1),
+    );
+    // The eyes stand within the space's bounds of where participants arrive, across the ground, and at most 10 m up.
+    let reach = tomori_scene::anchors::REACH;
+    let farthest = points
+        .iter()
+        .map(|point| point.distance(layout::ARRIVAL))
+        .fold(0.0, f32::max)
+        + reach * std::f32::consts::SQRT_2
+        + 10.0;
+    assert!(farthest < FAR / 10.0, "{farthest} m");
+    let lighting = lighting();
+    let hidden = |distance: f32| 1.0 - (-lighting.haze_density * distance * distance).exp();
+    assert!(hidden(FAR / 10.0) > 0.999);
+    assert_eq!(hidden(FAR), 1.0);
+}
