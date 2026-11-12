@@ -6,7 +6,8 @@
 //! from this participant's own hand every frame and from the others' hands their presence brings, and let go, thrown as
 //! fast as the hand moved, foreseen until the server's snapshots take over; each marshmallow as toasted as the server
 //! side says, which toasts it from where the holder's hand holds it, and, for one this participant holds, as they
-//! foresee it toasting by the same rule from where they draw it, easing to what the server side says. See
+//! foresee it toasting by the same rule from where they draw it, easing to what the server side says; and each stick on
+//! its way back fading out where it was, its marshmallow as it was, and in on its log, fresh. See
 //! `tomori-environment-farmyard`'s `campsite`.
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -14,6 +15,7 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use tomori_physics::Placement;
 use tomori_physics::message::Intent;
+use tomori_physics::mirror::Fade;
 use tomori_scene::client_side::{Grab, Hand, Picked, Sound};
 use tomori_scene::pointing::{Ray, Shape};
 
@@ -86,12 +88,14 @@ impl Shapes for Rack {
 }
 
 /// The sticks as this client shows them: their bodies, how toasted the server side says each is, this participant's
-/// foresight of those they hold, and when they were last drawn.
+/// foresight of those they hold, how toasted each on its way back was as it began, which it is drawn as fading out,
+/// the server side having said its marshmallow fresh, and when they were last drawn.
 #[derive(Clone, Debug, Default)]
 pub struct Sticks {
     loose: Loose<Rack>,
     toast: Vec<f32>,
     foreseen: BTreeMap<u32, f32>,
+    leaving: BTreeMap<u32, f32>,
     last: Option<Instant>,
 }
 
@@ -110,6 +114,11 @@ impl Sticks {
     /// What changed, as the server side announced it, arriving at `now` on the farmyard's clock; and the sounds of what
     /// landed.
     pub fn changed(&mut self, event: &Event, now: u64) -> Vec<(Sound, [f32; 3])> {
+        for returning in &event.sticks.returning {
+            if let Some(index) = campsite::index(returning.body) {
+                self.leaving.insert(returning.body, self.toast(index));
+            }
+        }
         for toasted in &event.toast {
             if let Some(index) = campsite::index(toasted.body)
                 && let Some(toast) = self.toast.get_mut(index)
@@ -170,7 +179,7 @@ impl Sticks {
     /// Every stick as it is drawn at `now`, the farmyard's clock at `clock`: those this participant holds, in their
     /// hand, their marshmallows as they foresee them toasting; one another holds, in theirs, from `right` and `left`,
     /// their hands by their numbers; and the rest where the server side says they are; each as toasted as the server
-    /// side says.
+    /// side says, but one fading out on its way back, as toasted as it was, and burning only drawn whole.
     pub fn shown(
         &mut self,
         right: &[(u32, Hand)],
@@ -186,12 +195,24 @@ impl Sticks {
             .min(FRAME_MOST);
         self.last = Some(now);
         let placed = self.loose.placed(right, left, now, clock);
-        self.foreseen
-            .retain(|body, _| placed.iter().any(|(held, _, mine)| held == body && *mine));
+        self.foreseen.retain(|body, _| {
+            placed
+                .iter()
+                .any(|(held, _, _, mine)| held == body && *mine)
+        });
+        self.leaving.retain(|body, _| {
+            placed
+                .iter()
+                .any(|(leaving, _, fade, _)| leaving == body && matches!(fade, Fade::Out(_)))
+        });
         placed
             .into_iter()
-            .map(|(body, placement, mine)| {
-                let said = self.toast(Rack::number(body) as usize);
+            .map(|(body, placement, fade, mine)| {
+                let said = self
+                    .leaving
+                    .get(&body)
+                    .copied()
+                    .unwrap_or_else(|| self.toast(Rack::number(body) as usize));
                 let pose = Pose::of(&placement);
                 let marshmallow = pose.marshmallow();
                 let toast = if mine {
@@ -201,11 +222,22 @@ impl Sticks {
                 } else {
                     said
                 };
+                // Smaller about its middle as it fades, its model running from its butt.
+                let drawn = campsite::drawn(&placement);
+                let transform = match fade {
+                    Fade::Whole => drawn,
+                    _ => {
+                        placement.matrix()
+                            * Mat4::from_scale(Vec3::splat(fade.scale()))
+                            * placement.matrix().inverse()
+                            * drawn
+                    }
+                };
                 Shown {
-                    transform: campsite::drawn(&placement),
+                    transform,
                     marshmallow,
                     shade: campsite::shade(toast),
-                    burning: campsite::burning(toast, marshmallow),
+                    burning: fade == Fade::Whole && campsite::burning(toast, marshmallow),
                 }
             })
             .collect()

@@ -133,9 +133,19 @@ pub struct Landed {
     pub water: bool,
 }
 
+/// A body taken back where it belongs, as lost, left in water or sent home: from where it is, `from`, where it fades out
+/// over [`crate::FADE`] as the update saying it is said, to where it returns to, `to`, where it is put at once and fades
+/// in over [`crate::FADE`] more, both at [`Precision::Rest`]; never drawn between. Nobody may take it until it is there.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Returning {
+    pub body: u32,
+    pub from: Encoded,
+    pub to: Encoded,
+}
+
 /// What changed since the side last said: where each body that moves is, at [`Precision::Moving`], at most
 /// [`crate::SNAPSHOT_RATE`] times a second; where each that came to rest rests, once, at [`Precision::Rest`], exactly
-/// where its body was snapped; what changed hands; and what struck something.
+/// where its body was snapped; what changed hands; what struck something; and what began its way back.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Update {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -146,6 +156,8 @@ pub struct Update {
     pub holding: Vec<Holding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landed: Vec<Landed>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returning: Vec<Returning>,
 }
 
 impl Update {
@@ -155,9 +167,11 @@ impl Update {
             && self.rested.is_empty()
             && self.holding.is_empty()
             && self.landed.is_empty()
+            && self.returning.is_empty()
     }
 
-    /// This update, followed by `later`: what moves as `later` says, what rested and changed hands in turn.
+    /// This update, followed by `later`: what moves as `later` says, what rested, changed hands and began its way back
+    /// in turn.
     pub fn merge(&mut self, later: Update) {
         if !later.moving.is_empty() {
             self.moving = later.moving;
@@ -165,6 +179,7 @@ impl Update {
         self.rested.extend(later.rested);
         self.holding.extend(later.holding);
         self.landed.extend(later.landed);
+        self.returning.extend(later.returning);
     }
 }
 
@@ -369,7 +384,7 @@ mod tests {
         assert_eq!((update.holding.len(), update.landed.len()), (1, 1));
         assert!(!update.is_empty());
         let text = serde_json::to_string(&update).unwrap();
-        assert!(!text.contains("water") && !text.contains("held"));
+        assert!(!text.contains("water") && !text.contains("held") && !text.contains("returning"));
         assert_eq!(serde_json::from_str::<Update>(&text).unwrap(), update);
         for only in [
             Update {
@@ -384,9 +399,34 @@ mod tests {
                 landed: update.landed.clone(),
                 ..Default::default()
             },
+            Update {
+                returning: vec![Returning {
+                    body: 1,
+                    from: Encoded::default(),
+                    to: Encoded::default(),
+                }],
+                ..Default::default()
+            },
         ] {
             assert!(!only.is_empty());
         }
+        // What began its way back is said in turn, as what rested is.
+        let back = |body| Returning {
+            body,
+            from: Encoded::default(),
+            to: Encoded::default(),
+        };
+        let mut returning = Update {
+            returning: vec![back(1)],
+            ..Default::default()
+        };
+        returning.merge(Update {
+            returning: vec![back(2)],
+            ..Default::default()
+        });
+        assert_eq!(returning.returning, [back(1), back(2)]);
+        let text = serde_json::to_string(&returning).unwrap();
+        assert_eq!(serde_json::from_str::<Update>(&text).unwrap(), returning);
     }
 
     #[test]

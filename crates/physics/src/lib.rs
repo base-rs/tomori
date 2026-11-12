@@ -59,6 +59,9 @@ pub const SILENT: u64 = 3_000;
 pub const DELAY: u64 = 100;
 /// How long the holder's foresight of what they let go blends into the server's placements, in milliseconds.
 pub const BLEND: u64 = 150;
+/// How long a body taken back fades out where it is, in milliseconds, before it is put where it returns to, at once,
+/// and fades in there for as long again: so that it is never seen on its way.
+pub const FADE: u64 = 500;
 
 /// Why the world refused what it was given or asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +90,8 @@ pub enum Refused {
     Reach(u32),
     /// The body is only grabbable, and nobody holds it to let go.
     Kinematic(u32),
+    /// The body is fading on its way back to where it returns to, and is taken once it is there.
+    Returning(u32),
 }
 
 impl std::fmt::Display for Refused {
@@ -110,6 +115,7 @@ impl std::fmt::Display for Refused {
             Self::Hands => write!(formatter, "both hands are full"),
             Self::Reach(id) => write!(formatter, "body {id} is out of reach"),
             Self::Kinematic(id) => write!(formatter, "body {id} is held by nobody"),
+            Self::Returning(id) => write!(formatter, "body {id} is on its way back"),
         }
     }
 }
@@ -154,6 +160,7 @@ mod tests {
             (Refused::Hands, "both hands are full"),
             (Refused::Reach(2), "out of reach"),
             (Refused::Kinematic(2), "held by nobody"),
+            (Refused::Returning(2), "on its way back"),
         ] {
             assert!(refused.to_string().contains(says), "{refused:?}");
         }

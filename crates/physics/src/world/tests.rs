@@ -828,6 +828,25 @@ fn a_body_lost_below_the_world_or_beyond_its_reach_goes_back_where_it_began() {
             "{to}: {back:?} {home:?}"
         );
         assert!(world.placement(1).unwrap().position.distance(home.position) < 0.001);
+        // Taken back once, from where it was lost to its home, and never said anywhere between.
+        let returning: Vec<&Returning> = updates
+            .iter()
+            .flat_map(|update| &update.returning)
+            .collect();
+        assert_eq!(returning.len(), 1, "{to}");
+        assert_eq!(returning[0].to, home.encoded(Precision::Rest));
+        let from = returning[0].from.placement(Precision::Rest).position;
+        assert!(from.distance(home.position) > 1.0, "{to}: {from}");
+        let after = updates
+            .iter()
+            .position(|update| !update.returning.is_empty())
+            .unwrap();
+        for update in &updates[after..] {
+            for snapshot in &update.moving {
+                let at = snapshot.placement(Precision::Moving).position;
+                assert!(at.distance(home.position) < 0.01, "{to}: {at}");
+            }
+        }
     }
 }
 
@@ -910,16 +929,27 @@ fn water_slows_and_buoys_what_enters_it_and_takes_back_what_rests_in_it() {
         rested.position.y < -0.9 && rested.position.x > 0.5,
         "{rested:?}"
     );
-    // It soaks, then glides home, saying where it goes as it glides, and rests there.
+    // It soaks, then is taken back home, said once, fading where it is and then in at home, never said between, and
+    // rests there.
     assert!(world.moving());
     let (updates, taken) = until_rest(&mut world, 30.0);
     assert!((5.0..20.0).contains(&taken), "{taken}");
+    let returning: Vec<&Returning> = updates
+        .iter()
+        .flat_map(|update| &update.returning)
+        .collect();
+    assert_eq!(returning.len(), 1);
+    assert_eq!(returning[0].from, rested.encoded(Precision::Rest));
+    assert_eq!(returning[0].to, home.encoded(Precision::Rest));
     assert!(
         updates
             .iter()
-            .filter(|update| !update.moving.is_empty())
-            .count()
-            > 20
+            .flat_map(|update| &update.moving)
+            .all(|snapshot| snapshot
+                .placement(Precision::Moving)
+                .position
+                .distance(home.position)
+                < 0.01)
     );
     let back = world.placement(1).unwrap();
     assert!(
@@ -1078,7 +1108,7 @@ fn a_stone_overhanging_its_support_falls_rather_than_being_put_to_sleep() {
 }
 
 #[test]
-fn a_body_sent_home_glides_there_through_whatever_it_passes_and_rests_where_it_began() {
+fn a_body_sent_home_fades_there_through_whatever_lies_between_and_rests_where_it_began() {
     // Two stones on the ground, one moved off a metre and the other between it and where it began.
     let mut world = world(vec![
         Body::convex(1, pebble(1, 0.2, 0.08)).at(Placement::at(Vec3::new(0.0, 0.05, 0.0))),
@@ -1100,8 +1130,8 @@ fn a_body_sent_home_glides_there_through_whatever_it_passes_and_rests_where_it_b
     };
     let epoch = world.take(3, &take, Some(&seen)).unwrap();
     // Held, it is not sent anywhere.
-    assert_eq!(world.send_home(1, 1_000), Err(Refused::Held(1)));
-    assert_eq!(world.send_home(9, 1_000), Err(Refused::Unknown(9)));
+    assert_eq!(world.send_home(1), Err(Refused::Held(1)));
+    assert_eq!(world.send_home(9), Err(Refused::Unknown(9)));
     let let_go = LetGo {
         body: 1,
         epoch,
@@ -1112,19 +1142,73 @@ fn a_body_sent_home_glides_there_through_whatever_it_passes_and_rests_where_it_b
     };
     world.let_go(3, &let_go, Some(&seen)).unwrap();
     until_rest(&mut world, 10.0);
-    assert!(world.placement(1).unwrap().position.x > 0.8);
+    let away = world.placement(1).unwrap();
+    assert!(away.position.x > 0.8);
     assert!(!world.at_home(1, 0.03));
-    // Sent home, it glides there over the time asked, said moving, its epoch kept, through the stone between, which it
-    // does not push.
-    let epoch = world.epoch(1).unwrap();
-    world.send_home(1, 500).unwrap();
+    // Sent home, it is said to be on its way, from where it lies to where it began, its epoch kept; sent again, it goes
+    // on its way.
+    let (epoch, began) = (world.epoch(1).unwrap(), world.clock());
+    world.send_home(1).unwrap();
+    world.send_home(1).unwrap();
     assert!(world.moving());
-    let (updates, taken) = until_rest(&mut world, 10.0);
-    assert!((0.5..5.0).contains(&taken), "{taken}");
-    assert!(updates.iter().any(|update| !update.moving.is_empty()));
+    let said = world.step(0.0);
+    assert_eq!(
+        said.returning,
+        [Returning {
+            body: 1,
+            from: away.encoded(Precision::Rest),
+            to: home.encoded(Precision::Rest),
+        }]
+    );
+    // Whoever joins sees it where it returns to, at rest.
+    let shared = world.shared().bodies[0].clone();
+    assert_eq!(
+        (shared.at, shared.moving),
+        (home.encoded(Precision::Rest), false)
+    );
+    let catching = |at: Vec3| Seen {
+        head: Vec3::new(0.8, 1.2, 0.3),
+        hands: [None, Some(Placement::at(at))],
+    };
+    let mut updates = vec![said];
+    let mut jumped = None;
+    let mut last = world.placement(1).unwrap().position;
+    while world.moving() {
+        // Fading, it is nobody's to take, where it was or where it returns to.
+        let at = world.placement(1).unwrap().position;
+        if matches!(world.entries[0].motion, Motion::Returning { .. }) {
+            assert_eq!(
+                world.take(3, &Take { epoch, ..take }, Some(&catching(at))),
+                Err(Refused::Returning(1))
+            );
+            // Where it was for the fade out, then where it returns to: one jump, at once, and nowhere between.
+            if at != last {
+                assert!(jumped.is_none(), "it moved twice: {last} to {at}");
+                assert!(at.distance(home.position) < 1e-4, "{at}");
+                jumped = Some(world.clock());
+            }
+        }
+        last = at;
+        updates.push(world.step(1.0 / 60.0));
+    }
+    let jumped = jumped.unwrap();
+    assert!(
+        (began + FADE..began + FADE + 20).contains(&jumped),
+        "{began} {jumped}"
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.moving.iter().all(|snapshot| snapshot
+                .placement(Precision::Moving)
+                .position
+                .distance(home.position)
+                < 0.01))
+    );
     assert_eq!(world.epoch(1), Some(epoch));
     assert!(world.at_home(1, 0.003));
     assert!(world.placement(1).unwrap().position.distance(home.position) < 0.003);
+    // The stone between was never pushed.
     assert!(
         world
             .placement(2)
@@ -1133,31 +1217,132 @@ fn a_body_sent_home_glides_there_through_whatever_it_passes_and_rests_where_it_b
             .distance(between.position)
             < 0.002
     );
-    // Caught as it glides, it is held, and let go, falls as any body does.
-    world.send_home(1, 2_000).unwrap();
-    world.step(0.5);
-    let gliding = world.placement(1).unwrap().position;
-    let catching = Seen {
-        head: Vec3::new(0.8, 1.2, 0.3),
-        hands: [None, Some(Placement::at(gliding))],
-    };
-    let epoch = world.epoch(1).unwrap();
-    let epoch = world
-        .take(3, &Take { epoch, ..take }, Some(&catching))
+    // Home, it is anyone's to take again.
+    let at = world.placement(1).unwrap().position;
+    world
+        .take(3, &Take { epoch, ..take }, Some(&catching(at)))
         .unwrap();
     assert_eq!(world.held(1).map(|held| held.by), Some(3));
-    let let_go = LetGo {
-        epoch,
-        at: Placement::at(Vec3::new(0.8, 0.3, 0.0)).encoded(Precision::Rest),
-        ..let_go
+}
+
+/// Body `body` taken by participant 3 from where it lies, let go, unmoving, at `at`, and left to rest.
+fn put(world: &mut World, body: u32, at: Vec3) {
+    let seen = |hand: Vec3| Seen {
+        head: hand + Vec3::new(0.0, 0.6, 0.3),
+        hands: [None, Some(Placement::at(hand))],
     };
-    world.let_go(3, &let_go, Some(&catching)).unwrap();
-    until_rest(&mut world, 10.0);
-    let lying = world.placement(1).unwrap();
+    let lying = world.placement(body).unwrap().position;
+    let take = Take {
+        body,
+        epoch: world.epoch(body).unwrap(),
+        hand: Side::Right,
+        offset: Encoded::default(),
+    };
+    let epoch = world.take(3, &take, Some(&seen(lying))).unwrap();
+    let let_go = LetGo {
+        body,
+        epoch,
+        at: Placement::at(at).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    world.let_go(3, &let_go, Some(&seen(at))).unwrap();
+    until_rest(world, 10.0);
+}
+
+/// Body `body` sent home: where it is said to return to, once it rests there.
+fn sent_home(world: &mut World, body: u32) -> Placement {
+    world.send_home(body).unwrap();
+    let to = world.step(0.0).returning[0].to.placement(Precision::Rest);
+    until_rest(world, 10.0);
+    to
+}
+
+#[test]
+fn a_body_whose_home_is_taken_returns_to_the_nearest_free_home_of_another() {
+    // Three different stones along the ground, the second's home nearer the first's than the third's.
+    let stone = |body: u32, x: f32| {
+        Body::convex(body, pebble(body, 0.2, 0.08)).at(Placement::at(Vec3::new(x, 0.05, 0.0)))
+    };
+    let mut world = world(vec![stone(1, 0.5), stone(2, 0.75), stone(3, 0.0)]);
+    assert!(world.settle(10.0));
+    let homes: Vec<Placement> = (1..=3).map(|body| world.home(body).unwrap()).collect();
+    // The first and second carried off, and the third left where the second began.
+    put(&mut world, 1, Vec3::new(2.0, 0.1, 0.0));
+    put(&mut world, 2, Vec3::new(-2.0, 0.1, 0.0));
+    put(&mut world, 3, homes[1].position + Vec3::Y * 0.05);
+    // Both sent home at once: the first to its own, free; the second's taken, and the first's, the nearest, being
+    // returned to, to the third's, free, in its own turn, its home its own still, as the two are not alike.
+    world.send_home(1).unwrap();
+    world.send_home(2).unwrap();
+    let said = world.step(0.0).returning;
+    let to: Vec<Placement> = said
+        .iter()
+        .map(|returning| returning.to.placement(Precision::Rest))
+        .collect();
+    assert_eq!(said.len(), 2);
+    assert_eq!(to[0], homes[0].snapped(Precision::Rest));
     assert!(
-        lying.position.distance(Vec3::new(0.8, 0.04, 0.0)) < 0.05,
+        to[1]
+            .position
+            .with_y(0.0)
+            .distance(homes[2].position.with_y(0.0))
+            < 1e-3,
+        "{:?}",
+        to[1]
+    );
+    assert!(to[1].rotation.angle_between(homes[1].rotation) < 1e-3);
+    until_rest(&mut world, 10.0);
+    assert!(world.at_home(1, 0.003));
+    assert!(!world.at_home(2, 0.03));
+    assert_eq!(world.home(2), Some(homes[1]));
+    let lying = world.placement(2).unwrap();
+    assert!(
+        lying.position.distance(homes[2].position) < 0.03,
         "{lying:?}"
     );
+}
+
+#[test]
+fn a_body_whose_home_is_taken_by_one_alike_takes_its_home_in_turn() {
+    // Two alike, as two sticks on a log are.
+    let hull = pebble(1, 0.2, 0.08);
+    let mut world = world(vec![
+        Body::convex(1, hull.clone()).at(Placement::at(Vec3::new(0.0, 0.05, 0.0))),
+        Body::convex(2, hull).at(Placement::at(Vec3::new(0.5, 0.05, 0.0))),
+    ]);
+    assert!(world.settle(10.0));
+    let homes = [world.home(1).unwrap(), world.home(2).unwrap()];
+    // The first carried off, and the second left where the first began.
+    put(&mut world, 1, Vec3::new(2.0, 0.1, 0.0));
+    put(&mut world, 2, homes[0].position + Vec3::Y * 0.05);
+    // Sent home, the first takes the second's, and the second the first's, where it lies: both at home.
+    assert_eq!(sent_home(&mut world, 1), homes[1].snapped(Precision::Rest));
+    assert_eq!(
+        (world.home(1), world.home(2)),
+        (Some(homes[1]), Some(homes[0]))
+    );
+    assert!(world.at_home(1, 0.003));
+    assert!(world.at_home(2, 0.03));
+}
+
+#[test]
+fn a_body_with_nowhere_free_to_return_to_is_let_go_on_whatever_lies_at_its_home() {
+    let stone = |body: u32, x: f32| {
+        Body::convex(body, pebble(body, 0.2, 0.08)).at(Placement::at(Vec3::new(x, 0.05, 0.0)))
+    };
+    let mut world = world(vec![stone(1, 0.0), stone(2, 0.25)]);
+    assert!(world.settle(10.0));
+    let home = world.home(1).unwrap();
+    // The first carried off, and the second left across both their homes.
+    put(&mut world, 1, Vec3::new(2.0, 0.1, 0.0));
+    put(&mut world, 2, Vec3::new(0.125, 0.1, 0.0));
+    assert_eq!(sent_home(&mut world, 1), home.snapped(Precision::Rest));
+    // On the second, rather than within it.
+    let lying = world.placement(1).unwrap();
+    assert!(lying.position.y > home.position.y + 0.01, "{lying:?}");
+    assert!(!world.occupied(0, &lying));
 }
 
 #[test]
@@ -1199,7 +1384,7 @@ fn a_body_lighter_than_water_floats_on_it_and_comes_to_rest_there() {
 }
 
 #[test]
-fn a_grabbable_body_sent_home_glides_there_and_rests_without_falling() {
+fn a_grabbable_body_sent_home_fades_there_and_rests_without_falling() {
     let hook = Body::convex(1, pebble(1, 0.1, 0.04))
         .kinematic()
         .at(Placement::at(Vec3::new(0.0, 1.5, 0.0)));
@@ -1225,7 +1410,7 @@ fn a_grabbable_body_sent_home_glides_there_and_rests_without_falling() {
     };
     world.let_go(3, &let_go, Some(&seen)).unwrap();
     assert!(!world.moving());
-    world.send_home(1, 300).unwrap();
+    world.send_home(1).unwrap();
     let (updates, _) = until_rest(&mut world, 5.0);
     // Back where it began, in the air, said once at rest there.
     assert!(world.at_home(1, 0.001));

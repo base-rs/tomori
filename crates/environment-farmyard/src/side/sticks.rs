@@ -4,8 +4,8 @@
 //! The campsite's marshmallow sticks as the farmyard's server side keeps them: loose bodies ([`Loose`]) of a
 //! `tomori-physics` world of the campsite's own, taken and let go as any loose body is, as the beach's stones are; each
 //! held stick's marshmallow toasted from where its holder's hand holds it, as the server last saw it, in the fire's heat;
-//! a stick put back by its log, or come to rest where it does not stay, back on its log, gliding there, with a fresh
-//! marshmallow once it rests on it; and, once nobody has been in the space for an hour, every stick back on its log.
+//! a stick put back by its log, or come to rest where it does not stay, back on its log, fading there, with a fresh
+//! marshmallow as it goes; and, once nobody has been in the space for an hour, every stick back on its log.
 //! See `crate::campsite`.
 use std::time::{Duration, Instant};
 
@@ -215,7 +215,7 @@ impl Sticks {
                     .is_some_and(|at| campsite::by_its_log(at.position));
             if put_back {
                 // Nobody holds it, as it was just let go.
-                let _ = self.loose.world_mut().send_home(body, campsite::PUT_BACK);
+                let _ = self.loose.world_mut().send_home(body);
             }
         }
         true
@@ -240,7 +240,7 @@ impl Sticks {
             let body = campsite::body(index);
             let world = self.loose.world_mut();
             if !world.at_home(body, campsite::RACKED) && world.held(body).is_none() {
-                let _ = world.send_home(body, campsite::TIDIED);
+                let _ = world.send_home(body);
             }
         }
         // Tidied once, until someone comes and goes again.
@@ -269,11 +269,19 @@ impl Sticks {
 
     /// Move on to `now`, with where the server last saw everyone, `presence`, at the farmyard's `clock`; and what to say
     /// of what changed, if anything did: the sticks' bodies, at most [`tomori_physics::SNAPSHOT_RATE`] times a second,
-    /// and how toasted those whose toasting changed are, at most every [`TOAST_EVERY`], but a fresh marshmallow at once.
+    /// and how toasted those whose toasting changed are, at most every [`TOAST_EVERY`], but a fresh marshmallow at once:
+    /// on a stick that begins its way back to its log, which clients draw as it was until it fades in there, or that
+    /// comes to rest on it.
     pub fn update(&mut self, presence: &[Presence], now: Instant, clock: u64) -> Option<Event> {
         self.toast_held(presence, now);
         let sticks = self.loose.update(now).unwrap_or_default();
         let mut fresh = false;
+        for returning in &sticks.returning {
+            let index =
+                campsite::index(returning.body).expect("the campsite's world holds only sticks");
+            fresh |= self.toast[index] != 0.0;
+            self.toast[index] = 0.0;
+        }
         for rested in &sticks.rested {
             let body = rested.body();
             let index = campsite::index(body).expect("the campsite's world holds only sticks");
@@ -284,7 +292,7 @@ impl Sticks {
                 fresh |= self.toast[index] != 0.0;
                 self.toast[index] = 0.0;
             } else if campsite::goes_back(&at) {
-                let _ = world.send_home(body, campsite::TIDIED);
+                let _ = world.send_home(body);
             }
         }
         let due = fresh

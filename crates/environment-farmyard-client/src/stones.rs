@@ -89,9 +89,9 @@ impl Stones {
     ) -> Vec<Shown> {
         self.placed(right, left, now, clock)
             .into_iter()
-            .map(|(stone, placement, _)| Shown {
+            .map(|(stone, placement, fade, _)| Shown {
                 stone: stone as usize,
-                transform: placement.matrix(),
+                transform: placement.matrix() * Mat4::from_scale(Vec3::splat(fade.scale())),
             })
             .collect()
     }

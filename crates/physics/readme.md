@@ -2,7 +2,7 @@
 
 Rigid-body physics for a [Tomori](https://github.com/ioquatix/tomori) environment's loose objects, which participants take with either hand, carry, throw and stack: simulated once, by the environment's server side, on [Rapier](https://rapier.rs), and drawn alike by every client, which never simulates.
 
-Whoever holds a body controls it, every client drawing it from their hand, which presence already brings; let go, the server side simulates it, saying where it is 20 times a second while it moves and once where it rests, and nothing while it rests.
+Whoever holds a body controls it, every client drawing it from their hand, which presence already brings; let go, the server side simulates it, saying where it is 20 times a second while it moves and once where it rests, and nothing while it rests. A body lost, left in water that takes it back, or sent home fades out where it is and in where it returns to, never seen on its way.
 
 ## Usage
 

@@ -7,21 +7,24 @@
 use std::collections::BTreeMap;
 
 use glam::Vec3;
+use rapier3d::parry::query::contact;
+use rapier3d::parry::shape::Shape;
 use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, PhysicsWorld, Pose3, QueryFilter, RigidBodyBuilder,
+    Collider, ColliderBuilder, ColliderHandle, PhysicsWorld, Pose3, QueryFilter, RigidBodyBuilder,
     RigidBodyHandle,
 };
 
-use crate::message::{Holding, Landed, LetGo, Shared, Snapshot, State, Take, Thrown, Update};
+use crate::message::{
+    Holding, Landed, LetGo, Returning, Shared, Snapshot, State, Take, Thrown, Update,
+};
 use crate::{
-    BODY_LIMIT, Body, HELD_LIMIT, Held, Kind, Placement, Precision, Refused, SNAPSHOT_RATE,
+    BODY_LIMIT, Body, FADE, HELD_LIMIT, Held, Kind, Placement, Precision, Refused, SNAPSHOT_RATE,
     STATIC_TRIANGLES, Seen, Settings, Static, Water,
 };
 
-/// How long a body glides back from the water it rested in to where it began, in milliseconds, and how high it rises on
-/// the way.
-pub const GLIDE: u64 = 2_000;
-const GLIDE_RISE: f32 = 0.3;
+/// How far a body may lie within another where it would return to, in metres, for the place to be free: as one resting
+/// on a neighbour that settled against it does, a millimetre or so, but not one lying where it was.
+const OVERLAP: f32 = 0.005;
 /// How sharply a body's velocity must change within a step for it to have struck something, in metres a second, and how
 /// soon after one it may strike again, in milliseconds, so that a stone settling clacks once rather than rattling.
 const STRUCK: f32 = 0.6;
@@ -48,12 +51,9 @@ enum Motion {
     Moving,
     /// In someone's hand: out of the simulation, touching nothing, until they let go.
     Held,
-    /// Gliding back to where it began, from where it was, since `began`, for `over` milliseconds.
-    Returning {
-        from: Placement,
-        began: u64,
-        over: u64,
-    },
+    /// On its way back to `to` since `began`, out of the simulation, touching nothing: where it was for [`FADE`],
+    /// fading out, then at `to`, fading in, for [`FADE`] more.
+    Returning { to: Placement, began: u64 },
 }
 
 /// One body of the world.
@@ -64,7 +64,8 @@ struct Entry {
     epoch: u32,
     held: Option<Held>,
     motion: Motion,
-    /// Where it began, as it settled there, which it returns to.
+    /// Where it began, as it settled there, which it returns to; or the home of a body alike that it took, as its own
+    /// was taken.
     home: Placement,
     /// Its velocity a step ago, when it last struck something, and whether it was in water.
     velocity: Vec3,
@@ -287,7 +288,7 @@ impl World {
             let moving: Vec<Snapshot> = self
                 .entries
                 .iter()
-                .filter(|entry| matches!(entry.motion, Motion::Moving | Motion::Returning { .. }))
+                .filter(|entry| entry.motion == Motion::Moving)
                 .map(|entry| {
                     Snapshot::new(entry.body.id, &self.placement_of(entry), Precision::Moving)
                 })
@@ -332,56 +333,37 @@ impl World {
 
     /// One step.
     fn advance(&mut self) {
-        let clock = self.clock();
         let gravity = self.settings.gravity;
         for index in 0..self.entries.len() {
             let entry = &self.entries[index];
-            let at = self.placement_of(entry);
-            match entry.motion {
-                Motion::Returning { from, began, over } => {
-                    let t = (clock.saturating_sub(began) as f32 / over as f32).min(1.0);
-                    // A shorter glide rises less, so that a body put back near where it began slips into place.
-                    let rise = GLIDE_RISE * (over as f32 / GLIDE as f32).min(1.0);
-                    let lift = Vec3::Y * rise * (t * std::f32::consts::PI).sin();
-                    let to = Placement::new(
-                        from.position.lerp(entry.home.position, t) + lift,
-                        from.rotation.slerp(entry.home.rotation, t),
-                    );
-                    // Out of the simulation as it glides, so that it pushes nothing it passes through.
-                    self.physics.bodies[entry.handle].set_position(pose(&to), false);
-                }
-                Motion::Moving => {
-                    // Buoyed by the water it displaces, its volume being its mass over its density, as much of it as
-                    // is below the water's surface, and damped more as it is: so that a body lighter than the water
-                    // floats, as a stick does, as deep as it is lighter, and comes to rest there.
-                    let (water, under) = match self.submerged(&entry.body, &at) {
-                        Some((water, under)) => (Some(water.clone()), under),
-                        None => (None, 0.0),
-                    };
-                    let (body, handle) = (&entry.body, entry.handle);
-                    let rigid = &mut self.physics.bodies[handle];
-                    rigid.reset_forces(false);
-                    match water {
-                        Some(water) => {
-                            let displaced = rigid.mass() / body.density * water.density;
-                            rigid.add_force(-gravity * displaced * under, false);
-                            let damped = |dry: f32, wet: f32| dry + (wet - dry) * under;
-                            rigid.set_linear_damping(damped(
-                                body.linear_damping,
-                                water.linear_damping,
-                            ));
-                            rigid.set_angular_damping(damped(
-                                body.angular_damping,
-                                water.angular_damping,
-                            ));
-                        }
-                        None => {
-                            rigid.set_linear_damping(body.linear_damping);
-                            rigid.set_angular_damping(body.angular_damping);
-                        }
+            if entry.motion == Motion::Moving {
+                let at = self.placement_of(entry);
+                // Buoyed by the water it displaces, its volume being its mass over its density, as much of it as
+                // is below the water's surface, and damped more as it is: so that a body lighter than the water
+                // floats, as a stick does, as deep as it is lighter, and comes to rest there.
+                let (water, under) = match self.submerged(&entry.body, &at) {
+                    Some((water, under)) => (Some(water.clone()), under),
+                    None => (None, 0.0),
+                };
+                let (body, handle) = (&entry.body, entry.handle);
+                let rigid = &mut self.physics.bodies[handle];
+                rigid.reset_forces(false);
+                match water {
+                    Some(water) => {
+                        let displaced = rigid.mass() / body.density * water.density;
+                        rigid.add_force(-gravity * displaced * under, false);
+                        let damped = |dry: f32, wet: f32| dry + (wet - dry) * under;
+                        rigid.set_linear_damping(damped(body.linear_damping, water.linear_damping));
+                        rigid.set_angular_damping(damped(
+                            body.angular_damping,
+                            water.angular_damping,
+                        ));
+                    }
+                    None => {
+                        rigid.set_linear_damping(body.linear_damping);
+                        rigid.set_angular_damping(body.angular_damping);
                     }
                 }
-                _ => {}
             }
         }
         self.physics.step();
@@ -423,10 +405,9 @@ impl World {
         let (velocity, sleeping) = (rigid.linvel(), rigid.is_sleeping());
         let id = entry.body.id;
         match entry.motion {
-            Motion::Returning { began, over, .. } if clock >= began + over => {
-                // Clear of any body that has come to lie where it began, but resting where it began on what it
-                // rested on.
-                let home = self.clear(index, entry.home, false);
+            Motion::Returning { to, began } if clock >= began + 2 * FADE => {
+                // Clear of any body that has come to lie there since, but resting there on what it rests on.
+                let home = self.clear(index, to, QueryFilter::exclude_fixed());
                 let kind = entry.body.kind;
                 let rigid = &mut self.physics.bodies[self.entries[index].handle];
                 rigid.set_enabled(true);
@@ -440,6 +421,10 @@ impl World {
                     self.entries[index].motion = Motion::Moving;
                 }
             }
+            Motion::Returning { to, began } if clock >= began + FADE => {
+                // Faded out where it was, it is put where it returns to at once, still touching nothing, to fade in.
+                self.physics.bodies[entry.handle].set_position(pose(&to), false);
+            }
             Motion::Resting if !sleeping && entry.body.kind == Kind::Dynamic => {
                 self.entries[index].motion = Motion::Moving
             }
@@ -447,17 +432,10 @@ impl World {
                 let returns = self
                     .water(at.position)
                     .and_then(|water| water.returns_after);
-                let entry = &mut self.entries[index];
-                if let (Some(after), Some(since)) = (returns, entry.soaking)
+                if let (Some(after), Some(since)) = (returns, self.entries[index].soaking)
                     && clock >= since + after
                 {
-                    entry.soaking = None;
-                    entry.motion = Motion::Returning {
-                        from: at,
-                        began: clock,
-                        over: GLIDE,
-                    };
-                    self.physics.bodies[entry.handle].set_enabled(false);
+                    self.send_back(index);
                 }
             }
             Motion::Moving => {
@@ -488,11 +466,7 @@ impl World {
                     entry.still = Some((clock, at));
                 }
                 if lost {
-                    let rigid = &mut self.physics.bodies[entry.handle];
-                    rigid.set_position(pose(&entry.home), true);
-                    rigid.set_linvel(Vec3::ZERO, true);
-                    rigid.set_angvel(Vec3::ZERO, true);
-                    entry.velocity = Vec3::ZERO;
+                    self.send_back(index);
                 } else if sleeping {
                     self.rest(index, at);
                 }
@@ -521,20 +495,15 @@ impl World {
             .push(Snapshot::new(entry.body.id, &at, Precision::Rest));
     }
 
-    /// `at`, lifted a centimetre at a time, at most [`CLEAR`], until body `index` placed there meets nothing, or, unless
-    /// `statics`, no other body: so that a body let go inside another, or the ground, is let go on it instead, and one
-    /// returned where another has come to lie is let go on that, but one returned where it rested rests there.
-    fn clear(&self, index: usize, at: Placement, statics: bool) -> Placement {
+    /// `at`, lifted a centimetre at a time, at most [`CLEAR`], until body `index` placed there meets nothing `filter`
+    /// takes: so that a body let go inside another, or the ground, is let go on it instead, one returned where another
+    /// has come to lie is let go on that, but one returned where it rested rests there.
+    fn clear(&self, index: usize, at: Placement, filter: QueryFilter) -> Placement {
         let entry = &self.entries[index];
         let shape = self.physics.colliders[entry.collider]
             .shared_shape()
             .clone();
-        let filter = if statics {
-            QueryFilter::default()
-        } else {
-            QueryFilter::exclude_fixed()
-        }
-        .exclude_rigid_body(entry.handle);
+        let filter = filter.exclude_rigid_body(entry.handle);
         let mut lifted = at;
         for _ in 0..(CLEAR * 100.0) as usize {
             if self
@@ -573,6 +542,9 @@ impl World {
             && (take.epoch == entry.epoch || take.epoch == entry.epoch.wrapping_add(1));
         if entry.held.is_some() && !again {
             return Err(Refused::Held(take.body));
+        }
+        if matches!(entry.motion, Motion::Returning { .. }) {
+            return Err(Refused::Returning(take.body));
         }
         if entry.epoch != take.epoch && !again {
             return Err(Refused::Epoch(take.body));
@@ -689,30 +661,117 @@ impl World {
             .collect()
     }
 
-    /// Body `body`, which nobody holds, sent back to where it began, gliding there over `over` milliseconds from where it
-    /// is, rising on the way as a body taken back from water does, a short glide less, and let go just clear of whatever
-    /// has come to lie there: as an environment puts back what was left where it does not belong, or tidies. Its epoch is
-    /// unchanged, so that it may be taken, caught, as it glides. Refused for a body someone holds.
-    pub fn send_home(&mut self, body: u32, over: u64) -> Result<(), Refused> {
+    /// Body `body`, which nobody holds, sent back to where it began, as a body lost or left in water is: fading out
+    /// where it is over [`FADE`], put at once where it returns to, its home or the nearest free home of another, and
+    /// fading in there over [`FADE`] more, nobody's to take until it is there; as an environment puts back what was left
+    /// where it does not belong, or tidies. Its epoch is unchanged. Refused for a body someone holds; one on its way
+    /// back already goes on its way.
+    pub fn send_home(&mut self, body: u32) -> Result<(), Refused> {
         let index = self.index(body)?;
-        let clock = self.clock();
-        let entry = &self.entries[index];
-        if entry.held.is_some() {
-            return Err(Refused::Held(body));
+        match self.entries[index].motion {
+            Motion::Held => Err(Refused::Held(body)),
+            Motion::Returning { .. } => Ok(()),
+            _ => {
+                self.send_back(index);
+                Ok(())
+            }
         }
+    }
+
+    /// Body `index`, which nobody holds, taken back: out of the simulation, touching nothing, it fades out where it is
+    /// for [`FADE`], is put, at once, where it returns to, [`World::free_home`], and fades in there for [`FADE`] more,
+    /// before it is let go there, just clear of whatever has come to lie there since; said once, as it begins
+    /// ([`Returning`]), so that every client fades it rather than drawing it on its way, and refused to anyone who
+    /// would take it until it is there.
+    fn send_back(&mut self, index: usize) {
+        let id = self.entries[index].body.id;
         let from = self
-            .placement(body)
+            .placement(id)
             .expect("a body nobody holds has a placement");
+        let to = self.free_home(index);
+        let clock = self.clock();
         let entry = &mut self.entries[index];
+        entry.motion = Motion::Returning { to, began: clock };
         entry.soaking = None;
         entry.still = None;
-        entry.motion = Motion::Returning {
-            from,
-            began: clock,
-            over: over.max(1),
-        };
+        entry.velocity = Vec3::ZERO;
         self.physics.bodies[entry.handle].set_enabled(false);
-        Ok(())
+        self.pending.returning.push(Returning {
+            body: id,
+            from: from.encoded(Precision::Rest),
+            to: to.encoded(Precision::Rest),
+        });
+    }
+
+    /// Where body `index` returns to: its home, unless another body lies there, or is returning there; or else the
+    /// nearest home of another body that is free, the body's home then that one, and that body's the one it left, if
+    /// the two are alike, as two of the campsite's sticks are, so that neither then lies away from its home, or, if
+    /// not, as two of the beach's stones are not, the place alone, its own turn, lifted clear of what it rests on; or,
+    /// with nowhere free, its home all the same, lifted onto whatever lies there as it arrives.
+    fn free_home(&mut self, index: usize) -> Placement {
+        let own = self.entries[index].home;
+        if !self.occupied(index, &own) {
+            return own;
+        }
+        let mut others: Vec<usize> = (0..self.entries.len())
+            .filter(|other| *other != index)
+            .collect();
+        let away = |other: &usize| self.entries[*other].home.position.distance(own.position);
+        others.sort_by(|a, b| away(a).total_cmp(&away(b)));
+        for other in others {
+            let slot = self.entries[other].home;
+            let alike = self.entries[other].body.hull == self.entries[index].body.hull;
+            let at = if alike {
+                slot
+            } else {
+                let turned = Placement::new(slot.position, own.rotation);
+                self.clear(index, turned, QueryFilter::only_fixed())
+            };
+            if self.occupied(index, &at) {
+                continue;
+            }
+            if alike {
+                self.entries[other].home = own;
+                self.entries[index].home = slot;
+            }
+            return at;
+        }
+        own
+    }
+
+    /// Whether body `index`, placed at `at`, would lie more than [`OVERLAP`] within another body in the simulation, or
+    /// within where another is returning to.
+    fn occupied(&self, index: usize, at: &Placement) -> bool {
+        let entry = &self.entries[index];
+        let shape = self.physics.colliders[entry.collider].shape();
+        let placed = pose(at);
+        let within = |position: &Pose3, other: &dyn Shape| {
+            contact(&placed, shape, position, other, 0.0)
+                .ok()
+                .flatten()
+                .is_some_and(|contact| contact.dist < -OVERLAP)
+        };
+        let away: Vec<ColliderHandle> = self
+            .entries
+            .iter()
+            .filter(|other| matches!(other.motion, Motion::Held | Motion::Returning { .. }))
+            .map(|other| other.collider)
+            .collect();
+        let present = |handle: ColliderHandle, _: &Collider| !away.contains(&handle);
+        let filter = QueryFilter::exclude_fixed()
+            .exclude_rigid_body(entry.handle)
+            .predicate(&present);
+        let lying = self
+            .physics
+            .intersect_shape(placed, shape, filter)
+            .any(|(_, collider)| within(collider.position(), collider.shape()));
+        lying
+            || self.entries.iter().any(|other| match other.motion {
+                Motion::Returning { to, .. } => {
+                    within(&pose(&to), self.physics.colliders[other.collider].shape())
+                }
+                _ => false,
+            })
     }
 
     /// Whether body `body` rests where it began, as it settled there, to within `near` metres.
@@ -733,7 +792,7 @@ impl World {
     fn release(&mut self, index: usize, thrown: Thrown) -> u32 {
         let id = self.entries[index].body.id;
         self.physics.bodies[self.entries[index].handle].set_enabled(true);
-        let at = self.clear(index, thrown.at, true);
+        let at = self.clear(index, thrown.at, QueryFilter::default());
         let entry = &mut self.entries[index];
         entry.epoch = entry.epoch.wrapping_add(1);
         entry.held = None;
@@ -769,11 +828,13 @@ impl World {
                 .map(|entry| Shared {
                     body: entry.body.id,
                     epoch: entry.epoch,
+                    // One on its way back is shared where it returns to, as whoever joins sees it once it is there.
                     at: match entry.motion {
                         Motion::Resting => entry.rested,
+                        Motion::Returning { to, .. } => to.encoded(Precision::Rest),
                         _ => self.placement_of(entry).encoded(Precision::Rest),
                     },
-                    moving: matches!(entry.motion, Motion::Moving | Motion::Returning { .. }),
+                    moving: entry.motion == Motion::Moving,
                     held: entry.held,
                 })
                 .collect(),

@@ -421,11 +421,6 @@ pub fn settings() -> Settings {
 /// How near where it began, leaning on its log, a stick at rest is back on its log, fresh.
 pub const RACKED: f32 = 0.03;
 
-/// How long a stick put back by its log glides onto it, and one left where it does not stay glides back, in
-/// milliseconds.
-pub const PUT_BACK: u64 = 600;
-pub const TIDIED: u64 = 1_500;
-
 /// How fast a stick may be let go, at most, in metres a second, to be put back on its log when let go by it, rather
 /// than thrown from beside it.
 pub const GENTLY: f32 = 1.0;

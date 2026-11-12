@@ -4,14 +4,15 @@
 //! The client's half: every body as the side shares and announces it, drawn where it rests, between the snapshots of
 //! what moves, [`DELAY`] behind the environment's clock, or, for a body this participant just let go, from their own
 //! foresight of it, under gravity from where they let it go, blending into the server's placements over [`BLEND`] as
-//! they arrive, so that the holder sees no hitch. A held body is placed by its holder's hand, which only the client knows
-//! each frame: see [`Mirror::held`].
+//! they arrive, so that the holder sees no hitch. A body on its way back fades out where it was and in where it returns
+//! to, [`Fade`], each over [`FADE`], and is never drawn between. A held body is placed by its holder's hand, which only
+//! the client knows each frame: see [`Mirror::held`].
 use std::collections::{BTreeMap, VecDeque};
 
 use glam::{Quat, Vec3};
 
 use crate::message::{State, Update};
-use crate::{BLEND, DELAY, Held, Placement, Precision, Settings};
+use crate::{BLEND, DELAY, FADE, Held, Placement, Precision, Settings};
 
 /// How many snapshots of each moving body are kept: two seconds of them.
 const TRACK: usize = 40;
@@ -60,6 +61,49 @@ fn between(from: &Placement, to: &Placement, t: f32) -> Placement {
     )
 }
 
+/// How much of a body is drawn: all of it; or, on its way back, fading out where it was, or in where it returns to, by
+/// how large it is drawn, from 1 to 0 and from 0 to 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fade {
+    Whole,
+    Out(f32),
+    In(f32),
+}
+
+impl Fade {
+    /// How large it is drawn, from 0 to 1, about its middle.
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Whole => 1.0,
+            Self::Out(scale) | Self::In(scale) => scale,
+        }
+    }
+}
+
+/// A body on its way back, since `began` on the environment's clock, from `from` to `to`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Back {
+    began: u64,
+    from: Placement,
+    to: Placement,
+}
+
+impl Back {
+    /// How much of it is drawn at `clock`: whole until it begins, fading out over [`FADE`], in over [`FADE`] more,
+    /// eased, and whole again once it is back.
+    fn fade(&self, clock: u64) -> Fade {
+        let eased = |t: f32| t * t * (3.0 - 2.0 * t);
+        let since = clock.saturating_sub(self.began);
+        if since < FADE {
+            Fade::Out(1.0 - eased(since as f32 / FADE as f32))
+        } else if since < 2 * FADE {
+            Fade::In(eased((since - FADE) as f32 / FADE as f32))
+        } else {
+            Fade::Whole
+        }
+    }
+}
+
 /// One body as this client knows it.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Mirrored {
@@ -72,6 +116,8 @@ struct Mirrored {
     /// The clock it came to rest at, once it has since it last moved.
     rested: Option<u64>,
     foresight: Option<Foresight>,
+    /// Its way back, while it is on it.
+    back: Option<Back>,
 }
 
 impl Mirrored {
@@ -113,8 +159,21 @@ impl Mirrored {
         Some(between(&from.1, &to.1, t))
     }
 
-    /// Where it is drawn at `clock`, held or not.
+    /// How much of it is drawn at `clock`, [`DELAY`] behind it, as what moves is.
+    fn fade(&self, clock: u64) -> Fade {
+        self.back
+            .map_or(Fade::Whole, |back| back.fade(clock.saturating_sub(DELAY)))
+    }
+
+    /// Where it is drawn at `clock`, held or not: on its way back, where it was as it fades out, and where it returns to
+    /// as it fades in, nowhere between.
     fn placement(&self, clock: u64) -> Placement {
+        if let Some(back) = &self.back {
+            return match self.fade(clock) {
+                Fade::Out(_) => back.from,
+                _ => back.to,
+            };
+        }
         if let Some(foresight) = &self.foresight {
             let foreseen = foresight.at(clock);
             let Some(arrived) = foresight.arrived else {
@@ -164,6 +223,7 @@ impl Mirror {
                         },
                         rested: None,
                         foresight: None,
+                        back: None,
                     },
                 )
             })
@@ -171,7 +231,8 @@ impl Mirror {
     }
 
     /// What changed, as the side announced it at `sent` on the environment's clock, arriving at `now` on it, as this
-    /// client reckons it.
+    /// client reckons it. A body on its way back, from then, forgets how it moved, and its snapshots begin anew where it
+    /// returns to.
     pub fn apply(&mut self, sent: u64, update: &Update, now: u64) {
         for holding in &update.holding {
             if let Some(body) = self.bodies.get_mut(&holding.body) {
@@ -181,6 +242,7 @@ impl Mirror {
                     body.track.clear();
                     body.rested = None;
                     body.foresight = None;
+                    body.back = None;
                 }
             }
         }
@@ -210,6 +272,20 @@ impl Mirror {
                 }
             }
         }
+        for returning in &update.returning {
+            if let Some(body) = self.bodies.get_mut(&returning.body) {
+                let to = returning.to.placement(Precision::Rest);
+                body.back = Some(Back {
+                    began: sent,
+                    from: returning.from.placement(Precision::Rest),
+                    to,
+                });
+                body.rest = to;
+                body.track.clear();
+                body.rested = None;
+                body.foresight = None;
+            }
+        }
     }
 
     /// Foresee body `body`, which this participant let go at `at` on the environment's clock `clock`, moving at
@@ -237,9 +313,24 @@ impl Mirror {
         self.bodies.get(&body).and_then(|body| body.held)
     }
 
+    /// Whether body `body` is on its way back, which nobody may take until it is there, as it was last drawn.
+    pub fn returning(&self, body: u32) -> bool {
+        self.bodies
+            .get(&body)
+            .is_some_and(|body| body.back.is_some())
+    }
+
+    /// How much of body `body` is drawn at `clock` on the environment's clock: whole, unless it is on its way back.
+    pub fn fade(&self, body: u32, clock: u64) -> Fade {
+        self.bodies
+            .get(&body)
+            .map_or(Fade::Whole, |body| body.fade(clock))
+    }
+
     /// Where body `body` is drawn at `clock` on the environment's clock, unless someone holds it: where it rests,
-    /// between its snapshots, or as this participant foresees it. Once the server's snapshots have taken over and it
-    /// rests, the foresight is forgotten.
+    /// between its snapshots, as this participant foresees it, or on its way back, where it was or where it returns to.
+    /// Once the server's snapshots have taken over and it rests, the foresight is forgotten, and once it is back, its
+    /// way back.
     pub fn placement(&mut self, body: u32, clock: u64) -> Option<Placement> {
         let mirrored = self
             .bodies
@@ -257,6 +348,9 @@ impl Mirror {
             mirrored.rested = mirrored
                 .rested
                 .map(|rested| rested.min(clock.saturating_sub(DELAY)));
+        }
+        if mirrored.fade(clock) == Fade::Whole {
+            mirrored.back = None;
         }
         Some(mirrored.placement(clock))
     }
@@ -460,6 +554,79 @@ mod tests {
         assert_eq!(mirror.placement(0, 1_320), Some(rest));
         assert_eq!(mirror.bodies[&0].foresight, None);
         assert_eq!(mirror.placement(0, 1_330), Some(rest));
+    }
+
+    #[test]
+    fn a_body_on_its_way_back_fades_out_where_it_was_and_in_where_it_returns_to_in_one_jump() {
+        let mut mirror = Mirror::new();
+        mirror.share(&state());
+        let (from, to) = (
+            Placement::at(Vec3::new(0.0, 0.0, 0.0)),
+            Placement::new(Vec3::new(5.0, 0.5, 0.0), Quat::from_rotation_y(1.0))
+                .snapped(Precision::Rest),
+        );
+        let back = |body| Update {
+            returning: vec![crate::message::Returning {
+                body,
+                from: from.encoded(Precision::Rest),
+                to: to.encoded(Precision::Rest),
+            }],
+            ..Default::default()
+        };
+        // Foreseen as this participant let it go, then lost, and taken back at 1 s.
+        mirror.let_go(0, from, Vec3::new(8.0, 0.0, 0.0), Vec3::ZERO, 900);
+        mirror.apply(1_000, &back(0), 1_010);
+        mirror.apply(1_000, &back(9), 1_010);
+        assert!(mirror.returning(0) && !mirror.returning(9));
+        assert_eq!(mirror.fade(9, 1_500), Fade::Whole);
+        assert_eq!(mirror.bodies[&0].foresight, None);
+        // A delay behind, as what moves is: whole where it was, until it begins.
+        assert_eq!(mirror.placement(0, 1_050), Some(from));
+        assert_eq!(mirror.fade(0, 1_050), Fade::Out(1.0));
+        assert_eq!(mirror.fade(0, 1_350), Fade::Out(0.5));
+        assert_eq!(mirror.fade(0, 1_850), Fade::In(0.5));
+        // Each frame where it was or where it returns to, jumping once, as it is drawn smallest, and never between; and
+        // never drawn larger or smaller than a little more than a frame's fading.
+        let mut jumps = 0;
+        let (mut was, mut scale) = (from, 1.0);
+        for clock in (1_000..2_300).step_by(5) {
+            let at = mirror.placement(0, clock).unwrap();
+            let fade = mirror.fade(0, clock);
+            assert!(at == from || at == to, "{clock}: {at:?}");
+            if at != was {
+                jumps += 1;
+                assert!(fade.scale() < 0.01, "{clock}: {fade:?}");
+            }
+            assert!((fade.scale() - scale).abs() < 0.02, "{clock}: {fade:?}");
+            (was, scale) = (at, fade.scale());
+        }
+        assert_eq!(jumps, 1);
+        // Back, it is whole where it returns to, no longer on its way, and moving from there begins anew there.
+        assert_eq!(mirror.fade(0, 2_300), Fade::Whole);
+        assert!(!mirror.returning(0));
+        mirror.apply(2_300, &moving(0, 5.0), 2_310);
+        let x = mirror.placement(0, 2_350).unwrap().position.x;
+        assert!((x - 5.0).abs() < 1e-3, "{x}");
+        // Taken on its way back, as the side refuses, but should it say so, it is in the hand whole.
+        mirror.apply(3_000, &back(0), 3_000);
+        mirror.apply(
+            3_100,
+            &Update {
+                holding: vec![Holding {
+                    body: 0,
+                    epoch: 1,
+                    held: Some(Held {
+                        by: 7,
+                        hand: Side::Left,
+                        offset: Encoded::default(),
+                    }),
+                }],
+                ..Default::default()
+            },
+            3_100,
+        );
+        assert!(!mirror.returning(0));
+        assert_eq!(mirror.fade(0, 3_200), Fade::Whole);
     }
 
     #[test]

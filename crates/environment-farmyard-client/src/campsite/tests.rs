@@ -413,3 +413,53 @@ fn a_visitor_takes_no_stick_and_what_lands_is_heard_lightly_or_splashing() {
     };
     assert!(loudest(&tap) < loudest(&clack));
 }
+
+#[test]
+fn a_stick_on_its_way_back_fades_out_as_toasted_as_it_was_and_in_on_its_log_fresh() {
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|shared| shared.toast[2] = campsite::BLACK));
+    let now = Instant::now();
+    let from = Placement::at(campsite::heart() + Vec3::Y * 0.1);
+    let to = campsite::home(2).snapped(Precision::Rest);
+    // On its way back from the fire, burnt, the side saying its marshmallow fresh as it begins.
+    sticks.changed(
+        &Event {
+            clock: 1_000,
+            sticks: Update {
+                // And something that is no stick, which changes nothing.
+                returning: [campsite::body(2), 7]
+                    .map(|body| tomori_physics::message::Returning {
+                        body,
+                        from: from.encoded(Precision::Rest),
+                        to: to.encoded(Precision::Rest),
+                    })
+                    .to_vec(),
+                ..Update::default()
+            },
+            toast: vec![campsite::Toasted {
+                body: campsite::body(2),
+                toast: 0.0,
+            }],
+        },
+        1_000,
+    );
+    // Fading out where it was, half as large about its middle, as black as it was, but alight no longer.
+    let out = sticks.shown(&[], &[], now, 1_100 + tomori_physics::FADE / 2)[2];
+    assert_eq!(out.shade, campsite::shade(campsite::BLACK));
+    assert!(!out.burning);
+    let middle = out
+        .transform
+        .transform_point3(-Vec3::Z * campsite::STICK_LENGTH * 0.5);
+    assert!(middle.distance(from.position) < 1e-4, "{middle}");
+    assert!((out.transform.x_axis.truncate().length() - 0.5).abs() < 1e-3);
+    // Fading in on its log, fresh; and whole there once back.
+    let coming = sticks.shown(&[], &[], now, 1_100 + tomori_physics::FADE * 3 / 2)[2];
+    assert_eq!(coming.shade, 0);
+    let middle = coming
+        .transform
+        .transform_point3(-Vec3::Z * campsite::STICK_LENGTH * 0.5);
+    assert!(middle.distance(to.position) < 1e-4, "{middle}");
+    let back = sticks.shown(&[], &[], now, 1_100 + tomori_physics::FADE * 2)[2];
+    assert_eq!(back.transform, campsite::drawn(&to));
+    assert_eq!(back.shade, 0);
+}
