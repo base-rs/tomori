@@ -90,11 +90,23 @@ impl Track {
 #[derive(Clone, Debug, Default)]
 pub struct Relayed {
     tracks: BTreeMap<u32, Track>,
+    /// How many times the conversation had forgotten the others' hands when these were drawn.
+    forgotten: u64,
 }
 
 impl Relayed {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Forget every hand once the conversation has forgotten them, `forgotten` times, on connecting and on leaving or
+    /// joining a space: a number may then be someone else's, whose hand is drawn where it first is rather than moving
+    /// there from where the last one's was.
+    pub fn since(&mut self, forgotten: u64) {
+        if self.forgotten != forgotten {
+            self.tracks.clear();
+            self.forgotten = forgotten;
+        }
     }
 
     /// The hands at `now`, from `hands`, each as their presence last said it, by their numbers: each drawn between the
@@ -127,6 +139,7 @@ pub(crate) fn others(
 ) -> Others {
     let unturn = carriage.orientation.inverse();
     let relay = |relayed: &mut Relayed, hands: Vec<(u32, tomori_protocol::Pose)>| {
+        relayed.since(conversation.hands_forgotten());
         let hands = hands
             .into_iter()
             .map(|(source, pose)| {
@@ -273,5 +286,81 @@ mod tests {
             relayed.update(at(step * 90), vec![(6, hand(step as f32, 0.0))]);
         }
         assert_eq!(relayed.tracks[&6].delay(), MOST);
+    }
+
+    #[test]
+    fn a_number_that_may_be_someone_else_s_is_drawn_where_its_hand_first_is_never_from_the_last_one_s()
+     {
+        use crate::scene::fixtures::{joined, space};
+        use tomori_client::{ConnectionState, Event};
+        use tomori_protocol::{Participant, Pose, ServerMessage};
+
+        let start = Instant::now();
+        let at = |milliseconds: u64| start + Duration::from_millis(milliseconds);
+        let carriage = crate::anchors::Anchor {
+            position: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+        };
+        let with_bob = |id: &'static str| {
+            space(move |state| {
+                state.id = id.into();
+                state.participants.push(Participant {
+                    name: "Bob".into(),
+                    source: 2,
+                    engagement: None,
+                });
+            })
+        };
+        let presence = |x: f32| {
+            Event::Message(ServerMessage::Presence {
+                source: 2,
+                head: Pose::HOME,
+                left: None,
+                right: Some(Pose::at([x, 1.0, 0.0])),
+                hands: None,
+            })
+        };
+        let mut conversation = joined();
+        let mut relayed = crate::sides::Hands::<Relayed>::default();
+        let mut drawn = |conversation: &crate::conversation::Conversation, milliseconds: u64| {
+            others(&mut relayed, conversation, carriage, at(milliseconds))
+                .0
+                .iter()
+                .map(|(_, hand)| hand.position.x)
+                .collect::<Vec<_>>()
+        };
+        // Moving, and so drawn between its updates.
+        conversation.apply(with_bob("space-1"));
+        conversation.apply(presence(0.0));
+        assert_eq!(drawn(&conversation, 0), [0.0]);
+        conversation.apply(presence(0.014));
+        assert_eq!(drawn(&conversation, 14), [0.0]);
+        // In another space, the same number is drawn where its first update says, at once.
+        conversation.apply(with_bob("space-2"));
+        conversation.apply(presence(5.0));
+        assert_eq!(drawn(&conversation, 21), [5.0]);
+        conversation.apply(presence(5.014));
+        assert_eq!(drawn(&conversation, 35), [5.0]);
+        // Likewise after connecting again.
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: tomori_protocol::ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: vec![],
+            utterance_limit: None,
+            name: None,
+        }));
+        conversation.apply(with_bob("space-2"));
+        conversation.apply(presence(9.0));
+        assert_eq!(drawn(&conversation, 42), [9.0]);
+        // And once the participant has left, whoever has their number next.
+        conversation.apply(space(|state| state.id = "space-2".into()));
+        assert!(drawn(&conversation, 49).is_empty());
+        conversation.apply(with_bob("space-2"));
+        conversation.apply(presence(2.0));
+        assert_eq!(drawn(&conversation, 56), [2.0]);
     }
 }

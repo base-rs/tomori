@@ -311,6 +311,9 @@ pub struct Conversation {
     right_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
     /// The others' left hands, likewise.
     left_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
+    /// How many times the others' hands have been forgotten, on connecting and on leaving or joining a space, after
+    /// which their numbers may be someone else's.
+    hands_forgotten: u64,
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
@@ -540,6 +543,7 @@ impl Conversation {
             source: None,
             right_hands: std::collections::BTreeMap::new(),
             left_hands: std::collections::BTreeMap::new(),
+            hands_forgotten: 0,
             role: ConnectionRole::Unknown,
             certificate: None,
             pairing: None,
@@ -909,8 +913,7 @@ impl Conversation {
             log::info!("Connected to {server} as {role:?}");
             self.server_name = name.clone();
             self.source = Some(*source);
-            self.right_hands.clear();
-            self.left_hands.clear();
+            self.forget_hands();
             self.utterance_limit = *utterance_limit;
             self.role = *role;
             self.certificate = *certificate;
@@ -1649,8 +1652,7 @@ impl Conversation {
         self.knock = None;
         self.forget_turn();
         self.space = None;
-        self.right_hands.clear();
-        self.left_hands.clear();
+        self.forget_hands();
         self.cards = None;
         self.projection.clear();
         self.channel.clear();
@@ -4498,6 +4500,18 @@ impl Conversation {
     /// The others' left hands, likewise.
     pub fn left_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
         self.others(&self.left_hands)
+    }
+
+    /// How many times the others' hands have been forgotten, on connecting and on leaving or joining a space: once it
+    /// changes, a number may be someone else's, so what was drawn of their hands is forgotten too.
+    pub fn hands_forgotten(&self) -> u64 {
+        self.hands_forgotten
+    }
+
+    fn forget_hands(&mut self) {
+        self.right_hands.clear();
+        self.left_hands.clear();
+        self.hands_forgotten += 1;
     }
 
     fn others(
