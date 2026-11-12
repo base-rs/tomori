@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tomori_protocol::{
     CODE_LINES, Code, Panel, Place, Pose, Projection, TOMORI_WALL, TokenKind, Wall, WallKind,
-    wall as layout,
+    chart::ChartTime, wall as layout,
 };
 
 use crate::{
@@ -80,6 +80,8 @@ const LABEL_INDENT: usize = 24;
 const LIFT: f32 = layout::LIFT;
 /// How far in front of a chart's face its readout is drawn, in the face's own units, so that it is drawn over it.
 const READOUT_LIFT: f32 = 0.002;
+/// The most charts a readout is linked to, besides the chart pointed at.
+pub const LINKED: usize = 8;
 
 /// How near a slot's plane a panel carried must come to dock there, as a share of how far the participant is from the
 /// slot, and the least and most it is, in metres: see [`capture`].
@@ -1754,6 +1756,11 @@ pub struct Output {
     /// which pointing says as the words begin. See `design/projection.md`.
     pub readout: Option<Sheet>,
     pub across: Option<u16>,
+    /// The readouts linked to it, at the same time, over every other chart sharing its time, as their time axes say,
+    /// never their labels: live charts on its wall, by how long before now, where it is live, or fixed windows anywhere,
+    /// by the instant, where it is one, at most [`LINKED`], each drawn in its chart's plane over its face. See the
+    /// linked time cursor in `design/projection.md`.
+    pub linked: Vec<Sheet>,
     /// Which hand's ray the wall editor followed this frame, which [`Self::wall_ticked`] is felt on.
     pub wall_hand: Side,
     /// What it did for the left hand: every field above but these is the right hand's.
@@ -1799,6 +1806,8 @@ pub struct Projector {
     /// The readout last drawn over a chart pointed at, with the face it was drawn over and what it shows, handed over
     /// again while it shows the same, as while the ray is still.
     readout: Option<(Arc<Canvas>, chart_readout::Readout, Arc<Canvas>)>,
+    /// Each readout last linked to it, by the panel it was drawn over, handed over again while it shows the same.
+    linked: HashMap<String, (Arc<Canvas>, chart_readout::Readout, Arc<Canvas>)>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -2201,6 +2210,10 @@ impl Projector {
                 .map_or(1, |chart| chart.points.max(2) - 1);
             (at / last as f32 * f32::from(tomori_protocol::chart::ACROSS)).round() as u16
         });
+        output.linked = self.linked(
+            &standing,
+            read.as_ref().map(|(panel, _, (at, ..))| (*panel, *at)),
+        );
         output.readout = read.map(|(_, model, (_, face, readout))| {
             let canvas = match self.readout.take() {
                 Some((kept_face, kept, canvas))
@@ -2630,6 +2643,67 @@ impl Projector {
                 self.turn = index + 1;
             }
         }
+    }
+
+    /// The readouts linked to the chart `read` points at, at the place across its axis it points at, over every other
+    /// chart standing that shares its time, as [`Output::linked`] says, none carried: drawn from each face as it was
+    /// last drawn, without laying anything out, each handed over again while it shows the same.
+    fn linked(&mut self, standing: &[Standing], read: Option<(&Panel, f32)>) -> Vec<Sheet> {
+        let mut kept = std::mem::take(&mut self.linked);
+        let Some((pointed, time)) = read.and_then(|(panel, at)| {
+            panel
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.time_of(at))
+                .map(|time| (panel, time))
+        }) else {
+            return Vec::new();
+        };
+        let wall = |panel: &Panel| match &panel.place {
+            Place::Wall { wall, .. } => Some(wall.clone()),
+            _ => None,
+        };
+        let carried: Vec<String> = Side::BOTH
+            .into_iter()
+            .filter_map(|side| self.held_in(side).map(str::to_owned))
+            .collect();
+        let here = wall(pointed).filter(|_| !carried.contains(&pointed.id));
+        let mut sheets = Vec::new();
+        for (panel, model, fit) in standing {
+            if sheets.len() == LINKED {
+                break;
+            }
+            let shares = panel.id != pointed.id
+                && !carried.contains(&panel.id)
+                && (matches!(time, ChartTime::Instant { .. })
+                    || (here.is_some() && wall(panel) == here));
+            let Some((face, readout)) = panel
+                .chart
+                .as_ref()
+                .filter(|_| shares)
+                .and_then(|chart| chart.at_time(time))
+                .and_then(|at| self.faces_for(panel).linked(*fit, at))
+            else {
+                continue;
+            };
+            let drawn = match kept.remove(&panel.id) {
+                Some((kept_face, kept_readout, canvas))
+                    if Arc::ptr_eq(&kept_face, &face) && kept_readout == readout =>
+                {
+                    (kept_face, kept_readout, canvas)
+                }
+                _ => {
+                    let canvas = crate::frame_timing::drawn(readout.overlay(&face));
+                    (face, readout, canvas)
+                }
+            };
+            sheets.push(Sheet {
+                canvas: Some(drawn.2.clone()),
+                model: Some(*model * Mat4::from_translation(Vec3::Z * READOUT_LIFT)),
+            });
+            self.linked.insert(panel.id.clone(), drawn);
+        }
+        sheets
     }
 
     /// The faces of `panel`, which stands, and so has them.

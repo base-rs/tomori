@@ -547,3 +547,152 @@ fn a_chart_s_range_is_fixed_where_its_axis_says_and_otherwise_round_above_what_i
     assert_eq!(flat.range(), (5.0, 6.0));
     assert_eq!(Chart::new(2).range(), (0.0, 1.0));
 }
+
+#[test]
+fn a_time_on_one_chart_is_found_on_another_of_its_kind_by_its_time_axis_never_its_labels() {
+    let live = |points: u32, step_ms: u32| Chart::new(points).with_time(TimeAxis::Live { step_ms });
+    // Ten minutes ago on 15 minutes at 5 s is the 50th minute of an hour's chart at a minute, and covered by neither 5
+    // minutes nor a chart that says nothing of its time, whatever its labels say.
+    let quarter = live(181, 5_000);
+    let ten = quarter.time_of(60.0).unwrap();
+    assert_eq!(ten, ChartTime::BeforeNow { ms: 600_000.0 });
+    assert_eq!(live(61, 60_000).at_time(ten), Some(50.0));
+    assert_eq!(live(61, 5_000).at_time(ten), None);
+    let labelled =
+        Chart::new(61).with_labels(vec![AxisLabel::new(0, "-1 h"), AxisLabel::new(60, "now")]);
+    assert_eq!(labelled.at_time(ten), None);
+    assert_eq!(labelled.time_of(30.0), None);
+    // Within half a point of its ends it is its end; nonsense is the first point.
+    assert_eq!(
+        live(61, 60_000).at_time(ChartTime::BeforeNow { ms: -20_000.0 }),
+        Some(60.0)
+    );
+    assert_eq!(
+        quarter.time_of(f32::NAN),
+        Some(ChartTime::BeforeNow { ms: 900_000.0 })
+    );
+    // A fixed window, 02:20 to 02:50 UTC on 12 November 2026, links only by the instant, to a window that overlaps it,
+    // never to a live chart, and never to the same time of day on another day.
+    const DAY: i64 = 86_400_000;
+    let at = |hours: i64, minutes: i64| 1_794_441_600_000 + hours * 3_600_000 + minutes * 60_000;
+    let fixed = |from: i64, to: i64| {
+        Chart::new(181).with_time(TimeAxis::Fixed {
+            from_ms: from,
+            to_ms: to,
+        })
+    };
+    let east = fixed(at(2, 20), at(2, 50));
+    let instant = east.time_of(102.0).unwrap();
+    assert_eq!(
+        instant,
+        ChartTime::Instant {
+            utc_ms: at(2, 37) as f64
+        }
+    );
+    assert_eq!(fixed(at(2, 30), at(3, 0)).at_time(instant), Some(42.0));
+    assert_eq!(
+        fixed(at(2, 30) - DAY, at(3, 0) - DAY).at_time(instant),
+        None
+    );
+    assert_eq!(fixed(at(3, 0), at(3, 30)).at_time(instant), None);
+    assert_eq!(quarter.at_time(instant), None);
+    assert_eq!(east.at_time(ten), None);
+    // A window of no width, or a step of none, as an untrusted server might send, finds nothing; an unknown kind
+    // neither.
+    assert_eq!(fixed(at(2, 20), at(2, 20)).at_time(instant), None);
+    assert_eq!(live(61, 0).at_time(ten), None);
+    let mut unknown = live(61, 60_000);
+    unknown.time = Some(TimeAxis::Unknown);
+    assert_eq!((unknown.time_of(1.0), unknown.at_time(ten)), (None, None));
+}
+
+#[test]
+fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s_structure() {
+    let with = |time: TimeAxis| Chart::new(181).with_time(time).cleaned().unwrap().time;
+    assert_eq!(
+        with(TimeAxis::Live { step_ms: 5_000 }),
+        Some(TimeAxis::Live { step_ms: 5_000 })
+    );
+    assert_eq!(
+        with(TimeAxis::Live {
+            step_ms: CHART_STEP_MS
+        }),
+        Some(TimeAxis::Live {
+            step_ms: CHART_STEP_MS
+        })
+    );
+    assert_eq!(with(TimeAxis::Live { step_ms: 0 }), None);
+    assert_eq!(
+        with(TimeAxis::Live {
+            step_ms: CHART_STEP_MS + 1
+        }),
+        None
+    );
+    let fixed = TimeAxis::Fixed {
+        from_ms: 0,
+        to_ms: 1_800_000,
+    };
+    assert_eq!(with(fixed), Some(fixed));
+    assert_eq!(
+        with(TimeAxis::Fixed {
+            from_ms: 5,
+            to_ms: 5
+        }),
+        None
+    );
+    assert_eq!(
+        with(TimeAxis::Fixed {
+            from_ms: 9,
+            to_ms: 5
+        }),
+        None
+    );
+    assert_eq!(
+        with(TimeAxis::Fixed {
+            from_ms: -CHART_INSTANT_MS - 1,
+            to_ms: 0
+        }),
+        None
+    );
+    assert_eq!(
+        with(TimeAxis::Fixed {
+            from_ms: 0,
+            to_ms: CHART_INSTANT_MS + 1
+        }),
+        None
+    );
+    let widest = 180 * i64::from(CHART_STEP_MS);
+    assert!(
+        with(TimeAxis::Fixed {
+            from_ms: 0,
+            to_ms: widest
+        })
+        .is_some()
+    );
+    assert_eq!(
+        with(TimeAxis::Fixed {
+            from_ms: 0,
+            to_ms: widest + 1
+        }),
+        None
+    );
+    assert_eq!(with(TimeAxis::Unknown), None);
+    // On the wire, absent where it says nothing, and read as nothing from an older server.
+    let fixed_chart = Chart::new(181).with_time(fixed);
+    let wire = serde_json::to_value(&fixed_chart).unwrap();
+    assert_eq!(
+        wire["time"],
+        serde_json::json!({"kind": "fixed", "from_ms": 0, "to_ms": 1_800_000})
+    );
+    assert!(
+        serde_json::to_value(Chart::new(181))
+            .unwrap()
+            .get("time")
+            .is_none()
+    );
+    let older: Chart = serde_json::from_str(r#"{"points": 181}"#).unwrap();
+    assert_eq!(older.time, None);
+    // A window moved is another structure, as its labels moved are.
+    assert!(fixed_chart.same_structure(&fixed_chart.clone()));
+    assert!(!fixed_chart.same_structure(&Chart::new(181)));
+}

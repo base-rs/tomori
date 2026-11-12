@@ -26,6 +26,8 @@ const TIME: Rgba = [0.92, 0.93, 0.95, 1.0];
 /// The label's backing and frame, and the ring about each dot that keeps it clear of the lines under it.
 const BACKING: Rgba = [0.02, 0.035, 0.06, 0.94];
 const FRAME: Rgba = [0.55, 0.62, 0.7, 0.5];
+/// How much fainter a linked readout's line and frame are than those of the chart pointed at.
+const LINKED: f32 = 0.55;
 /// How far the label stands from the line, and the space inside its frame, in font pixels.
 const GAP: f32 = 6.0;
 const INSET: (f32, f32) = (3.0, 2.0);
@@ -40,6 +42,9 @@ pub struct Readout {
     pub dots: Vec<([f32; 2], Rgba)>,
     pub lines: Vec<(String, Rgba)>,
     pub label: [f32; 4],
+    /// Whether it is linked to the readout of another chart pointed at, sharing its time, rather than where the ray
+    /// meets this one: drawn fainter, so that the chart pointed at stands out.
+    pub linked: bool,
 }
 
 impl Readout {
@@ -118,6 +123,15 @@ impl Readout {
             dots,
             lines,
             label: [left, top, across, down],
+            linked: false,
+        }
+    }
+
+    /// It linked to the readout of another chart pointed at, at the same time: its line and frame fainter.
+    pub fn linked(self) -> Self {
+        Self {
+            linked: true,
+            ..self
         }
     }
 
@@ -129,11 +143,19 @@ impl Readout {
         canvas.background = [0.0; 4];
         canvas.rows = vec![Row::default(); face.rows.len()];
         let (top, bottom) = self.span;
+        let faint = |[red, green, blue, alpha]: Rgba| {
+            [
+                red,
+                green,
+                blue,
+                if self.linked { alpha * LINKED } else { alpha },
+            ]
+        };
         canvas.shapes.push(Shape::Stroke {
             from: [self.x, top],
             to: [self.x, bottom],
             width: 1.0,
-            color: CROSSHAIR,
+            color: faint(CROSSHAIR),
         });
         for (centre, color) in &self.dots {
             canvas.shapes.push(Shape::Dot {
@@ -159,7 +181,7 @@ impl Readout {
         });
         canvas
             .shapes
-            .push(Shape::frame(left, top, [across, down], 1.0, FRAME));
+            .push(Shape::frame(left, top, [across, down], 1.0, faint(FRAME)));
         for (row, (text, color)) in self.lines.iter().enumerate() {
             canvas.labels.push(Label::new(
                 left + INSET.0,

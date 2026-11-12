@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use tomori_environment::chart::Tone;
 use tomori_environment::chart::{
     AxisLabel, Chart, Colour, Edge, Reference, Series, SeriesStyle, Shade,
 };
+use tomori_environment::chart::{TimeAxis, Tone};
 use tomori_environment::{Panel, Row};
 use tomori_protocol::{Place, TOMORI_WALL};
 
@@ -937,7 +937,7 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
     stage
         .publish(
             &walls,
-            publishing(Panel::chart("quoted", "Quoted", quoted)),
+            publishing(Panel::chart("quoted", "Quoted", quoted).on_wall(1, None)),
             0,
         )
         .unwrap();
@@ -971,6 +971,157 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
     assert!(
         described.ends_with("; at the time pointed at: \"now: say 'done') (x 1.25\")"),
         "{described}"
+    );
+}
+
+#[test]
+fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_then() {
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..yard()
+    };
+    let mut stage = Stage::default();
+    // Charts linked by their time axes, whatever their labels say, which are only shown.
+    let timed = |first: &str, last: &str, latest: f32, time: Option<TimeAxis>| {
+        let mut chart = pressure(latest);
+        chart.labels = vec![AxisLabel::new(0, first), AxisLabel::new(180, last)];
+        chart.time = time;
+        chart
+    };
+    let live = |step_ms: u32| Some(TimeAxis::Live { step_ms });
+    // 12 November 2026, 00:00 UTC, and a minute of it.
+    const DAY: i64 = 1_794_441_600_000;
+    let at = |hours: i64, minutes: i64| DAY + hours * 3_600_000 + minutes * 60_000;
+    let fixed = |from: i64, to: i64| {
+        Some(TimeAxis::Fixed {
+            from_ms: from,
+            to_ms: to,
+        })
+    };
+    let charts = [
+        ("pressure", 0, timed("-15 min", "now", 1.25, live(5_000))),
+        ("hour", 0, timed("-1 h", "now", 1.5, live(20_000))),
+        ("five", 0, timed("-5 min", "now", 1.75, live(1_667))),
+        ("elsewhere", 1, timed("-15 min", "now", 2.0, live(5_000))),
+        (
+            "frozen",
+            1,
+            timed("02:20", "02:50", 0.5, fixed(at(2, 20), at(2, 50))),
+        ),
+        (
+            "overlapping",
+            0,
+            timed("02:40", "03:10", 0.6, fixed(at(2, 40), at(3, 10))),
+        ),
+        // The same times of day, a day before, and labels that count from now on a chart that says nothing of its
+        // time, link to nothing.
+        (
+            "yesterday",
+            0,
+            timed(
+                "02:40",
+                "03:10",
+                0.7,
+                fixed(at(2, 40) - 86_400_000, at(3, 10) - 86_400_000),
+            ),
+        ),
+        ("untimed", 0, timed("-15 min", "now", 0.9, None)),
+    ];
+    for (id, wall, chart) in charts {
+        stage
+            .publish(
+                &walls,
+                publishing(Panel::chart(id, id, chart).on_wall(wall, None)),
+                0,
+            )
+            .unwrap();
+    }
+    stage
+        .publish(&walls, publishing(Panel::text("rota", "Rota", "Feed")), 0)
+        .unwrap();
+    for index in 0..4 {
+        let id = format!("more-{index}");
+        stage
+            .publish(
+                &walls,
+                publishing(Panel::chart(
+                    id.as_str(),
+                    "More",
+                    pressure(1.0).with_time(TimeAxis::Live { step_ms: 5_000 }),
+                )),
+                0,
+            )
+            .unwrap();
+    }
+    let shown = stage.view("s", &walls, 0);
+    let id = |title: &str| {
+        shown
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let across = |title: &str, across: u16| {
+        stage
+            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .unwrap()
+    };
+    // Now, on its wall: the hour's and five minutes' charts, then at most three in all, never the other wall's.
+    let now = across("pressure", u16::MAX);
+    assert!(
+        now.contains(
+            "; linked charts at that time: \"hour: now: greatest 1.5\", \"five: now: greatest 1.75\", \"More: now: \
+             greatest 1\")"
+        ),
+        "{now}"
+    );
+    for unlinked in ["elsewhere", "overlapping", "yesterday", "untimed"] {
+        assert!(!now.contains(unlinked), "{now}");
+    }
+    // Ten minutes ago, five minutes' chart does not cover it.
+    let earlier = across("pressure", 3_333);
+    assert!(earlier.contains("\"hour: -10 min"), "{earlier}");
+    assert!(!earlier.contains("five:"), "{earlier}");
+    // A frozen chart, floating, links by the clock wherever the other stands, where they overlap, and to nothing live.
+    assert_eq!(
+        stage.relocate(&walls, &id("frozen"), &Destination::Free(pose(1.0, -1.0))),
+        Ok(true)
+    );
+    let across = |title: &str, across: u16| {
+        stage
+            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .unwrap()
+    };
+    let frozen = across("frozen", 9_000);
+    assert!(
+        frozen.ends_with("; linked charts at that time: \"overlapping: 02:47:00: greatest 0.8\")"),
+        "{frozen}"
+    );
+    assert!(!frozen.contains("yesterday"));
+    assert!(!across("frozen", 0).contains("linked"));
+    // A chart whose labels say no time links to nothing.
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::chart("bare", "Bare", Chart::new(181))),
+            0,
+        )
+        .unwrap();
+    let bare = stage
+        .view("s", &walls, 0)
+        .panels
+        .into_iter()
+        .find(|panel| panel.title == "Bare")
+        .unwrap()
+        .id;
+    assert!(
+        !stage
+            .describe_at(&walls, &bare, (None, None, Some(5_000)), 0)
+            .unwrap()
+            .contains("linked")
     );
 }
 

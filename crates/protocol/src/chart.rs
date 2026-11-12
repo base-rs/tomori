@@ -372,6 +372,74 @@ pub struct Chart {
     pub badge: Option<Note>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Note>,
+    /// What its points are in time, if it says: by which a client links its readout to another chart's at the same
+    /// time, never by its labels, which are only shown. An older client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<TimeAxis>,
+}
+
+/// The most milliseconds between a chart's points, a day.
+pub const CHART_STEP_MS: u32 = 86_400_000;
+
+/// The farthest from the Unix epoch a chart's window reaches, in milliseconds either side: the end of the year 9999.
+pub const CHART_INSTANT_MS: i64 = 253_402_300_799_999;
+
+/// What a chart's points are in time: those of a live chart, whose last point is now and each `step_ms` milliseconds
+/// after the one before, or those of a fixed window, whose first point is at `from_ms` and last at `to_ms`, absolute
+/// instants in milliseconds since the Unix epoch, in UTC, the points evenly between. Two charts are linked at the same
+/// time only by these, a live chart to another live chart by how long before now, a fixed window to another by the
+/// instant, never by a time of day. `Unknown` stands for a kind a newer server sends, which links nothing. See the
+/// linked time cursor in `design/projection.md`.
+///
+/// ```
+/// use tomori_protocol::chart::TimeAxis;
+///
+/// assert_eq!(
+///     serde_json::to_string(&TimeAxis::Live { step_ms: 5_000 }).unwrap(),
+///     r#"{"kind":"live","step_ms":5000}"#
+/// );
+/// let newer: TimeAxis = serde_json::from_str(r#"{"kind": "sidereal"}"#).unwrap();
+/// assert_eq!(newer, TimeAxis::Unknown);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TimeAxis {
+    Live {
+        step_ms: u32,
+    },
+    Fixed {
+        from_ms: i64,
+        to_ms: i64,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+impl TimeAxis {
+    /// It as a chart of `points` keeps it once cleaned: a live step from 1 ms to [`CHART_STEP_MS`], and a fixed window
+    /// that ends after it begins, within [`CHART_INSTANT_MS`] of the epoch and no wider than its points at
+    /// [`CHART_STEP_MS`] apart; none otherwise.
+    fn cleaned(self, points: u32) -> Option<Self> {
+        match self {
+            Self::Live { step_ms } => (1..=CHART_STEP_MS).contains(&step_ms).then_some(self),
+            Self::Fixed { from_ms, to_ms } => (from_ms < to_ms
+                && from_ms >= -CHART_INSTANT_MS
+                && to_ms <= CHART_INSTANT_MS
+                && to_ms - from_ms <= i64::from(points - 1) * i64::from(CHART_STEP_MS))
+            .then_some(self),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// A time on a chart's axis, as [`Chart::time_of`] finds it from its [`TimeAxis`]: so many milliseconds before now, on
+/// a live chart, or an absolute instant, in milliseconds since the Unix epoch in UTC, on a fixed window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum ChartTime {
+    BeforeNow { ms: f64 },
+    Instant { utc_ms: f64 },
 }
 
 /// `value` kept to [`SIGNIFICANT`] figures, so that its JSON is short; `None` where it is not finite.
@@ -403,7 +471,14 @@ impl Chart {
             legend: true,
             badge: None,
             status: None,
+            time: None,
         }
+    }
+
+    /// The chart, its points in time as `time` says.
+    pub fn with_time(mut self, time: TimeAxis) -> Self {
+        self.time = Some(time);
+        self
     }
 
     /// The chart, labelled `labels` along its axis.
@@ -547,6 +622,7 @@ impl Chart {
         if let Some(status) = &mut self.status {
             status.text = one_line(&status.text, CHART_STATUS_CHARS);
         }
+        self.time = self.time.and_then(|time| time.cleaned(self.points));
         Ok(self)
     }
 
@@ -565,8 +641,10 @@ impl Chart {
             legend,
             badge: _,
             status: _,
+            time,
         } = self;
         *points == other.points
+            && *time == other.time
             && *labels == other.labels
             && *axis == other.axis
             && *references == other.references
@@ -1004,6 +1082,55 @@ impl Chart {
             larger.minus,
             step.abs() < larger.unit.1,
         )
+    }
+
+    /// The time at `at`, a point's index or a share of the way between two, held to its points, as its [`TimeAxis`] says:
+    /// so many milliseconds before now on a live chart, or the instant on a fixed window; `None` where it says neither.
+    /// Its labels are never read for it. See the linked time cursor in `design/projection.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::chart::{Chart, ChartTime, TimeAxis};
+    ///
+    /// let live = Chart::new(181).with_time(TimeAxis::Live { step_ms: 5_000 });
+    /// assert_eq!(live.time_of(120.0), Some(ChartTime::BeforeNow { ms: 300_000.0 }));
+    /// let hourly = Chart::new(61).with_time(TimeAxis::Live { step_ms: 60_000 });
+    /// assert_eq!(hourly.at_time(ChartTime::BeforeNow { ms: 300_000.0 }), Some(55.0));
+    /// assert_eq!(Chart::new(10).time_of(3.0), None);
+    /// ```
+    pub fn time_of(&self, at: f32) -> Option<ChartTime> {
+        let last = f64::from(self.points.max(2) - 1);
+        let at = if at.is_nan() {
+            0.0
+        } else {
+            f64::from(at).clamp(0.0, last)
+        };
+        match self.time? {
+            TimeAxis::Live { step_ms } => Some(ChartTime::BeforeNow {
+                ms: (last - at) * f64::from(step_ms),
+            }),
+            TimeAxis::Fixed { from_ms, to_ms } => Some(ChartTime::Instant {
+                utc_ms: from_ms as f64 + (to_ms as f64 - from_ms as f64) * at / last,
+            }),
+            TimeAxis::Unknown => None,
+        }
+    }
+
+    /// Where along its time axis `time` is, a point's index or a share of the way between two, as its [`TimeAxis`] says:
+    /// a time before now only on a live chart and an instant only on a fixed window; `None` for another kind, a chart
+    /// that says neither, or a time before its first point or after its last by more than half a point, so that a chart
+    /// that does not cover it shows nothing there.
+    pub fn at_time(&self, time: ChartTime) -> Option<f32> {
+        let last = f64::from(self.points.max(2) - 1);
+        let at = match (self.time?, time) {
+            (TimeAxis::Live { step_ms }, ChartTime::BeforeNow { ms }) => {
+                last - ms / f64::from(step_ms)
+            }
+            (TimeAxis::Fixed { from_ms, to_ms }, ChartTime::Instant { utc_ms }) => {
+                (utc_ms - from_ms as f64) / (to_ms as f64 - from_ms as f64) * last
+            }
+            _ => return None,
+        };
+        (at.is_finite() && (-0.5..=last + 0.5).contains(&at)).then(|| at.clamp(0.0, last) as f32)
     }
 
     /// How a value of the chart reads, `value` in its axis's unit, `203,800 a minute`; `no data` where it has none.

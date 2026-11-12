@@ -2433,6 +2433,7 @@ impl Step {
                 && let Some(readout) = readout.clone()
             {
                 projection.push(readout);
+                projection.extend(projected.linked.iter().cloned());
             } else if let (Some(panel), Some((_, _, point)), None) =
                 (&resolved.panel, panel_pointed, self.projector.held_in(side))
                 && let Some(shown) = conversation
@@ -7780,6 +7781,92 @@ mod tests {
                 Resource::panel("panel-1"),
             ]
         );
+    }
+
+    #[test]
+    fn pointing_at_a_frozen_chart_draws_a_readout_linked_to_it_over_another_frozen_chart() {
+        use tomori_protocol::chart::{AxisLabel, TimeAxis};
+        use tomori_protocol::{Panel, Place, Pose, ServerMessage};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| state.projection = true));
+        let at = |x: f32| arrival::HOME + Vec3::new(x, 0.0, -2.0);
+        let frozen = |id: &str, x: f32, from: &str, to: &str| {
+            let mut chart = crate::chart::fixtures::admissions();
+            let last = chart.points - 1;
+            chart.labels = vec![AxisLabel::new(0, from), AxisLabel::new(last, to)];
+            // The same half hour of 12 November 2026 in UTC, by which they link, the labels only shown.
+            chart.time = Some(TimeAxis::Fixed {
+                from_ms: 1_794_450_000_000,
+                to_ms: 1_794_451_800_000,
+            });
+            Panel::new(
+                id,
+                id,
+                chart.summary(),
+                Place::Free {
+                    pose: Pose::upright_facing(at(x).to_array(), arrival::HOME.to_array()),
+                },
+            )
+            .with_chart(chart)
+        };
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![
+                        frozen("us-east1", -0.6, "02:20", "02:50"),
+                        frozen("eu-west1", 0.6, "02:20", "02:50"),
+                    ]),
+            ),
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let overlays = |frame: &Frame| {
+            frame
+                .projection
+                .iter()
+                .filter_map(|sheet| sheet.canvas.as_deref())
+                .filter(|canvas| canvas.background[3] == 0.0 && !canvas.labels.is_empty())
+                .map(|canvas| crate::ui_text::plain(&canvas.labels[0].cells))
+                .collect::<Vec<_>>()
+        };
+        // Through the middle of the first chart's plot, a little below its middle: the same time on both.
+        let pointing = Senses {
+            beam: true,
+            ray: Ray::new(
+                arrival::HOME,
+                at(-0.6) + Vec3::new(0.0, -20.0 * crate::projection::PIXEL, 0.0) - arrival::HOME,
+            ),
+            ..senses()
+        };
+        let mut frame = step.update(
+            &pointing,
+            &mut conversation,
+            &mut felt(),
+            Instant::now(),
+            FRAME,
+        );
+        for _ in 0..3 {
+            frame = step.update(
+                &pointing,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                FRAME,
+            );
+        }
+        let read = overlays(&frame);
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert_eq!(read[0], read[1]);
+        assert!(read[0].starts_with("02:3"), "{read:?}");
+        // Pointing at nothing, neither.
+        let away = Senses {
+            beam: true,
+            ray: Ray::new(arrival::HOME, Vec3::Y),
+            ..senses()
+        };
+        let frame = step.update(&away, &mut conversation, &mut felt(), Instant::now(), FRAME);
+        assert!(overlays(&frame).is_empty());
     }
 
     #[test]

@@ -541,7 +541,8 @@ fn a_chart_panel_from_a_server_before_versions_is_followed_by_its_points() {
 /// with a latest point of its own for it, and a text panel floating.
 fn charts(seq: u64) -> Projection {
     let chart = |index: usize| {
-        let mut chart = crate::chart::fixtures::pressure();
+        let mut chart = crate::chart::fixtures::pressure()
+            .with_time(tomori_protocol::chart::TimeAxis::Live { step_ms: 5_000 });
         *chart.series[0].values.last_mut().unwrap() =
             Some(0.5 + 0.01 * (seq as usize + index) as f32);
         chart
@@ -939,4 +940,257 @@ fn scanning_a_chart_s_plot_reads_it_over_its_face_without_drawing_the_face_again
     let ray = Ray::new(HOME, slot_middle(&shown, 2) - HOME);
     let output = projector.update(input(&shown, HOME, ray));
     assert_eq!((output.readout, output.across), (None, None));
+}
+
+/// Charts that share the time of a chart pointed at, on its wall where its axis counts back from now, or anywhere where
+/// it says clock times, show a readout linked to it at the same time, drawn over their faces without laying anything
+/// out; charts that do not cover the time, on another wall, carried or of the other kind show none.
+#[test]
+fn pointing_at_a_chart_links_a_readout_on_every_chart_sharing_its_time() {
+    use tomori_protocol::chart::{AxisLabel, TimeAxis};
+    // Labels are only shown: charts link by their time axes.
+    let timed = |labels: Vec<AxisLabel>, time: Option<TimeAxis>| {
+        let mut chart = crate::chart::fixtures::pressure();
+        chart.labels = labels;
+        chart.time = time;
+        chart
+    };
+    let live = |first: &str, step_ms: u32| {
+        timed(
+            vec![AxisLabel::new(0, first), AxisLabel::new(180, "now")],
+            Some(TimeAxis::Live { step_ms }),
+        )
+    };
+    // 12 November 2026, 00:00 UTC, and a minute of it.
+    const DAY: i64 = 1_794_441_600_000;
+    let at = |hours: i64, minutes: i64| DAY + hours * 3_600_000 + minutes * 60_000;
+    let fixed = |from: &str, to: &str, from_ms: i64, to_ms: i64| {
+        timed(
+            vec![AxisLabel::new(0, from), AxisLabel::new(180, to)],
+            Some(TimeAxis::Fixed { from_ms, to_ms }),
+        )
+    };
+    let chart = |id: &str, chart: tomori_protocol::Chart, place: Place| {
+        Panel::new(id, id, chart.summary(), place).with_chart(chart)
+    };
+    let floating = |x: f32| Place::Free {
+        pose: Pose::upright_facing([x, 2.9, -1.5], HOME.to_array()),
+    };
+    let mut shown = projection(vec![
+        chart("pressure", live("-15 min", 5_000), on("wall-1", 0)),
+        // An hour's chart covers ten minutes ago; five minutes' does not.
+        chart("hour", live("-1 h", 20_000), on("wall-1", 1)),
+        chart("five", live("-5 min", 1_667), on("wall-1", 2)),
+        Panel::new("notes", "Notes", "Text.", on("wall-1", 3)),
+        // Labels that count back from now, on a chart that says nothing of its time, link nothing.
+        chart(
+            "untimed",
+            timed(
+                vec![AxisLabel::new(0, "-1 h"), AxisLabel::new(180, "now")],
+                None,
+            ),
+            on("wall-1", 4),
+        ),
+        // On another wall, the same live window is not shared.
+        chart("elsewhere", live("-15 min", 5_000), on("wall-2", 0)),
+        // Frozen windows, overlapping by ten minutes, one that does not overlap, and the same times a day before.
+        chart(
+            "frozen",
+            fixed("02:20", "02:50", at(2, 20), at(2, 50)),
+            floating(-0.8),
+        ),
+        chart(
+            "overlapping",
+            fixed("02:40", "03:10", at(2, 40), at(3, 10)),
+            floating(0.8),
+        ),
+        chart(
+            "later",
+            fixed("05:00", "05:30", at(5, 0), at(5, 30)),
+            floating(0.0),
+        ),
+        chart(
+            "yesterday",
+            fixed(
+                "02:40",
+                "03:10",
+                at(2, 40) - 86_400_000,
+                at(3, 10) - 86_400_000,
+            ),
+            floating(1.6),
+        ),
+    ]);
+    shown.walls.push(Wall::new(
+        "wall-2",
+        WallKind::Added,
+        Pose::upright_facing([4.0, 1.5, -3.0], [4.0, 1.5, 0.0]),
+    ));
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let walls: Vec<(&Wall, Mat4)> = shown
+        .walls
+        .iter()
+        .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
+        .collect();
+    // The ray from home at `at`, a share of the way across the plot of `panel`, halfway down it.
+    let towards = |projector: &Projector, panel: &str, share: f32| {
+        let (panel_model, _) = projector
+            .stands(shown.panel(panel).unwrap(), &walls)
+            .unwrap();
+        let canvas = face(projector, panel);
+        let plot = projector.faces[panel].sizes[0]
+            .face
+            .as_ref()
+            .and_then(|face| face.plot.clone())
+            .unwrap();
+        let (width, height) = canvas.size();
+        let [x, y] = [plot.left + plot.width * share, plot.top + plot.height / 2.0];
+        let local = Vec3::new(
+            (x + canvas.padding.0 as f32) * canvas.pixel - width / 2.0,
+            height / 2.0 - (y + canvas.padding.1 as f32) * canvas.pixel,
+            0.0,
+        );
+        Ray::new(HOME, panel_model.transform_point3(local) - HOME)
+    };
+    let linked = |projector: &Projector| {
+        let mut linked: Vec<(String, String)> = projector
+            .linked
+            .iter()
+            .map(|(id, (_, readout, _))| (id.clone(), readout.lines[0].0.clone()))
+            .collect();
+        linked.sort();
+        linked
+    };
+    let counted = counts();
+    // Ten minutes ago on the pressure chart is ten minutes ago on the hour's, on its wall alone.
+    let ray = towards(&projector, "pressure", 1.0 / 3.0);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert!(output.readout.is_some());
+    assert_eq!(output.linked.len(), 1);
+    assert_eq!(
+        linked(&projector),
+        [("hour".to_owned(), "-10 min".to_owned())]
+    );
+    let (_, readout, _) = &projector.linked["hour"];
+    assert!(readout.linked);
+    let (hour_model, _) = projector
+        .stands(shown.panel("hour").unwrap(), &walls)
+        .unwrap();
+    assert_eq!(
+        output.linked[0].model,
+        Some(hour_model * Mat4::from_translation(Vec3::Z * super::super::READOUT_LIFT))
+    );
+    // Still, it is handed over again; nothing was laid out or drawn again.
+    let again = projector.update(input(&shown, HOME, ray));
+    assert!(Arc::ptr_eq(
+        output.linked[0].canvas.as_ref().unwrap(),
+        again.linked[0].canvas.as_ref().unwrap()
+    ));
+    assert_eq!(counts(), counted);
+    // Two minutes ago, the five minutes' chart covers it too.
+    let ray = towards(&projector, "pressure", 13.0 / 15.0);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert_eq!(output.linked.len(), 2);
+    assert_eq!(
+        linked(&projector)
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["five", "hour"]
+    );
+    // The hour's chart carried in the left hand is left out, while its wall's other charts still link.
+    let hour = towards(&projector, "hour", 0.5);
+    let left = |grip: f32| crate::projection::Hold {
+        ray: hour,
+        grip: Some(grip),
+        active: true,
+        pointing: true,
+        ..Default::default()
+    };
+    let carrying = |grip: f32| Input {
+        left: left(grip),
+        ..input(&shown, HOME, ray)
+    };
+    projector.update(carrying(0.0));
+    projector.update(carrying(1.0));
+    assert_eq!(projector.held_in(crate::sides::Side::Left), Some("hour"));
+    let output = projector.update(carrying(1.0));
+    assert_eq!(output.linked.len(), 1);
+    assert_eq!(linked(&projector)[0].0, "five");
+    projector.update(carrying(0.0));
+    // A frozen chart links to the one overlapping it, by the instant, wherever it stands, and to nothing live, nor to
+    // the same times of day a day before.
+    let ray = towards(&projector, "frozen", 5.0 / 6.0);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert!(output.readout.is_some());
+    let frozen = linked(&projector);
+    assert_eq!(frozen.len(), 1);
+    assert_eq!(frozen[0].0, "overlapping");
+    // About 02:45, to the second, as its points are ten seconds apart, where the ray meets the plot to the pixel.
+    assert!(frozen[0].1.starts_with("02:4"), "{}", frozen[0].1);
+    // Where they do not overlap, nothing.
+    let ray = towards(&projector, "frozen", 0.1);
+    assert!(projector.update(input(&shown, HOME, ray)).linked.is_empty());
+    // Off the plot, or pointing at nothing, none.
+    assert!(
+        projector
+            .update(input(&shown, HOME, None))
+            .linked
+            .is_empty()
+    );
+    assert!(projector.linked.is_empty());
+}
+
+/// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
+#[test]
+fn a_face_not_yet_drawn_or_of_no_chart_links_no_readout() {
+    let chart = crate::chart::fixtures::pressure();
+    let charted =
+        Panel::new("chart", "Pressure", chart.summary(), on("wall-1", 0)).with_chart(chart);
+    assert!(Faces::new(&charted).linked(Fit::SLOT, 60.0).is_none());
+    let mut text = Faces::new(&Panel::new("text", "Notes", "Text.", on("wall-1", 1)));
+    text.face(Fit::SLOT, (0, &RowMarks::default()), FRAME);
+    assert!(text.linked(Fit::SLOT, 60.0).is_none());
+    let mut drawn = Faces::new(&charted);
+    drawn.face(Fit::SLOT, (0, &RowMarks::default()), FRAME);
+    let (_, readout) = drawn.linked(Fit::SLOT, 60.0).expect("a chart drawn links");
+    assert!(readout.linked);
+    assert_eq!(readout.lines[0].0, "-10 min");
+}
+
+/// Of the fifteen charts on the wall of a chart pointed at, every one of them sharing its time, at most eight link.
+#[test]
+fn at_most_eight_charts_link_to_one_pointed_at() {
+    let shown = charts(5);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let walls: Vec<(&Wall, Mat4)> = shown
+        .walls
+        .iter()
+        .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
+        .collect();
+    let (panel_model, _) = projector
+        .stands(shown.panel("chart-0").unwrap(), &walls)
+        .unwrap();
+    let canvas = face(&projector, "chart-0");
+    let plot = projector.faces["chart-0"].sizes[0]
+        .face
+        .as_ref()
+        .and_then(|face| face.plot.clone())
+        .unwrap();
+    let (width, height) = canvas.size();
+    let [x, y] = [plot.left + plot.width * 0.9, plot.top + plot.height / 2.0];
+    let local = Vec3::new(
+        (x + canvas.padding.0 as f32) * canvas.pixel - width / 2.0,
+        height / 2.0 - (y + canvas.padding.1 as f32) * canvas.pixel,
+        0.0,
+    );
+    let ray = Ray::new(HOME, panel_model.transform_point3(local) - HOME);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert!(output.readout.is_some());
+    assert_eq!(output.linked.len(), super::super::LINKED);
+    assert!(projector.linked.keys().all(|id| {
+        let index: usize = id.strip_prefix("chart-").unwrap().parse().unwrap();
+        (1..16).contains(&index)
+    }));
 }
