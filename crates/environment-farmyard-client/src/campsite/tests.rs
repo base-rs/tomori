@@ -1,24 +1,51 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use std::time::Duration;
+
 use glam::Quat;
+use tomori_physics::message::{Holding, Landed, Shared as Body, State, Update};
+use tomori_physics::{Held, PULL_TIME, Precision};
+use tomori_scene::client_side::{Actions, Phase, Side};
 
 use super::*;
+use crate::loose::placed;
 
-/// The sticks, as the server side shares them fresh, with `change` made.
-fn shared(change: impl FnOnce(&mut Vec<Stick>)) -> Shared {
-    let mut sticks = vec![Stick::default(); STICKS];
-    change(&mut sticks);
-    Shared { sticks }
+/// The sticks, as the server side shares them, each on its log, fresh, with `change` made.
+fn shared(change: impl FnOnce(&mut Shared)) -> Shared {
+    let mut shared = Shared {
+        sticks: State {
+            bodies: (0..STICKS)
+                .map(|index| Body {
+                    body: campsite::body(index),
+                    epoch: 0,
+                    at: campsite::home(index).encoded(Precision::Rest),
+                    moving: false,
+                    held: None,
+                })
+                .collect(),
+        },
+        toast: vec![0.0; STICKS],
+    };
+    change(&mut shared);
+    shared
 }
 
-/// A hand holding a stick by its handle, as it lies racked.
+/// Stick `index` held by participant `by`, in their right hand, by its handle.
+fn held_by(by: u32) -> Option<Held> {
+    Some(Held {
+        by,
+        hand: tomori_physics::Side::Right,
+        offset: campsite::grip().encoded(Precision::Rest),
+    })
+}
+
+/// A hand holding a stick by its handle, as it leans on its log.
 fn hand_on(index: usize) -> Hand {
-    let pose = Pose::racked(index);
-    Hand::new(
-        pose.butt + pose.along * campsite::HOLD,
-        Quat::from_rotation_arc(Vec3::NEG_Z, pose.along),
-    )
+    let hand = campsite::home(index)
+        .snapped(Precision::Rest)
+        .then(&campsite::grip().inverse());
+    Hand::new(hand.position, hand.rotation)
 }
 
 /// A hand holding a stick's marshmallow over the heart of the fire.
@@ -29,14 +56,37 @@ fn over_the_fire() -> Hand {
     Hand::new(hand, Quat::from_rotation_arc(Vec3::NEG_Z, along))
 }
 
+fn grab(index: usize, hand: Hand, phase: Phase, side: Side) -> Grab {
+    Grab::new(format!("stick-{index}"), hand, phase).of(side)
+}
+
+/// What changed, as the server side says it, of stick `index`: who holds it at what epoch.
+fn holding(index: usize, epoch: u32, held: Option<Held>) -> Event {
+    Event {
+        clock: 1,
+        sticks: Update {
+            holding: vec![Holding {
+                body: campsite::body(index),
+                epoch,
+                held,
+            }],
+            ..Update::default()
+        },
+        toast: Vec::new(),
+    }
+}
+
 #[test]
 fn a_ray_passing_near_a_free_stick_takes_it_with_the_grip_and_the_bonfire_is_pointed_at() {
     let mut sticks = Sticks::new();
-    let at = |pose: Pose| Ray::new(pose.middle() + Vec3::new(0.02, 1.5, 0.0), Vec3::NEG_Y).unwrap();
+    let at = |index: usize| {
+        let pose = Pose::of(&campsite::home(index));
+        Ray::new(pose.middle() + Vec3::new(0.02, 1.5, 0.0), Vec3::NEG_Y).unwrap()
+    };
     // Nothing before the server side says what there is.
-    assert_eq!(sticks.pick(&at(Pose::racked(1))), None);
-    sticks.share(shared(|_| {}));
-    let picked = sticks.pick(&at(Pose::racked(1))).unwrap();
+    assert_eq!(sticks.pick(&at(1)), None);
+    sticks.share(&shared(|_| {}));
+    let picked = sticks.pick(&at(1)).unwrap();
     assert_eq!(picked.object, "stick-1");
     assert!(picked.actions.contains(Actions::GRAB));
     assert!(!picked.selectable);
@@ -45,363 +95,321 @@ fn a_ray_passing_near_a_free_stick_takes_it_with_the_grip_and_the_bonfire_is_poi
     let picked = sticks.pick(&fire).unwrap();
     assert_eq!(picked.object, "bonfire");
     assert_eq!(picked.actions, Actions::NONE);
-    // A stick another holds is theirs, and is not pointed at to take.
-    sticks.share(shared(|sticks| sticks[1].held = Some(9)));
+    // A ray through the bonfire towards a stick's marshmallow over its log meets the bonfire first, and one from beyond
+    // the log the other way, the stick.
+    let marshmallow = Pose::of(&campsite::home(1)).marshmallow();
+    let towards = (marshmallow - campsite::heart()).normalize();
+    let through = Ray::new(campsite::heart() - towards * 1.0, towards).unwrap();
+    assert_eq!(sticks.pick(&through).unwrap().object, "bonfire");
+    let back = Ray::new(marshmallow + towards * 1.0, -towards).unwrap();
+    assert_eq!(sticks.pick(&back).unwrap().object, "stick-1");
+    // A stick another holds is theirs, and is not pointed at to take, nor reached for.
+    sticks.share(&shared(|shared| shared.sticks.bodies[1].held = held_by(9)));
     assert_ne!(
-        sticks
-            .pick(&at(Pose::racked(1)))
-            .map(|picked| picked.object),
+        sticks.pick(&at(1)).map(|picked| picked.object),
         Some("stick-1".to_owned())
     );
     assert_eq!(sticks.within_reach(hand_on(1).position), None);
-    // A ray along the log, over it, meets every stick leaning on it, and takes the nearest.
-    let (middle, along, length, _) = campsite::seat();
-    let along = Vec3::new(along.x, 0.0, along.y);
-    // As high as a stick passes over the log's axis, its butt 0.6 m back from it.
-    let racked = Pose::racked(1);
-    let level = (racked.along.x.powi(2) + racked.along.z.powi(2)).sqrt();
-    let over = middle + Vec3::Y * (racked.butt + racked.along * (0.6 / level)).y;
-    let lengthwise = Ray::new(over + along * length, -along).unwrap();
-    sticks.share(shared(|_| {}));
-    let met: Vec<f32> = (0..STICKS)
-        .filter_map(|index| {
-            Pose::racked(index).met(lengthwise.origin, lengthwise.direction, POINTED)
-        })
-        .collect();
-    assert!(met.len() >= 2, "{met:?}");
-    assert!(
-        sticks
-            .pick(&lengthwise)
-            .unwrap()
-            .object
-            .starts_with("stick-")
-    );
-    // A hand at two sticks' handles, one lying across another's, reaches the nearer.
-    let hand = hand_on(1).position;
-    sticks.share(shared(|sticks| {
-        sticks[0].lying = Some(Lying {
-            at: (hand + Vec3::new(0.05, 0.0, -0.2)).to_array(),
-            yaw: 0.0,
-        });
-    }));
-    assert_eq!(sticks.within_reach(hand).as_deref(), Some("stick-1"));
-    sticks.share(shared(|sticks| sticks[1].held = Some(9)));
     // A hand at a free stick's handle reaches it, the nearest; nowhere near, none.
     assert_eq!(
         sticks.within_reach(hand_on(2).position).as_deref(),
         Some("stick-2")
     );
     assert_eq!(sticks.within_reach(Vec3::new(0.0, 1.0, 0.0)), None);
+    // Its names are its place on the log, and nothing else is a stick.
+    assert_eq!(
+        (Rack::number(campsite::body(3)), Rack::body(3)),
+        (3, Some(campsite::body(3)))
+    );
+    assert_eq!(Rack::body(STICKS as u32), None);
 }
 
 #[test]
-fn a_stick_taken_is_held_in_the_hand_toasted_over_the_fire_and_let_go_where_the_server_side_will_rest_it()
+fn a_stick_taken_with_either_hand_is_held_by_its_handle_along_the_fist_and_let_go_as_fast_as_the_hand_moved()
  {
     let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
+    sticks.share(&shared(|_| {}));
     let start = Instant::now();
     let me = Some(3);
-    // Taken, the server side is asked for it at the epoch seen, and it is drawn in the hand at once.
-    let grab = |hand: Hand, phase| Grab::new("stick-2", hand, phase);
-    let intents = sticks.update(Some(&grab(hand_on(2), Phase::Began)), me, start);
-    assert_eq!(intents, [Intent::Grab { grab: 2, epoch: 0 }]);
-    let shown = sticks.shown(&[]);
-    let held = Pose::held(hand_on(2).position, hand_on(2).orientation);
-    assert_eq!(shown[2].transform, held.transform());
-    // Not taken twice.
-    assert!(
-        sticks
-            .update(Some(&grab(hand_on(2), Phase::Began)), me, start)
-            .is_empty()
+    // Taken with the right hand, the server side is asked for it at the epoch seen, held by its handle.
+    let hand = hand_on(2);
+    let intents = sticks.update(
+        [grab(2, hand, Phase::Began, Side::Right)].iter(),
+        me,
+        start,
+        1_000,
     );
-    // The server side agrees.
-    sticks.changed(Event {
-        clock: 1,
-        stick: 2,
-        now: Stick {
-            epoch: 1,
-            held: Some(3),
-            ..Stick::default()
-        },
-    });
-    // Held over the fire, it toasts, frame by frame, and says how toasted at most twice a second.
-    let mut said = Vec::new();
-    let mut now = start;
-    for _ in 0..300 {
-        now += Duration::from_millis(20);
-        said.extend(sticks.update(Some(&grab(over_the_fire(), Phase::Changed)), me, now));
-    }
-    let levels: Vec<f32> = said
-        .iter()
-        .map(|intent| match intent {
-            Intent::Toast {
-                toast: 2,
-                epoch: 1,
-                level,
-            } => *level,
-            other => panic!("{other:?}"),
-        })
-        .collect();
-    assert!((10..=13).contains(&levels.len()), "{levels:?}");
-    assert!(levels.windows(2).all(|pair| pair[1] > pair[0]));
-    // Six seconds over the heart: golden, as this participant sees it at once, and so the server side is told.
-    let toast = *levels.last().unwrap();
-    assert!(
-        toast > campsite::GOLDEN - 0.05 && toast < campsite::BROWN,
-        "{toast}"
-    );
-    let shown = sticks.shown(&[]);
-    assert!(shown[2].shade >= campsite::shade(campsite::GOLDEN) - 1);
-    assert!(!shown[2].burning);
-    // Let go on the clearing's earth, it is asked to rest there, and foreseen there, until the server side agrees.
-    let earth = Hand::new(
-        campsite::FIRE + Vec3::new(0.6, 1.0, 0.9),
-        Quat::from_rotation_y(0.5),
-    );
-    let intents = sticks.update(Some(&grab(earth, Phase::Ended)), me, now);
-    let pose = Pose::held(earth.position, earth.orientation);
-    let [
-        Intent::Release {
-            release: 2,
-            epoch: 1,
-            level,
-            at,
-            yaw,
-        },
-    ] = intents[..]
-    else {
-        panic!("{intents:?}");
+    let [Intent::Take(take)] = intents.as_slice() else {
+        panic!("{intents:?}")
     };
-    assert!((level - sticks.letting[2].as_ref().unwrap().toast).abs() < 1e-6);
-    assert_eq!((at, yaw), (pose.middle().to_array(), pose.yaw()));
-    let lying = campsite::rest(at, yaw).unwrap();
     assert_eq!(
-        sticks.shown(&[])[2].transform,
-        Pose::lying(&lying).transform()
+        (take.body, take.epoch, take.hand),
+        (campsite::body(2), 0, tomori_physics::Side::Right)
     );
-    // Nothing more is said of it, held or let go, until it is taken again, nor may it be taken until the server agrees.
-    assert!(
-        sticks
-            .update(Some(&grab(earth, Phase::Changed)), me, now)
-            .is_empty()
-    );
-    assert!(
-        sticks
-            .update(Some(&grab(earth, Phase::Ended)), me, now)
-            .is_empty()
-    );
-    assert_eq!(sticks.within_reach(earth.position), None);
-    sticks.changed(Event {
-        clock: 2,
-        stick: 2,
-        now: Stick {
-            epoch: 2,
-            toast: level,
-            held: None,
-            lying: Some(lying),
-        },
-    });
-    assert!(sticks.letting[2].is_none());
     assert_eq!(
-        sticks.shown(&[])[2].transform,
-        Pose::lying(&lying).transform()
+        take.offset.placement(Precision::Rest),
+        campsite::grip().snapped(Precision::Rest)
     );
+    // It settles into the fist as it is taken, and is drawn there.
+    let later = start + Duration::from_secs_f32(PULL_TIME + 0.01);
+    let shown = sticks.shown(&[], &[], later, 1_000);
+    let in_hand = campsite::drawn(&placed(&hand).then(&campsite::grip().snapped(Precision::Rest)));
+    assert!(shown[2].transform.abs_diff_eq(in_hand, 1e-4));
+    // The left hand takes another as the right holds its own.
+    let left = hand_on(0);
+    let intents = sticks.update(
+        [grab(0, left, Phase::Began, Side::Left)].iter(),
+        me,
+        later,
+        1_000,
+    );
+    assert!(
+        matches!(intents.as_slice(), [Intent::Take(take)] if take.hand == tomori_physics::Side::Left)
+    );
+    // Swung forward, and let go, it is let go where it was drawn, moving as the hand did.
+    let mut now = later;
+    let mut hand = hand;
+    for _ in 0..5 {
+        now += Duration::from_millis(16);
+        hand.position += Vec3::new(0.0, 0.0, -0.032);
+        sticks.update(
+            [grab(2, hand, Phase::Changed, Side::Right)].iter(),
+            me,
+            now,
+            1_100,
+        );
+    }
+    let intents = sticks.update(
+        [grab(2, hand, Phase::Ended, Side::Right)].iter(),
+        me,
+        now,
+        1_100,
+    );
+    let [Intent::LetGo(let_go)] = intents.as_slice() else {
+        panic!("{intents:?}")
+    };
+    assert_eq!((let_go.body, let_go.epoch), (campsite::body(2), 1));
+    assert!(
+        (Vec3::from(let_go.velocity).z + 2.0).abs() < 0.1,
+        "{let_go:?}"
+    );
+    let at = let_go.at.placement(Precision::Rest);
+    assert!(Pose::of(&at).from_handle(hand.position) < 0.01);
+    // The intents are takings and lettings go alone: nothing says how toasted it is.
+    for intent in sticks.update(
+        [grab(0, left, Phase::Ended, Side::Left)].iter(),
+        me,
+        now,
+        1_100,
+    ) {
+        let text = serde_json::to_string(&intent).unwrap();
+        assert!(text.starts_with(r#"{"let_go":"#), "{text}");
+    }
 }
 
 #[test]
-fn a_marshmallow_left_in_the_fire_catches_and_a_stick_put_back_on_its_log_is_fresh() {
-    let mut sticks = Sticks::new();
-    sticks.share(shared(|sticks| sticks[0].toast = campsite::BROWN));
-    let start = Instant::now();
-    let grab = |hand: Hand, phase| Grab::new("stick-0", hand, phase);
-    sticks.update(Some(&grab(hand_on(0), Phase::Began)), Some(1), start);
-    sticks.changed(Event {
-        clock: 1,
-        stick: 0,
-        now: Stick {
-            epoch: 1,
-            toast: campsite::BROWN,
-            held: Some(1),
-            lying: None,
-        },
-    });
-    let mut now = start;
-    for _ in 0..400 {
-        now += Duration::from_millis(25);
-        sticks.update(Some(&grab(over_the_fire(), Phase::Changed)), Some(1), now);
+fn a_marshmallow_held_in_the_fire_is_foreseen_toasting_and_eases_to_what_the_server_side_says() {
+    // Over the heart of the fire, the foresight toasts by the side's own rule, but runs no further ahead of what the side
+    // said than the side's half second and presence's flight explain.
+    let heart = campsite::heart();
+    let mut foreseen = 0.0;
+    for _ in 0..10 {
+        foreseen = foresee(foreseen, 0.0, heart, 0.05);
     }
-    // Black, in the heat, it burns; drawn out of the heat, it does not.
-    assert!(sticks.shown(&[])[0].burning);
-    assert_eq!(sticks.shown(&[])[0].shade, campsite::SHADES - 1);
-    sticks.update(Some(&grab(hand_on(1), Phase::Changed)), Some(1), now);
-    assert!(!sticks.shown(&[])[0].burning);
-    // Put back on its log, it is foreseen there with a fresh marshmallow.
-    let (middle, ..) = campsite::seat();
-    let log = Hand::new(middle + Vec3::Y * 0.6, Quat::from_rotation_y(1.2));
-    sticks.update(Some(&grab(log, Phase::Ended)), Some(1), now);
-    let shown = sticks.shown(&[]);
-    assert_eq!(shown[0].transform, Pose::racked(0).transform());
-    assert_eq!(shown[0].shade, 0);
+    assert!(foreseen > 0.01 && foreseen <= AHEAD + 1e-4, "{foreseen}");
+    for _ in 0..100 {
+        foreseen = foresee(foreseen, 0.0, heart, 0.05);
+    }
+    assert!(foreseen <= AHEAD + 1e-4, "{foreseen}");
+    // The side says more, as it would of a hand it saw nearer the heart: the foresight eases up to it within a second.
+    for _ in 0..20 {
+        foreseen = foresee(foreseen, 0.5, heart + Vec3::X * 2.0, 0.05);
+    }
+    assert!((foreseen - 0.5).abs() < BEHIND + 0.01, "{foreseen}");
+    // Out of the heat, nothing more.
+    assert_eq!(foresee(0.5, 0.5, heart + Vec3::X * 2.0, 1.0), 0.5);
+    // As this participant holds one, it is drawn as they foresee it; once the side says more, as the side says.
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|_| {}));
+    let start = Instant::now();
+    let me = Some(3);
+    sticks.update(
+        [grab(1, hand_on(1), Phase::Began, Side::Right)].iter(),
+        me,
+        start,
+        0,
+    );
+    sticks.changed(&holding(1, 1, held_by(3)), 0);
+    let mut now = start;
+    for _ in 0..60 {
+        now += Duration::from_millis(16);
+        sticks.update(
+            [grab(1, over_the_fire(), Phase::Changed, Side::Right)].iter(),
+            me,
+            now,
+            0,
+        );
+        sticks.shown(&[], &[], now, 0);
+    }
+    let foreseen = sticks.foreseen[&campsite::body(1)];
+    assert!(foreseen > 0.0 && foreseen <= AHEAD + 1e-4, "{foreseen}");
+    sticks.changed(
+        &Event {
+            clock: 2,
+            sticks: Update::default(),
+            toast: vec![campsite::Toasted {
+                body: campsite::body(1),
+                toast: campsite::BLACK,
+            }],
+        },
+        0,
+    );
+    let mut shown = Vec::new();
+    for _ in 0..90 {
+        now += Duration::from_millis(16);
+        sticks.update(
+            [grab(1, over_the_fire(), Phase::Changed, Side::Right)].iter(),
+            me,
+            now,
+            0,
+        );
+        shown = sticks.shown(&[], &[], now, 0);
+    }
+    assert_eq!(shown[1].shade, campsite::SHADES - 1);
+    // Black, in the heat, it burns.
+    assert!(shown[1].burning);
+    assert_eq!(sticks.toast(1), campsite::BLACK);
+}
+
+#[test]
+fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_says_and_fresh_once_put_back()
+ {
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|shared| {
+        shared.sticks.bodies[3].held = held_by(9);
+        shared.toast[3] = campsite::BLACK;
+        shared.toast[0] = campsite::GOLDEN;
+    }));
+    let now = Instant::now();
+    // In their hand, from the hand their presence brings, over the fire, burning.
+    let hand = over_the_fire();
+    let shown = sticks.shown(&[(9, hand)], &[], now, 0);
+    let in_hand = campsite::drawn(&placed(&hand).then(&campsite::grip().snapped(Precision::Rest)));
+    assert!(shown[3].transform.abs_diff_eq(in_hand, 1e-4));
+    assert!(shown[3].burning);
+    // On its log, golden, but not burning; the others fresh.
+    assert_eq!(shown[0].shade, campsite::shade(campsite::GOLDEN));
+    assert!(!shown[0].burning);
+    assert_eq!(shown[1].shade, 0);
+    // Their hand unreported, it stays where it was last drawn.
+    let again = sticks.shown(&[], &[], now, 0);
+    assert_eq!(again[3].transform, shown[3].transform);
+    // Put back, fresh, as the side says.
+    sticks.changed(
+        &Event {
+            clock: 2,
+            sticks: Update::default(),
+            toast: vec![campsite::Toasted {
+                body: campsite::body(0),
+                toast: 0.0,
+            }],
+        },
+        0,
+    );
+    assert_eq!(sticks.shown(&[], &[], now, 0)[0].shade, 0);
+    // What is not a number, nor a stick, changes nothing.
+    sticks.changed(
+        &Event {
+            clock: 3,
+            sticks: Update::default(),
+            toast: vec![
+                campsite::Toasted {
+                    body: campsite::body(3),
+                    toast: f32::NAN,
+                },
+                campsite::Toasted {
+                    body: 7,
+                    toast: 0.5,
+                },
+            ],
+        },
+        0,
+    );
+    assert_eq!(sticks.toast(3), campsite::BLACK);
 }
 
 #[test]
 fn two_taking_one_stick_the_loser_lets_it_go_and_sees_it_in_the_winner_s_hand() {
     let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
-    let start = Instant::now();
-    let grab = |hand: Hand, phase| Grab::new("stick-1", hand, phase);
-    // Bea takes it as Ada does; the server side says Ada was first.
-    let bea = Some(2);
-    sticks.update(Some(&grab(hand_on(1), Phase::Began)), bea, start);
-    sticks.share(shared(|sticks| {
-        sticks[1].epoch = 1;
-        sticks[1].held = Some(1);
-    }));
-    // Bea holds nothing: she says nothing of it, and lets go of nothing.
-    let later = start + Duration::from_secs(1);
-    let changed = sticks.update(Some(&grab(over_the_fire(), Phase::Changed)), bea, later);
-    assert!(changed.is_empty());
-    assert!(
-        sticks
-            .update(Some(&grab(hand_on(1), Phase::Ended)), bea, later)
-            .is_empty()
+    sticks.share(&shared(|_| {}));
+    let now = Instant::now();
+    let mine = hand_on(1);
+    sticks.update(
+        [grab(1, mine, Phase::Began, Side::Right)].iter(),
+        Some(3),
+        now,
+        0,
     );
-    // It is drawn in Ada's hand, from her presence; and where it was last drawn, should her hand go unreported.
-    let ada = over_the_fire();
-    let shown = sticks.shown(&[(1, ada)]);
-    let in_her_hand = Pose::held(ada.position, ada.orientation);
-    assert_eq!(shown[1].transform, in_her_hand.transform());
-    assert_eq!(sticks.shown(&[])[1].transform, in_her_hand.transform());
-    assert_eq!(
-        sticks.shown(&[(7, hand_on(3))])[1].transform,
-        in_her_hand.transform()
-    );
-    // Before it is ever drawn in a hand, it is drawn where it rests.
-    let mut unseen = Sticks::new();
-    unseen.share(shared(|sticks| sticks[0].held = Some(1)));
-    assert_eq!(unseen.shown(&[])[0].transform, Pose::racked(0).transform());
-}
-
-#[test]
-fn a_grab_the_server_side_never_agrees_to_is_given_up_and_a_visitor_takes_nothing() {
-    let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
-    let start = Instant::now();
-    let grab = |phase| Grab::new("stick-3", hand_on(3), phase);
-    // A visitor takes nothing, nor does a grab of what is not a stick, or not one there is.
-    assert!(
-        sticks
-            .update(Some(&grab(Phase::Began)), None, start)
-            .is_empty()
-    );
-    for object in ["hen-1", "stick-9", "stick-x"] {
-        let other = Grab::new(object, hand_on(3), Phase::Began);
-        assert!(sticks.update(Some(&other), Some(1), start).is_empty());
-    }
-    // Taken, but never agreed to, as when its intent was dropped, it is given up after a moment and drawn where it rests.
-    assert_eq!(
-        sticks
-            .update(Some(&grab(Phase::Began)), Some(1), start)
-            .len(),
-        1
-    );
-    sticks.update(None, Some(1), start + Duration::from_millis(1400));
-    assert!(sticks.holding.is_some());
-    sticks.update(None, Some(1), start + Duration::from_millis(1600));
-    assert!(sticks.holding.is_none());
-    assert_eq!(sticks.shown(&[])[3].transform, Pose::racked(3).transform());
-    // Agreed and then taken back by the server side, as when this participant was gone too long, it is given up too.
-    sticks.update(Some(&grab(Phase::Began)), Some(1), start);
-    sticks.share(shared(|sticks| {
-        sticks[3].epoch = 1;
-        sticks[3].held = Some(1);
-    }));
-    assert!(sticks.holding.as_ref().unwrap().agreed);
-    sticks.share(shared(|sticks| sticks[3].epoch = 2));
-    assert!(sticks.holding.is_none());
-    // While the server side has not yet heard of a grab, it waits.
-    sticks.update(Some(&grab(Phase::Began)), Some(1), start);
-    sticks.share(shared(|sticks| sticks[3].epoch = 2));
-    assert!(sticks.holding.is_some());
-    // An event for a stick there is not changes nothing, and a share of fewer sticks forgets one held beyond them.
-    sticks.changed(Event {
-        clock: 0,
-        stick: 9,
-        now: Stick::default(),
-    });
-    sticks.share(Shared {
-        sticks: vec![Stick::default(); 2],
-    });
-    assert!(sticks.holding.is_none());
-    assert_eq!(sticks.shown(&[]).len(), 2);
-}
-
-#[test]
-fn a_letting_go_the_server_side_never_took_is_asked_again_or_given_up() {
-    let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
-    let start = Instant::now();
-    let me = Some(4);
-    let grab = |hand: Hand, phase| Grab::new("stick-1", hand, phase);
-    let earth = Hand::new(
-        campsite::FIRE + Vec3::new(0.6, 1.0, 0.9),
-        Quat::from_rotation_y(0.5),
-    );
-    // Taken and agreed, then let go, its letting go dropped by the intents' rate: the server side still says it is held.
-    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
-    let held = |sticks: &mut Vec<Stick>| {
-        sticks[1].epoch = 1;
-        sticks[1].held = Some(4);
-    };
-    sticks.share(shared(held));
-    let released = sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
-    assert_eq!(released.len(), 1);
-    assert!(
-        sticks
-            .update(None, me, start + Duration::from_millis(1400))
-            .is_empty()
-    );
-    // After a moment it is asked again, the same, and then not again for another moment.
-    let later = start + Duration::from_millis(1600);
-    assert_eq!(sticks.update(None, me, later), released);
-    assert!(sticks.update(None, me, later).is_empty());
-    sticks.share(shared(held));
-    assert_eq!(
-        sticks.update(None, me, later + Duration::from_millis(1600)),
-        released
-    );
-    // Taken, it rests where it was foreseen.
-    let Intent::Release { at, yaw, .. } = released[0] else {
-        panic!("{released:?}");
-    };
-    let lying = campsite::rest(at, yaw).unwrap();
-    sticks.share(shared(|sticks| {
-        sticks[1].epoch = 2;
-        sticks[1].lying = Some(lying);
-    }));
-    assert!(sticks.letting[1].is_none());
-    // Its grab dropped and let go, the server side never had it held: after a moment it is given up, back where it was.
-    let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
-    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
-    sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
-    assert_ne!(sticks.shown(&[])[1].transform, Pose::racked(1).transform());
-    assert!(sticks.update(None, me, later).is_empty());
-    assert!(sticks.letting[1].is_none());
-    assert_eq!(sticks.shown(&[])[1].transform, Pose::racked(1).transform());
-    // Let go before hearing that another took it first, it is drawn in their hand as soon as the server side says so.
-    let mut sticks = Sticks::new();
-    sticks.share(shared(|_| {}));
-    sticks.update(Some(&grab(hand_on(1), Phase::Began)), me, start);
-    sticks.update(Some(&grab(earth, Phase::Ended)), me, start);
-    sticks.share(shared(|sticks| {
-        sticks[1].epoch = 1;
-        sticks[1].held = Some(7);
-    }));
-    assert!(sticks.letting[1].is_none());
+    // Another's taking arrived first: this participant holds nothing, and sees it in their hand.
+    sticks.changed(&holding(1, 1, held_by(9)), 0);
+    assert_eq!(sticks.loose().held_in(tomori_physics::Side::Right), None);
     let theirs = over_the_fire();
-    assert_eq!(
-        sticks.shown(&[(7, theirs)])[1].transform,
-        Pose::held(theirs.position, theirs.orientation).transform()
+    let shown = sticks.shown(&[(9, theirs)], &[], now, 0);
+    let in_hand =
+        campsite::drawn(&placed(&theirs).then(&campsite::grip().snapped(Precision::Rest)));
+    assert!(shown[1].transform.abs_diff_eq(in_hand, 1e-4));
+    // Letting go of the grip it lost asks nothing.
+    assert!(
+        sticks
+            .update(
+                [grab(1, mine, Phase::Ended, Side::Right)].iter(),
+                Some(3),
+                now,
+                0
+            )
+            .is_empty()
     );
+}
+
+#[test]
+fn a_visitor_takes_no_stick_and_what_lands_is_heard_lightly_or_splashing() {
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|_| {}));
+    let now = Instant::now();
+    assert!(
+        sticks
+            .update(
+                [grab(2, hand_on(2), Phase::Began, Side::Right)].iter(),
+                None,
+                now,
+                0
+            )
+            .is_empty()
+    );
+    assert_eq!(sticks.loose().held_in(tomori_physics::Side::Right), None);
+    // A stick landing hard taps, more softly than a stone; one landing gently is not heard; one in the pool splashes.
+    let landed = |speed: f32, water: bool| Event {
+        clock: 2,
+        sticks: Update {
+            landed: vec![Landed {
+                body: campsite::body(2),
+                speed,
+                water,
+            }],
+            ..Update::default()
+        },
+        toast: Vec::new(),
+    };
+    assert_eq!(sticks.changed(&landed(3.0, false), 0).len(), 1);
+    assert!(sticks.changed(&landed(0.6, false), 0).is_empty());
+    assert_eq!(sticks.changed(&landed(0.6, true), 0).len(), 1);
+    let tap = Rack::sound(0, false, 3.0).unwrap();
+    let clack = crate::stones::sound(false, 3.0);
+    let loudest = |sound: &Sound| {
+        sound
+            .samples
+            .iter()
+            .fold(0.0f32, |most, sample| most.max(sample.abs()))
+    };
+    assert!(loudest(&tap) < loudest(&clack));
 }

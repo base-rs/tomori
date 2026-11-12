@@ -183,7 +183,7 @@ fn the_sticks_lean_on_their_log_their_marshmallows_towards_the_fire_but_out_of_i
 }
 
 #[test]
-fn a_stick_is_held_along_the_hand_lies_level_and_is_met_by_a_ray_passing_near_it() {
+fn a_stick_is_held_along_the_hand_by_its_handle_and_met_by_a_ray_passing_near_it() {
     // Held, it runs forward through the fist from a little behind it.
     let turn = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.4);
     let hand = Vec3::new(1.0, 1.2, -3.0);
@@ -193,31 +193,38 @@ fn a_stick_is_held_along_the_hand_lies_level_and_is_met_by_a_ray_passing_near_it
     assert!(held.from_handle(hand) < 1e-4);
     assert!(held.tip().distance(held.butt) - STICK_LENGTH < 1e-4);
     assert!(held.marshmallow().distance(held.tip()) - MARSHMALLOW_INSET < 1e-4);
+    // Its body is held by its handle, within what a hand may hold, as the grip says.
+    let body = Placement::new(hand, turn).then(&grip());
+    let read = Pose::of(&body);
+    assert!(read.butt.distance(held.butt) < 1e-5 && read.along.distance(held.along) < 1e-5);
+    assert!(grip().position.length() < tomori_physics::HOLD);
     // A nonsense turn holds it straight ahead.
     assert_eq!(
         Pose::held(hand, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)).along,
         Vec3::NEG_Z
     );
-    // Its model runs from its butt along −Z, placed so.
-    let transform = held.transform();
-    assert!(transform.transform_point3(Vec3::ZERO).distance(held.butt) < 1e-5);
-    assert!(
-        transform
-            .transform_point3(Vec3::NEG_Z * STICK_LENGTH)
-            .distance(held.tip())
-            < 1e-4
-    );
-    // Lying, it is level, its middle where it lies, heading as it was let go.
-    let lying = Lying {
-        at: [-4.0, 0.05, -15.5],
-        yaw: 1.1,
+    // Its model runs from its butt along −Z, drawn so for its body, turned about its length as the body is.
+    for transform in [held.transform(), drawn(&body)] {
+        assert!(transform.transform_point3(Vec3::ZERO).distance(held.butt) < 1e-5);
+        assert!(
+            transform
+                .transform_point3(Vec3::NEG_Z * STICK_LENGTH)
+                .distance(held.tip())
+                < 1e-4
+        );
+    }
+    // A pose's placement reads back as the pose, whichever way it is turned about its length.
+    let lying = Pose {
+        butt: Vec3::new(-4.0, 0.05, -15.5),
+        along: Vec3::new(0.6, 0.0, -0.8),
     };
-    let pose = Pose::lying(&lying);
-    assert_eq!(pose.along.y, 0.0);
-    assert!(pose.middle().distance(Vec3::from(lying.at)) < 1e-5);
-    assert!((pose.yaw() - 1.1).abs() < 1e-5);
+    for roll in [0.0, 1.0, -2.5] {
+        let back = Pose::of(&lying.placement(roll));
+        assert!(back.butt.distance(lying.butt) < 1e-5 && back.along.distance(lying.along) < 1e-5);
+    }
     // A ray passing within a few centimetres of it meets it, at about where it passes, and one passing further does not;
     // nor one that points away.
+    let pose = lying;
     let origin = pose.middle() + Vec3::new(0.0, 1.0, 0.03);
     assert!((pose.met(origin, Vec3::NEG_Y, 0.05).unwrap() - 1.0).abs() < 0.01);
     assert_eq!(pose.met(origin + Vec3::X * 0.3, Vec3::NEG_Y, 0.05), None);
@@ -227,6 +234,76 @@ fn a_stick_is_held_along_the_hand_lies_level_and_is_met_by_a_ray_passing_near_it
     assert!((along - 1.0).abs() < 1e-3);
     // The handle is the half nearest the butt.
     assert!(pose.from_handle(pose.tip()) > STICK_LENGTH * 0.45);
+}
+
+#[test]
+fn a_stick_is_a_light_body_of_its_rod_and_marshmallow_drawn_as_it_collides() {
+    let hull = hull();
+    assert!(hull.len() <= tomori_physics::HULL_POINTS);
+    // Every corner of its model, its rod and each shade of its marshmallow, is a point of its hull, about its middle.
+    let model = stick();
+    let corners: Vec<Vec3> = model
+        .nodes
+        .iter()
+        .filter_map(|node| node.mesh)
+        .flat_map(|mesh| &model.meshes[mesh].primitives)
+        .flat_map(|primitive| primitive.positions.iter())
+        .map(|corner| *corner + Vec3::Z * STICK_LENGTH * 0.5)
+        .collect();
+    for corner in &corners {
+        assert!(
+            hull.iter().any(|point| point.distance(*corner) < 1e-5),
+            "{corner}"
+        );
+    }
+    // Its middle is the hull's, between its butt and its tip.
+    let (low, high) = hull.iter().fold(
+        (Vec3::INFINITY, Vec3::NEG_INFINITY),
+        |(low, high), point| (low.min(*point), high.max(*point)),
+    );
+    assert!(
+        (low.z + STICK_LENGTH * 0.5).abs() < 1e-5 && (high.z - STICK_LENGTH * 0.5).abs() < 1e-5
+    );
+    let widest = hull
+        .iter()
+        .map(|point| point.truncate().length())
+        .fold(0.0, f32::max);
+    assert!((widest - MARSHMALLOW.1).abs() < 1e-5);
+    // Bodies of their own numbers, which name their sticks, of dry wood, lighter than water, so that they float.
+    let bodies = bodies();
+    assert_eq!(bodies.len(), STICKS);
+    const { assert!(DENSITY < 1_000.0) };
+    for (index, body) in bodies.iter().enumerate() {
+        assert_eq!(body.id, super::body(index));
+        assert_eq!(super::index(body.id), Some(index));
+        assert_eq!(body.check(), Ok(()));
+        assert_eq!(body.kind, tomori_physics::Kind::Dynamic);
+        assert_eq!(body.home, home(index));
+        assert!(Pose::of(&body.home).butt.distance(Pose::racked(index).butt) < 1e-4);
+    }
+    assert_eq!(super::index(FIRST_STICK - 1), None);
+    assert_eq!(super::index(super::body(STICKS)), None);
+    assert_eq!(super::index(3), None);
+}
+
+#[test]
+fn what_the_sticks_rest_on_is_drawn_and_within_the_physics_limits() {
+    let colliders = colliders();
+    assert!(colliders.iter().all(Static::valid));
+    let triangles: usize = colliders.iter().map(Static::triangles).sum();
+    assert!(triangles <= tomori_physics::STATIC_TRIANGLES, "{triangles}");
+    // The ground about the fire as it is drawn, with its clearing, both log seats, the fire's ring of stones and its
+    // bonfire.
+    assert_eq!(colliders.len(), 1 + 2 + PIT_STONES as usize + 1);
+    // The pool's water, below the campsite, within its reach, which takes back what rests in it.
+    let pool = &waters()[0];
+    assert_eq!(pool.returns_after, Some(RETURNS));
+    assert!(in_pool(layout::POOL + Vec3::new(1.0, -0.1, 0.5)));
+    assert!(!in_pool(heart()));
+    let settings = settings();
+    let far = Vec2::new(layout::POOL.x, layout::POOL.z) - ground(FIRE);
+    assert!(far.length() + layout::POOL_RADIUS < settings.lost_beyond + 0.5);
+    assert_eq!(settings.home, Vec3::new(FIRE.x, 0.0, FIRE.z));
 }
 
 #[test]
@@ -262,290 +339,118 @@ fn a_marshmallow_toasts_over_the_heart_of_the_fire_from_white_to_golden_brown_an
 }
 
 #[test]
-fn a_stick_let_go_rests_straight_down_on_what_is_beneath_it_or_goes_back_on_its_log() {
+fn a_marshmallow_held_in_the_heat_toasts_by_how_near_and_how_long() {
+    // Ten seconds over the heart of the fire, half way; twice as long, to black and beyond, but never past 1.
+    assert!((toasted(0.0, heart(), 10.0) - TOAST_RATE * 10.0).abs() < 1e-6);
+    assert!(toasted(0.0, heart(), 20.0) > BLACK);
+    assert_eq!(toasted(0.9, heart(), 60.0), 1.0);
+    // Further off, slower; beyond its heat, not at all; nor for no time, nor nonsense.
+    let edge = heart() + Vec3::X * 0.45;
+    assert!(toasted(0.2, edge, 1.0) > 0.2 && toasted(0.2, edge, 1.0) < toasted(0.2, heart(), 1.0));
+    assert_eq!(toasted(0.2, heart() + Vec3::X * 0.7, 30.0), 0.2);
+    assert_eq!(toasted(0.2, heart(), 0.0), 0.2);
+    assert_eq!(toasted(0.2, heart(), f32::NAN), 0.2);
+    assert_eq!(toasted(0.2, heart(), -5.0), 0.2);
+    // A marshmallow on its log never toasts.
+    for index in 0..STICKS {
+        assert_eq!(toasted(0.0, Pose::racked(index).marshmallow(), 60.0), 0.0);
+    }
+}
+
+#[test]
+fn a_stick_that_comes_to_rest_stays_where_it_lies_or_goes_back_on_its_log() {
     let fire = ground(FIRE);
-    // On the clearing's earth, level, its heading kept.
-    let on_earth = fire + Vec2::new(0.9, 0.6);
-    let lying = rest([on_earth.x, 1.1, on_earth.y], 0.4).unwrap();
-    assert_eq!(
-        lying.at,
-        [
-            on_earth.x,
-            trail::CLEARING_HEIGHT + STICK_RADIUS,
-            on_earth.y
-        ]
-    );
-    assert_eq!(lying.yaw, 0.4);
-    // On the lookout's log seat, on its top; the second seat is the sticks' log, and a stick let go on it goes back.
-    let (middle, _, _, radius) = trail::seat();
-    let lying = rest([middle.x, 1.0, middle.z], 0.0).unwrap();
-    assert!((lying.at[1] - (seat_top(radius) + STICK_RADIUS)).abs() < 1e-5);
-    // On the trail's track, a little above the meadow.
+    let at = |point: Vec2, height: f32| Vec3::new(point.x, height, point.y);
+    // On the clearing's earth, on the lookout's log seat, on the trail or on the meadow, it stays.
+    let (lookout, ..) = trail::seat();
     let (point, _, _) = trail::frame(39);
-    assert_eq!(beneath(point), Some(trail::LIFT));
-    // The meadow beyond the clearing, off the trail, as the ground is.
-    let meadow = fire + Vec2::new(-1.0, -3.0);
-    assert!(trail::from_middle(meadow) > trail::HALF);
-    assert_eq!(beneath(meadow), Some(backdrop::ground(meadow)));
-    // A nonsense heading lies along −Z.
-    assert_eq!(
-        rest([on_earth.x, 1.0, on_earth.y], f32::NAN).unwrap().yaw,
-        0.0
-    );
-    // Back on its log: let go by its log, in the fire, too far away, inside the fence, or nowhere at all.
-    let (middle, ..) = seat();
-    for nowhere in [
-        ground(middle) + Vec2::new(0.1, 0.2),
-        fire + Vec2::new(0.2, 0.1),
-        fire + Vec2::new(DROP_REACH + 0.5, 0.0),
-        Vec2::new(-4.0, -10.5),
-        Vec2::NAN,
+    let lying = |middle: Vec3, yaw: f32| Placement::new(middle, Quat::from_rotation_y(yaw));
+    for stays in [
+        at(fire + Vec2::new(0.9, 0.6), 0.02),
+        lookout + Vec3::Y * 0.45,
+        at(point, trail::LIFT),
+        at(fire + Vec2::new(-1.0, -3.0), 0.0),
     ] {
-        assert_eq!(rest([nowhere.x, 1.0, nowhere.y], 0.0), None, "{nowhere}");
+        assert!(!goes_back(&lying(stays, 0.0)), "{stays}");
     }
-}
-
-/// Stick `index`'s epoch in `campsite`.
-fn epoch(campsite: &Campsite, index: usize) -> u32 {
-    campsite.sticks()[index].epoch
-}
-
-#[test]
-fn the_first_to_take_a_stick_holds_it_and_only_its_holder_toasts_it_and_lets_it_go() {
-    let mut campsite = Campsite::new();
-    assert_eq!(campsite.sticks().len(), STICKS);
-    assert!(campsite.sticks().iter().all(Stick::fresh));
-    // Ada takes stick 1 at the epoch she saw; Bea, taking it too at that epoch, is refused, so that the first wins.
-    assert_eq!(
-        campsite.ask(1, Intent::Grab { grab: 1, epoch: 0 }, 1_000),
-        Some(1)
-    );
-    assert_eq!(campsite.sticks()[1].held, Some(1));
-    assert_eq!(epoch(&campsite, 1), 1);
-    assert_eq!(
-        campsite.ask(2, Intent::Grab { grab: 1, epoch: 0 }, 1_001),
-        None
-    );
-    assert_eq!(
-        campsite.ask(2, Intent::Grab { grab: 1, epoch: 1 }, 1_001),
-        None
-    );
-    assert_eq!(campsite.sticks()[1].held, Some(1));
-    // Nobody holds two, nor takes a stick that is not there, nor at an epoch that has moved on.
-    assert_eq!(
-        campsite.ask(1, Intent::Grab { grab: 2, epoch: 0 }, 1_002),
-        None
-    );
-    assert_eq!(
-        campsite.ask(2, Intent::Grab { grab: 9, epoch: 0 }, 1_002),
-        None
-    );
-    assert_eq!(
-        campsite.ask(2, Intent::Grab { grab: 2, epoch: 5 }, 1_002),
-        None
-    );
-    // Her toasting is taken, as far as the fire could have toasted it since: 10 s at most toasts it half way.
-    let toast = |level| Intent::Toast {
-        toast: 1,
-        epoch: 1,
-        level,
-    };
-    assert_eq!(campsite.ask(1, toast(0.9), 11_000), Some(1));
-    let level = campsite.sticks()[1].toast;
-    assert!((level - (TOAST_RATE * 10.0 + 0.03)).abs() < 1e-4, "{level}");
-    // Never less than it was, nor nonsense, nor from anyone else, nor at another epoch.
-    assert_eq!(campsite.ask(1, toast(0.1), 12_000), None);
-    assert_eq!(campsite.ask(1, toast(f32::NAN), 13_000), None);
-    assert_eq!(campsite.ask(2, toast(0.6), 14_000), None);
-    assert_eq!(
-        campsite.ask(
-            1,
-            Intent::Toast {
-                toast: 1,
-                epoch: 0,
-                level: 0.6
-            },
-            14_000
-        ),
-        None
-    );
-    assert_eq!(campsite.sticks()[1].toast, level);
-    // Let go on the clearing's earth, it lies there, as toasted as she said, and anyone may take it.
-    let fire = ground(FIRE);
-    let release = |epoch, at: Vec2, level| Intent::Release {
-        release: 1,
-        epoch,
-        level,
-        at: [at.x, 1.2, at.y],
-        yaw: 0.5,
-    };
-    let earth = fire + Vec2::new(0.8, 0.8);
-    assert_eq!(campsite.ask(2, release(1, earth, 0.6), 20_000), None);
-    assert_eq!(campsite.ask(1, release(0, earth, 0.6), 20_000), None);
-    assert_eq!(campsite.ask(1, release(1, earth, 0.6), 20_000), Some(1));
-    let stick = &campsite.sticks()[1];
-    assert_eq!((stick.held, stick.epoch), (None, 2));
-    assert!((stick.toast - 0.6).abs() < 1e-6);
-    assert_eq!(stick.lying, rest([earth.x, 1.2, earth.y], 0.5));
-    assert!(!stick.fresh());
-    // Bea takes it from where it lies, and puts it back on its log: it is fresh again.
-    assert_eq!(
-        campsite.ask(2, Intent::Grab { grab: 1, epoch: 2 }, 21_000),
-        Some(1)
-    );
+    // Floating in the pool, it stays until the pool takes it back.
+    assert!(!goes_back(&lying(
+        layout::POOL + Vec3::new(0.5, -0.02, 0.0),
+        1.0
+    )));
+    // By its log, in the fire, carried away or nowhere at all, it goes back on its log.
     let (middle, ..) = seat();
-    assert_eq!(
-        campsite.ask(2, release(3, ground(middle), 0.5), 22_000),
-        Some(1)
-    );
-    assert!(campsite.sticks()[1].fresh());
-    assert_eq!(epoch(&campsite, 1), 4);
-    // Dropped in the fire, it is taken by it, and a fresh one is on its log.
-    assert_eq!(
-        campsite.ask(1, Intent::Grab { grab: 1, epoch: 4 }, 23_000),
-        Some(1)
-    );
-    assert_eq!(campsite.ask(1, release(5, fire, 0.9), 24_000), Some(1));
-    assert!(campsite.sticks()[1].fresh());
-}
-
-#[test]
-fn a_stick_its_holder_left_with_goes_back_on_its_log_and_an_empty_campsite_tidies_itself_after_an_hour()
- {
-    let mut campsite = Campsite::new();
-    campsite.ask(1, Intent::Grab { grab: 0, epoch: 0 }, 0);
-    campsite.ask(2, Intent::Grab { grab: 3, epoch: 0 }, 0);
-    let earth = ground(FIRE) + Vec2::new(0.0, -1.0);
-    campsite.ask(
-        2,
-        Intent::Release {
-            release: 3,
-            epoch: 1,
-            level: 0.02,
-            at: [earth.x, 1.0, earth.y],
-            yaw: 0.0,
-        },
-        1_000,
-    );
-    // Until the server says who is there, nothing changes.
-    assert!(campsite.sweep(None, 2_000).is_empty());
-    assert_eq!(campsite.sticks()[0].held, Some(1));
-    // Ada gone, the stick she held goes back on its log; Bea's, lying, stays where it lies while she is there.
-    assert_eq!(campsite.sweep(Some(&[2]), 3_000), [0]);
-    assert!(campsite.sticks()[0].fresh());
-    assert_eq!(epoch(&campsite, 0), 2);
-    assert!(campsite.sweep(Some(&[2]), 4_000).is_empty());
-    // Once nobody has been there for an hour, it tidies itself; not a moment before, nor if someone came back meanwhile.
-    assert!(campsite.sweep(Some(&[]), 10_000).is_empty());
-    assert!(campsite.sweep(Some(&[]), 10_000 + TIDY - 1).is_empty());
-    assert!(campsite.sweep(Some(&[5]), 10_000 + TIDY).is_empty());
-    assert!(campsite.sweep(Some(&[]), 20_000 + TIDY).is_empty());
-    assert_eq!(campsite.sweep(Some(&[]), 20_000 + TIDY * 2), [3]);
-    assert!(campsite.sticks().iter().all(Stick::fresh));
-    // Nothing more to tidy.
-    assert!(campsite.sweep(Some(&[]), 20_000 + TIDY * 3).is_empty());
-    assert_eq!(Campsite::default().sticks(), Campsite::new().sticks());
-}
-
-#[test]
-fn the_agent_is_told_of_the_bonfire_and_each_stick_and_may_inspect_them() {
-    let mut campsite = Campsite::new();
-    campsite.ask(4, Intent::Grab { grab: 2, epoch: 0 }, 0);
-    let objects = campsite.describe();
-    assert_eq!(objects.len(), STICKS + 1);
-    let (id, reference, description, at) = &objects[0];
-    assert_eq!(
-        (id.as_str(), reference.as_str()),
-        ("bonfire", "campsite/bonfire")
-    );
-    assert!(description.contains("bonfire"));
-    assert_eq!(*at, Some(heart()));
-    for (index, (id, reference, description, at)) in objects[1..].iter().enumerate() {
-        assert_eq!(*id, format!("stick-{index}"));
-        assert_eq!(*reference, format!("campsite/stick-{index}"));
-        assert!(tomori_environment::valid_reference(reference));
-        assert!(description.contains("marshmallow"));
-        // Where it rests, but not in a hand, which only presence says.
-        if index == 2 {
-            assert!(description.contains("held"));
-            assert_eq!(*at, None);
-        } else {
-            assert!(description.contains("leaning on the log"));
-            assert_eq!(*at, Some(Pose::racked(index).marshmallow()));
-        }
+    assert!(by_its_log(middle + Vec3::new(0.1, 0.3, 0.2)));
+    assert!(!by_its_log(at(fire, 0.0)));
+    for back in [
+        middle + Vec3::new(0.1, 0.4, 0.2),
+        at(fire + Vec2::new(0.2, 0.1), 0.1),
+        at(fire + Vec2::new(DROP_REACH + 0.5, 0.0), 0.0),
+        Vec3::NAN,
+    ] {
+        assert!(goes_back(&lying(back, 0.3)), "{back}");
     }
-    // Lying, it says so.
-    let earth = ground(FIRE) + Vec2::new(0.0, 1.0);
-    campsite.ask(
-        4,
-        Intent::Release {
-            release: 2,
-            epoch: 1,
-            level: 0.0,
-            at: [earth.x, 1.0, earth.y],
-            yaw: 0.0,
-        },
-        100,
-    );
-    assert!(campsite.describe()[3].2.contains("lying"));
-    let bonfire = campsite.inspect("campsite/bonfire").unwrap();
-    assert_eq!(bonfire["kind"], "bonfire");
-    let stick = campsite.inspect("campsite/stick-2").unwrap();
-    assert_eq!(stick["looks"], "fresh and white");
-    assert_eq!(stick["on_its_log"], false);
-    assert_eq!(campsite.inspect("campsite/stick-9"), None);
-    assert_eq!(campsite.inspect("campsite/stick-x"), None);
-    assert_eq!(campsite.inspect("hen/pip"), None);
+    // Its middle beside the fire, but its tip among the embers, the fire takes it too; lying alongside, it does not.
+    let beside = at(fire + Vec2::new(0.75, 0.0), 0.03);
+    assert!(goes_back(&lying(beside, std::f32::consts::FRAC_PI_2)));
+    assert!(!goes_back(&lying(beside, 0.0)));
+    // Every stick begins on its log.
+    for index in 0..STICKS {
+        assert!(by_its_log(home(index).position));
+    }
 }
 
 #[test]
-fn its_intents_events_and_state_are_json_apart_from_the_flock_s() {
-    // Each intent reads back as itself, and never as one of the flock's, nor the flock's as one of its.
-    let intents = [
-        Intent::Grab { grab: 1, epoch: 2 },
-        Intent::Toast {
-            toast: 1,
-            epoch: 2,
-            level: 0.25,
-        },
-        Intent::Release {
-            release: 1,
-            epoch: 2,
-            level: 0.5,
-            at: [1.0, 2.0, 3.0],
-            yaw: 0.5,
-        },
-    ];
-    for intent in intents {
-        let text = serde_json::to_string(&intent).unwrap();
-        assert_eq!(serde_json::from_str::<Intent>(&text).unwrap(), intent);
-        assert!(
-            serde_json::from_str::<crate::flock::Intent>(&text).is_err(),
-            "{text}"
-        );
-    }
-    assert!(serde_json::from_str::<Intent>(r#"{"notice":1,"toward":[0,0]}"#).is_err());
-    assert!(serde_json::from_str::<Intent>(r#"{"away":1}"#).is_err());
-    // A stick on its log says nothing of a holder or where it lies.
+fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() {
+    // An event says the sticks' bodies and how toasted those that changed are, and nothing of either it need not.
     let event = Event {
         clock: 5,
-        stick: 1,
-        now: Stick::default(),
+        sticks: Update::default(),
+        toast: vec![Toasted {
+            body: body(1),
+            toast: 0.5,
+        }],
     };
     let text = serde_json::to_string(&event).unwrap();
     assert_eq!(
         text,
-        r#"{"clock":5,"stick":1,"now":{"epoch":0,"toast":0.0}}"#
+        r#"{"clock":5,"sticks":{},"toast":[{"body":101,"toast":0.5}]}"#
     );
     assert_eq!(serde_json::from_str::<Event>(&text).unwrap(), event);
-    // The sticks are read from the farmyard's state beside the flock's, and none from a state from before them.
-    let shared: Shared = serde_json::from_str(
-        r#"{"clock":1,"chickens":[],"sticks":[{"epoch":3,"toast":0.5,"held":7}]}"#,
-    )
+    let quiet = Event {
+        toast: Vec::new(),
+        ..event.clone()
+    };
+    assert_eq!(
+        serde_json::to_string(&quiet).unwrap(),
+        r#"{"clock":5,"sticks":{}}"#
+    );
+    // Never one of the flock's events, nor the beach's, nor they one of its.
+    assert!(serde_json::from_str::<crate::beach::Event>(&text).is_err());
+    let flock = r#"{"clock":5,"chicken":1,"behaviour":{"began":0}}"#;
+    assert!(serde_json::from_str::<Event>(flock).is_err());
+    let beach = serde_json::to_string(&crate::beach::Event {
+        clock: 5,
+        stones: Update::default(),
+    })
     .unwrap();
-    assert_eq!(shared.sticks[0].held, Some(7));
-    let before: Shared = serde_json::from_str(r#"{"clock":1,"chickens":[]}"#).unwrap();
-    assert!(before.sticks.is_empty());
+    assert!(serde_json::from_str::<Event>(&beach).is_err());
+    // The campsite is read from the farmyard's state beside the flock's, and none from a state from before it.
+    let state = serde_json::json!({
+        "clock": 1,
+        "chickens": [],
+        "campsite": {"sticks": {"bodies": [{"body": 100, "epoch": 3, "at": [0, 0, 0, 0, 0, 0, 10000]}]}, "toast": [0.5]},
+    });
+    let read = shared(&state);
+    assert_eq!(read.sticks.bodies[0].epoch, 3);
+    assert_eq!(read.toast, [0.5]);
+    assert_eq!(
+        shared(&serde_json::json!({"clock": 1, "chickens": []})),
+        Shared::default()
+    );
+    // A state from when the sticks were the campsite's own is none of them.
+    let before = serde_json::json!({"clock": 1, "sticks": [{"epoch": 3, "toast": 0.5, "held": 7}]});
+    assert_eq!(shared(&before), Shared::default());
 }
 
 #[test]

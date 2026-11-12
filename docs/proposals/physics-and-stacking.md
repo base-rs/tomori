@@ -1,6 +1,6 @@
 # Proposal: Physics, Stacking Stones and a Little Dam
 
-Status: **approved by the maintainer**, November 2026, with the decisions below, which this text now follows. Nothing here is implemented yet beyond what the campsite (#346) built for its sticks. It was written against `origin/main` at `f2aad5e1` (#334) and amended after the campsite.
+Status: **approved by the maintainer**, November 2026, with the decisions below, which this text now follows. Its first two stages are implemented: the beach's stones on `tomori-physics` (#367), and the campsite's sticks moved onto the same model, toasted by the server, their trust in the client closed (see `design/physics.md` and `design/farmyard.md`); stages 3 and 4 are not. It was written against `origin/main` at `f2aad5e1` (#334) and amended after the campsite.
 
 It builds on environments' server sides and the limits they keep within (`design/environments.md`, #275), objects that say where they stand (`Object::at`, #307) and anchors, the state channel with its state, events and intents, the projection's revisions, patches and per-client limits (`design/projection.md`, #282, #284, #289), the grip and the responder chain (`design/interaction.md`, `design/responders.md`), presence and travel (`design/spaces.md`, `design/locomotion.md`), the rate limits by role (`design/security.md`, #290), the farmyard's hens, owned by its server side and animated alike on every client (`design/farmyard.md`, #198), and the river stones of the farmyard's trail (#334).
 
@@ -212,7 +212,7 @@ The campsite's sticks become bodies of the same world, so that one model covers 
 
 ## 8. A staged plan
 
-**Stage 1: real physics for stones, and grabbing with either hand.**
+**Stage 1: real physics for stones, and grabbing with either hand.** Implemented (#367).
 
 - Workspace: glam 0.30 to 0.33, in a pull request of its own first.
 - `tomori-physics` on Rapier, shared: bodies, colliders, the world, holding, snapshots, rests and wakes, its limits; opening with the **harness**: programmatically stacked cairns of 3 to 10 stones, run for ten simulated minutes, required to settle and sleep within seconds and never move after; one more stone dropped on, required to wake the cairn without bursting it; and releases with the poses and speeds a hand gives.
@@ -221,7 +221,7 @@ The campsite's sticks become bodies of the same world, so that one model covers 
 - Costs: Rapier and its dependencies in the server; server CPU, small and only while something moves; about 1,200 triangles; a farmyard version bump.
 - Risks: **stacking stability**, the biggest of the proposal; the grip's order on the left hand; the visible blend at release over a slow link.
 
-**Stage 2: the sticks on the general model.**
+**Stage 2: the sticks on the general model.** Implemented.
 
 - Farmyard: the campsite's sticks as bodies of the world, toasting on the server from the held pose, at rest simulated; the campsite's own grab, rest and toast handling removed, and `farmyard.md`'s note of its trust in the client with it.
 - Risks: a stick, long and thin, resting less steadily than a stone; toasting that lags the hand by presence's flight, which the holder's foresight hides.

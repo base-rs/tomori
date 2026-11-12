@@ -8,6 +8,7 @@ use tomori_environment::{Intent as Asked, Outlet};
 
 use super::*;
 use crate::behaviour::Doing;
+use crate::campsite;
 use crate::flock::State;
 
 /// What the side sent, as the server would keep it.
@@ -351,11 +352,20 @@ fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_
     let inbox = space.inbox();
     let running = std::thread::spawn(move || FarmyardSide.run(&space));
     eventually(|| !kept.states.lock().unwrap().is_empty());
-    // Its state has every stick, on its log, beside the flock.
-    let shared: campsite::Shared = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
-    assert_eq!(shared.sticks.len(), campsite::STICKS);
-    assert!(shared.sticks.iter().all(campsite::Stick::fresh));
-    // Two take stick 2 at once: the first holds it, announced to everyone; the second changes nothing.
+    // Its state has every stick, at rest on its log, fresh, beside the flock.
+    let first: serde_json::Value = serde_json::from_str(&kept.states.lock().unwrap()[0]).unwrap();
+    let shared = campsite::shared(&first);
+    assert_eq!(shared.sticks.bodies.len(), campsite::STICKS);
+    assert!(
+        shared
+            .sticks
+            .bodies
+            .iter()
+            .all(|stick| !stick.moving && stick.held.is_none())
+    );
+    assert_eq!(shared.toast, [0.0; campsite::STICKS]);
+    // Two beside stick 2, their right hands at its handle, take it at once: the first holds it, announced to everyone;
+    // the second changes nothing.
     let sticks = |kept: &Kept| -> Vec<campsite::Event> {
         kept.events
             .lock()
@@ -364,17 +374,38 @@ fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_
             .filter_map(|event| serde_json::from_str::<campsite::Event>(event).ok())
             .collect()
     };
+    let body = tomori_physics::Encoded(shared.sticks.bodies[2].at.0)
+        .placement(tomori_physics::Precision::Rest);
+    let hand = body.then(&campsite::grip().inverse()).position;
     inbox.set_present(vec![3, 4]);
-    assert!(inbox.push(Asked::new(3, r#"{"grab": 2, "epoch": 0}"#)));
-    assert!(inbox.push(Asked::new(4, r#"{"grab": 2, "epoch": 0}"#)));
+    for participant in [3, 4] {
+        inbox.set_presence(tomori_environment::Presence::new(
+            participant,
+            tomori_protocol::Pose::at([hand.x, hand.y + 0.6, hand.z + 0.3]),
+            None,
+            Some(tomori_protocol::Pose::at(hand.to_array())),
+            Instant::now(),
+        ));
+    }
+    let take = format!(
+        r#"{{"take":{{"body":{},"epoch":0,"hand":"right","offset":{}}}}}"#,
+        campsite::body(2),
+        serde_json::to_string(&campsite::grip().encoded(tomori_physics::Precision::Rest)).unwrap()
+    );
+    assert!(inbox.push(Asked::new(3, &take)));
+    assert!(inbox.push(Asked::new(4, &take)));
     eventually(|| !sticks(&kept).is_empty());
-    std::thread::sleep(Duration::from_millis(100));
-    let told = sticks(&kept);
-    assert_eq!(told.len(), 1);
-    assert_eq!((told[0].stick, told[0].now.held), (2, Some(3)));
-    let state: campsite::Shared =
+    std::thread::sleep(Duration::from_millis(200));
+    let holdings: Vec<tomori_physics::message::Holding> = sticks(&kept)
+        .into_iter()
+        .flat_map(|event| event.sticks.holding)
+        .collect();
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].body, campsite::body(2));
+    assert_eq!(holdings[0].held.map(|held| held.by), Some(3));
+    let state: serde_json::Value =
         serde_json::from_str(kept.states.lock().unwrap().last().unwrap()).unwrap();
-    assert_eq!(state.sticks[2].held, Some(3));
+    assert_eq!(state["campsite"]["sticks"]["bodies"][2]["held"]["by"], 3);
     // Described in a hand, it is not said where it is, which only presence says; the others are, on their log.
     eventually(|| {
         kept.objects.lock().unwrap().last().is_some_and(|objects| {
@@ -386,22 +417,37 @@ fn the_side_keeps_the_campsite_s_sticks_taking_the_first_grab_and_letting_go_of_
         })
     });
     let objects = kept.objects.lock().unwrap().last().unwrap().clone();
-    assert!(
-        objects
-            .iter()
-            .any(|object| object.id() == "stick-1" && object.position().is_some())
-    );
+    assert!(objects.iter().any(|object| object.id() == "stick-1"
+        && object.description().contains("leaning on the log")
+        && object.position().is_some()));
     // The agent may inspect it, as the campsite's.
     let inspector = inbox.inspector().unwrap();
     let details: serde_json::Value =
         serde_json::from_str(&inspector.inspect("campsite/stick-2").unwrap().unwrap()).unwrap();
     assert_eq!(details["held_by"], 3);
-    // Its holder gone from the space, it goes back on its log, fresh, for everyone.
+    // The campsite's old intents, a grab from anywhere and a toasting said by the client, change nothing.
+    assert!(inbox.push(Asked::new(4, r#"{"grab": 1, "epoch": 0}"#)));
+    assert!(inbox.push(Asked::new(3, r#"{"toast": 2, "epoch": 1, "level": 0.9}"#)));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        sticks(&kept)
+            .iter()
+            .flat_map(|event| &event.sticks.holding)
+            .count(),
+        1
+    );
+    assert!(sticks(&kept).iter().all(|event| event.toast.is_empty()));
+    // Its holder gone from the space, it is let go where their hand was, for everyone.
     inbox.set_present(vec![4]);
-    eventually(|| sticks(&kept).len() == 2);
-    let back = &sticks(&kept)[1];
-    assert_eq!(back.stick, 2);
-    assert!(back.now.fresh());
+    eventually(|| {
+        sticks(&kept).iter().any(|event| {
+            event
+                .sticks
+                .holding
+                .iter()
+                .any(|holding| holding.body == campsite::body(2) && holding.held.is_none())
+        })
+    });
     cancellation.cancel();
     assert_eq!(running.join().unwrap(), Ok(()));
 }

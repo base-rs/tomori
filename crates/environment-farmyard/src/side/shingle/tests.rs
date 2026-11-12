@@ -1,9 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use std::time::Duration;
+
+use glam::Quat;
+
 use super::*;
-use tomori_physics::message::{LetGo, Take};
-use tomori_physics::{Body, Encoded, Precision, Side};
+use tomori_environment::Presence;
+use tomori_physics::message::{Intent, LetGo, Take};
+use tomori_physics::{Body, Encoded, Placement, Precision, SILENT, Side};
 use tomori_protocol::Pose;
 
 /// Someone standing beside stone `index`, their right hand on it, seen at `at`.
@@ -409,22 +414,4 @@ fn each_taking_and_letting_go_is_logged_taken_or_refused_and_why() {
         assert!(shingle.ask(3, &take(99, 0), &[ada]));
     }
     assert!(shingle.logged.skipped > 0);
-}
-
-#[test]
-fn the_stones_log_at_most_a_burst_and_then_a_few_a_second_saying_how_many_were_not() {
-    let now = Instant::now();
-    let mut logged = Logged::new(now);
-    for line in 0..LOG_BURST as usize {
-        assert_eq!(logged.line(line.to_string(), now), Some(line.to_string()));
-    }
-    assert_eq!(logged.line("skipped".to_owned(), now), None);
-    assert_eq!(logged.line("skipped".to_owned(), now), None);
-    let later = now + Duration::from_secs(1);
-    assert_eq!(
-        logged.line("next".to_owned(), later).unwrap(),
-        "next (2 more of the stones' takings and lettings go were not logged.)"
-    );
-    assert_eq!(logged.line("then".to_owned(), later).unwrap(), "then");
-    assert_eq!(logged.line("beyond".to_owned(), later), None);
 }

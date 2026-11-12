@@ -1032,3 +1032,166 @@ fn a_stone_overhanging_its_support_falls_rather_than_being_put_to_sleep() {
         assert!(unruled(&mut world, 3.0) < 0.005, "{overhang}");
     }
 }
+
+#[test]
+fn a_body_sent_home_glides_there_through_whatever_it_passes_and_rests_where_it_began() {
+    // Two stones on the ground, one moved off a metre and the other between it and where it began.
+    let mut world = world(vec![
+        Body::convex(1, pebble(1, 0.2, 0.08)).at(Placement::at(Vec3::new(0.0, 0.05, 0.0))),
+        Body::convex(2, pebble(2, 0.2, 0.08)).at(Placement::at(Vec3::new(0.5, 0.05, 0.0))),
+    ]);
+    assert!(world.settle(10.0));
+    let (home, between) = (world.home(1).unwrap(), world.placement(2).unwrap());
+    assert!(world.at_home(1, 0.001));
+    assert!(!world.at_home(9, 1.0));
+    let seen = Seen {
+        head: Vec3::new(0.8, 1.2, 0.3),
+        hands: [None, Some(Placement::at(Vec3::new(0.3, 0.3, 0.0)))],
+    };
+    let take = Take {
+        body: 1,
+        epoch: 0,
+        hand: Side::Right,
+        offset: Encoded::default(),
+    };
+    let epoch = world.take(3, &take, Some(&seen)).unwrap();
+    // Held, it is not sent anywhere.
+    assert_eq!(world.send_home(1, 1_000), Err(Refused::Held(1)));
+    assert_eq!(world.send_home(9, 1_000), Err(Refused::Unknown(9)));
+    let let_go = LetGo {
+        body: 1,
+        epoch,
+        at: Placement::at(Vec3::new(1.0, 0.3, 0.0)).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    world.let_go(3, &let_go, Some(&seen)).unwrap();
+    until_rest(&mut world, 10.0);
+    assert!(world.placement(1).unwrap().position.x > 0.8);
+    assert!(!world.at_home(1, 0.03));
+    // Sent home, it glides there over the time asked, said moving, its epoch kept, through the stone between, which it
+    // does not push.
+    let epoch = world.epoch(1).unwrap();
+    world.send_home(1, 500).unwrap();
+    assert!(world.moving());
+    let (updates, taken) = until_rest(&mut world, 10.0);
+    assert!((0.5..5.0).contains(&taken), "{taken}");
+    assert!(updates.iter().any(|update| !update.moving.is_empty()));
+    assert_eq!(world.epoch(1), Some(epoch));
+    assert!(world.at_home(1, 0.003));
+    assert!(world.placement(1).unwrap().position.distance(home.position) < 0.003);
+    assert!(
+        world
+            .placement(2)
+            .unwrap()
+            .position
+            .distance(between.position)
+            < 0.002
+    );
+    // Caught as it glides, it is held, and let go, falls as any body does.
+    world.send_home(1, 2_000).unwrap();
+    world.step(0.5);
+    let gliding = world.placement(1).unwrap().position;
+    let catching = Seen {
+        head: Vec3::new(0.8, 1.2, 0.3),
+        hands: [None, Some(Placement::at(gliding))],
+    };
+    let epoch = world.epoch(1).unwrap();
+    let epoch = world
+        .take(3, &Take { epoch, ..take }, Some(&catching))
+        .unwrap();
+    assert_eq!(world.held(1).map(|held| held.by), Some(3));
+    let let_go = LetGo {
+        epoch,
+        at: Placement::at(Vec3::new(0.8, 0.3, 0.0)).encoded(Precision::Rest),
+        ..let_go
+    };
+    world.let_go(3, &let_go, Some(&catching)).unwrap();
+    until_rest(&mut world, 10.0);
+    let lying = world.placement(1).unwrap();
+    assert!(
+        lying.position.distance(Vec3::new(0.8, 0.04, 0.0)) < 0.05,
+        "{lying:?}"
+    );
+}
+
+#[test]
+fn a_body_lighter_than_water_floats_on_it_and_comes_to_rest_there() {
+    // A pool a metre deep, and a plank of wood, a little over half as dense as water, let go above it.
+    let bed = Static::cuboid(
+        Vec3::new(-3.0, -2.0, -3.0),
+        Vec3::new(3.0, -1.0, 3.0),
+        Quat::IDENTITY,
+    );
+    let outline = vec![
+        Vec2::new(-3.0, -3.0),
+        Vec2::new(3.0, -3.0),
+        Vec2::new(3.0, 3.0),
+        Vec2::new(-3.0, 3.0),
+    ];
+    let plank: Vec<Vec3> = (0..8)
+        .map(|corner| {
+            let sign = |bit: u32| if corner & bit == 0 { -1.0 } else { 1.0 };
+            Vec3::new(sign(1) * 0.3, sign(2) * 0.02, sign(4) * 0.05)
+        })
+        .collect();
+    let mut world = World::new(
+        Settings::default(),
+        vec![bed],
+        vec![Water::below(0.0, outline)],
+        vec![
+            Body::convex(1, plank)
+                .with_density(600.0)
+                .at(Placement::at(Vec3::new(0.0, 0.5, 0.0))),
+        ],
+    )
+    .unwrap();
+    world.settle(20.0);
+    assert!(!world.moving());
+    // It floats as deep as it is lighter than the water: 60% of its 4 cm below the surface, its middle 4 mm under.
+    let floating = world.placement(1).unwrap();
+    assert!((floating.position.y + 0.004).abs() < 0.004, "{floating:?}");
+}
+
+#[test]
+fn a_grabbable_body_sent_home_glides_there_and_rests_without_falling() {
+    let hook = Body::convex(1, pebble(1, 0.1, 0.04))
+        .kinematic()
+        .at(Placement::at(Vec3::new(0.0, 1.5, 0.0)));
+    let mut world = world(vec![hook]);
+    let seen = Seen {
+        head: Vec3::new(0.0, 1.6, 0.5),
+        hands: [None, Some(Placement::at(Vec3::new(0.0, 1.4, 0.0)))],
+    };
+    let take = Take {
+        body: 1,
+        epoch: 0,
+        hand: Side::Right,
+        offset: Encoded::default(),
+    };
+    let epoch = world.take(3, &take, Some(&seen)).unwrap();
+    let let_go = LetGo {
+        body: 1,
+        epoch,
+        at: Placement::at(Vec3::new(0.5, 1.2, 0.0)).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    world.let_go(3, &let_go, Some(&seen)).unwrap();
+    assert!(!world.moving());
+    world.send_home(1, 300).unwrap();
+    let (updates, _) = until_rest(&mut world, 5.0);
+    // Back where it began, in the air, said once at rest there.
+    assert!(world.at_home(1, 0.001));
+    assert!(updates.iter().any(|update| !update.rested.is_empty()));
+    assert!(
+        world
+            .placement(1)
+            .unwrap()
+            .position
+            .distance(Vec3::new(0.0, 1.5, 0.0))
+            < 0.001
+    );
+}

@@ -1,58 +1,39 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The campsite's marshmallow sticks as a client shows them: where each is, as the server side last said, the stick
-//! this participant holds, drawn from their own hand every frame and toasted over the fire as they hold it, and those
-//! the others hold, drawn from the hands their presence brings. Whoever holds a stick controls it; let go, it rests
-//! where the server side decides, which this client foresees with the same rule, so that nothing jumps while the
-//! server agrees. See `tomori-environment-farmyard`'s `context/campsite.md`.
-use std::time::{Duration, Instant};
+//! The campsite's marshmallow sticks as a client shows them: loose bodies ([`Loose`]), as the beach's stones are, taken
+//! with either grip by their handle, pointing at them or reaching for them, held along the hand through the fist, drawn
+//! from this participant's own hand every frame and from the others' hands their presence brings, and let go, thrown as
+//! fast as the hand moved, foreseen until the server's snapshots take over; each marshmallow as toasted as the server
+//! side says, which toasts it from where the holder's hand holds it, and, for one this participant holds, as they
+//! foresee it toasting by the same rule from where they draw it, easing to what the server side says. See
+//! `tomori-environment-farmyard`'s `campsite`.
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use glam::{Mat4, Vec3};
-use tomori_scene::client_side::{Actions, Grab, Hand, Phase, Picked};
+use tomori_physics::Placement;
+use tomori_physics::message::Intent;
+use tomori_scene::client_side::{Grab, Hand, Picked, Sound};
 use tomori_scene::pointing::{Ray, Shape};
 
-use tomori_environment_farmyard::campsite::{
-    self, Event, Intent, Lying, Pose, STICKS, Shared, Stick, TOAST_RATE,
-};
+pub use crate::loose::{Loose, Shapes};
+use tomori_environment_farmyard::campsite::{self, Event, Pose, STICKS, Shared};
 
 /// How near the ray passes a stick to point at it, and how much nearer for each metre away, as a thin thing is hard to
 /// point at exactly from afar; and how near a hand comes to a stick's handle to take it.
 const POINTED: f32 = 0.04;
 const POINTED_PER_METRE: f32 = 0.012;
 pub const REACH: f32 = 0.1;
-/// How often, at most, the holder says how toasted their marshmallow is, and by how much it must have changed: within
-/// the intents' rate, with room for taking and letting go.
-const TOAST_EVERY: Duration = Duration::from_millis(500);
-const TOAST_STEP: f32 = 0.005;
-/// How long a grab waits for the server side to agree before it is given up, as when it was dropped, and a letting go
-/// before it is asked again, or given up where the server side never had the stick held, as when the grab was dropped.
-const UNAGREED: Duration = Duration::from_millis(1500);
-
-/// The stick this participant holds: which, the epoch their grab makes it, how toasted it is as they hold it, where
-/// their hand holds it, when they took it and last said how toasted it is, and whether the server side has agreed.
-#[derive(Clone, Debug)]
-struct Holding {
-    stick: usize,
-    epoch: u32,
-    toast: f32,
-    pose: Pose,
-    since: Instant,
-    last: Instant,
-    said: (Instant, f32),
-    agreed: bool,
-}
-
-/// A stick this participant let go, foreseen where the server side will rest it, until the server side says it has:
-/// with what it asked, and when, so that a letting go the intents' rate dropped is asked again.
-#[derive(Clone, Debug)]
-struct Letting {
-    epoch: u32,
-    lying: Option<Lying>,
-    toast: f32,
-    asked: Intent,
-    sent: Instant,
-}
+/// How far ahead of what the server side says the holder's foresight of their marshmallow's toasting may run, as the
+/// server side says it every half second from the hand presence brings it a moment late, and how far behind; and how
+/// soon, in seconds, it eases up to what the server side says, should it fall behind, about a fifth of the way each
+/// twentieth of a second.
+const AHEAD: f32 = campsite::TOAST_RATE * 0.75;
+const BEHIND: f32 = 0.01;
+const EASE: f32 = 0.25;
+/// The longest frame the foresight toasts over, in seconds.
+const FRAME_MOST: f32 = 0.1;
 
 /// A stick as it is drawn this frame: where, the shade of its marshmallow and whether it burns.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,16 +44,55 @@ pub struct Shown {
     pub burning: bool,
 }
 
-/// The sticks as this client shows them.
+/// The campsite's sticks, as loose bodies are: called by their place on the log, met along their length, taken by
+/// their handle and held along the hand however they were taken, and heard, lightly, as they land.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rack;
+
+impl Shapes for Rack {
+    const PREFIX: &'static str = "stick-";
+    const NAME: &'static str = "a marshmallow stick";
+    const REACH: f32 = REACH;
+
+    fn number(body: u32) -> u32 {
+        campsite::index(body).map_or(body, |index| index as u32)
+    }
+
+    fn body(number: u32) -> Option<u32> {
+        ((number as usize) < STICKS).then(|| campsite::body(number as usize))
+    }
+
+    fn met(origin: Vec3, direction: Vec3, _body: u32, placement: &Placement) -> Option<f32> {
+        let pose = Pose::of(placement);
+        let distance = pose.middle().distance(origin);
+        pose.met(origin, direction, POINTED + POINTED_PER_METRE * distance)
+    }
+
+    fn reach(_body: u32, placement: &Placement, hand: Vec3) -> f32 {
+        Pose::of(placement).from_handle(hand)
+    }
+
+    /// By its handle, along the hand, however it was taken: flying there from where it was, as a stone pulled along the
+    /// ray does, so that a stick taken anywhere along its handle settles into the fist.
+    fn held(_body: u32, _at: &Placement, _hand: &Placement, _within: bool) -> (Placement, bool) {
+        (campsite::grip(), true)
+    }
+
+    /// A tap of wood, softer than a stone's clack, or a splash into the pool.
+    fn sound(_body: u32, water: bool, speed: f32) -> Option<Sound> {
+        let speed = if water { speed } else { speed * 0.4 };
+        (speed >= crate::stones::QUIET).then(|| crate::stones::sound(water, speed))
+    }
+}
+
+/// The sticks as this client shows them: their bodies, how toasted the server side says each is, this participant's
+/// foresight of those they hold, and when they were last drawn.
 #[derive(Clone, Debug, Default)]
 pub struct Sticks {
-    shared: Vec<Stick>,
-    holding: Option<Holding>,
-    letting: Vec<Option<Letting>>,
-    /// Where each stick another holds was last drawn, should their hand go unreported.
-    drawn: Vec<Option<Pose>>,
-    /// This participant's number, as the last frame said.
-    me: Option<u32>,
+    loose: Loose<Rack>,
+    toast: Vec<f32>,
+    foreseen: BTreeMap<u32, f32>,
+    last: Option<Instant>,
 }
 
 impl Sticks {
@@ -81,272 +101,128 @@ impl Sticks {
     }
 
     /// The sticks as the server side shares them, in its state: every one anew.
-    pub fn share(&mut self, shared: Shared) {
-        self.shared = shared.sticks.into_iter().take(STICKS).collect();
-        self.letting.resize(self.shared.len(), None);
-        self.drawn.resize(self.shared.len(), None);
-        for index in 0..self.shared.len() {
-            self.agree(index);
-        }
-        if self
-            .holding
-            .as_ref()
-            .is_some_and(|holding| holding.stick >= self.shared.len())
-        {
-            self.holding = None;
-        }
+    pub fn share(&mut self, shared: &Shared) {
+        self.loose.share(&shared.sticks);
+        self.toast = shared.toast.iter().copied().take(STICKS).collect();
+        self.toast.resize(STICKS, 0.0);
     }
 
-    /// A stick that changed, as the server side announces it.
-    pub fn changed(&mut self, event: Event) {
-        let Some(stick) = self.shared.get_mut(event.stick) else {
-            return;
-        };
-        *stick = event.now;
-        self.agree(event.stick);
-    }
-
-    /// What the server side now says of stick `index`, against what this participant did with it: their grab agreed,
-    /// or given up as another holds it or it moved on; and their letting go, once it rests.
-    fn agree(&mut self, index: usize) {
-        let stick = &self.shared[index];
-        if let Some(holding) = self
-            .holding
-            .as_mut()
-            .filter(|holding| holding.stick == index)
-        {
-            let mine = stick.held.is_some() && stick.held == self.me;
-            if mine && stick.epoch == holding.epoch {
-                holding.agreed = true;
-            } else if holding.agreed || stick.held.is_some() || stick.epoch >= holding.epoch {
-                // Another took it first, or it has moved on without this participant, as when they left it too long:
-                // they hold nothing.
-                self.holding = None;
+    /// What changed, as the server side announced it, arriving at `now` on the farmyard's clock; and the sounds of what
+    /// landed.
+    pub fn changed(&mut self, event: &Event, now: u64) -> Vec<(Sound, [f32; 3])> {
+        for toasted in &event.toast {
+            if let Some(index) = campsite::index(toasted.body)
+                && let Some(toast) = self.toast.get_mut(index)
+                && toasted.toast.is_finite()
+            {
+                *toast = toasted.toast.clamp(0.0, 1.0);
             }
         }
-        // Rested, or another holds it, as when this participant let go of a grab another won before hearing so.
-        let other = stick.held.is_some() && stick.held != self.me;
-        if self.letting[index]
-            .as_ref()
-            .is_some_and(|letting| other || stick.epoch >= letting.epoch)
-        {
-            self.letting[index] = None;
-        }
+        self.loose.changed(event.clock, &event.sticks, now)
     }
 
-    /// Whether stick `index` may be taken: nobody holds it, as far as this client knows.
-    fn free(&self, index: usize) -> bool {
-        self.shared[index].held.is_none()
-            && self
-                .holding
-                .as_ref()
-                .is_none_or(|holding| holding.stick != index)
-            && self.letting[index].is_none()
+    /// How toasted stick `index` is, as the server side last said.
+    pub fn toast(&self, index: usize) -> f32 {
+        self.toast.get(index).copied().unwrap_or_default()
     }
 
-    /// Where stick `index` rests, as the server side says or this client foresees, and how toasted it is.
-    fn resting(&self, index: usize) -> (Pose, f32) {
-        match &self.letting[index] {
-            Some(letting) => (
-                match &letting.lying {
-                    Some(lying) => Pose::lying(lying),
-                    None => Pose::racked(index),
-                },
-                letting.toast,
-            ),
-            None => (self.shared[index].resting(index), self.shared[index].toast),
-        }
+    /// The loose bodies the sticks are.
+    pub fn loose(&self) -> &Loose<Rack> {
+        &self.loose
     }
 
     /// What `ray` meets first of the campsite: a free stick it passes near, which the grip takes, or the bonfire, each
-    /// with how far along the ray.
+    /// with how far along the ray; nothing until the server side has said what there is.
     pub fn pick(&self, ray: &Ray) -> Option<Picked> {
-        // Nothing until the server side has said what there is.
-        if self.shared.is_empty() {
+        if self.toast.is_empty() {
             return None;
         }
-        let sticks = (0..self.shared.len())
-            .filter(|index| self.free(*index))
-            .filter_map(|index| {
-                let (pose, _) = self.resting(index);
-                let distance = pose.middle().distance(ray.origin);
-                pose.met(
-                    ray.origin,
-                    ray.direction,
-                    POINTED + POINTED_PER_METRE * distance,
-                )
-                .map(|along| {
-                    Picked::new(format!("stick-{index}"), "a marshmallow stick", along)
-                        .handles(Actions::GRAB)
-                })
-            });
         let bonfire = Shape::Sphere {
             center: campsite::heart(),
             radius: 0.35,
         }
         .intersect(ray)
         .map(|distance| Picked::new("bonfire", "the bonfire", distance));
-        sticks
+        self.loose
+            .pick(ray)
+            .into_iter()
             .chain(bonfire)
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
 
     /// The free stick whose handle a hand at `hand` is within [`REACH`] of, the nearest.
     pub fn within_reach(&self, hand: Vec3) -> Option<String> {
-        (0..self.shared.len())
-            .filter(|index| self.free(*index))
-            .map(|index| (index, self.resting(index).0.from_handle(hand)))
-            .filter(|(_, distance)| *distance <= REACH)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(index, _)| format!("stick-{index}"))
+        self.loose.within_reach(hand)
     }
 
-    /// A frame at `now`: the grip on a stick, if any, by this participant, `participant`, if they take part; what to ask
-    /// the server side.
-    pub fn update(
+    /// A frame at `now`, the farmyard's clock at `clock`: the grips on sticks this frame, by this participant,
+    /// `participant`, if they take part; what to ask the server side.
+    pub fn update<'a>(
         &mut self,
-        grab: Option<&Grab>,
+        grabs: impl Iterator<Item = &'a Grab>,
         participant: Option<u32>,
         now: Instant,
+        clock: u64,
     ) -> Vec<Intent> {
-        let mut intents = Vec::new();
-        self.me = participant;
-        if self.holding.as_ref().is_some_and(|holding| {
-            !holding.agreed && now.saturating_duration_since(holding.since) >= UNAGREED
-        }) {
-            self.holding = None;
-        }
-        // A letting go the server side has not taken for a while is asked again while it still says this participant
-        // holds the stick, and otherwise, as when it never had their grab, given up.
-        for index in 0..self.letting.len() {
-            let Some(letting) = self.letting[index]
-                .as_mut()
-                .filter(|letting| now.saturating_duration_since(letting.sent) >= UNAGREED)
-            else {
-                continue;
-            };
-            let stick = &self.shared[index];
-            if stick.held.is_some()
-                && stick.held == participant
-                && stick.epoch.wrapping_add(1) == letting.epoch
-            {
-                letting.sent = now;
-                intents.push(letting.asked.clone());
-            } else {
-                self.letting[index] = None;
-            }
-        }
-        let Some(grab) = grab else {
-            return intents;
-        };
-        let index = grab
-            .object
-            .strip_prefix("stick-")
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|index| *index < self.shared.len());
-        let pose = Pose::held(grab.hand.position, grab.hand.orientation);
-        match (grab.phase, index) {
-            (Phase::Began, Some(index)) if participant.is_some() && self.free(index) => {
-                let stick = &self.shared[index];
-                intents.push(Intent::Grab {
-                    grab: index,
-                    epoch: stick.epoch,
-                });
-                self.holding = Some(Holding {
-                    stick: index,
-                    epoch: stick.epoch.wrapping_add(1),
-                    toast: stick.toast,
-                    pose,
-                    since: now,
-                    last: now,
-                    said: (now, stick.toast),
-                    agreed: false,
-                });
-            }
-            (Phase::Changed, Some(index)) => {
-                let Some(holding) = self
-                    .holding
-                    .as_mut()
-                    .filter(|holding| holding.stick == index)
-                else {
-                    return intents;
-                };
-                let seconds = now
-                    .saturating_duration_since(holding.last)
-                    .as_secs_f32()
-                    .min(0.1);
-                holding.last = now;
-                holding.pose = pose;
-                holding.toast = (holding.toast
-                    + TOAST_RATE * campsite::heat(pose.marshmallow()) * seconds)
-                    .min(1.0);
-                let (when, level) = holding.said;
-                if now.saturating_duration_since(when) >= TOAST_EVERY
-                    && holding.toast - level >= TOAST_STEP
-                {
-                    holding.said = (now, holding.toast);
-                    intents.push(Intent::Toast {
-                        toast: index,
-                        epoch: holding.epoch,
-                        level: holding.toast,
-                    });
-                }
-            }
-            (Phase::Ended, Some(index)) => {
-                let Some(holding) = self.holding.take_if(|holding| holding.stick == index) else {
-                    return intents;
-                };
-                let (at, yaw) = (pose.middle(), pose.yaw());
-                let lying = campsite::rest(at.to_array(), yaw);
-                let asked = Intent::Release {
-                    release: index,
-                    epoch: holding.epoch,
-                    level: holding.toast,
-                    at: at.to_array(),
-                    yaw,
-                };
-                intents.push(asked.clone());
-                self.letting[index] = Some(Letting {
-                    epoch: holding.epoch.wrapping_add(1),
-                    lying,
-                    toast: if lying.is_some() { holding.toast } else { 0.0 },
-                    asked,
-                    sent: now,
-                });
-            }
-            _ => {}
-        }
-        intents
+        self.loose.update(grabs, participant, now, clock)
     }
 
-    /// Every stick as it is drawn this frame: the one this participant holds, in their hand; one another holds, in
-    /// theirs, from `hands`, by their numbers, or where it was last drawn; and the rest where they rest.
-    pub fn shown(&mut self, hands: &[(u32, Hand)]) -> Vec<Shown> {
-        (0..self.shared.len())
-            .map(|index| {
-                let (pose, toast) = match (&self.holding, self.shared[index].held) {
-                    (Some(holding), _) if holding.stick == index => (holding.pose, holding.toast),
-                    (_, Some(holder)) if self.letting[index].is_none() => {
-                        let held = hands
-                            .iter()
-                            .find(|(number, _)| *number == holder)
-                            .map(|(_, hand)| Pose::held(hand.position, hand.orientation));
-                        let pose = held
-                            .or(self.drawn[index])
-                            .unwrap_or_else(|| self.resting(index).0);
-                        self.drawn[index] = Some(pose);
-                        (pose, self.shared[index].toast)
-                    }
-                    _ => self.resting(index),
+    /// Every stick as it is drawn at `now`, the farmyard's clock at `clock`: those this participant holds, in their
+    /// hand, their marshmallows as they foresee them toasting; one another holds, in theirs, from `right` and `left`,
+    /// their hands by their numbers; and the rest where the server side says they are; each as toasted as the server
+    /// side says.
+    pub fn shown(
+        &mut self,
+        right: &[(u32, Hand)],
+        left: &[(u32, Hand)],
+        now: Instant,
+        clock: u64,
+    ) -> Vec<Shown> {
+        let seconds = self
+            .last
+            .map_or(0.0, |last| {
+                now.saturating_duration_since(last).as_secs_f32()
+            })
+            .min(FRAME_MOST);
+        self.last = Some(now);
+        let placed = self.loose.placed(right, left, now, clock);
+        self.foreseen
+            .retain(|body, _| placed.iter().any(|(held, _, mine)| held == body && *mine));
+        placed
+            .into_iter()
+            .map(|(body, placement, mine)| {
+                let said = self.toast(Rack::number(body) as usize);
+                let pose = Pose::of(&placement);
+                let marshmallow = pose.marshmallow();
+                let toast = if mine {
+                    let foreseen = self.foreseen.entry(body).or_insert(said);
+                    *foreseen = foresee(*foreseen, said, marshmallow, seconds);
+                    *foreseen
+                } else {
+                    said
                 };
                 Shown {
-                    transform: pose.transform(),
-                    marshmallow: pose.marshmallow(),
+                    transform: campsite::drawn(&placement),
+                    marshmallow,
                     shade: campsite::shade(toast),
-                    burning: campsite::burning(toast, pose.marshmallow()),
+                    burning: campsite::burning(toast, marshmallow),
                 }
             })
             .collect()
+    }
+}
+
+/// The toasting this participant foresees of a marshmallow they hold, `foreseen`, at `at`, `seconds` on, as the server
+/// side said `said`: toasted by the same rule the side toasts it by, never more than [`AHEAD`] beyond what the side
+/// said, which only rises, so that it never runs far from what everyone else sees, and eased up to it, should it fall
+/// more than [`BEHIND`] short, so that it never jumps.
+pub fn foresee(foreseen: f32, said: f32, at: Vec3, seconds: f32) -> f32 {
+    let toasted = campsite::toasted(foreseen, at, seconds).min((said + AHEAD).min(1.0));
+    let least = (said - BEHIND).max(0.0);
+    if toasted < least {
+        toasted + (least - toasted) * (seconds / EASE).min(1.0)
+    } else {
+        toasted
     }
 }
 
