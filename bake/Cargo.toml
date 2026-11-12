@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 bake = ">=0.20.2"
-base-project = ">=0.1.11"
+base-project = ">=0.1.12"
 
 [dev-dependencies]
 # Reads `cargo metadata`, for the dependency rule between the core, environments and apps.

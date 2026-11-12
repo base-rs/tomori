@@ -333,9 +333,9 @@ dependencies = [
 
 [[package]]
 name = "bake-cargo"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0014efec0989a709fa1ae2b154b416202ea6cb07d67a67be5316036b68a9fa9"
+checksum = "c37f7b9995ad08422ea73a6d958df81e70c21f6ae73fead2939560cd67f0a4d5"
 dependencies = [
  "bake",
  "bake-license",
@@ -528,9 +528,9 @@ dependencies = [
 
 [[package]]
 name = "base-project"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb5a5a6d9b74408f87d547965dbc7138b028be3f82b62b7a87250c5aaa07dd68"
+checksum = "6d9030dfa8bb7bf86d73e45dcc5a2426c4f88051334c5cb46bab7f457aae8090"
 dependencies = [
  "bake",
  "bake-agent-context",
