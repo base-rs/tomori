@@ -5,58 +5,14 @@
 //! when asked, kept home by an owner, told by `presence`, and back at home when the space changes environment, and
 //! never moved otherwise in a space whose agent moves only when asked. See
 //! `design/environments.md` and `design/mcp.md`.
-use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tomori_protocol::{ClientMessage, Pose, SpaceState};
-use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend};
-use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::test_support::{TestClient, eventually};
 
-/// A server over `backend` serving Tomori's tools.
-fn start(backend: &FakeBackend) -> TestServer {
-    TestServer::with_tools(backend.clone(), |backends| {
-        Server::new(backends, Arc::new(TextTranscriber::default()))
-    })
-}
-
-/// Call the tool `name` with `arguments` for the agent of `session`, as OpenCode does, and return its result.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = std::net::TcpStream::connect(server.tools.unwrap()).unwrap();
-    std::io::Write::write_all(
-        &mut stream,
-        format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    let mut response = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// A tool's structured result, which must not be a failure.
-fn content(result: &Value) -> &Value {
-    assert_ne!(result["isError"], true, "{result}");
-    &result["structuredContent"]
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> &str {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap()
-}
+pub mod mcp_support;
+use mcp_support::{call, content, failure, start};
 
 fn close(a: [f32; 3], b: [f32; 3]) -> bool {
     a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)

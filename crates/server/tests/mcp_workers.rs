@@ -2,41 +2,15 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Tomori's worker tools: listing a space's workers, and removing them, only ever the space's own. See `design/mcp.md`.
-use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tomori_backend::{Error, ErrorKind, Event, Worker, WorkerState};
 use tomori_protocol::{ClientMessage, Projection, ServerMessage, SpaceState};
-use tomori_server::Server;
-use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
-use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::fake::{FakeBackend, FakeSession};
+use tomori_server::test_support::{TestClient, TestServer, eventually};
 
-/// A server over `backend` serving Tomori's tools.
-fn start(backend: &FakeBackend) -> TestServer {
-    TestServer::with_tools(backend.clone(), |backends| {
-        Server::new(backends, Arc::new(TextTranscriber::default()))
-    })
-}
-
-/// A participant `name` of `server`, whose client reads what is projected in its space.
-fn projected(server: &TestServer, participant: &str, name: &str) -> TestClient {
-    let mut client = TestClient::open(server.address);
-    client.hello_projected(participant, name);
-    client
-}
-
-/// Create a space titled `title` in `/tmp`, and wait for it.
-fn create(client: &mut TestClient, title: &str) -> String {
-    client.send(&ClientMessage::CreateSpace {
-        title: title.to_owned(),
-        backend: FAKE_BACKEND_NAME.to_owned(),
-        directory: "/tmp".to_owned(),
-        session: None,
-        environment: None,
-        instructions: None,
-    });
-    client.space(|state| state.title == title).id
-}
+pub mod mcp_support;
+use mcp_support::{call_from, content, create, failure, projected, start};
 
 /// The bearer token of `server`'s MCP endpoint, once a space has registered it.
 fn token(server: &TestServer) -> String {
@@ -46,53 +20,6 @@ fn token(server: &TestServer) -> String {
 /// The identifier of `session`, as OpenCode names it in a tool call's `_meta`.
 fn id(session: &FakeSession) -> String {
     tomori_backend::Session::id(session)
-}
-
-/// Call the tool `name` with `arguments` for the agent of `session`, as OpenCode does, and return its result.
-fn call(
-    server: &TestServer,
-    token: &str,
-    session: Option<&str>,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    let mut params = json!({ "name": name, "arguments": arguments });
-    if let Some(session) = session {
-        params["_meta"] = json!({ "ai.opencode/sessionID": session });
-    }
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = std::net::TcpStream::connect(server.tools.unwrap()).unwrap();
-    std::io::Write::write_all(
-        &mut stream,
-        format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    let mut response = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// A tool's structured result, which must not be a failure.
-fn content(result: &Value) -> &Value {
-    assert_ne!(result["isError"], true, "{result}");
-    assert_eq!(
-        result["content"][0]["text"],
-        result["structuredContent"].to_string()
-    );
-    &result["structuredContent"]
-}
-
-/// The text of a tool's failure.
-fn failure(result: &Value) -> &str {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap()
 }
 
 /// A worker of the session `parent`, or of the worker `parent`.
@@ -219,7 +146,7 @@ impl Spaces {
 
     /// Call `name` with `arguments` as the agent of the space's own session.
     fn call(&self, name: &str, arguments: Value) -> Value {
-        call(&self.server, &self.token, Some(&self.one), name, arguments)
+        call_from(&self.server, &self.token, Some(&self.one), name, arguments)
     }
 
     /// Ada says `words` to the agent, and waits until it is given them, so that a tool may act on her word.
@@ -310,7 +237,7 @@ fn the_workers_listed_are_those_the_space_shows() {
         message: "Still finding workers.".to_owned(),
     });
     spaces.bob.space(|state| shown(state) == ["o1"]);
-    let other = call(
+    let other = call_from(
         &spaces.server,
         &spaces.token,
         Some(&spaces.two),
@@ -385,7 +312,7 @@ fn finished_workers_are_removed_for_everyone_with_one_notice() {
     // Everyone in the space sees them go, and nobody elsewhere does, and the space's Tomori wall says so.
     carol.space(|state| shown(state) == ["w3", "w6"]);
     let said = after(&spaces.ada, &["w3", "w6"], |found| !found.is_empty());
-    let elsewhere = call(
+    let elsewhere = call_from(
         &spaces.server,
         &spaces.token,
         Some(&spaces.two),
@@ -589,7 +516,7 @@ fn only_the_space_s_own_workers_are_ever_removed() {
     );
     assert!(spaces.backend.removed_workers().is_empty());
     assert!(spaces.backend.deleted().is_empty());
-    let elsewhere = call(
+    let elsewhere = call_from(
         &spaces.server,
         &spaces.token,
         Some(&two),
@@ -624,7 +551,7 @@ fn only_the_space_s_own_workers_are_ever_removed() {
             ("remove_workers", json!({"finished": true})),
         ] {
             assert!(
-                failure(&call(
+                failure(&call_from(
                     &spaces.server,
                     &spaces.token,
                     Some(session),
@@ -637,7 +564,7 @@ fn only_the_space_s_own_workers_are_ever_removed() {
         }
     }
     assert!(
-        failure(&call(
+        failure(&call_from(
             &spaces.server,
             &spaces.token,
             None,
@@ -835,7 +762,7 @@ fn a_space_deleted_while_its_workers_are_removed_is_left_deleted() {
     let result = serde_json::from_str::<Value>(body).unwrap()["result"].clone();
     assert_eq!(sessions(content(&result), "removed"), ["w1"]);
     assert!(
-        !call(&spaces.server, &spaces.token, None, "spaces", json!({}))["structuredContent"]["spaces"]
+        !call_from(&spaces.server, &spaces.token, None, "spaces", json!({}))["structuredContent"]["spaces"]
             .as_array()
             .unwrap()
             .iter()

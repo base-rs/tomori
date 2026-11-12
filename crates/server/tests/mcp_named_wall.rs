@@ -4,52 +4,14 @@
 //! An environment's own wall that its environment named, locked as every such wall is: the agent puts panels on it by
 //! its name, `place: wall Details slot 4`, in a reply's blocks and with `move_panel`, lists it by that name in
 //! `presence`, and still cannot change it. See `design/projection.md` and `design/mcp.md`.
-use std::io::{Read, Write};
-use std::net::TcpStream;
 
 use serde_json::{Value, json};
-use tomori_backend::Event;
 use tomori_protocol::{Grid, Place, Pose, ServerMessage};
-use tomori_server::fake::FakeSession;
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{Environment, EnvironmentWall};
 
-/// Call a tool with `arguments` at `server`'s MCP endpoint, with `token`, as the agent of `session`.
-fn call(server: &TestServer, token: &str, session: &str, name: &str, arguments: Value) -> Value {
-    let params = json!({
-        "name": name,
-        "arguments": arguments,
-        "_meta": { "ai.opencode/sessionID": session },
-    });
-    let body =
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }).to_string();
-    let mut stream = TcpStream::connect(server.tools.unwrap()).unwrap();
-    write!(
-        stream,
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
-}
-
-/// The agent of `session` replies `text` as the message `message`.
-fn agent_replies(session: &FakeSession, message: &str, text: &str) {
-    session.emit(Event::MessageStarted {
-        message: message.into(),
-        role: tomori_backend::Role::Assistant,
-    });
-    session.emit(Event::TextDelta {
-        message: message.into(),
-        text: text.into(),
-    });
-    session.emit(Event::MessageCompleted {
-        message: message.into(),
-    });
-}
+pub mod mcp_support;
+use mcp_support::{agent_replies, call};
 
 #[test]
 fn the_agent_puts_panels_on_a_declared_locked_wall_by_the_name_its_environment_gave_it() {

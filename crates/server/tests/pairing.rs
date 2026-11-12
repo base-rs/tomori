@@ -10,10 +10,8 @@ use tomori_security::Fingerprint;
 use tomori_security::pairing::{ChosenName, Nonce, code, display};
 use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
-/// The certificate fingerprint the test servers pair with. The test clients speak plain HTTP, so the fingerprint is only what the code is derived from.
-fn fingerprint() -> Fingerprint {
-    Fingerprint::of(b"test certificate")
-}
+pub mod pairing_support;
+use pairing_support::{failed, fingerprint, pair, paired};
 
 /// A server that admits by tokens, with visitors if `visitors`, and pairs, with its pairing handle, and pairing opened as the operator opens it, since it is closed by default, even without an owner.
 fn pairing_server(
@@ -33,37 +31,6 @@ fn pairing_server(
     let pairing = receiver.recv().unwrap();
     pairing.open().unwrap();
     (server, pairing)
-}
-
-fn failed(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::PairFailed { error } => Some(error.clone()),
-        _ => None,
-    })
-}
-
-/// Begin and reveal, as a device does, returning the code it derives.
-fn pair(client: &mut TestClient) -> String {
-    let device = Nonce::generate();
-    client.send(&ClientMessage::PairBegin {
-        commitment: device.commitment(),
-    });
-    let server = client.wait_for(|message| match message {
-        ServerMessage::PairNonce { nonce } => Nonce::parse(nonce),
-        _ => None,
-    });
-    client.send(&ClientMessage::PairReveal {
-        nonce: device.to_hex(),
-    });
-    client.wait_for(|message| matches!(message, ServerMessage::PairWaiting).then_some(()));
-    code(fingerprint(), device, server)
-}
-
-fn paired(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::Paired { token } => Some(token.clone()),
-        _ => None,
-    })
 }
 
 #[test]

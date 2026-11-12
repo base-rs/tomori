@@ -6,14 +6,12 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use tomori_protocol::{ClientMessage, ConnectionRole, PAIRING_CLOSED, ServerMessage};
-use tomori_security::Fingerprint;
-use tomori_security::pairing::{Nonce, code};
+use tomori_security::pairing::Nonce;
 use tomori_server::test_support::{TestClient, TestServer};
 use tomori_server::{Opener, PAIRING_OPEN_FOR, PairingState};
 
-fn fingerprint() -> Fingerprint {
-    Fingerprint::of(b"test certificate")
-}
+pub mod pairing_support;
+use pairing_support::{failed, fingerprint, pair, paired};
 
 /// A server that admits by tokens, with visitors if `visitors`, and pairs, with its pairing handle.
 fn pairing_server(
@@ -33,44 +31,12 @@ fn pairing_server(
     (server, receiver.recv().unwrap())
 }
 
-/// Begin and reveal, as a device does, returning the code it derives.
-fn pair(client: &mut TestClient) -> String {
-    let device = Nonce::generate();
-    client.send(&ClientMessage::PairBegin {
-        commitment: device.commitment(),
-    });
-    let server = client.wait_for(|message| match message {
-        ServerMessage::PairNonce { nonce } => Nonce::parse(nonce),
-        ServerMessage::PairFailed { error } => panic!("pairing was refused: {error}"),
-        _ => None,
-    });
-    client.send(&ClientMessage::PairReveal {
-        nonce: device.to_hex(),
-    });
-    client.wait_for(|message| matches!(message, ServerMessage::PairWaiting).then_some(()));
-    code(fingerprint(), device, server)
-}
-
 /// Ask to pair, expecting to be refused, and return why.
 fn refused(client: &mut TestClient) -> String {
     client.send(&ClientMessage::PairBegin {
         commitment: Nonce::generate().commitment(),
     });
     failed(client)
-}
-
-fn failed(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::PairFailed { error } => Some(error.clone()),
-        _ => None,
-    })
-}
-
-fn paired(client: &TestClient) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::Paired { token } => Some(token.clone()),
-        _ => None,
-    })
 }
 
 /// The next word of whether pairing is open, as an owner's client is told: the seconds left, or `None` once closed.
