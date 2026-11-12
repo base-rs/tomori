@@ -103,7 +103,10 @@ fn a_stone_taken_within_reach_and_thrown_is_said_to_move_at_most_twenty_times_a_
     assert!(shingle.ask(3, &take(0, 0), &presence));
     let said = shingle.update(start).unwrap();
     assert_eq!(said.holding[0].held.map(|held| held.by), Some(3));
-    // Thrown out over the river, it is said as it flies, at most twenty times a second, and once where it rests.
+    assert_eq!(shingle.behind(), 0);
+    // Thrown out over the river, it is said as it flies, at most twenty times a second, and once where it rests, each
+    // time said as of when it was where it is said to be, which is less than a snapshot's interval before, as the
+    // simulation reaches only whole steps.
     let from = beside(&shingle, 1, 3, start);
     let at = Placement::at(glam::Vec3::from(from.head.position) + glam::Vec3::new(0.3, -0.4, 0.0));
     let (_, out) = (beach::frame().1, beach::frame().2);
@@ -114,14 +117,22 @@ fn a_stone_taken_within_reach_and_thrown_is_said_to_move_at_most_twenty_times_a_
     ));
     let mut updates = 0;
     let mut rested = false;
+    let mut behind = 0;
     let mut now = start;
     for _ in 0..(60 * 10) {
         now += Duration::from_millis(16);
         if let Some(update) = shingle.update(now) {
             updates += 1;
             rested |= !update.rested.is_empty();
+            if update.moving.is_empty() {
+                assert_eq!(shingle.behind(), 0);
+            } else {
+                assert!(shingle.behind() < 50, "{}", shingle.behind());
+                behind = behind.max(shingle.behind());
+            }
         }
     }
+    assert!(behind > 0);
     assert!(
         updates <= 10 * tomori_physics::SNAPSHOT_RATE as usize + 1,
         "{updates}"

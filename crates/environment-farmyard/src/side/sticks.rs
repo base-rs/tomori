@@ -389,10 +389,17 @@ impl Sticks {
     /// second; and how toasted those sticks whose toasting changed are, how big the fire is and how far the logs whose
     /// burning changed have burnt, at most every [`TOAST_EVERY`], but a fresh marshmallow or log at once: on one that
     /// begins its way back, which clients draw as it was until it fades in, or a stick that comes to rest on its log;
-    /// and a log alight as it comes to rest in the fire.
+    /// and a log alight as it comes to rest in the fire; said at `clock`, or sooner, when what moves was where it says
+    /// (see [`Loose::behind`]).
     pub fn update(&mut self, presence: &[Presence], now: Instant, clock: u64) -> Option<Event> {
         self.tick(presence, now);
         let sticks = self.loose.update(now).unwrap_or_default();
+        // Said as of when what moves was where it says.
+        let clock = if sticks.moving.is_empty() {
+            clock
+        } else {
+            clock.saturating_sub(self.loose.behind())
+        };
         let mut fresh = false;
         for returning in &sticks.returning {
             match (

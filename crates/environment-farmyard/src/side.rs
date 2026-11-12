@@ -18,8 +18,9 @@ use crate::flock::{Event, Flock, Intent, PECKS, seed};
 pub use shingle::Shingle;
 pub use sticks::Sticks;
 
-/// How long the side waits for an intent before moving the flock on, and how often it describes the chickens to the
-/// space's agent.
+/// How long the side waits at most for an intent before moving the flock, the sticks and the stones on, counted from
+/// when it last waited this long rather than from the last intent, so that what moves is said at an even pace; and how
+/// often it describes the chickens to the space's agent.
 pub const TICK: Duration = Duration::from_millis(50);
 pub const DESCRIBE: Duration = Duration::from_secs(1);
 
@@ -197,9 +198,11 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     let mut described: Option<Instant> = None;
     // Whether someone is at the coop, as the side was last told, or nothing until it is.
     let mut visited = None;
+    // When it next moves on, whatever intents arrive meanwhile, so that what moves is said at an even pace.
+    let mut tick = Instant::now() + TICK;
     while !space.cancellation().is_cancelled() {
         let mut changes = Vec::new();
-        let intent = space.next_intent(TICK);
+        let intent = space.next_intent(tick.saturating_duration_since(Instant::now()));
         let mut flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(acted) = intent.as_ref().and_then(|intent| intent.acted()) {
             // The server checked the action against what the side declared: only peck, with a whole number of pecks.
@@ -235,10 +238,12 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         // A stick or a stone whose holder has left, or gone quiet, is let go where their hand was, and an empty space
         // puts its sticks back after a while; then the sticks toast and move on, and the stones move on.
         let (present, presence) = (space.present(), space.presence());
-        sticks.sweep(present.as_deref(), &presence, Instant::now());
-        shingle.sweep(present.as_deref(), &presence, Instant::now());
-        let camped = sticks.update(&presence, Instant::now(), clock());
-        let moved = shingle.update(Instant::now());
+        let now = Instant::now();
+        let ticked = now >= tick;
+        sticks.sweep(present.as_deref(), &presence, now);
+        shingle.sweep(present.as_deref(), &presence, now);
+        let camped = sticks.update(&presence, now, clock());
+        let moved = shingle.update(now);
         changes.extend(flock.update(clock()));
         // Each change, the flock's, the sticks' and then the stones', announced with the state it leaves.
         let mut events: Vec<String> = changes
@@ -259,7 +264,8 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         let shared = shingle.shared();
         if let Some(moved) = moved {
             events.push(json(Stones {
-                clock: clock(),
+                // As of when what moves was where it says.
+                clock: clock().saturating_sub(shingle.behind()),
                 stones: moved,
             }));
             *stones.lock().unwrap_or_else(PoisonError::into_inner) = shared.clone();
@@ -269,6 +275,9 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         }
         for event in pace.due(Instant::now()) {
             space.announce(event, state(&flock, &campsite, &shared, clock()))?;
+        }
+        if ticked {
+            tick = Instant::now() + TICK;
         }
         if described.is_none_or(|described| described.elapsed() >= DESCRIBE) {
             described = Some(Instant::now());
