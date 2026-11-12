@@ -2,13 +2,13 @@
 
 ## Unreleased
 
-- **The upper terrace's floor no longer looks like a star.** Its floor was drawn as long thin triangles fanning out from one point, shaded moss or stone in turn, which read as a giant star at your feet; it is now even triangles about 0.6 m across, with patches of stone among the moss. The ground about the stream above the waterfall is drawn without fans of slivers too. See `design/farmyard.md`.
-
-- For environments: `tomori-environment-farmyard`'s `terrace` gains `SPACING`, `edge` and `faces`, and loses `FAN`.
-
 - **Bigger marshmallows.** The campsite's marshmallows are twice as big, 9 cm long, on the end of each stick, and they toast at the same distances from the flames as before; a burnt one's flame is twice as big too. The sticks rest a little further back on their log so they don't tip off it, and a stick dropped in the pool floats and comes back after a minute as before. See `design/farmyard.md`.
 
 - For environments: `tomori-physics` now soaks a body lighter than the water that rests floating in it, its middle within the water's outline and some of it below the surface, even with its middle above it, and takes it back as the water says; a stone, heavier than the water, still soaks only with its middle in it. `tomori-environment-farmyard`'s `campsite::in_pool` takes the stick's placement rather than its middle, **breaking** for code that calls it, `campsite::girth` is new, and the campsite's world is unclustered. See `design/physics.md`.
+
+- **The upper terrace's floor no longer looks like a star.** Its floor was drawn as long thin triangles fanning out from one point, shaded moss or stone in turn, which read as a giant star at your feet; it is now even triangles about 0.6 m across, with patches of stone among the moss. The ground about the stream above the waterfall is drawn without fans of slivers too. See `design/farmyard.md`.
+
+- For environments: `tomori-environment-farmyard`'s `terrace` gains `SPACING`, `edge` and `faces`, and loses `FAN`.
 
 - **A locked wall's padlock within reach.** An owner now sees a locked wall's padlock at its corner nearest them, or, along a wall wider than 2 m, at a place between its corners along its top or bottom edge, rather than always beyond its top left corner, so that a big wall's padlock is within reach from wherever you stand along it. It stays where it is as you shift about, moving only once another place is clearly nearer, or at once if it would otherwise be out of reach or hidden, and stays where you squeezed it once unlocked. It still shows only within 3 m of you and in clear view, measured to where it stands, and `Locked: come closer to unlock` says so exactly when coming closer would show it. Each owner sees their own. See `design/projection.md`.
 
