@@ -32,6 +32,12 @@ impl SpectatorView {
         input.renderer.set_environment(frame.environment);
         // Its scenery draws in its own coordinates, carried into the space's, as on the headset.
         input.renderer.set_carriage(self.feed.carriage());
+        // What the environment's client side shows, as on the headset. See `design/spectator.md`.
+        if let Some(drawn) = self.feed.drawn() {
+            input
+                .renderer
+                .animate(input.device, input.queue, drawn.as_ref());
+        }
         // The feed animates a swarm as large as the renderer's, or none while another avatar shows, which its own
         // scenery draws. See `design/avatars.md`.
         input

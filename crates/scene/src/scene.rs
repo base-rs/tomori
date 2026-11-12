@@ -2664,26 +2664,8 @@ impl Step {
                     Side::Left,
                 );
                 // The others' hands, each drawn between the presence updates that bring it, about a frame behind.
-                let hands_of =
-                    |relayed: &mut crate::relayed::Relayed,
-                     hands: Vec<(u32, tomori_protocol::Pose)>| {
-                        let hands = hands
-                            .into_iter()
-                            .map(|(source, pose)| {
-                                (
-                                    source,
-                                    crate::client_side::Hand::new(
-                                        carriage.unplace(Vec3::from_array(pose.position)),
-                                        unturn
-                                            * glam::Quat::from_array(pose.orientation).normalize(),
-                                    ),
-                                )
-                            })
-                            .collect();
-                        relayed.update(now, hands)
-                    };
-                let hands = hands_of(&mut self.relayed.right, conversation.right_hands());
-                let left_hands = hands_of(&mut self.relayed.left, conversation.left_hands());
+                let (hands, left_hands) =
+                    crate::relayed::others(&mut self.relayed, conversation, carriage, now);
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(

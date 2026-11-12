@@ -28,7 +28,7 @@ The sections up to **Proposal** describe the routing as it was when the proposal
 
 ### One frame step for every interactive client
 
-The headset and the desktop window run the same frame step, `tomori-scene`'s `Step`, with the keyboard and mouse standing in for the controllers (`desktop.md`: "The window runs the frame step it shares with the headset, with the keyboard and mouse standing in for its controls, not a separate interface"). `Step::buttons` (`crates/scene/src/scene.rs`) acts on the buttons and sticks each frame, and `Step::update` (`scene.rs`) on the trigger, the grip, the ray and everything drawn. The spectator takes no input and runs no client side (`environments.md`; `crates/client-spectator` uses no `Step`), so nothing here changes it. Hand tracking alone has no stick, A or B (`wrist-transcript.md`), and a pinch does not act as the trigger yet (`environments.md`).
+The headset and the desktop window run the same frame step, `tomori-scene`'s `Step`, with the keyboard and mouse standing in for the controllers (`desktop.md`: "The window runs the frame step it shares with the headset, with the keyboard and mouse standing in for its controls, not a separate interface"). `Step::buttons` (`crates/scene/src/scene.rs`) acts on the buttons and sticks each frame, and `Step::update` (`scene.rs`) on the trigger, the grip, the ray and everything drawn. The spectator takes no input and uses no `Step`, and the client side it runs is told no stick, scroll or select (`spectator.md`), so nothing here changes it. Hand tracking alone has no stick, A or B (`wrist-transcript.md`), and a pinch does not act as the trigger yet (`environments.md`).
 
 ### What the ray is on: already unified
 
