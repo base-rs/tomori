@@ -144,6 +144,15 @@ pub fn name_key(name: &str) -> String {
         .collect()
 }
 
+/// `text` cut to at most `limit` bytes, at a character's boundary.
+pub(crate) fn cut_bytes(text: &str, limit: usize) -> String {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
