@@ -13,7 +13,7 @@
 //! ([`colliders`], [`waters`], [`settings`]), so that it falls, rolls and rests, or floats in the pool, and puts it
 //! back on its log where it does not stay ([`goes_back`]). The side toasts the marshmallow of a stick held in the fire's
 //! heat from where the holder's hand holds it ([`toasted`]), and shares how toasted each is ([`Shared`], [`Event`]).
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -66,12 +66,13 @@ pub fn heart() -> Vec3 {
 /// How many marshmallow sticks there are.
 pub const STICKS: usize = 4;
 /// How long a stick is, its radius, how far from its butt a hand holds it, and its marshmallow's length and radius,
-/// whose middle is this far from its tip.
+/// whose middle is this far from its tip: a big one, 9 cm long, its far end 17.5 mm short of the tip, which shows
+/// through it.
 pub const STICK_LENGTH: f32 = 1.0;
 pub const STICK_RADIUS: f32 = 0.011;
 pub const HOLD: f32 = 0.15;
-pub const MARSHMALLOW: (f32, f32) = (0.045, 0.019);
-pub const MARSHMALLOW_INSET: f32 = 0.04;
+pub const MARSHMALLOW: (f32, f32) = (0.09, 0.038);
+pub const MARSHMALLOW_INSET: f32 = 0.0625;
 
 /// Where a stick is: its butt, and the way along it from its butt to its tip, a unit vector.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,12 +107,18 @@ impl Pose {
         let towards = (to_fire - along * to_fire.dot(along)).normalize();
         let spread = (index as f32 - (STICKS as f32 - 1.0) * 0.5) * 0.2;
         // Its butt back from the seat's middle, on the ground, its shaft leaning at the angle that lays it on the log,
-        // touching it, rather than through it: the log's axis as far from the shaft as their radii together.
-        let back = 0.6;
+        // touching it, rather than through it: the log's axis as far from the shaft as the flats of the log's eight
+        // sides and of the stick's six where it crosses it, at its hull's girth there. Far enough back that it crosses
+        // the log well beyond its middle of mass, which its big marshmallow draws towards its tip, so that it rests on
+        // the log rather than tipping over it.
+        let back = 0.72;
         let butt = middle + along * spread - towards * back;
-        let axis = radius + 0.04;
+        let ground = backdrop::drawn_ground(Vec2::new(butt.x, butt.z)).unwrap_or(backdrop::MEADOW);
+        let butt = Vec3::new(butt.x, ground + STICK_RADIUS, butt.z);
+        let axis = middle.y + radius + 0.04 - butt.y;
         let reach = (back * back + axis * axis).sqrt();
-        let touching = (radius + STICK_RADIUS + 0.004) / reach;
+        let flats = radius * (PI / 8.0).cos() + girth(reach) * (PI / STICK_SIDES as f32).cos();
+        let touching = flats / reach;
         let lean = axis.atan2(back) + touching.asin();
         // A little splayed, as sticks leant together are, each turned a few degrees.
         let turn = Quat::from_rotation_y((scatter(index as u32 + 9700) - 0.5) * 0.14);
@@ -290,9 +297,19 @@ fn ring(along: Vec3, at: Vec3, radius: f32, sides: u32) -> Vec<Vec3> {
 /// them are of four corners, on which it lies still, rather than slivers it rocks on.
 pub const STICK_SIDES: u32 = 6;
 
+/// How far a stick's hull reaches from its line, at most, `along` from its butt, up to its marshmallow: its rod's
+/// radius at its butt, widening to its marshmallow's at the marshmallow's near end, as the hull is a cone between
+/// them, on which it rests on what it leans on.
+pub fn girth(along: f32) -> f32 {
+    let (length, radius) = MARSHMALLOW;
+    let near = STICK_LENGTH - MARSHMALLOW_INSET - length * 0.5;
+    STICK_RADIUS + (radius - STICK_RADIUS) * (along / near).clamp(0.0, 1.0)
+}
+
 /// The points of a stick's hull, about its middle, its butt towards +Z and its tip towards −Z: the corners of its
 /// rod's ends and of its marshmallow's, as its model draws them, so that it collides as it is drawn, its rod lying no
-/// more than the marshmallow's few millimetres more than its own above what it rests on.
+/// more than the marshmallow's radius more than its own above what it rests on, as a stick would with a marshmallow
+/// on its end, and resting on its log by its hull's [`girth`] there.
 pub fn hull() -> Vec<Vec3> {
     let half = STICK_LENGTH * 0.5;
     let (length, radius) = MARSHMALLOW;
@@ -415,13 +432,15 @@ pub fn waters() -> Vec<Water> {
 }
 
 /// How the campsite's world simulates: as `tomori-physics` does by default, a stick lost beyond its region going back
-/// on its log.
+/// on its log, but unclustered, as the beach's is, since one plane for the ground's triangles near alike pushed a stick
+/// lying across them, its big marshmallow on its tip, round its butt a few millimetres a second, for ever.
 pub fn settings() -> Settings {
     Settings {
         home: Vec3::new(FIRE.x, 0.0, FIRE.z),
         lost_beyond: REGION,
         ..Settings::default()
     }
+    .unclustered()
 }
 
 /// How near where it began, leaning on its log, a stick at rest is back on its log, fresh.
@@ -437,10 +456,18 @@ pub fn by_its_log(middle: Vec3) -> bool {
     Vec2::new(middle.x, middle.z).distance(Vec2::new(seat.x, seat.z)) < BACK
 }
 
-/// Whether a stick with its middle at `middle` floats in the pool, from which it goes back on its log once it has rested
-/// there for [`RETURNS`].
-pub fn in_pool(middle: Vec3) -> bool {
-    waters().iter().any(|water| water.contains(middle))
+/// Whether a stick placed at `at` floats in the pool, from which it goes back on its log once it has rested there for
+/// [`RETURNS`]: its middle within the pool, and some of it below the water's surface, as `tomori-physics` soaks a body
+/// lighter than the water, since one floating with its big marshmallow down may hold its middle above it.
+pub fn in_pool(at: &Placement) -> bool {
+    let lowest = hull()
+        .into_iter()
+        .map(|point| at.transform_point(point).y)
+        .fold(f32::INFINITY, f32::min);
+    let middle = Vec2::new(at.position.x, at.position.z);
+    waters()
+        .iter()
+        .any(|water| lowest < water.height && tomori_physics::body::within(&water.outline, middle))
 }
 
 /// Whether a stick resting at `at` goes back on its log with a fresh marshmallow: by its log, its middle there; in the
@@ -448,7 +475,7 @@ pub fn in_pool(middle: Vec3) -> bool {
 /// fire; but for one floating in the pool, which goes back after a while.
 pub fn goes_back(at: &Placement) -> bool {
     let middle = at.position;
-    if in_pool(middle) {
+    if in_pool(at) {
         return false;
     }
     let pose = Pose::of(at);

@@ -147,28 +147,48 @@ fn the_sticks_lean_on_their_log_their_marshmallows_towards_the_fire_but_out_of_i
         let pose = Pose::racked(index);
         assert!((pose.along.length() - 1.0).abs() < 1e-4);
         // Its butt on the ground, back from the log, away from the fire, and its marshmallow over the log towards it.
-        assert!(pose.butt.y.abs() < 1e-4);
+        let beneath = backdrop::drawn_ground(ground(pose.butt)).unwrap();
+        assert!((pose.butt.y - beneath - STICK_RADIUS).abs() < 1e-4);
         let to_fire = FIRE - middle;
         let towards = (to_fire - axis * to_fire.dot(axis)).normalize();
         assert!((pose.butt - middle).dot(towards) < -0.3);
-        assert!((pose.marshmallow() - middle).dot(towards) > 0.1);
+        assert!((pose.marshmallow() - middle).dot(towards) > 0.05);
         assert!(pose.marshmallow().y > seat_top(radius));
-        // Touching the log, rather than through it or above it: its shaft as far from the log's axis as their radii.
+        // Touching the log, rather than through it or above it: its shaft as far from the log's axis as the flats of
+        // the log's sides and of the stick's hull, at its girth where it crosses it, and no further than their corners;
+        // crossing it well beyond the stick's middle of mass, so that it does not tip over it.
         let shaft = pose.along;
         let normal = shaft.cross(axis).normalize();
         let distance = (axis_point - pose.butt).dot(normal).abs();
+        let offset = pose.butt - axis_point;
+        let (b, d, e) = (shaft.dot(axis), shaft.dot(offset), axis.dot(offset));
+        let crossing = (b * e - d) / (1.0 - b * b);
         assert!(
-            (distance - (radius + STICK_RADIUS)).abs() < 0.012,
+            crossing > 0.7 && crossing < STICK_LENGTH * 0.8,
+            "{crossing}"
+        );
+        let flats = radius * (PI / 8.0).cos() + girth(crossing) * (PI / 6.0).cos();
+        assert!(
+            distance > flats - 0.002 && distance < radius + girth(crossing),
             "{index} {distance}"
         );
+        // Its marshmallow beyond the log and clear of it, from its near end to its far one.
+        for end in [-0.5, 0.5] {
+            let at = pose.marshmallow() + pose.along * MARSHMALLOW.0 * end;
+            let from_log = (at - axis_point).reject_from(axis).length();
+            assert!(
+                from_log > radius + MARSHMALLOW.1 + 0.02,
+                "{index} {from_log}"
+            );
+        }
         // Out of the fire's heat, so that a marshmallow on its log never toasts.
         assert_eq!(heat(pose.marshmallow()), 0.0);
-        // Apart from the others.
+        // Apart from the others, by more than twice their width.
         for other in 0..index {
             assert!(
                 pose.marshmallow()
                     .distance(Pose::racked(other).marshmallow())
-                    > 0.15
+                    > MARSHMALLOW.1 * 4.0
             );
         }
         // Within the log's solid, with the sticks.
@@ -237,6 +257,55 @@ fn a_stick_is_held_along_the_hand_by_its_handle_and_met_by_a_ray_passing_near_it
 }
 
 #[test]
+fn a_marshmallow_is_big_on_the_end_of_its_stick_and_toasts_from_its_middle() {
+    // Twice what it was, 9 cm long and 7.6 cm across, on the end of the stick, its tip showing through it.
+    let (length, radius) = MARSHMALLOW;
+    assert!((length - 0.09).abs() < 1e-6 && (radius - 0.038).abs() < 1e-6);
+    let beyond = MARSHMALLOW_INSET - length * 0.5;
+    assert!(beyond > 0.01 && beyond < 0.025, "{beyond}");
+    assert!(girth(0.0) == STICK_RADIUS && girth(STICK_LENGTH) == radius);
+    // Toasted from the middle of its marshmallow, wherever the stick is held, by how near that is to the heart of the
+    // fire, as far from the hand as it ever was along the stick, less the marshmallow's own middle's step back.
+    let turn = Quat::from_rotation_y(-0.4) * Quat::from_rotation_x(-0.3);
+    let along = turn * Vec3::NEG_Z;
+    let hand = heart() - along * (STICK_LENGTH - MARSHMALLOW_INSET - HOLD);
+    let held = Pose::held(hand, turn);
+    let middle = held.marshmallow();
+    assert!(middle.distance(heart()) < 1e-4, "{middle}");
+    assert!(middle.distance(held.tip()) - MARSHMALLOW_INSET < 1e-4);
+    assert_eq!(toasted(0.0, middle, 1.0), TOAST_RATE);
+    // Its middle drawn where the stick's model draws it.
+    let model = stick();
+    let node = model
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some(shade_node(0).as_str()))
+        .unwrap();
+    let corners = &model.meshes[node.mesh.unwrap()].primitives[0].positions;
+    let (low, high) = corners.iter().fold(
+        (Vec3::INFINITY, Vec3::NEG_INFINITY),
+        |(low, high), corner| (low.min(*corner), high.max(*corner)),
+    );
+    let drawn = (low + high) * 0.5;
+    assert!(drawn.distance(Vec3::NEG_Z * (STICK_LENGTH - MARSHMALLOW_INSET)) < 1e-4);
+    assert!((high.z - low.z - length).abs() < 1e-4);
+    // Heat measured from its middle, so that it toasts as far from the flames as a marshmallow ever did: its middle a
+    // little within 0.6 m of the heart, it toasts, and a little beyond, not, though its near side be within.
+    let held_at = |middle: Vec3| {
+        Pose::held(
+            middle - along * (STICK_LENGTH - MARSHMALLOW_INSET - HOLD),
+            turn,
+        )
+    };
+    for (off, toasts) in [(0.58, true), (0.62, false)] {
+        let middle = heart() + along.cross(Vec3::Y).normalize() * off;
+        let at = held_at(middle).marshmallow();
+        assert!(at.distance(middle) < 1e-4);
+        assert_eq!(toasted(0.0, at, 1.0) > 0.0, toasts, "{off}");
+    }
+}
+
+#[test]
 fn a_stick_is_a_light_body_of_its_rod_and_marshmallow_drawn_as_it_collides() {
     let hull = hull();
     assert!(hull.len() <= tomori_physics::HULL_POINTS);
@@ -298,8 +367,21 @@ fn what_the_sticks_rest_on_is_drawn_and_within_the_physics_limits() {
     // The pool's water, below the campsite, within its reach, which takes back what rests in it.
     let pool = &waters()[0];
     assert_eq!(pool.returns_after, Some(RETURNS));
-    assert!(in_pool(layout::POOL + Vec3::new(1.0, -0.1, 0.5)));
-    assert!(!in_pool(heart()));
+    assert!(in_pool(&Placement::at(
+        layout::POOL + Vec3::new(1.0, -0.1, 0.5)
+    )));
+    assert!(!in_pool(&Placement::at(heart())));
+    // Floating with its middle a little above the water, its big marshmallow in it, it is in the pool; but not lying
+    // beside it, nor held above it.
+    let tipped = Quat::from_rotation_x(-0.1);
+    let afloat = Placement::new(layout::POOL + Vec3::new(0.3, 0.02, 0.5), tipped);
+    assert!(in_pool(&afloat));
+    assert!(!in_pool(&Placement::new(
+        layout::POOL + Vec3::new(0.3, 0.2, 0.5),
+        tipped
+    )));
+    let beside = layout::POOL + Vec3::X * (layout::POOL_RADIUS + 0.5);
+    assert!(!in_pool(&Placement::at(beside + Vec3::NEG_Y * 0.2)));
     let settings = settings();
     let far = Vec2::new(layout::POOL.x, layout::POOL.z) - ground(FIRE);
     assert!(far.length() + layout::POOL_RADIUS < settings.lost_beyond + 0.5);
