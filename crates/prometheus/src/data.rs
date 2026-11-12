@@ -57,14 +57,19 @@ impl Data {
     }
 }
 
-/// What a query answered, with the warnings Prometheus gave beside it, such as about results it may have missed, scrubbed as errors are (see [`Error`]).
+/// What a query answered, with the warnings and infos Prometheus gave beside it, such as about results it may have missed, scrubbed as errors are (see [`Error`]), and whether it may be partial.
 ///
 /// Samples of native histograms, which this crate does not read, are left out, keeping a series' float samples, and a warning says how many: wrap them in `histogram_count()`, `histogram_sum()` or `histogram_quantile()` to read them as floats.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<T> {
     pub data: T,
     pub warnings: Vec<String>,
+    /// Whether the answer may be partial: whether the source gave a warning other than PromQL's own annotations about the query, which begin `PromQL info:` or `PromQL warning:`, as a gateway does that could not reach one of its stores and answered with what it reached, leaving whole series out. A partial answer is never kept by a client's cache (see [`crate::Cache`]), so the next read asks again. Annotations, Prometheus's `infos`, which [`Response::warnings`] holds too, and the client's own warning about native histograms it left out do not make an answer partial.
+    pub partial: bool,
 }
+
+/// How Prometheus begins the annotations it gives among its warnings about the query itself, such as a rate of a metric that might not be a counter, which say nothing of data left out.
+const ANNOTATIONS: [&str; 2] = ["PromQL info:", "PromQL warning:"];
 
 /// The parts of an answer that matter for reading it.
 pub(crate) struct Answer<'a> {
@@ -103,8 +108,15 @@ pub(crate) fn read(
         return Err(unreadable("it does not say it succeeded"));
     }
     let mut warnings = Vec::new();
+    let mut partial = false;
     for warning in json["warnings"].as_array().into_iter().flatten() {
-        warnings.push(scrub.quote(warning.as_str().unwrap_or("")));
+        let text = warning.as_str().unwrap_or("");
+        partial |= !ANNOTATIONS.iter().any(|prefix| text.starts_with(prefix));
+        warnings.push(scrub.quote(text));
+    }
+    // Prometheus's info annotations, which say nothing of missing data.
+    for info in json["infos"].as_array().into_iter().flatten() {
+        warnings.push(scrub.quote(info.as_str().unwrap_or("")));
     }
     let (data, skipped) = data(&json["data"], filter)?;
     if skipped > 0 {
@@ -112,7 +124,11 @@ pub(crate) fn read(
             "{skipped} native histogram samples were left out; wrap them in histogram_count(), histogram_sum() or histogram_quantile() to read them"
         ));
     }
-    Ok(Response { data, warnings })
+    Ok(Response {
+        data,
+        warnings,
+        partial,
+    })
 }
 
 fn unreadable(why: &str) -> Error {
@@ -315,7 +331,25 @@ mod tests {
     fn warnings_are_kept_without_the_token() {
         let mut body = success(json!({"resultType": "vector", "result": []}));
         body["warnings"] = json!(["partial s3cret", 7]);
-        assert_eq!(ok(body).unwrap().warnings, ["partial [redacted]", ""]);
+        let response = ok(body).unwrap();
+        assert_eq!(response.warnings, ["partial [redacted]", ""]);
+        assert!(response.partial);
+    }
+
+    #[test]
+    fn promql_annotations_and_infos_are_kept_but_make_no_answer_partial() {
+        let mut body = success(json!({"resultType": "vector", "result": []}));
+        body["warnings"] = json!([
+            "PromQL warning: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"up\"",
+            "PromQL info: ignored histogram",
+        ]);
+        body["infos"] = json!(["PromQL info: metric might not be a counter"]);
+        let response = ok(body.clone()).unwrap();
+        assert_eq!(response.warnings.len(), 3);
+        assert!(!response.partial);
+        // A store's warning among them makes it partial.
+        body["warnings"] = json!(["PromQL info: x", "remote query error: store unreachable"]);
+        assert!(ok(body).unwrap().partial);
     }
 
     #[test]
@@ -414,6 +448,7 @@ mod tests {
                 "2 native histogram samples were left out; wrap them in histogram_count(), histogram_sum() or histogram_quantile() to read them"
             ]
         );
+        assert!(!vector.partial);
         let samples = vector.data.into_vector().unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].metric["pod"], "web-1");

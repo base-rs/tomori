@@ -137,6 +137,24 @@ impl Range {
         Self { start, end, step }
     }
 
+    /// This range with its start and end rounded down to steps counted from the epoch, so that every range of the step asks for the same points, as a query cache in front of the source rewards, and a client's [`crate::Cache`] keeps the points of ranges of one step together.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tomori_prometheus::{Range, Timestamp};
+    ///
+    /// let at = |millis| Timestamp::from_millis(millis);
+    /// let range = Range::new(at(61_500), at(3_659_000), Duration::from_secs(60)).aligned();
+    /// assert_eq!(range, Range::new(at(60_000), at(3_600_000), Duration::from_secs(60)));
+    /// ```
+    pub fn aligned(self) -> Self {
+        Self {
+            start: self.start.floor(self.step),
+            end: self.end.floor(self.step),
+            step: self.step,
+        }
+    }
+
     /// How many points each series can have, or `None` when the range is empty or its step is shorter than a millisecond, which Prometheus would refuse.
     pub fn points(&self) -> Option<u64> {
         let step = u64::try_from(self.step.as_millis()).unwrap_or(u64::MAX);
@@ -199,6 +217,18 @@ mod tests {
         ] {
             assert_eq!(Timestamp::from_millis(millis).rfc3339(), written);
         }
+    }
+
+    #[test]
+    fn a_range_is_aligned_to_its_steps_from_the_epoch() {
+        let at = |millis| Timestamp::from_millis(millis);
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            Range::new(at(61_500), at(3_659_000), minute).aligned(),
+            Range::new(at(60_000), at(3_600_000), minute)
+        );
+        let aligned = Range::new(at(-1), at(120_000), minute).aligned();
+        assert_eq!(aligned, Range::new(at(-60_000), at(120_000), minute));
     }
 
     #[test]
