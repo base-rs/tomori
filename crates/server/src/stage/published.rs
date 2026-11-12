@@ -39,6 +39,9 @@ pub(super) struct Published {
     /// Its columns, cleaned, for a list laid out as a table: none for one that is not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) columns: Vec<ListColumn>,
+    /// The parameters it depends on, by their ids, in the order it named them. See `design/panel-context.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) depends: Vec<String>,
 }
 
 /// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
@@ -388,6 +391,13 @@ pub(super) struct Resting {
     /// How many runs of its side that published others have ended without publishing it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(super) missed: u32,
+    /// Its own context's settings, kept so that it comes back so set. See `design/panel-context.md`.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        deserialize_with = "super::context::read"
+    )]
+    pub(super) context: super::context::Settings,
 }
 
 fn is_zero(missed: &u32) -> bool {
@@ -433,6 +443,7 @@ impl Resting {
             pinned: kept.pinned,
             arranged: kept.arranged,
             missed: 0,
+            context: kept.context.clone(),
         }
     }
 }
@@ -449,6 +460,7 @@ pub struct Publishing {
     rows: Option<Vec<Row>>,
     highlighted: Option<String>,
     columns: Vec<ListColumn>,
+    depends: Vec<String>,
 }
 
 impl Publishing {
@@ -459,6 +471,8 @@ impl Publishing {
         let listed = panel.rows().map(<[_]>::to_vec);
         let highlighted = panel.highlighted().map(str::to_owned);
         let declared = panel.columns().to_vec();
+        let depends = panel.depends().to_vec();
+        super::context::dependencies(&depends)?;
         let (id, title, body, chart, wall, slot, reference) = panel.into_parts();
         if !tomori_environment::valid_panel_id(&id) {
             return Err(format!(
@@ -504,6 +518,7 @@ impl Publishing {
             rows,
             highlighted,
             columns,
+            depends,
         };
         Ok(publishing)
     }
@@ -621,6 +636,7 @@ impl Stage {
             mut rows,
             highlighted,
             columns,
+            depends,
         } = publishing;
         let earlier = self
             .kept_published(walls.environment, &id)
@@ -637,6 +653,7 @@ impl Stage {
             rows,
             highlighted,
             columns,
+            depends,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -667,12 +684,14 @@ impl Stage {
             pinned: false,
             arranged: false,
             published: Some(published),
+            context: super::context::Settings::new(),
         };
         // Back where it rested, where that is still there.
         if let Some(resting) = resting {
             kept.id = resting.panel;
             kept.created = resting.created;
             kept.pinned = resting.pinned;
+            kept.context = resting.context;
             match resting.place {
                 Placed::Free { pose } => {
                     self.float(walls, kept, pose);
@@ -733,6 +752,7 @@ impl Stage {
                         && published.reference == publishing.reference
                         && same_rows(published.rows.as_deref(), publishing.rows.as_deref())
                         && published.columns == publishing.columns
+                        && published.depends == publishing.depends
                 }) && kept.content == publishing.content
             })
     }
@@ -762,6 +782,8 @@ impl Stage {
         let Some(room) = self.rooms.get_mut(environment) else {
             return false;
         };
+        // What its side declared belongs to its run.
+        room.parameters.clear();
         let mut resting = Vec::new();
         room.panels.retain(|kept| match &kept.published {
             Some(published) => {

@@ -208,6 +208,11 @@ pub struct Wall {
     /// `design/projection.md`.
     #[serde(rename = "revision", default, skip_serializing_if = "is_zero")]
     pub version: u64,
+    /// Its context: a chip for each setting of its own, which the panels its environment published on it inherit where
+    /// they do not fix it themselves, at most [`crate::context::CONTEXT_CHIPS`]; none where it only follows. An older
+    /// client ignores it. See `design/panel-context.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<crate::context::ContextChip>,
 }
 
 impl Wall {
@@ -229,7 +234,14 @@ impl Wall {
             name: None,
             status: false,
             version: 0,
+            context: Vec::new(),
         }
+    }
+
+    /// The wall, with the chips of its context.
+    pub fn with_context(mut self, context: Vec<crate::context::ContextChip>) -> Self {
+        self.context = context;
+        self
     }
 
     /// The wall, called `name` by its environment, or nothing with `None`.
@@ -727,6 +739,12 @@ pub struct Panel {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
+    /// Its context, for a panel its environment published that depends on any: a chip for each parameter it depends on
+    /// and its time, as it is shown now, each following, fixed by its own setting or inherited from its wall's, at most
+    /// [`crate::context::CONTEXT_CHIPS`]. Part of its version. An older client ignores it. See
+    /// `design/panel-context.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<crate::context::ContextChip>,
 }
 
 /// How small and how large a floating panel is stretched, as a proportion of its own size ([`Panel::size`]): never so
@@ -955,6 +973,7 @@ impl Panel {
             columns: Vec::new(),
             diagram: None,
             size: None,
+            context: Vec::new(),
         }
     }
 
@@ -984,6 +1003,12 @@ impl Panel {
         self.size
             .filter(|size| size.is_finite())
             .map_or(1.0, |size| size.clamp(FLOAT_SIZES.0, FLOAT_SIZES.1))
+    }
+
+    /// The panel, with the chips of its context.
+    pub fn with_context(mut self, context: Vec<crate::context::ContextChip>) -> Self {
+        self.context = context;
+        self
     }
 
     /// The panel, a list panel of `rows`, each on its line of the body, in order.
@@ -1037,6 +1062,7 @@ impl Panel {
             columns,
             diagram,
             size,
+            context,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -1054,6 +1080,7 @@ impl Panel {
             && *columns == other.columns
             && *diagram == other.diagram
             && *size == other.size
+            && *context == other.context
             && charts
     }
 

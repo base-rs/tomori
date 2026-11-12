@@ -27,6 +27,7 @@ mod blocks;
 pub(crate) use tomori_protocol::checklist;
 mod beside;
 mod code;
+pub(crate) mod context;
 mod groups;
 mod image;
 mod layouts;
@@ -240,7 +241,21 @@ fn most_bytes(panel: &Panel) -> usize {
         .map(|column| escaped(&column.title) + 48)
         .sum();
     let diagram = panel.diagram.as_ref().map_or(0, json_size);
-    text + spans + chart + rows + columns + diagram + 768
+    // Each chip of its context: its parameter, label and value, and room for its keys and setting.
+    let chips: usize = panel
+        .context
+        .iter()
+        .map(|chip| {
+            escaped(&chip.parameter)
+                + escaped(&chip.label)
+                + match &chip.value {
+                    tomori_protocol::context::ContextValue::Text { text } => escaped(text),
+                    _ => 0,
+                }
+                + 112
+        })
+        .sum();
+    text + spans + chart + rows + columns + diagram + chips + 768
 }
 
 /// The most a projection's panels may take together, by [`most_bytes`], for its JSON to be measured to fit it to a
@@ -719,6 +734,14 @@ struct Kept {
     /// within [`tomori_protocol::FLOAT_SIZES`]: kept only while it floats, since a wall's slot sizes the panels in it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     size: Option<f32>,
+    /// Its own context's settings, for a panel its environment published, each fixing a parameter it depends on over
+    /// its wall's. See `design/panel-context.md`.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "context::read"
+    )]
+    context: context::Settings,
 }
 
 impl Kept {
@@ -854,6 +877,17 @@ struct Room {
     /// environment retracts them, the space comes back to the environment or the server restarts.
     #[serde(skip)]
     dismissed: BTreeSet<String>,
+    /// Each wall's own context's settings, by the wall's identity, which the panels its environment published on it
+    /// inherit where they do not fix them themselves. See `design/panel-context.md`.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "context::read_walls"
+    )]
+    contexts: BTreeMap<String, context::Settings>,
+    /// The parameters its environment's side declares in its run now, which belong to the run and are never written.
+    #[serde(skip)]
+    parameters: Vec<context::Parameter>,
 }
 
 /// A room as the space writes it: its panels but those its environment published, which are written where they are,
@@ -874,6 +908,8 @@ struct RoomRecord<'a> {
     panels: Vec<&'a Kept>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     resting: Vec<published::Resting>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    contexts: &'a BTreeMap<String, context::Settings>,
 }
 
 impl Serialize for Room {
@@ -889,6 +925,8 @@ impl Serialize for Room {
             panels,
             resting,
             dismissed: _,
+            contexts,
+            parameters: _,
         } = self;
         let live: Vec<published::Resting> = panels
             .iter()
@@ -910,6 +948,7 @@ impl Serialize for Room {
                 .filter(|kept| kept.published.is_none())
                 .collect(),
             resting,
+            contexts,
         }
         .serialize(serializer)
     }
@@ -1478,7 +1517,20 @@ impl Stage {
             .filter_map(|(kept, sent)| sent.then_some(kept))
             .collect();
         let placed: Vec<u64> = kept.iter().map(|kept| kept.placed).collect();
-        let panels = kept.iter().map(|kept| kept.panel(now)).collect();
+        let panels = kept
+            .iter()
+            .map(|kept| {
+                kept.panel(now)
+                    .with_context(self.panel_chips(walls.environment, kept))
+            })
+            .collect();
+        let shown = shown
+            .into_iter()
+            .map(|wall| {
+                let chips = self.wall_chips(walls.environment, &wall.id);
+                wall.with_context(chips)
+            })
+            .collect();
         let mut projection = Projection::new(space, walls.environment)
             .with_walls(shown)
             .with_panels(panels);
@@ -1576,6 +1628,7 @@ impl Stage {
             published: None,
             anchor: None,
             size: None,
+            context: context::Settings::new(),
         };
         self.put(walls, kept, to);
         self.bound(walls.environment);
@@ -2358,6 +2411,8 @@ impl Stage {
         // Taken out of its group first, the rest stay together where they still touch.
         room.detach(wall);
         room.walls.retain(|added| added.id != wall);
+        // Its context goes with it, so that a wall added later with its identity begins following.
+        room.contexts.remove(wall);
         for panel in &mut room.panels {
             if let Some(slot) = panel.slot_on(wall) {
                 panel.place = Placed::Free {
@@ -4054,6 +4109,7 @@ mod tests {
             published: None,
             anchor: None,
             size: None,
+            context: context::Settings::new(),
         };
         // More hidden in other environments than the limit allows, the earliest placed in the second.
         for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {
@@ -4844,7 +4900,39 @@ mod tests {
             ),
         );
         let charted = text.clone().with_chart(chart);
-        for panel in [&text, &image, &on_wall, &charted] {
+        // A context's chips at their longest: escaped values, the longest windows and inherited settings.
+        use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+        let long = "\u{1}\"".repeat(16);
+        let chipped = text.clone().with_context(vec![
+            ContextChip::new(
+                &long,
+                &long,
+                ContextValue::Text { text: long.clone() },
+                ContextSetting::Inherited,
+            ),
+            ContextChip::new(
+                "a",
+                &long,
+                ContextValue::Text { text: long.clone() },
+                ContextSetting::Fixed,
+            ),
+            ContextChip::new(
+                "b",
+                &long,
+                ContextValue::Live { minutes: u32::MAX },
+                ContextSetting::Fixed,
+            ),
+            ContextChip::new(
+                "time",
+                "Time",
+                ContextValue::Window {
+                    from_ms: i64::MIN,
+                    to_ms: i64::MIN,
+                },
+                ContextSetting::Inherited,
+            ),
+        ]);
+        for panel in [&text, &image, &on_wall, &charted, &chipped] {
             let (bound, bytes) = (most_bytes(panel), json_size(panel));
             assert!(
                 (bytes..=bytes + 1024).contains(&bound),

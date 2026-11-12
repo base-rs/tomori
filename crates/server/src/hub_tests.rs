@@ -5080,6 +5080,243 @@ fn every_panel_of_an_environment_whose_place_changes_is_told_whatever_moved_it()
     let _ = (a, c);
 }
 
+/// The contexts `seen` holds from the `from`th on, waiting until there are at least `count` intents, by panel.
+fn contexts_from(
+    seen: &Mutex<Vec<tomori_environment::Intent>>,
+    from: usize,
+    count: usize,
+) -> Vec<tomori_environment::Context> {
+    eventually_in("the side is told the contexts", || {
+        seen.lock().unwrap().len() >= from + count
+    });
+    seen.lock().unwrap()[from..]
+        .iter()
+        .filter_map(|intent| intent.context().cloned())
+        .collect()
+}
+
+#[test]
+fn a_side_s_parameters_show_on_its_panels_chips_and_it_is_told_how_each_panel_is_bound() {
+    use tomori_environment::{Binding, Context, ContextParameter, Time};
+    use tomori_protocol::context::{ContextSetting, ContextValue};
+    let Yard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        ada,
+        source,
+    } = yard_recording();
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    let region = |value: &str| vec![ContextParameter::new("region", "Region", value)];
+    // What the stage refuses is refused at once, saying why.
+    let refused = hub
+        .channel_set_context(
+            &outlet,
+            vec![ContextParameter::new("time", "Time", "now")],
+            start,
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("never time"), "{refused}");
+    hub.channel_set_context(&outlet, region("US-EAST1"), start)
+        .unwrap();
+    let chart = tomori_environment::chart::Chart::new(181)
+        .with_time(tomori_environment::chart::TimeAxis::Live { step_ms: 5_000 });
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::chart("latency", "Latency", chart).depends_on(["region"]),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let chips = |ada: &Client| {
+        ada.projection()
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Latency")
+            .map(|panel| panel.context.clone())
+            .unwrap_or_default()
+    };
+    eventually_in("the chart shows its chips", || !chips(&ada).is_empty());
+    assert_eq!(
+        chips(&ada)[0].value,
+        ContextValue::Text {
+            text: "US-EAST1".into()
+        }
+    );
+    assert_eq!(chips(&ada)[1].value, ContextValue::Live { minutes: 15 });
+    // Following everything, nothing is told.
+    hub.sweep_present();
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|intent| intent.context().is_none())
+    );
+    // The selection changing shows on the chip, and is told nothing.
+    hub.channel_set_context(&outlet, region("EU-WEST1"), start + Duration::from_secs(1))
+        .unwrap();
+    eventually_in("the chip follows the selection", || {
+        chips(&ada).first().map(|chip| chip.value.clone())
+            == Some(ContextValue::Text {
+                text: "EU-WEST1".into(),
+            })
+    });
+    // Its wall fixed to a window, it inherits it, and its side is told, by nobody.
+    let window = crate::stage::context::Setting::Window {
+        from_ms: 1_794_450_000_000,
+        to_ms: 1_794_451_800_000,
+    };
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        assert_eq!(
+            record
+                .stage
+                .set_wall_context(&walls, "environment-0", "time", Some(window)),
+            Ok(true)
+        );
+        drop(environments);
+        state.touch_projection(&id);
+    }
+    assert_eq!(
+        contexts_from(&seen, 0, 1),
+        [Context::new(
+            "latency",
+            vec![("region".into(), Binding::Follows)],
+            Time::Window {
+                from_ms: 1_794_450_000_000,
+                to_ms: 1_794_451_800_000
+            },
+        )]
+    );
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|intent| intent.context().is_some())
+            .all(|intent| intent.participant() == 0)
+    );
+    eventually_in("the chart shows its wall's window", || {
+        chips(&ada).get(1).map(|chip| chip.setting) == Some(ContextSetting::Inherited)
+    });
+    let wall = ada
+        .projection()
+        .wall("environment-0")
+        .unwrap()
+        .context
+        .clone();
+    assert_eq!(wall.len(), 1);
+    assert_eq!(wall[0].setting, ContextSetting::Fixed);
+    // Told again only as it changes: following again is told, the same again is not.
+    let told = seen.lock().unwrap().len();
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        record
+            .stage
+            .set_wall_context(&walls, "environment-0", "time", None)
+            .unwrap();
+        drop(environments);
+        state.touch_projection(&id);
+        state.touch_projection(&id);
+    }
+    let contexts = contexts_from(&seen, told, 1);
+    assert_eq!(contexts.len(), 1);
+    assert!(contexts[0].follows());
+    hub.sweep_present();
+    assert_eq!(seen.lock().unwrap().len(), told + 1);
+    // Moved by Ada onto the other wall, fixed to EU-WEST1, it is told its new context there, as hers.
+    let set_wall = |wall: &str, parameter: &str, setting| {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        record
+            .stage
+            .set_wall_context(&walls, wall, parameter, Some(setting))
+            .unwrap();
+        drop(environments);
+        state.touch_projection(&id);
+    };
+    set_wall(
+        "environment-1",
+        "region",
+        crate::stage::context::Setting::Fixed {
+            value: "EU-WEST1".into(),
+        },
+    );
+    hub.sweep_present();
+    let told = seen.lock().unwrap().len();
+    let latency = ada
+        .projection()
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Latency")
+        .unwrap()
+        .id
+        .clone();
+    ada.send(ClientMessage::PlacePanel {
+        panel: latency,
+        wall: Some("environment-1".into()),
+        slot: None,
+        pose: None,
+        size: None,
+        revision: None,
+    });
+    let fixed = Context::new(
+        "latency",
+        vec![("region".into(), Binding::Fixed("EU-WEST1".into()))],
+        Time::Follows,
+    );
+    eventually_in("the side is told the new context", || {
+        seen.lock().unwrap()[told..]
+            .iter()
+            .any(|intent| intent.context() == Some(&fixed))
+    });
+    let moved = seen.lock().unwrap()[told..]
+        .iter()
+        .find(|intent| intent.context().is_some())
+        .map(tomori_environment::Intent::participant);
+    assert_eq!(moved, Some(source));
+    // Its side no longer declaring a region, it is told no binding for it; declaring it again, the wall's setting, kept,
+    // binds again.
+    let told = seen.lock().unwrap().len();
+    hub.channel_set_context(&outlet, Vec::new(), start + Duration::from_secs(3))
+        .unwrap();
+    hub.sweep_present();
+    let contexts = contexts_from(&seen, told, 1);
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].binding("region"), None);
+    let told = seen.lock().unwrap().len();
+    hub.channel_set_context(&outlet, region("US-EAST1"), start + Duration::from_secs(4))
+        .unwrap();
+    hub.sweep_present();
+    assert_eq!(contexts_from(&seen, told, 1), [fixed]);
+    // Through the side's own outlet, held to its rate; another binding's declarations change nothing; and a side
+    // stopped is refused.
+    use tomori_environment::Outlet;
+    assert_eq!(outlet.set_context(region("AP-SOUTH1")), Ok(()));
+    let past = (0..200)
+        .map(|_| hub.channel_set_context(&outlet, region("AP-SOUTH1"), start))
+        .find(Result::is_err);
+    assert!(past.is_some());
+    let binding = outlet.binding;
+    let other = SpaceOutlet {
+        binding: binding + 1,
+        ..yard_outlet(&hub, &id)
+    };
+    assert_eq!(other.set_context(region("MARS-1")), Ok(()));
+    hub.lock().space_mut(&id).unwrap().stopped = Some(binding);
+    assert!(outlet.set_context(region("EU-WEST1")).is_err());
+}
+
 #[test]
 fn moves_past_a_participant_s_rate_wait_and_a_side_started_again_is_told_where_its_panels_rest() {
     use tomori_environment::PanelPlace;

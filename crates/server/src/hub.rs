@@ -482,6 +482,15 @@ impl tomori_environment::Outlet for SpaceOutlet {
             .upgrade()
             .map_or(Ok(()), |hub| hub.channel_declare_zones(self, zones))
     }
+
+    fn set_context(
+        &self,
+        parameters: Vec<tomori_environment::ContextParameter>,
+    ) -> tomori_environment::Result<()> {
+        self.hub.upgrade().map_or(Ok(()), |hub| {
+            hub.channel_set_context(self, parameters, Instant::now())
+        })
+    }
 }
 
 pub struct Hub {
@@ -780,6 +789,9 @@ struct Told {
     binding: Option<u64>,
     places: std::collections::BTreeMap<String, tomori_environment::PanelPlace>,
     owed: Option<u32>,
+    /// How each of the environment's panels was last told it is bound to its context, by the environment's id for it;
+    /// one not here follows everything. See `design/panel-context.md`.
+    contexts: std::collections::BTreeMap<String, tomori_environment::Context>,
 }
 
 struct SpaceRecord {
@@ -1407,6 +1419,28 @@ impl HubState {
                 "Panel {id} of space {space} is now {place:?}, by {cause}; told to its side: {delivered}."
             );
         }
+        // How each panel is bound to its context, where that changed, or, for a side new to it, wherever it follows
+        // anything less than everything, as `cause`'s, as a move is: the participant whose message changed it, as by
+        // moving the panel onto another wall, or 0 for nobody's.
+        let contexts = record.stage.contexts(&record.model.environment);
+        let same = told.environment == record.model.environment && told.binding == binding;
+        for (id, context) in &contexts {
+            let before = same.then(|| told.contexts.get(id)).flatten();
+            let changed = match before {
+                Some(before) => before != context,
+                None => !context.follows(),
+            };
+            if changed {
+                let delivered = self.sides.deliver(
+                    space,
+                    tomori_environment::Intent::context_of(cause, context.clone()),
+                );
+                log::debug!(
+                    "Panel {id} of space {space} is bound to {context:?}, by {cause}; told to its side: {delivered}."
+                );
+            }
+        }
+        told.contexts = contexts;
         told.environment.clone_from(&record.model.environment);
         told.binding = binding;
         told.places = places;
@@ -2767,6 +2801,42 @@ impl Hub {
             state.touch_projection_paced(&outlet.space, now);
         }
         self.keep();
+        Ok(())
+    }
+
+    /// The parameters the side of `outlet`'s binding declares its panels depend on, with their values now, replacing
+    /// those it declared before, at `now`, held to the rate its publishing is: a change of them is a change of what the
+    /// space projects, its chips, told to everyone in the space as the side's changes are. See
+    /// `design/panel-context.md`.
+    fn channel_set_context(
+        &self,
+        outlet: &SpaceOutlet,
+        parameters: Vec<tomori_environment::ContextParameter>,
+        now: Instant,
+    ) -> tomori_environment::Result<()> {
+        let parameters = crate::stage::context::declared(parameters)?;
+        let mut state = self.lock();
+        Self::running(&state, outlet)?;
+        let Some(channel) = self.current_channel(&mut state, outlet) else {
+            return Ok(());
+        };
+        let publishes = channel
+            .publishes
+            .get_or_insert_with(|| crate::channel::Publishes::new(now));
+        publishes.message(now)?;
+        let record = state.space_mut(&outlet.space).expect("found above");
+        if record
+            .stage
+            .declare_parameters(&outlet.environment, parameters)
+        {
+            let channel = record.channel.as_mut().expect("found above");
+            channel
+                .publishes
+                .as_mut()
+                .expect("made above")
+                .charge(now, None, 0);
+            state.touch_projection_paced(&outlet.space, now);
+        }
         Ok(())
     }
 
