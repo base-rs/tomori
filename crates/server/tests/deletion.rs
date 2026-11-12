@@ -374,10 +374,7 @@ fn a_session_another_space_is_bound_to_is_never_deleted_with_a_space() {
     });
     // Bound to the first space's session, the second takes that session's own title.
     let second = ada.space(|state| state.title == "First" && state.id != first.id);
-    ada.send(&ClientMessage::Join {
-        space: first.id.clone(),
-    });
-    ada.space(|state| state.id == first.id);
+    ada.join(&first.id);
     delete(&mut ada, &first.id, true);
     assert_eq!(
         ada.error(),

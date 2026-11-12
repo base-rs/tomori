@@ -1862,10 +1862,7 @@ fn a_visitor_hears_replies_live_but_is_never_caught_up_and_cannot_replay() {
     assert!(ada.next_audio(Duration::from_millis(500)).is_none());
 
     let mut vic = server.connect("vic", "Vic");
-    vic.send(&ClientMessage::Join {
-        space: space.clone(),
-    });
-    vic.space(|state| state.id == space);
+    vic.join(&space);
     // A visitor's engagement is ignored, without an error, and it is played nothing it missed.
     report(&mut vic, Engagement::Engaged);
     vic.send(&ClientMessage::Replay { message: None });

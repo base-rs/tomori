@@ -192,10 +192,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
     let server = TestServer::with_tokens(true, |server| server);
     let (mut ada, space) = owned_space(&server);
     let mut vic = server.connect("vic", "Vic");
-    vic.send(&ClientMessage::Join {
-        space: space.id.clone(),
-    });
-    let state = vic.space(|state| state.id == space.id);
+    let state = vic.join(&space.id);
     // A visitor is not a participant, nor counted as one.
     assert_eq!(state.participants.len(), 1);
     assert_eq!(spaces(&mut vic)[0].participants, 1);
@@ -615,10 +612,7 @@ fn an_owner_signs_in_and_sees_the_status_page() {
     let (mut ada, space) = owned_space(&server);
     let _vic = {
         let mut vic = server.connect("vic", "Vic");
-        vic.send(&ClientMessage::Join {
-            space: space.id.clone(),
-        });
-        vic.space(|state| state.id == space.id);
+        vic.join(&space.id);
         vic
     };
     let (owner, token) = server.issue("Ada's browser", Grant::Owner);

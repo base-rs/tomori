@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tomori_backend::Event;
 use tomori_protocol::{
-    Activity, ClientMessage, ENVIRONMENT_LIMIT, EnvironmentVersion, ServerMessage, SpaceState,
+    Activity, ClientMessage, ENVIRONMENT_LIMIT, EnvironmentVersion, ServerMessage,
 };
 use tomori_security::Grant;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend};
@@ -60,19 +60,6 @@ fn create(client: &mut TestClient, title: &str, environment: Option<&str>) {
         session: None,
         environment: environment.map(str::to_owned),
         instructions: None,
-    });
-}
-
-fn join(client: &mut TestClient, id: &str) -> SpaceState {
-    client.send(&ClientMessage::Join {
-        space: id.to_owned(),
-    });
-    client.space(|state| state.id == id)
-}
-
-fn change(client: &mut TestClient, environment: &str) {
-    client.send(&ClientMessage::SetEnvironment {
-        environment: environment.to_owned(),
     });
 }
 
@@ -226,10 +213,10 @@ fn a_client_creates_spaces_only_in_environments_it_presents() {
     });
 
     // Anyone may still join a space in an environment they cannot present, and is told its version.
-    assert_eq!(join(&mut lacking, &space.id).environment_version, Some(2));
+    assert_eq!(lacking.join(&space.id).environment_version, Some(2));
 
     // Such a client's own request to change the environment is refused as creating one is.
-    change(&mut lacking, "sky");
+    lacking.set_environment("sky");
     assert_eq!(
         lacking.error(),
         "The server offers no environment this client can present."
@@ -251,7 +238,7 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
     let space = ada.space(|state| state.title == "Shared");
 
     // A change to an environment the requester does not present is refused as one the server does not offer it.
-    change(&mut ada, "minimal");
+    ada.set_environment("minimal");
     assert_eq!(
         ada.error(),
         "This client cannot present minimal at version 1; available: sky, observe."
@@ -268,24 +255,24 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
     let bob_fields: Vec<(&str, &str)> = bob_fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut bob = TestClient::open_with(server.address, &bob_fields);
     bob.hello_presenting("bob", "Bob", listed(Some(&[("sky", 1), ("minimal", 1)])));
-    join(&mut bob, &space.id);
+    bob.join(&space.id);
     let mut vic = TestClient::open(server.address);
     vic.hello_presenting("vic", "Vic", listed(Some(&[("sky", 1), ("observe", 1)])));
-    join(&mut vic, &space.id);
+    vic.join(&space.id);
     let mut old = TestClient::open(server.address);
     old.hello("old", "Old");
-    join(&mut old, &space.id);
+    old.join(&space.id);
 
     // Nobody else's list matters: the change goes ahead, and everyone is sent the space in the new environment and
     // version, to fall back to the grid if they cannot present it.
-    change(&mut ada, "observe");
+    ada.set_environment("observe");
     for client in [&ada, &bob, &vic, &old] {
         let state = client.space(|state| state.environment == "observe");
         assert_eq!(state.environment_version, Some(2));
     }
     assert_quiet(&mut ada);
     // Choosing the environment the space is in already is not refused either.
-    change(&mut ada, "observe");
+    ada.set_environment("observe");
     assert_quiet(&mut ada);
 
     // A reconnect's list replaces the earlier one in what it is offered.
@@ -310,8 +297,8 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
         &[("Authorization", &format!("Bearer {token}"))],
     );
     ada.hello_presenting("ada", "Ada", listed(Some(&[("sky", 1)])));
-    join(&mut ada, &space.id);
-    change(&mut ada, "observe");
+    ada.join(&space.id);
+    ada.set_environment("observe");
     assert_eq!(
         ada.error(),
         "This client cannot present observe at version 2; available: sky."
@@ -320,6 +307,6 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
     // A closed space keeps its environment, and says so.
     server.backend.started()[0].emit(Event::Closed { reason: None });
     ada.space(|state| state.activity == Activity::Closed);
-    change(&mut ada, "sky");
+    ada.set_environment("sky");
     assert_eq!(ada.error(), "The agent session has stopped.");
 }

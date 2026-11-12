@@ -97,10 +97,7 @@ fn the_listing_tells_spaces_apart_by_folder_environment_activity_and_newest_repl
 
     // That is no more than the visitor reads by joining the space.
     let mut vic = vic;
-    vic.send(&ClientMessage::Join {
-        space: tomori.clone(),
-    });
-    let state = vic.space(|state| state.id == tomori);
+    let state = vic.join(&tomori);
     assert!(state.messages.last().is_some_and(|message| {
         message
             .text
