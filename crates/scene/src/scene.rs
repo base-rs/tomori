@@ -234,25 +234,30 @@ pub struct Frame<'a> {
     pub home_ring: crate::anchors::HomeRing,
 }
 
-/// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there,
-/// as [`precedence::Right`] orders.
+/// Whose a push of a stick is: each push belongs to what took it as it left the middle, until it returns there, as
+/// [`precedence::Right`] orders the right stick's and [`precedence::Left`] the left's. Each stick acts on what its own
+/// hand carries and its own hand's ray is on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum RightStick {
+enum Push {
     /// At the middle.
     #[default]
     Free,
-    /// A panel was carried as it left the middle: the push moves and turns it.
+    /// A panel or a wall was carried in the stick's hand as it left the middle: the push moves and turns it.
     Carried,
-    /// Nothing was carried, and the ray pointed at this panel, which has more than it shows: the push scrolls it, for
-    /// this participant alone.
+    /// Nothing was carried in the stick's hand, and its ray, shown in full, pointed at this panel, which has more than it
+    /// shows: the push scrolls it, for this participant alone.
     Scrolled(String),
+    /// In a space whose environment allows travel here, nothing the stick's ray was on took it: the push travels, turning,
+    /// aiming a teleport along that hand's ray, stepping back or rising. See `design/locomotion.md`.
+    Travel,
     /// The transcript showed, or the ray was on something else of Tomori's, or on nothing with no environment's client
-    /// side to take it: the push moves the transcript's focus or pages cards, as ever.
+    /// side to take it, or the other stick travelled, scrolled or pushed an object already: the push moves the
+    /// transcript's focus or pages cards, as ever, or, of the left stick outside a space, moves in what the lobby lists.
     Other,
     /// Nothing of Tomori's took it, in a space with an environment's client side: the push is the client side's. See
     /// `design/environments.md`.
     Environment,
-    /// Nothing of Tomori's took it, and the ray pointed at this object of the client side's, which takes the right
+    /// Nothing of Tomori's took it, and the stick's ray pointed at this object of the client side's, which takes the
     /// stick: the push is the object's, told as the client side's `Input::scroll` with the push's number, which no other
     /// push shares. See `design/environments.md`.
     Object(String, u64),
@@ -261,36 +266,16 @@ enum RightStick {
     Abandoned,
 }
 
-impl RightStick {
-    /// Whose the push is with the stick at `stick`: the owner `claim` names, as it leaves the middle, or else whose it
-    /// was.
-    fn update(self, stick: Vec2, claim: impl FnOnce() -> Self) -> Self {
-        // A stick that reads nonsense is at the middle.
-        if !stick.is_finite() || stick.length() < STICK_CENTRE {
-            return Self::Free;
-        }
-        match self {
-            Self::Free => claim(),
-            owner => owner,
-        }
-    }
-}
-
-/// Whose a push of the left stick is: each push belongs to what took it as it left the middle, until it returns there,
-/// as [`precedence::Left`] orders.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum LeftStick {
-    /// At the middle.
-    #[default]
-    Free,
-    /// Travel's, where the environment allows it, or nothing's.
-    Other,
-    /// In a space whose environment has a client side, which allows no travel here, with the ray on nothing of
-    /// Tomori's: the client side's. See `design/environments.md`.
+/// The rungs of either stick's order whose push is something's own, as a push leaves the middle: see [`Push`].
+enum SharedRung {
+    Carried,
+    Scroll(String),
+    Object(String),
+    Travel,
     Environment,
 }
 
-impl LeftStick {
+impl Push {
     /// Whose the push is with the stick at `stick`: the owner `claim` names, as it leaves the middle, or else whose it
     /// was.
     fn update(self, stick: Vec2, claim: impl FnOnce() -> Self) -> Self {
@@ -340,9 +325,10 @@ struct Client {
     /// What the trigger and B did for it since its last frame, which it is told on its next.
     select: Option<crate::client_side::Select>,
     back: bool,
-    /// The object of its that the ray pointed at last frame, if it takes the right stick, which a push takes.
-    scrollable: Option<String>,
-    /// The pushes of the right stick, and turns of the wheel, it has been told of.
+    /// The object of its that each ray pointed at last frame, if it takes the stick, which a push of that hand's stick
+    /// takes.
+    scrollable: Hands<Option<String>>,
+    /// The pushes of the sticks, and turns of the wheel, it has been told of.
     scroller: crate::client_side::Scroller,
     /// The object of its within reach of each hand last frame, and the one each ray pointed at last frame that takes the
     /// grip, with how far along the ray, which a squeeze of that hand's grip takes, the one within reach first.
@@ -532,21 +518,23 @@ pub struct Step {
     projector: crate::projection::Projector,
     /// Where the participant has travelled, in an environment that allows it, and the teleport being aimed; see `design/locomotion.md`.
     travel: Travel,
-    /// The left stick, which travels in such a space, from the last buttons.
+    /// The stick whose push travels in such a space, from the last buttons, and whether it is the right, so that a
+    /// teleport it aims is aimed along the right ray, until the push has been followed to its end.
     travel_stick: Vec2,
+    travel_right: bool,
     /// Whose the right stick's push is, from when it left the middle until it returns.
-    right_stick: RightStick,
-    /// The right stick, while its push is an object's, from the last buttons.
+    right_stick: Push,
+    /// The stick whose push is an object's, from the last buttons.
     scroll_axis: Vec2,
     /// A turn of the desktop's wheel that an object takes, as a push of the right stick. See `design/desktop.md`.
     wheel_push: Option<WheelPush>,
     /// How many pushes have been an object's, which numbers each.
     pushes: u64,
-    /// The right stick, while a panel carried takes it, from the last buttons, and whether it was clicked since the last
-    /// frame, which turns the panel back to square.
-    carry_stick: Vec2,
+    /// Each stick, while what its hand carries takes it, from the last buttons, and whether the right stick was clicked
+    /// since the last frame, which turns the panel back to square.
+    carry_stick: Hands<Vec2>,
     straighten: bool,
-    /// The panel the right stick scrolls, and how far forward it is pushed, from the last buttons, and the panel the
+    /// The panel a stick scrolls, and how far forward it is pushed, from the last buttons, and the panel the
     /// mouse's wheel scrolled since the last frame, and by how many rows.
     scroll_stick: Option<(String, f32)>,
     wheel: Option<(String, f32)>,
@@ -570,7 +558,7 @@ pub struct Step {
     /// The left and right sticks, where they are the client side's, from the last buttons.
     environment_sticks: (Vec2, Vec2),
     /// Whose the left stick's push is, from when it left the middle until it returns.
-    left_stick: LeftStick,
+    left_stick: Push,
     /// The pulls of the trigger and the presses of A on the client side's selectable objects, which outlive a client
     /// side, so that a pull begun for one is nobody's once it has gone. See `design/environments.md`.
     selector: crate::client_side::Selector,
@@ -671,6 +659,9 @@ struct HandState {
     /// its hand points down, as an arm resting at the side does. See `design/interaction.md`.
     lit: Option<Instant>,
     lowered: bool,
+    /// The ray was drawn in full last frame, rather than as a stub or hidden, as its hand hangs at the side: only then
+    /// does what it is on capture a push of its hand's stick. See `design/interaction.md`.
+    full: bool,
 }
 
 impl Default for HandState {
@@ -694,6 +685,7 @@ impl Default for HandState {
             since: None,
             lit: None,
             lowered: false,
+            full: false,
         }
     }
 }
@@ -733,11 +725,12 @@ impl Default for Step {
             projector: crate::projection::Projector::paced(),
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
-            right_stick: RightStick::Free,
+            travel_right: false,
+            right_stick: Push::Free,
             scroll_axis: Vec2::ZERO,
             wheel_push: None,
             pushes: 0,
-            carry_stick: Vec2::ZERO,
+            carry_stick: Hands::default(),
             straighten: false,
             scroll_stick: None,
             wheel: None,
@@ -747,7 +740,7 @@ impl Default for Step {
             client: None,
             ambience: None,
             environment_sticks: (Vec2::ZERO, Vec2::ZERO),
-            left_stick: LeftStick::Free,
+            left_stick: Push::Free,
             selector: crate::client_side::Selector::default(),
             a_press: crate::client_side::Press::default(),
             #[cfg(test)]
@@ -786,17 +779,18 @@ impl Step {
         self.cancel_travel();
         // A push that was an object's is nobody's until it returns to the middle, so that it does not begin again.
         self.abandon_scroll();
-        if self.right_stick != RightStick::Abandoned {
-            self.right_stick = RightStick::Free;
+        for push in [&mut self.right_stick, &mut self.left_stick] {
+            if *push != Push::Abandoned {
+                *push = Push::Free;
+            }
         }
-        self.carry_stick = Vec2::ZERO;
+        self.carry_stick = Hands::default();
         self.straighten = false;
         self.scroll_stick = None;
         self.wheel = None;
         self.throwing = None;
         self.removing = None;
         self.environment_sticks = (Vec2::ZERO, Vec2::ZERO);
-        self.left_stick = LeftStick::Free;
         self.a_press = crate::client_side::Press::default();
         if let Some(client) = self.client.as_mut() {
             client.back = false;
@@ -807,8 +801,10 @@ impl Step {
     /// goes: the push is nobody's until it returns to the middle, and the client side, if it is still there, is told it
     /// ended on its next frame.
     fn abandon_scroll(&mut self) {
-        if matches!(self.right_stick, RightStick::Object(..)) {
-            self.right_stick = RightStick::Abandoned;
+        for push in [&mut self.right_stick, &mut self.left_stick] {
+            if matches!(push, Push::Object(..)) {
+                *push = Push::Abandoned;
+            }
         }
         self.wheel_push = None;
         self.scroll_axis = Vec2::ZERO;
@@ -894,6 +890,14 @@ impl Step {
         self.travel_stick = Vec2::ZERO;
     }
 
+    /// Drop a teleport being aimed with `side`'s stick, as when that stick is lost, without travelling; one aimed with
+    /// the other stick goes on.
+    pub fn cancel_travel_of(&mut self, side: Side) {
+        if self.travel_right == (side == Side::Right) {
+            self.cancel_travel();
+        }
+    }
+
     /// Where the participant's room is in the space's scene, in the space `conversation` is in: the transform the frame's poses are given in, which each platform applies to its head, eyes, controllers and hands before [`Self::update`]. Anywhere else, or in another space, the room is back home. See `design/locomotion.md`.
     pub fn rig(&mut self, conversation: &Conversation) -> Rig {
         self.placed = self
@@ -910,7 +914,7 @@ impl Step {
     /// Whether the left stick rested at its middle as of the last frame's buttons, no push of it under way, so that
     /// a click of it is not part of travel. See `design/live-audio.md`.
     pub fn left_stick_free(&self) -> bool {
-        self.left_stick == LeftStick::Free
+        self.left_stick == Push::Free
     }
 
     /// Whether the hand menu is pinned open with Y.
@@ -954,33 +958,126 @@ impl Step {
         let stick = buttons.left_stick;
         // Whose each push of a stick is, decided as it leaves the middle, until it returns there: the first rung of
         // `precedence` that claims it, Tomori's own interface first, so that the environment's client side has it only
-        // with the ray on something of its own or on nothing of Tomori's. See `design/interaction.md`.
+        // with the ray on something of its own or on nothing of Tomori's. Each stick acts on what its own hand carries
+        // and its own hand's ray is on, as the frame before found it, and the sticks alike: what the hand carries, what
+        // its ray, shown in full, is on that takes the stick, and otherwise, where the environment allows it, travel,
+        // so that a hand hanging at the side as the participant walks past a long panel captures no push. See
+        // `design/interaction.md`.
         let environment = self.client.is_some();
-        // The left stick acts on what the left ray is on, or else the right's; the right stick, A and B on what the
-        // right ray is on, or else the left's.
-        let left_aim = self.hands[self.serving(Side::Left)].aim;
+        // A and B act on what the right ray is on, or else the left's.
         let serving = self.serving(Side::Right);
         let aim = self.hands[serving].aim;
         let travels = !matches!(conversation.locomotion(), locomotion::Locomotion::None);
-        self.left_stick = self.left_stick.update(stick, || {
-            match precedence::Left::first(|rung| match rung {
-                precedence::Left::Travel => travels,
-                precedence::Left::Tomori => {
-                    matches!(left_aim, precedence::Aim::Tomori | precedence::Aim::Pad)
-                }
-                precedence::Left::Environment => environment,
-                precedence::Left::Nothing => true,
-            }) {
-                precedence::Left::Environment => LeftStick::Environment,
-                _ => LeftStick::Other,
-            }
+        // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
+        let wrist_active = self.wrist.state().active();
+        // A push is the panel or wall its hand carries, if one is carried as it leaves the middle, until it returns there,
+        // and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards,
+        // never take a push that moved the panel, nor the panel one that moved them. Otherwise, a push that leaves the
+        // middle with its ray on a panel with more than it shows scrolls it, for this participant alone, and nothing
+        // else, while the right wrist's transcript does not take the right stick. See `design/projection.md`.
+        let carrying = self.projector.carrying();
+        let carries = Hands::from_fn(|side| self.projector.carrying_in(side));
+        let scrolls = Hands::from_fn(|side| {
+            let hand = &self.hands[side];
+            hand.panel.clone().filter(|panel| {
+                hand.full
+                    && !(side == Side::Right && wrist_active)
+                    && self.projector.scrollable(panel)
+            })
         });
-        let (travel_stick, environment_left) = match self.left_stick {
-            LeftStick::Environment => (Vec2::ZERO, stick),
-            _ => (stick, Vec2::ZERO),
+        // An object of the environment's that takes the stick, its hand's ray shown in full on it, has a push that nothing
+        // of Tomori's takes, with its identity. See `design/environments.md`.
+        let objects = Hands::from_fn(|side| {
+            let hand = &self.hands[side];
+            self.client
+                .as_ref()
+                .and_then(|client| client.scrollable[side].clone())
+                .filter(|_| hand.full && hand.aim == precedence::Aim::Environment)
+        });
+        let on_tomori = |side: Side| {
+            matches!(
+                self.hands[side].aim,
+                precedence::Aim::Tomori | precedence::Aim::Pad
+            )
         };
-        // In a space whose environment allows it, the left stick travels, which the frame step does with the ray; see `design/locomotion.md`.
-        self.travel_stick = if focused { travel_stick } else { Vec2::ZERO };
+        let left_rung = precedence::Left::first(|rung| match rung {
+            precedence::Left::Carried => carries.left,
+            precedence::Left::Scroll => scrolls.left.is_some(),
+            precedence::Left::Object => objects.left.is_some(),
+            precedence::Left::Travel => travels,
+            precedence::Left::Tomori => on_tomori(Side::Left),
+            precedence::Left::Environment => environment,
+            precedence::Left::Nothing => true,
+        });
+        let rung = precedence::Right::first(|rung| match rung {
+            precedence::Right::Carried => carries.right,
+            precedence::Right::Transcript => wrist_active,
+            precedence::Right::Scroll => scrolls.right.is_some(),
+            precedence::Right::Object => objects.right.is_some(),
+            precedence::Right::Travel => travels,
+            precedence::Right::Tomori => on_tomori(Side::Right),
+            precedence::Right::Environment => environment,
+            precedence::Right::Cards => true,
+        });
+        // What a push takes as it leaves the middle, given what the other stick's push has under way: one push at a time
+        // travels, scrolls or pushes an object, so that one begun while the other stick's does is nobody's.
+        let claim = |shared: Option<SharedRung>, other: &Push, number: u64| match shared {
+            Some(SharedRung::Carried) => Push::Carried,
+            Some(SharedRung::Scroll(panel)) => match other {
+                Push::Scrolled(_) => Push::Other,
+                _ => Push::Scrolled(panel),
+            },
+            // A push begun without focus is nobody's, so that it never begins an object's.
+            Some(SharedRung::Object(object)) => match other {
+                Push::Object(..) => Push::Abandoned,
+                _ if focused => Push::Object(object, number),
+                _ => Push::Abandoned,
+            },
+            Some(SharedRung::Travel) => match other {
+                Push::Travel => Push::Other,
+                _ => Push::Travel,
+            },
+            Some(SharedRung::Environment) => Push::Environment,
+            None => Push::Other,
+        };
+        let left_shared = match left_rung {
+            precedence::Left::Carried => Some(SharedRung::Carried),
+            precedence::Left::Scroll => scrolls.left.clone().map(SharedRung::Scroll),
+            precedence::Left::Object => objects.left.clone().map(SharedRung::Object),
+            precedence::Left::Travel => Some(SharedRung::Travel),
+            precedence::Left::Environment => Some(SharedRung::Environment),
+            precedence::Left::Tomori | precedence::Left::Nothing => None,
+        };
+        let right_shared = match rung {
+            precedence::Right::Carried => Some(SharedRung::Carried),
+            precedence::Right::Scroll => scrolls.right.clone().map(SharedRung::Scroll),
+            precedence::Right::Object => objects.right.clone().map(SharedRung::Object),
+            precedence::Right::Travel => Some(SharedRung::Travel),
+            precedence::Right::Environment => Some(SharedRung::Environment),
+            precedence::Right::Transcript
+            | precedence::Right::Tomori
+            | precedence::Right::Cards => None,
+        };
+        // The left stick's push is decided first, so that of two begun together, the left's travels.
+        let number = self.pushes + 1;
+        let right_before = self.right_stick.clone();
+        self.left_stick = std::mem::take(&mut self.left_stick)
+            .update(stick, || claim(left_shared, &right_before, number));
+        if let Push::Object(_, number) = &self.left_stick {
+            self.pushes = self.pushes.max(*number);
+            self.wheel_push = None;
+        }
+        let number = self.pushes + 1;
+        let left_now = self.left_stick.clone();
+        self.right_stick = std::mem::take(&mut self.right_stick)
+            .update(buttons.right_stick, || {
+                claim(right_shared, &left_now, number)
+            });
+        if let Push::Object(_, number) = &self.right_stick {
+            self.pushes = self.pushes.max(*number);
+            self.wheel_push = None;
+        }
+        // Outside a space, the left stick moves in what the lobby lists, whoever's its push is.
         let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
         let navigate = moving && !self.stick_latched;
         self.stick_latched = moving;
@@ -992,74 +1089,53 @@ impl Step {
                 conversation.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
             }
         }
-        // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
-        let wrist_active = self.wrist.state().active();
-        // A push of the right stick is the panel or wall carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. Otherwise, while the transcript does not show, a push that leaves the middle pointing at a panel with more than it shows scrolls it, for this participant alone, and nothing else. See `design/projection.md`.
-        let carrying = self.projector.carrying();
-        let scrolls = self.hands[serving]
-            .panel
-            .as_deref()
-            .filter(|panel| !wrist_active && self.projector.scrollable(panel));
-        // An object of the environment's that takes the right stick, pointed at, has a push that nothing of Tomori's
-        // takes, with its identity. See `design/environments.md`.
-        let object = self
-            .client
-            .as_ref()
-            .and_then(|client| client.scrollable.as_deref());
-        let rung = precedence::Right::first(|rung| match rung {
-            precedence::Right::Carried => carrying,
-            precedence::Right::Transcript => wrist_active,
-            precedence::Right::Scroll => scrolls.is_some(),
-            precedence::Right::Tomori => {
-                matches!(aim, precedence::Aim::Tomori | precedence::Aim::Pad)
+        let of = |push: &Push, value: Vec2, owner: fn(&Push) -> bool| {
+            if focused && owner(push) {
+                value
+            } else {
+                Vec2::ZERO
             }
-            precedence::Right::Object => object.is_some(),
-            precedence::Right::Environment => environment,
-            precedence::Right::Cards => true,
-        });
-        let number = self.pushes + 1;
-        self.right_stick =
-            std::mem::take(&mut self.right_stick).update(buttons.right_stick, || match rung {
-                precedence::Right::Carried => RightStick::Carried,
-                precedence::Right::Scroll => scrolls.map_or(RightStick::Other, |panel| {
-                    RightStick::Scrolled(panel.to_owned())
-                }),
-                // A push begun without focus is nobody's, so that it never begins an object's.
-                precedence::Right::Object => match object {
-                    Some(object) if focused => RightStick::Object(object.to_owned(), number),
-                    _ => RightStick::Abandoned,
-                },
-                precedence::Right::Environment => RightStick::Environment,
-                precedence::Right::Transcript
-                | precedence::Right::Tomori
-                | precedence::Right::Cards => RightStick::Other,
-            });
-        if let RightStick::Object(_, number) = &self.right_stick {
-            self.pushes = *number;
-            self.wheel_push = None;
+        };
+        let (left, right) = (&self.left_stick, &self.right_stick);
+        let carried = |push: &Push| *push == Push::Carried;
+        let travelling = |push: &Push| *push == Push::Travel;
+        let environmental = |push: &Push| *push == Push::Environment;
+        let pushing = |push: &Push| matches!(push, Push::Object(..));
+        self.carry_stick = Hands {
+            left: of(left, stick, carried),
+            right: of(right, buttons.right_stick, carried),
+        };
+        // In a space whose environment allows it, the stick whose push travels does, which the frame step does with its
+        // hand's ray; see `design/locomotion.md`.
+        self.travel_stick =
+            of(left, stick, travelling) + of(right, buttons.right_stick, travelling);
+        if travelling(left) {
+            self.travel_right = false;
+        } else if travelling(right) {
+            self.travel_right = true;
         }
-        let (carry_stick, right, environment_right) = match self.right_stick {
-            RightStick::Carried => (buttons.right_stick, Vec2::ZERO, Vec2::ZERO),
-            RightStick::Scrolled(_) | RightStick::Object(..) | RightStick::Abandoned => {
-                (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO)
-            }
-            RightStick::Environment => (Vec2::ZERO, Vec2::ZERO, buttons.right_stick),
-            RightStick::Free | RightStick::Other => (Vec2::ZERO, buttons.right_stick, Vec2::ZERO),
+        let environment_left = of(left, stick, environmental);
+        let environment_right = of(right, buttons.right_stick, environmental);
+        // The right stick moves the transcript's focus or pages cards with what nothing else took.
+        let right = if matches!(self.right_stick, Push::Free | Push::Other) {
+            buttons.right_stick
+        } else {
+            Vec2::ZERO
         };
-        self.scroll_axis = match self.right_stick {
-            RightStick::Object(..) => buttons.right_stick,
-            _ => Vec2::ZERO,
+        self.scroll_axis = if pushing(&self.left_stick) {
+            stick
+        } else if pushing(&self.right_stick) {
+            buttons.right_stick
+        } else {
+            Vec2::ZERO
         };
-        self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
-        self.scroll_stick = match &self.right_stick {
-            RightStick::Scrolled(panel) if focused => Some((panel.clone(), buttons.right_stick.y)),
+        self.scroll_stick = match (&self.left_stick, &self.right_stick) {
+            (Push::Scrolled(panel), _) if focused => Some((panel.clone(), stick.y)),
+            (_, Push::Scrolled(panel)) if focused => Some((panel.clone(), buttons.right_stick.y)),
             _ => None,
         };
-        self.environment_sticks = if focused {
-            (environment_left, environment_right)
-        } else {
-            (Vec2::ZERO, Vec2::ZERO)
-        };
+        self.environment_sticks = (environment_left, environment_right);
+        let object = objects.right.as_deref();
         // The mouse's wheel scrolls the panel pointed at, unless one is carried or the transcript shows.
         if let Some(panel) = &self.hands[serving].panel
             && focused
@@ -1080,7 +1156,8 @@ impl Step {
         if let Some(object) = object
             && rung == precedence::Right::Object
             && focused
-            && self.right_stick == RightStick::Free
+            && self.right_stick == Push::Free
+            && !matches!(self.left_stick, Push::Object(..))
             && buttons.scroll.is_finite()
             && buttons.scroll != 0.0
         {
@@ -1759,8 +1836,13 @@ impl Step {
             Hands::from_fn(|side| rays[side].filter(|_| !self.hands[side].lowered || busy[side]));
         // In an environment that allows it, the left stick travels: aiming a teleport with the left ray, the hand whose stick aims it, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
         let locomotion = conversation.locomotion();
-        // The hand whose ray aims: the left on the headset, whose stick aims, and the mouse on the desktop.
-        let aimer = senses.teleport;
+        // The hand whose ray aims: the left on the headset, whose stick aims, and the mouse on the desktop, or the right
+        // while the right stick's push travels, until it has been followed to its end.
+        let aimer = if self.travel_right {
+            Side::Right
+        } else {
+            senses.teleport
+        };
         // Only once the environment's scenery has grown in, so that its surfaces are seen; not while the transcript shows; and not while the left hand carries a card, since aiming would put it down. A panel carried in either hand travels along, in the hand, as the rig carries the ray it follows.
         let grown = scenery.reveal.is_none() && scenery.environment == conversation.environment();
         let travel_active =
@@ -1778,6 +1860,9 @@ impl Step {
             chosen: chosen_pad,
             dt,
         });
+        if self.right_stick != Push::Travel {
+            self.travel_right = false;
+        }
         // Landing clicks as choosing does, on the hand that aimed; a pad chosen with A clicked as A chose it.
         if travel.teleported || (travel.transported && !pressed) {
             feedback.emit_on(feedback::Event::Choose, aimer.into(), now);
@@ -1823,6 +1908,7 @@ impl Step {
                 step.hands[side].card_reach.min(distance)
             }),
             free: triggers[side].is_some_and(|trigger| trigger > crate::pointing::PULL),
+            stick: step.carry_stick[side],
         };
         let right = hold(self, Side::Right);
         let left = hold(self, Side::Left);
@@ -1839,7 +1925,7 @@ impl Step {
             active: right.active,
             pointing: right.pointing,
             nearer: right.nearer,
-            stick: self.carry_stick,
+            stick: right.stick,
             straighten: std::mem::take(&mut self.straighten),
             free: right.free,
             controls: self.controls,
@@ -1965,7 +2051,7 @@ impl Step {
                         focus: None,
                         select: None,
                         back: false,
-                        scrollable: None,
+                        scrollable: Hands::default(),
                         scroller: Default::default(),
                         reachable: Hands::default(),
                         grabbable: Hands::default(),
@@ -2233,11 +2319,14 @@ impl Step {
                 .as_ref()
                 .filter(|picked| picked.selectable)
                 .map(|picked| picked.object.clone());
-            // What a push of the right stick takes next frame.
-            client.scrollable = right_object
-                .as_ref()
-                .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
-                .map(|picked| picked.object.clone());
+            // What a push of each hand's stick takes next frame.
+            client.scrollable = Hands::from_fn(|side| {
+                resolved[side]
+                    .object
+                    .as_ref()
+                    .filter(|picked| picked.actions.contains(crate::client_side::Actions::SCROLL))
+                    .map(|picked| picked.object.clone())
+            });
             // And what a squeeze of each grip takes: what is within reach of that hand, or else what its ray is on that
             // takes the grip.
             client.grabbable = Hands::from_fn(|side| {
@@ -2325,6 +2414,10 @@ impl Step {
             if says && ray_shown[side] {
                 hand.lit = Some(now);
             }
+            hand.full = ray_shown[side]
+                && hand
+                    .lit
+                    .is_some_and(|lit| now.saturating_duration_since(lit) < LIT);
         }
         // The labels on the rays name the panel each points at, not one carried, and say how to tick the item it meets; on
         // a chart's plot, the right ray's readout says what the chart reads there instead, over its face.
@@ -2447,8 +2540,14 @@ impl Step {
                 if wheeled == Some(None) {
                     self.wheel_push = None;
                 }
-                let push = match (&self.right_stick, &self.wheel_push) {
-                    (RightStick::Object(object, number), _) => {
+                let stuck = match (&self.right_stick, &self.left_stick) {
+                    (Push::Object(object, number), _) | (_, Push::Object(object, number)) => {
+                        Some((object, number))
+                    }
+                    _ => None,
+                };
+                let push = match (stuck, &self.wheel_push) {
+                    (Some((object, number)), _) => {
                         Some((object.as_str(), *number, self.scroll_axis))
                     }
                     (_, Some(wheel)) => Some((
@@ -4777,10 +4876,10 @@ mod tests {
         assert_eq!(told(&mut step, &mut conversation, push, true), Vec2::ZERO);
         // Losing focus forgets whose the push was.
         step.blur(&mut conversation);
-        assert_eq!(step.left_stick, LeftStick::Free);
+        assert_eq!(step.left_stick, Push::Free);
         assert_eq!(
-            LeftStick::Other.update(Vec2::NAN, || LeftStick::Environment),
-            LeftStick::Free
+            Push::Other.update(Vec2::NAN, || Push::Environment),
+            Push::Free
         );
     }
 
@@ -4811,7 +4910,7 @@ mod tests {
         assert!(step.wrist.state().active());
         let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
         assert_eq!(told.1, Vec2::ZERO);
-        assert_eq!(step.right_stick, RightStick::Other);
+        assert_eq!(step.right_stick, Push::Other);
         // While a panel is carried, a push is the panel's.
         let (mut conversation, mut step, mut senses, done) = lit(Default::default());
         let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -0.6);
@@ -4836,11 +4935,11 @@ mod tests {
         sticks(&mut step, &mut conversation, &senses, &done, rest, true);
         let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
         assert_eq!(told.1, Vec2::ZERO);
-        assert_eq!(step.right_stick, RightStick::Carried);
+        assert_eq!(step.right_stick, Push::Carried);
         // A push is the environment's only if nothing else takes it as it leaves the middle, until it returns there.
         assert_eq!(
-            RightStick::Environment.update(Vec2::Y, || RightStick::Carried),
-            RightStick::Environment
+            Push::Environment.update(Vec2::Y, || Push::Carried),
+            Push::Environment
         );
     }
 
@@ -4875,8 +4974,8 @@ mod tests {
         let rest = Buttons::default();
         let now = Instant::now();
         // In an environment without travel, whose client side would take both sticks, a panel in front of its lamp
-        // takes them: one with more than it shows scrolls with the right stick, one that shows everything takes it to
-        // do nothing, and neither gives the left stick to the environment.
+        // takes the right stick: one with more than it shows scrolls with it, and one that shows everything takes it to
+        // do nothing. The left stick follows the left ray, which is on nothing, so it is the environment's.
         for (lines, scrolls) in [(200, true), (1, false)] {
             let (mut conversation, mut step, senses, done) = lit(Locomotion::None);
             code_ahead(&mut conversation, lines);
@@ -4884,14 +4983,14 @@ mod tests {
             assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
             assert_eq!(step.projector.scrollable("panel-1"), scrolls);
             let told = sticks(&mut step, &mut conversation, &senses, &done, push, true);
-            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
-            assert_eq!(step.left_stick, LeftStick::Other);
+            assert_eq!(told, (Vec2::X, Vec2::ZERO), "{lines}");
+            assert_eq!(step.left_stick, Push::Environment);
             if scrolls {
-                assert_eq!(step.right_stick, RightStick::Scrolled("panel-1".into()));
+                assert_eq!(step.right_stick, Push::Scrolled("panel-1".into()));
                 step.update(&senses, &mut conversation, &mut felt(), now, 0.5);
                 assert!(step.projector.scroll("panel-1") > 0);
             } else {
-                assert_eq!(step.right_stick, RightStick::Other);
+                assert_eq!(step.right_stick, Push::Other);
             }
             // A push begun on the panel stays Tomori's as the ray moves off it, until it returns to the middle.
             let away = Senses {
@@ -4899,15 +4998,15 @@ mod tests {
                 ..senses
             };
             let told = sticks(&mut step, &mut conversation, &away, &done, push, true);
-            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
+            assert_eq!(told, (Vec2::X, Vec2::ZERO), "{lines}");
             // Back to the middle with the ray on nothing of Tomori's, nor of the environment's, the next push is the
             // environment's.
             sticks(&mut step, &mut conversation, &away, &done, rest, true);
             assert_eq!(step.hands.right.aim, precedence::Aim::Nothing);
             let told = sticks(&mut step, &mut conversation, &away, &done, push, true);
             assert_eq!(told, (Vec2::X, Vec2::NEG_Y), "{lines}");
-            // Carried, the panel takes the right stick before anything else, and the left stick is not the
-            // environment's.
+            // Carried in the right hand, the panel takes the right stick before anything else, and the left stick,
+            // whose hand carries nothing, is the environment's still.
             sticks(&mut step, &mut conversation, &senses, &done, rest, true);
             let gripped = Senses {
                 grip: Some(1.0),
@@ -4916,9 +5015,9 @@ mod tests {
             step.update(&gripped, &mut conversation, &mut felt(), now, FRAME);
             assert_eq!(step.projector.held(), Some("panel-1"));
             let told = sticks(&mut step, &mut conversation, &gripped, &done, push, true);
-            assert_eq!(told, (Vec2::ZERO, Vec2::ZERO), "{lines}");
-            assert_eq!(step.right_stick, RightStick::Carried);
-            assert_eq!(step.left_stick, LeftStick::Other);
+            assert_eq!(told, (Vec2::X, Vec2::ZERO), "{lines}");
+            assert_eq!(step.right_stick, Push::Carried);
+            assert_eq!(step.left_stick, Push::Environment);
         }
     }
 
@@ -4978,7 +5077,7 @@ mod tests {
                 &mut felt(),
                 now,
             );
-            assert_eq!(step.right_stick, RightStick::Other);
+            assert_eq!(step.right_stick, Push::Other);
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
             assert_eq!((frame.card, frame.content), (0, 0));
             step.buttons(
@@ -6022,6 +6121,570 @@ mod tests {
         assert!(left.distance(ahead) > 1.0);
     }
 
+    use crate::sides::Side as Hand;
+
+    /// Where a hand's ray starts, in the participant's room, and which way it points.
+    type Aim = (Vec3, Vec3);
+
+    /// In a space in Sky whose environment teleports onto a floor 40 m across, or does not, showing `panels`, grown in.
+    fn travelling(
+        locomotion: crate::locomotion::Locomotion,
+        panels: Vec<tomori_protocol::Panel>,
+    ) -> (Conversation, Step) {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(crate::test_support::SKY, locomotion)]);
+        fixtures::show_projection(&mut conversation, Vec::new(), panels);
+        let mut step = Step::default();
+        for _ in 0..400 {
+            let senses = rays_placed(&mut step, &conversation, None, None, [0.0; 2]);
+            step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                FRAME,
+            );
+        }
+        (conversation, step)
+    }
+
+    fn floor() -> crate::locomotion::Locomotion {
+        use crate::locomotion::{Locomotion, Surface};
+        Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))])
+    }
+
+    /// The senses of a participant at home in their room with the rays `right` and `left` and the grips, right then
+    /// left, as the platform places them with the rig, the rays drawn as the headset draws them.
+    fn rays_placed(
+        step: &mut Step,
+        conversation: &Conversation,
+        right: Option<Aim>,
+        left: Option<Aim>,
+        grips: [f32; 2],
+    ) -> Senses {
+        let rig = step.rig(conversation).matrix();
+        let head = rig * Mat4::from_translation(arrival::HOME);
+        let ray = |aim: Option<Aim>| {
+            aim.and_then(|(origin, direction)| {
+                Ray::new(
+                    rig.transform_point3(origin),
+                    rig.transform_vector3(direction),
+                )
+            })
+        };
+        Senses {
+            beam: true,
+            head: Some(head),
+            head_pose: Pose::from_transform(head),
+            viewer: Some(head.w_axis.truncate()),
+            ray: ray(right),
+            left_ray: ray(left),
+            grip: Some(grips[0]),
+            left_grip: Some(grips[1]),
+            left_trigger: Some(0.0),
+            ..senses()
+        }
+    }
+
+    /// Which way the rig turns the room's ahead, along the floor.
+    fn rig_ahead(step: &mut Step, conversation: &Conversation) -> Vec3 {
+        step.rig(conversation)
+            .matrix()
+            .transform_vector3(Vec3::NEG_Z)
+    }
+
+    /// What a frame drew that the tests of the sticks read.
+    struct Pushed {
+        landing: Option<Vec3>,
+        blink: f32,
+        arrival: Option<Arrival>,
+        projection: Vec<controller_ui::Sheet>,
+    }
+
+    /// Push the sticks, left then right, and step a frame with `senses`.
+    fn push_sticks(
+        step: &mut Step,
+        conversation: &mut Conversation,
+        senses: &Senses,
+        left: Vec2,
+        right: Vec2,
+    ) -> Pushed {
+        step.buttons(
+            &both(left, right),
+            true,
+            conversation,
+            &mut felt(),
+            Instant::now(),
+        );
+        let frame = step.update(senses, conversation, &mut felt(), Instant::now(), FRAME);
+        Pushed {
+            landing: frame.landing,
+            blink: frame.blink,
+            arrival: frame.arrival,
+            projection: frame.projection,
+        }
+    }
+
+    /// Whose `side`'s stick's push is.
+    fn stick_of(step: &Step, side: Hand) -> &Push {
+        match side {
+            Hand::Left => &step.left_stick,
+            Hand::Right => &step.right_stick,
+        }
+    }
+
+    /// Facing −Z after `turns` snap turns to the right, along the floor.
+    fn turned(turns: f32) -> Vec3 {
+        let angle = turns * crate::locomotion::SNAP_TURN;
+        Vec3::new(angle.sin(), 0.0, -angle.cos())
+    }
+
+    #[test]
+    fn either_stick_turns_30_degrees_once_a_push_where_its_ray_is_on_nothing() {
+        let ahead: Aim = (arrival::HOME + Vec3::new(0.2, -0.4, -0.3), Vec3::NEG_Z);
+        for side in Hand::BOTH {
+            let (mut conversation, mut step) = travelling(floor(), Vec::new());
+            let push = |stick: Vec2| match side {
+                Hand::Left => (stick, Vec2::ZERO),
+                Hand::Right => (Vec2::ZERO, stick),
+            };
+            let sense = |step: &mut Step, conversation: &Conversation| {
+                rays_placed(step, conversation, Some(ahead), Some(ahead), [0.0; 2])
+            };
+            let senses = sense(&mut step, &conversation);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+            assert_eq!(step.hands[side].aim, precedence::Aim::Nothing, "{side:?}");
+            // Pushed right and held, it turns 30° to the right once, about the head.
+            for _ in 0..5 {
+                let senses = sense(&mut step, &conversation);
+                let (left, right) = push(Vec2::X);
+                push_sticks(&mut step, &mut conversation, &senses, left, right);
+            }
+            assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+            let head = step
+                .rig(&conversation)
+                .matrix()
+                .transform_point3(arrival::HOME);
+            assert!(
+                head.distance(arrival::HOME) < 1e-4,
+                "{side:?}: about the head"
+            );
+            // Rolled forward and back again within the push, it turns no more and aims nothing.
+            for stick in [Vec2::new(0.5, 0.9), Vec2::new(0.9, -0.9), Vec2::X] {
+                let senses = sense(&mut step, &conversation);
+                let (left, right) = push(stick);
+                let frame = push_sticks(&mut step, &mut conversation, &senses, left, right);
+                assert_eq!(frame.landing, None);
+            }
+            assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+            // Back to the middle, the next push turns again, and a push left turns back.
+            for stick in [Vec2::ZERO, Vec2::X, Vec2::ZERO, Vec2::NEG_X, Vec2::ZERO] {
+                let senses = sense(&mut step, &conversation);
+                let (left, right) = push(stick);
+                push_sticks(&mut step, &mut conversation, &senses, left, right);
+            }
+            assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+            // A push mostly forward, drifting a little sideways as it passes the threshold, aims rather than turns.
+            for stick in [Vec2::new(0.3, 0.8), Vec2::new(0.6, 0.75)] {
+                let senses = sense(&mut step, &conversation);
+                let (left, right) = push(stick);
+                push_sticks(&mut step, &mut conversation, &senses, left, right);
+            }
+            assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+            assert_eq!(step.travel_right, side == Hand::Right);
+        }
+    }
+
+    #[test]
+    fn the_right_stick_aims_a_teleport_along_the_right_ray_and_lands_as_it_returns() {
+        let (mut conversation, mut step) = travelling(floor(), Vec::new());
+        // The right ray points down at the floor a metre and a half ahead; the left, level, at nothing.
+        let right: Aim = (
+            arrival::HOME + Vec3::new(0.2, -0.4, -0.3),
+            Vec3::new(0.0, -1.2, -1.2),
+        );
+        let left: Aim = (arrival::HOME + Vec3::new(-0.2, -0.4, -0.3), Vec3::NEG_Z);
+        let senses = rays_placed(&mut step, &conversation, Some(right), Some(left), [0.0; 2]);
+        push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::ZERO,
+            Vec2::ZERO,
+        );
+        let frame = push_sticks(&mut step, &mut conversation, &senses, Vec2::ZERO, Vec2::Y);
+        let landing = frame.landing.expect("somewhere to land");
+        assert!(
+            landing.distance(Vec3::new(0.2, 0.0, -1.5)) < 1e-4,
+            "{landing}"
+        );
+        // The right ray shows the landing; the left goes on pointing.
+        let arrival = frame.arrival.unwrap();
+        let beam = arrival.ray.unwrap();
+        assert!(beam.hit && beam.end.distance(landing) < 1e-4);
+        assert!(arrival.left_ray.is_none_or(|beam| !beam.hit));
+        // Meanwhile a push of the left stick travels nowhere, and is nobody's until it returns.
+        let frame = push_sticks(&mut step, &mut conversation, &senses, Vec2::X, Vec2::Y);
+        assert_eq!(step.left_stick, Push::Other);
+        assert!(frame.landing.is_some());
+        assert!(rig_ahead(&mut step, &conversation).distance(Vec3::NEG_Z) < 1e-4);
+        // Returned to the middle, it lands there, the head over the landing.
+        let frame = push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::ZERO,
+            Vec2::ZERO,
+        );
+        assert_eq!(frame.blink, 1.0);
+        let head = step
+            .rig(&conversation)
+            .matrix()
+            .transform_point3(arrival::HOME);
+        assert!(head.distance(Vec3::new(0.2, 1.6, -1.5)) < 1e-4, "{head}");
+        assert!(!step.travel_right);
+        // A right stick lost while it aims lands nowhere.
+        let senses = rays_placed(&mut step, &conversation, Some(right), Some(left), [0.0; 2]);
+        push_sticks(&mut step, &mut conversation, &senses, Vec2::ZERO, Vec2::Y);
+        step.cancel_travel_of(Hand::Left);
+        assert!(
+            step.travel_right,
+            "the left stick's loss leaves the right's aim"
+        );
+        step.cancel_travel_of(Hand::Right);
+        push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::ZERO,
+            Vec2::ZERO,
+        );
+        let after = step
+            .rig(&conversation)
+            .matrix()
+            .transform_point3(arrival::HOME);
+        assert!(after.distance(head) < 1e-4, "{after}");
+        // Where the environment allows no travel, or travel is turned off here, the right stick neither turns nor aims.
+        for off in [false, true] {
+            let (mut conversation, mut step) = if off {
+                let (mut conversation, step) = travelling(floor(), Vec::new());
+                conversation.toggle_travel();
+                (conversation, step)
+            } else {
+                travelling(crate::locomotion::Locomotion::None, Vec::new())
+            };
+            let senses = rays_placed(&mut step, &conversation, Some(right), Some(left), [0.0; 2]);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+            for stick in [Vec2::X, Vec2::ZERO, Vec2::Y] {
+                let frame = push_sticks(&mut step, &mut conversation, &senses, Vec2::ZERO, stick);
+                assert_eq!(frame.landing, None, "{off}");
+            }
+            assert_eq!(step.right_stick, Push::Other, "{off}");
+            assert_eq!(step.rig(&conversation), Rig::default(), "{off}");
+        }
+    }
+
+    /// A code panel of 200 lines, more than it shows, floating at `at`, facing home.
+    fn long_panel(at: Vec3) -> tomori_protocol::Panel {
+        use tomori_protocol::{Code, Panel, Place, Pose};
+        let body: Vec<String> = (1..=200)
+            .map(|line| format!("let x{line} = {line};"))
+            .collect();
+        Panel::new(
+            "panel-1",
+            "rust",
+            body.join("\n"),
+            Place::Free {
+                pose: Pose::upright_facing(at.to_array(), arrival::HOME.with_y(at.y).to_array()),
+            },
+        )
+        .with_code(Code::new("rust", 200))
+    }
+
+    #[test]
+    fn a_push_begun_on_a_panel_with_more_than_it_shows_scrolls_it_with_either_stick_as_the_ray_leaves()
+     {
+        let at = arrival::HOME + Vec3::new(0.0, 0.0, -0.8);
+        let on: Aim = (
+            arrival::HOME + Vec3::new(0.0, -0.3, -0.2),
+            Vec3::new(0.0, 0.3, -0.6),
+        );
+        let off: Aim = (
+            arrival::HOME + Vec3::new(0.0, -0.3, -0.2),
+            Vec3::new(1.0, 0.0, -0.2),
+        );
+        for side in Hand::BOTH {
+            let (mut conversation, mut step) = travelling(floor(), vec![long_panel(at)]);
+            let push = |stick: Vec2| match side {
+                Hand::Left => (stick, Vec2::ZERO),
+                Hand::Right => (Vec2::ZERO, stick),
+            };
+            let aims = |aim: Aim| match side {
+                Hand::Left => (None, Some(aim)),
+                Hand::Right => (Some(aim), None),
+            };
+            let (right, left) = aims(on);
+            let senses = rays_placed(&mut step, &conversation, right, left, [0.0; 2]);
+            for _ in 0..3 {
+                push_sticks(
+                    &mut step,
+                    &mut conversation,
+                    &senses,
+                    Vec2::ZERO,
+                    Vec2::ZERO,
+                );
+            }
+            assert_eq!(
+                step.hands[side].panel.as_deref(),
+                Some("panel-1"),
+                "{side:?}"
+            );
+            assert!(step.hands[side].full, "{side:?}");
+            // Pulled back, it scrolls the panel down, and neither steps back nor turns as it rolls sideways, even once
+            // the ray has left the panel.
+            let (left_stick, right_stick) = push(Vec2::NEG_Y);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                left_stick,
+                right_stick,
+            );
+            assert_eq!(
+                stick_of(&step, side),
+                &Push::Scrolled("panel-1".into()),
+                "{side:?}"
+            );
+            let (right, left) = aims(off);
+            let away = rays_placed(&mut step, &conversation, right, left, [0.0; 2]);
+            let rolled = [Vec2::new(0.9, -0.3), Vec2::NEG_X];
+            for stick in std::iter::repeat_n(Vec2::NEG_Y, 30).chain(rolled) {
+                let (left_stick, right_stick) = push(stick);
+                let frame =
+                    push_sticks(&mut step, &mut conversation, &away, left_stick, right_stick);
+                assert_eq!(frame.landing, None);
+            }
+            assert!(step.projector.scroll("panel-1") > 0, "{side:?}");
+            let frame = push_sticks(&mut step, &mut conversation, &away, Vec2::ZERO, Vec2::ZERO);
+            assert_eq!(frame.blink, 0.0, "{side:?}: no backstep");
+            assert_eq!(step.rig(&conversation), Rig::default(), "{side:?}");
+            // With the ray off the panel, the next push turns.
+            push_sticks(&mut step, &mut conversation, &away, Vec2::ZERO, Vec2::ZERO);
+            let (left_stick, right_stick) = push(Vec2::X);
+            push_sticks(&mut step, &mut conversation, &away, left_stick, right_stick);
+            assert_eq!(stick_of(&step, side), &Push::Travel, "{side:?}");
+            assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+        }
+        // With both rays on it, one stick scrolls it at a time: the other's push meanwhile is nobody's.
+        let (mut conversation, mut step) = travelling(floor(), vec![long_panel(at)]);
+        let senses = rays_placed(&mut step, &conversation, Some(on), Some(on), [0.0; 2]);
+        for _ in 0..3 {
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+        }
+        push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::NEG_Y,
+            Vec2::ZERO,
+        );
+        push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::NEG_Y,
+            Vec2::NEG_Y,
+        );
+        assert_eq!(step.left_stick, Push::Scrolled("panel-1".into()));
+        assert_eq!(step.right_stick, Push::Other);
+    }
+
+    #[test]
+    fn a_hand_hanging_at_the_side_past_a_long_panel_captures_no_push_while_one_pointed_at_it_does()
+    {
+        // A long panel low beside the path; the left hand hangs, its ray pointing steeply down through the panel, as an
+        // arm at the side does walking past it.
+        let at = Vec3::new(0.0, 0.4, -0.5);
+        let hand = arrival::HOME + Vec3::new(0.0, -0.5, 0.0);
+        let hanging: Aim = (hand, (at - hand).normalize());
+        assert!(
+            -hanging.1.y > 0.8,
+            "pointing well down, past where a ray hides"
+        );
+        let pointed: Aim = (
+            Vec3::new(0.0, 0.7, 0.0),
+            (at - Vec3::new(0.0, 0.7, 0.0)).normalize(),
+        );
+        assert!(
+            -pointed.1.y < 0.7,
+            "pointing a little down, where a ray shows"
+        );
+        // On the desktop, which draws no rays and so lowers none, the hanging ray does meet the panel.
+        let (mut conversation, mut step) = travelling(floor(), vec![long_panel(at)]);
+        let senses = Senses {
+            beam: false,
+            ..rays_placed(&mut step, &conversation, None, Some(hanging), [0.0; 2])
+        };
+        push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses,
+            Vec2::ZERO,
+            Vec2::ZERO,
+        );
+        assert_eq!(step.hands.left.panel.as_deref(), Some("panel-1"));
+        // On the headset it hides, meets nothing, and a push of the left stick turns rather than scrolls.
+        let (mut conversation, mut step) = travelling(floor(), vec![long_panel(at)]);
+        for _ in 0..3 {
+            let senses = rays_placed(&mut step, &conversation, None, Some(hanging), [0.0; 2]);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+        }
+        assert!(step.hands.left.lowered && !step.hands.left.full);
+        assert_eq!(step.hands.left.panel, None);
+        let senses = rays_placed(&mut step, &conversation, None, Some(hanging), [0.0; 2]);
+        push_sticks(&mut step, &mut conversation, &senses, Vec2::X, Vec2::ZERO);
+        assert_eq!(step.left_stick, Push::Travel);
+        assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+        assert_eq!(step.projector.scroll("panel-1"), 0);
+        // Pointed at it deliberately, its ray shown in full on it, the next push scrolls it instead.
+        let (mut conversation, mut step) = travelling(floor(), vec![long_panel(at)]);
+        for _ in 0..3 {
+            let senses = rays_placed(&mut step, &conversation, None, Some(pointed), [0.0; 2]);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+        }
+        assert!(step.hands.left.full && !step.hands.left.lowered);
+        assert_eq!(step.hands.left.panel.as_deref(), Some("panel-1"));
+        let senses = rays_placed(&mut step, &conversation, None, Some(pointed), [0.0; 2]);
+        for _ in 0..10 {
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::NEG_Y,
+                Vec2::ZERO,
+            );
+        }
+        assert_eq!(step.left_stick, Push::Scrolled("panel-1".into()));
+        assert!(step.projector.scroll("panel-1") > 0);
+        assert_eq!(step.rig(&conversation), Rig::default());
+    }
+
+    #[test]
+    fn each_stick_moves_what_its_own_hand_carries_while_the_other_travels_carrying_it_along() {
+        let at = arrival::HOME + Vec3::new(-0.3, 0.0, -1.0);
+        let hand = arrival::HOME + Vec3::new(-0.3, -0.3, -0.2);
+        let left: Aim = (hand, (at - hand).normalize());
+        let right: Aim = (
+            arrival::HOME + Vec3::new(0.3, -0.3, -0.2),
+            Vec3::new(0.3, 0.0, -1.0),
+        );
+        let panel = tomori_protocol::Panel::new(
+            "panel-1",
+            "Build status",
+            "Green.",
+            tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::upright_facing(
+                    at.to_array(),
+                    arrival::HOME.with_y(at.y).to_array(),
+                ),
+            },
+        );
+        let (mut conversation, mut step) = travelling(floor(), vec![panel]);
+        let senses = |step: &mut Step, conversation: &Conversation, grip: f32| {
+            rays_placed(step, conversation, Some(right), Some(left), [0.0, grip])
+        };
+        for grip in [0.0, 0.0, 1.0] {
+            let senses = senses(&mut step, &conversation, grip);
+            push_sticks(
+                &mut step,
+                &mut conversation,
+                &senses,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            );
+        }
+        assert_eq!(step.projector.held_in(Hand::Left), Some("panel-1"));
+        let carried = |frame: &Pushed| {
+            frame
+                .projection
+                .iter()
+                .find(|sheet| {
+                    sheet
+                        .canvas
+                        .as_deref()
+                        .is_some_and(|canvas| canvas.plain().starts_with("Build"))
+                })
+                .and_then(|sheet| sheet.model)
+                .map(|model| model.w_axis.truncate())
+                .unwrap()
+        };
+        // The left stick pushes the panel the left hand carries further along the left ray, and travels nowhere.
+        let reach = |step: &mut Step, conversation: &Conversation, frame: &Pushed| {
+            let ray = senses(step, conversation, 1.0).left_ray.unwrap();
+            carried(frame).distance(ray.origin)
+        };
+        let held = senses(&mut step, &conversation, 1.0);
+        let frame = push_sticks(&mut step, &mut conversation, &held, Vec2::ZERO, Vec2::ZERO);
+        let near = reach(&mut step, &conversation, &frame);
+        let mut frame = frame;
+        for _ in 0..10 {
+            let senses = senses(&mut step, &conversation, 1.0);
+            frame = push_sticks(&mut step, &mut conversation, &senses, Vec2::Y, Vec2::ZERO);
+        }
+        assert_eq!(step.left_stick, Push::Carried);
+        assert_eq!(frame.landing, None);
+        assert!(reach(&mut step, &conversation, &frame) > near + 0.1);
+        let far = reach(&mut step, &conversation, &frame);
+        // The right stick, its ray on nothing, turns the participant, and the panel stays in the left hand, as far
+        // along its ray as it was.
+        for stick in [Vec2::ZERO, Vec2::X, Vec2::ZERO] {
+            let senses = senses(&mut step, &conversation, 1.0);
+            push_sticks(&mut step, &mut conversation, &senses, Vec2::ZERO, stick);
+        }
+        assert!(rig_ahead(&mut step, &conversation).distance(turned(1.0)) < 1e-4);
+        let senses_now = senses(&mut step, &conversation, 1.0);
+        let frame = push_sticks(
+            &mut step,
+            &mut conversation,
+            &senses_now,
+            Vec2::ZERO,
+            Vec2::ZERO,
+        );
+        assert_eq!(step.projector.held_in(Hand::Left), Some("panel-1"));
+        let ray = senses_now.left_ray.unwrap();
+        assert!(carried(&frame).distance(ray.at(far)) < 1e-2);
+    }
+
     #[test]
     fn the_trigger_held_while_a_wall_is_carried_attracts_no_swarm_and_lets_it_go_unsnapped() {
         use tomori_protocol::{Pose, Wall, WallKind};
@@ -6771,11 +7434,8 @@ mod tests {
             press(|buttons| buttons.right_stick = Vec2::X),
         );
         step.blur(&mut conversation);
-        assert_eq!(step.right_stick, RightStick::Free);
-        assert_eq!(
-            RightStick::Other.update(Vec2::NAN, || RightStick::Carried),
-            RightStick::Free
-        );
+        assert_eq!(step.right_stick, Push::Free);
+        assert_eq!(Push::Other.update(Vec2::NAN, || Push::Carried), Push::Free);
     }
 
     #[test]
@@ -6852,7 +7512,7 @@ mod tests {
             &mut conversation,
             press(|buttons| buttons.right_stick = Vec2::NEG_Y),
         );
-        assert!(matches!(step.right_stick, RightStick::Scrolled(ref panel) if panel == "panel-1"));
+        assert!(matches!(step.right_stick, Push::Scrolled(ref panel) if panel == "panel-1"));
         step.update(&on_panel, &mut conversation, &mut feedback, now, 0.2);
         assert_eq!(step.projector.scroll("panel-1"), 3);
         assert_eq!(step.presentation_navigation.card, 0);
@@ -6863,7 +7523,7 @@ mod tests {
         let frame = step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
         assert_eq!(footer(&frame), "↑ 14 above");
         buttons(&mut step, &mut conversation, Buttons::default());
-        assert_eq!(step.right_stick, RightStick::Free);
+        assert_eq!(step.right_stick, Push::Free);
         // Pushed forward, it scrolls back up.
         step.update(&on_panel, &mut conversation, &mut feedback, now, FRAME);
         buttons(
@@ -6881,7 +7541,7 @@ mod tests {
             &mut conversation,
             press(|buttons| buttons.right_stick = Vec2::NEG_Y),
         );
-        assert_eq!(step.right_stick, RightStick::Other);
+        assert_eq!(step.right_stick, Push::Other);
         step.update(&on_panel, &mut conversation, &mut feedback, now, 1.0);
         assert_eq!(step.projector.scroll("panel-1"), 8);
         buttons(&mut step, &mut conversation, Buttons::default());
@@ -6926,7 +7586,7 @@ mod tests {
             &mut conversation,
             press(|buttons| buttons.right_stick = Vec2::Y),
         );
-        assert_eq!(step.right_stick, RightStick::Scrolled("panel-1".into()));
+        assert_eq!(step.right_stick, Push::Scrolled("panel-1".into()));
         let after = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, 0.5));
         assert!(before.distance(after) < 1e-4);
         // Carried, a new push moves it, as ever, and the wheel scrolls nothing.
@@ -6939,7 +7599,7 @@ mod tests {
                 buttons.scroll = 3.0;
             }),
         );
-        assert_eq!(step.right_stick, RightStick::Carried);
+        assert_eq!(step.right_stick, Push::Carried);
         assert_eq!(step.wheel, None);
         let pushed = carried(&step.update(&gripped, &mut conversation, &mut feedback, now, 0.5));
         assert!(pushed.distance(arrival::HOME) > after.distance(arrival::HOME) + 0.1);

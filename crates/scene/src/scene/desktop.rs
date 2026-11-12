@@ -963,6 +963,57 @@ mod tests {
     }
 
     #[test]
+    fn the_right_stick_s_keys_turn_and_teleport_too_with_the_mouse_on_nothing() {
+        use crate::locomotion::{Locomotion, Surface};
+        let mut conversation = joined();
+        conversation.set_locomotion(vec![(
+            crate::test_support::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(20.0))]),
+        )]);
+        let mut desktop = desktop(&mut conversation);
+        let mut start = Instant::now();
+        for _ in 0..40 {
+            start += Duration::from_millis(100);
+            desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+        }
+        // With the mouse on nothing, ] turns 30° about the head, as → does.
+        desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.3));
+        desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+        desktop.key(Key::Right(Direction::Right), true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD, SIZE);
+        desktop.key(
+            Key::Right(Direction::Right),
+            false,
+            false,
+            &mut conversation,
+        );
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 2, SIZE);
+        let head = drawn.frame.presence.unwrap().head;
+        let turned = Quat::from_array(head.orientation).angle_between(Head::default().rotation());
+        assert!(
+            (turned - crate::locomotion::SNAP_TURN).abs() < 1e-3,
+            "{turned}"
+        );
+        // [ turns back; Page Up, low in the window, aims where the mouse points, and lands as it is released.
+        desktop.key(Key::Right(Direction::Left), true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 3, SIZE);
+        desktop.key(Key::Right(Direction::Left), false, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 3, SIZE);
+        desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.95));
+        desktop.key(Key::Right(Direction::Up), true, false, &mut conversation);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 4, SIZE);
+        let landing = drawn.frame.landing.expect("somewhere to land");
+        desktop.key(Key::Right(Direction::Up), false, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 5, SIZE);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 6, SIZE);
+        let head = drawn.frame.presence.unwrap().head;
+        let travelled = Vec3::new(landing.x, arrival::HOME.y, landing.z);
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+        let turned = Quat::from_array(head.orientation).angle_between(Head::default().rotation());
+        assert!(turned < 1e-3, "{turned}");
+    }
+
+    #[test]
     fn a_click_or_enter_on_a_pad_the_mouse_points_at_takes_the_participant_to_its_partner() {
         use crate::locomotion::{Locomotion, Pad, Surface};
         let forward = Head::default()

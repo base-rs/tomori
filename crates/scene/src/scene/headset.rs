@@ -93,6 +93,8 @@ pub struct Controls {
     /// The left stick's action is bound to a connected controller, so that a stick that reads zero because it was lost is not taken for a released one.
     pub navigation_active: bool,
     pub presentation_navigation: Vec2,
+    /// The right stick's action is bound to a connected controller, as `navigation_active` says of the left's.
+    pub presentation_navigation_active: bool,
     /// The left stick's click is held, which toggles the live microphone once as it goes down.
     pub live_toggle: bool,
     pub live_toggle_active: bool,
@@ -132,6 +134,7 @@ impl Controls {
             navigation: axis(actions.navigation),
             navigation_active: actions.navigation.active,
             presentation_navigation: axis(actions.presentation_navigation),
+            presentation_navigation_active: actions.presentation_navigation.active,
             live_toggle: held(actions.live_toggle),
             live_toggle_active: actions.live_toggle.active,
             replay: pressed(actions.replay),
@@ -588,9 +591,12 @@ impl Headset {
             feedback,
             now,
         );
-        // A left stick that was lost reads as released, which must not land a teleport being aimed; see `design/locomotion.md`.
+        // A stick that was lost reads as released, which must not land a teleport it aims; see `design/locomotion.md`.
         if !controls.navigation_active {
-            self.step.cancel_travel();
+            self.step.cancel_travel_of(crate::sides::Side::Left);
+        }
+        if !controls.presentation_navigation_active {
+            self.step.cancel_travel_of(crate::sides::Side::Right);
         }
     }
 
@@ -2271,6 +2277,69 @@ mod tests {
         let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 5);
         let head = drawn.frame.presence.unwrap().head;
         assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+    }
+
+    #[test]
+    fn the_right_stick_turns_and_teleports_along_the_right_ray_and_presence_follows() {
+        let mut rig = Rig::new(travelling());
+        for _ in 0..400 {
+            rig.frame(&Controls::default(), [None, None], Duration::ZERO);
+        }
+        // The right controller points down and ahead, at the floor 1.5 m in front, and at nothing else.
+        let aim = Pose {
+            position: [0.2, 1.2, -0.3],
+            orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
+        };
+        let pointing = |stick: glam::Vec2| Controls {
+            aim: Some(aim),
+            controller_poses: [None, Some(grip(Quat::IDENTITY))],
+            presentation_navigation: stick,
+            presentation_navigation_active: true,
+            navigation_active: true,
+            trigger: Some(0.0),
+            ..Controls::default()
+        };
+        rig.frame(&pointing(glam::Vec2::ZERO), [None, None], Duration::ZERO);
+        // Pushed right, it turns 30° about the head, once however long it is held, and presence says so, so that
+        // the server sees which way the participant faces.
+        for _ in 0..4 {
+            rig.frame(&pointing(glam::Vec2::X), [None, None], Duration::ZERO);
+        }
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD);
+        let presence = drawn.frame.presence.unwrap();
+        let head = presence.head;
+        assert!(Vec3::from_array(head.position).distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
+        let forward = Quat::from_array(head.orientation) * -Vec3::Z;
+        assert!(forward.distance(Vec3::new(0.5, 0.0, -(3f32.sqrt()) / 2.0)) < 1e-4);
+        let relayed = relayed(presence);
+        let forward = Quat::from_array(relayed.orientation) * -Vec3::Z;
+        assert!(forward.distance(Vec3::new(0.5, 0.0, -(3f32.sqrt()) / 2.0)) < 1e-4);
+        // Pushed left, it turns back; pushed forward, it aims along the right ray, which shows the landing.
+        rig.frame(&pointing(glam::Vec2::NEG_X), [None, None], HOLD * 2);
+        rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 3);
+        let drawn = rig.frame(&pointing(glam::Vec2::Y), [None, None], HOLD * 4);
+        let landing = drawn.frame.landing.expect("somewhere to land");
+        assert!(
+            landing.distance(Vec3::new(0.2, 0.0, -1.5)) < 1e-4,
+            "{landing}"
+        );
+        let beam = drawn.frame.arrival.and_then(|arrival| arrival.ray).unwrap();
+        assert!(beam.hit && beam.end.distance(landing) < 1e-4);
+        // A right stick lost while it aims, reading zero, lands nowhere.
+        let lost = Controls {
+            presentation_navigation_active: false,
+            ..pointing(glam::Vec2::ZERO)
+        };
+        rig.frame(&lost, [None, None], HOLD * 5);
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 6);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
+        // Aimed again and released, it lands there.
+        rig.frame(&pointing(glam::Vec2::Y), [None, None], HOLD * 7);
+        rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 8);
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 9);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(Vec3::new(0.2, 1.6, -1.5)) < 1e-4);
     }
 
     #[test]

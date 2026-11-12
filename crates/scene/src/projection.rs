@@ -1627,8 +1627,8 @@ pub struct Input<'a> {
     /// How far along the ray something else it meets is, such as a card, which the grip picks up instead of a panel
     /// behind it.
     pub nearer: f32,
-    /// The right stick, while a panel carried takes it: forward and back push it further or pull it closer, and a flick
-    /// sideways turns it a snap.
+    /// The right stick, while what the right hand carries takes it: forward and back push it further or pull it closer,
+    /// and a flick sideways turns it a snap. What the left hand carries takes the left stick, [`Hold::stick`].
     pub stick: Vec2,
     /// The right stick was clicked while a panel was carried: it turns back to face the participant square.
     pub straighten: bool,
@@ -1645,8 +1645,9 @@ pub struct Input<'a> {
     /// one is not shown, and the ray takes no padlock, handle, bar or wall beyond one. `None` where nothing is declared.
     pub surfaces: Option<&'a crate::locomotion::Locomotion>,
     /// The left hand's ray, grip and trigger, which act on the panels and walls as the right's above do: it points,
-    /// pulls off and carries a panel of its own, and takes hold of a wall and its handles. The stick and its click act
-    /// on what the right hand carries, or else on what the left does. See `design/interaction.md`.
+    /// pulls off and carries a panel of its own, and takes hold of a wall and its handles. Each hand's stick acts on what
+    /// that hand carries; the right stick's click on what the right hand carries, or else on what the left does. See
+    /// `design/interaction.md`.
     pub left: Hold,
     pub now: Instant,
     /// Seconds since the last frame.
@@ -1668,6 +1669,8 @@ pub struct Hold {
     pub nearer: f32,
     /// The hand's trigger is held: a wall it carries snaps to no other.
     pub free: bool,
+    /// The hand's own stick, while what the hand carries takes it, as [`Input::stick`] says of the right's.
+    pub stick: Vec2,
 }
 
 impl Default for Hold {
@@ -1680,6 +1683,7 @@ impl Default for Hold {
             pointing: false,
             nearer: f32::INFINITY,
             free: false,
+            stick: Vec2::ZERO,
         }
     }
 }
@@ -1857,6 +1861,7 @@ impl Projector {
                 pointing: input.pointing,
                 nearer: input.nearer,
                 free: input.free,
+                stick: input.stick,
             },
             left: input.left,
         };
@@ -1912,8 +1917,8 @@ impl Projector {
         let pickable = pickable(&walls, travelling.is_some());
         let mut output = Output::default();
         let mut told: Hands<Told> = Hands::default();
-        // The right stick and its click act on what the right hand carries, or else on what the left does: a panel, or
-        // the wall the editor carries for that hand.
+        // Each hand's stick acts on what that hand carries, a panel or the wall the editor carries for it; the right
+        // stick's click, on what the right hand carries, or else on what the left does.
         let carries = |side: Side| {
             self.held[side].is_some()
                 || (self.editor_hand == side && self.editor.carrying().is_some())
@@ -1923,17 +1928,15 @@ impl Projector {
             let hand = hands[side];
             let (_, released) = edges[side];
             let steers = steered == Some(side);
-            // The panel carried follows its hand's ray, facing the viewer, as far along it and as turned as the right
+            // The panel carried follows its hand's ray, facing the viewer, as far along it and as turned as its hand's
             // stick puts it.
             if let Some(held) = &mut self.held[side]
                 && hand.active
             {
-                if steers {
-                    output.turned |= held.manipulation.update(input.stick, input.dt);
-                    if input.straighten && !held.manipulation.square() {
-                        held.manipulation.straighten();
-                        output.turned = true;
-                    }
+                output.turned |= held.manipulation.update(hand.stick, input.dt);
+                if steers && input.straighten && !held.manipulation.square() {
+                    held.manipulation.straighten();
+                    output.turned = true;
                 }
                 if let Some(ray) = hand.ray {
                     // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
@@ -2064,11 +2067,7 @@ impl Projector {
                     .pointed
                     .as_ref()
                     .map_or(f32::INFINITY, |(_, distance, _)| *distance),
-                stick: if steered == Some(editing) && picking {
-                    input.stick
-                } else {
-                    Vec2::ZERO
-                },
+                stick: if picking { hand.stick } else { Vec2::ZERO },
                 straighten: input.straighten && steered == Some(editing) && picking,
                 free: hand.free,
                 viewer,
