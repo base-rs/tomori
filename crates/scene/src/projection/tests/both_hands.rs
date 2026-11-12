@@ -736,3 +736,49 @@ fn a_wall_is_sized_by_both_hands_no_larger_than_a_wall_may_be_and_one_of_a_group
     let output = projector.update(both(&walled, (right, 0.0), (left, 0.0), ADJUST, now));
     assert_eq!(output.wall.and_then(|change| change.scale), None);
 }
+
+#[test]
+fn both_hands_stretch_a_volume_as_they_stretch_a_panel_its_depth_with_it_and_it_floats_at_that_size()
+ {
+    use tomori_protocol::diagram::{Diagram, Edge, Layout, Node};
+    let mut diagram = Diagram::default();
+    diagram.layout = Layout::Force;
+    for (id, x) in [("a", -200), ("b", 200)] {
+        let mut node = Node::new(id, id.to_uppercase());
+        node.at = [x, 0, 0];
+        diagram.nodes.push(node);
+    }
+    diagram.edges.push(Edge::new(0, 1));
+    diagram.extent = [600, 300, 200];
+    let middle = Vec3::new(0.0, 1.5, -2.0);
+    let pose = Pose::upright_facing(middle.to_array(), HOME.to_array());
+    let volume = Panel::new("v", "Pair", "- A\n- B", Place::Free { pose })
+        .with_diagram(diagram)
+        .with_version(12);
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![wall(TOMORI_WALL, WallKind::Tomori, 0.0, 9.0)])
+        .with_panels(vec![volume]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let none = editing::Rights::default();
+    let (right, left) = (from(RIGHT_HAND, middle), from(LEFT_HAND, middle));
+    let first = projector.update(both(&shown, (right, 1.0), (None, 0.0), none, now));
+    let before = scale_of(first.volumes[0].model);
+    projector.update(both(&shown, (right, 1.0), (left, 1.0), none, now));
+    assert!(projector.two_handed());
+    // Twice as far apart, it is twice as large, its solids and its depth with it.
+    let wide = (
+        from(RIGHT_HAND + Vec3::X * 0.2, middle),
+        from(LEFT_HAND - Vec3::X * 0.2, middle),
+    );
+    let output = projector.update(both(&shown, (wide.0, 1.0), (wide.1, 1.0), none, now));
+    let drawn = output.volumes[0].model;
+    assert!((scale_of(drawn) / before - 2.0).abs() < 1e-3);
+    assert!((drawn.z_axis.truncate().length() / before - 2.0).abs() < 1e-3);
+    let output = projector.update(both(&shown, (wide.0, 0.0), (wide.1, 0.0), none, now));
+    assert!(
+        matches!(output.placed, Some((ref id, Target::Sized(_, Resized { size: 2.0, version: 12 }))) if id == "v"),
+        "{:?}",
+        output.placed
+    );
+}
