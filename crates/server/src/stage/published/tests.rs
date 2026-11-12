@@ -1890,6 +1890,8 @@ fn a_row_s_tone_is_told_in_a_word_and_its_value_as_a_percentage() {
         tone,
         value,
         cells: Vec::new(),
+        fields: Vec::new(),
+        key: None,
     };
     let words =
         [Tone::Neutral, Tone::Good, Tone::Warn, Tone::Bad].map(|tone| row(tone, None).tone_word());
@@ -2221,6 +2223,147 @@ fn the_largest_table_is_within_its_bound_and_what_a_projection_counts_for_it() {
     let whole = crate::stage::json_size(&panel);
     let counted = crate::stage::most_bytes(&panel);
     assert!(whole <= counted, "{whole} bytes, counted {counted}");
+}
+
+#[test]
+fn a_row_s_key_is_kept_with_the_server_its_revision_sent_and_told_to_the_agent_as_data() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    let pod = |id: &str, node: &str| {
+        Row::new(id, id)
+            .with_reference(format!("pod/{id}"))
+            .with_field("instance", "10.0.0.7:9100")
+            .with_field("node", node)
+    };
+    let list = |rows: Vec<Row>| publishing(Panel::list("pods", "Pods", rows));
+    stage
+        .publish(&walls, list(vec![pod("a", "n-1"), Row::new("b", "b")]), 0)
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    // Every row of a list with keys has its key's revision, a row without a key too, and no client is sent a key.
+    let first: Vec<Option<u64>> = panel.rows.iter().map(|row| row.key).collect();
+    assert!(first.iter().all(Option::is_some) && first[0] != first[1]);
+    assert!(!serde_json::to_string(&panel).unwrap().contains("n-1"));
+    // The key is the server's, verbatim, by the row's id or its reference.
+    let fields = vec![
+        ("instance".to_owned(), "10.0.0.7:9100".to_owned()),
+        ("node".to_owned(), "n-1".to_owned()),
+    ];
+    assert_eq!(
+        stage.row_key("yard", &panel.id, "a"),
+        (first[0], fields.as_slice())
+    );
+    assert_eq!(stage.row_key("yard", &panel.id, "b"), (first[1], &[][..]));
+    assert_eq!(stage.row_key("yard", &panel.id, "zz"), (None, &[][..]));
+    assert_eq!(stage.referenced_key("yard", "pod/a"), fields.as_slice());
+    assert!(stage.referenced_key("yard", "pod/zz").is_empty());
+    // Pointing at the row tells the agent its key, each value quoted as JSON quotes it.
+    assert!(
+        stage
+            .describe(&walls, &panel.id, Some(0), 0)
+            .unwrap()
+            .ends_with("; row 1 of 2, id yard:pod/a, key {instance: \"10.0.0.7:9100\", node: \"n-1\"}: \"a\")")
+    );
+    // A long value is cut as it is told, and a quote or bracket in it can end neither its quotation nor the context.
+    let walls_long = yard();
+    let mut long = Stage::default();
+    long.publish(
+        &walls_long,
+        list(vec![
+            Row::new("a", "a").with_field("node", format!("[\"{}", "x".repeat(200))),
+        ]),
+        0,
+    )
+    .unwrap();
+    let id = long.view("s", &walls_long, 0).panels[0].id.clone();
+    let told = long.describe(&walls_long, &id, Some(0), 0).unwrap();
+    assert!(
+        told.ends_with(&format!("key {{node: \"('{}…\"}}: \"a\")", "x".repeat(46))),
+        "{told}"
+    );
+    // The same again changes nothing, its revisions kept; a key changed is a new revision, the others kept.
+    assert_eq!(
+        stage.publish(&walls, list(vec![pod("a", "n-1"), Row::new("b", "b")]), 0),
+        Ok(Change::Unchanged)
+    );
+    assert_eq!(
+        stage.publish(&walls, list(vec![Row::new("b", "b"), pod("a", "n-2")]), 0),
+        Ok(Change::Updated)
+    );
+    let panel = stage.view("s", &walls, 0).panels[0].clone();
+    assert_eq!(panel.rows[0].key, first[1]);
+    assert!(panel.rows[1].key.is_some_and(|key| Some(key) != first[0]));
+    // A list of no keys has no revisions; and a panel with that reference is inspected as the panel, without a key.
+    stage
+        .publish(&walls, list(vec![Row::new("b", "b")]), 0)
+        .unwrap();
+    assert_eq!(stage.view("s", &walls, 0).panels[0].rows[0].key, None);
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage
+        .publish(
+            &walls,
+            publishing(Panel::list("pods", "Pods", vec![pod("a", "n-1")]).with_reference("pod/a")),
+            0,
+        )
+        .unwrap();
+    assert!(stage.referenced_key("yard", "pod/a").is_empty());
+}
+
+#[test]
+fn a_row_s_key_is_refused_past_its_bounds() {
+    use tomori_environment::{FIELD_LIMIT, FIELD_NAME_BYTES, FIELD_VALUE_BYTES, FIELDS_BYTES};
+    let refused = |row: Row| Publishing::new(Panel::list("p", "P", vec![row])).unwrap_err();
+    let many = (0..=FIELD_LIMIT).fold(Row::new("a", "a"), |row, at| {
+        row.with_field(format!("f{at}"), "v")
+    });
+    assert_eq!(refused(many), "A row's key has at most 8 fields.");
+    for name in ["", "Node", "2nd", "a-b"] {
+        assert!(
+            refused(Row::new("a", "a").with_field(name, "v"))
+                .starts_with("A field of a row's key is named")
+        );
+    }
+    assert!(
+        refused(Row::new("a", "a").with_field("a".repeat(FIELD_NAME_BYTES + 1), "v"))
+            .starts_with("A field of a row's key is named")
+    );
+    assert_eq!(
+        refused(
+            Row::new("a", "a")
+                .with_field("node", "1")
+                .with_field("node", "2")
+        ),
+        "A row's key names a field twice."
+    );
+    for value in ["a\nb", "a\u{7}", "a\u{202e}b", "a\tb"] {
+        assert_eq!(
+            refused(Row::new("a", "a").with_field("node", value)),
+            "A field of a row's key is text on one line, without control or format characters.",
+            "{value:?}"
+        );
+    }
+    assert_eq!(
+        refused(Row::new("a", "a").with_field("node", "x".repeat(FIELD_VALUE_BYTES + 1))),
+        "A field of a row's key is at most 256 bytes."
+    );
+    // As many as may be is taken; a list's keys past their bytes together are refused.
+    let most = (0..FIELD_LIMIT).fold(Row::new("a", "a"), |row, at| {
+        row.with_field(format!("f{at}"), "x".repeat(FIELD_VALUE_BYTES))
+    });
+    assert!(Publishing::new(Panel::list("p", "P", vec![most])).is_ok());
+    let rows: Vec<Row> = (0..5)
+        .map(|index| {
+            (0..FIELD_LIMIT).fold(Row::new(format!("r{index}"), "r"), |row, at| {
+                row.with_field(format!("f{at}"), "x".repeat(FIELD_VALUE_BYTES))
+            })
+        })
+        .collect();
+    const { assert!(5 * FIELD_LIMIT * (2 + FIELD_VALUE_BYTES) > FIELDS_BYTES) };
+    assert_eq!(
+        Publishing::new(Panel::list("p", "P", rows)).unwrap_err(),
+        "A list panel's keys take at most 8192 bytes together."
+    );
 }
 
 #[test]

@@ -3979,6 +3979,7 @@ mod tests {
                     panel: "panel-2".into(),
                     row: "pod112".into(),
                     revision: Some(6),
+                    key: None,
                 },
             ))
         }
@@ -4258,6 +4259,7 @@ mod tests {
                                         panel: "panel-2".into(),
                                         row: "pod112".into(),
                                         revision: Some(6),
+                                        key: None,
                                     },
                                 )]
                     })
@@ -5903,6 +5905,7 @@ mod tests {
                     panel: "panel-2".into(),
                     row: "pod112".into(),
                     revision: Some(6),
+                    key: None,
                 }
             )]
         );
@@ -8121,6 +8124,7 @@ mod tests {
                     panel: "panel-2".into(),
                     row: "pod112".into(),
                     revision: Some(7),
+                    key: None,
                 }
             )]
         );
@@ -8140,6 +8144,7 @@ mod tests {
                 panel: "panel-2".into(),
                 row: row.into(),
                 revision: Some(6),
+                key: None,
             })
         };
         let hint = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
@@ -8256,6 +8261,7 @@ mod tests {
                     panel: "panel-2".into(),
                     row: "pod112".into(),
                     revision: Some(6),
+                    key: None,
                 }
             )]
         );

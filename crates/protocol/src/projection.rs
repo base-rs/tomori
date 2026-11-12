@@ -831,6 +831,13 @@ pub struct ListRow {
     /// line: a client lays out those of the columns it lays out, each cut to [`LIST_CELL_CHARS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<String>,
+    /// The revision of its key, for a row of a list whose rows have keys: a number the server gives the key its
+    /// environment's side gave the row, the same for as long as that key is unchanged, and never the key itself, which
+    /// stays with the server. A client says it back as it chooses the row
+    /// ([`crate::ClientMessage::ChoosePanelRow`]'s `key`), so that the server hands the side the key the participant
+    /// saw, or refuses the choice as stale. Absent from an older server's, and for a list without keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<u64>,
 }
 
 impl ListRow {
@@ -844,7 +851,14 @@ impl ListRow {
             tone: crate::chart::Tone::Neutral,
             value: None,
             cells: Vec::new(),
+            key: None,
         }
+    }
+
+    /// The row, its key at revision `key`.
+    pub fn with_key(mut self, key: u64) -> Self {
+        self.key = Some(key);
+        self
     }
 
     /// The row, with `cells`, one for each of its list's columns.
@@ -1473,15 +1487,17 @@ mod tests {
                     panel: "panel-1".into(),
                     row: "pod/112".into(),
                     revision: Some(9),
+                    key: Some(4),
                 },
                 serde_json::json!({"type": "choose_panel_row", "panel": "panel-1",
-                    "row": "pod/112", "revision": 9}),
+                    "row": "pod/112", "revision": 9, "key": 4}),
             ),
             (
                 ClientMessage::ChoosePanelRow {
                     panel: "panel-1".into(),
                     row: "pod7".into(),
                     revision: None,
+                    key: None,
                 },
                 serde_json::json!({"type": "choose_panel_row", "panel": "panel-1", "row": "pod7"}),
             ),
@@ -1947,5 +1963,23 @@ mod tests {
         assert!(!table.same_structure(&cells(&["GRPC", "99%"])));
         assert!(!table.same_structure(&table.clone().with_columns(Vec::new())));
         assert_eq!((LIST_COLUMNS, LIST_CELL_CHARS), (8, 32));
+    }
+
+    #[test]
+    fn a_row_s_key_revision_is_sent_only_where_it_has_one_and_counts_in_its_version() {
+        let row = ListRow::new("pod-a", true).with_key(3);
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({"id": "pod-a", "choosable": true, "key": 3})
+        );
+        let older: ListRow = serde_json::from_value(serde_json::json!({"id": "pod-a"})).unwrap();
+        assert_eq!(older.key, None);
+        let place = Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0,
+        };
+        let list =
+            |row: ListRow| Panel::new("panel-1", "Q", "- a", place.clone()).with_rows(vec![row]);
+        assert!(!list(row.clone()).same_structure(&list(ListRow::new("pod-a", true).with_key(4))));
     }
 }

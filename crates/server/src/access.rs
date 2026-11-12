@@ -316,6 +316,7 @@ mod tests {
                 panel: "panel-1".into(),
                 row: "pod7".into(),
                 revision: None,
+                key: None,
             },
             ClientMessage::AttachWall {
                 wall: "wall-2".into(),

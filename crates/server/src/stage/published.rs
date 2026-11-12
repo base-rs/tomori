@@ -60,6 +60,15 @@ pub(crate) struct Row {
     /// Its cells, cleaned and cut, for a list laid out as a table, at most one for each of its columns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) cells: Vec<String>,
+    /// Its key, as its side gave it, verbatim: what the row stands for in the side's own terms, handed back with a
+    /// choice of it, told to the agent and never sent to a client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) fields: Vec<(String, String)>,
+    /// The revision of its key, for a row of a list whose rows have keys: the stage's tick at which its key was first
+    /// published as it is, kept while the key is unchanged, so that it names one key of one row for as long as the
+    /// server runs. Made as the list is published, never by its side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key: Option<u64>,
 }
 
 impl Row {
@@ -96,6 +105,55 @@ impl Row {
             .collect::<Vec<_>>()
             .join(" · ")
     }
+}
+
+/// The key of each of `rows`, as their side gave them, or why it is refused: more than
+/// [`tomori_environment::FIELD_LIMIT`] fields in a row, a name [`tomori_environment::valid_field_name`] refuses or a row
+/// gives twice, a value not on one line, with control or format characters, or longer than
+/// [`tomori_environment::FIELD_VALUE_BYTES`], or keys taking more than
+/// [`tomori_environment::FIELDS_BYTES`] together.
+fn keys(rows: &[tomori_environment::Row]) -> Result<(), String> {
+    let mut total = 0;
+    for row in rows {
+        let fields = row.fields();
+        if fields.len() > tomori_environment::FIELD_LIMIT {
+            return Err(format!(
+                "A row's key has at most {} fields.",
+                tomori_environment::FIELD_LIMIT
+            ));
+        }
+        for (at, (name, value)) in fields.iter().enumerate() {
+            if !tomori_environment::valid_field_name(name) {
+                return Err(format!(
+                    "A field of a row's key is named by 1 to {} lowercase ASCII letters, digits and _, beginning with a letter.",
+                    tomori_environment::FIELD_NAME_BYTES
+                ));
+            }
+            if fields[..at].iter().any(|(earlier, _)| earlier == name) {
+                return Err("A row's key names a field twice.".to_owned());
+            }
+            if tomori_protocol::text::one_line(value, usize::MAX) != *value {
+                return Err(
+                    "A field of a row's key is text on one line, without control or format characters."
+                        .to_owned(),
+                );
+            }
+            if value.len() > tomori_environment::FIELD_VALUE_BYTES {
+                return Err(format!(
+                    "A field of a row's key is at most {} bytes.",
+                    tomori_environment::FIELD_VALUE_BYTES
+                ));
+            }
+            total += name.len() + value.len();
+        }
+    }
+    if total > tomori_environment::FIELDS_BYTES {
+        return Err(format!(
+            "A list panel's keys take at most {} bytes together.",
+            tomori_environment::FIELDS_BYTES
+        ));
+    }
+    Ok(())
 }
 
 /// `text` on one line, with no spaces at either end, as [`tomori_protocol::text::one_line`] cleans it, cut to at most
@@ -241,6 +299,7 @@ fn list(
         return Err("A list panel highlights only a row it has.".to_owned());
     }
     let columns = self::columns(rows, columns)?;
+    keys(rows)?;
     let mut body = String::new();
     let mut room = blocks::BODY_CHARS;
     // A table's cells together take no more characters than a body, so that a table adds to what is sent and read no
@@ -299,6 +358,8 @@ fn list(
             tone: row.tone(),
             value: row.value().and_then(value),
             cells,
+            fields: row.fields().to_vec(),
+            key: None,
         });
     }
     let highlighted =
@@ -456,6 +517,23 @@ impl Publishing {
     }
 }
 
+/// Whether `kept`, a list's rows as kept, are `publishing`, as published, but for the revisions of their keys, which
+/// only the stage makes.
+fn same_rows(kept: Option<&[Row]>, publishing: Option<&[Row]>) -> bool {
+    match (kept, publishing) {
+        (Some(kept), Some(publishing)) => {
+            kept.len() == publishing.len()
+                && kept.iter().zip(publishing).all(|(kept, publishing)| {
+                    Row {
+                        key: None,
+                        ..kept.clone()
+                    } == *publishing
+                })
+        }
+        (kept, publishing) => kept.is_none() && publishing.is_none(),
+    }
+}
+
 /// What publishing a panel changed: nothing, as for the same again or one dismissed, what it shows, in place, or which
 /// panels are shown, as a new one is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,10 +616,16 @@ impl Stage {
             wall: asked,
             slot,
             reference,
-            rows,
+            mut rows,
             highlighted,
             columns,
         } = publishing;
+        let earlier = self
+            .kept_published(walls.environment, &id)
+            .and_then(|published| published.rows.clone());
+        if let Some(rows) = &mut rows {
+            self.revise_keys(rows, earlier.as_deref());
+        }
         let room = self.room(walls.environment);
         let published = Published {
             id: id.clone(),
@@ -644,7 +728,7 @@ impl Stage {
                     published.id == publishing.id
                         && published.chart == publishing.chart
                         && published.reference == publishing.reference
-                        && published.rows == publishing.rows
+                        && same_rows(published.rows.as_deref(), publishing.rows.as_deref())
                         && published.columns == publishing.columns
                 }) && kept.content == publishing.content
             })
@@ -737,6 +821,65 @@ impl Stage {
         let published = self.kept(environment, panel)?.published.as_ref()?;
         let rows = published.rows.as_deref()?;
         Some((rows, published.highlighted.as_deref()))
+    }
+
+    /// What its environment published as `id` in `environment` this run, if it is shown.
+    fn kept_published(&self, environment: &str, id: &str) -> Option<&Published> {
+        self.rooms.get(environment)?.panels.iter().find_map(|kept| {
+            kept.published
+                .as_ref()
+                .filter(|published| published.id == id)
+        })
+    }
+
+    /// Give each of `rows`, a list about to be published, the revision of its key, where any row of it has a key: the
+    /// revision the row with its id had in `earlier`, the list as shown before, where its key is the same, and otherwise
+    /// a new one, the stage's next tick, so that no two keys a client was shown share a revision; none for a list of no
+    /// keys. See `design/panel-actions.md`.
+    fn revise_keys(&mut self, rows: &mut [Row], earlier: Option<&[Row]>) {
+        if rows.iter().all(|row| row.fields.is_empty()) {
+            return;
+        }
+        for row in rows {
+            row.key = earlier
+                .into_iter()
+                .flatten()
+                .find(|was| was.id == row.id && was.fields == row.fields)
+                .and_then(|was| was.key)
+                .or_else(|| Some(self.tick()));
+        }
+    }
+
+    /// The key of the row `row` of the list panel `panel` shown in `environment`, and the revision of that key: none and
+    /// no fields for a list without keys, and for any row or panel it does not have.
+    pub(crate) fn row_key(
+        &self,
+        environment: &str,
+        panel: &str,
+        row: &str,
+    ) -> (Option<u64>, &[(String, String)]) {
+        self.rows(environment, panel)
+            .and_then(|(rows, _)| rows.iter().find(|listed| listed.id == row))
+            .map_or((None, &[]), |listed| (listed.key, listed.fields.as_slice()))
+    }
+
+    /// The key of the row its environment published with `reference` in `environment`, as `inspect` tells it, where no
+    /// panel has that reference, as [`Self::referenced`] finds it: none for a row without a key.
+    pub(crate) fn referenced_key(&self, environment: &str, reference: &str) -> &[(String, String)] {
+        let published = || {
+            self.rooms.get(environment).into_iter().flat_map(|room| {
+                room.panels
+                    .iter()
+                    .filter_map(|kept| kept.published.as_ref())
+            })
+        };
+        if published().any(|published| published.reference.as_deref() == Some(reference)) {
+            return &[];
+        }
+        published()
+            .flat_map(|published| published.rows.iter().flatten())
+            .find(|row| row.reference.as_deref() == Some(reference))
+            .map_or(&[], |row| row.fields.as_slice())
     }
 
     /// The columns of the list panel `panel` shown in `environment`, if its environment published it as a table: none

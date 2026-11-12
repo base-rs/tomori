@@ -1202,6 +1202,7 @@ mod tests {
                 panel: "panel-2".into(),
                 row: row.into(),
                 revision: Some(6),
+                key: None,
             })
         };
         // Down the middle of the window, the mouse comes to the first choosable row, whose label names Enter.

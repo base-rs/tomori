@@ -3992,8 +3992,9 @@ impl Conversation {
     }
 
     /// Choose the row the participant points at, [`Self::pointed_row`], for its environment, as A or the trigger does:
-    /// sent by the row's id with the panel's version the server last sent, so that a choice made as the list changes
-    /// names the row the participant saw. Says whether it chose, as only a participant does; a visitor is told they
+    /// sent by the row's id with the panel's version the server last sent and the revision of the row's key, so that a
+    /// choice made as the list changes names the row the participant saw, and its environment is handed that row's key
+    /// or none. Says whether it chose, as only a participant does; a visitor is told they
     /// only watch. See `design/panel-actions.md`.
     pub fn choose_row(&mut self) -> bool {
         let Some(row) = self.pointed_row() else {
@@ -4005,15 +4006,21 @@ impl Conversation {
     /// Choose `row`, the row of a list by its panel and its id, as [`Self::choose_row`] does the row pointed at: as the
     /// trigger of the hand whose ray is on it does. Says whether it chose.
     pub fn choose_row_at(&mut self, (panel, row): (String, String)) -> bool {
-        let revision = self
+        let shown = self
             .projection()
-            .and_then(|projection| projection.panel(&panel))
+            .and_then(|projection| projection.panel(&panel));
+        let revision = shown
             .map(|shown| shown.version)
             .filter(|version| *version > 0);
+        // The revision of the row's key as it was sent, so that the server hands its environment the key seen.
+        let key = shown
+            .and_then(|shown| shown.rows.iter().find(|listed| listed.id == row))
+            .and_then(|listed| listed.key);
         if !self.send(ClientMessage::ChoosePanelRow {
             panel: panel.clone(),
             row: row.clone(),
             revision,
+            key,
         }) {
             return false;
         }
@@ -14131,6 +14138,7 @@ mod tests {
             panel: "panel-1".into(),
             row: "pod112".into(),
             revision,
+            key: None,
         };
         let mut conversation = joined(|space| {
             space.projection = true;
@@ -14191,6 +14199,36 @@ mod tests {
         conversation.apply(queue(0));
         assert!(conversation.choose_row());
         assert_eq!(sent(&mut conversation), [choose(None)]);
+        // A row with a key is chosen with the revision of its key as it was sent, never a key of its own.
+        let keyed = tomori_protocol::Panel::new(
+            "panel-1",
+            "Queue",
+            "- pod7\n- pod112",
+            tomori_protocol::Place::Wall {
+                wall: "environment-0".into(),
+                slot: 0,
+            },
+        )
+        .with_rows(vec![
+            tomori_protocol::ListRow::new("pod7", false).with_key(40),
+            tomori_protocol::ListRow::new("pod112", true).with_key(41),
+        ])
+        .with_version(8);
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky").with_panels(vec![keyed]),
+            ),
+        }));
+        assert!(conversation.choose_row());
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::ChoosePanelRow {
+                panel: "panel-1".into(),
+                row: "pod112".into(),
+                revision: Some(8),
+                key: Some(41),
+            }]
+        );
         // A server that takes no choices offers none.
         conversation.apply(space(|space| {
             space.projection = true;
