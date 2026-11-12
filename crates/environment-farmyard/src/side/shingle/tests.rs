@@ -54,13 +54,38 @@ fn the_beach_s_stones_settle_on_the_shingle_within_seconds_and_then_cost_nothing
     let settled = world.clock();
     assert!(settled < 6_000, "settled in {settled} ms");
     assert_eq!(shingle.shared().bodies.len(), beach::STONES);
+    let homes = beach::homes();
     for body in world.bodies() {
         let at = world.placement(body).unwrap().position;
         let shingle = beach::height(glam::Vec2::new(at.x, at.z)).unwrap();
         let (_, tall) = beach::size(body as usize);
+        if beach::building(body as usize) {
+            // The building stones where they were laid, but as their gaps and the shingle's slope settle them.
+            let home = homes[body as usize].position;
+            assert!(
+                (at - home).with_y(0.0).length() < 0.03 && (home.y - at.y) < 0.06,
+                "stone {body} at {at}, laid at {home}"
+            );
+        } else {
+            assert!(
+                at.y > shingle && at.y < shingle + tall * 0.6,
+                "stone {body} at {at}, shingle {shingle}"
+            );
+        }
+    }
+    // The flagstones still a pile, each on the one below it.
+    let mut pile: Vec<u32> = world
+        .bodies()
+        .filter(|body| beach::kind(*body as usize) == beach::Kind::Flagstone)
+        .collect();
+    let at = |body: u32| world.placement(body).unwrap();
+    pile.sort_by(|a, b| at(*a).position.y.total_cmp(&at(*b).position.y));
+    for pair in pile.windows(2) {
+        let (below, above) = (at(pair[0]).position, at(pair[1]).position);
+        let thick = (beach::size(pair[0] as usize).1 + beach::size(pair[1] as usize).1) * 0.5;
         assert!(
-            at.y > shingle && at.y < shingle + tall * 0.6,
-            "stone {body} at {at}, shingle {shingle}"
+            (above - below).with_y(0.0).length() < 0.05 && above.y - below.y > thick - 0.015,
+            "{pair:?}: {below} {above}"
         );
     }
     // Resting, there is nothing to say, however long nothing happens.
@@ -162,7 +187,9 @@ fn the_agent_is_told_of_the_beach_and_how_many_stones_are_held() {
         ("beach", "beach/shingle")
     );
     assert!(
-        description.contains("28 river stones") && !description.contains("hand"),
+        description.contains("28 river stones")
+            && description.contains("8 big building stones")
+            && !description.contains("hand"),
         "{description}"
     );
     assert!(beach::height(glam::Vec2::new(at.x, at.z)).is_some());
@@ -171,7 +198,8 @@ fn the_agent_is_told_of_the_beach_and_how_many_stones_are_held() {
     let (_, _, description, _) = shingle.describe();
     assert!(description.contains("1 in someone's hand"), "{description}");
     let inspected = inspect(&shingle.shared());
-    assert_eq!(inspected["stones"], 28);
+    assert_eq!(inspected["stones"], 36);
+    assert_eq!(inspected["building"], 8);
     assert_eq!(inspected["held"], 1);
     assert_eq!(inspected["moving"], 0);
 }
@@ -215,19 +243,19 @@ fn a_cairn_of_the_beach_s_own_stones_stands_on_the_shingle_and_never_moves_aslee
 
 #[test]
 fn every_stone_of_the_beach_stands_on_a_big_slab_and_a_cobble_tops_a_cairn() {
-    let slab = (0..beach::STONES)
+    let slab = (0..beach::RIVER)
         .find(|index| beach::kind(*index) == beach::Kind::Slab && beach::big(*index))
         .unwrap();
-    for stone in (0..beach::STONES).filter(|stone| *stone != slab) {
+    for stone in (0..beach::RIVER).filter(|stone| *stone != slab) {
         let (placed, rested) = cairn(&[slab, stone]);
         standing(&placed, &rested);
     }
     // Big slabs, then small ones, then a cobble on top.
-    let mut slabs: Vec<usize> = (0..beach::STONES)
+    let mut slabs: Vec<usize> = (0..beach::RIVER)
         .filter(|index| beach::kind(*index) == beach::Kind::Slab)
         .collect();
     slabs.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
-    let cobble = (0..beach::STONES)
+    let cobble = (0..beach::RIVER)
         .find(|index| beach::kind(*index) == beach::Kind::Cobble && !beach::big(*index))
         .unwrap();
     let mut stones = vec![slabs[0], slabs[3], slabs[7], slabs[10]];
@@ -241,7 +269,7 @@ fn the_heaviest_stones_put_on_the_lightest_settle_and_never_move_asleep() {
     // Stacked the wrong way up, as a participant may, thirty times the mass on top: each settles, standing or fallen,
     // within the seconds the others do, and then costs nothing.
     let mass = |index: usize| beach::volume(index);
-    let mut light: Vec<usize> = (0..beach::STONES).collect();
+    let mut light: Vec<usize> = (0..beach::RIVER).collect();
     light.sort_by(|a, b| mass(*a).total_cmp(&mass(*b)));
     let heaviest = *light.last().unwrap();
     for below in light.iter().take(4) {
@@ -326,6 +354,216 @@ fn cairn(stones: &[usize]) -> (Vec<Placement>, Vec<Placement>) {
         .collect();
     assert_eq!(after, rested);
     (placed, rested)
+}
+
+/// One stone of a structure built of the beach's stones: which, where its middle stands from the structure's foot, out
+/// from the trail and along the beach, turned how far about the upright from lying along the beach, and on which of
+/// the structure's stones before it it rests, or, none, on the shingle.
+struct Part {
+    stone: usize,
+    out: f32,
+    along: f32,
+    turn: f32,
+    on: &'static [usize],
+}
+
+const fn part(stone: usize, out: f32, along: f32, turn: f32, on: &'static [usize]) -> Part {
+    Part {
+        stone,
+        out,
+        along,
+        turn,
+        on,
+    }
+}
+
+/// The building stones of `kind`, broadest first.
+fn building(kind: beach::Kind) -> Vec<usize> {
+    let mut stones: Vec<usize> = (beach::RIVER..beach::STONES)
+        .filter(|index| beach::kind(*index) == kind)
+        .collect();
+    stones.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
+    stones
+}
+
+/// `parts`, built on the flat shingle beside the trail, each placed a couple of millimetres above what it rests on, as
+/// a careful hand would: the world of them, settled, and where each was placed.
+fn built(parts: &[Part]) -> (World, Vec<Placement>) {
+    let (_, way, _) = beach::frame();
+    let along_beach = Quat::from_rotation_y((-way.y).atan2(way.x));
+    let mut placed: Vec<Placement> = Vec::new();
+    let points = |stone: usize, at: &Placement| -> Vec<glam::Vec3> {
+        beach::stone(stone)
+            .into_iter()
+            .map(|point| at.transform_point(point))
+            .collect()
+    };
+    for part in parts {
+        let foot = beach::at(beach::NEAR + 0.8 + part.out, part.along);
+        let mut at = Placement::new(
+            glam::Vec3::new(foot.x, 0.0, foot.y),
+            along_beach * Quat::from_rotation_y(part.turn),
+        );
+        let lowest = points(part.stone, &at)
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min);
+        let beneath = if part.on.is_empty() {
+            points(part.stone, &at)
+                .iter()
+                .filter_map(|point| beach::height(glam::Vec2::new(point.x, point.z)))
+                .fold(f32::NEG_INFINITY, f32::max)
+        } else {
+            part.on
+                .iter()
+                .flat_map(|below| points(parts[*below].stone, &placed[*below]))
+                .map(|point| point.y)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        at.position.y = beneath + 0.002 - lowest;
+        placed.push(at);
+    }
+    let bodies = parts
+        .iter()
+        .zip(&placed)
+        .enumerate()
+        .map(|(number, (part, at))| Body::convex(number as u32, beach::stone(part.stone)).at(*at))
+        .collect();
+    let mut world = World::new(
+        beach::settings(),
+        beach::colliders(),
+        beach::waters(),
+        bodies,
+    )
+    .unwrap();
+    world.settle(15.0);
+    (world, placed)
+}
+
+/// `parts`, built, standing: settled and asleep within 5 s, every stone within a centimetre and a half of where it was
+/// placed, none fallen from what it was placed on, and then, for ten simulated minutes, nothing moves, nothing is said
+/// and every stone stays put to the bit.
+fn stands(name: &str, parts: &[Part]) {
+    let (mut world, placed) = built(parts);
+    assert!(!world.moving(), "the {name} never settled");
+    let settled = world.clock();
+    assert!(settled < 5_000, "the {name} settled in {settled} ms");
+    let rested: Vec<Placement> = (0..parts.len() as u32)
+        .map(|number| world.placement(number).unwrap())
+        .collect();
+    // Each no lower on what it rests on than the gap it was placed with and a little more, as contacts settle and
+    // tilted tops lean it: none fell.
+    let sank: Vec<f32> = placed
+        .iter()
+        .zip(&rested)
+        .map(|(placed, rested)| placed.position.y - rested.position.y)
+        .collect();
+    for (number, (placed, rested)) in placed.iter().zip(&rested).enumerate() {
+        let crept = (rested.position - placed.position).with_y(0.0).length();
+        let beneath = parts[number]
+            .on
+            .iter()
+            .map(|below| sank[*below])
+            .fold(0.0, f32::max);
+        let lower = sank[number] - beneath;
+        assert!(crept < 0.015, "the {name}'s stone {number} crept {crept} m");
+        assert!(lower < 0.015, "the {name}'s stone {number} sank {lower} m");
+    }
+    for _ in 0..(600 * 4) {
+        assert!(world.step(0.25).is_empty(), "the {name} moved asleep");
+    }
+    let after: Vec<Placement> = (0..parts.len() as u32)
+        .map(|number| world.placement(number).unwrap())
+        .collect();
+    assert_eq!(after, rested, "the {name} moved asleep");
+}
+
+#[test]
+fn a_dolmen_of_two_blocks_and_a_flagstone_stands_and_never_moves_asleep() {
+    let [first, _, second] = building(beach::Kind::Block)[..] else {
+        panic!("three blocks")
+    };
+    let lintel = building(beach::Kind::Flagstone)[0];
+    let quarter = std::f32::consts::FRAC_PI_2;
+    stands(
+        "dolmen",
+        &[
+            part(first, 0.0, -0.24, quarter, &[]),
+            part(second, 0.0, 0.24, quarter, &[]),
+            part(lintel, 0.0, 0.0, 0.0, &[0, 1]),
+        ],
+    );
+}
+
+#[test]
+fn a_flagstone_on_a_cairn_of_big_slabs_stands_and_never_moves_asleep() {
+    let mut slabs: Vec<usize> = (0..beach::RIVER)
+        .filter(|index| beach::kind(*index) == beach::Kind::Slab && beach::big(*index))
+        .collect();
+    slabs.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
+    let flagstones = building(beach::Kind::Flagstone);
+    stands(
+        "flagstone on a cairn",
+        &[
+            part(slabs[0], 0.0, 0.0, 0.0, &[]),
+            part(slabs[1], 0.0, 0.0, 0.9, &[0]),
+            part(slabs[2], 0.0, 0.0, 1.8, &[1]),
+            part(flagstones[flagstones.len() - 1], 0.0, 0.0, 0.3, &[2]),
+        ],
+    );
+}
+
+#[test]
+fn a_short_wall_of_three_blocks_and_its_coping_stands_and_never_moves_asleep() {
+    let blocks = building(beach::Kind::Block);
+    let coping = building(beach::Kind::Flagstone)[0];
+    let width = |stone: usize| beach::size(stone).0;
+    let (left, middle, right) = (blocks[1], blocks[0], blocks[2]);
+    let apart = |a: usize, b: usize| (width(a) + width(b)) * 0.5 + 0.01;
+    stands(
+        "wall",
+        &[
+            part(middle, 0.0, 0.0, 0.0, &[]),
+            part(left, 0.0, -apart(left, middle), 0.0, &[]),
+            part(right, 0.0, apart(middle, right), 0.0, &[]),
+            part(coping, 0.0, 0.0, 0.0, &[0, 1, 2]),
+        ],
+    );
+}
+
+#[test]
+fn a_tower_of_three_blocks_capped_with_a_flagstone_stands_and_never_moves_asleep() {
+    let blocks = building(beach::Kind::Block);
+    let cap = building(beach::Kind::Flagstone)[1];
+    let quarter = std::f32::consts::FRAC_PI_2;
+    stands(
+        "tower",
+        &[
+            part(blocks[0], 0.0, 0.0, 0.0, &[]),
+            part(blocks[1], 0.0, 0.0, quarter, &[0]),
+            part(blocks[2], 0.0, 0.0, 0.1, &[1]),
+            part(cap, 0.0, 0.0, quarter + 0.2, &[2]),
+        ],
+    );
+}
+
+#[test]
+fn a_flagstone_laid_beyond_its_one_pillar_falls_rather_than_being_held_up() {
+    // A lintel on one pillar, its middle over the pillar's edge or beyond it, tips off and lies on the shingle; on the
+    // pillar's middle, it stands. The stillness rule puts to sleep only what has stopped.
+    let block = building(beach::Kind::Block)[0];
+    let lintel = building(beach::Kind::Flagstone)[0];
+    let half = beach::hewn(block).1 * 0.5;
+    for (beyond, stands) in [(-half, true), (half * 0.3, false), (half + 0.1, false)] {
+        let parts = [
+            part(block, 0.0, 0.0, std::f32::consts::FRAC_PI_2, &[]),
+            part(lintel, 0.0, half + beyond, 0.0, &[0]),
+        ];
+        let (world, placed) = built(&parts);
+        assert!(!world.moving(), "{beyond}");
+        let fell = placed[1].position.y - world.placement(1).unwrap().position.y;
+        assert_eq!(fell < 0.01, stands, "{beyond}: it fell {fell} m");
+    }
 }
 
 #[test]

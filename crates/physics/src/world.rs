@@ -124,6 +124,10 @@ impl World {
         // no more than a few millimetres under its own weight rather than sinking and creeping.
         physics.integration_parameters.contact_softness =
             physics.integration_parameters.static_contact_softness;
+        // Contacts against a mesh clustered, as Rapier's are by default, or each against its own triangle, as the
+        // settings say.
+        physics.integration_parameters.contact_clustering = settings.clustered;
+        physics.integration_parameters.num_internal_pgs_iterations = settings.passes.max(1);
         let mut lowest = f32::INFINITY;
         for collider in &statics {
             if !collider.valid() {
@@ -640,8 +644,9 @@ impl World {
     }
 
     /// Body `let_go.body` let go by its holder `by`, last [`Seen`] as `seen`, at the epoch their taking made, as
-    /// [`LetGo::checked`] bounds it: back in the simulation where they let it go, lifted clear of anything it was let go
-    /// inside, moving and spinning as it was; or, only grabbable, resting there. Returns its epoch now.
+    /// [`LetGo::checked`] bounds it, and no faster than the body itself is let go ([`Body::thrown_at_most`]): back in
+    /// the simulation where they let it go, lifted clear of anything it was let go inside, moving and spinning as it
+    /// was; or, only grabbable, resting there. Returns its epoch now.
     pub fn let_go(&mut self, by: u32, let_go: &LetGo, seen: Option<&Seen>) -> Result<u32, Refused> {
         let index = self.index(let_go.body)?;
         let entry = &self.entries[index];
@@ -654,7 +659,8 @@ impl World {
         let holding = seen
             .and_then(|seen| seen.holding(&held))
             .unwrap_or_else(|| self.placement_of(entry));
-        let thrown = let_go.checked(seen, holding);
+        let mut thrown = let_go.checked(seen, holding);
+        thrown.velocity = thrown.velocity.clamp_length_max(entry.body.fastest);
         Ok(self.release(index, thrown))
     }
 
