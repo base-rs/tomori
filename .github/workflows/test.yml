@@ -13,32 +13,17 @@ permissions:
   contents: read
 
 jobs:
-  # Formatting, Clippy and the workspace tests on current stable Rust, under the Base 100% source-region coverage gate, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The main branch ruleset requires test-result below and check from publish.yml. See the Tests section of readme.md.
+  # Formatting, Clippy and the workspace tests on current stable Rust. Pull requests and pushes to main run the tests under the Base 100% source-region coverage gate. The merge queue runs them without coverage instrumentation, which takes most of this job's time: each pull request in it has already passed the gate on its own, and the queue checks that it still builds and passes merged with those ahead of it. Pushes keep the gate so that main's Rust cache, which pull requests restore, holds the instrumented build. The main branch ruleset requires test-result below and check from publish.yml. See the Tests section of readme.md and design/testing.md.
   test:
-    name: test (${{ matrix.rust }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [stable, minimum]
+    env:
+      COVERAGE: ${{ github.event_name != 'merge_group' }}
     steps:
       - uses: actions/checkout@v7
-      - name: Read the minimum supported Rust version
-        id: version
-        if: matrix.rust == 'minimum'
-        run: |
-          rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          if [[ ! "$rust" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo "::error file=Cargo.toml::Expected rust-version = \"X.Y\" in [workspace.package], found '$rust'."
-            exit 1
-          fi
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ steps.version.outputs.rust || 'stable' }}
-          # Formatting and Clippy run on stable only, as their lints change between versions, and so does coverage.
-          components: ${{ matrix.rust == 'stable' && 'clippy, llvm-tools-preview, rustfmt' || '' }}
+          components: clippy, llvm-tools-preview, rustfmt
           # Invalidate caches containing the retired socketry-cargo-bake launcher.
           cache-shared-key: coverage-bake-launcher-v2
       # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
@@ -63,37 +48,38 @@ jobs:
           bash scripts/fetch-asr-model.sh whisper tiny.en
           bash scripts/fetch-tts-model.sh
       - name: Check formatting
-        if: matrix.rust == 'stable'
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        if: matrix.rust == 'stable'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # An environment's server side uses tomori-assets without its gpu feature, so its core must build, lint cleanly and depend on no GPU crate without it. See design/assets.md.
       - name: Check tomori-assets without the GPU
-        if: matrix.rust == 'stable'
         run: |
           cargo clippy --package tomori-assets --no-default-features --all-targets --locked -- -D warnings
           if cargo tree --package tomori-assets --no-default-features --edges normal --prefix none --locked | grep -E '^(wgpu|naga|ash|tomori-render) '; then
             echo "::error file=crates/assets/Cargo.toml::tomori-assets depends on a GPU crate without its gpu feature."
             exit 1
           fi
+      # In the merge queue: the targets and the documentation tests that the coverage task runs, without instrumentation.
       - name: Run tests
-        if: matrix.rust == 'minimum'
+        if: env.COVERAGE == 'false'
         env:
           # Fail the rendering tests, rather than skipping them, if no Vulkan adapter is found.
           TOMORI_REQUIRE_GPU: 1
           # Fail the speech model tests, rather than skipping them, if a model is missing.
           TOMORI_REQUIRE_MODELS: 1
-        run: cargo test --workspace --locked
+        run: |
+          cargo test --workspace --all-targets --locked
+          cargo test --workspace --doc --locked
+      # Rust's cache keeps both tools in ~/.cargo/bin, so that these reinstall nothing unless a newer version is released.
       - name: Install Bake launcher
-        if: matrix.rust == 'stable'
+        if: env.COVERAGE == 'true'
         run: cargo install bake --locked
       - name: Install coverage tool
-        if: matrix.rust == 'stable'
+        if: env.COVERAGE == 'true'
         run: cargo install cargo-llvm-cov --locked
       # The coverage task runs the tests itself, after the project's test:before task, which fetches the sherpa-onnx libraries, unchanged since the step above.
       - name: Run tests and require complete source-region coverage
-        if: matrix.rust == 'stable'
+        if: env.COVERAGE == 'true'
         shell: bash
         env:
           TOMORI_REQUIRE_GPU: 1
@@ -101,7 +87,7 @@ jobs:
         run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
       # Bake reports a coverage failure as one line holding every uncovered region, often megabytes long, which the Actions log viewer doesn't show. This step extracts the counts, computes the percentage, and writes it to both the log and the job summary.
       - name: Summarize coverage
-        if: always() && matrix.rust == 'stable'
+        if: always() && env.COVERAGE == 'true'
         shell: bash
         run: |
           result=$(grep -o -E 'region coverage is [0-9]+/[0-9]+ measured source regions[^;]*; [0-9]+ source regions remain uncovered|Region coverage passed: [0-9]+/[0-9]+ measured source regions covered[^)]*\)' coverage.log | head -n 1 || true)
@@ -112,6 +98,37 @@ jobs:
           counts=$(grep -o -E '[0-9]+/[0-9]+' <<< "$result" | head -n 1)
           percentage=$(awk -F / '{ if ($2 > 0) printf "%.2f", 100 * $1 / $2; else print "100.00" }' <<< "$counts")
           echo "Source-region coverage: ${percentage}% (${result})." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # That every target builds on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The tests run on stable above.
+  minimum:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the minimum supported Rust version
+        id: version
+        run: |
+          rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ ! "$rust" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error file=Cargo.toml::Expected rust-version = \"X.Y\" in [workspace.package], found '$rust'."
+            exit 1
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ steps.version.outputs.rust }}
+          # Its own cache, of checked rather than built dependencies.
+          cache-shared-key: minimum-check
+      - name: Install the ALSA development files for the desktop client
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      - uses: actions/cache@v6
+        with:
+          path: .tools/sherpa-onnx
+          key: sherpa-onnx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+      - name: Fetch the sherpa-onnx libraries
+        run: bash scripts/fetch-sherpa-onnx.sh
+      - name: Check every target
+        run: cargo check --workspace --all-targets --locked
 
   # The client core, the headset application for the Quest and the example headset's, as scripts/android.sh builds them.
   android:
@@ -237,10 +254,11 @@ jobs:
 
   test-result:
     if: always()
-    needs: [test, android, android-release]
+    needs: [test, minimum, android, android-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Every job above, including the coverage gate wherever it runs.
       - name: Require successful tests and coverage
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}

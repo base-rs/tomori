@@ -14,6 +14,7 @@ permissions:
   contents: read
 
 jobs:
+  # Project-specific: bake-cargo's template also checks formatting and Clippy here, and runs the tests on pushes. Test.yml's test job already does all of these, for every pull request, merge queue entry and push, and the main branch requires its test-result, so this job keeps only what publishing needs. A push to main is the commit that the merge queue tested.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -25,31 +26,24 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - name: Install Bake launcher
         run: cargo install bake --locked
-      # Project-specific: Clippy and the tests build the desktop client and the speech crate, which need ALSA and the sherpa-onnx libraries, and the rendering tests draw on Mesa's software Vulkan driver, lavapipe, with the Vulkan loader, as in test.yml.
-      - name: Install the ALSA development files for the desktop client, and lavapipe
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
-      - name: Fetch the sherpa-onnx libraries
-        run: bash scripts/fetch-sherpa-onnx.sh
       - name: Detect an explicit release request
         id: detect
         env:
           BAKE_BEFORE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           BAKE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: cargo bake --locked cargo:release:detect --base "$BAKE_BEFORE" --sha "$BAKE_SHA"
+      # Project-specific: packaging builds the desktop client and the speech crate, which need ALSA and the sherpa-onnx libraries.
+      - name: Install the ALSA development files for the desktop client
+        if: steps.detect.outputs.release == 'true'
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      - name: Fetch the sherpa-onnx libraries
+        if: steps.detect.outputs.release == 'true'
+        run: bash scripts/fetch-sherpa-onnx.sh
       - name: Validate release candidate
         if: steps.detect.outputs.release == 'true'
         run: cargo bake --locked cargo:release
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Run tests
-        if: github.event_name == 'push'
-        run: cargo test --workspace --locked
 
   publish:
     needs: check
