@@ -11,6 +11,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+use tomori_assets::haze::Haze;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -96,28 +97,56 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array!
 // Keep the shared cube lighting shader, extending its instance transform here.
 // The source shader is also used independently by offscreen reference tests.
 fn oriented_shader() -> String {
-    include_str!("swarm.wgsl")
+    tomori_assets::haze::shader(include_str!("swarm.wgsl"))
         .replace("    @location(4) color: vec3<f32>,", "    @location(4) color: vec3<f32>,\n    @location(5) basis_x: vec3<f32>,\n    @location(6) basis_y: vec3<f32>,\n    @location(7) basis_z: vec3<f32>,")
         .replace("    var out: VertexOutput;", "    let rotation = mat3x3<f32>(basis_x, basis_y, basis_z);\n    var out: VertexOutput;")
         .replace("position + vertex * drawn", "position + rotation * (vertex * drawn)")
         .replace("out.normal = normal;", "out.normal = rotation * normal;")
 }
 
-/// The bytes of an eye's camera: its matrix from the scene to its clip space, which every pipeline bound to it reads,
-/// and, for Tomori's cubes, where the eye is, the environment's haze and half its view's height in pixels, padded to a
-/// multiple of 16 bytes.
-const CAMERA_SIZE: u64 = 112;
+/// The bytes of an eye's camera, as every pipeline bound to it reads it: its matrix from the scene to its clip space,
+/// where the eye is, the scene's haze and, for Tomori's cubes, half its view's height in pixels, padded to a multiple
+/// of 16 bytes.
+pub(crate) const CAMERA_SIZE: u64 = 112;
 
-/// An eye's camera, as `swarm.wgsl` reads it: `scene_to_clip`, the eye it sees from, `haze`, the environment's scenery's
-/// (see [`crate::scenery::Scenery::haze`]), by which its cubes are hazed as the scenery is, and half of `height`, its
-/// view's height in pixels, by which no cube is drawn smaller than a pixel. See `design/rendering.md`.
-fn camera(scene_to_clip: Mat4, haze: glam::Vec4, height: u32) -> [f32; 28] {
+/// An eye's camera, as Tomori's own pipelines read it: `scene_to_clip`, the eye it sees from, `haze`, the environment's,
+/// which they fade what they draw by, and half of `height`, its view's height in pixels, by which no cube is drawn
+/// smaller than a pixel. See `design/rendering.md`.
+pub(crate) fn camera(scene_to_clip: Mat4, haze: Haze, height: u32) -> [f32; 28] {
     let mut camera = [0.0; 28];
     camera[..16].copy_from_slice(&scene_to_clip.to_cols_array());
     camera[16..19].copy_from_slice(&crate::scenery::eye(scene_to_clip).to_array());
     camera[20..24].copy_from_slice(&haze.to_array());
     camera[24] = height as f32 * 0.5;
     camera
+}
+
+/// The layout of an eye's camera, [`camera`], which Tomori's cubes, its controllers, its signs and arrival's labels are
+/// drawn with, read by their fragments too for the haze.
+pub(crate) fn camera_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("eye camera layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(CAMERA_SIZE),
+            },
+            count: None,
+        }],
+    })
+}
+
+/// An eye's camera buffer, for [`camera`].
+pub(crate) fn camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("eye camera"),
+        size: CAMERA_SIZE,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// The samples per pixel the headset and desktop window draw with unless told otherwise: 4, for multisample anti-aliasing.
@@ -296,27 +325,8 @@ impl Renderer {
             label: Some("oriented swarm instances"),
             source: wgpu::ShaderSource::Wgsl(oriented_shader().into()),
         });
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("eye camera layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(CAMERA_SIZE),
-                },
-                count: None,
-            }],
-        });
-        let cameras = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("eye camera"),
-                size: CAMERA_SIZE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
+        let camera_layout = camera_layout(device);
+        let cameras = std::array::from_fn(|_| camera_buffer(device));
         let camera_bindings = std::array::from_fn(|eye| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("eye camera binding"),
@@ -613,6 +623,17 @@ impl Renderer {
             .iter()
             .find(|(environment, _)| *environment == self.environment)
             .map(|(_, scenery)| scenery.as_ref())
+    }
+
+    /// The haze everything drawn is faded by, for an eye at `eye` in the scene: the environment's, from its scenery; or
+    /// none, the grid's, where there is no scenery or while the environment grows out of a space's object with the eye
+    /// still outside it, in the grid.
+    pub fn haze(&self, eye: glam::Vec3) -> Haze {
+        match (self.scenery(), self.reveal) {
+            (Some(_), Some(sphere)) if eye.distance(sphere.centre) > sphere.radius => Haze::NONE,
+            (Some(scenery), _) => scenery.haze(),
+            (None, _) => Haze::NONE,
+        }
     }
 
     /// What this renderer can draw: the grid, then each scenery's environment, as the desktop window's E key cycles through them.
@@ -1025,11 +1046,6 @@ impl Renderer {
             label: Some("swarm frame"),
         });
         let multisampled = self.multisampled.as_ref();
-        // Tomori's cubes are hazed as the environment's scenery is, in its coordinates, which its carriage moves without
-        // stretching, so that distances are the same in the space's.
-        let haze = self
-            .scenery()
-            .map_or(glam::Vec4::ZERO, |scenery| scenery.haze());
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
@@ -1051,15 +1067,19 @@ impl Renderer {
                 scenery.encode(&mut encoder, eye);
             }
             // Separate buffers are important: two writes to one buffer before
-            // submission would make both eyes use the right-eye transform.
+            // submission would make both eyes use the right-eye transform. Everything is hazed as the environment's
+            // scenery is, in its coordinates, which its carriage moves without stretching, so that distances are the
+            // same in the space's.
+            let haze = self.haze(crate::scenery::eye(scene_to_clip));
             queue.write_buffer(
                 &self.cameras[eye],
                 0,
                 bytemuck::cast_slice(&camera(scene_to_clip, haze, self.size.1)),
             );
             // Each panel's model is in the same space as the eyes' matrices.
+            let seen = crate::ui_panel::Seen::new(matrices[eye], haze);
             for ((panel, model), _) in panels.iter().zip(&visible).filter(|(_, seen)| **seen) {
-                panel.prepare(queue, eye, matrices[eye] * *model);
+                panel.prepare_seen(queue, eye, &seen, *model);
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eye"),

@@ -119,7 +119,7 @@ impl Controllers {
         camera_layout: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("controllers.wgsl"));
+        let shader = device.create_shader_module(hazed_wgsl!("controllers.wgsl"));
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("controller texture layout"),
             entries: &[

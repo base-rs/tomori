@@ -140,7 +140,11 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
             renderer.set_environment(GRID);
             renderer.update(&queue, &swarm, None, false);
             let minimal = capture(&mut renderer, matrices, Mat4::IDENTITY);
+            // Everything is hazed as the environment shown is: the grid by none, and Sky by its own.
+            let standing = glam::Vec3::new(0.0, 1.6, 0.0);
+            assert_eq!(renderer.haze(standing), tomori_render::haze::Haze::NONE);
             renderer.set_environment(SKY);
+            assert_eq!(renderer.haze(standing), tomori_environment_sky_client::HAZE);
             renderer.update(&queue, &swarm, None, false);
             let sky = capture(&mut renderer, matrices, Mat4::IDENTITY);
             assert_ne!(sky[0], minimal[0]);
@@ -210,8 +214,11 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                     radius,
                 }),
             };
+            // Growing, nothing is hazed until the eye is inside it, as on the grid.
+            let mut hazes = Vec::new();
             let mut revealed = |scenery| {
                 renderer.set_scenery(scenery);
+                hazes.push(renderer.haze(standing));
                 renderer.update(&queue, &swarm, None, false);
                 capture(&mut renderer, matrices, Mat4::IDENTITY)
             };
@@ -223,6 +230,15 @@ fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
                 reveal: None,
             });
             assert_eq!(renderer.environment(), SKY);
+            assert_eq!(
+                hazes,
+                [
+                    tomori_render::haze::Haze::NONE,
+                    tomori_render::haze::Haze::NONE,
+                    tomori_environment_sky_client::HAZE,
+                    tomori_environment_sky_client::HAZE
+                ]
+            );
             // Within one step, as in `workspace_graphics`: a few interpolated colours may round differently where only the pipeline differs.
             let changed = |a: &[u8], b: &[u8]| {
                 a.as_chunks::<4>()

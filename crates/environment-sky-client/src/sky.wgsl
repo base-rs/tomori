@@ -3,6 +3,10 @@ struct Camera {
     inverse_view_projection: mat4x4<f32>,
     // Centre and radius of the sphere Sky is drawn inside; a negative radius fills the world.
     reveal: vec4<f32>,
+    // Sky's haze: its colour, and its density in its fourth component.
+    haze: vec4<f32>,
+    // Where the eye is.
+    eye: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -87,7 +91,6 @@ struct SceneryVertex {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) emission: f32,
-    @location(3) distance: f32,
     @location(4) world_position: vec3<f32>,
     @location(5) light_uv: vec2<f32>,
 }
@@ -105,7 +108,6 @@ fn scenery_vertex(
     out.normal = normal;
     out.color = color;
     out.emission = emission;
-    out.distance = out.position.w;
     out.world_position = position;
     out.light_uv = light_uv;
     return out;
@@ -164,6 +166,5 @@ fn shade(in: SceneryVertex) -> vec4<f32> {
     let direct = 0.52 * max(dot(normal, moon), 0.0) * visibility;
     let light = vec3<f32>(ambient + direct) + baked.rgb;
     let color = in.color * mix(light, vec3<f32>(1.0), in.emission);
-    let haze = 1.0 - exp(-0.00025 * in.distance * in.distance);
-    return vec4<f32>(mix(color, vec3<f32>(0.018, 0.027, 0.06), haze), 1.0);
+    return vec4<f32>(hazed(color, camera.haze, distance(in.world_position, camera.eye.xyz)), 1.0);
 }

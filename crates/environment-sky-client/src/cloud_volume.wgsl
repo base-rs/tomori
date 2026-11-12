@@ -22,8 +22,8 @@ fn volume_fragment(in: RayVertex) -> @location(0) vec4<f32> {
     var radiance = vec3<f32>(0.0);
     // Fixed positions: no screen-space jitter or temporal noise swimming per eye.
     for (var step = 0u; step < 32u; step += 1u) {
-        let distance = interval.x + (f32(step) + 0.5) * step_length;
-        let position = in.near + direction * distance;
+        let along = interval.x + (f32(step) + 0.5) * step_length;
+        let position = in.near + direction * along;
         let amount = density(position);
         if amount > 0.005 {
             let opacity = 1.0 - exp(-amount * step_length * 0.85);
@@ -32,8 +32,7 @@ fn volume_fragment(in: RayVertex) -> @location(0) vec4<f32> {
             let light_transmission = exp(-4.0 * density(position + moon * 3.0));
             let ambient = vec3<f32>(0.055, 0.075, 0.13);
             let moonlight = vec3<f32>(0.32, 0.37, 0.49) * light_transmission;
-            let haze = 1.0 - exp(-distance * distance * 0.00024);
-            let light = mix(ambient + moonlight, vec3<f32>(0.018, 0.027, 0.06), haze);
+            let light = hazed(ambient + moonlight, camera.haze, distance(position, camera.eye.xyz));
             radiance += transmission * opacity * light;
             transmission *= 1.0 - opacity;
             if transmission < 0.02 { break; }

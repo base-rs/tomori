@@ -123,8 +123,7 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
     }
     let color = surface.rgb * light + material.emissive.rgb;
     let far = distance(in.world, camera.eye.xyz);
-    let haze = 1.0 - exp(-lighting.haze.w * far * far);
-    return vec4<f32>(mix(color, lighting.haze.rgb, haze), 1.0);
+    return vec4<f32>(hazed(color, lighting.haze, far), 1.0);
 }
 
 @fragment

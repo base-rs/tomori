@@ -220,7 +220,7 @@ impl PanelImages {
         samples: u32,
         transforms: &wgpu::BindGroupLayout,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("panel_image.wgsl"));
+        let shader = device.create_shader_module(hazed_wgsl!("panel_image.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel image layout"),
             entries: &[

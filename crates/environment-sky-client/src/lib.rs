@@ -28,7 +28,15 @@ struct Camera {
     inverse_view_projection: [f32; 16],
     /// The sphere Sky is drawn inside while it grows or shrinks: its centre, then its radius, which is negative when Sky fills the world.
     reveal: [f32; 4],
+    /// Sky's haze, [`HAZE`]: its colour, then its density.
+    haze: [f32; 4],
+    /// Where the eye is, for the haze.
+    eye: [f32; 4],
 }
+
+/// Sky's haze, a night blue over the distant hills and clouds, which everything drawn while Sky is shown is faded by.
+pub const HAZE: tomori_render::haze::Haze =
+    tomori_render::haze::Haze::new(Vec3::new(0.018, 0.027, 0.06), 0.00025);
 
 /// GPU resources for Sky. The caller owns render targets, depth, transforms,
 /// selection, and all interaction. No device-local clock drives this scenery.
@@ -116,7 +124,12 @@ impl Sky {
             bind_group_layouts: &[Some(&layout), Some(&shadows.layout), Some(&lightmap.layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                tomori_render::haze::shader(include_str!("sky.wgsl")).into(),
+            ),
+        });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32, 4 => Float32x2];
         let vertex_layout = [Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<mesh::Vertex>() as u64,
@@ -230,6 +243,10 @@ impl Sky {
                 Some((centre, radius)) => [centre.x, centre.y, centre.z, radius.max(0.0)],
                 None => [0.0, 0.0, 0.0, -1.0],
             },
+            haze: HAZE.to_array(),
+            eye: tomori_render::scenery::eye(view_projection)
+                .extend(1.0)
+                .to_array(),
         };
         queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
     }

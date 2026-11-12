@@ -1,7 +1,8 @@
 // The campsite's bonfire: low-poly flame tongues, each a card turned towards the eye about the upright, swaying and
 // flickering by the time alone, as big as the fire is; embers rising from them and fading, as many and as high as the
 // fire is big; and a little flame on a marshmallow that burns. All of it glows, added to what is behind it, so that
-// nothing of it needs sorting, and it is drawn only inside the reveal sphere while the farmyard grows.
+// nothing of it needs sorting, hazed as everything is, and it is drawn only inside the reveal sphere while the farmyard
+// grows.
 
 struct Camera {
     inverse_view_projection: mat4x4<f32>,
@@ -84,5 +85,6 @@ fn fire_fragment(in: Shaded) -> @location(0) vec4<f32> {
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }
-    return vec4<f32>(in.color, 1.0);
+    // Its glow is added to what is behind it, so the haze takes as much of it as it hides.
+    return vec4<f32>(hazed_glow(in.color, camera.haze, distance(in.world, camera.eye.xyz)), 1.0);
 }

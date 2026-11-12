@@ -429,7 +429,7 @@ impl WorkspaceGraphics {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
+        let shader = device.create_shader_module(hazed_wgsl!("workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world workspace layout"),
             bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
@@ -3387,26 +3387,8 @@ mod tests {
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             pollster::block_on(async move {
                 let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                let camera_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: None,
-                        entries: &[wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(64),
-                            },
-                            count: None,
-                        }],
-                    });
-                let camera = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None,
-                    size: 64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+                let camera_layout = crate::graphics::camera_layout(&device);
+                let camera = crate::graphics::camera_buffer(&device);
                 let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &camera_layout,
@@ -3451,7 +3433,7 @@ mod tests {
                     1,
                 );
                 // A depth-writing opaque body in front of part of the sign.
-                let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
+                let shader = device.create_shader_module(hazed_wgsl!("workspace.wgsl"));
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("synthetic body layout"),
                     bind_group_layouts: &[Some(&camera_layout), Some(glyphs.layout())],
@@ -3534,94 +3516,100 @@ mod tests {
                     .placements
                     .0
                     .insert(station.id.clone(), station.position);
-                let capture_order = |graphics: &WorkspaceGraphics,
-                                     matrix: glam::Mat4,
-                                     body: bool,
-                                     sorted: bool| {
-                    queue.write_buffer(&camera, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
-                    glyphs.sync(&device, &queue);
-                    let glyph_binding = glyphs.binding();
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: None,
-                        size: 512 * 512 * 4,
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                        mapped_at_creation: false,
-                    });
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    {
-                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                let capture_order =
+                    |graphics: &WorkspaceGraphics, matrix: glam::Mat4, body: bool, sorted: bool| {
+                        queue.write_buffer(
+                            &camera,
+                            0,
+                            bytemuck::cast_slice(&crate::graphics::camera(
+                                matrix,
+                                tomori_assets::haze::Haze::NONE,
+                                1,
+                            )),
+                        );
+                        glyphs.sync(&device, &queue);
+                        let glyph_binding = glyphs.binding();
+                        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                             label: None,
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                depth_slice: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: 0.08,
-                                        g: 0.12,
-                                        b: 0.16,
-                                        a: 1.0,
-                                    }),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: &depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(1.0),
-                                        store: wgpu::StoreOp::Discard,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
+                            size: 512 * 512 * 4,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
                         });
-                        if body {
-                            pass.set_pipeline(&body_pipeline);
-                            pass.set_bind_group(0, &binding, &[]);
-                            pass.set_bind_group(1, &glyph_binding, &[]);
-                            pass.set_vertex_buffer(0, body_buffer.slice(..));
-                            pass.draw(0..6, 0..1);
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: None,
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: 0.08,
+                                            g: 0.12,
+                                            b: 0.16,
+                                            a: 1.0,
+                                        }),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: &depth_view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(1.0),
+                                            store: wgpu::StoreOp::Discard,
+                                        }),
+                                        stencil_ops: None,
+                                    },
+                                ),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            if body {
+                                pass.set_pipeline(&body_pipeline);
+                                pass.set_bind_group(0, &binding, &[]);
+                                pass.set_bind_group(1, &glyph_binding, &[]);
+                                pass.set_vertex_buffer(0, body_buffer.slice(..));
+                                pass.draw(0..6, 0..1);
+                            }
+                            if sorted {
+                                graphics.draw(&mut pass, &binding, &glyph_binding, matrix);
+                            } else {
+                                // Reproduce the old single blended draw in the test only.
+                                pass.set_pipeline(&graphics.pipeline);
+                                pass.set_bind_group(0, &binding, &[]);
+                                pass.set_bind_group(1, &glyph_binding, &[]);
+                                pass.set_vertex_buffer(0, graphics.vertices.slice(..));
+                                pass.draw(0..graphics.count, 0..1);
+                            }
                         }
-                        if sorted {
-                            graphics.draw(&mut pass, &binding, &glyph_binding, matrix);
-                        } else {
-                            // Reproduce the old single blended draw in the test only.
-                            pass.set_pipeline(&graphics.pipeline);
-                            pass.set_bind_group(0, &binding, &[]);
-                            pass.set_bind_group(1, &glyph_binding, &[]);
-                            pass.set_vertex_buffer(0, graphics.vertices.slice(..));
-                            pass.draw(0..graphics.count, 0..1);
-                        }
-                    }
-                    encoder.copy_texture_to_buffer(
-                        texture.as_image_copy(),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &buffer,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(512 * 4),
-                                rows_per_image: Some(512),
+                        encoder.copy_texture_to_buffer(
+                            texture.as_image_copy(),
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: &buffer,
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(512 * 4),
+                                    rows_per_image: Some(512),
+                                },
                             },
-                        },
-                        extent,
-                    );
-                    queue.submit([encoder.finish()]);
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    buffer
-                        .slice(..)
-                        .map_async(wgpu::MapMode::Read, move |result| {
-                            tx.send(result).unwrap();
-                        });
-                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                    rx.recv().unwrap().unwrap();
-                    let result = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                    buffer.unmap();
-                    result
-                };
+                            extent,
+                        );
+                        queue.submit([encoder.finish()]);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        buffer
+                            .slice(..)
+                            .map_async(wgpu::MapMode::Read, move |result| {
+                                tx.send(result).unwrap();
+                            });
+                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        rx.recv().unwrap().unwrap();
+                        let result = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                        buffer.unmap();
+                        result
+                    };
                 let capture = |graphics: &WorkspaceGraphics, matrix, body| {
                     capture_order(graphics, matrix, body, true)
                 };

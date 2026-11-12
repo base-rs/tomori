@@ -270,9 +270,9 @@ impl Clouds {
     }
 }
 
-/// A cloud pass's shader: `cloud_common.wgsl`, which defines the camera, the ray and the vertex stage, followed by the pass's own `source`.
+/// A cloud pass's shader: the shared haze functions, then `cloud_common.wgsl`, which defines the camera, the ray and the vertex stage, followed by the pass's own `source`.
 pub(super) fn shader_source(source: &str) -> String {
-    format!("{}\n{source}", include_str!("cloud_common.wgsl"))
+    tomori_render::haze::shader(&format!("{}\n{source}", include_str!("cloud_common.wgsl")))
 }
 
 #[cfg(test)]

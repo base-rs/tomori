@@ -125,12 +125,19 @@ pub fn wgsl_files(directory: impl AsRef<std::path::Path>) -> Vec<(String, String
     files
 }
 
-/// Parses and validates WGSL `source` with naga, as wgpu does when it creates a shader module, so that a shader is checked where no adapter can compile it.
+/// Parses and validates WGSL `source` with naga, as wgpu does when it creates a shader module, so that a shader is checked where no adapter can compile it: after the shared haze functions, `tomori_assets::haze::shader`, as every pipeline that draws in the world compiles its own, unless it begins with them already or is them.
 ///
 /// # Panics
 ///
 /// With the error, located in the source and labelled with `label`, if the source does not parse or validate.
 pub fn validate_wgsl(label: &str, source: &str) {
+    let hazed;
+    let source = if source.starts_with(tomori_assets::haze::WGSL) {
+        source
+    } else {
+        hazed = tomori_assets::haze::shader(source);
+        &hazed
+    };
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("{}", error.emit_to_string_with_path(source, label)));
     naga::valid::Validator::new(

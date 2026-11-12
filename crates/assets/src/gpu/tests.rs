@@ -184,7 +184,7 @@ fn even() -> Lighting {
 fn every_shader_is_valid_wgsl() {
     let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["model.wgsl"]);
+    assert_eq!(names, ["haze.wgsl", "model.wgsl"]);
     for (name, source) in files {
         test_gpu::validate_wgsl(&name, &source);
     }

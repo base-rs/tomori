@@ -138,11 +138,12 @@ pub trait Scenery {
     fn set_reveal(&mut self, reveal: Option<(Vec3, f32)>);
     /// The eyes' targets changed size.
     fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
-    /// The haze the scenery fades what is far away into: its colour, linear RGB, and in `w` its density, by which what is
-    /// `d` metres from the eye fades into it by `1 - exp(-density d²)`, as `tomori-assets`' models are. Tomori's own cubes,
-    /// the swarm and the workers among them, are hazed alike over it. By default none. See `design/rendering.md`.
-    fn haze(&self) -> glam::Vec4 {
-        glam::Vec4::ZERO
+    /// The haze the scenery fades what is far away into, by which what is `d` metres from the eye fades into its colour by
+    /// `1 - exp(-density d²)`, as `tomori-assets`' models are. Everything the renderer draws while it is shown is hazed
+    /// alike, by the shared haze: Tomori's cubes, controllers, signs and panels with it. By default none. See
+    /// `design/rendering.md`.
+    fn haze(&self) -> tomori_assets::haze::Haze {
+        tomori_assets::haze::Haze::NONE
     }
 }
 
