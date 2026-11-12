@@ -14,8 +14,9 @@ use tomori_protocol::Pose;
 
 use crate::delegation::State;
 
-/// How far from the space's middle, on each axis, an anchor may stand, in metres, as the server bounds it.
-pub const REACH: f32 = 20.0;
+/// How far from the space's middle, on each axis, an anchor may stand, in metres, as the server bounds it: the space's
+/// bounds, 30 m since the farmyard's upper terrace, above its waterfall, 24 m from where participants arrive.
+pub const REACH: f32 = 30.0;
 
 /// How far from the space's middle, on each axis, a placement may stand a worker, in metres; beyond it, or where it
 /// is not finite, the worker stands where the default arc would put it.
@@ -612,7 +613,7 @@ mod tests {
         assert_eq!(doubled.orientation, Quat::IDENTITY);
         // Beyond reach, not finite, or without an orientation, it is none.
         for refused in [
-            pose([0.0, 0.0, -20.5], upright),
+            pose([0.0, 0.0, -REACH - 0.5], upright),
             pose([f32::NAN, 0.0, 0.0], upright),
             pose([0.0; 3], [0.0; 4]),
             pose([0.0; 3], [f32::INFINITY, 0.0, 0.0, 1.0]),

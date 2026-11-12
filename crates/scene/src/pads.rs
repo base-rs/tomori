@@ -182,13 +182,13 @@ pub(crate) fn pick(locomotion: &Locomotion, ray: &Ray) -> Option<(Key, f32, Vec3
 /// The pad or target `ray` points at among `locomotion`'s, how far along it and where: the nearest, as [`pick`] finds
 /// a pad and a target's upright cylinder is met from outside it, within [`REACH`] of the ray's origin horizontally,
 /// unless a declared surface crosses the ray first. A target the ray starts over, as one stands on, is not pointed at,
-/// since it would take them nowhere.
+/// since it would take them nowhere, nor one whose reach the ray starts beyond ([`Target::within`]).
 pub(crate) fn point(locomotion: &Locomotion, ray: &Ray) -> Option<(Way, f32, Vec3)> {
     let pad = pick(locomotion, ray).map(|(key, distance, at)| (Way::Pad(key), distance, at));
     let target = locomotion
         .targets()
         .enumerate()
-        .filter(|(_, target)| !target.over(ray.origin))
+        .filter(|(_, target)| !target.over(ray.origin) && target.reached_from(ray.origin))
         .filter_map(|(index, target)| aimed(target, ray).map(|distance| (index, distance)))
         .filter(|(_, distance)| {
             let point = ray.at(*distance);
@@ -805,6 +805,29 @@ mod tests {
             None
         );
         assert_eq!(point(&Locomotion::None, &ray(eye, Vec3::ZERO)), None);
+    }
+
+    #[test]
+    fn a_target_with_a_reach_is_pointed_at_only_from_within_it() {
+        // A fall reached only from the rock before it, within 4 m of its foot, and a stone pointed at from anywhere.
+        let fall = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 40.0)]).with_targets([
+            Target::object(Vec3::new(0.0, 0.0, -8.0), 1.0, 4.0)
+                .within(4.0)
+                .arriving(Vec3::new(0.0, 0.0, 2.0)),
+        ]);
+        let target = fall.targets().next().unwrap();
+        assert_eq!(target.reach(), Some(4.0));
+        let near = Vec3::new(0.5, 1.6, -5.0);
+        assert!(target.reached_from(near) && !target.reached_from(Vec3::new(0.0, 1.6, 0.0)));
+        let (way, ..) = point(&fall, &ray(near, Vec3::new(0.0, 2.0, -7.0))).unwrap();
+        assert_eq!(way, Way::Target(0));
+        // From the shore 8 m away, the same fall is pointed at no more, nor from high above it.
+        let shore = Vec3::new(0.0, 1.6, 0.0);
+        assert_eq!(point(&fall, &ray(shore, Vec3::new(0.0, 2.0, -7.0))), None);
+        let above = Vec3::new(0.0, 8.0, -5.0);
+        assert_eq!(point(&fall, &ray(above, Vec3::new(0.0, 2.0, -7.0))), None);
+        let anywhere = Target::object(Vec3::ZERO, 0.5, 1.0);
+        assert!(anywhere.reach().is_none() && anywhere.reached_from(Vec3::splat(9.0)));
     }
 
     #[test]

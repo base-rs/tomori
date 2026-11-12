@@ -6084,7 +6084,7 @@ fn only_owners_add_and_remove_walls() {
     assert_eq!(
         ada.errors(),
         [
-            "A wall must stand within 20 m of the space's middle.".to_owned(),
+            "A wall must stand within 30 m of the space's middle.".to_owned(),
             "Only a wall an owner added can be removed.".to_owned(),
             format!(
                 "The wall is too long; the limit is {} bytes.",

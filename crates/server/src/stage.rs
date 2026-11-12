@@ -110,7 +110,7 @@ pub const LONGEST_RADIUS: f32 = 50.0;
 pub const TOMORI_COLUMNS: u32 = 6;
 
 /// How far from the space's origin, on each axis, a wall or a floating panel may be, in metres.
-pub const REACH: f32 = 20.0;
+pub const REACH: f32 = 30.0;
 
 /// The version of the kept format, written with each space's stage.
 pub const SCHEMA: u32 = 1;
@@ -1951,7 +1951,7 @@ impl Stage {
         pose: &Pose,
         layout: Option<Layout>,
     ) -> Result<String, &'static str> {
-        let pose = valid(pose).ok_or("A wall must stand within 20 m of the space's middle.")?;
+        let pose = valid(pose).ok_or("A wall must stand within 30 m of the space's middle.")?;
         if self
             .rooms
             .get(walls.environment)
@@ -2108,7 +2108,7 @@ impl Stage {
         let pose = match (change.pose, kind) {
             (None, _) => before.pose,
             (Some(pose), WallKind::Added | WallKind::Environment) => {
-                valid(&pose).ok_or("A wall must stand within 20 m of the space's middle.")?
+                valid(&pose).ok_or("A wall must stand within 30 m of the space's middle.")?
             }
             (Some(_), _) => {
                 return Err(
@@ -2520,7 +2520,7 @@ impl Stage {
             Target::Slot(wall, _) if shown(&wall) => return Err("That wall has no such slot."),
             Target::Wall(_) | Target::Slot(..) => return Err("That wall is not here."),
             Target::Free(pose) => Target::Free(
-                valid(&pose).ok_or("A panel must float within 20 m of the space's middle.")?,
+                valid(&pose).ok_or("A panel must float within 30 m of the space's middle.")?,
             ),
         };
         let onto_tomori =
@@ -3723,7 +3723,7 @@ mod tests {
             stage.place(&SKY, "panel-99", Target::Wall(TOMORI_WALL.into())),
             Err("That panel is not here.")
         );
-        let far = pose(25.0, 0.0);
+        let far = pose(35.0, 0.0);
         let unturned = Pose {
             orientation: [0.0; 4],
             ..free
@@ -3739,7 +3739,7 @@ mod tests {
         for pose in [far, unturned, infinite, nan] {
             assert_eq!(
                 stage.place(&SKY, &one, Target::Free(pose)),
-                Err("A panel must float within 20 m of the space's middle.")
+                Err("A panel must float within 30 m of the space's middle.")
             );
         }
         // An orientation is made a unit quaternion.
@@ -3848,8 +3848,8 @@ mod tests {
             Err("This environment has as many added walls as it can take.")
         );
         assert_eq!(
-            stage.add_wall(&room("farmyard"), &pose(30.0, 3.0), None),
-            Err("A wall must stand within 20 m of the space's middle.")
+            stage.add_wall(&room("farmyard"), &pose(40.0, 3.0), None),
+            Err("A wall must stand within 30 m of the space's middle.")
         );
         let on_it = stage.project(
             &SKY,
@@ -6333,12 +6333,12 @@ mod tests {
         assert!(moved.pose.orientation[0].abs() < 1e-6 && moved.pose.orientation[2].abs() < 1e-6);
         assert_eq!(view.panel(&id).unwrap().place, on(&wall, 0));
         let far = WallChange {
-            pose: Some(pose(30.0, 0.0)),
+            pose: Some(pose(40.0, 0.0)),
             ..WallChange::default()
         };
         assert_eq!(
             stage.set_wall(&SKY, &wall, far),
-            Err("A wall must stand within 20 m of the space's middle.")
+            Err("A wall must stand within 30 m of the space's middle.")
         );
     }
 

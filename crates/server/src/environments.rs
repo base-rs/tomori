@@ -768,7 +768,7 @@ impl Environment {
     /// [`Self::with_status_wall`] says otherwise; only then keep it at least `tomori_protocol::entourage::LOWEST_AGENT`,
     /// 1.4 m, above the floor, for the wall to stand beneath it with a gap. Make it seen from where participants
     /// arrive, and a wall beneath it read: see `tomori_environment::sightlines`. The server sends it in the space's
-    /// state, carried into the space's coordinates, if it is then finite, within 20 m of home and has an orientation,
+    /// state, carried into the space's coordinates, if it is then finite, within 30 m of home and has an orientation,
     /// made upright, and leaves it out otherwise. See `design/environments.md`.
     ///
     /// ```
@@ -1484,7 +1484,7 @@ mod tests {
             orientation: [0.0, 0.0, 0.38268343, 0.9238795],
         };
         let far = Pose {
-            position: [0.0, 0.0, -21.0],
+            position: [0.0, 0.0, -31.0],
             ..pod
         };
         let offered = tomoris()
@@ -1650,7 +1650,7 @@ mod tests {
             .with_anchor(Anchor::new("tomori/near/1", yard))
             .with_anchor(aisle.clone())
             .with_anchor(claimed)
-            .with_anchor(Anchor::new("beyond", Pose::at([0.0, 0.0, -25.0])));
+            .with_anchor(Anchor::new("beyond", Pose::at([0.0, 0.0, -35.0])));
         let rack = &checked.anchors()[2];
         let label = rack.label.as_deref().unwrap();
         assert!(
@@ -1698,7 +1698,7 @@ mod tests {
         assert_eq!(offered.carry("street", &Pose::at([0.0, 1.0, -40.0])), None);
         assert_eq!(offered.carry("unknown", &Pose::HOME), None);
         // Beyond reach, it is left out, as the workers anchor is.
-        let far = Anchor::new(HOME, Pose::at([0.0, 0.0, -25.0])).with_extent(6.0, 2.5, 3.0);
+        let far = Anchor::new(HOME, Pose::at([0.0, 0.0, -35.0])).with_extent(6.0, 2.5, 3.0);
         let offered = offered.with(Environment::new("far", "Far").with_anchor(far));
         assert_eq!(offered.anchors("far"), tomori_protocol::Anchors::new());
         let plain = Environment::new("roomy", "Roomy");
@@ -1785,9 +1785,9 @@ mod tests {
             assert!(close(offered.anchors(id).agent.unwrap(), balcony));
             assert_eq!(offered.anchors(id).arrival, None);
         }
-        // An arrival beyond a kilometre is ignored too; and an anchor carried beyond 20 m of home is left out.
+        // An arrival beyond a kilometre is ignored too; and an anchor carried beyond 30 m of home is left out.
         let far = Environment::new("far", "Far")
-            .with_arrival(Pose::at([0.0, 0.0, 30.0]))
+            .with_arrival(Pose::at([0.0, 0.0, 40.0]))
             .with_agent(balcony)
             .with_workers(Pose::at([f32::NAN, 0.0, 0.0]))
             .with_walls([Pose::at([f32::NAN, 0.0, 0.0])]);
@@ -1899,7 +1899,7 @@ mod tests {
             Environment::new("strip", "Strip").with_status_wall(StatusWall::at(board)),
             Environment::new("tiny", "Tiny").with_status_wall(StatusWall::at(single)),
             Environment::new("far", "Far")
-                .with_status_wall(StatusWall::at(Pose::at([0.0, 1.4, -30.0]))),
+                .with_status_wall(StatusWall::at(Pose::at([0.0, 1.4, -40.0]))),
         ]);
         let walls = offered.walls("farm");
         assert_eq!(

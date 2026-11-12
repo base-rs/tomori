@@ -217,7 +217,7 @@ fn a_declaration_is_bounded_and_its_points_carried() {
     let refused = Zones::declare(vec![far], |_| None).unwrap_err();
     assert_eq!(
         refused,
-        "The zone \"far\" is around a point more than 20 m from home."
+        "The zone \"far\" is around a point more than 30 m from home."
     );
     // Its point is where the carriage puts it.
     let well = Zone::sphere("well", Around::point([0.0; 3]), 1.0);

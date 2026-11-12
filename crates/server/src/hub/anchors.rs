@@ -307,7 +307,7 @@ impl Hub {
         let pose = environments
             .carry(&outlet.environment, &anchor.pose)
             .ok_or_else(|| {
-                refused("its pose is not finite, has no orientation, or stands more than 20 m from home")
+                refused("its pose is not finite, has no orientation, or stands more than 30 m from home")
             })?;
         let mut anchor = crate::environments::cleaned(anchor);
         anchor.pose = pose;

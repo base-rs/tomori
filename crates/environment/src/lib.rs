@@ -564,7 +564,7 @@ impl Object {
     /// rack's middle or a hen where she pecks: so that the agent stands off the line of sight to it when someone points
     /// at it, goes to it when asked, and stands a worker by it. A side whose object moves describes it again where it
     /// is now; what it no longer describes has no position. The server carries it into the space's coordinates and
-    /// leaves out one that is not finite or stands more than 20 m from home on any axis, describing the object without
+    /// leaves out one that is not finite or stands more than 30 m from home on any axis, describing the object without
     /// it. See `design/environments.md`.
     pub fn at(mut self, position: [f32; 3]) -> Self {
         self.position = Some(position);
@@ -1158,7 +1158,7 @@ impl Space {
     /// it starts. See `design/environments.md`.
     ///
     /// The server refuses, saying why: a name, extent, kind or object [`Anchor::checked`] refuses; the name of one the
-    /// environment declares, `home` among them; a pose not finite, without an orientation, or more than 20 m from home
+    /// environment declares, `home` among them; a pose not finite, without an orientation, or more than 30 m from home
     /// on any axis; and a new one beyond [`ANCHOR_LIMIT`], 64, in the space, those it declares counted first. It cleans
     /// the label onto one line and cuts it after [`ANCHOR_LABEL_LIMIT`] characters. It makes each anchor's changes at
     /// most about once every [`ANCHOR_INTERVAL`], and [`ANCHOR_CHANGES_PER_SECOND`] in the space after a burst of
@@ -1219,7 +1219,7 @@ impl Space {
     /// intents, and one the inbox has no room for is told at a later sweep. A zone declared again under its name keeps
     /// who was within it; a declaration sooner than [`ZONE_INTERVAL`] after the last taken waits, the latest replacing the
     /// one before. The server refuses, saying why, a
-    /// declaration [`check_zones`] refuses, or one around a point beyond 20 m of home once carried into the space, and
+    /// declaration [`check_zones`] refuses, or one around a point beyond 30 m of home once carried into the space, and
     /// keeps none of it. What it keeps belongs to the side's binding. See `design/environments.md`.
     ///
     /// ```

@@ -282,8 +282,8 @@ fn a_side_s_anchor_is_refused_for_its_name_its_bounds_and_beyond_the_space_s_lim
     }
     assert!(refused(rack("cupboard", 0.0).with_extent(0.1, 1.0, 1.0)).contains("extent"));
     assert!(refused(rack("rack/a1", 0.0).with_kind("a rack")).contains("kind"));
-    let far = Anchor::new("hall-9", tomori_protocol::Pose::at([0.0, 1.4, -30.0]));
-    assert!(refused(far).contains("20 m"));
+    let far = Anchor::new("hall-9", tomori_protocol::Pose::at([0.0, 1.4, -40.0]));
+    assert!(refused(far).contains("30 m"));
     let unturned = Anchor::new(
         "hall-8",
         tomori_protocol::Pose {

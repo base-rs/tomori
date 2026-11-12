@@ -195,7 +195,7 @@ impl Room {
             .iter()
             .any(|root| valid(&self.added(root).expect("a wall here").pose).is_none())
         {
-            return Err("A group's walls must stand within 20 m of the space's middle.");
+            return Err("A group's walls must stand within 30 m of the space's middle.");
         }
         let mut index = 0;
         while index < placed.len() {
@@ -232,7 +232,7 @@ impl Room {
                 }
                 let pose = group::attached_pose(&parent, &wall, attach.edge, attach.align)
                     .and_then(|pose| valid(&pose))
-                    .ok_or("A group's walls must stand within 20 m of the space's middle.")?;
+                    .ok_or("A group's walls must stand within 30 m of the space's middle.")?;
                 self.added_mut(&child).expect("a wall here").pose = pose;
                 placed.push(child);
             }
@@ -374,7 +374,7 @@ impl Stage {
         }
         let pose = match pose {
             Some(pose) => {
-                Some(valid(&pose).ok_or("A wall must stand within 20 m of the space's middle.")?)
+                Some(valid(&pose).ok_or("A wall must stand within 30 m of the space's middle.")?)
             }
             None => None,
         };

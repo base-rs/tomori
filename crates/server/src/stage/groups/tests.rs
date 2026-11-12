@@ -364,10 +364,10 @@ fn only_added_walls_snap_without_overlapping_all_flat_or_curved_alike() {
         stage.attach_wall(&SKY, &ids[0], unknown, false, None),
         Err("Tomori does not know that edge or alignment.")
     );
-    let far = Pose::upright_facing([30.0, 1.4, 0.0], [0.0, 1.4, 0.0]);
+    let far = Pose::upright_facing([40.0, 1.4, 0.0], [0.0, 1.4, 0.0]);
     assert_eq!(
         stage.attach_wall(&SKY, &ids[0], None, false, Some(far)),
-        Err("A wall must stand within 20 m of the space's middle.")
+        Err("A wall must stand within 30 m of the space's middle.")
     );
     // The third stands where the first would go below the second, so that snap is refused, and nothing moves.
     let below = |to: &str| Some(Attach::new(to, Edge::Bottom, Align::Start));
@@ -402,7 +402,7 @@ fn only_added_walls_snap_without_overlapping_all_flat_or_curved_alike() {
     );
     // A group beyond reach is refused too.
     let (mut stage, ids) = added(&[((1, 1), 1.0); 2]);
-    let edge = Pose::upright_facing([19.6, 1.4, 0.0], [19.6, 1.4, 5.0]);
+    let edge = Pose::upright_facing([29.6, 1.4, 0.0], [29.6, 1.4, 5.0]);
     stage
         .set_wall(
             &SKY,
@@ -416,7 +416,7 @@ fn only_added_walls_snap_without_overlapping_all_flat_or_curved_alike() {
     let away = Some(Attach::new(&ids[0], Edge::Right, Align::Start));
     assert_eq!(
         stage.attach_wall(&SKY, &ids[1], away, false, None),
-        Err("A group's walls must stand within 20 m of the space's middle.")
+        Err("A group's walls must stand within 30 m of the space's middle.")
     );
     // Carried by a wall within reach so far that its group's first would stand beyond it, it is refused, and nothing
     // moves.
@@ -425,7 +425,7 @@ fn only_added_walls_snap_without_overlapping_all_flat_or_curved_alike() {
         .attach_wall(&SKY, &ids[1], right(&ids[0]), false, None)
         .unwrap();
     let before = view(&stage);
-    let edge = Pose::upright_facing([-19.8, 1.4, -2.4], [-19.8, 1.4, 0.0]);
+    let edge = Pose::upright_facing([-29.8, 1.4, -2.4], [-29.8, 1.4, 0.0]);
     assert_eq!(
         stage.set_wall(
             &SKY,
@@ -435,7 +435,7 @@ fn only_added_walls_snap_without_overlapping_all_flat_or_curved_alike() {
                 ..WallChange::default()
             },
         ),
-        Err("A group's walls must stand within 20 m of the space's middle.")
+        Err("A group's walls must stand within 30 m of the space's middle.")
     );
     assert_eq!(view(&stage), before);
 }

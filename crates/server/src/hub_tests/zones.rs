@@ -307,14 +307,14 @@ fn a_declaration_out_of_bounds_is_refused_keeping_nothing() {
         .collect();
     let refused = hub.channel_declare_zones(&deck.outlet, many).unwrap_err();
     assert!(refused.message().contains("more than the 16"), "{refused}");
-    // A point beyond 20 m of home, once carried, is refused too.
-    let far = Zone::sphere("far", Around::point([0.0, 1.6, 30.0]), 1.0);
+    // A point beyond 30 m of home, once carried, is refused too.
+    let far = Zone::sphere("far", Around::point([0.0, 1.6, 40.0]), 1.0);
     let refused = hub
         .channel_declare_zones(&deck.outlet, vec![far])
         .unwrap_err();
     assert_eq!(
         refused.message(),
-        "The zone \"far\" is around a point more than 20 m from home."
+        "The zone \"far\" is around a point more than 30 m from home."
     );
     hub.sweep_zones(Instant::now());
     deck.kept.told("nothing kept", &[]);

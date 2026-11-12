@@ -630,11 +630,15 @@ pub struct Target {
     /// way they faced.
     yaw: Option<f32>,
     name: Option<std::sync::Arc<str>>,
+    /// How near the middle of its foot the ray's origin must be for it to be pointed at, or `None` for anywhere within
+    /// [`REACH`].
+    within: Option<f32>,
 }
 
 impl Target {
     /// An object standing on `foot`, the middle of its base, pointed at within `radius` of its upright axis and up to
-    /// `height` above its foot, on whose top's middle a participant arrives, facing the way they faced, unnamed.
+    /// `height` above its foot, on whose top's middle a participant arrives, facing the way they faced, unnamed, and
+    /// pointed at from anywhere within [`REACH`].
     pub fn object(foot: Vec3, radius: f32, height: f32) -> Self {
         Self {
             foot,
@@ -643,7 +647,26 @@ impl Target {
             arrival: foot + Vec3::Y * height,
             yaw: None,
             name: None,
+            within: None,
         }
+    }
+
+    /// The target, pointed at only from within `reach` of the middle of its foot, as a teleporter in a waterfall is
+    /// reached only from the rock before it, rather than from wherever the fall is in sight.
+    pub fn within(mut self, reach: f32) -> Self {
+        self.within = Some(reach);
+        self
+    }
+
+    /// How near the middle of its foot the ray must start for it to be pointed at, if it says.
+    pub fn reach(&self) -> Option<f32> {
+        self.within
+    }
+
+    /// Whether a ray from `origin` may point at it: from anywhere, or from within its reach of the middle of its foot.
+    pub fn reached_from(&self, origin: Vec3) -> bool {
+        self.within
+            .is_none_or(|reach| origin.distance(self.foot) <= reach)
     }
 
     /// The target, where a participant arrives at `arrival` instead, the room's floor at its height: on a declared
@@ -702,7 +725,12 @@ impl Target {
 
     /// Whether its arrival is on its own top: at its height, within a centimetre, and within its radius.
     pub fn arrives_on_top(&self) -> bool {
-        (self.arrival.y - (self.foot.y + self.height)).abs() <= STANDING && self.over(self.arrival)
+        self.holds(self.arrival)
+    }
+
+    /// Whether `point` stands on its top: at its height, within a centimetre, and within its radius.
+    fn holds(&self, point: Vec3) -> bool {
+        (point.y - (self.foot.y + self.height)).abs() <= STANDING && self.over(point)
     }
 
     /// The target, declared in an environment's own coordinates, in a space's, where `carriage` takes them: moved and
@@ -717,11 +745,16 @@ impl Target {
     }
 
     /// Whether a participant may be taken to it: finite, no wider than [`WIDEST_PAD`] from its axis, no taller than
-    /// [`TALLEST_TARGET`], it and its arrival within [`crate::anchors::REACH`] of home on each axis, and arriving on its
-    /// own top or on one of `surfaces`, so that whoever arrives stands on a floor.
-    fn usable(&self, surfaces: &[Surface]) -> bool {
+    /// [`TALLEST_TARGET`], it and its arrival within [`crate::anchors::REACH`] of home on each axis, reached from within
+    /// a reach that is a positive number if it says one, and arriving on its own top, on one of `surfaces`, or on the
+    /// top of another of `targets` that arrives on its own and may be used, so that whoever arrives stands on a floor:
+    /// two targets, one on a rock and one on a terrace above it, so make a way up and back down.
+    fn usable(&self, surfaces: &[Surface], targets: &[Target]) -> bool {
         let within =
             |point: Vec3| point.is_finite() && point.abs().max_element() <= crate::anchors::REACH;
+        let onto = |other: &Target| {
+            other.arrives_on_top() && other.holds(self.arrival) && other.usable(surfaces, &[])
+        };
         within(self.foot)
             && within(self.foot + Vec3::Y * self.height)
             && within(self.arrival)
@@ -730,8 +763,10 @@ impl Target {
             && self.height > 0.0
             && self.height <= TALLEST_TARGET
             && self.yaw.is_none_or(f32::is_finite)
+            && self.within.is_none_or(|reach| reach > 0.0)
             && (self.arrives_on_top()
-                || surfaces.iter().any(|surface| surface.stands(self.arrival)))
+                || surfaces.iter().any(|surface| surface.stands(self.arrival))
+                || targets.iter().any(onto))
     }
 }
 
@@ -822,7 +857,7 @@ impl Locomotion {
 
     /// The teleport targets a participant may use: the first [`MOST_TARGETS`] of those declared that are finite, no
     /// wider than [`WIDEST_PAD`], no taller than [`TALLEST_TARGET`], within [`crate::anchors::REACH`] of home on each
-    /// axis and arriving on their own top or on a declared surface.
+    /// axis and arriving on their own top, on a declared surface or on another's top.
     pub fn targets(&self) -> impl Iterator<Item = &Target> {
         let (surfaces, targets): (&[Surface], &[Target]) = match self {
             Self::None => (&[], &[]),
@@ -835,7 +870,7 @@ impl Locomotion {
         };
         targets
             .iter()
-            .filter(move |target| target.usable(surfaces))
+            .filter(move |target| target.usable(surfaces, targets))
             .take(MOST_TARGETS)
     }
 
@@ -2708,16 +2743,16 @@ mod tests {
 
     #[test]
     fn only_pads_that_stand_on_a_surface_within_bounds_are_used() {
-        let floor = || vec![Surface::disc(Vec3::ZERO, 30.0)];
+        let floor = || vec![Surface::disc(Vec3::ZERO, crate::anchors::REACH + 10.0)];
         let pair = |a: Pad, b: Pad| Locomotion::teleport(floor()).with_pads([[a, b]]);
         let good = || Pad::at(Vec3::new(2.0, 0.0, 0.0));
         assert_eq!(pair(good(), good()).pads().count(), 1);
-        // Off every surface, above one, too wide, beyond 20 m of home, nonsense: the pair is not used.
+        // Off every surface, above one, too wide, beyond the space's bounds, nonsense: the pair is not used.
         for bad in [
             Pad::at(Vec3::new(2.0, 0.5, 0.0)),
             Pad::at(Vec3::new(2.0, 0.0, 0.0)).with_radius(2.5),
             Pad::at(Vec3::new(2.0, 0.0, 0.0)).with_radius(0.0),
-            Pad::at(Vec3::new(20.5, 0.0, 0.0)),
+            Pad::at(Vec3::new(crate::anchors::REACH + 0.5, 0.0, 0.0)),
             Pad::at(Vec3::new(f32::NAN, 0.0, 0.0)),
             Pad {
                 yaw: Some(f32::INFINITY),
@@ -2985,16 +3020,38 @@ mod tests {
             Target::object(Vec3::new(0.0, 0.0, -6.0), 0.5, TALLEST_TARGET + 0.1),
             Target::object(Vec3::new(0.0, 0.0, -6.0), f32::NAN, 1.0),
             Target::object(Vec3::new(0.0, f32::INFINITY, -6.0), 0.5, 1.0),
-            Target::object(Vec3::new(0.0, 0.0, -21.0), 0.5, 1.0),
-            Target::object(Vec3::new(0.0, 19.5, -6.0), 0.5, 1.0),
-            rock().arriving(Vec3::new(0.0, 0.0, 21.0)),
+            Target::object(Vec3::new(0.0, 0.0, -crate::anchors::REACH - 1.0), 0.5, 1.0),
+            Target::object(Vec3::new(0.0, crate::anchors::REACH - 0.5, -6.0), 0.5, 1.0),
+            rock().arriving(Vec3::new(0.0, 0.0, crate::anchors::REACH + 1.0)),
             Target {
                 yaw: Some(f32::NAN),
                 ..rock()
             },
+            rock().within(0.0),
+            rock().within(f32::NAN),
         ] {
             assert_eq!(used(bad.clone()), 0, "{bad:?}");
         }
+        assert_eq!(used(rock().within(3.0)), 1, "pointed at from within 3 m");
+        // A target on a terrace above takes a participant down onto the rock's top, which is a floor once the rock's own
+        // target arrives on it and may be used; not onto a rock that may not be used, nor beside its top or above it.
+        let down =
+            |arrival: Vec3| Target::object(Vec3::new(3.0, 5.0, -6.0), 0.4, 0.8).arriving(arrival);
+        let both = |rock: Target, down: Target| {
+            Locomotion::teleport(shore())
+                .with_targets([rock, down])
+                .targets()
+                .count()
+        };
+        let top = rock().arrival();
+        assert_eq!(both(rock(), down(top + Vec3::X * 0.3)), 2);
+        assert_eq!(
+            both(rock().arriving(Vec3::new(2.5, 0.0, 0.0)), down(top)),
+            1
+        );
+        assert_eq!(both(rock().within(-1.0), down(top)), 0);
+        assert_eq!(both(rock(), down(top + Vec3::X)), 1);
+        assert_eq!(both(rock(), down(top + Vec3::Y * 0.1)), 1);
         let many = Locomotion::fly(shore(), 5.0).with_targets((0..10).map(|_| rock()));
         assert_eq!(many.targets().count(), MOST_TARGETS);
         assert_eq!(Locomotion::None.with_targets([rock()]).targets().count(), 0);

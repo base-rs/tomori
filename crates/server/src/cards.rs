@@ -37,7 +37,7 @@ pub const JITTER_MOST: Duration = Duration::from_secs(30);
 pub const MAX_PLACEMENTS: usize = 400;
 
 /// How far from the space's origin a card can be placed, in metres along each axis.
-pub const REACH: f32 = 20.0;
+pub const REACH: f32 = 30.0;
 
 /// The longest title told to the agent, in characters.
 const TITLE_CHARS: usize = 160;
