@@ -648,15 +648,9 @@ mod tests {
         let mut now = settle(&mut motion, &lobby(), 0.0);
         now = settle(&mut motion, &joining("one"), now);
         now = settle(&mut motion, &entered("one"), now);
-        let radius = motion.scenery(now).reveal.map(|sphere| sphere.radius);
+        let reveal = motion.scenery(now).reveal;
         motion.update(&entered("one"), now + FRAME);
-        assert_eq!(
-            motion
-                .scenery(now + FRAME)
-                .reveal
-                .map(|sphere| sphere.radius),
-            radius
-        );
+        assert_eq!(motion.scenery(now + FRAME).reveal, reveal);
     }
 
     #[test]

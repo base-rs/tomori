@@ -341,6 +341,7 @@ fn a_server_needing_attention_glows_and_offers_a_jump() {
 
 #[test]
 fn a_jump_connects_and_joins_the_most_urgent_space_in_one_choice() {
+    crate::test_support::log_everything();
     let mut conversation = crate::test_support::conversation("Ada");
     let laptop = advertising("Laptop", "10.0.0.2:8765", 1, 1);
     conversation.set_servers(vec![laptop.clone()]);
@@ -1085,6 +1086,7 @@ fn a_visitor_knocks_and_is_admitted() {
 
 #[test]
 fn an_admission_this_device_did_not_ask_for_is_ignored() {
+    crate::test_support::log_everything();
     let certificate = tomori_client::Fingerprint::of(b"server certificate");
     let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
     conversation.apply(space(|_| {}));
@@ -8143,6 +8145,7 @@ fn a_chooses_the_choosable_row_pointed_at_by_its_id_and_the_version_seen_and_nev
     assert!(!conversation.just_chose("panel-1", "pod7"));
     assert!(!conversation.just_chose("panel-9", "pod112"));
     // Refused, as of a row gone, it is no longer said to be chosen; a refusal of another panel leaves it so.
+    crate::test_support::log_everything();
     let refused = |panel: &str| {
         Event::Message(ServerMessage::Error {
             error: "That row is no longer on the list.".into(),

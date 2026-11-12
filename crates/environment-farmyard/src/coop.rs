@@ -542,6 +542,7 @@ mod tests {
 
     #[test]
     fn a_coop_from_an_asset_replaces_the_built_one_unless_it_cannot_be_loaded() {
+        log::set_max_level(log::LevelFilter::Trace);
         let built = Coop::default().model(Library::shared());
         assert_eq!(*built, model());
         // Missing, the built one stands in.

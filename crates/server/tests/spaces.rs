@@ -212,6 +212,24 @@ fn sessions_in(client: &mut TestClient, directory: &str) -> Vec<tomori_protocol:
 }
 
 #[test]
+fn a_listing_the_backend_cannot_give_says_why() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    backend.fail_listing(Some(tomori_backend::Error::new(
+        tomori_backend::ErrorKind::Unavailable,
+        "The agent cannot be reached.",
+    )));
+    ada.send(&ClientMessage::ListSessions {
+        backend: "fake".into(),
+        directory: "/tmp".into(),
+    });
+    assert_eq!(ada.error(), "The agent cannot be reached.");
+    backend.fail_listing(None);
+    assert!(sessions_in(&mut ada, "/tmp").is_empty());
+}
+
+#[test]
 fn listing_the_backend_sessions_returns_those_beneath_the_directory_not_in_a_space() {
     let backend = FakeBackend::new();
     let server = TestServer::with_backend(backend.clone());

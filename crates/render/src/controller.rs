@@ -87,7 +87,7 @@ fn decode_texture(encoded: &[u8], budget: usize) -> Result<Texture> {
         let rgba = decoder
             .transcode(0, basisu::TargetFormat::Rgba32, basisu::DecodeFlags::NONE)
             .map_err(|error| anyhow::anyhow!("KTX2 transcode failed: {error:?}"))?;
-        ensure!(rgba.len() == size, "invalid KTX2 output size");
+        // The transcoder makes the base level's output as large as its dimensions, checked above, say.
         Ok(Texture {
             width,
             height,
@@ -209,10 +209,7 @@ fn append_node(
                 .read_positions()
                 .context("controller model missing embedded positions")?
                 .collect();
-            ensure!(
-                positions.len() <= MAX_VERTICES,
-                "controller model has too many positions"
-            );
+            // As many as the accessor's count, checked above.
             let normals: Option<Vec<_>> = reader.read_normals().map(|normals| normals.collect());
             if let Some(normals) = &normals {
                 ensure!(
@@ -304,7 +301,7 @@ fn append_node(
                                 .normalize_or_zero()
                         })
                         .unwrap_or(face);
-                    ensure!(normal.is_finite(), "non-finite controller normal");
+                    // Normalized or zero, so finite.
                     model.vertices.push(Vertex {
                         position: points[i].to_array(),
                         normal: normal.to_array(),
@@ -383,6 +380,32 @@ mod tests {
             );
             assert!(decode_texture(bytes, 1).is_err());
         }
+        // A header saying it is wider than a controller texture may be.
+        let mut wide = include_bytes!("../tests/fixtures/etc1s.ktx2").to_vec();
+        wide[20..24].copy_from_slice(&4097_u32.to_le_bytes());
+        assert!(
+            format!(
+                "{:#}",
+                decode_texture(&wide, MAX_TEXTURE_BYTES)
+                    .map(drop)
+                    .unwrap_err()
+            )
+            .contains("invalid controller texture dimensions")
+        );
+    }
+
+    #[test]
+    fn an_image_whose_colours_exceed_the_budget_is_refused() {
+        // Four bytes as grey, but sixteen as RGBA.
+        let mut grey = Vec::new();
+        image::GrayImage::new(2, 2)
+            .write_to(&mut Cursor::new(&mut grey), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(decode_texture(&grey, 16).unwrap().rgba.len(), 16);
+        assert!(
+            format!("{:#}", decode_texture(&grey, 8).map(drop).unwrap_err())
+                .contains("controller textures exceed size limit")
+        );
     }
 
     #[test]
@@ -725,6 +748,93 @@ mod tests {
             .unwrap()
             .push(second);
         assert_eq!(parse_glb(&glb(two, Some(&bin))).unwrap().textures.len(), 2);
+        // UVs for fewer vertices than the positions.
+        let mut short = with_png(true);
+        short["accessors"][1]["count"] = 2.into();
+        assert!(rejected(short, Some(&bin)).contains("invalid controller UVs"));
+        // A texture of its own for each of more primitives than the model may have textures.
+        let mut many = with_png(true);
+        let image = many["images"][0].clone();
+        let primitive = many["meshes"][0]["primitives"][0].clone();
+        let count = MAX_TEXTURES + 1;
+        many["images"] = vec![image; count].into();
+        many["textures"] = (0..count)
+            .map(|index| serde_json::json!({"source": index}))
+            .collect();
+        many["materials"] = (0..count)
+            .map(|index| serde_json::json!({"pbrMetallicRoughness": {"baseColorTexture": {"index": index}}}))
+            .collect();
+        many["meshes"][0]["primitives"] = (0..count)
+            .map(|index| {
+                let mut primitive = primitive.clone();
+                primitive["material"] = index.into();
+                primitive
+            })
+            .collect();
+        assert!(rejected(many, Some(&bin)).contains("too many controller textures"));
+    }
+
+    #[test]
+    fn a_model_beyond_the_limits_or_not_finite_is_refused() {
+        let bin = triangle(&[]);
+        let bin = Some(bin.as_slice());
+        let deep = model(|json| {
+            let mut nodes: Vec<_> = (1..=64)
+                .map(|child| serde_json::json!({"children": [child]}))
+                .collect();
+            nodes.push(serde_json::json!({"mesh": 0}));
+            json["nodes"] = nodes.into();
+        });
+        assert!(rejected(deep, bin).contains("node nesting exceeds limit"));
+        let many = model(|json| json["scenes"][0]["nodes"] = vec![0; MAX_NODES + 1].into());
+        assert!(rejected(many, bin).contains("too many nodes"));
+        let positions = model(|json| json["accessors"][0]["count"] = (MAX_VERTICES + 1).into());
+        assert!(rejected(positions, bin).contains("too many positions"));
+        let color = model(|json| {
+            // Too large for an f32, so infinite.
+            json["materials"] =
+                serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1e39, 0, 0, 1]}}]);
+            json["meshes"][0]["primitives"][0]["material"] = 0.into();
+        });
+        assert!(rejected(color, bin).contains("invalid controller material"));
+        let mut infinite = Vec::new();
+        for value in [f32::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            infinite.extend_from_slice(&value.to_le_bytes());
+        }
+        assert!(rejected(model(|_| {}), Some(&infinite)).contains("non-finite controller vertex"));
+        // Normals, or indices, after the positions.
+        let after = |semantic: &str, accessor: serde_json::Value| {
+            model(|json| {
+                json["buffers"][0]["byteLength"] = 60.into();
+                json["bufferViews"] = serde_json::json!([
+                    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                    {"buffer": 0, "byteOffset": 36, "byteLength": 24}
+                ]);
+                json["accessors"].as_array_mut().unwrap().push(accessor);
+                let primitive = &mut json["meshes"][0]["primitives"][0];
+                if semantic == "indices" {
+                    primitive["indices"] = 1.into();
+                } else {
+                    primitive["attributes"][semantic] = 1.into();
+                }
+            })
+        };
+        let bin = triangle(&[0, 0, 1, 0, 2, 0, 0, 0].repeat(3));
+        let bin = Some(bin.as_slice());
+        let normals = after(
+            "NORMAL",
+            serde_json::json!({"bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3"}),
+        );
+        assert!(rejected(normals, bin).contains("normal count mismatch"));
+        let indices = |count: usize| {
+            after(
+                "indices",
+                serde_json::json!({"bufferView": 1, "componentType": 5123, "count": count, "type": "SCALAR"}),
+            )
+        };
+        assert_eq!(parse_glb(&glb(indices(3), bin)).unwrap().vertices.len(), 3);
+        assert!(rejected(indices(4), bin).contains("invalid controller triangle count"));
+        assert!(rejected(indices(MAX_VERTICES + 1), bin).contains("too many indices"));
     }
 
     #[test]

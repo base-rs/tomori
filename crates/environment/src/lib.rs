@@ -1482,6 +1482,15 @@ mod tests {
     }
 
     #[test]
+    fn an_object_stands_and_reaches_where_its_side_says() {
+        let object = Object::new("bonfire", "the campsite's bonfire");
+        assert_eq!((object.position(), object.extent()), (None, None));
+        let object = object.at([2.0, 0.0, -4.0]).with_extent(0.6);
+        assert_eq!(object.position(), Some([2.0, 0.0, -4.0]));
+        assert_eq!(object.extent(), Some(0.6));
+    }
+
+    #[test]
     fn a_space_is_what_it_was_given() {
         let space = Space::new("space-1-2", "Fleet", "/srv/fleet");
         assert_eq!(space.id(), "space-1-2");
