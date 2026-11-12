@@ -117,6 +117,21 @@ pub fn stepped(size: f32, bounds: (f32, f32)) -> f32 {
     ((size / STEP).round() * STEP).clamp(bounds.0, bounds.1)
 }
 
+/// How far past halfway to the next step the hands must spread or close before the size shown steps, as a proportion of
+/// a step, so that hands held still at the edge between two steps do not flicker between them.
+const HYSTERESIS: f32 = 0.25;
+
+/// The size to show as the hands ask for `size`, `shown` shown now: `shown` while `size` is within half a step and a
+/// little of it, and otherwise `size` [`stepped`], within `bounds`. So a size taken hold of between steps, as the agent
+/// may set one, is kept until the hands move it.
+pub fn settled(shown: f32, size: f32, bounds: (f32, f32)) -> f32 {
+    if size.is_finite() && (size - shown).abs() < STEP * (0.5 + HYSTERESIS) {
+        shown
+    } else {
+        stepped(size, bounds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +236,22 @@ mod tests {
         assert_eq!(stepped(0.1, (0.5, 4.0)), 0.5);
         assert_eq!(stepped(9.0, (0.5, 4.0)), 4.0);
         assert_eq!(stepped(f32::NAN, (0.5, 4.0)), 1.0);
+    }
+
+    #[test]
+    fn a_size_at_the_edge_between_two_steps_holds_still_until_the_hands_move_past_it() {
+        let bounds = (0.5, 4.0);
+        // Just past halfway to the next step, either way, it stays.
+        assert_eq!(settled(1.2, 1.226, bounds), 1.2);
+        assert_eq!(settled(1.25, 1.224, bounds), 1.25);
+        // Well past it, it steps.
+        assert_eq!(settled(1.2, 1.24, bounds), 1.25);
+        assert!((settled(1.25, 1.21, bounds) - 1.2).abs() < 1e-6);
+        // Taken hold of between steps, it is kept until moved.
+        assert_eq!(settled(1.33, 1.33, bounds), 1.33);
+        assert_eq!(settled(1.33, 1.4, bounds), 1.4);
+        // Within its bounds, and nonsense steps to its own size.
+        assert_eq!(settled(3.95, 9.0, bounds), 4.0);
+        assert_eq!(settled(1.2, f32::NAN, bounds), 1.0);
     }
 }

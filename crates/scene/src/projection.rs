@@ -2249,7 +2249,7 @@ impl Projector {
                 if let (Some(first), Some(second)) = (hand.ray, hands[both.second].ray) {
                     let moved = both.hold.follow([first, second]);
                     let bounds = tomori_protocol::FLOAT_SIZES;
-                    let size = two_hands::stepped(both.size * moved.spread, bounds);
+                    let size = two_hands::settled(held.size, both.size * moved.spread, bounds);
                     if (size - held.size).abs() > 1e-4 {
                         both.changed = Some(input.now);
                     }

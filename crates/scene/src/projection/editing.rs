@@ -2212,7 +2212,7 @@ impl Editor {
             let mut changed = start.clone();
             let mut stopped = false;
             if sized_by_hands(start) {
-                let scale = two_hands::stepped(start.scale() * moved.spread, layout::SCALES);
+                let scale = two_hands::settled(shown, start.scale() * moved.spread, layout::SCALES);
                 let sized =
                     |scale: f32| laid_out(start, start.grid(), scale, start.aspect, start.radius());
                 // Grown past what a wall may be, it stays as large as it was.
