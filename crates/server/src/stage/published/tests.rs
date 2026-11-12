@@ -1074,7 +1074,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
     };
     let across = |title: &str, across: u16| {
         stage
-            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .describe_at(
+                &walls,
+                &id(title),
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
             .unwrap()
     };
     // Now, on its wall: the hour's and five minutes' charts, then at most three in all, never the other wall's.
@@ -1100,7 +1108,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
     );
     let across = |title: &str, across: u16| {
         stage
-            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .describe_at(
+                &walls,
+                &id(title),
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
             .unwrap()
     };
     let frozen = across("frozen", 9_000);
@@ -1127,7 +1143,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
         .id;
     assert!(
         !stage
-            .describe_at(&walls, &bare, (None, None, Some(5_000)), 0)
+            .describe_at(
+                &walls,
+                &bare,
+                crate::stage::Pointed {
+                    across: Some(5_000),
+                    ..crate::stage::Pointed::default()
+                },
+                0
+            )
             .unwrap()
             .contains("linked")
     );
