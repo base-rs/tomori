@@ -30,10 +30,9 @@ mod images;
 mod inbound;
 mod instructions;
 pub mod kept;
-mod server_sides;
-
 mod limits;
 mod mcp;
+pub mod mixer;
 #[cfg(feature = "speech")]
 pub mod offline;
 mod option;
@@ -51,6 +50,7 @@ mod recognition;
 mod retention;
 mod seating;
 mod server;
+mod server_sides;
 mod space;
 mod stage;
 mod system;
@@ -61,8 +61,6 @@ mod voice;
 mod watch;
 mod workspace;
 mod zones;
-
-pub mod mixer;
 
 #[cfg(feature = "fake")]
 pub mod fake;

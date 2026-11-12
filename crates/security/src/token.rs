@@ -1,8 +1,6 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use sha2::{Digest, Sha256};
-
 /// Every token the server issues starts with this, so that a token is recognizable, such as by secret scanners.
 pub const TOKEN_PREFIX: &str = "tomori_";
 
@@ -15,8 +13,9 @@ pub fn generate() -> String {
 }
 
 /// The hash under which a token is stored, so that the store never holds a token in the clear.
-#[cfg_attr(not(feature = "issue"), allow(dead_code))]
+#[cfg(any(feature = "issue", test))]
 pub(crate) fn hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
     crate::hex::encode(&Sha256::digest(token.as_bytes()))
 }
 
