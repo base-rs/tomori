@@ -5219,6 +5219,7 @@ impl Hub {
                 panel,
                 row,
                 revision,
+                key,
             } => {
                 if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
                     state.error(participant, error);
@@ -5238,12 +5239,30 @@ impl Hub {
                     .panel(&panel)
                     .map(|shown| shown.version);
                 let walls = environments.walls(&record.model.environment);
-                let chosen = record.stage.chosen(&walls, &panel, &row).map(|(id, row)| {
-                    // Chosen from the panel as it is now, unless it changed since the version they saw; a client
-                    // that says none is taken at its word.
-                    let current = revision.is_none_or(|seen| shown == Some(seen));
-                    tomori_environment::Chosen::new(id, row, current)
-                });
+                let chosen = record
+                    .stage
+                    .chosen(&walls, &panel, &row)
+                    .and_then(|(id, chosen)| {
+                        // Chosen from the panel as it is now, unless it changed since the version they saw; a client
+                        // that says none is taken at its word.
+                        let current = revision.is_none_or(|seen| shown == Some(seen));
+                        // A row of a list with keys is handed on with its key only where that is the key the participant
+                        // saw: by the revision of its key they say, or, from a client that says none, by the panel's version,
+                        // or at its word where it says neither; otherwise it is refused as stale, never resolved to another
+                        // key. A client never sends a key, so none is forged.
+                        let (revised, fields) =
+                            record.stage.row_key(walls.environment, &panel, &row);
+                        let seen = match (revised, key) {
+                            (None, _) => true,
+                            (Some(revised), Some(seen)) => revised == seen,
+                            (Some(_), None) => current,
+                        };
+                        if !seen {
+                            return Err(crate::stage::STALE_ROW);
+                        }
+                        Ok(tomori_environment::Chosen::new(id, chosen, current)
+                            .with_fields(fields.to_vec()))
+                    });
                 match chosen {
                     Ok(chosen) => {
                         let record = state

@@ -770,6 +770,8 @@ impl Kept {
                             .with_highlight(highlighted == Some(row.id.as_str()))
                             .with_tone(row.tone)
                             .with_cells(row.cells.clone());
+                        // The revision of its key, never the key, which stays with the server.
+                        sent.key = row.key;
                         sent.value = row.value;
                         sent
                     })
@@ -2735,6 +2737,22 @@ impl Stage {
                 let value = row.percent().map_or(String::new(), |percent| {
                     format!(", at {percent}% of its limit")
                 });
+                // Its key, as data, each value cleaned as all text others choose is, so that none ends the context block,
+                // quoted as JSON quotes it, so that none ends its quotation, and cut to a few words, so that a row's key
+                // adds at most about 700 characters to what is said.
+                let key = if row.fields.is_empty() {
+                    String::new()
+                } else {
+                    let fields: Vec<String> = row
+                        .fields
+                        .iter()
+                        .map(|(name, value)| {
+                            let value = crate::space::one_line(value, KEY_TOLD_CHARS);
+                            format!("{name}: {}", serde_json::Value::String(value))
+                        })
+                        .collect();
+                    format!(", key {{{}}}", fields.join(", "))
+                };
                 // A table's row as its cells, each after its column's title, `: ` and ` · ` between them, within their
                 // bounds, so that nothing is cut.
                 let columns = self.columns(walls.environment, &panel.id);
@@ -2746,7 +2764,7 @@ impl Stage {
                             * (tomori_environment::COLUMN_TITLE_CHARS + 5)
                 };
                 details.push_str(&format!(
-                    "; row {} of {}{highlighted}{tone}{value}{id}: \"{}\"",
+                    "; row {} of {}{highlighted}{tone}{value}{id}{key}: \"{}\"",
                     index + 1,
                     rows.len(),
                     crate::space::one_line(&row.told(columns), most)
@@ -2778,6 +2796,14 @@ impl Stage {
 /// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the
 /// projection sent again shows the panel as it is, so that they look and tick again.
 pub(crate) const STALE_TICK: &str = "That panel changed as you ticked it; look again.";
+
+/// The most characters of each value of a row's key a description of the row pointed at tells, followed by `…` where
+/// it is cut: the agent reads it whole with `panels` or `inspect`.
+const KEY_TOLD_CHARS: usize = 48;
+
+/// Why a participant's choice of a row is refused when the row's key changed since the one they saw, so that its
+/// environment is never handed another key than the one shown: the client cues it, and they look and choose again.
+pub(crate) const STALE_ROW: &str = "That row changed as you chose it; look again.";
 
 /// Why a participant's change to a wall is refused when the wall changed since the version they saw, as when another
 /// participant changed it meanwhile: the client cues it, and the projection sent again shows the wall as it is, so that

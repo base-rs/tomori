@@ -160,6 +160,9 @@ impl ServerSide for Observers {
                 Row::new(id, "")
                     .with_cells([name.to_owned(), format!("{busy}%"), wait.to_owned()])
                     .with_value(busy as f32 / 100.0)
+                    .with_reference(format!("observer/{id}"))
+                    .with_field("instance", format!("{id}.internal:9100"))
+                    .with_field("region", "us-east")
                     .choosable()
             })
             .to_vec();
@@ -174,11 +177,14 @@ impl ServerSide for Observers {
         };
         space.publish(table("grpc"))?;
         while !space.cancellation().is_cancelled() {
+            // The row chosen found by its key, as the side gave it, never by its id's or text's parts.
             if let Some(chosen) = space
                 .next_intent(Duration::from_millis(20))
                 .and_then(|intent| intent.chosen().cloned())
+                && let Some(instance) = chosen.field("instance")
+                && let Some(id) = instance.strip_suffix(".internal:9100")
             {
-                space.publish(table(chosen.row()))?;
+                space.publish(table(id))?;
             }
         }
         Ok(())
@@ -735,6 +741,7 @@ fn choosing_a_row_of_an_environment_s_list_reaches_its_side_which_highlights_it(
         panel: list.id.clone(),
         row: "pod7".into(),
         revision: Some(list.version),
+        key: None,
     });
     let body = ada.wait_for(|message| match message {
         ServerMessage::Projection { projection } => projection
@@ -753,6 +760,7 @@ fn choosing_a_row_of_an_environment_s_list_reaches_its_side_which_highlights_it(
         panel: list.id.clone(),
         row: "pod9".into(),
         revision: None,
+        key: None,
     });
     let refused = ada.wait_for(|message| match message {
         ServerMessage::Error { error, panel, .. } => Some((error.clone(), panel.clone())),
@@ -806,6 +814,9 @@ fn an_environment_s_table_reaches_clients_in_columns_the_agent_reads_its_cells_a
         ])
     );
     assert_eq!(table.rows[1].cells, ["HTTP", "10%", "12 ms"]);
+    // Each row's key's revision, never its key.
+    assert!(table.rows.iter().all(|row| row.key.is_some()));
+    assert!(!serde_json::to_string(&table).unwrap().contains("internal"));
     // The agent reads its columns and each row's cells.
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let token = token(&backend);
@@ -830,11 +841,28 @@ fn an_environment_s_table_reaches_clients_in_columns_the_agent_reads_its_cells_a
         json!(["GRPC", "100%", "0 ms"])
     );
     assert!(read["panels"][0]["rows"][0].get("text").is_none());
+    // And each row's key, as data, which inspecting the row tells too.
+    assert_eq!(
+        read["panels"][0]["rows"][0]["key"],
+        json!({"instance": "grpc.internal:9100", "region": "us-east"})
+    );
+    let inspected = call(
+        &server,
+        &token,
+        &session,
+        "inspect",
+        json!({"id": "observers:observer/http"}),
+    );
+    assert_eq!(
+        inspected["key"],
+        json!({"instance": "http.internal:9100", "region": "us-east"})
+    );
     // Choosing a row of the table reaches its side by the row's id, which highlights it.
     ada.send(&ClientMessage::ChoosePanelRow {
         panel: table.id.clone(),
         row: "jobs".into(),
         revision: Some(table.version),
+        key: table.rows[2].key,
     });
     let highlighted = ada.wait_for(|message| match message {
         ServerMessage::Projection { projection } => projection

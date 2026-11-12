@@ -4127,6 +4127,8 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
                     .with_value(0.123)
                     // As many characters of cells as a table holds of them all.
                     .with_cells(vec!["\u{1F600}".repeat(10); 4])
+                    // And as long a key as a list's keys hold of them all, each character one JSON escapes in two.
+                    .with_field("k", "\"".repeat(tomori_environment::FIELD_VALUE_BYTES))
             })
             .collect();
         let columns = vec![
@@ -4238,6 +4240,18 @@ fn a_side_shows_as_many_panels_as_it_may_at_once_and_the_agent_reads_every_one()
     // A table's row by its cells, as many as the table's characters hold, in place of its text.
     assert!(rows[2].get("text").is_none());
     assert_eq!(rows[2]["cells"][0], "\u{1F600}".repeat(10));
+    // Its rows' keys, which whole would take it past what is read, are cut to fit, each value ending with …, or, as
+    // here, beside the largest text and cells, left out, and it says so.
+    assert!(rows.iter().all(|row| {
+        row.get("key")
+            .is_none_or(|key| key["k"].as_str().unwrap().ends_with('…'))
+    }));
+    assert!(
+        read[0]["keys_cut"]
+            .as_str()
+            .unwrap()
+            .contains("inspect a row")
+    );
     assert!(rows[2]["inspect_id"].as_str().unwrap().starts_with("yard:"));
     assert_eq!(rows[2]["highlighted"], false);
     assert_eq!(
@@ -4316,6 +4330,207 @@ impl tomori_environment::ServerSide for Recording {
 }
 
 #[test]
+fn a_choice_of_a_row_with_a_key_hands_its_side_the_key_seen_or_is_refused_as_stale() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0])])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let start = Instant::now();
+    // Pods of one instance on two nodes, the same name on both, keyed by the side's own terms.
+    let pod = |id: &str, node: &str| {
+        tomori_environment::Row::new(id, format!("{id} on {node}"))
+            .with_field("instance", "10.0.0.7:9100")
+            .with_field("region", "us-east")
+            .with_field("node", node)
+            .choosable()
+    };
+    let publish = |rows: Vec<tomori_environment::Row>, at: Duration| {
+        hub.channel_publish_at(
+            &outlet,
+            tomori_environment::Panel::list("pods", "Pods", rows),
+            start + at,
+        )
+        .unwrap();
+        hub.flush_publishes(start + at);
+        ada.projection()
+            .panels
+            .into_iter()
+            .find(|panel| panel.title == "Pods")
+            .unwrap()
+    };
+    let list = publish(vec![pod("a", "n-1"), pod("b", "n-2")], Duration::ZERO);
+    // A client is sent each row's key's revision, never the key.
+    let keys: Vec<Option<u64>> = list.rows.iter().map(|row| row.key).collect();
+    assert!(keys.iter().all(Option::is_some) && keys[0] != keys[1]);
+    assert!(!serde_json::to_string(&list).unwrap().contains("10.0.0.7"));
+    let choose =
+        |row: &str, revision: Option<u64>, key: Option<u64>| ClientMessage::ChoosePanelRow {
+            panel: list.id.clone(),
+            row: row.to_owned(),
+            revision,
+            key,
+        };
+    let chosen = |count: usize| {
+        eventually_in("the side is handed the choice", || {
+            seen.lock().unwrap().len() >= count
+        });
+        seen.lock().unwrap()[count - 1].chosen().cloned().unwrap()
+    };
+    let fields = |node: &str| {
+        vec![
+            ("instance".to_owned(), "10.0.0.7:9100".to_owned()),
+            ("region".to_owned(), "us-east".to_owned()),
+            ("node".to_owned(), node.to_owned()),
+        ]
+    };
+    // Chosen as seen, the side is handed the row's key, verbatim, in its order.
+    ada.send(choose("b", Some(list.version), keys[1]));
+    assert!(ada.errors().is_empty());
+    let first = chosen(1);
+    assert_eq!(
+        (first.row(), first.current(), first.fields()),
+        ("b", true, fields("n-2").as_slice())
+    );
+    assert_eq!(first.field("node"), Some("n-2"));
+    // Reordered, row b's key unchanged: still handed on by the revision of its key, the list told changed since.
+    let reordered = publish(
+        vec![pod("b", "n-2"), pod("a", "n-1")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(
+        reordered.rows[0].key, keys[1],
+        "a key unchanged keeps its revision"
+    );
+    ada.read();
+    ada.send(choose("b", Some(list.version), keys[1]));
+    let second = chosen(2);
+    assert_eq!(
+        (second.current(), second.fields()),
+        (false, fields("n-2").as_slice())
+    );
+    // Row b now stands for another pod: a choice of the key seen is refused as stale, naming the panel, and the side is
+    // handed nothing; the key now shown is handed on.
+    let moved = publish(
+        vec![pod("b", "n-9"), pod("a", "n-1")],
+        Duration::from_secs(4),
+    );
+    assert_ne!(moved.rows[0].key, keys[1]);
+    assert_eq!(moved.rows[1].key, keys[0]);
+    ada.read();
+    ada.send(choose("b", Some(reordered.version), keys[1]));
+    let refused: Vec<(String, Option<String>)> = ada
+        .read()
+        .into_iter()
+        .filter_map(|message| match message {
+            ServerMessage::Error { error, panel, .. } => Some((error, panel)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [(crate::stage::STALE_ROW.to_owned(), Some(list.id.clone()))]
+    );
+    // A client that says no key's revision, as an older one, is handed the key where the panel is the version it saw,
+    // or where it says no version, and refused as stale otherwise.
+    ada.send(choose("b", Some(reordered.version), None));
+    assert_eq!(ada.errors(), [crate::stage::STALE_ROW]);
+    ada.send(choose("b", Some(moved.version), None));
+    assert_eq!(chosen(3).fields(), fields("n-9").as_slice());
+    ada.send(choose("a", None, None));
+    assert_eq!(chosen(4).fields(), fields("n-1").as_slice());
+    // A key revision the row never had, as a forged one, is refused as stale; an unknown row gives nothing.
+    ada.send(choose("a", Some(moved.version), Some(u64::MAX)));
+    assert_eq!(ada.errors(), [crate::stage::STALE_ROW]);
+    ada.send(choose("zz", Some(moved.version), moved.rows[0].key));
+    assert_eq!(ada.errors(), ["That row is no longer on the list."]);
+    // Nothing more reached the side.
+    ada.send(choose("a", Some(moved.version), moved.rows[1].key));
+    assert_eq!(chosen(5).fields(), fields("n-1").as_slice());
+    assert_eq!(seen.lock().unwrap().len(), 5);
+    // Republished with only its text and value changed, its key the same, row a keeps its key's revision, and a
+    // choice of the key seen before is handed on, the list told changed since.
+    let retold = publish(
+        vec![
+            pod("b", "n-9"),
+            tomori_environment::Row::new("a", "a, now busier")
+                .with_field("instance", "10.0.0.7:9100")
+                .with_field("region", "us-east")
+                .with_field("node", "n-1")
+                .with_value(0.9)
+                .choosable(),
+        ],
+        Duration::from_secs(6),
+    );
+    assert_ne!(retold.version, moved.version);
+    assert_eq!(retold.rows[1].key, moved.rows[1].key);
+    ada.read();
+    ada.send(choose("a", Some(moved.version), moved.rows[1].key));
+    let kept = chosen(6);
+    assert_eq!(
+        (kept.current(), kept.fields()),
+        (false, fields("n-1").as_slice())
+    );
+    // A list without keys sends no revisions and hands on no key, whatever a client says.
+    let plain = publish(
+        vec![tomori_environment::Row::new("c", "c").choosable()],
+        Duration::from_secs(8),
+    );
+    assert_eq!(plain.rows[0].key, None);
+    ada.read();
+    ada.send(ClientMessage::ChoosePanelRow {
+        panel: plain.id.clone(),
+        row: "c".into(),
+        revision: Some(plain.version),
+        key: Some(7),
+    });
+    assert!(chosen(7).fields().is_empty());
+    // The agent reads a list whose keys whole would take more than it reads with each value cut, ending with …, and
+    // told so; one that fits, whole.
+    let long = (0..tomori_environment::ROW_LIMIT)
+        .map(|index| {
+            tomori_environment::Row::new(format!("r{index}"), "r")
+                .with_field("k", "\"".repeat(tomori_environment::FIELD_VALUE_BYTES))
+        })
+        .collect();
+    publish(long, Duration::from_secs(10));
+    let read = hub.tool_panels("session", Some("Pods"), 0).unwrap();
+    let wire = crate::mcp::structured(read.clone()).to_string().len();
+    assert!(
+        wire <= crate::hub::agent_panels::LISTING_BYTES,
+        "{wire} bytes"
+    );
+    let panel = &read["panels"][0];
+    let key = panel["rows"][0]["key"]["k"].as_str().unwrap();
+    assert_eq!(key, format!("{}…", "\"".repeat(64)));
+    assert!(panel["keys_cut"].is_string());
+    publish(vec![pod("a", "n-1")], Duration::from_secs(12));
+    let read = hub.tool_panels("session", Some("Pods"), 0).unwrap();
+    assert_eq!(read["panels"][0]["rows"][0]["key"]["node"], "n-1");
+    assert!(read["panels"][0].get("keys_cut").is_none());
+}
+
+#[test]
 fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_else_does() {
     let (hub, _jobs) = hub_with(FakeBackend::new());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4389,6 +4604,7 @@ fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_els
         panel: list.id.clone(),
         row: row.to_owned(),
         revision,
+        key: None,
     };
     let source = {
         let state = hub.lock();
@@ -4438,6 +4654,7 @@ fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_els
                 panel: panel("Rota").id,
                 row: "a".into(),
                 revision: None,
+                key: None,
             },
             "That panel has no rows to choose.",
         ),
@@ -4446,6 +4663,7 @@ fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_els
                 panel: "panel-404".into(),
                 row: "a".into(),
                 revision: None,
+                key: None,
             },
             "That panel is not here.",
         ),
@@ -4473,6 +4691,7 @@ fn a_participant_s_choice_of_a_row_reaches_its_environment_by_id_and_nothing_els
         panel: "p".repeat(limits::IDENTIFIER_BYTES + 1),
         row: "pod9".into(),
         revision: None,
+        key: None,
     });
     assert_eq!(ada.errors().len(), 1);
     hub.channel_publish_at(
@@ -4986,6 +5205,7 @@ fn a_choice_made_against_the_version_a_paced_client_was_sent_is_resolved_by_id()
         panel: first.id.clone(),
         row: row.to_owned(),
         revision: Some(revision),
+        key: None,
     };
     let chosen = |count: usize| {
         eventually_in("the side is handed the choice", || {
@@ -5062,6 +5282,7 @@ fn a_row_of_the_last_of_as_many_lists_as_a_side_may_show_is_chosen() {
         panel: panel.id.clone(),
         row: format!("pod{last}"),
         revision: Some(panel.version),
+        key: None,
     });
     assert!(ada.errors().is_empty());
     eventually_in("the side is handed the choice", || {

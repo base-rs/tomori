@@ -44,6 +44,9 @@ pub(crate) struct Asking {
     actions: Vec<tomori_environment::Action>,
     /// Whether one action was asked for, to be told whole.
     one: bool,
+    /// The key of the row of a list it names, as its side gave it, told as data: none for anything else, and a row
+    /// without one. See `design/panel-actions.md`.
+    key: Vec<(String, String)>,
 }
 
 /// The most bytes an inspection's result takes as it is sent, as structured content and again as text, so that the
@@ -195,6 +198,11 @@ impl Hub {
             };
             actions = vec![actions.swap_remove(index)];
         }
+        let key = if object.is_none() {
+            record.stage.referenced_key(current, reference).to_vec()
+        } else {
+            Vec::new()
+        };
         let described = object
             .map(|(_, described)| described.description.clone())
             .or_else(|| record.stage.referenced(current, reference))
@@ -223,6 +231,7 @@ impl Hub {
             inspector,
             actions,
             one: action.is_some(),
+            key,
         })
     }
 
@@ -240,6 +249,7 @@ impl Hub {
             inspector,
             actions,
             one,
+            key,
         } = asking;
         // Its actions as fully as fit, with what to do about any left out.
         let result = |details: Value, next: &str| {
@@ -249,7 +259,7 @@ impl Hub {
                 } else {
                     " It offers the actions listed, which you may take on it with act when someone asks."
                 };
-                json!({
+                let mut told = json!({
                     "space": space,
                     "id": id,
                     "environment": environment,
@@ -258,7 +268,16 @@ impl Hub {
                     "actions": actions,
                     "note": NOTE,
                     "next": format!("{next}{offers}{more}"),
-                })
+                });
+                // A row's key, as data, as its side gave it.
+                if !key.is_empty() {
+                    told["key"] = key
+                        .iter()
+                        .map(|(name, value)| (name.clone(), json!(value)))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                }
+                told
             };
             let ask = if one {
                 " Some of its choices are left out, as choices_total counts them: ask whoever asked to name one."

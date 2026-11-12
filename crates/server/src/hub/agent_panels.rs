@@ -135,6 +135,13 @@ pub(crate) const LISTING_BYTES: usize = 32 * 1024;
 /// result around them.
 const LISTING_ROOM: usize = 1024;
 
+/// How many characters of each value of its rows' keys a list read whole tells, in turn, until it is within
+/// [`LISTING_BYTES`]: all of them, then the first 64, then 16, then none.
+const KEYS_TOLD: [Option<usize>; 4] = [None, Some(64), Some(16), Some(0)];
+
+/// What a list read whole says where its rows' keys are cut to fit.
+const KEYS_CUT: &str = "Some rows' keys are cut, each value ending with …, or left out, to fit; inspect a row for its whole key.";
+
 /// How many bytes `value` takes as a tool's result is sent: as its structured content, and again as its text, a JSON
 /// string of it, whose quotes and backslashes are escaped. See [`crate::mcp::structured`].
 pub(crate) fn sent(value: &Value) -> usize {
@@ -238,7 +245,7 @@ fn listed(
 /// once: an environment's list its rows, each with its id, the id the agent may inspect it by, whether it is
 /// highlighted, its tone, in a word, its value against its limit, from 0 to 1, or null, and its text, and, of a list
 /// laid out as a table, its columns, each with its title, alignment and whether its rows' values are drawn under it,
-/// and each row's cells in place of its text; any other text
+/// and each row's cells in place of its text, and each row's key, where its side gave it one, as data; any other text
 /// or chart panel its body, as participants see it, and its list items; a code panel only its language, as before.
 fn detailed(
     projection: &Projection,
@@ -246,9 +253,11 @@ fn detailed(
     updated: Option<u64>,
     published: (Option<(&str, Option<&str>)>, bool),
     rows: Option<(&[crate::stage::Row], Option<&str>)>,
+    keys: Option<usize>,
 ) -> Value {
     let mut described = summarized(projection, panel, updated, published);
     let columns = &panel.columns;
+    let mut cut = false;
     match rows {
         Some((rows, highlighted)) => {
             described["rows"] = rows
@@ -271,9 +280,36 @@ fn detailed(
                     } else {
                         told["cells"] = json!(row.cells);
                     }
+                    // Its key, as data, where its side gave it one: each value its first `keys` characters, followed by
+                    // `…`, and none where that is none, where the whole would take more than is read.
+                    if !row.fields.is_empty() {
+                        match keys {
+                            Some(0) => cut = true,
+                            most => {
+                                told["key"] = row
+                                    .fields
+                                    .iter()
+                                    .map(|(name, value)| {
+                                        let shown = match most {
+                                            Some(most) if value.chars().count() > most => {
+                                                cut = true;
+                                                tomori_protocol::text::one_line(value, most)
+                                            }
+                                            _ => value.clone(),
+                                        };
+                                        (name.clone(), json!(shown))
+                                    })
+                                    .collect::<serde_json::Map<_, _>>()
+                                    .into();
+                            }
+                        }
+                    }
                     told
                 })
                 .collect();
+            if cut {
+                described["keys_cut"] = json!(KEYS_CUT);
+            }
             if !columns.is_empty() {
                 described["columns"] = columns
                     .iter()
@@ -339,14 +375,21 @@ impl Hub {
         if let Some(panel) = panel {
             let id = find(&projection, panel)?;
             let panel = projection.panel(&id).expect("a panel found");
-            let detail = detailed(
-                &projection,
-                panel,
-                updated(panel),
-                published(panel),
-                rows(panel),
-            );
-            told["panels"] = json!([detail]);
+            // Whole, or, where its rows' keys would take it past what is read, their values cut, and then left out.
+            for keys in KEYS_TOLD {
+                let detail = detailed(
+                    &projection,
+                    panel,
+                    updated(panel),
+                    published(panel),
+                    rows(panel),
+                    keys,
+                );
+                told["panels"] = json!([detail]);
+                if sent(&told) + LISTING_ROOM <= LISTING_BYTES {
+                    break;
+                }
+            }
             return Ok(told);
         }
         let total = projection.panels.len();

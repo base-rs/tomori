@@ -52,8 +52,9 @@ pub use zone::{
 };
 
 pub use panel::{
-    CELL_CHARS, COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, PANEL_ID_BYTES, PANEL_LIMIT, Panel,
-    ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_panel_id, valid_row_id,
+    CELL_CHARS, COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, FIELD_LIMIT, FIELD_NAME_BYTES,
+    FIELD_VALUE_BYTES, FIELDS_BYTES, PANEL_ID_BYTES, PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES,
+    ROW_LIMIT, Row, valid_field_name, valid_panel_id, valid_row_id,
 };
 /// How a list panel's column aligns its cells, as [`Column::aligned`] takes it.
 pub use tomori_protocol::CellAlign;
@@ -240,6 +241,7 @@ pub struct Chosen {
     panel: String,
     row: String,
     current: bool,
+    fields: Vec<(String, String)>,
 }
 
 impl Chosen {
@@ -249,7 +251,38 @@ impl Chosen {
             panel: panel.into(),
             row: row.into(),
             current,
+            fields: Vec::new(),
         }
+    }
+
+    /// The choice, of a row whose key is `fields`, as the side published it.
+    pub fn with_fields(mut self, fields: Vec<(String, String)>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    /// The key of the row chosen, verbatim, in the order the side gave its fields ([`crate::Row::with_field`]), as it
+    /// was when the participant saw the row: the server hands on a choice only of a row whose key has not changed since
+    /// they saw it, and refuses the rest as stale, so that the side acts on exactly what was chosen. None for a row
+    /// without a key. A client never sends a key, so none can be forged. See `design/panel-actions.md`.
+    pub fn fields(&self) -> &[(String, String)] {
+        &self.fields
+    }
+
+    /// The value of the chosen row's field `name`, if its key has one.
+    ///
+    /// ```
+    /// use tomori_environment::Chosen;
+    ///
+    /// let chosen = Chosen::new("queues", "pod-a", true).with_fields(vec![("node".into(), "n-3".into())]);
+    /// assert_eq!((chosen.field("node"), chosen.field("region")), (Some("n-3"), None));
+    /// assert!(Chosen::new("queues", "pod-a", true).fields().is_empty());
+    /// ```
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
     }
 
     /// The side's id for the panel, as it published it.

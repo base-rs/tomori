@@ -58,6 +58,39 @@ pub const COLUMN_TITLE_CHARS: usize = 24;
 /// at most [`ROW_CHARS`], as its text does; those past that are cut, or left empty.
 pub const CELL_CHARS: usize = tomori_protocol::LIST_CELL_CHARS;
 
+/// The most fields of a row's key, [`Row::with_field`]: a row with more is refused.
+pub const FIELD_LIMIT: usize = 8;
+
+/// The longest name of a field of a row's key, in bytes.
+pub const FIELD_NAME_BYTES: usize = 32;
+
+/// The longest value of a field of a row's key, in bytes.
+pub const FIELD_VALUE_BYTES: usize = 256;
+
+/// The most bytes of names and values the keys of a list panel's rows take together: a list whose keys take more is
+/// refused.
+pub const FIELDS_BYTES: usize = 8 * 1024;
+
+/// Whether `name` is one a field of a row's key may have: 1 to [`FIELD_NAME_BYTES`] ASCII lowercase letters, digits and
+/// `_`, beginning with a letter.
+///
+/// ```
+/// use tomori_environment::valid_field_name;
+///
+/// assert!(valid_field_name("instance"));
+/// assert!(valid_field_name("pod_2"));
+/// assert!(!valid_field_name(""));
+/// assert!(!valid_field_name("Node"));
+/// assert!(!valid_field_name("2nd"));
+/// ```
+pub fn valid_field_name(name: &str) -> bool {
+    (1..=FIELD_NAME_BYTES).contains(&name.len())
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 /// A column of a list panel laid out as a table, [`Panel::with_columns`]: its title, which may be empty, a list whose
 /// every title is empty showing no header, how its cells are aligned, and whether each row's value is drawn as a bar
 /// under its cell rather than under the whole row. See `design/panel-actions.md`.
@@ -165,6 +198,7 @@ pub struct Row {
     tone: Tone,
     value: Option<f32>,
     cells: Vec<String>,
+    fields: Vec<(String, String)>,
 }
 
 impl Row {
@@ -178,7 +212,45 @@ impl Row {
             tone: Tone::Neutral,
             value: None,
             cells: Vec::new(),
+            fields: Vec::new(),
         }
+    }
+
+    /// The row, its key gaining the field `name`, `value`: what the row stands for in the side's own terms, such as the
+    /// instance, region and node of a pod, which the server keeps and hands back verbatim, in its order, with a choice
+    /// of the row ([`crate::Chosen::fields`]), so that the side finds what was chosen exactly, never by parsing the
+    /// row's id or matching its text. A key is never sent to a client, so no client can forge or change it; the agent
+    /// is told it, as data, of a row pointed at, read or inspected. At most [`FIELD_LIMIT`] fields, each named as
+    /// [`valid_field_name`] takes, once, with a value of text on one line, without control or format characters, of at
+    /// most [`FIELD_VALUE_BYTES`], and a list's keys together at most [`FIELDS_BYTES`]; the server refuses more, or
+    /// another value, saying why. A key that changes and then changes back is a new key to the server, so that a choice
+    /// made while it was as it was first is refused as stale, and the participant chooses again. See
+    /// `design/panel-actions.md`.
+    ///
+    /// ```
+    /// use tomori_environment::Row;
+    ///
+    /// let row = Row::new("pod-a", "pod a").with_field("instance", "10.0.0.7:9100").with_field("node", "n-3");
+    /// assert_eq!(row.field("node"), Some("n-3"));
+    /// assert_eq!(row.fields().len(), 2);
+    /// assert_eq!(Row::new("pod-a", "").field("node"), None);
+    /// ```
+    pub fn with_field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.push((name.into(), value.into()));
+        self
+    }
+
+    /// Its key's fields, in the order it gave them; none unless it says.
+    pub fn fields(&self) -> &[(String, String)] {
+        &self.fields
+    }
+
+    /// The value of its key's field `name`, if it has one.
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
     }
 
     /// The row, with `cells`, one for each column of its list, in their order, for a list laid out as a table
@@ -551,6 +623,38 @@ mod tests {
         );
         assert!(Panel::text("rota", "Rota", "").columns().is_empty());
         assert_eq!((COLUMN_LIMIT, COLUMN_TITLE_CHARS, CELL_CHARS), (8, 24, 32));
+    }
+
+    #[test]
+    fn a_row_s_key_is_what_it_was_given_in_order_and_its_names_are_short_and_plain() {
+        let row = Row::new("a", "A")
+            .with_field("region", "us-east")
+            .with_field("instance", "i-1");
+        assert_eq!(
+            row.fields(),
+            [
+                ("region".to_owned(), "us-east".to_owned()),
+                ("instance".to_owned(), "i-1".to_owned())
+            ]
+        );
+        assert_eq!(
+            (row.field("instance"), row.field("node")),
+            (Some("i-1"), None)
+        );
+        assert!(valid_field_name(&"a".repeat(FIELD_NAME_BYTES)));
+        assert!(!valid_field_name(&"a".repeat(FIELD_NAME_BYTES + 1)));
+        for refused in ["_a", "a-b", "a b", "ä", "A"] {
+            assert!(!valid_field_name(refused), "{refused:?}");
+        }
+        assert_eq!(
+            (
+                FIELD_LIMIT,
+                FIELD_NAME_BYTES,
+                FIELD_VALUE_BYTES,
+                FIELDS_BYTES
+            ),
+            (8, 32, 256, 8192)
+        );
     }
 
     #[test]

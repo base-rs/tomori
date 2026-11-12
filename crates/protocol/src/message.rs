@@ -797,14 +797,19 @@ pub enum ClientMessage {
     /// decides what it does; it changes nothing in the projection. A choice the server refuses, as of a row that has
     /// gone, names the panel in its [`ServerMessage::Error`]; one past the rate is dropped quietly.
     ///
-    /// A client also says, as `revision`, the panel's [`crate::Panel::version`] it saw. The row is named by its id, never
-    /// by its place in the list, so that a choice made as the list changed still names the row the participant saw; the
-    /// server tells the environment whether the panel was as they saw it. See `design/panel-actions.md`.
+    /// A client also says, as `revision`, the panel's [`crate::Panel::version`] it saw, and, as `key`, the revision of
+    /// the row's key it saw ([`crate::ListRow::key`]), where the row had one. The row is named by its id, never by its
+    /// place in the list, so that a choice made as the list changed still names the row the participant saw; the server
+    /// hands the environment the row's key, which it keeps and never sends, only where it is the key the participant
+    /// saw, refusing the choice as stale otherwise, and tells it whether the panel was as they saw it. A client sends no
+    /// key of its own. See `design/panel-actions.md`.
     ChoosePanelRow {
         panel: String,
         row: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<u64>,
     },
     /// Send the whole projection of the client's space again, as [`ServerMessage::Projection`]: the client holds
     /// `revision`, and was sent a [`ServerMessage::ProjectionPatch`] it could not apply, as one from another revision,
