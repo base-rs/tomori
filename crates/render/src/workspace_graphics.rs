@@ -1391,6 +1391,9 @@ const LEADER_WIDTH: f32 = 1.3;
 const LEADER_DOT: f32 = 2.6;
 const SIGN_LEADER: f32 = -0.006;
 const SIGN_PLATE: f32 = -0.004;
+/// A highlighted sign's border, a millimetre behind its plate, so that the plate covers it everywhere but its edge
+/// rather than the two fighting for depth.
+const SIGN_OUTLINE: f32 = -0.005;
 /// How much brighter a sign, its leader and its dot are drawn while its worker is pointed at, as its flock is drawn paler;
 /// how far its dark plate is tinted towards its state's colour then; and how wide, in font pixels, the border about its
 /// plate's edge is.
@@ -1443,7 +1446,7 @@ fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
             radius: PLATE_RADIUS + OUTLINE_WIDTH,
             outline: None,
         };
-        shape(mesh, &border, p, SIGN_PLATE);
+        shape(mesh, &border, p, SIGN_OUTLINE);
     }
     let plate = Shape::Rect {
         x: -PLATE_MARGIN[0],
