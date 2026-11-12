@@ -113,15 +113,27 @@ fn the_agent_is_told_of_a_node_with_its_edges_and_of_an_edge_with_its_style() {
     // A dotted edge, a node with a reference, and a group by its label.
     let (stage, id) = shown("title: T\n---\nsubgraph g [Group]\na@{ ref: crates/x }\nend\na --> b\n");
     let mut kept = stage.clone();
-    if let Some(diagram) = kept.here_mut("sky", &id).unwrap().content.diagram.as_mut() {
-        diagram.edges[0].style = tomori_protocol::diagram::Style::Dotted;
-    }
+    let diagram = kept.here_mut("sky", &id).unwrap().content.diagram.as_mut().unwrap();
+    diagram.edges[0].style = tomori_protocol::diagram::Style::Dotted;
+    // A group without a label is named by its id, and an edge to a node not there, as a record changed by hand might
+    // hold, is not told.
+    diagram.groups[0].label.clear();
+    diagram.edges.push(tomori_protocol::diagram::Edge::new(0, 40));
+
     let read = |stage: &Stage, node: Option<&str>, edge: Option<u16>| {
         stage
             .describe_at(&walls, &id, crate::stage::Pointed { node, edge, ..Default::default() }, 0)
             .unwrap()
     };
     assert!(read(&kept, None, Some(0)).ends_with("; dotted)"));
+    assert!(read(&kept, Some("a"), None).contains("box, in group \"g\"; edges: to b; ref:"));
+    assert!(read(&kept, Some("b"), None).ends_with("box; edges: from a)"));
+    // A node of no edges says none.
+    let (lone, lone_id) = shown("a\n");
+    let told = lone
+        .describe_at(&SKY, &lone_id, crate::stage::Pointed { node: Some("a"), ..Default::default() }, 0)
+        .unwrap();
+    assert!(told.ends_with("; box)"), "{told}");
     assert!(read(&stage, Some("a"), None).ends_with("box, in group \"Group\"; edges: to b; ref: \"crates/x\")"));
     assert_eq!(stage.named_diagram("sky", "nothing"), None);
 }

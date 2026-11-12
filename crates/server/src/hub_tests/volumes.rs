@@ -122,11 +122,13 @@ fn a_block_with_the_id_of_a_volume_updates_it_where_it_stands_and_the_agent_is_t
     // The agent is told before the next words, by the block's own lines.
     let notes = hub.lock().space(&space).unwrap().model.notes().iter().map(|note| note.to_string()).collect::<Vec<_>>();
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].starts_with("Tomori showed the diagram \"How a frame is drawn\" (id renderer, panel-"), "{}", notes[0]);
-    assert!(notes[0].contains("line 16: 'render' is not a node; made a box called render (did you mean renderer?)"), "{}", notes[0]);
-    assert!(notes[0].contains("layout 'spiral' is not one Tomori knows"), "{}", notes[0]);
+    let note = &notes[0];
+    assert!(note.starts_with("Tomori showed the diagram \"How a frame is drawn\" (id renderer, panel-"), "{note}");
+    assert!(note.contains("line 16: 'render' is not a node; made a box called render (did you mean renderer?)"), "{note}");
+    assert!(note.contains("layout 'spiral' is not one Tomori knows"), "{note}");
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
-    assert!(prompt.text.contains("[Tomori showed the diagram"), "{}", prompt.text);
+    let text = &prompt.text;
+    assert!(prompt.text.contains("[Tomori showed the diagram"), "{text}");
 }
 
 #[test]
@@ -187,8 +189,23 @@ fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
         assert_eq!(answer["isError"], true);
         assert_eq!(answer["content"][0]["text"], error);
     }
-    let answer = call(&hub, "show_diagram", json!({"source": "a", "place": "behind the moon"}));
-    assert_eq!(answer["isError"], true);
+    for arguments in [
+        json!({"source": "a", "place": "behind the moon"}),
+        json!({"source": "a", "place": "near Nobody"}),
+        json!({"source": "a", "title": 3}),
+        json!({"source": "a", "id": 3}),
+        json!({"source": "a", "place": 3}),
+        json!({"source": 3}),
+    ] {
+        assert_eq!(call(&hub, "show_diagram", arguments)["isError"], true);
+    }
+    // A volume is read back by panels, its outline its body, and is not updated by update_panel.
+    let answer = call(&hub, "panels", json!({"panel": shown[0].id}));
+    let read = &answer["structuredContent"]["panels"][0];
+    assert_eq!(read["kind"], "diagram");
+    assert_eq!((read["node_count"].as_u64(), read["edge_count"].as_u64()), (Some(3), Some(2)));
+    let answer = call(&hub, "update_panel", json!({"panel": shown[0].id, "title": "Renamed"}));
+    assert_eq!(answer["content"][0]["text"], "A diagram is updated with show_diagram, or a diagram block, of its id.");
     let large: Vec<Value> = (0..300)
         .map(|index| json!({"id": format!("n{index}"), "detail": "x".repeat(100)}))
         .collect();
@@ -225,11 +242,11 @@ fn pointing_at_a_node_or_an_edge_names_it_to_the_agent_with_each_hand() {
         ],
         None,
     );
+    let text = &prompt.text;
     assert!(
-        prompt.text.contains("[Pointing at node \"Frame step\" (id step) in diagram \"How a frame is drawn\" (id renderer, "),
-        "{}",
-        prompt.text
+        text.contains("[Pointing at node \"Frame step\" (id step) in diagram \"How a frame is drawn\" (id renderer, "),
+        "{text}"
     );
-    assert!(prompt.text.contains("; sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{}", prompt.text);
-    assert!(prompt.text.contains("edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"), "{}", prompt.text);
+    assert!(prompt.text.contains("; sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
+    assert!(prompt.text.contains("edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"), "{text}");
 }

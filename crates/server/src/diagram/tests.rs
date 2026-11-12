@@ -136,7 +136,8 @@ fn a_small_edit_to_a_layered_diagram_keeps_each_rank_in_order() {
     let now = relative(&after, &ids);
     let pitch = 180.0;
     for (index, id) in ids.iter().enumerate() {
-        assert!(apart(was[index], now[index]) < pitch, "{id} moved from {:?} to {:?}", was[index], now[index]);
+        let (was, now) = (was[index], now[index]);
+        assert!(apart(was, now) < pitch, "{id} moved from {was:?} to {now:?}");
     }
     // stage stood left of backend, and still does.
     assert_eq!(
@@ -160,19 +161,22 @@ fn a_small_edit_to_a_force_diagram_moves_little() {
     let was = relative(&before, &ids);
     let now = relative(&after, &ids);
     for (index, id) in ids.iter().enumerate() {
-        assert!(apart(was[index], now[index]) < 90.0, "{id} moved from {:?} to {:?}", was[index], now[index]);
+        let (was, now) = (was[index], now[index]);
+        assert!(apart(was, now) < 90.0, "{id} moved from {was:?} to {now:?}");
     }
     // Laid out afresh from the same, it would be the same as before.
     assert_eq!(force(body, None), before);
     // No two nodes overlap.
     for (index, a) in after.nodes.iter().enumerate() {
         for b in &after.nodes[index + 1..] {
-            assert!(apart(a.at.map(f64::from), b.at.map(f64::from)) >= 100.0, "{} and {}", a.id, b.id);
+            let (a, b) = (&a.id, &b.id);
+            assert!(apart(at(&after, a), at(&after, b)) >= 100.0, "{a} and {b}");
         }
     }
     // It is widest across, then tallest, and shallowest in depth.
     let spread = |axis: usize| before.nodes.iter().map(|node| f64::from(node.at[axis]).powi(2)).sum::<f64>();
-    assert!(spread(0) >= spread(1) && spread(1) >= spread(2), "{} {} {}", spread(0), spread(1), spread(2));
+    let spreads = [spread(0), spread(1), spread(2)];
+    assert!(spreads[0] >= spreads[1] && spreads[1] >= spreads[2], "{spreads:?}");
 }
 
 #[test]
@@ -184,7 +188,8 @@ fn groups_stand_together_and_their_boxes_hold_their_members() {
     for (index, group) in diagram.groups.iter().enumerate() {
         for node in diagram.nodes.iter().filter(|node| node.group.map(usize::from) == Some(index)) {
             for axis in 0..3 {
-                assert!(group.low[axis] < node.at[axis] && node.at[axis] < group.high[axis], "{} in {}", node.id, group.id);
+                let (node, group, at) = (&node.id, &group.id, (group.low[axis], node.at[axis], group.high[axis]));
+                assert!(at.0 < at.1 && at.1 < at.2, "{node} in {group}");
             }
         }
     }
@@ -244,4 +249,46 @@ fn two_nodes_at_one_spot_part_and_far_points_are_held_in_range() {
     assert_eq!(millimetres(1e9), i16::MAX);
     assert_eq!(normalised([0.0; 3]), None);
     assert_eq!(thinned(vec![[0.0; 3]; 3]).len(), 3);
+}
+
+#[test]
+fn force_lays_out_one_node_parts_what_overlaps_and_turns_a_line_flat() {
+    // One node, and nodes of no edges at all, which stand one more than the furthest apart.
+    for body in ["a\n", "a\nb\nc --- d\n"] {
+        let mut diagram = parse(body).0;
+        diagram.layout = tomori_protocol::diagram::Layout::Force;
+        lay_out(&mut diagram, None);
+        assert!(diagram.extent.iter().all(|side| *side > 0));
+    }
+    let graph = Graph {
+        widths: vec![60.0; 3],
+        groups: vec![None; 3],
+        edges: Vec::new(),
+        written: Vec::new(),
+        ids: vec!["a".into(), "b".into(), "c".into()],
+    };
+    // Overlapping, or at one spot, they are pushed apart until none overlaps.
+    let mut spots = vec![[0.0; 3], [0.0; 3], [10.0, 0.0, 0.0]];
+    force::separate(&graph, &mut spots);
+    for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+        assert!(apart(spots[a], spots[b]) >= 119.0, "{spots:?}");
+    }
+    // Along one line, they are turned to lie across, the first on the left.
+    let mut line = vec![[0.0, 0.0, 300.0], [0.0, 0.0, 0.0], [0.0, 0.0, -300.0]];
+    force::turned(&mut line);
+    assert!(line[0][0] < -299.0 && line[2][0] > 299.0, "{line:?}");
+    assert!(line.iter().all(|spot| spot[1].abs() < 1e-6 && spot[2].abs() < 1e-6), "{line:?}");
+    // At one spot, they stay there.
+    let mut one = vec![[5.0; 3]; 2];
+    force::turned(&mut one);
+    assert_eq!(one, [[0.0; 3]; 2]);
+}
+
+#[test]
+fn a_layered_layout_laid_out_again_across_keeps_its_ranks_order() {
+    let (before, _) = laid("flowchart LR\nhub --> a\nhub --> b\nhub --> c\n", None);
+    let (after, _) = laid("flowchart LR\nhub --> new\nhub --> a\nhub --> b\nhub --> c\n", Some(&before));
+    let y = |diagram: &Diagram, id: &str| at(diagram, id)[1];
+    // Down the rank in the order they stood, the new one among them where its edge draws it.
+    assert!(y(&after, "a") > y(&after, "b") && y(&after, "b") > y(&after, "c"));
 }

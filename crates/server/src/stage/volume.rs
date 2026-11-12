@@ -128,8 +128,9 @@ impl Stage {
     /// The diagram of the volume the agent calls `slug` in `environment`, as it stands, from which a block or tool
     /// with its id lays the volume out again.
     pub(crate) fn named_diagram(&self, environment: &str, slug: &str) -> Option<&Diagram> {
-        let id = self.named(environment, slug)?;
-        self.kept(environment, &id)?.content.diagram.as_deref()
+        self.here(environment)
+            .find(|kept| kept.content.code.is_none() && kept.content.slug.as_deref() == Some(slug))
+            .and_then(|kept| kept.content.diagram.as_deref())
     }
 }
 

@@ -118,7 +118,7 @@ fn distances(graph: &Graph) -> Vec<Vec<f64>> {
 }
 
 /// Push apart every two nodes nearer than their half widths and a gap, each half of what they lack, in turn.
-fn separate(graph: &Graph, spots: &mut [Spot]) {
+pub(super) fn separate(graph: &Graph, spots: &mut [Spot]) {
     for _ in 0..SEPARATIONS {
         let mut moved = false;
         for a in 0..spots.len() {
@@ -147,7 +147,7 @@ fn separate(graph: &Graph, spots: &mut [Spot]) {
 /// Turn `spots` about their middle so that they are widest across, then tallest, and shallowest in depth, which a
 /// volume read from in front shows best: their principal axes, by power iteration on their covariance, signed so that
 /// the first node stands left of and above the middle.
-fn turned(spots: &mut [Spot]) {
+pub(super) fn turned(spots: &mut [Spot]) {
     let count = spots.len() as f64;
     let middle = [0, 1, 2].map(|axis| spots.iter().map(|spot| spot[axis]).sum::<f64>() / count);
     let centred: Vec<Spot> = spots.iter().map(|spot| [0, 1, 2].map(|axis| spot[axis] - middle[axis])).collect();
