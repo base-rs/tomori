@@ -191,6 +191,10 @@ pub(crate) struct Following {
     pub(super) pinned_by: Option<String>,
     /// Where it was, and when, as it was sent home: it glides home from there.
     homing: Option<([f32; 3], Instant)>,
+    /// The waypoint it glides home by, over the ground, and where home is, until it arrives.
+    homeway: Option<([f32; 3], [f32; 3])>,
+    /// The environment's walkable ground and the agent's home, as it last went somewhere, for its way home over it.
+    terrain: Option<(follow::Ground, Pose)>,
     /// Since when the space has had nobody in it, while it is pinned.
     empty: Option<Instant>,
     /// Since when the conversation has been quiet, while it is away from home.
@@ -250,6 +254,7 @@ impl Following {
             self.holding.values().min().copied(),
             self.glance.map(|(_, until)| until),
             self.glide.as_ref().map(Glide::ends),
+            self.homeway_ends(),
             self.poll,
             self.keeping.as_ref().and_then(|keeping| keeping.due),
         ]
@@ -312,16 +317,29 @@ impl Following {
         }
     }
 
-    /// Its way home, at home's `home`, while it was sent home and is summoned nowhere since.
+    /// Its way home, at home's `home`, while it was sent home and is summoned nowhere since: by its waypoint over the
+    /// ground, until it arrives, where it goes by one.
     fn homeward(&self, summoned: Option<Pose>, home: Pose) -> Option<Glide> {
         let (from, started) = self.homing.filter(|_| summoned.is_none())?;
+        let path = match self.homeway {
+            Some((via, _)) => vec![via, home.position],
+            None => vec![home.position],
+        };
         Some(Glide {
             from,
             was: None,
-            path: vec![home.position],
+            path,
             started,
             speed: GLIDE,
         })
+    }
+
+    /// When its way home by a waypoint over the ground ends, while it goes by one.
+    fn homeway_ends(&self) -> Option<Instant> {
+        let (from, started) = self.homing?;
+        let (via, home) = self.homeway?;
+        let length = follow::distance(from, via) + follow::distance(via, home);
+        Some(started + Duration::from_secs_f32(length / GLIDE))
     }
 
     /// Whether it is on its way somewhere at `now`, or home.
@@ -600,7 +618,7 @@ impl Hub {
         if !others.is_empty() {
             let mut huddle = vec![captured.speaker];
             huddle.extend(others.iter().copied());
-            if follow::serves(&agent, &huddle) {
+            if follow::serves(&agent, &huddle, &captured.scene) {
                 return;
             }
         }
@@ -806,6 +824,11 @@ impl Hub {
         let was = record.summoned;
         state.summon(space, Some(at), Some(head.position));
         state.agent_moved(space, (from, was), at, route, now);
+        state
+            .space_mut(space)
+            .expect("found above")
+            .following
+            .terrain = captured.scene.ground.clone().zip(Some(captured.home));
         let name = state.participants[participant].name.clone();
         let handle = crate::presence::handle(&name, state.participants[participant].tag);
         state.agent_pin(space, now, Some(handle));
@@ -884,6 +907,11 @@ impl Hub {
         let was = record.summoned;
         state.summon(space, Some(at), Some(eyes));
         state.agent_moved(space, (from, was), at, route, now);
+        state
+            .space_mut(space)
+            .expect("found above")
+            .following
+            .terrain = scene.ground.zip(Some(home));
     }
 
     /// What the agent of `space` keeps clear of now, the environment's solids, the walls shown, the panels floating and
@@ -916,7 +944,8 @@ impl Hub {
             panels,
             heads,
         )
-        .hovering(environments.follow_height(environment));
+        .hovering(environments.follow_height(environment))
+        .on(environments.ground(environment));
         (scene, projection, home(&environments.anchors(environment)))
     }
 }
@@ -1275,6 +1304,7 @@ impl HubState {
         };
         let route = follow::route(agent.position, spot.position, scene);
         following.start(agent.position, record.summoned, spot.position, route, now);
+        following.terrain = scene.ground.clone().zip(Some(captured.home));
         following.facing = None;
         following.glance = None;
         following.quiet = None;
@@ -1293,7 +1323,8 @@ impl HubState {
         let how = match route {
             Route::Straight => "gliding",
             Route::Via(_) => "gliding by a waypoint",
-            Route::Stream => "streaming",
+            Route::Stream(None) => "streaming",
+            Route::Stream(Some(_)) => "streaming over the ground",
         };
         log::info!(
             "The agent of space {space} followed {with}, as {reason}, {:.1} m from them, {how} to ({x:.2}, {y:.2}, {z:.2}), {:.1} m from them, facing them.",
@@ -1314,8 +1345,22 @@ impl HubState {
             (Some(_), Some(glide)) => Some((glide.at(now), now)),
             (Some(summoned), None) => Some((summoned.position, now)),
         };
+        let terrain = record.following.terrain.take();
+        // Over the ground, where the straight way home passes below it, as from a deck down to home beneath it.
+        let homeway = match (record.summoned, &terrain) {
+            (None, _) => record.following.homeway,
+            (Some(_), Some((ground, home))) => homing.and_then(|(from, _)| {
+                follow::over_ground(from, home.position, Some(ground))
+                    .map(|via| (via, home.position))
+            }),
+            (Some(_), None) => None,
+        };
+        let via = homeway.map(|(via, _)| via);
         record.following = Following {
             homing,
+            homeway,
+            via,
+            terrain,
             // Home, it still knows whom it talks with.
             partner: record.following.partner.take(),
             talked: record.following.talked,
@@ -1613,6 +1658,11 @@ impl HubState {
             // Arrived, it no longer goes by its waypoint or streams, for whoever joins.
             changed |= following.via.take().is_some() | std::mem::take(&mut following.stream);
         }
+        if following.homeway_ends().is_some_and(|ends| ends <= now) {
+            // Home, likewise.
+            following.homeway = None;
+            changed |= following.via.take().is_some();
+        }
         let mut home = None;
         let mut walked = None;
         if following.poll.is_some_and(|due| due <= now) {
@@ -1677,14 +1727,16 @@ impl Following {
         let (path, speed) = match route {
             Route::Straight => (vec![to], GLIDE),
             Route::Via(via) => (vec![via, to], GLIDE),
-            Route::Stream => (vec![to], STREAMING),
+            Route::Stream(None) => (vec![to], STREAMING),
+            Route::Stream(Some(via)) => (vec![via, to], STREAMING),
         };
         self.via = match route {
-            Route::Via(via) => Some(via),
+            Route::Via(via) | Route::Stream(Some(via)) => Some(via),
             _ => None,
         };
-        self.stream = route == Route::Stream;
+        self.stream = matches!(route, Route::Stream(_));
         self.homing = None;
+        self.homeway = None;
         self.glide = Some(Glide {
             from,
             was,

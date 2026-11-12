@@ -84,6 +84,8 @@ speech = ["dep:tomori-speech"]
 speech-shared = ["speech", "tomori-speech/shared"]
 
 [dependencies]
+# The walkable ground's points and rays, as `tomori-environment`'s navmesh takes them.
+glam = "0.33"
 async-channel = "2"
 tomori-backend = { version = "0.2.0", path = "../backend" }
 tomori-environment = { version = "0.2.0", path = "../environment" }

@@ -49,6 +49,9 @@ pub struct Environment {
     /// How high above the space's floor the agent hovers as it comes to someone, if it says. See
     /// `design/environments.md`.
     follow_height: Option<f32>,
+    /// Its walkable ground, in its own coordinates, if it gives it: the navmesh its clients walk on, which the agent
+    /// stands above and keeps clear of. See `design/environments.md`.
+    navmesh: Option<Arc<tomori_environment::navmesh::Navmesh>>,
 }
 
 /// The lowest and highest an environment may have the agent hover as it comes to someone, in metres above the space's
@@ -395,11 +398,12 @@ impl fmt::Debug for Environment {
             .field("walls", &self.walls)
             .field("solids", &self.solids)
             .field("follow_height", &self.follow_height)
+            .field("navmesh", &self.navmesh)
             .finish()
     }
 }
 
-/// Equal when they offer the same identifier, label, version, instructions, anchors and walls, and the same server side, which is the same one rather than one like it.
+/// Equal when they offer the same identifier, label, version, instructions, anchors, walls, solids and ground, and the same server side, which is the same one rather than one like it.
 impl PartialEq for Environment {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -414,6 +418,7 @@ impl PartialEq for Environment {
             && self.walls == other.walls
             && self.solids == other.solids
             && self.follow_height == other.follow_height
+            && self.navmesh == other.navmesh
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
                 (None, None) => true,
@@ -442,6 +447,7 @@ impl Environment {
             carried: Vec::new(),
             solids: Vec::new(),
             follow_height: None,
+            navmesh: None,
         }
     }
 
@@ -923,6 +929,34 @@ impl Environment {
         &self.solids
     }
 
+    /// The environment, with `navmesh`, its walkable ground, in its own coordinates: the same ground its clients'
+    /// teleport profile lands participants on, derived by `tomori_environment::navmesh::Navmesh::derive` from what it
+    /// draws as ground, less what stands on it, from the description its crate shares between its server and its
+    /// clients. The agent following someone stands on their level, as high above the floor beneath it as their eyes
+    /// stand above theirs, and goes there above the ground, never through a floor nor up from beneath one. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use glam::Vec3;
+    /// use tomori_environment::navmesh::Navmesh;
+    /// use tomori_server::Environment;
+    ///
+    /// let deck = [Vec3::new(-2.0, 3.0, -2.0), Vec3::new(2.0, 3.0, -2.0), Vec3::new(0.0, 3.0, 2.0)];
+    /// let ground = Navmesh::derive([deck], &[]);
+    /// let farm = Environment::new("farm", "Farm").with_navmesh(ground.clone());
+    /// assert_eq!(farm.navmesh(), Some(&ground));
+    /// assert_eq!(Environment::new("farm", "Farm").navmesh(), None);
+    /// ```
+    pub fn with_navmesh(mut self, navmesh: tomori_environment::navmesh::Navmesh) -> Self {
+        self.navmesh = Some(Arc::new(navmesh));
+        self
+    }
+
+    /// Its walkable ground, in its own coordinates, if it gives it.
+    pub fn navmesh(&self) -> Option<&tomori_environment::navmesh::Navmesh> {
+        self.navmesh.as_deref()
+    }
+
     /// The environment, whose agent hovers `metres` above the space's floor, the floor where participants arrive, as
     /// it comes to someone, following the speaker, called or asked to go to them or beside something, rather than a
     /// little above their eyes, such as one whose home floats high over the scene; but never lower than it would stand
@@ -1081,6 +1115,17 @@ impl Environments {
     /// How high above the space's floor the agent of the environment `id` hovers as it comes to someone, if it says.
     pub(crate) fn follow_height(&self, id: &str) -> Option<f32> {
         self.get(id).and_then(Environment::follow_height)
+    }
+
+    /// The walkable ground of the environment `id`, carried into a space's coordinates as its solids are, if it gives
+    /// it, none when it is not offered.
+    pub(crate) fn ground(&self, id: &str) -> Option<crate::follow::Ground> {
+        self.get(id).and_then(|environment| {
+            environment
+                .navmesh
+                .clone()
+                .map(|mesh| crate::follow::Ground::new(mesh, environment.carriage()))
+        })
     }
 
     /// The solids of the environment `id`, carried into a space's coordinates, none when it is not offered.

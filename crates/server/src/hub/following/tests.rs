@@ -32,7 +32,7 @@ fn a_glide_through_its_waypoint_is_followed_along_its_way_at_its_speed() {
     assert!(follow::distance(along.position, [0.0, 1.0, 0.0]) < 1e-3);
     assert_eq!(along.orientation, to.orientation);
     // Streamed, faster, with no waypoint.
-    following.start([0.0; 3], None, [12.0, 0.0, 0.0], Route::Stream, now);
+    following.start([0.0; 3], None, [12.0, 0.0, 0.0], Route::Stream(None), now);
     assert_eq!((following.via, following.stream), (None, true));
     assert_eq!(
         following.deadline(),

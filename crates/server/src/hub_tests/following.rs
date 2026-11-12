@@ -412,6 +412,88 @@ fn in_an_environment_with_a_follow_height_it_hovers_there_above_whoever_it_comes
 }
 
 #[test]
+fn on_an_environment_s_ground_it_follows_someone_up_onto_a_terrace_and_home_again_above_it() {
+    // Ada teleported onto a terrace 4 m above the yard, reached only by teleport, deep in from its edges; the agent's
+    // home is in the yard. Without the environment's ground, it would stand within the space's floor's heights, below
+    // her.
+    let terrace = crate::follow::ground::tests::levels();
+    let ada = [9.0, 5.6, -9.0];
+    for ground in [false, true] {
+        let (hub, _jobs, space, _commands, client) = following(Some(90));
+        let sky = crate::Environment::new("sky", "Sky");
+        let sky = if ground {
+            sky.with_navmesh(terrace.clone())
+        } else {
+            sky
+        };
+        hub.set_environments(Environments::new([sky]));
+        client.send(looking(ada, [9.0, 5.6, -12.0]));
+        press(&client, "u1");
+        let start = Instant::now() + COMMIT;
+        hub.flush_snapshots(start);
+        let spot = agent(&hub, &space).0.expect("gone to her");
+        assert!((level(spot.position, ada) - CONVERSATION).abs() < 1e-3);
+        if !ground {
+            assert!((spot.position[1] - 2.4).abs() < 1e-4, "{spot:?}");
+            continue;
+        }
+        // On the terrace, as high above it as her eyes, and a little more; streamed there by a waypoint above the yard.
+        assert!((spot.position[1] - 5.7).abs() < 1e-4, "{spot:?}");
+        let state = last_state(&client).expect("told");
+        assert!(state.stream);
+        let via = state.via.expect("over the ground");
+        let home = crate::hub::agent_home(&Default::default()).position;
+        assert!((via[0] - home[0]).abs() < 1e-4 && (via[2] - home[2]).abs() < 1e-4);
+        assert!(via[1] >= 5.7 - 1e-4, "{via:?}");
+        // Sent home once it has arrived, it glides home by a waypoint out over the yard, rather than down through the
+        // terrace, and goes by it no more once home.
+        let arrived = start + Duration::from_secs(30);
+        hub.flush_snapshots(arrived);
+        hub.lock().agent_home(&space, "it was sent home", arrived);
+        hub.flush_snapshots(arrived);
+        assert_eq!(agent(&hub, &space).0, None);
+        let state = last_state(&client).expect("told");
+        let via = state.via.expect("over the ground");
+        assert!(!state.stream);
+        let ground = crate::follow::ground::tests::terrace();
+        assert!(
+            ground.open(spot.position, via) && ground.open(via, home),
+            "{via:?}"
+        );
+        assert!(!ground.open(spot.position, home));
+        // On its way, it is along the way to the waypoint, a second's glide from where it was.
+        let home_pose = crate::hub::agent_home(&Default::default());
+        let second = arrived + Duration::from_secs(1);
+        let on_its_way = {
+            let state = hub.lock();
+            let following = &state.space(&space).unwrap().following;
+            assert!(following.moving(None, home_pose, second));
+            following.at(None, home_pose, second).position
+        };
+        let towards: Vec<f32> = (0..3).map(|axis| via[axis] - spot.position[axis]).collect();
+        let length = towards
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        for axis in 0..3 {
+            let expected = spot.position[axis] + towards[axis] / length * GLIDE;
+            assert!((on_its_way[axis] - expected).abs() < 1e-3, "{on_its_way:?}");
+        }
+        hub.flush_snapshots(start + Duration::from_secs(200));
+        assert_eq!(hub.lock().space(&space).unwrap().following.via, None);
+        assert_eq!(last_state(&client).expect("told").via, None);
+        // Sent home again, home, it goes by none.
+        let again = start + Duration::from_secs(201);
+        assert!(
+            !hub.lock()
+                .agent_home(&space, "it was sent home again", again)
+        );
+        assert_eq!(hub.lock().space(&space).unwrap().following.via, None);
+    }
+}
+
+#[test]
 fn turned_at_home_it_turns_back_once_the_conversation_is_quiet() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
