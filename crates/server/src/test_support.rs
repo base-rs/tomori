@@ -671,6 +671,21 @@ impl TestClient {
         self.space(|state| state.title == title)
     }
 
+    /// Join the space `space`. Returns its first snapshot.
+    pub fn join(&mut self, space: &str) -> SpaceState {
+        self.send(&ClientMessage::Join {
+            space: space.to_owned(),
+        });
+        self.space(|state| state.id == space)
+    }
+
+    /// Ask to change the space's environment to `environment`, without waiting for the answer.
+    pub fn set_environment(&mut self, environment: &str) {
+        self.send(&ClientMessage::SetEnvironment {
+            environment: environment.to_owned(),
+        });
+    }
+
     pub fn next_audio(&self, timeout: Duration) -> Option<AudioFrame> {
         self.audio.recv_timeout(timeout).ok()
     }

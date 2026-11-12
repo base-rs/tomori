@@ -74,15 +74,9 @@ fn a_space_follows_its_session_s_title_until_an_owner_renames_it_and_again_once_
         },
     );
     let mut bob = server.connect_with_token("bob", "Bob", &token);
-    bob.send(&ClientMessage::Join {
-        space: studio.id.clone(),
-    });
-    bob.space(|state| state.id == studio.id);
+    bob.join(&studio.id);
     let mut vic = server.connect("vic", "Vic");
-    vic.send(&ClientMessage::Join {
-        space: studio.id.clone(),
-    });
-    vic.space(|state| state.id == studio.id);
+    vic.join(&studio.id);
     let lobby = server.connect("cat", "Cat");
 
     // Renamed in the agent's own interface, the session gives the space its new title, for everyone in it and in the
@@ -153,10 +147,7 @@ fn an_owner_says_a_space_s_new_title_and_nobody_else_can() {
         },
     );
     let mut bob = server.connect_with_token("bob", "Bob", &token);
-    bob.send(&ClientMessage::Join {
-        space: studio.id.clone(),
-    });
-    bob.space(|state| state.id == studio.id);
+    bob.join(&studio.id);
 
     // The owner's words are the title, without their closing full stop, and are never queued for the agent.
     say_title(&mut ada, "t1", "Release planning.");

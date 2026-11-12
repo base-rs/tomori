@@ -24,10 +24,7 @@ fn knocking_server(
 /// A visitor watching `space`.
 fn visitor(server: &TestServer, identity: &str, name: &str, space: &str) -> TestClient {
     let mut client = server.connect(identity, name);
-    client.send(&ClientMessage::Join {
-        space: space.to_owned(),
-    });
-    client.space(|state| state.id == space);
+    client.join(space);
     client
 }
 
@@ -125,10 +122,7 @@ fn the_first_decision_resolves_a_knock() {
     let (server, mut ada, space) = knocking_server(|server| server);
     let (_, token) = server.issue("Bea", Grant::Owner);
     let mut bea = server.connect_with_token("bea", "Bea", &token);
-    bea.send(&ClientMessage::Join {
-        space: space.clone(),
-    });
-    bea.space(|state| state.id == space);
+    bea.join(&space);
     let mut vic = visitor(&server, "vic", "Vic", &space);
     vic.send(&ClientMessage::Knock);
     assert_eq!(knock_state(&vic), KnockState::Pending);
@@ -224,10 +218,7 @@ fn a_collaborator_elsewhere_asks_an_owner_instead_of_knocking() {
     let other = ada.create_space("Other").id;
     let (_, token) = server.issue("Bob", Grant::Collaborator { space: studio });
     let mut bob = server.connect_with_token("bob", "Bob", &token);
-    bob.send(&ClientMessage::Join {
-        space: other.clone(),
-    });
-    bob.space(|state| state.id == other);
+    bob.join(&other);
     bob.send(&ClientMessage::Knock);
     assert_eq!(
         bob.error(),

@@ -333,8 +333,7 @@ fn a_restored_space_is_given_its_environment_s_layer_whenever_the_environments_a
                     .map(String::as_str),
                 Some(*layer)
             );
-            ada.send(&ClientMessage::Join { space: id.clone() });
-            let restored = ada.space(|space| space.id == *id);
+            let restored = ada.join(id);
             assert_eq!(
                 restored.instructions.map(|layers| layers.environment),
                 Some((*layer).to_owned())
@@ -478,10 +477,7 @@ fn a_space_kept_before_its_speech_was_stored_speaks_in_full() {
     let backend = FakeBackend::new();
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
-    ada.send(&ClientMessage::Join {
-        space: "space-old-1".into(),
-    });
-    let space = ada.space(|space| space.id == "space-old-1");
+    let space = ada.join("space-old-1");
     assert_eq!(space.speech, tomori_protocol::SpeechSetting::Full);
 }
 
@@ -496,10 +492,7 @@ fn a_restored_space_is_listed_while_it_is_bound_again() {
     backend.hold_creation();
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
-    ada.send(&ClientMessage::Join {
-        space: studio.clone(),
-    });
-    let waiting = ada.space(|space| space.id == studio);
+    let waiting = ada.join(&studio);
     assert_eq!(waiting.error.as_deref(), Some(RESTORING));
     // Input waits until the space is bound again.
     ada.say("u1", "are you there");
