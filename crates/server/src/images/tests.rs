@@ -515,3 +515,34 @@ fn memory_keeps_only_the_latest_images_while_a_directory_keeps_them_all() {
     assert_eq!(store.get(&images[0].image.hash).unwrap(), images[0].png);
     fs::remove_dir_all(folder).unwrap();
 }
+
+#[test]
+fn the_same_image_kept_by_several_spaces_at_once_is_kept_whole_for_each() {
+    let folder = folder("together");
+    let store = ImageStore::new();
+    store.keep_in(folder.clone()).unwrap();
+    // Large enough that writing it takes a while, so that the writes overlap.
+    let png: Arc<[u8]> = (0..IMAGE_BYTES).map(|byte| byte as u8).collect();
+    let hash: [u8; 32] = Sha256::digest(&png).into();
+    let prepared = Prepared {
+        image: Image::new(hash_text(&hash), 1, 1, png.len() as u32),
+        png,
+    };
+    std::thread::scope(|scope| {
+        let puts: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..8)
+                        .map(|_| store.put(&prepared))
+                        .collect::<Result<Vec<()>, String>>()
+                })
+            })
+            .collect();
+        for put in puts {
+            assert_eq!(put.join().unwrap(), Ok(vec![(); 8]));
+        }
+    });
+    let file = folder.join(format!("{}.png", prepared.image.hash));
+    assert_eq!(fs::read(&file).unwrap(), &prepared.png[..]);
+    fs::remove_dir_all(folder).unwrap();
+}
