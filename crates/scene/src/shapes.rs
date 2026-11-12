@@ -272,7 +272,7 @@ impl Shape {
                         for &(y, v) in &down {
                             // Its middle is hollow.
                             if u != [0.0, 0.0] || v != [0.0, 0.0] {
-                                place.piece(pieces, x, y, FRAME, u, v, color);
+                                place.piece(pieces, x, y, tile(FRAME, u, v), color);
                             }
                         }
                     }
@@ -353,7 +353,7 @@ impl Shape {
                 let half = width.min(STROKE_WIDTH) / 2.0;
                 let [low, high, column] = band(half, SCALE);
                 let across = half + margin(SCALE);
-                place.raw(
+                place.piece(
                     pieces,
                     [-length / 2.0, length / 2.0],
                     [-across, across],
@@ -376,13 +376,12 @@ impl Shape {
                 };
                 let scale = DISC.reach / radius;
                 let reach = radius + REACH / scale;
+                let span = [-reach * scale, reach * scale];
                 place.piece(
                     pieces,
                     [-reach, reach],
                     [-reach, reach],
-                    DISC,
-                    [-reach * scale, reach * scale],
-                    [-reach * scale, reach * scale],
+                    tile(DISC, span, span),
                     color,
                 );
             }
@@ -401,13 +400,12 @@ impl Shape {
                 };
                 let scale = RING.reach / radius;
                 let reach = radius + REACH / scale;
+                let span = [-reach * scale, reach * scale];
                 place.piece(
                     pieces,
                     [-reach, reach],
                     [-reach, reach],
-                    RING,
-                    [-reach * scale, reach * scale],
-                    [-reach * scale, reach * scale],
+                    tile(RING, span, span),
                     color,
                 );
             }
@@ -500,7 +498,7 @@ impl Place {
                     if j == 0 {
                         let [low, high, column] = band(half[1], scale);
                         let uv = [[column, low], [column, low], [column, high], [column, high]];
-                        self.raw(
+                        self.piece(
                             pieces,
                             x,
                             [-half[1] - margin(scale), half[1] + margin(scale)],
@@ -512,7 +510,7 @@ impl Place {
                     if i == 0 {
                         let [low, high, column] = band(half[0], scale);
                         let uv = [[column, low], [column, high], [column, low], [column, high]];
-                        self.raw(
+                        self.piece(
                             pieces,
                             [-half[0] - margin(scale), half[0] + margin(scale)],
                             y,
@@ -521,38 +519,15 @@ impl Place {
                         );
                     }
                 } else {
-                    self.piece(pieces, x, y, figure, u, v, color);
+                    self.piece(pieces, x, y, tile(figure, u, v), color);
                 }
             }
         }
     }
 
-    /// The piece from `x[0]` to `x[1]` along the box and `y[0]` to `y[1]` across it, from its middle, drawn from
-    /// `figure`'s tile from `u[0]` to `u[1]` and `v[0]` to `v[1]` from its middle.
-    #[allow(clippy::too_many_arguments)]
-    fn piece(
-        &self,
-        pieces: &mut Vec<Piece>,
-        x: [f32; 2],
-        y: [f32; 2],
-        figure: Figure,
-        u: [f32; 2],
-        v: [f32; 2],
-        color: Rgba,
-    ) {
-        let tile = |u: f32, v: f32| [figure.middle[0] + u, figure.middle[1] + v];
-        let uv = [
-            tile(u[0], v[0]),
-            tile(u[1], v[0]),
-            tile(u[0], v[1]),
-            tile(u[1], v[1]),
-        ];
-        self.raw(pieces, x, y, uv, color);
-    }
-
     /// The piece from `x[0]` to `x[1]` along the box and `y[0]` to `y[1]` across it, from its middle, its corners,
     /// top-left, top-right, bottom-left and bottom-right, drawn from `uv` in the atlas.
-    fn raw(
+    fn piece(
         &self,
         pieces: &mut Vec<Piece>,
         x: [f32; 2],
@@ -577,6 +552,18 @@ impl Place {
             color,
         });
     }
+}
+
+/// The corners of the part of `figure`'s tile from `u[0]` to `u[1]` along it and `v[0]` to `v[1]` across it, from its
+/// middle, in the atlas, top-left, top-right, bottom-left and bottom-right, as a piece is drawn from them.
+fn tile(figure: Figure, u: [f32; 2], v: [f32; 2]) -> [[f32; 2]; 4] {
+    let at = |u: f32, v: f32| [figure.middle[0] + u, figure.middle[1] + v];
+    [
+        at(u[0], v[0]),
+        at(u[1], v[0]),
+        at(u[0], v[1]),
+        at(u[1], v[1]),
+    ]
 }
 
 /// How far beyond its edge a shape drawn at `scale` reaches, in font pixels.
