@@ -30,7 +30,7 @@ fn pose(x: f32, z: f32) -> Pose {
 }
 
 /// The `index`th of many spots in rows of twelve, 3 m apart, each row `step` further from `z`, so that as many as a
-/// space holds stand within 20 m of its middle.
+/// space holds stand within 30 m of its middle.
 fn spread(index: usize, z: f32, step: f32) -> Pose {
     pose(
         (index % 12) as f32 * 3.0 - 16.5,

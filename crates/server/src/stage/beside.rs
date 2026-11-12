@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(spot(&head, &[], &[], &[around]), None);
         // Beyond the space's reach, nowhere.
         assert_eq!(
-            spot(&super::tests::head([30.0, 1.6, 0.0], 0.0), &[], &[], &[]),
+            spot(&super::tests::head([40.0, 1.6, 0.0], 0.0), &[], &[], &[]),
             None
         );
     }

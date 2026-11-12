@@ -338,12 +338,12 @@ fn by_an_object_with_nowhere_clear_beside_it_it_stays_where_it_is() {
     let (hub, space, commands, outlet, ada) = yard(0);
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     // At the corner of what the agent may reach, asked from beyond it, so every spot beside it is out of reach.
-    let corner = [19.5, 1.0, 19.5];
+    let corner = [29.5, 1.0, 29.5];
     assert_eq!(
         outlet.describe(vec![Object::new("lamp-1", "a lamp").at(corner)]),
         Ok(())
     );
-    ada.send(looking([30.0, 1.6, 30.0], corner));
+    ada.send(looking([40.0, 1.6, 40.0], corner));
     said(&hub, &ada, &commands, Vec::new(), None);
     let refused = hub
         .agent_move_agent("session", "object lamp-1", Some("ada"))

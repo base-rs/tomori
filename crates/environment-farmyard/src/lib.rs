@@ -19,7 +19,7 @@
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
-//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 10, "Farmyard"));
+//! assert_eq!((ID, VERSION, LABEL), ("farmyard", 11, "Farmyard"));
 //! ```
 pub mod backdrop;
 pub mod beach;
@@ -36,6 +36,7 @@ pub mod props;
 mod shapes;
 #[cfg(feature = "side")]
 pub mod side;
+pub mod terrace;
 pub mod trail;
 pub mod walkable;
 pub mod workbench;
@@ -55,8 +56,9 @@ pub const ID: &str = "farmyard";
 /// and 8 when it gained the shingle beach by the riverbank, whose stones an earlier client neither draws nor lets anyone
 /// take, and 9 when the campsite's sticks became bodies of the same physics, which an earlier client would ask for in
 /// intents the side no longer takes, and 10 when the beach gained its building stones, which an earlier client would
-/// draw as river stones, or not at all.
-pub const VERSION: u32 = 10;
+/// draw as river stones, or not at all, and 11 when the mountain behind the waterfall rose to an upper terrace above
+/// it, with its own falls and an anchor, which an earlier client neither draws nor lets anyone reach.
+pub const VERSION: u32 = 11;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";

@@ -261,11 +261,12 @@ pub const VIEWPOINTS: [(&str, &str, usize, f32); 2] = [
 
 /// How far from the waterfall rock's middle, towards the lookout, its anchor stands, and how high above its top: behind
 /// whoever stands on it facing the waterfall, so that whatever gathers there is beside them rather than before the fall,
-/// and within 20 m of where participants arrive, as every anchor is.
+/// and within 20 m of where participants arrive, as every anchor was before the upper terrace.
 const ROCK_ANCHOR: (f32, f32) = (1.6, 1.8);
 
 /// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; the waterfall
-/// rock's, beside the rock towards the lookout, facing the rock; and its stations,
+/// rock's, beside the rock towards the lookout, facing the rock; the upper terrace's above it, behind whoever arrives
+/// there ([`crate::terrace::place`]); and its stations,
 /// each beside its clearing, along the trail, opposite its post, facing the clearing, telling the agent of whoever
 /// comes within [`STATION_RADIUS`] of it, its clearing and the trail beside it;
 /// the agent may go to any, and workers be placed at one, in its [`ROOM`].
@@ -314,6 +315,7 @@ pub fn places() -> Vec<Place> {
             notify_within: None,
         },
     );
+    places.insert(3, crate::terrace::place());
     places
 }
 
@@ -364,6 +366,8 @@ pub struct TargetPlace {
     pub arrival: Vec3,
     pub name: &'static str,
     pub facing: Vec3,
+    /// How near the middle of its foot one must point from, if only from near it.
+    pub within: Option<f32>,
 }
 
 /// The waterfall rock and the lookout's seat, each a teleport target: pointing at the rock, from the lookout or anywhere
@@ -385,6 +389,7 @@ pub fn targets() -> [TargetPlace; 2] {
             arrival: rock,
             name: "Waterfall rock",
             facing: level(layout::WATERFALL, rock),
+            within: None,
         },
         TargetPlace {
             foot: middle,
@@ -393,6 +398,7 @@ pub fn targets() -> [TargetPlace; 2] {
             arrival,
             name: "Pool lookout",
             facing: level(layout::POOL, arrival),
+            within: None,
         },
     ]
 }

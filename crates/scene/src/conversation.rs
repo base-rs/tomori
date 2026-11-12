@@ -8266,7 +8266,7 @@ mod tests {
             orientation: [0.0, 0.0, 0.0, 1.0],
         };
         let far = Pose {
-            position: [0.0, 0.0, -25.0],
+            position: [0.0, 0.0, -35.0],
             ..agent
         };
         let observe = |state: &mut SpaceState| {

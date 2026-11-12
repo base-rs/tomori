@@ -464,6 +464,25 @@ pub const ROCK_TOP: f32 = 0.6;
 pub const ROCK_REACH: f32 = 0.9;
 pub const ROCK_FOOT: f32 = POOL.y - 0.3;
 
+/// The upper terrace, a private place at the top of the falls, reached only by pointing at the waterfall from its rock:
+/// how high its floor is drawn, 7.2 m above the pool, on the mountain behind the waterfall, beside the stream that runs
+/// from the upper pool to the waterfall's lip. See [`crate::terrace`].
+pub const TERRACE: f32 = 6.9;
+/// How far from [`BACKDROP_CENTRE`] the upper cliff behind the terrace rises, from its foot to its lip, two of the
+/// foothills' rings, and how high its top stands.
+pub const UPPER_CLIFF: [f32; 2] = [29.5, 30.5];
+pub const UPPER_TOP: f32 = 9.5;
+/// The upper pool at the upper cliff's foot, on the waterfall's way, its middle at its water's level, which is the
+/// water's as it leaves the waterfall's lip, and how wide it is to its shore: its overflow runs straight to the lip and
+/// over it, so that the two falls are one stream.
+pub const UPPER_POOL: Vec3 = Vec3::new(-3.72, CLIFF_TOP + 0.08, -32.2562);
+pub const UPPER_POOL_RADIUS: f32 = 1.1;
+/// Where the upper falls' water leaves the lip of the upper cliff, where it meets the upper pool, and the middle of its
+/// fall, where a sound of it comes from.
+pub const UPPER_FALLS_LIP: Vec3 = Vec3::new(-3.981, UPPER_TOP, -34.239);
+pub const UPPER_FALLS_FOOT: Vec3 = Vec3::new(-3.8244, UPPER_POOL.y, -33.0493);
+pub const UPPER_FALLS: Vec3 = Vec3::new(-3.90265, (UPPER_TOP + UPPER_POOL.y) * 0.5, -33.6442);
+
 /// The river's far bank seen from `from`, by its point `point`: 2 m beyond its middle, away from `from`, 0.3 m above its
 /// water, on the far shore rising out of it, which is what is seen of a river in its channel from afar.
 pub fn far_bank(point: Vec3, from: Vec2) -> Vec3 {
@@ -485,9 +504,14 @@ pub const BUSH: [(Vec2, f32); 5] = [
 ];
 
 /// Where the backdrop's sounds come from, each a name and a place: the `waterfall` at the middle of its fall, its
-/// `pool`, the `river` at each of its bends and every `bush` patch's middle, on the ground. Ambient sound attaches here.
+/// `pool`, the `upper-falls` at the middle of the falls above the terrace, the `river` at each of its bends and every
+/// `bush` patch's middle, on the ground. Ambient sound attaches here.
 pub fn sounds() -> Vec<(&'static str, Vec3)> {
-    let mut sounds = vec![("waterfall", WATERFALL), ("pool", POOL)];
+    let mut sounds = vec![
+        ("waterfall", WATERFALL),
+        ("pool", POOL),
+        ("upper-falls", UPPER_FALLS),
+    ];
     sounds.extend(RIVER[1..].iter().map(|point| ("river", *point)));
     sounds.extend(BUSH.iter().map(|(middle, _)| {
         let ground = crate::backdrop::ground(*middle);

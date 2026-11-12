@@ -16,7 +16,7 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .iter()
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
-/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 10)]);
+/// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 11)]);
 /// ```
 pub fn builder() -> Builder {
     let farmyard = Environment::new(
@@ -49,14 +49,15 @@ pub fn builder() -> Builder {
 }
 
 /// The farmyard's solids: the yard's, the posts and seat along its trail, the waterfall rock, the backdrop's plants and
-/// pines beside the trail and the rock, so that the agent coming to someone there swings clear of them, and the
-/// campsite's fire and its second seat, with the sticks leaning on it.
+/// pines beside the trail and the rock, so that the agent coming to someone there swings clear of them, the campsite's
+/// fire and its second seat, with the sticks leaning on it, and the upper terrace's stones, flat rock, cairn and ferns.
 pub fn farmyard_solids() -> Vec<([f32; 3], [f32; 3])> {
-    use tomori_environment_farmyard::{campsite, layout, trail};
+    use tomori_environment_farmyard::{campsite, layout, terrace, trail};
     let mut solids = layout::solids();
     solids.extend(trail::solids());
     solids.extend(trail::beside());
     solids.extend(campsite::solids());
+    solids.extend(terrace::solids());
     solids
 }
 
@@ -75,8 +76,9 @@ pub fn farmyard_campsite() -> tomori_protocol::cluster::Anchor {
     .with_label(place.label)
 }
 
-/// The farmyard trail's named anchors: its viewpoints, `riverbank`, `pool-lookout` and `waterfall-rock`, beside the rock
-/// in the pool that participants teleport onto from the lookout, of kind `viewpoint`, and its exercise stations,
+/// The farmyard trail's named anchors: its viewpoints, `riverbank`, `pool-lookout`, `waterfall-rock`, beside the rock
+/// in the pool that participants teleport onto from the lookout, and `upper-terrace`, on the terrace above the
+/// waterfall that they teleport up to from the rock, of kind `viewpoint`, and its exercise stations,
 /// `station-1` to `station-5`, of kind `station`, each labelled with its exercise, so that the agent can suggest a walk,
 /// go to one and say what to do there, each with room, `trail::ROOM`, for one to eighteen workers.
 /// A station's anchor stands beside its clearing, opposite its post, facing the clearing, and tells the agent of whoever
@@ -163,7 +165,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 10)
+                ("farmyard", "Farmyard", 11)
             ]
         );
         // The farmyard alone has a server side, for its chickens.
@@ -270,6 +272,11 @@ mod tests {
                     Some("viewpoint"),
                     Some("The waterfall rock")
                 ),
+                (
+                    "upper-terrace",
+                    Some("viewpoint"),
+                    Some("The upper terrace")
+                ),
                 ("station-1", Some("station"), Some("10 squats")),
                 (
                     "station-2",
@@ -301,16 +308,22 @@ mod tests {
         assert_eq!(
             told,
             [
-                None, None, None, radius, radius, radius, radius, radius, None
+                None, None, None, None, radius, radius, radius, radius, radius, None
             ]
         );
         // Every one is sent to a space: within reach of home, where participants arrive, on each axis as the arrival
-        // carries it, the waterfall rock's furthest, and above the trail.
+        // carries it, the space's bounds, 30 m: the upper terrace's within them and every other within 20 m, the
+        // waterfall rock's furthest, and above the trail.
         let carriage = tomori_protocol::Pose::carriage(&super::farmyard_arrival());
         for anchor in farmyard.anchors() {
             let carried = carriage.carry(&anchor.pose);
+            let reach = if anchor.name == "upper-terrace" {
+                29.0
+            } else {
+                19.5
+            };
             assert!(
-                carried.position.iter().all(|axis| axis.abs() < 19.5),
+                carried.position.iter().all(|axis| axis.abs() < reach),
                 "{anchor:?} {carried:?}"
             );
             assert!(anchor.pose.position[1] >= 1.4, "{anchor:?}");
@@ -325,6 +338,7 @@ mod tests {
                 + trail::solids().len()
                 + trail::beside().len()
                 + tomori_environment_farmyard::campsite::solids().len()
+                + tomori_environment_farmyard::terrace::solids().len()
         );
         let solids: Vec<Solid> = farmyard
             .solids()
@@ -332,8 +346,13 @@ mod tests {
             .map(|(low, high)| Solid::new(*low, *high))
             .collect();
         for anchor in farmyard.anchors().iter().filter(|anchor| !anchor.is_home()) {
+            let floor = if anchor.name == "upper-terrace" {
+                layout::TERRACE
+            } else {
+                trail::HEIGHT
+            };
             assert_eq!(
-                fits(&Cluster::new(anchor), trail::HEIGHT, &solids),
+                fits(&Cluster::new(anchor), floor, &solids),
                 Ok(()),
                 "{}",
                 anchor.name

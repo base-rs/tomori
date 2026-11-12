@@ -115,7 +115,7 @@ impl Zones {
                 let point = match zone.around() {
                     Around::Point(point) => Some(carry(*point).ok_or_else(|| {
                         format!(
-                            "The zone {:?} is around a point more than 20 m from home.",
+                            "The zone {:?} is around a point more than 30 m from home.",
                             zone.name()
                         )
                     })?),

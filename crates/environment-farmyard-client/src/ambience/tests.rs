@@ -277,8 +277,20 @@ fn its_sounds_are_where_the_backdrop_has_them_and_leave_voices_for_the_birds() {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     };
     assert!(distance(river.path.nearest(arrival), arrival) < river.radius * 0.75);
-    assert_eq!(waterfall.path.points(), [layout::WATERFALL.to_array()]);
+    assert_eq!(
+        waterfall.path.points(),
+        [
+            layout::UPPER_FALLS.to_array(),
+            layout::WATERFALL_LIP.to_array(),
+            layout::WATERFALL.to_array()
+        ]
+    );
     assert!(distance(layout::WATERFALL.to_array(), arrival) < waterfall.radius * 0.75);
+    // From the yard and the trail, the waterfall is heard from the middle of its fall, as it was before the falls above
+    // it joined it.
+    for ear in [arrival, [layout::WORKBENCH.x, EYES, layout::WORKBENCH.y]] {
+        assert_eq!(waterfall.path.nearest(ear), layout::WATERFALL.to_array());
+    }
     // The bonfire from among its flames, heard from the trail beside it and the lookout, but not from the arrival, nor
     // the workbench.
     assert_eq!(fire.path.points(), [campsite::heart().to_array()]);
@@ -395,4 +407,26 @@ fn the_waterfall_is_loud_on_the_rock_before_it_as_its_place_makes_it() {
     assert!(on_rock > at_lookout + 8.0, "{on_rock} {at_lookout}");
     assert!(on_rock > beds + 6.0, "{on_rock} {beds}");
     assert!(on_rock > heard_loop(river, rock), "{on_rock}");
+    assert_eq!(waterfall.path.nearest(rock), layout::WATERFALL.to_array());
+}
+
+#[test]
+fn the_falls_are_heard_about_the_upper_terrace_between_them() {
+    let ambience = with(&[]);
+    let beds = beds(&ambience);
+    let [river, waterfall, fire] = &ambience.loops[..] else {
+        panic!("a river, a waterfall and a fire");
+    };
+    // Where one arrives on the terrace, facing the upper falls, the water is about them, nearer than from the rock, as
+    // loud above the beds, and the river below and the campsite's fire are hardly there.
+    let arrival = tomori_environment_farmyard::terrace::arrival();
+    let ear = (arrival + glam::Vec3::Y * EYES).to_array();
+    let rock = (layout::WATERFALL_ROCK + glam::Vec3::Y * EYES).to_array();
+    let (terrace, on_rock) = (heard_loop(waterfall, ear), heard_loop(waterfall, rock));
+    println!("waterfall: terrace {terrace:.1}, rock {on_rock:.1}, beds {beds:.1}");
+    assert!(distance(waterfall.path.nearest(ear), ear) < 6.0);
+    assert!(terrace > beds + 6.0, "{terrace} {beds}");
+    assert!(terrace > on_rock - 3.0, "{terrace} {on_rock}");
+    assert!(heard_loop(river, ear) < terrace - 10.0);
+    assert!(heard_loop(fire, ear) < -150.0);
 }

@@ -333,10 +333,17 @@ fn eyes() -> Vec<Vec3> {
         .into_iter()
         .flat_map(|(middle, radius)| about(middle, radius));
     let rock = layout::WATERFALL_ROCK;
+    let terrace = crate::walkable::navmesh()
+        .triangles()
+        .iter()
+        .flatten()
+        .filter(|corner| corner.y > layout::TERRACE - 0.1)
+        .map(|corner| *corner + Vec3::Y * EYES);
     yard.chain(along_the_trail())
         .chain(campsite)
         .map(|at| Vec3::new(at.x, EYES, at.y))
         .chain([rock + Vec3::Y * EYES])
+        .chain(terrace)
         .collect()
 }
 
@@ -477,9 +484,9 @@ fn the_ferns_are_modest_for_the_quest() {
         .map(|eyes| triangles(Some(eyes)))
         .max()
         .unwrap();
-    assert_eq!(most, 22_151, "the count the documentation gives");
+    assert_eq!(most, 22_724, "the count the documentation gives");
     assert!(most <= BUDGET);
-    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 17_099);
+    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 17_555);
     assert!(triangles(None) > BUDGET * 3 / 2);
     assert_eq!((ferns().len(), bush().len()), (152, 40));
 }
