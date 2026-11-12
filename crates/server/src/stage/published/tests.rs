@@ -2406,7 +2406,7 @@ fn the_largest_table_is_within_its_bound_and_what_a_projection_counts_for_it() {
     let bytes = serde_json::to_vec(&panel.rows).unwrap().len();
     assert!(bytes <= 8 * 1024, "{bytes} bytes");
     let whole = crate::stage::json_size(&panel);
-    let counted = crate::stage::most_bytes(&panel);
+    let counted = crate::stage::frames::most_bytes(&panel);
     assert!(whole <= counted, "{whole} bytes, counted {counted}");
 }
 
