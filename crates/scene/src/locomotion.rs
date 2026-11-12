@@ -590,8 +590,7 @@ impl Pad {
     /// [`crate::anchors::REACH`] of home on each axis, as the environment's anchors are, and standing on one of
     /// `surfaces`, so that whoever arrives on it stands on a floor.
     fn usable(&self, surfaces: &[Surface]) -> bool {
-        self.centre.is_finite()
-            && self.centre.abs().max_element() <= crate::anchors::REACH
+        crate::anchors::within(self.centre, crate::anchors::REACH)
             && self.radius > 0.0
             && self.radius <= WIDEST_PAD
             && self.yaw.is_none_or(f32::is_finite)
@@ -750,8 +749,7 @@ impl Target {
     /// top of another of `targets` that arrives on its own and may be used, so that whoever arrives stands on a floor:
     /// two targets, one on a rock and one on a terrace above it, so make a way up and back down.
     fn usable(&self, surfaces: &[Surface], targets: &[Target]) -> bool {
-        let within =
-            |point: Vec3| point.is_finite() && point.abs().max_element() <= crate::anchors::REACH;
+        let within = |point: Vec3| crate::anchors::within(point, crate::anchors::REACH);
         let onto = |other: &Target| {
             other.arrives_on_top() && other.holds(self.arrival) && other.usable(surfaces, &[])
         };

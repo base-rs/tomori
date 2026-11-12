@@ -1263,9 +1263,8 @@ impl Scene {
     /// Say where the agent stands while it is `away` from home, its middle and how far it reaches, or `None` while it
     /// is home: its satellites orbit it while it is away. Call before [`Self::update`]. See `design/interaction.md`.
     pub fn set_agent(&mut self, away: Option<(Vec3, f32)>) {
-        self.away = away.filter(|(centre, reach)| {
-            centre.is_finite() && centre.abs().max_element() <= 90.0 && reach.is_finite()
-        });
+        self.away = away
+            .filter(|(centre, reach)| crate::anchors::within(*centre, 90.0) && reach.is_finite());
     }
 
     /// The satellites drawn this frame, among [`Self::cubes`]: while the agent is away from home, a small mote for each
@@ -1366,7 +1365,7 @@ impl Scene {
         self.coordinator_sample_count = 0;
         for position in positions.iter().take(MAX_COORDINATOR_SAMPLES) {
             let position = Vec3::from_array(*position);
-            if position.is_finite() && position.abs().max_element() <= 90.0 {
+            if crate::anchors::within(position, 90.0) {
                 self.coordinator_samples[self.coordinator_sample_count] = position;
                 self.coordinator_sample_count += 1;
             }
