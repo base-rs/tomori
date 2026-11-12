@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::chart::Colour;
-use crate::text::one_line;
+use crate::text::{cut_bytes, one_line};
 use crate::world::{Kind, Mark, Reference, Target};
 
 mod parse;
@@ -1145,15 +1145,6 @@ impl Builder {
             .collect();
         (world, edges)
     }
-}
-
-/// `text` cut to at most `limit` bytes, at a character's boundary.
-fn cut_bytes(text: &str, limit: usize) -> String {
-    let mut end = text.len().min(limit);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
 }
 
 /// How many single characters must be inserted, removed or changed to make `a` into `b`, by which a misspelt name is

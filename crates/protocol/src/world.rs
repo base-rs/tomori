@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chart::Colour;
-use crate::text::one_line;
+use crate::text::{cut_bytes, one_line};
 
 /// The longest name of a reference, in bytes, beyond which it is cut.
 pub const NAME_BYTES: usize = 128;
@@ -111,7 +111,7 @@ impl Reference {
     pub fn new(kind: Kind, name: &str) -> Self {
         Self {
             kind,
-            name: cut(one_line(name, NAME_BYTES).trim(), NAME_BYTES),
+            name: cut_bytes(one_line(name, NAME_BYTES).trim(), NAME_BYTES),
         }
     }
 }
@@ -296,15 +296,6 @@ impl Target {
         });
         target
     }
-}
-
-/// `text` cut to at most `limit` bytes, at a character's boundary.
-fn cut(text: &str, limit: usize) -> String {
-    let mut end = text.len().min(limit);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
 }
 
 #[cfg(test)]
