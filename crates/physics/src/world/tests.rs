@@ -288,6 +288,12 @@ fn a_world_takes_only_what_it_can_simulate() {
         refused(vec![], vec![stone(1).with_density(0.0)]),
         Some(Refused::Body(1))
     );
+    for fastest in [-1.0, f32::NAN] {
+        assert_eq!(
+            refused(vec![], vec![stone(1).thrown_at_most(fastest)]),
+            Some(Refused::Body(1))
+        );
+    }
     let flat = vec![Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::new(1.0, 0.0, 1.0)];
     assert_eq!(
         refused(vec![], vec![Body::convex(2, flat.clone())]),
@@ -600,6 +606,44 @@ fn only_its_holder_lets_go_of_a_body_at_the_epoch_their_taking_made() {
             .distance(taken.position)
             < 0.03
     );
+}
+
+#[test]
+fn a_heavy_body_is_let_go_no_faster_than_it_is_thrown_at_most() {
+    // A big stone, thrown as hard as a hand lets go of a small one, leaves at the most it may, and no faster; let go
+    // gently, it keeps the speed it was given.
+    for (asked, left) in [(2.0 * RELEASE_SPEED, 2.0), (1.5, 1.5)] {
+        let mut world = world(vec![
+            Body::convex(1, pebble(1, 0.6, 0.12))
+                .thrown_at_most(2.0)
+                .at(Placement::at(Vec3::new(0.0, 0.07, 0.0))),
+        ]);
+        world.settle(10.0);
+        let seen = Seen {
+            head: Vec3::new(0.0, 1.6, 0.6),
+            hands: [None, Some(Placement::at(Vec3::new(0.0, 0.5, 0.3)))],
+        };
+        let take = Take {
+            body: 1,
+            epoch: 0,
+            hand: Side::Right,
+            offset: Encoded::default(),
+        };
+        let epoch = world.take(3, &take, Some(&seen)).unwrap();
+        let let_go = LetGo {
+            body: 1,
+            epoch,
+            at: Placement::at(Vec3::new(0.0, 1.0, 0.0)).encoded(Precision::Rest),
+            velocity: [asked, 0.0, 0.0],
+            spin: [0.0; 3],
+            clock: 0,
+        };
+        world.let_go(3, &let_go, Some(&seen)).unwrap();
+        let before = world.placement(1).unwrap().position;
+        world.step(1.0 / 60.0);
+        let speed = (world.placement(1).unwrap().position - before).x * 60.0;
+        assert!((speed - left).abs() < 0.05, "{asked}: {speed}");
+    }
 }
 
 #[test]
@@ -1194,4 +1238,254 @@ fn a_grabbable_body_sent_home_glides_there_and_rests_without_falling() {
             .distance(Vec3::new(0.0, 1.5, 0.0))
             < 0.001
     );
+}
+
+/// A dressed stone's hull, as one split along its bedding and roughly squared, for building: a box `width` along X,
+/// `depth` along Z and `height` high, its edges bevelled and its corners nudged by `seed`, its bottom a face of four,
+/// flat, and its top a face of four, level, with a ring of eight about its middle.
+fn dressed(seed: u32, width: f32, depth: f32, height: f32) -> Vec<Vec3> {
+    let nudge = |index: u32| pebble(seed, 1.0, 1.0)[(index % 14) as usize].x.abs() * 0.1;
+    let (x, z) = (width * 0.5, depth * 0.5);
+    let corners = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+    let mut points = Vec::new();
+    for level in [-0.5, 0.5] {
+        for (across, along) in corners {
+            points.push(Vec3::new(
+                across * x * 0.88,
+                level * height,
+                along * z * 0.88,
+            ));
+        }
+    }
+    for (corner, (across, along)) in corners.into_iter().enumerate() {
+        for (side, (wide, deep)) in [(1.0, 0.76), (0.76, 1.0)].into_iter().enumerate() {
+            let at = corner as u32 * 2 + side as u32;
+            points.push(Vec3::new(
+                across * x * wide * (1.0 - nudge(at) * 0.5),
+                (nudge(at + 7) - 0.025) * height,
+                along * z * deep * (1.0 - nudge(at + 3) * 0.5),
+            ));
+        }
+    }
+    points
+}
+
+/// One stone of a structure: its hull, where its middle stands across the ground, turned how far about the upright, and
+/// which of those before it it rests on, or, none, the ground.
+struct Part {
+    hull: Vec<Vec3>,
+    at: Vec2,
+    turn: f32,
+    on: Vec<usize>,
+}
+
+fn part(hull: Vec<Vec3>, at: Vec2, turn: f32, on: &[usize]) -> Part {
+    Part {
+        hull,
+        at,
+        turn,
+        on: on.to_vec(),
+    }
+}
+
+/// A block, 38 by 30 cm and 34 high, a pillar's or a wall's; and a flagstone, 72 by 48 cm and 12 thick, a lintel's.
+fn block(seed: u32) -> Vec<Vec3> {
+    dressed(seed, 0.38, 0.3, 0.34)
+}
+
+fn flagstone(seed: u32) -> Vec<Vec3> {
+    dressed(seed, 0.72, 0.48, 0.12)
+}
+
+/// `parts` built on `ground`, each placed a couple of millimetres above what it rests on, in a world of them simulated
+/// by `settings` and settled for at most ten seconds; and where each was placed.
+fn built(settings: Settings, ground: Static, parts: &[Part]) -> (World, Vec<Placement>) {
+    let mut placed: Vec<Placement> = Vec::new();
+    let span = |hull: &[Vec3], at: &Placement| {
+        hull.iter()
+            .map(|point| at.transform_point(*point).y)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), y| {
+                (low.min(y), high.max(y))
+            })
+    };
+    for part in parts {
+        let mut at = Placement::new(
+            Vec3::new(part.at.x, 0.0, part.at.y),
+            Quat::from_rotation_y(part.turn),
+        );
+        let beneath = part
+            .on
+            .iter()
+            .map(|below| span(&parts[*below].hull, &placed[*below]).1)
+            .fold(ground.lowest().max(0.0), f32::max);
+        at.position.y = beneath + 0.002 - span(&part.hull, &at).0;
+        placed.push(at);
+    }
+    let bodies = parts
+        .iter()
+        .zip(&placed)
+        .enumerate()
+        .map(|(number, (part, at))| Body::convex(number as u32, part.hull.clone()).at(*at))
+        .collect();
+    let mut world = World::new(settings, vec![ground], Vec::new(), bodies).unwrap();
+    world.settle(10.0);
+    (world, placed)
+}
+
+#[test]
+fn structures_of_blocks_and_flagstones_stand_and_sleep_and_the_stillness_rule_holds_none_up() {
+    let (left, right) = (Vec2::new(-0.24, 0.0), Vec2::new(0.24, 0.0));
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let (cairn, _) = cairn(4, Vec2::ZERO, 0);
+    let mut on_a_cairn: Vec<Part> = cairn
+        .into_iter()
+        .enumerate()
+        .map(|(level, body)| {
+            let on: Vec<usize> = level.checked_sub(1).into_iter().collect();
+            part(body.hull, Vec2::ZERO, level as f32 * 0.9, &on)
+        })
+        .collect();
+    on_a_cairn.push(part(dressed(20, 0.5, 0.36, 0.09), Vec2::ZERO, 0.3, &[3]));
+    let structures = [
+        // Two pillars and a lintel across them.
+        (
+            "dolmen",
+            vec![
+                part(block(1), left, quarter, &[]),
+                part(block(2), right, quarter, &[]),
+                part(flagstone(3), Vec2::ZERO, 0.0, &[0, 1]),
+            ],
+        ),
+        ("flagstone on a cairn", on_a_cairn),
+        // Three blocks in a row and a coping stone along them.
+        (
+            "wall",
+            vec![
+                part(block(4), Vec2::ZERO, 0.0, &[]),
+                part(block(5), Vec2::new(-0.39, 0.0), 0.0, &[]),
+                part(block(6), Vec2::new(0.39, 0.0), 0.0, &[]),
+                part(flagstone(7), Vec2::ZERO, 0.0, &[0, 1, 2]),
+            ],
+        ),
+        // Three blocks on end, each turned across the one below, and a flagstone on top.
+        (
+            "tower",
+            vec![
+                part(block(8), Vec2::ZERO, 0.0, &[]),
+                part(block(9), Vec2::ZERO, quarter, &[0]),
+                part(block(10), Vec2::ZERO, 0.1, &[1]),
+                part(flagstone(11), Vec2::ZERO, quarter + 0.2, &[2]),
+            ],
+        ),
+    ];
+    // As Rapier solves contacts by default, and each against its own triangle, as the farmyard's beach does.
+    for ((name, parts), settings) in structures.iter().flat_map(|structure| {
+        [
+            (structure, Settings::default()),
+            (structure, Settings::default().unclustered()),
+        ]
+    }) {
+        let (mut world, placed) = built(settings, ground(), parts);
+        assert!(!world.moving(), "the {name} never slept");
+        assert!(
+            world.clock() <= 5_000,
+            "the {name} took {} ms to sleep",
+            world.clock()
+        );
+        // Standing: none crept a centimetre and a half, nor sank onto what it rests on more than the gap it was placed
+        // with and a little more, as contacts settle under a heavy stone.
+        let rested = placements(&world);
+        let sank: Vec<f32> = placed
+            .iter()
+            .zip(&rested)
+            .map(|(placed, rested)| placed.position.y - rested.position.y)
+            .collect();
+        for (number, (placed, rested)) in placed.iter().zip(&rested).enumerate() {
+            let crept = (rested.position - placed.position).with_y(0.0).length();
+            let beneath = parts[number]
+                .on
+                .iter()
+                .map(|below| sank[*below])
+                .fold(0.0, f32::max);
+            let lower = sank[number] - beneath;
+            assert!(crept < 0.015, "the {name}'s stone {number} crept {crept} m");
+            assert!(lower < 0.01, "the {name}'s stone {number} sank {lower} m");
+        }
+        for _ in 0..(600 * 4) {
+            assert!(world.step(0.25).is_empty(), "the {name} woke");
+        }
+        assert_eq!(placements(&world), rested, "the {name} moved asleep");
+        // Woken and left to Rapier alone, it stands as it was put to sleep: nothing the rule stopped was falling.
+        let moved = unruled(&mut world, 3.0);
+        assert!(moved < 0.005, "the {name} moved {moved} m without the rule");
+    }
+}
+
+#[test]
+fn a_lintel_beyond_its_one_pillar_falls_rather_than_being_put_to_sleep() {
+    // On the pillar's top, within it, it stands; with its middle beyond the pillar's edge, it tips off.
+    for (beyond, stands) in [(0.0, true), (0.12, true), (0.2, false), (0.3, false)] {
+        let parts = [
+            part(block(1), Vec2::ZERO, 0.0, &[]),
+            part(flagstone(2), Vec2::new(beyond, 0.0), 0.0, &[0]),
+        ];
+        let (mut world, placed) = built(Settings::default().unclustered(), ground(), &parts);
+        assert!(!world.moving(), "{beyond}");
+        let fell = placed[1].position.y - world.placement(1).unwrap().position.y;
+        assert_eq!(fell < 0.01, stands, "{beyond}: it fell {fell} m");
+        assert!(unruled(&mut world, 3.0) < 0.005, "{beyond}");
+    }
+}
+
+#[test]
+fn a_broad_flat_stone_on_ground_bent_a_degree_or_two_settles_rather_than_creeping() {
+    // A mesh of quarter-metre cells, flat and then sloping away more steeply, as a shingle beach does where it leaves
+    // the meadow: a block or a flagstone lying across a bend rests, solving each contact against its own triangle, rather
+    // than creeping a few millimetres a second for ever, as it does when Rapier solves those within 5° as one plane.
+    let profile = |x: f32| {
+        let bends = [
+            (-2.0, 0.015),
+            (0.0, 0.0128),
+            (0.25, 0.008),
+            (0.5, -0.0064),
+            (0.75, -0.0252),
+            (4.0, -0.4),
+        ];
+        let index = bends
+            .iter()
+            .position(|(at, _)| x <= *at)
+            .unwrap_or(bends.len() - 1)
+            .max(1);
+        let ((a, low), (b, high)) = (bends[index - 1], bends[index]);
+        low + (high - low) * ((x - a) / (b - a)).clamp(0.0, 1.0)
+    };
+    let columns = 17;
+    let heights: Vec<f32> = (0..columns * columns)
+        .map(|index| profile(-2.0 + (index % columns) as f32 * 0.25))
+        .collect();
+    let bent = Static::heights(Vec2::splat(-2.0), 0.25, columns, &heights);
+    for step in 0..12 {
+        let at = Vec2::new(-0.1 + step as f32 * 0.05, step as f32 * 0.07 - 0.4);
+        let hull = if step % 2 == 0 {
+            block(step)
+        } else {
+            flagstone(step)
+        };
+        let mut world = World::new(
+            Settings::default().unclustered(),
+            vec![bent.clone()],
+            Vec::new(),
+            vec![Body::convex(1, hull.clone()).at(Placement::new(
+                Vec3::new(
+                    at.x,
+                    profile(at.x - 0.36).max(profile(at.x + 0.36)) + 0.2,
+                    at.y,
+                ),
+                Quat::from_rotation_y(step as f32 * 0.4),
+            ))],
+        )
+        .unwrap();
+        assert!(world.settle(10.0), "{at}");
+        assert!(world.clock() <= 3_000, "{at}: {} ms", world.clock());
+    }
 }

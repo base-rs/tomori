@@ -4,8 +4,10 @@
 //! The shingle beach beside the trail where it passes the river, by the `riverbank` viewpoint: a slope of grey shingle
 //! from the trail's edge down into the river's channel to the water's edge, the one surface that reaches its water, with
 //! river stones lying on it, slabs, cobbles, long and angular ones, from a hand's breadth across to as much as a hand
-//! might lift, which participants take with either hand, carry, throw and stack into cairns, simulated by the farmyard's server side with `tomori-physics` and
-//! drawn alike by every client. See `design/farmyard.md` and `docs/proposals/physics-and-stacking.md`.
+//! might lift, and beside them a handful of much bigger building stones, flagstones and blocks, for building little
+//! structures, which participants take with either hand, carry, throw and stack into cairns, simulated by the
+//! farmyard's server side with `tomori-physics` and drawn alike by every client. See `design/farmyard.md` and
+//! `docs/proposals/physics-and-stacking.md`.
 //!
 //! What both halves share is here: where the beach is and how high its surface stands; each stone's hull, from which
 //! it is both drawn and collided; what the stones rest on and the river's water; and the models of the beach and its
@@ -220,21 +222,34 @@ pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
         .collect()
 }
 
-/// How many stones lie on the beach.
-pub const STONES: usize = 28;
+/// How many river stones lie on the beach, numbered from 0; how many big building stones beside them, numbered after
+/// them; and how many stones in all.
+pub const RIVER: usize = 28;
+pub const BUILDING: usize = 8;
+pub const STONES: usize = RIVER + BUILDING;
 
-/// The kinds of stone the beach has, as a river's shingle sorts them: flat slabs and discs, which cairns are built of;
-/// rounded cobbles; long ones; and angular ones, broken rather than worn.
+/// The kinds of stone the beach has: as a river's shingle sorts them, flat slabs and discs, which cairns are built of,
+/// rounded cobbles, long ones, and angular ones, broken rather than worn; and, to build with, flagstones, broad and
+/// flat, for lintels, tables and roofs, and blocks, for pillars and walls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Slab,
     Cobble,
     Long,
     Angular,
+    Flagstone,
+    Block,
 }
 
-/// Which kind stone `index` is: of every seven, three slabs, two cobbles, a long one and an angular one.
+/// Which kind stone `index` is: of every seven river stones, three slabs, two cobbles, a long one and an angular one;
+/// and of the building stones, five flagstones and three blocks.
 pub fn kind(index: usize) -> Kind {
+    if building(index) {
+        return match index - RIVER {
+            2 | 5 | 7 => Kind::Block,
+            _ => Kind::Flagstone,
+        };
+    }
     match index % 7 {
         0 | 2 | 5 => Kind::Slab,
         1 | 6 => Kind::Cobble,
@@ -243,33 +258,108 @@ pub fn kind(index: usize) -> Kind {
     }
 }
 
-/// Whether stone `index` is one of the big ones, every other one, two to four hands' breadths across, as much as one
-/// hand holds; the rest a hand's breadth to two.
+/// Whether stone `index` is one of the big river stones, every other one, two to four hands' breadths across, as much
+/// as one hand holds; the rest a hand's breadth to two.
 pub fn big(index: usize) -> bool {
-    index % 2 == 1
+    !building(index) && index % 2 == 1
+}
+
+/// Whether stone `index` is one of the building stones, half a metre to three quarters across, after the river's.
+pub fn building(index: usize) -> bool {
+    index >= RIVER
 }
 
 /// How wide stone `index` is, its longest way across, 11.5 to 20 cm, or a big one, as its kind is, up to 37 cm for a
-/// slab or a long one and less for the rounder, heavier kinds, so that none is more than a hand might lift, about 15 kg;
-/// and how high, as its kind is: a slab a quarter to a third of its width, a cobble half to two thirds, a long or an
-/// angular one a third or more.
+/// slab or a long one and less for the rounder, heavier kinds, so that none is more than a hand might lift, about 15
+/// kg; and how high, as its kind is: a slab a quarter to a third of its width, a cobble half to two thirds, a long or
+/// an angular one a third or more. A building stone is as [`hewn`] says.
 pub fn size(index: usize) -> (f32, f32) {
+    if building(index) {
+        let (width, _, height) = hewn(index);
+        return (width, height);
+    }
     let seed = index as u32 * 7 + 3100;
     let kind = kind(index);
     let (least, more) = match (big(index), kind) {
         (false, _) => (0.115, 0.085),
         (true, Kind::Slab | Kind::Long) => (0.28, 0.09),
         (true, Kind::Angular) => (0.25, 0.08),
-        (true, Kind::Cobble) => (0.22, 0.06),
+        (true, _) => (0.22, 0.06),
     };
     let width = least + scatter(seed) * more;
     let (least, more) = match kind {
         Kind::Slab => (0.24, 0.09),
         Kind::Cobble => (0.5, 0.15),
         Kind::Long => (0.34, 0.1),
-        Kind::Angular => (0.36, 0.12),
+        _ => (0.36, 0.12),
     };
     (width, width * (least + scatter(seed + 1) * more))
+}
+
+/// How wide building stone `index` is, its longest way across, how deep, the other way, and how high: a flagstone 55 to
+/// 75 cm across, three fifths to three quarters as deep and 9 to 14 cm thick, and a block 34 to 44 cm across, three
+/// quarters as deep or more and 32 to 35 cm high, so that two of them, or three in a row, hold up a flagstone as a
+/// dolmen's pillars do, nearly level.
+/// Their widest is within [`tomori_physics::HOLD`] of a hand that holds them by an edge.
+pub fn hewn(index: usize) -> (f32, f32, f32) {
+    let seed = index as u32 * 11 + 3500;
+    let ((width, wider), (deep, deeper), (high, higher)) = match kind(index) {
+        Kind::Block => ((0.34, 0.1), (0.74, 0.14), (0.32, 0.03)),
+        _ => ((0.55, 0.2), (0.6, 0.15), (0.09, 0.05)),
+    };
+    let width = width + scatter(seed) * wider;
+    (
+        width,
+        width * (deep + scatter(seed + 1) * deeper),
+        high + scatter(seed + 2) * higher,
+    )
+}
+
+/// How far in a building stone's edges are bevelled, at its bottom, about its middle and at its top, as fractions of
+/// its half width and depth.
+const BEVEL: f32 = 0.12;
+
+/// The points of building stone `index`'s hull, about its middle, the same every time: a box of its [`hewn`] size, its
+/// edges bevelled and its corners nudged, as a stone split along its bedding and dressed roughly is; its bottom a face
+/// of four, flat, its top a face of four, flat and very nearly level, so that a flagstone laid across two blocks lies
+/// level on them, and between them a ring of eight about its middle, nudged in and up or down. Sixteen points.
+fn dressed(index: usize) -> Vec<Vec3> {
+    let (width, depth, height) = hewn(index);
+    let (x, z) = (width * 0.5, depth * 0.5);
+    let seed = index as u32 * 97 + 3600;
+    let nudge = |offset: u32| scatter(seed + offset);
+    let (tilt_x, tilt_z) = (nudge(0) - 0.5, nudge(1) - 0.5);
+    let corners = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+    let mut points = Vec::with_capacity(16);
+    for (level, base) in [(-0.5, 10), (0.5, 20)] {
+        for (corner, (across, along)) in corners.iter().enumerate() {
+            let inset = 1.0 - BEVEL * (0.7 + nudge(base + corner as u32) * 0.6);
+            let (px, pz) = (across * x * inset, along * z * inset);
+            // Its top tilted no more than about a degree, its bottom flat.
+            let tilt = if level > 0.0 {
+                (px * tilt_x + pz * tilt_z) * 0.03
+            } else {
+                0.0
+            };
+            points.push(Vec3::new(px, level * height + tilt, pz));
+        }
+    }
+    for (corner, (across, along)) in corners.iter().enumerate() {
+        for (side, (wide, deep)) in [(1.0, 1.0 - 2.0 * BEVEL), (1.0 - 2.0 * BEVEL, 1.0)]
+            .iter()
+            .enumerate()
+        {
+            let at = 30 + corner as u32 * 4 + side as u32 * 2;
+            let reach = 1.0 - nudge(at) * 0.05;
+            let level = (nudge(at + 1) - 0.5) * 0.24 * height;
+            points.push(Vec3::new(
+                across * x * wide * reach,
+                level,
+                along * z * deep * reach,
+            ));
+        }
+    }
+    points
 }
 
 /// One ring of a stone's points, from its bottom up: how many corners, at what height, as a fraction of the stone's
@@ -309,7 +399,7 @@ fn rings(kind: Kind) -> Vec<Ring> {
             ring(6, 0.3, 0.87, 0.5),
             ring(4, 0.5, 0.44, 0.0),
         ],
-        Kind::Angular => vec![
+        _ => vec![
             ring(4, -0.5, 0.72, 0.3),
             ring(5, 0.0, 1.0, 0.0),
             ring(4, 0.5, 0.6, 0.6),
@@ -324,16 +414,20 @@ fn roughness(kind: Kind) -> (f32, f32, f32, (f32, f32), f32) {
         Kind::Slab => (0.08, 0.0, 0.0, (0.72, 0.22), 0.16),
         Kind::Long => (0.08, 0.0, 0.0, (0.46, 0.14), 0.16),
         Kind::Cobble => (0.05, 0.0, 0.0, (0.84, 0.13), 0.1),
-        Kind::Angular => (0.18, 0.12, 0.24, (0.66, 0.2), 0.3),
+        _ => (0.18, 0.12, 0.24, (0.66, 0.2), 0.3),
     }
 }
 
 /// The points of stone `index`'s hull, about its middle, the same every time, ring by ring from its bottom up, as its
 /// kind's rings are, each corner nudged its own way, the whole squashed across, a little longer one way than the other
-/// or, a long one, much longer: its bottom flat and its top flat but a little tilted, each its own way, as stones chosen
-/// for a cairn are, so that it lies still where it is put and a stone put on it lies still on it. It is drawn from the
-/// same points, and collided as their convex hull, at most [`tomori_physics::HULL_POINTS`].
+/// or, a long one, much longer: its bottom flat and its top flat but a little tilted, each its own way, as stones
+/// chosen for a cairn are, so that it lies still where it is put and a stone put on it lies still on it. It is drawn
+/// from the same points, and collided as their convex hull, at most [`tomori_physics::HULL_POINTS`]. A building stone
+/// is [`dressed`] rather than worn.
 pub fn stone(index: usize) -> Vec<Vec3> {
+    if building(index) {
+        return dressed(index);
+    }
     let (width, height) = size(index);
     let kind = kind(index);
     let radius = width * 0.5;
@@ -482,14 +576,97 @@ const GENTLE: f32 = NEAR + 2.6;
 /// far bank; beyond, a stone thrown is lost, and returns to where it began.
 const REGION: f32 = 7.0;
 
-/// Where stone `index` lies to begin with, roughly, as the server side lets it settle: scattered over the beach, more
-/// of them near the water, apart from each other and from the river's stones, each turned as it fell.
+/// How far out from the trail's middle the building stones lie: on the flat shingle beyond where participants stand,
+/// and where it begins to slope, clear of the trail and of the shingle that is walked; and where along the beach the
+/// pile of flagstones lies, towards one end, and the blocks, in a row towards the other.
+pub const BUILDING_OUT: f32 = NEAR + 1.32;
+pub const PILE_ALONG: f32 = -0.9;
+pub const BLOCKS_ALONG: [f32; 3] = [0.45, 0.85, 1.25];
+
+/// The highest the shingle stands beneath stone `index` placed at `at`, where it is above the shingle.
+fn beneath(index: usize, at: &Placement) -> f32 {
+    stone(index)
+        .into_iter()
+        .filter_map(|point| {
+            let point = at.transform_point(point);
+            height(Vec2::new(point.x, point.z))
+        })
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// How far below and above its middle stone `index`'s lowest and highest points are, turned only about the upright.
+fn extent(index: usize) -> (f32, f32) {
+    stone(index)
+        .into_iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+            (low.min(point.y), high.max(point.y))
+        })
+}
+
+/// Where the building stones lie to begin with, roughly, as the server side lets them settle, by their numbers: the
+/// flagstones in a pile, the broadest at the bottom, each a little turned and off the one below it, as they would be
+/// stacked by hand, and the blocks standing in a row, each its long way out from the trail, so that the beach is kept
+/// clear for the river's stones and nobody walks into them.
+fn building_homes() -> Vec<(usize, Placement)> {
+    let (_, way, _) = frame();
+    let along_beach = Quat::from_rotation_y((-way.y).atan2(way.x));
+    let mut flagstones: Vec<usize> = (RIVER..STONES)
+        .filter(|index| kind(*index) == Kind::Flagstone)
+        .collect();
+    flagstones.sort_by(|a, b| size(*b).0.total_cmp(&size(*a).0));
+    let mut homes = Vec::with_capacity(BUILDING);
+    let mut top = f32::NEG_INFINITY;
+    for (level, index) in flagstones.into_iter().enumerate() {
+        let seed = index as u32 * 13 + 3700;
+        let point = at(
+            BUILDING_OUT + (scatter(seed) - 0.5) * 0.03,
+            PILE_ALONG + (scatter(seed + 1) - 0.5) * 0.03,
+        );
+        let turn = along_beach * Quat::from_rotation_y((scatter(seed + 2) - 0.5) * 0.12);
+        let (low, high) = extent(index);
+        let mut home = Placement::new(Vec3::new(point.x, 0.0, point.y), turn);
+        let below = if level == 0 {
+            beneath(index, &home) + 0.005
+        } else {
+            top + 0.003
+        };
+        home.position.y = below - low;
+        top = home.position.y + high;
+        homes.push((index, home));
+    }
+    let blocks = (RIVER..STONES).filter(|index| kind(*index) == Kind::Block);
+    for (index, along) in blocks.zip(BLOCKS_ALONG) {
+        let point = at(BUILDING_OUT, along);
+        let turn = along_beach
+            * Quat::from_rotation_y(
+                std::f32::consts::FRAC_PI_2 + (scatter(index as u32 + 3800) - 0.5) * 0.2,
+            );
+        let mut home = Placement::new(Vec3::new(point.x, 0.0, point.y), turn);
+        home.position.y = beneath(index, &home) + 0.005 - extent(index).0;
+        homes.push((index, home));
+    }
+    homes.sort_by_key(|(index, _)| *index);
+    homes
+}
+
+/// Where stone `index` lies to begin with, roughly, as the server side lets it settle: the river's scattered over the
+/// beach, more of them near the water, apart from each other, from the building stones and from the river's own
+/// stones, each turned as it fell; and the building stones as [`building_homes`] lays them.
 pub fn homes() -> Vec<Placement> {
     let boulders = boulders();
     let dry = dry();
-    let mut placed: Vec<(Vec2, f32)> = Vec::new();
+    let building = building_homes();
+    let mut placed: Vec<(Vec2, f32)> = building
+        .iter()
+        .map(|(index, home)| {
+            (
+                Vec2::new(home.position.x, home.position.z),
+                size(*index).0 * 0.5,
+            )
+        })
+        .collect();
     let mut homes = Vec::with_capacity(STONES);
-    for index in 0..STONES {
+    for index in 0..RIVER {
         let (width, tall) = size(index);
         let radius = width * 0.5;
         let mut attempt = 0u32;
@@ -522,16 +699,42 @@ pub fn homes() -> Vec<Placement> {
             turn,
         ));
     }
+    homes.extend(building.into_iter().map(|(_, home)| home));
     homes
 }
 
-/// The beach's stones as bodies, numbered from 0, each of granite, where it lies to begin with.
+/// The beach's stones as bodies, numbered from 0, each of granite, where it lies to begin with, let go no faster than
+/// its [`heft`] lets a hand throw it.
 pub fn bodies() -> Vec<Body> {
     homes()
         .into_iter()
         .enumerate()
-        .map(|(index, home)| Body::convex(index as u32, stone(index)).at(home))
+        .map(|(index, home)| {
+            Body::convex(index as u32, stone(index))
+                .at(home)
+                .thrown_at_most(fastest(index))
+        })
         .collect()
+}
+
+/// Granite's density, in kilograms a cubic metre, which the beach's stones are of.
+pub const GRANITE: f32 = 2_650.0;
+/// The mass a hand throws as fast as it moves, in kilograms, and the least of the hand's speed a stone leaves it with.
+const HEFTED: f32 = 1.5;
+const HEAVIEST: f32 = 0.25;
+
+/// How much of the hand's speed stone `index` leaves it with: all of it, for a stone of [`HEFTED`] or less, and less
+/// the heavier it is, down to [`HEAVIEST`], so that a big stone thrown as a small one is goes slower and less far, as
+/// it would, and a building stone, of 50 kg or more, barely leaves the hand.
+pub fn heft(index: usize) -> f32 {
+    let mass = volume(index) * GRANITE;
+    (HEFTED / mass).powf(0.3).clamp(HEAVIEST, 1.0)
+}
+
+/// The fastest stone `index` leaves a hand, in metres a second: [`tomori_physics::RELEASE_SPEED`] as its [`heft`]
+/// lessens it, which the server side holds a letting go to, as it holds every one to that.
+pub fn fastest(index: usize) -> f32 {
+    tomori_physics::RELEASE_SPEED * heft(index)
 }
 
 /// What the stones rest on: the beach's surface as it is drawn; the ground about it, the trail, the river's bed and its
@@ -608,7 +811,9 @@ pub fn shared(state: &serde_json::Value) -> tomori_physics::message::State {
 /// How long a stone rests in the river before it comes back to the beach, in milliseconds.
 pub const RETURNS: u64 = 60_000;
 
-/// How the beach's world simulates: as `tomori-physics` does by default, a stone lost beyond its region going back.
+/// How the beach's world simulates: as `tomori-physics` does by default, a stone lost beyond its region going back, but
+/// with every contact against the shingle's triangles solved against its own, [`Settings::unclustered`], so that a
+/// building stone lying across a bend of a degree or two in the shingle rests rather than creeping along it.
 pub fn settings() -> Settings {
     let middle = at((NEAR + FAR) * 0.5, 0.0);
     Settings {
@@ -616,6 +821,7 @@ pub fn settings() -> Settings {
         lost_beyond: REGION,
         ..Settings::default()
     }
+    .unclustered()
 }
 
 /// The colours of the beach's shingle and its stones.
@@ -717,7 +923,7 @@ fn crossing(origin: Vec3, direction: Vec3, [a, b, c]: [Vec3; 3]) -> Option<f32> 
 }
 
 /// The most triangles the beach and its stones draw together, which the tests check.
-pub const BUDGET: usize = 1_400;
+pub const BUDGET: usize = 1_600;
 
 #[cfg(test)]
 mod tests;

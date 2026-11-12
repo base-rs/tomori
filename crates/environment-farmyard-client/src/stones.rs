@@ -110,28 +110,23 @@ fn reach(stone: u32, placement: &Placement, hand: Vec3) -> f32 {
 
 /// Where stone `stone`, turned `turned` in the hand, is held as it is pulled to it: in front of the fist, along its
 /// −Z, as far as the stone reaches back towards the hand that way, a little within it, as the fingers close round it,
-/// so that a big stone is held before the hand rather than through it.
+/// a fifth of the way and no more than a few centimetres, so that a big stone is held before the hand rather than
+/// through it, and a building stone by its near edge.
 fn palm(stone: u32, turned: glam::Quat) -> Placement {
     let back = beach::stone(stone as usize)
         .into_iter()
         .map(|point| (turned * point).z)
         .fold(0.0, f32::max);
-    Placement::new(Vec3::new(0.0, 0.0, -(back * 0.8 + 0.02)), turned)
+    let within = (back * 0.2).min(0.04);
+    Placement::new(Vec3::new(0.0, 0.0, -(back - within + 0.02)), turned)
 }
 
-/// How much of the hand's speed stone `stone` leaves it with: all of it, for a stone of [`HEFTED`] or less, and less
-/// the heavier it is, down to [`HEAVIEST`], so that a big stone thrown as a small one is goes slower and less far, as
-/// it would.
+/// How much of the hand's speed stone `stone` leaves it with, as [`beach::heft`] says: so that a big stone thrown as a
+/// small one is goes slower and less far, as it would, and the server side, which holds it to the same, need cut
+/// nothing.
 pub fn heft(stone: u32) -> f32 {
-    let mass = beach::volume(stone as usize) * GRANITE;
-    (HEFTED / mass).powf(0.3).clamp(HEAVIEST, 1.0)
+    beach::heft(stone as usize)
 }
-
-/// Granite's density, in kilograms a cubic metre, which the beach's stones are of.
-const GRANITE: f32 = 2_650.0;
-/// The mass a hand throws as fast as it moves, in kilograms, and the least of the hand's speed a stone leaves it with.
-const HEFTED: f32 = 1.5;
-const HEAVIEST: f32 = 0.45;
 
 /// `placement` of stone `stone`, lifted so that none of it is below the beach's shingle, where there is shingle: so
 /// that a stone held is never drawn inside the beach, and is let go on it rather than in it.

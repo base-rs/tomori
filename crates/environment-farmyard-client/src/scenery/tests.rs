@@ -7,7 +7,7 @@
 //! beside it, with `-chickens` added to its name; `TOMORI_FARMYARD_COOP_PREVIEW` saves the coop by its ramp and in at its
 //! window, with hens on the ramp and in a nest, as `-1.png`, and the path's stones, as `-2.png`;
 //! `TOMORI_FARMYARD_CAMPSITE_PREVIEW` saves the campsite from the lookout's log seat, a marshmallow toasting over its
-//! bonfire.
+//! bonfire; and `TOMORI_FARMYARD_BEACH_PREVIEW` a little dolmen of the beach's building stones on its shingle.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -1100,6 +1100,158 @@ fn the_bonfire_s_light_flickers_and_the_campsite_draws_within_its_budget() {
         assert_eq!(meshes.len(), 2);
         assert_eq!(meshes[1], 1 + stick.shade);
     }
+}
+
+/// The beach's stones as its server side settles them, but three of its building stones, two blocks and its broadest
+/// flagstone, built into a little dolmen on the flat shingle where no other stone lies; and the dolmen's middle, on the
+/// shingle.
+fn beach_with_a_dolmen() -> (Vec<crate::stones::Shown>, Vec3) {
+    use tomori_environment_farmyard::beach;
+    use tomori_physics::Placement;
+    use tomori_physics::world::World;
+    let by_width = |kind: beach::Kind| {
+        let mut stones: Vec<usize> = (beach::RIVER..beach::STONES)
+            .filter(|index| beach::kind(*index) == kind)
+            .collect();
+        stones.sort_by(|a, b| beach::size(*b).0.total_cmp(&beach::size(*a).0));
+        stones
+    };
+    let (blocks, lintel) = (
+        by_width(beach::Kind::Block),
+        by_width(beach::Kind::Flagstone)[0],
+    );
+    let (left, right) = (blocks[0], blocks[2]);
+    let mut bodies = beach::bodies();
+    // Where on the flat shingle the dolmen stands farthest from every other stone.
+    let others: Vec<glam::Vec2> = bodies
+        .iter()
+        .filter(|body| ![left, right, lintel].contains(&(body.id as usize)))
+        .map(|body| glam::Vec2::new(body.home.position.x, body.home.position.z))
+        .collect();
+    let (out, along) = (0..=10)
+        .flat_map(|out| {
+            (0..=16).map(move |along| {
+                (
+                    beach::NEAR + 0.6 + out as f32 * 0.05,
+                    -0.8 + along as f32 * 0.1,
+                )
+            })
+        })
+        .max_by(|a, b| {
+            let clear = |(out, along): (f32, f32)| {
+                let middle = beach::at(out, along);
+                others
+                    .iter()
+                    .map(|other| other.distance(middle))
+                    .fold(f32::INFINITY, f32::min)
+            };
+            clear(*a).total_cmp(&clear(*b))
+        })
+        .unwrap();
+    let (_, way, _) = beach::frame();
+    let along_beach = glam::Quat::from_rotation_y((-way.y).atan2(way.x));
+    let span = |stone: usize, at: &Placement| {
+        beach::stone(stone)
+            .into_iter()
+            .map(|point| at.transform_point(point).y)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), y| {
+                (low.min(y), high.max(y))
+            })
+    };
+    let pillar = |stone: usize, offset: f32| {
+        let point = beach::at(out, along + offset);
+        let mut at = Placement::new(
+            Vec3::new(point.x, 0.0, point.y),
+            along_beach * glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        );
+        at.position.y = beach::height(point).unwrap() + 0.01 - span(stone, &at).0;
+        at
+    };
+    let (first, second) = (pillar(left, -0.24), pillar(right, 0.24));
+    let middle = beach::at(out, along);
+    let mut top = Placement::new(Vec3::new(middle.x, 0.0, middle.y), along_beach);
+    top.position.y =
+        span(left, &first).1.max(span(right, &second).1) + 0.003 - span(lintel, &top).0;
+    for (stone, at) in [(left, first), (right, second), (lintel, top)] {
+        bodies[stone].home = at;
+    }
+    let mut world = World::new(
+        beach::settings(),
+        beach::colliders(),
+        beach::waters(),
+        bodies,
+    )
+    .unwrap();
+    assert!(world.settle(15.0));
+    let shown = world
+        .bodies()
+        .map(|body| crate::stones::Shown {
+            stone: body as usize,
+            transform: world.placement(body).unwrap().matrix(),
+        })
+        .collect();
+    (
+        shown,
+        Vec3::new(middle.x, beach::height(middle).unwrap(), middle.y),
+    )
+}
+
+#[test]
+fn a_little_dolmen_of_the_beach_s_building_stones_is_drawn_standing_on_its_shingle() {
+    use tomori_environment_farmyard::beach;
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let mut farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        let (stones, middle) = beach_with_a_dolmen();
+        // From the trail beside the beach, a step along from the dolmen, looking down at it.
+        let (_, way, outward) = beach::frame();
+        let eye = middle - Vec3::new(outward.x, 0.0, outward.y) * 1.3
+            + Vec3::new(way.x, 0.0, way.y) * 1.1
+            + Vec3::Y * 1.5;
+        let view = (eye, middle + Vec3::Y * 0.3);
+        let mut drawn = |stones: Vec<crate::stones::Shown>| {
+            farmyard.animate(
+                &device,
+                &queue,
+                &crate::client::Drawn {
+                    stones,
+                    chickens: Vec::new(),
+                    sticks: Vec::new(),
+                },
+            );
+            capture_sized(&device, &queue, &farmyard, 4, view, picture())
+        };
+        let without = drawn(Vec::new());
+        let pixels = drawn(stones);
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_BEACH_PREVIEW") {
+            image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone())
+                .unwrap()
+                .save(path)
+                .unwrap();
+        }
+        // The lintel is drawn high on its pillars, over the shingle seen there without it, and its shade beneath it
+        // darkens nothing of the shingle well beyond it.
+        let lintel = seen_at(view, middle + Vec3::Y * 0.49);
+        assert!(
+            (about(&pixels, lintel) - about(&without, lintel)).abs() > 20.0,
+            "{} {}",
+            about(&pixels, lintel),
+            about(&without, lintel)
+        );
+        let beyond = seen_at(view, middle - Vec3::new(outward.x, 0.0, outward.y) * 0.9);
+        assert!((about(&pixels, beyond) - about(&without, beyond)).abs() < 2.0);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
 }
 
 #[test]

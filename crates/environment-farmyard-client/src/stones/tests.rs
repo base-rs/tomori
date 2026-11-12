@@ -683,13 +683,18 @@ fn a_big_stone_pulled_to_the_hand_is_held_before_it_and_thrown_slower_than_a_sma
             assert!(held.position.length() <= tomori_physics::HOLD);
         }
     }
-    // The heaviest leaves the hand at under half its speed, a small one at all of it.
-    let heaviest = (0..beach::STONES as u32)
+    // The heaviest river stone leaves the hand at under half its speed, a small one at all of it, and a building stone
+    // at no more than a third of it, as the side holds it to.
+    let heaviest = (0..beach::RIVER as u32)
         .max_by(|a, b| beach::volume(*a as usize).total_cmp(&beach::volume(*b as usize)))
         .unwrap();
     assert!(beach::big(heaviest as usize));
     assert!((0.45..0.6).contains(&heft(heaviest)), "{}", heft(heaviest));
     assert_eq!(heft(0), 1.0);
+    for stone in beach::RIVER..beach::STONES {
+        assert!((0.25..0.36).contains(&heft(stone as u32)), "{stone}");
+        assert!(beach::fastest(stone) < 3.0, "{stone}");
+    }
     // Pulled along the ray and thrown as fast as a small one, it flies slower.
     let mut stones = Stones::new();
     let mut shared = state();
@@ -855,6 +860,63 @@ mod played {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_building_stone_is_held_by_the_edge_it_is_taken_at_and_thrown_no_faster_than_its_heft_lets_it()
+     {
+        let mut played = Played::new(0);
+        // The flagstone on top of the pile, taken at its farthest edge.
+        let stone = (beach::RIVER as u32..beach::STONES as u32)
+            .filter(|stone| beach::kind(*stone as usize) == beach::Kind::Flagstone)
+            .max_by(|a, b| {
+                let y = |stone: u32| played.side.world().placement(stone).unwrap().position.y;
+                y(*a).total_cmp(&y(*b))
+            })
+            .unwrap();
+        let at = played.side.world().placement(stone).unwrap();
+        let edge = beach::stone(stone as usize)
+            .into_iter()
+            .map(|point| at.transform_point(point))
+            .max_by(|a, b| {
+                let out = |point: &Vec3| (*point - at.position).with_y(0.0).length();
+                out(a).total_cmp(&out(b))
+            })
+            .unwrap();
+        let mut hand = edge + (edge - at.position).with_y(0.0).normalize() * 0.02;
+        assert_eq!(
+            played.client.within_reach(hand),
+            Some(format!("stone-{stone}"))
+        );
+        played.frame(Some((stone, Phase::Began)), hand);
+        for _ in 0..10 {
+            played.frame(Some((stone, Phase::Changed)), hand);
+        }
+        // Held where the hand closed on it, by its edge, its middle well away from the hand, within what may be held.
+        assert_eq!(played.side.world().held(stone).map(|held| held.by), Some(3));
+        let held = played.client.holding[1].as_ref().unwrap();
+        let reach = held.offset.position.length();
+        assert!(reach > 0.2 && reach < tomori_physics::HOLD, "{reach}");
+        // Swung hard, 6 m/s, and let go, it leaves at no more than its heft lets it.
+        for _ in 0..8 {
+            hand += Vec3::new(0.0, 0.0, 6.0 * 0.014);
+            played.frame(Some((stone, Phase::Changed)), hand);
+        }
+        played.frame(Some((stone, Phase::Ended)), hand);
+        let fastest = beach::fastest(stone as usize);
+        assert!(fastest < 3.0);
+        let mut last = played.side.world().placement(stone).unwrap().position;
+        let mut quickest: f32 = 0.0;
+        for _ in 0..6 {
+            played.frame(None, hand);
+            let now = played.side.world().placement(stone).unwrap().position;
+            quickest = quickest.max((now - last).with_y(0.0).length() / 0.014);
+            last = now;
+        }
+        assert!(
+            quickest > 0.5 && quickest <= fastest + 0.2,
+            "{quickest} {fastest}"
+        );
     }
 
     #[test]

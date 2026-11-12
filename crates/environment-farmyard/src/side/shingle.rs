@@ -65,15 +65,15 @@ impl Shingle {
             .bodies()
             .filter(|body| world.held(*body).is_some())
             .count();
+        let stones = format!(
+            "the shingle beach by the river, where {} river stones lie to pick up, throw and stack, and {} big \
+             building stones, flagstones and blocks, to build with",
+            beach::RIVER,
+            beach::BUILDING
+        );
         let description = match held {
-            0 => format!(
-                "the shingle beach by the river, where {} river stones lie to pick up, throw and stack",
-                beach::STONES
-            ),
-            held => format!(
-                "the shingle beach by the river, where {} river stones lie to pick up, throw and stack, {held} in someone's hand",
-                beach::STONES
-            ),
+            0 => stones,
+            held => format!("{stones}, {held} in someone's hand"),
         };
         (
             "beach".to_owned(),
@@ -92,9 +92,15 @@ pub fn inspect(shared: &State) -> serde_json::Value {
         .filter(|body| body.held.is_some())
         .count();
     let moving = shared.bodies.iter().filter(|body| body.moving).count();
+    let building = shared
+        .bodies
+        .iter()
+        .filter(|body| beach::building(body.body as usize))
+        .count();
     serde_json::json!({
         "kind": "shingle beach",
         "stones": shared.bodies.len(),
+        "building": building,
         "held": held,
         "moving": moving,
     })

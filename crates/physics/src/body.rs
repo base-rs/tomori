@@ -20,8 +20,9 @@ pub enum Kind {
 
 /// One of an environment's loose bodies, by the number it is known by on the wire: the points of its convex hull, which
 /// it is drawn and collided from alike, in its own coordinates, about its middle; how dense it is, its friction, how
-/// much it bounces and how its motion is damped; whether it is [`Kind::Dynamic`] or [`Kind::Kinematic`]; and where it
-/// begins, which it returns to when it is lost.
+/// much it bounces and how its motion is damped; whether it is [`Kind::Dynamic`] or [`Kind::Kinematic`]; where it
+/// begins, which it returns to when it is lost; and the fastest it leaves a hand, in metres a second, at most
+/// [`crate::RELEASE_SPEED`], so that a heavy one cannot be flung far.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Body {
     pub id: u32,
@@ -33,13 +34,14 @@ pub struct Body {
     pub angular_damping: f32,
     pub kind: Kind,
     pub home: Placement,
+    pub fastest: f32,
 }
 
 impl Body {
     /// Body `id`, the convex hull of `points`, of granite by default: 2,650 kg/m³, a friction of 0.9, bouncing little,
-    /// damped a little, dynamic, beginning at the origin. A face that another body is to rest on, or that rests on
-    /// another, has at most four corners: Rapier rests a face of more than four on another unsteadily, so that a stack
-    /// of them shakes itself apart. See `design/physics.md`.
+    /// damped a little, dynamic, beginning at the origin, let go as fast as [`crate::RELEASE_SPEED`]. A face that
+    /// another body is to rest on, or that rests on another, has at most four corners: Rapier rests a face of more than
+    /// four on another unsteadily, so that a stack of them shakes itself apart. See `design/physics.md`.
     pub fn convex(id: u32, points: Vec<Vec3>) -> Self {
         Self {
             id,
@@ -51,6 +53,7 @@ impl Body {
             angular_damping: 0.5,
             kind: Kind::Dynamic,
             home: Placement::IDENTITY,
+            fastest: crate::RELEASE_SPEED,
         }
     }
 
@@ -81,6 +84,13 @@ impl Body {
         self
     }
 
+    /// This body, let go no faster than `speed`, as a heavy one is: a letting go faster is cut to it, as one faster
+    /// than [`crate::RELEASE_SPEED`] is cut to that.
+    pub fn thrown_at_most(mut self, speed: f32) -> Self {
+        self.fastest = speed;
+        self
+    }
+
     /// This body, beginning at `home`.
     pub fn at(mut self, home: Placement) -> Self {
         self.home = home;
@@ -104,7 +114,8 @@ impl Body {
     }
 
     /// Whether the world takes it, or why not: a hull of 4 to [`HULL_POINTS`] finite points, positive and finite
-    /// density and friction, restitution and damping finite and not negative, and a valid home.
+    /// density and friction, restitution, damping and the fastest it is let go finite and not negative, and a valid
+    /// home.
     pub fn check(&self) -> Result<(), Refused> {
         if self.hull.len() < 4 || self.hull.len() > HULL_POINTS {
             return Err(Refused::Hull(self.id));
@@ -116,6 +127,7 @@ impl Body {
             self.restitution + 1.0,
             self.linear_damping + 1.0,
             self.angular_damping + 1.0,
+            self.fastest + 1.0,
         ]
         .iter()
         .all(|value| value.is_finite() && *value > 0.0);
@@ -306,8 +318,9 @@ pub fn within(outline: &[Vec2], point: Vec2) -> bool {
 
 /// How the world simulates: its gravity; its step and how many substeps each takes; when a body falls asleep, once it
 /// has moved less than `sleep_speed` a second and turned less than `sleep_turn` radians a second for `sleep_after`
-/// seconds, firmer than Rapier's own, so that a cairn stops being simulated as soon as it stands; and how far from home
-/// and below its lowest collider a body is lost, and goes back where it began.
+/// seconds, firmer than Rapier's own, so that a cairn stops being simulated as soon as it stands; how far from home
+/// and below its lowest collider a body is lost, and goes back where it began; and how its contacts are solved, see
+/// [`Settings::unclustered`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub gravity: Vec3,
@@ -319,6 +332,10 @@ pub struct Settings {
     pub home: Vec3,
     pub lost_beyond: f32,
     pub lost_below: f32,
+    /// Whether contacts against a mesh's triangles within about 5° of each other are solved as one plane, as Rapier
+    /// does by default, and how many passes of the solver each substep takes, one by default.
+    pub clustered: bool,
+    pub passes: usize,
 }
 
 impl Default for Settings {
@@ -333,6 +350,23 @@ impl Default for Settings {
             home: Vec3::ZERO,
             lost_beyond: 30.0,
             lost_below: 1.0,
+            clustered: true,
+            passes: 1,
+        }
+    }
+}
+
+impl Settings {
+    /// These settings, every contact against a mesh's triangle solved against its own triangle rather than the
+    /// triangles within about 5° of each other as one plane, and in two passes of the solver each substep: for broad,
+    /// flat, heavy bodies resting across gentle bends in a mesh, whose contacts pushed along the one plane creep sideways
+    /// a few millimetres a second for ever, at a little more cost; the second pass so that a heavy body on a small one
+    /// settles as soon as it did. See `design/physics.md`.
+    pub fn unclustered(self) -> Self {
+        Self {
+            clustered: false,
+            passes: 2,
+            ..self
         }
     }
 }
