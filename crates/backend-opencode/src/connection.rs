@@ -683,6 +683,17 @@ type RestoreFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = RestoreRe
 type ActivityFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ActivityResult> + 'a>>>;
 type DiscoveryFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = DiscoveryResult> + 'a>>>;
 
+/// The service a connection's requests and reads go to: its HTTP client,
+/// where it is and with what credentials, the connection's cancellation, which
+/// ends them all with it, and its timers.
+#[derive(Clone, Copy)]
+struct Service<'a, 'c, T> {
+    client: &'a Client<'c>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: T,
+}
+
 /// Open the server's global event stream, then serve it and the commands,
 /// polling the stream, the command channel, the requests in flight, reads and
 /// a periodic reconciliation of each session's running state together, until
@@ -727,6 +738,12 @@ async fn connected<S: Timers>(
         held,
         sequence,
     } = sessions;
+    let service = Service {
+        client,
+        resolved,
+        cancellation,
+        timers,
+    };
 
     let mut groups = EventGroups::default();
     let mut timer = timers.timer();
@@ -741,15 +758,7 @@ async fn connected<S: Timers>(
         FuturesUnordered::new();
     // The stream is open, so whatever happens from now on is observed: read
     // again every session whose events were lost.
-    start_resyncs(
-        registrations,
-        &mut resyncs,
-        sequence,
-        client,
-        resolved,
-        cancellation,
-        timers,
-    );
+    start_resyncs(registrations, &mut resyncs, sequence, service);
 
     // Commands not yet started, in the order they arrived, each with whether
     // it waited for this connection; the requests in flight; and the sessions
@@ -785,10 +794,7 @@ async fn connected<S: Timers>(
                 registrations,
                 &mut snapshots,
                 sequence,
-                client,
-                resolved,
-                cancellation,
-                timers,
+                service,
             );
         }
         let reading = lost.is_none();
@@ -826,7 +832,7 @@ async fn connected<S: Timers>(
                     close_session(registrations, &mut waiting, &id, &identity);
                 }
                 Ok(command @ Command::Snapshot { .. }) => {
-                    prepare_command(command, false, registrations, &mut snapshots, sequence, client, resolved, cancellation, timers);
+                    prepare_command(command, false, registrations, &mut snapshots, sequence, service);
                 }
                 Ok(command) if waiting.len() >= MAX_WAITING => {
                     refuse(command, tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, TOO_MANY_WAITING));
@@ -856,7 +862,7 @@ async fn connected<S: Timers>(
                 }
             }) => {
                 finish_snapshot(registrations, completed.expect("a snapshot was in flight"));
-                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
+                start_discoveries(registrations, &mut discoveries, service);
                 continue;
             }
             completed = Fused::new(async {
@@ -868,7 +874,7 @@ async fn connected<S: Timers>(
             }) => {
                 let completed = completed.expect("a discovery was in flight");
                 finish_discovery(registrations, completed, timers.now());
-                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
+                start_discoveries(registrations, &mut discoveries, service);
                 continue;
             }
             completed = Fused::new(async {
@@ -880,10 +886,10 @@ async fn connected<S: Timers>(
             }) => {
                 finish_resync(registrations, completed.expect("a read was in flight"), timers.now());
                 // A slot is free: start the next waiting session at once.
-                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
-                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
-                start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
+                start_resyncs(registrations, &mut resyncs, sequence, service);
+                start_discoveries(registrations, &mut discoveries, service);
+                start_restores(registrations, &mut restores, service);
+                start_activity_syncs(registrations, &mut activities, service);
                 continue;
             }
             completed = Fused::new(async {
@@ -894,7 +900,7 @@ async fn connected<S: Timers>(
                 }
             }) => {
                 finish_activity_sync(registrations, completed.expect("a read was in flight"));
-                start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
+                start_activity_syncs(registrations, &mut activities, service);
                 continue;
             }
             completed = Fused::new(async {
@@ -905,7 +911,7 @@ async fn connected<S: Timers>(
                 }
             }) => {
                 finish_restore(registrations, completed.expect("a restore was in flight"));
-                start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                start_restores(registrations, &mut restores, service);
                 continue;
             }
             completed = Fused::new(async {
@@ -956,7 +962,7 @@ async fn connected<S: Timers>(
                                     dispatch_events_at(&payload, registrations, number);
                                 }
                             }
-                            start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                            start_restores(registrations, &mut restores, service);
                             oversized = groups.oversized();
                         }
                         if oversized {
@@ -1046,12 +1052,12 @@ async fn connected<S: Timers>(
                     let retry = std::mem::take(&mut registration.restore_retry);
                     registration.restore_due.extend(retry);
                 }
-                start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                start_activity_syncs(registrations, &mut activities, client, resolved, cancellation, timers);
+                start_restores(registrations, &mut restores, service);
+                start_activity_syncs(registrations, &mut activities, service);
                 // Retry a session whose read again failed.
-                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                start_resyncs(registrations, &mut resyncs, sequence, service);
                 // Go on with a discovery whose retry is due.
-                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
+                start_discoveries(registrations, &mut discoveries, service);
                 retry_worker_delivery(registrations);
                 next_reconcile = timers.now() + RECONCILE_INTERVAL;
                 continue;
@@ -1174,7 +1180,6 @@ fn close_session(
 /// for the one in flight for it. Each request runs beside the event stream,
 /// reads and every other request, so a stalled one holds up only its own
 /// session's later commands.
-#[allow(clippy::too_many_arguments)]
 fn start_commands<'a, S: Timers>(
     waiting: &mut VecDeque<(Command, bool)>,
     busy: &mut HashSet<String>,
@@ -1182,10 +1187,7 @@ fn start_commands<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    client: &'a Client<'_>,
-    resolved: &'a Resolved,
-    cancellation: &'a Cancellation,
-    timers: &'a S,
+    service: Service<'a, '_, &'a S>,
 ) {
     let mut kept = VecDeque::new();
     while let Some((command, held)) = waiting.pop_front() {
@@ -1198,17 +1200,9 @@ fn start_commands<'a, S: Timers>(
             kept.push_back((command, held));
             continue;
         }
-        if let Some(request) = prepare_command(
-            command,
-            held,
-            registrations,
-            snapshots,
-            sequence,
-            client,
-            resolved,
-            cancellation,
-            timers,
-        ) {
+        if let Some(request) =
+            prepare_command(command, held, registrations, snapshots, sequence, service)
+        {
             if let Some(session) = &session {
                 busy.insert(session.clone());
             }
