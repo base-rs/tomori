@@ -7686,6 +7686,8 @@ mod timers;
 mod walking;
 #[path = "hub_tests/watching.rs"]
 mod watching;
+#[path = "hub_tests/zones.rs"]
+mod zones;
 
 /// A side that keeps who it was last told takes part in its space, for a test to read.
 struct Present(Arc<Mutex<Option<Vec<u32>>>>);

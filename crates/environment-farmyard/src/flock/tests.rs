@@ -623,3 +623,44 @@ fn flock_running() -> Flock {
     }
     flock
 }
+
+#[test]
+fn the_hens_on_the_ground_glance_up_as_someone_comes_to_the_coop() {
+    let mut flock = flock("space-1");
+    // At the start, every hen stands about on the ground: each glances up, to alternate sides, for a moment.
+    let changes = flock.glance(1_000);
+    assert_eq!(changes.len(), flock.hens().len());
+    for (index, behaviour) in &changes {
+        assert_eq!(behaviour.since, 1_000 + LEAD);
+        let side = if index % 2 == 0 {
+            crate::behaviour::LOOK
+        } else {
+            -crate::behaviour::LOOK
+        };
+        assert_eq!(
+            behaviour.doing,
+            Doing::Look {
+                side,
+                until: 1_000 + LEAD + GLANCE
+            }
+        );
+    }
+    // One up in the coop, and one running off, do not.
+    flock.hens[1].behaviour = Behaviour {
+        since: 0,
+        at: [-2.8, layout::COOP_FLOOR, -8.4],
+        heading: 0.0,
+        doing: Doing::Stand,
+    };
+    let mut running = flock_running();
+    running.hens[1].behaviour = flock.hens[1].behaviour;
+    let glanced: Vec<usize> = running
+        .glance(10_000)
+        .into_iter()
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        !glanced.contains(&0) && !glanced.contains(&1),
+        "{glanced:?}"
+    );
+}

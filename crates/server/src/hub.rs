@@ -473,6 +473,15 @@ impl tomori_environment::Outlet for SpaceOutlet {
             .upgrade()
             .map_or(Ok(()), |hub| hub.channel_declare_actions(self, actions))
     }
+
+    fn declare_zones(
+        &self,
+        zones: Vec<tomori_environment::Zone>,
+    ) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_declare_zones(self, zones))
+    }
 }
 
 pub struct Hub {
@@ -2500,6 +2509,27 @@ impl Hub {
         Ok(())
     }
 
+    /// The zones the side of `outlet`'s binding declares, replacing those it declared before, each told as it is at the
+    /// next sweep, or why they are refused, keeping none of them. See `design/environments.md`.
+    fn channel_declare_zones(
+        &self,
+        outlet: &SpaceOutlet,
+        zones: Vec<tomori_environment::Zone>,
+    ) -> tomori_environment::Result<()> {
+        let environments = self.environments();
+        let zones = crate::zones::Zones::declare(zones, |point| {
+            environments
+                .carry(&outlet.environment, &tomori_protocol::Pose::at(point))
+                .map(|pose| pose.position)
+        })?;
+        drop(environments);
+        let mut state = self.lock();
+        if let Some(record) = self.current_channel(&mut state, outlet) {
+            record.zones.declare(zones, Instant::now());
+        }
+        Ok(())
+    }
+
     /// The panel the side of `outlet`'s binding publishes onto its environment's own walls, or updates in place, for
     /// everyone in the space, held to the rates [`crate::channel::Publishes`] keeps: an update that comes too soon waits,
     /// replacing any update of the same panel waiting before it, and is made as soon as it may be, at the next change the
@@ -3491,6 +3521,7 @@ impl Hub {
         self.flush_anchors(now);
         self.sweep_places(now);
         self.sweep_proximity(now);
+        self.sweep_zones(now);
         self.sweep_present();
         // Such as after a closed space was forgotten.
         self.keep();
@@ -4394,6 +4425,7 @@ impl Hub {
                     .as_ref()
                     .map(|seen| (seen.head, seen.controllers[0], seen.controllers[1]));
                 record.seen = seen;
+                let engagement = record.engagement;
                 if let Some((head, left, right)) = sounded {
                     let environment = &state.space(id).expect("found above").model.environment;
                     let environments = self.environments();
@@ -4405,7 +4437,8 @@ impl Hub {
                         left.as_ref().map(uncarry),
                         right.as_ref().map(uncarry),
                         Instant::now(),
-                    );
+                    )
+                    .with_engagement(engagement);
                     self.server_sides.presence(id, presence);
                 }
                 // A following agent keeps with whoever it talks with as they move. See `design/environments.md`.
@@ -4745,6 +4778,12 @@ impl Hub {
                 };
                 log::debug!("Participant {} is now {engagement:?}.", record.source);
                 record.engagement = Some(engagement);
+                let source = record.source;
+                if let Some(space) = space {
+                    // At once, whatever the presence throttle, since a headset lifted off says it is away and then stops
+                    // reporting. See `tomori_environment::Space::presence`.
+                    self.server_sides.engagement(space, source, engagement);
+                }
                 if let Some(space) = space
                     && let Some(record) = state.space_mut(space)
                 {

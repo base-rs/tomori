@@ -17,6 +17,7 @@ struct Kept {
     events: Mutex<Vec<String>>,
     objects: Mutex<Vec<Vec<Object>>>,
     actions: Mutex<Vec<tomori_environment::Action>>,
+    zones: Mutex<Vec<tomori_environment::Zone>>,
 }
 
 impl Outlet for Kept {
@@ -38,6 +39,11 @@ impl Outlet for Kept {
 
     fn declare_actions(&self, actions: Vec<tomori_environment::Action>) -> Result<()> {
         *self.actions.lock().unwrap() = actions;
+        Ok(())
+    }
+
+    fn declare_zones(&self, zones: Vec<tomori_environment::Zone>) -> Result<()> {
+        *self.zones.lock().unwrap() = zones;
         Ok(())
     }
 }
@@ -155,6 +161,66 @@ fn the_side_declares_that_a_hen_may_be_made_to_peck_and_answers_the_agent() {
     assert_eq!(running.join().unwrap(), Ok(()));
 }
 
+#[test]
+fn the_hens_glance_up_as_someone_comes_to_the_coop() {
+    let cancellation = Cancellation::new();
+    let kept = Arc::new(Kept::default());
+    let space = Space::with_cancellation("space-1", "Fleet", "/", cancellation.child())
+        .with_outlet(kept.clone());
+    let inbox = space.inbox();
+    let running = std::thread::spawn(move || FarmyardSide.run(&space));
+    eventually(|| !kept.objects.lock().unwrap().is_empty());
+    // Declared once, a zone the server takes, before the coop's ramp and clear of where participants arrive.
+    assert_eq!(*kept.zones.lock().unwrap(), zones());
+    assert_eq!(tomori_environment::check_zones(&zones()), Ok(()));
+    let arrival = crate::layout::ARRIVAL;
+    assert!(!zones()[0].holds(
+        [crate::layout::RAMP_FOOT.x, 0.0, crate::layout::RAMP_FOOT.z],
+        [arrival.x, 1.6, arrival.z],
+        true
+    ));
+    let glances = || {
+        kept.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                let event: crate::flock::Event = serde_json::from_str(event).unwrap();
+                matches!(event.behaviour.doing, Doing::Look { until, .. } if until == event.behaviour.since + crate::flock::GLANCE)
+            })
+            .count()
+    };
+    // Told nobody is there, as it declares it, nothing glances; someone coming, the hens standing about glance up.
+    assert!(inbox.occupy(tomori_environment::Occupancy::new(COOP_ZONE, 0)));
+    assert!(inbox.occupy(tomori_environment::Occupancy::new(COOP_ZONE, 1)));
+    eventually(|| glances() > 0);
+    let glanced = glances();
+    // Leaving and coming again, they glance again.
+    assert!(inbox.occupy(tomori_environment::Occupancy::new(COOP_ZONE, 0)));
+    assert!(inbox.occupy(tomori_environment::Occupancy::new(COOP_ZONE, 1)));
+    eventually(|| glances() > glanced);
+    cancellation.cancel();
+    assert_eq!(running.join().unwrap(), Ok(()));
+}
+
+#[test]
+fn the_hens_notice_only_someone_coming_to_the_coop_where_nobody_was() {
+    use tomori_environment::Occupancy;
+    // Someone already there as the side starts is not noticed.
+    let mut visited = None;
+    assert!(!noticed(&mut visited, &Occupancy::new(COOP_ZONE, 1)));
+    assert_eq!(visited, Some(true));
+    let mut visited = None;
+    assert!(!noticed(&mut visited, &Occupancy::new(COOP_ZONE, 0)));
+    assert!(noticed(&mut visited, &Occupancy::new(COOP_ZONE, 1)));
+    // Another joining them, already noticed, is not.
+    assert!(!noticed(&mut visited, &Occupancy::new(COOP_ZONE, 2)));
+    assert!(!noticed(&mut visited, &Occupancy::new("elsewhere", 1)));
+    assert_eq!(visited, Some(true));
+    assert!(!noticed(&mut visited, &Occupancy::new(COOP_ZONE, 0)));
+    assert!(noticed(&mut visited, &Occupancy::new(COOP_ZONE, 3)));
+}
+
 /// An outlet that refuses everything, as one for a space that has gone might.
 struct Refusing;
 
@@ -235,8 +301,29 @@ fn the_side_stops_when_its_space_refuses_what_it_sends() {
     }
     let space = Space::new("space-1", "Fleet", "/").with_outlet(Arc::new(Declaring));
     assert_eq!(
-        run(&space, Some(chicken), Instant::now()),
+        run(&space, Some(chicken.clone()), Instant::now()),
         Err(Error::new("declared"))
+    );
+    // And one that refuses its zones, as it declares them.
+    struct Zoning;
+    impl Outlet for Zoning {
+        fn share(&self, _state: String) -> Result<()> {
+            Ok(())
+        }
+        fn announce(&self, _event: String, _state: String) -> Result<()> {
+            Ok(())
+        }
+        fn describe(&self, _objects: Vec<Object>) -> Result<()> {
+            Ok(())
+        }
+        fn declare_zones(&self, _zones: Vec<tomori_environment::Zone>) -> Result<()> {
+            Err(Error::new("zoned"))
+        }
+    }
+    let space = Space::new("space-1", "Fleet", "/").with_outlet(Arc::new(Zoning));
+    assert_eq!(
+        run(&space, Some(chicken), Instant::now()),
+        Err(Error::new("zoned"))
     );
     // Without its chickens, it cannot run.
     let space = Space::new("space-1", "Fleet", "/");

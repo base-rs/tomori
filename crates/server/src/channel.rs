@@ -42,6 +42,8 @@ pub struct Channel {
     pub actions: Vec<tomori_environment::Action>,
     /// How many more states and events it may send, once it has sent one.
     pub updates: Option<Updates>,
+    /// The zones the side declared, and who is within each, once it has declared them.
+    pub zones: crate::zones::Declared,
 }
 
 /// An object a side described, as the server keeps it.
@@ -96,6 +98,7 @@ impl Channel {
             places: None,
             actions: Vec::new(),
             updates: None,
+            zones: crate::zones::Declared::default(),
         }
     }
 

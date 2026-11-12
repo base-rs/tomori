@@ -564,6 +564,96 @@ impl Hub {
         }
     }
 
+    /// Look, at `now`, at who is within the zones the server side of each space declared, and tell the side each
+    /// zone's occupancy as [`crate::zones::Zones`] decides: by the heads of its participants whose clients report where
+    /// they are, not its visitors, nor anyone whose report is [`crate::presence::STALE`] or older, as a headset asleep
+    /// or lifted off, each zone about where its point, anchor or object stands now in the space's coordinates. Only the
+    /// side of the binding that declared them is told. Called as the hub sweeps. See `design/environments.md`.
+    pub(crate) fn sweep_zones(&self, now: Instant) {
+        let environments = self.environments();
+        let mut state = self.lock();
+        let ids: Vec<String> = state
+            .spaces
+            .iter()
+            .filter(|record| {
+                record
+                    .channel
+                    .as_ref()
+                    .is_some_and(|channel| channel.zones.any())
+            })
+            .map(|record| record.model.id.clone())
+            .collect();
+        for space in ids {
+            let record = state.space_mut(&space).expect("listed above");
+            let declared = &mut record.channel.as_mut().expect("listed above").zones;
+            declared.due(now);
+            // The first declaration is taken at once, so there are zones whenever any were declared.
+            let zones = declared
+                .current()
+                .expect("the first declaration is taken at once");
+            let around_anchors = zones.around_anchors();
+            let mut heads = std::mem::take(&mut declared.heads);
+            let record = state.space(&space).expect("listed above");
+            heads.clear();
+            heads.extend(
+                record
+                    .model
+                    .participants
+                    .iter()
+                    .filter_map(|key| state.participants.get(key))
+                    .filter(|participant| {
+                        participant.connection.is_some_and(|connection| {
+                            state.role(connection, Some(&space)).participates()
+                        })
+                    })
+                    // A headset lifted off says it is away, and then stops reporting.
+                    .filter(|participant| {
+                        participant.engagement != Some(tomori_protocol::Engagement::Away)
+                    })
+                    .filter_map(|participant| {
+                        let seen = participant.seen.as_ref()?;
+                        (now.saturating_duration_since(seen.at) < crate::presence::STALE).then_some(
+                            crate::zones::Head {
+                                participant: participant.source,
+                                at: seen.head.position,
+                            },
+                        )
+                    }),
+            );
+            let anchors = if around_anchors {
+                record.clusters(&environments)
+            } else {
+                Vec::new()
+            };
+            let record = state.space_mut(&space).expect("listed above");
+            let channel = record.channel.as_mut().expect("listed above");
+            let (binding, objects) = (channel.binding, &channel.objects);
+            let zones = channel.zones.current().expect("found above");
+            let anchor = |name: &str| {
+                anchors
+                    .iter()
+                    .find(|anchor| anchor.name == name)
+                    .map(|anchor| anchor.pose.position)
+            };
+            let object = |id: &str| {
+                objects
+                    .iter()
+                    .find(|object| object.id == id)
+                    .and_then(|object| object.position)
+            };
+            zones.observe(
+                now,
+                &heads,
+                crate::zones::Centres {
+                    anchor: &anchor,
+                    object: &object,
+                },
+                |occupancy| self.server_sides.occupy(&space, binding, occupancy),
+            );
+            channel.zones.heads = heads;
+        }
+    }
+
     /// Look, at `now`, at who is near the anchors of each space that notify its agent, and tell its agent, through the
     /// space's event queue, of each participant who came within one, as [`crate::proximity::Proximity`] decides: only
     /// participants, whose clients report where they are, named by their handle where another in the space shares
