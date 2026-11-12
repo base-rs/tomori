@@ -11,8 +11,9 @@ use crate::scene::headset::View;
 use anyhow::{Context, Result, anyhow, ensure};
 use ash::vk::{self, Handle};
 use openxr as xr;
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 pub struct Gpu {
     pub device: wgpu::Device,
@@ -701,13 +702,15 @@ fn density_support(
 }
 
 /// The device's own functions, which wgpu-hal calls, wrapped so that the eyes' render passes and their framebuffers are made with a density map, as [`Passes`] decides.
+#[derive(Clone, Copy)]
 struct Wrapped {
     create_render_pass: vk::PFN_vkCreateRenderPass,
     destroy_render_pass: vk::PFN_vkDestroyRenderPass,
     create_framebuffer: vk::PFN_vkCreateFramebuffer,
 }
 
-static WRAPPED: OnceLock<Wrapped> = OnceLock::new();
+/// Each wrapped device's own functions, since a device's may be called only with it, and an activity made again in the same process makes another device.
+static WRAPPED: LazyLock<Mutex<HashMap<vk::Device, Wrapped>>> = LazyLock::new(Mutex::default);
 static PASSES: LazyLock<Mutex<Passes>> = LazyLock::new(Mutex::default);
 
 fn passes() -> MutexGuard<'static, Passes> {
@@ -718,12 +721,17 @@ fn passes() -> MutexGuard<'static, Passes> {
 unsafe fn wrapped(instance: &ash::InstanceFnV1_0, device: vk::Device) -> ash::Device {
     let real = unsafe { ash::Device::load(instance, device) };
     let functions = real.fp_v1_0();
-    // One device a process: a second keeps the first's, which are the same functions of the same driver.
-    let _ = WRAPPED.set(Wrapped {
-        create_render_pass: functions.create_render_pass,
-        destroy_render_pass: functions.destroy_render_pass,
-        create_framebuffer: functions.create_framebuffer,
-    });
+    WRAPPED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            device,
+            Wrapped {
+                create_render_pass: functions.create_render_pass,
+                destroy_render_pass: functions.destroy_render_pass,
+                create_framebuffer: functions.create_framebuffer,
+            },
+        );
     unsafe {
         ash::Device::load_with(
             |name: &CStr| match name.to_bytes() {
@@ -741,11 +749,17 @@ unsafe fn wrapped(instance: &ash::InstanceFnV1_0, device: vk::Device) -> ash::De
     }
 }
 
-fn real() -> &'static Wrapped {
+/// `device`'s own functions, kept before any is called; never a panic, which cannot unwind out of a function the driver's caller calls.
+fn real(device: vk::Device) -> Option<Wrapped> {
     WRAPPED
-        .get()
-        .expect("the device's functions are wrapped before they are called")
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&device)
+        .copied()
 }
+
+/// The most attachments a framebuffer given a density map is made with without allocating: an eye's has its samples, its resolve, its depth and the map.
+const ATTACHMENTS: usize = 8;
 
 unsafe extern "system" fn create_render_pass(
     device: vk::Device,
@@ -753,6 +767,9 @@ unsafe extern "system" fn create_render_pass(
     allocator: *const vk::AllocationCallbacks<'_>,
     pass: *mut vk::RenderPass,
 ) -> vk::Result {
+    let Some(real) = real(device) else {
+        return vk::Result::ERROR_INITIALIZATION_FAILED;
+    };
     let eye = passes().eye();
     unsafe {
         let given = &*info;
@@ -760,13 +777,13 @@ unsafe extern "system" fn create_render_pass(
             && eye.matches(given)
         {
             let density = DensityPass::new(given);
-            let result = (real().create_render_pass)(device, density.info(), allocator, pass);
+            let result = (real.create_render_pass)(device, density.info(), allocator, pass);
             if result == vk::Result::SUCCESS {
                 passes().created(*pass);
             }
             return result;
         }
-        (real().create_render_pass)(device, info, allocator, pass)
+        (real.create_render_pass)(device, info, allocator, pass)
     }
 }
 
@@ -776,7 +793,9 @@ unsafe extern "system" fn destroy_render_pass(
     allocator: *const vk::AllocationCallbacks<'_>,
 ) {
     passes().destroyed(pass);
-    unsafe { (real().destroy_render_pass)(device, pass, allocator) }
+    if let Some(real) = real(device) {
+        unsafe { (real.destroy_render_pass)(device, pass, allocator) }
+    }
 }
 
 unsafe extern "system" fn create_framebuffer(
@@ -785,19 +804,36 @@ unsafe extern "system" fn create_framebuffer(
     allocator: *const vk::AllocationCallbacks<'_>,
     framebuffer: *mut vk::Framebuffer,
 ) -> vk::Result {
+    let Some(real) = real(device) else {
+        return vk::Result::ERROR_INITIALIZATION_FAILED;
+    };
     unsafe {
         let given = &*info;
+        // An imageless framebuffer, which wgpu 30 does not make, names its attachments elsewhere, so it is left as it is.
+        if given.flags.contains(vk::FramebufferCreateFlags::IMAGELESS) {
+            return (real.create_framebuffer)(device, info, allocator, framebuffer);
+        }
         let attachments = foveation::slice(given.p_attachments, given.attachment_count);
         let density = passes().density(given.render_pass, attachments);
         if let Some(density) = density {
-            let mut views = attachments.to_vec();
-            views.push(density);
+            // wgpu makes each frame's framebuffers anew, so an eye's are made without allocating.
+            let mut stack = [vk::ImageView::null(); ATTACHMENTS];
+            let mut heap = Vec::new();
+            let views = if attachments.len() < ATTACHMENTS {
+                stack[..attachments.len()].copy_from_slice(attachments);
+                stack[attachments.len()] = density;
+                &stack[..=attachments.len()]
+            } else {
+                heap.extend_from_slice(attachments);
+                heap.push(density);
+                &heap[..]
+            };
             let mut with = *given;
             with.attachment_count = views.len() as u32;
             with.p_attachments = views.as_ptr();
-            return (real().create_framebuffer)(device, &with, allocator, framebuffer);
+            return (real.create_framebuffer)(device, &with, allocator, framebuffer);
         }
-        (real().create_framebuffer)(device, info, allocator, framebuffer)
+        (real.create_framebuffer)(device, info, allocator, framebuffer)
     }
 }
 

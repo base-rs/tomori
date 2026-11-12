@@ -250,7 +250,7 @@ fn android_samples(android: &android::Android) -> u32 {
     graphics::requested_samples(value.as_deref())
 }
 
-/// The fixed foveation the headset draws with: the intent extra `tomori.foveation`, as with `am start -e tomori.foveation low`, `none` to turn it off or `high:own` for Tomori's own density map at high, or medium; see `design/rendering.md`.
+/// The fixed foveation the headset draws with: the intent extra `tomori.foveation`, as with `am start -e tomori.foveation low`, `none` to turn it off or `high:own` for Tomori's own density map at high, and high when absent; see `design/rendering.md`.
 #[cfg(target_os = "android")]
 fn android_foveation(android: &android::Android) -> foveation::Request {
     let value = android

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Fixed foveated rendering on the Quest.** The headset now shades the edges of each eye, which the lenses blur, at a half or a quarter of their pixels, with Meta's density map for the level asked for, leaving the middle sharp, so that the GPU does less each frame. The default is medium; start Tomori with `adb shell am start -n com.codeotaku.tomori/android.app.NativeActivity -e tomori.foveation low` (or `none`, `high`, or `medium:own` for Tomori's own map) to compare. Desktop runtimes draw as before. See `design/rendering.md`.
+- **Fixed foveated rendering on the Quest.** The headset now shades the edges of each eye, which the lenses blur, with fewer fragments than pixels, leaving the middle sharp, so that the eyes took a fifth less of the GPU's frame on a Quest 3, 6.7 ms rather than 8.3 ms; text you look at stays sharp. The default is high; start Tomori with `adb shell am start -n com.codeotaku.tomori/android.app.NativeActivity -e tomori.foveation medium` (or `none`, `low`, or `high:own` for Tomori's own density map where the runtime gives one) to compare. Desktop runtimes draw as before. See `design/rendering.md`.
 
 - **The agent and its workers stay bright at a distance.** Across the farmyard, the agent's swarm, its workers and their satellites no longer fade to dark as you walk away from them: they fade only into the environment's haze, as the workbench beside them does, rather than turning darker than it, and their particles stay at least a pixel across, so the cloud doesn't thin out. See `design/rendering.md`.
 

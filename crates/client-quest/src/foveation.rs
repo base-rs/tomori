@@ -20,8 +20,8 @@ pub enum Level {
 }
 
 impl Level {
-    /// Medium: its full density reaches far enough from the middle of each eye that a panel read off to one side, by moving the eyes rather than the head, stays sharp, while the edges, which the lenses blur anyway, are shaded at a quarter of the pixels or fewer.
-    pub const DEFAULT: Self = Self::Medium;
+    /// High: on the Quest 3 it took a fifth off the eyes' GPU time where medium took nothing measurable, and the text looked at stayed sharp, since it is read where the eyes look; see `design/rendering.md`.
+    pub const DEFAULT: Self = Self::High;
 
     /// The runtime's level for this one.
     pub fn xr(self) -> xr::FoveationLevelFB {
@@ -215,20 +215,21 @@ pub fn map_size(width: u32, height: u32, min: vk::Extent2D, max: vk::Extent2D) -
     }
 }
 
-/// The rings of Tomori's own map for `level`, from where the eye looks straight ahead out to its edges: the radius each reaches, as a fraction of the half-image, and its density across and down. Shaped like the runtime's: full in the middle, then half across, then half both ways, then less at the corners.
+/// The rings of Tomori's own map for `level`, from where the eye looks straight ahead out to its edges: the radius each reaches, as a fraction of the half-image, and its density across and down. Full in the middle, then half across, then half both ways, then a quarter both ways at the edges. High's are as measured on the headset; medium's and low's reach a little further out each, since a map whose full middle reached 0.55 and whose edges were a quarter across and a half down, though it shaded about half the pixels, saved nothing measurable: the GPU's own cost of drawing at a density map took what it saved, and only high's larger fragments at the edges saved more than that.
 fn rings(level: Level) -> &'static [(f32, [u8; 2])] {
     match level {
         Level::None => &[(f32::INFINITY, [FULL, FULL])],
         Level::Low => &[
-            (0.7, [FULL, FULL]),
-            (1.0, [HALF, FULL]),
-            (f32::INFINITY, [HALF, HALF]),
+            (0.5, [FULL, FULL]),
+            (0.75, [HALF, FULL]),
+            (1.0, [HALF, HALF]),
+            (f32::INFINITY, [QUARTER, QUARTER]),
         ],
         Level::Medium => &[
-            (0.55, [FULL, FULL]),
-            (0.8, [HALF, FULL]),
-            (1.05, [HALF, HALF]),
-            (f32::INFINITY, [QUARTER, HALF]),
+            (0.45, [FULL, FULL]),
+            (0.7, [HALF, FULL]),
+            (0.95, [HALF, HALF]),
+            (f32::INFINITY, [QUARTER, QUARTER]),
         ],
         Level::High => &[
             (0.4, [FULL, FULL]),
@@ -248,8 +249,14 @@ pub fn centre(fov: Fov) -> [f32; 2] {
 
 /// Tomori's own density map for one eye, `size` texels, at `level`, its rings about `centre` (see [`centre`]), or full everywhere without one: two bytes a texel, `R8G8_UNORM`, the density across and down, row by row from the top.
 pub fn own_map(level: Level, size: vk::Extent2D, centre: Option<[f32; 2]>) -> Vec<u8> {
-    let rings = centre.map_or(rings(Level::None), |_| rings(level));
-    let [cx, cy] = centre.unwrap_or([0.5, 0.5]);
+    match centre {
+        Some(centre) => map_of(rings(level), size, centre),
+        None => map_of(rings(Level::None), size, [0.5, 0.5]),
+    }
+}
+
+/// A density map of `size` texels in `rings` about `centre`, as [`own_map`].
+fn map_of(rings: &[(f32, [u8; 2])], size: vk::Extent2D, [cx, cy]: [f32; 2]) -> Vec<u8> {
     let mut texels = Vec::with_capacity((size.width * size.height * 2) as usize);
     for y in 0..size.height {
         for x in 0..size.width {
@@ -299,9 +306,9 @@ impl EyePass {
 
 /// # Safety
 ///
-/// `pointer` must be valid for `count` items, or `count` zero.
+/// `pointer` must be valid for `count` items, or null, or `count` zero: a null `pointer` is taken as no items, as Vulkan ignores an imageless framebuffer's.
 pub(crate) unsafe fn slice<'a, T>(pointer: *const T, count: u32) -> &'a [T] {
-    if count == 0 {
+    if count == 0 || pointer.is_null() {
         &[]
     } else {
         // SAFETY: the caller's.
@@ -441,8 +448,8 @@ mod tests {
     #[test]
     fn a_level_is_asked_for_by_name_or_number() {
         let level = |value| Request::parse(Some(value)).level;
-        assert_eq!(Request::parse(None).level, Level::Medium);
-        assert_eq!(level(" "), Level::Medium);
+        assert_eq!(Request::parse(None).level, Level::High);
+        assert_eq!(level(" "), Level::High);
         assert_eq!(level("off"), Level::None);
         assert_eq!(level("None"), Level::None);
         assert_eq!(level("0"), Level::None);
@@ -452,7 +459,7 @@ mod tests {
         assert_eq!(level("2"), Level::Medium);
         assert_eq!(level("high"), Level::High);
         assert_eq!(level("3"), Level::High);
-        assert_eq!(level("highest"), Level::Medium);
+        assert_eq!(level("highest"), Level::High);
         assert_eq!(
             Request::parse(Some("high:own")),
             Request {
@@ -465,7 +472,7 @@ mod tests {
         assert_eq!(
             Request::parse(Some("low:mine")),
             Request {
-                level: Level::Medium,
+                level: Level::High,
                 own: false
             }
         );
@@ -671,20 +678,36 @@ mod tests {
         }
         let corner = |level| at(&own_map(level, size, Some(centre)), 0.0, 0.999);
         assert_eq!(corner(Level::None), [FULL, FULL]);
-        assert_eq!(corner(Level::Low), [HALF, HALF]);
-        assert_eq!(corner(Level::Medium), [QUARTER, HALF]);
-        assert_eq!(corner(Level::High), [QUARTER, QUARTER]);
+        for level in [Level::Low, Level::Medium, Level::High] {
+            assert_eq!(corner(level), [QUARTER, QUARTER]);
+        }
         // Each level shades less than the one before.
-        let shaded = |level| -> f32 {
-            own_map(level, size, Some(centre))
-                .chunks(2)
+        let shade = |map: &[u8]| -> f32 {
+            map.chunks(2)
                 .map(|texel| texel[0] as f32 * texel[1] as f32 / (255.0 * 255.0))
                 .sum()
         };
+        let shaded = |level| shade(&own_map(level, size, Some(centre)));
         let levels = [Level::None, Level::Low, Level::Medium, Level::High].map(shaded);
         assert!(
             levels.windows(2).all(|pair| pair[1] < pair[0]),
             "{levels:?}"
+        );
+        // Low and medium shade less than the medium first measured on the headset, which saved nothing.
+        let measured_nothing = map_of(
+            &[
+                (0.55, [FULL, FULL]),
+                (0.8, [HALF, FULL]),
+                (1.05, [HALF, HALF]),
+                (f32::INFINITY, [QUARTER, HALF]),
+            ],
+            size,
+            centre,
+        );
+        let measured_nothing: f32 = shade(&measured_nothing);
+        assert!(
+            levels[1] < measured_nothing,
+            "{levels:?} {measured_nothing}"
         );
     }
 
@@ -848,6 +871,8 @@ mod tests {
         // A pass made with a density map is no longer shaped as the eyes'.
         assert!(!unsafe { EYES.matches(made) });
         assert!(unsafe { slice::<u8>(std::ptr::null(), 0) }.is_empty());
+        // An imageless framebuffer's attachments are null, whatever their count.
+        assert!(unsafe { slice::<u8>(std::ptr::null(), 3) }.is_empty());
     }
 
     #[test]
