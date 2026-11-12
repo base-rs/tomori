@@ -1416,8 +1416,8 @@ pub const KINDS: [(Kind, usize, [f32; 2]); 6] = [
 /// How large a koru is at the heart of a tree fern and of a ground fern, beside the fern's own size.
 pub const KORU: (f32, f32) = (2.5, 0.8);
 
-/// The ferns, the same every time: tree ferns, then ground ferns, each tried where [`candidate`] says, kept where it is
-/// shady enough and [`fits`], the kind that grows there or the next that fits, of those not yet at their most
+/// The ferns, the same every time: tree ferns, then ground ferns, each tried where `candidate` says, kept where it is
+/// shady enough and `fits`, the kind that grows there or the next that fits, of those not yet at their most
 /// ([`KINDS`]), turned, sized and set swaying from its
 /// place; and koru unfurling at the heart of every other tree fern and a few ground ferns.
 pub fn ferns() -> Vec<Fern> {

@@ -284,7 +284,7 @@ pub(crate) fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color
 /// The foothills' cells drawn finely, about the stream and the upper pool, which the rings are too coarse to draw: those
 /// from the waterfall's lip, [`layout::CLIFF`]'s top, to the upper cliff's, [`layout::UPPER_CLIFF`]'s, by their rings
 /// in [`RINGS`], and from [`FINE_SEGMENTS`] segments either side of the waterfall's way. Each is cut into
-/// [`FINE_ROWS`] rows, by its ring, and [`FINE_COLUMNS`] columns, whose corners are on [`ground`]; the cells beside
+/// `FINE_ROWS` rows, by its ring, and `FINE_COLUMNS` columns, whose corners are on [`ground`]; the cells beside
 /// them take the corners along the edge they share, so that the ground is one surface, closed along every seam.
 pub const FINE_RINGS: std::ops::Range<usize> = 8..13;
 /// How many segments either side of the waterfall's way are drawn finely.
