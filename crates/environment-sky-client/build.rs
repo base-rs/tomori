@@ -5,7 +5,10 @@
 mod cloud_noise;
 #[path = "src/light_bake.rs"]
 mod light_bake;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the build script bakes the light from the scene's faces and cuboids, never building its vertices"
+)]
 #[path = "src/mesh.rs"]
 mod mesh;
 

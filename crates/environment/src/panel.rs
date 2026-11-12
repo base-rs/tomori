@@ -543,7 +543,6 @@ impl Panel {
     }
 
     /// Its parts, to keep: its id, title, body, chart, wall, slot and reference.
-    #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
     ) -> (
