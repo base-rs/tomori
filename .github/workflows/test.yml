@@ -252,9 +252,29 @@ jobs:
           touch "$RELEASE_ARTIFACTS/other"
           refused "must hold only tomori-$RELEASE_VERSION.apk" env RELEASE_CERTIFICATE="$RUNNER_TEMP/release-certificate.sha256" scripts/release-artifacts/verify
 
+  # That no pull request edits releases.md: each release's notes are generated from the titles of the pull requests merged since the last, and only the release commit writes them. Pushes have no base, and check nothing.
+  releases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commits under review and their base.
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-shared-key: releases-bake-launcher-v1
+      - name: Install Bake launcher
+        run: cargo install bake --locked
+      - name: Reject hand edits to the generated release notes
+        env:
+          # A pull request's checkout merges it into its base branch as that is now, the merge's first parent; the event's base SHA can be older, from when the pull request was opened, and would count the base branch's own commits since.
+          BAKE_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.merge_group.base_sha }}
+        run: cargo bake --locked releases:check "$BAKE_BASE"
+
   test-result:
     if: always()
-    needs: [test, minimum, android, android-release]
+    needs: [test, minimum, android, android-release, releases]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

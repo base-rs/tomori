@@ -1491,6 +1491,23 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_says_it_is_the_status_wall_only_where_it_is_and_an_older_server_s_is_not() {
+        let wall = Wall::new(TOMORI_WALL, WallKind::Tomori, Pose::default());
+        let json = serde_json::to_value(&wall).unwrap();
+        assert!(json.get("status").is_none(), "{json}");
+        let status = wall.clone().with_status(true);
+        let mut json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["status"], true);
+        assert_eq!(
+            serde_json::from_value::<Wall>(json.clone()).unwrap(),
+            status
+        );
+        // An older server's wall, which says nothing of the role, is not the status wall.
+        json.as_object_mut().unwrap().remove("status");
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), wall);
+    }
+
+    #[test]
     fn projection_messages_have_a_stable_wire_format() {
         use crate::{ClientMessage, Resource, ServerMessage};
         let pose = Pose {
