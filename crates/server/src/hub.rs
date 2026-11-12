@@ -6712,10 +6712,12 @@ impl Hub {
                                     &environments,
                                     &place,
                                     before,
-                                    origin.as_ref(),
-                                    &people,
-                                    &projection,
-                                    &solids,
+                                    anchors::Surroundings {
+                                        asker: origin.as_ref(),
+                                        people: &people,
+                                        projection: &projection,
+                                        solids: &solids,
+                                    },
                                 )
                                 .ok(),
                         }

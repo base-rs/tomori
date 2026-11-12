@@ -57,6 +57,16 @@ fn places_notice(body: String) -> crate::stage::Content {
 use crate::environments::Environments;
 use crate::seating::Seating;
 
+/// What a panel of the agent's is placed among: whoever asked, by where their head was, `asker`, the `people` in the
+/// space, its `projection` and the `solids` the panel stays clear of.
+#[derive(Clone, Copy)]
+pub(super) struct Surroundings<'a> {
+    pub asker: Option<&'a Pose>,
+    pub people: &'a [crate::presence::Someone],
+    pub projection: &'a tomori_protocol::Projection,
+    pub solids: &'a [tomori_environment::sightlines::Solid],
+}
+
 impl SpaceRecord {
     /// The anchors the space's state sends: its environment's, carried into the space's coordinates, with those its
     /// environment's side placed for this binding, and the server's own beside the walls and people workers were placed
@@ -221,20 +231,21 @@ impl SpaceRecord {
     }
 
     /// Where `place` puts a panel of the agent's in the space, after `before` others put at the same anchor with it: at
-    /// an anchor, floating in its cluster's next free slot; or as [`crate::presence::destination`] says, for whoever
-    /// asked, whose head was at `asker`, among `people`, in `projection`, clear of `solids`. Or why it cannot, as for an
-    /// anchor not here.
-    #[allow(clippy::too_many_arguments)]
+    /// an anchor, floating in its cluster's next free slot; or as [`crate::presence::destination`] says, among
+    /// `around`. Or why it cannot, as for an anchor not here.
     pub(super) fn panel_destination(
         &self,
         environments: &Environments,
         place: &crate::stage::Placement,
         before: usize,
-        asker: Option<&Pose>,
-        people: &[crate::presence::Someone],
-        projection: &tomori_protocol::Projection,
-        solids: &[tomori_environment::sightlines::Solid],
+        around: Surroundings<'_>,
     ) -> Result<crate::stage::Destination, String> {
+        let Surroundings {
+            asker,
+            people,
+            projection,
+            solids,
+        } = around;
         match place {
             crate::stage::Placement::Anchor(name) => self
                 .arriving(environments, name, before)
