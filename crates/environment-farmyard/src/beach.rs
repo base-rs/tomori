@@ -1,17 +1,19 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The shingle beach beside the trail where it passes the river, by the `riverbank` viewpoint: a slope of grey shingle
-//! from the trail's edge down into the river's channel to the water's edge, the one surface that reaches its water, with
-//! river stones lying on it, slabs, cobbles, long and angular ones, from a hand's breadth across to as much as a hand
-//! might lift, and beside them a handful of much bigger building stones, flagstones and blocks, for building little
-//! structures, which participants take with either hand, carry, throw and stack into cairns, simulated by the
-//! farmyard's server side with `tomori-physics` and drawn alike by every client. See `design/farmyard.md` and
+//! The shingle beach beside the trail where it passes the river, by the `riverbank` viewpoint: the ground there, from
+//! the trail's edge down the river's bank into its shallows, drawn as shingle, its own faces shaded stony grey-brown
+//! with pebbles scattered over them, and walked down to the water's edge and a little into it, with river stones
+//! lying on it, slabs, cobbles, long and angular ones, from a hand's breadth across to as much as a hand might lift,
+//! and beside them a handful of much bigger building stones, flagstones and blocks, for building little structures,
+//! which participants take with either hand, carry, throw, stack into cairns and lay in the river as a dam, simulated
+//! by the farmyard's server side with `tomori-physics` and drawn alike by every client. See `design/farmyard.md` and
 //! `docs/proposals/physics-and-stacking.md`.
 //!
-//! What both halves share is here: where the beach is and how high its surface stands; each stone's hull, from which
-//! it is both drawn and collided; what the stones rest on and the river's water; and the models of the beach and its
-//! stones. The farmyard's server side runs the world of them, [`crate::side`]; its client crate mirrors it.
+//! What both halves share is here: where the beach is and how high it stands; each stone's hull, from which it is both
+//! drawn and collided; what the stones rest on, the river's water and its dam reach; and the models of the beach's
+//! pebbles and its stones. The farmyard's server side runs the world of them, [`crate::side`]; its client crate mirrors
+//! it.
 use std::f32::consts::TAU;
 
 use glam::{Quat, Vec2, Vec3};
@@ -21,24 +23,17 @@ use tomori_physics::{Body, Placement, Settings, Static, Water};
 use crate::backdrop::{self, facing};
 use crate::layout;
 use crate::props::scatter;
-use crate::shapes::Shapes;
+use crate::shapes::{self, Shapes};
 use crate::trail;
 
 /// The point of the trail's middle the beach lies beside, by the `riverbank` viewpoint, which is the same point.
 pub const AT: usize = 18;
 /// How far out from the trail's middle, towards the river, the beach runs: from the trail's edge to a little into the
-/// water, and how far either side along the trail.
+/// water, and how far either side along the trail. Its outline cuts the ground's faces, the part within it drawn as its
+/// shingle.
 pub const NEAR: f32 = trail::HALF;
 pub const FAR: f32 = 5.1;
 pub const HALF_WIDTH: f32 = 1.5;
-/// How far apart the corners of its surface are, and how far above the ground as the backdrop draws it, so that the
-/// ground never shows through the shingle.
-pub const STEP: f32 = 0.25;
-pub const RAISE: f32 = 0.015;
-/// How many times its surface is smoothed, and how far above the ground as drawn it stays at least, once smoothed.
-const SMOOTHING: usize = 6;
-const FLOOR: f32 = 0.008;
-
 /// Where the beach is: the trail's point beside it, the way along the trail, and the way out, towards the river.
 pub fn frame() -> (Vec2, Vec2, Vec2) {
     trail::frame(AT)
@@ -75,85 +70,41 @@ pub fn outline() -> Vec<Vec2> {
     ]
 }
 
-/// How many corners across and along its surface has, out from the trail and along it.
-const COLUMNS: usize = ((FAR - NEAR) / STEP) as usize + 1;
-const ROWS: usize = (2.0 * HALF_WIDTH / STEP) as usize + 1;
-
-/// How high the beach's surface stands at its corner `point`: a little above the ground as it is drawn there, or as it
-/// is shaped, whichever is higher, and above the trail where it meets it.
-fn corner(point: Vec2) -> f32 {
-    let drawn = backdrop::drawn_ground(point).unwrap_or(backdrop::MEADOW);
-    let mut height = drawn.max(backdrop::ground(point)) + RAISE;
-    if trail::from_middle(point) <= trail::HALF + 0.01 {
-        height = height.max(trail::LIFT + 0.004);
-    }
-    height
-}
-
-/// The beach's surface: its corners, a grid out from the trail and along it, and its triangles, two to each cell,
-/// as it is drawn and as the stones rest on it.
-pub fn surface() -> (Vec<Vec3>, Vec<[u32; 3]>) {
-    let mut corners = Vec::with_capacity(COLUMNS * ROWS);
-    for row in 0..ROWS {
-        for column in 0..COLUMNS {
-            let out = (NEAR + column as f32 * STEP).min(FAR);
-            let point = at(out, -HALF_WIDTH + row as f32 * STEP);
-            corners.push(Vec3::new(point.x, corner(point), point.y));
-        }
-    }
-    // Smoothed, so that where the slope bends it bends over a metre rather than at one edge, where a stone lying
-    // across the bend would rock on it; and never below the ground as it is drawn, nor below the trail at its edge.
-    let lowest: Vec<f32> = corners.iter().map(|corner| corner.y).collect();
-    for _ in 0..SMOOTHING {
-        let heights: Vec<f32> = corners.iter().map(|corner| corner.y).collect();
-        for row in 0..ROWS {
-            for column in 0..COLUMNS {
-                let at = |row: usize, column: usize| heights[row * COLUMNS + column];
-                let (up, down) = (row.saturating_sub(1), (row + 1).min(ROWS - 1));
-                let (near, far) = (column.saturating_sub(1), (column + 1).min(COLUMNS - 1));
-                let around =
-                    (at(up, column) + at(down, column) + at(row, near) + at(row, far)) / 4.0;
-                let index = row * COLUMNS + column;
-                let floor = lowest[index] - RAISE + FLOOR;
-                corners[index].y = ((at(row, column) + around) * 0.5).max(floor);
-            }
-        }
-    }
-    let mut triangles = Vec::new();
-    for row in 0..ROWS - 1 {
-        for column in 0..COLUMNS - 1 {
-            let index = |row: usize, column: usize| (row * COLUMNS + column) as u32;
-            let (a, b) = (index(row, column), index(row, column + 1));
-            let (c, d) = (index(row + 1, column + 1), index(row + 1, column));
-            if (row + column) % 2 == 0 {
-                triangles.extend([[a, b, c], [a, c, d]]);
-            } else {
-                triangles.extend([[a, b, d], [b, c, d]]);
-            }
-        }
-    }
-    (corners, triangles)
-}
-
-/// The beach's surface, made once.
-fn made() -> &'static (Vec<Vec3>, Vec<[u32; 3]>) {
-    static SURFACE: std::sync::OnceLock<(Vec<Vec3>, Vec<[u32; 3]>)> = std::sync::OnceLock::new();
-    SURFACE.get_or_init(surface)
-}
-
-/// How high the beach's surface stands at `point`, from its triangle there, or `None` beyond the beach.
-pub fn height(point: Vec2) -> Option<f32> {
-    let (corners, triangles) = made();
-    triangles.iter().find_map(|triangle| {
-        let [a, b, c] = triangle.map(|index| corners[index as usize]);
-        let flat = |corner: Vec3| Vec2::new(corner.x, corner.z);
-        let (a2, b2, c2) = (flat(a), flat(b), flat(c));
-        let area = (b2 - a2).perp_dot(c2 - a2);
-        let u = (b2 - point).perp_dot(c2 - point) / area;
-        let v = (c2 - point).perp_dot(a2 - point) / area;
-        let w = 1.0 - u - v;
-        (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
+/// The ground's own faces within the beach, as the yard and the backdrop draw them, which are its shingle: the
+/// meadow's and the foothills' faces cut along its outline, the parts within it, each flat and convex, made once. The
+/// beach is drawn as them and its stones rest on them, so that nothing is laid over the ground there.
+pub fn ground_faces() -> &'static [Vec<Vec3>] {
+    static FACES: std::sync::OnceLock<Vec<Vec<Vec3>>> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        let outline = outline();
+        std::iter::once(backdrop::meadow())
+            .chain(
+                backdrop::ground_triangles()
+                    .into_iter()
+                    .map(|(_, corners)| corners.to_vec()),
+            )
+            .filter_map(|corners| shapes::cut(&corners, &outline).0)
+            .collect()
     })
+}
+
+/// How high the triangle `corners` is at `point`, seen from above, if it is over it, its edges included.
+fn on([a, b, c]: &[Vec3; 3], point: Vec2) -> Option<f32> {
+    let flat = |corner: &Vec3| Vec2::new(corner.x, corner.z);
+    let (a2, b2, c2) = (flat(a), flat(b), flat(c));
+    let area = (b2 - a2).perp_dot(c2 - a2);
+    let u = (b2 - point).perp_dot(c2 - point) / area;
+    let v = (c2 - point).perp_dot(a2 - point) / area;
+    let w = 1.0 - u - v;
+    (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
+}
+
+/// How high the beach stands at `point`, as the ground is drawn there, from its face there, or `None` beyond the beach.
+pub fn height(point: Vec2) -> Option<f32> {
+    ground_faces()
+        .iter()
+        .flat_map(|face| shapes::fan(face))
+        .find_map(|triangle| on(&triangle, point))
 }
 
 /// How far out from the trail's middle the beach is dry all along, a hand's breadth above the water, where its stones
@@ -176,39 +127,34 @@ pub fn water_level() -> f32 {
     layout::nearest_river(at(FAR, 0.0)).0.y
 }
 
+/// How deep the river may be where participants stand in its shallows by the beach: ankle-deep.
+pub const SHALLOWS: f32 = 0.06;
+
+/// How far out from the trail's middle the walked shingle begins: just beyond the foot of the trail's edge, which is
+/// drawn over the ground there.
+pub const WALKED: f32 = trail::FOOT + 0.02;
+
 /// The beach's shingle as ground participants walk on, which the farmyard's `walkable` derives its walkable ground from:
-/// its triangles as they are drawn, from just beyond the trail's edge, which is the trail's to stand on, only where the
-/// whole backdrop is within the far plane from the eyes of one standing there, which is its flat shingle beside the
-/// trail, and short of where the river's water may spread, as everywhere in the farmyard, so that nobody lands in it.
-/// Its stones down its slope are reached by pulling them along the ray, which reaches the water's edge from there.
+/// the ground's own faces within it, as they are drawn ([`ground_faces`]), from just beyond the foot of the trail's edge
+/// ([`WALKED`]) down the bank to the water's edge and a little into the shallows, where the river is no more than
+/// [`SHALLOWS`] deep, so that a dam is built standing in the water. All of it slopes less than the 30° Tomori walks.
+/// From its lower slope the foothills' outer rings across the yard, more than 50 m away and deep in the haze, are
+/// beyond the headset's far plane, as they are from the waterfall rock.
 pub fn ground() -> Vec<[Vec3; 3]> {
-    let (corners, triangles) = made();
-    let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD + 0.1;
-    let walked = |corner: &Vec3| {
-        let point = Vec2::new(corner.x, corner.z);
-        trail::from_middle(point) >= trail::HALF + 0.02
-            && in_view(point)
-            && layout::nearest_river(point).1 > spread
-    };
-    triangles
+    let walked = [
+        at(WALKED, -HALF_WIDTH),
+        at(FAR, -HALF_WIDTH),
+        at(FAR, HALF_WIDTH),
+        at(WALKED, HALF_WIDTH),
+    ];
+    let lowest = water_level() - SHALLOWS;
+    ground_faces()
         .iter()
-        .map(|triangle| triangle.map(|corner| corners[corner as usize]))
-        .filter(|triangle| triangle.iter().all(walked))
+        .filter_map(|face| shapes::cut(face, &walked).0)
+        .map(|face| shapes::clipped(&face, |corner| corner.y - lowest))
+        .flat_map(|face| shapes::fan(&face).map(shapes::upward).collect::<Vec<_>>())
+        .filter(|[a, b, c]| (*b - *a).cross(*c - *a).length() > 1e-6)
         .collect()
-}
-
-/// How far away, at most, the backdrop may be from the eyes of one standing on the beach: two metres within the
-/// headset's far plane of 50 m, and a little more to spare.
-pub const VIEW: f32 = 47.5;
-
-/// Whether the whole of the foothills' ground, as the backdrop draws it, is within [`VIEW`] of the eyes of one standing
-/// at `point`.
-fn in_view(point: Vec2) -> bool {
-    static FOOTHILLS: std::sync::OnceLock<Vec<Vec3>> = std::sync::OnceLock::new();
-    let foothills =
-        FOOTHILLS.get_or_init(|| backdrop::model().meshes[0].primitives[0].positions.clone());
-    let eyes = Vec3::new(point.x, tomori_environment::sightlines::EYES, point.y);
-    foothills.iter().all(|corner| corner.distance(eyes) < VIEW)
 }
 
 /// The river's stones on and beside the beach, which participants keep clear of, as `(least, greatest)` corners.
@@ -569,21 +515,22 @@ fn boulders() -> Vec<backdrop::Stone> {
         .collect()
 }
 
-/// How far out from the trail's middle the beach's gentle slope ends, and its steep bank begins, roughly.
+/// How far out from the trail's middle the beach's gentle slope ends, and its steeper bank begins, roughly, where the
+/// foothills' second ring is.
 const GENTLE: f32 = NEAR + 2.6;
 
 /// How far from the beach's middle what the stones may rest on reaches: the ground, the trail, the river's bed and its
 /// far bank; beyond, a stone thrown is lost, and returns to where it began.
 const REGION: f32 = 7.0;
 
-/// How far out from the trail's middle the building stones lie: on the flat shingle beyond where participants stand,
-/// and where it begins to slope, clear of the trail and of the shingle that is walked; and where along the beach the
-/// pile of flagstones lies, towards one end, and the blocks, in a row towards the other.
-pub const BUILDING_OUT: f32 = NEAR + 1.32;
+/// How far out from the trail's middle the building stones lie: on the flat shingle, short of where it begins to slope,
+/// clear of the trail's edge; and where along the beach the pile of flagstones lies, towards one end, and the blocks,
+/// in a row towards the other.
+pub const BUILDING_OUT: f32 = NEAR + 0.85;
 pub const PILE_ALONG: f32 = -0.9;
 pub const BLOCKS_ALONG: [f32; 3] = [0.45, 0.85, 1.25];
 
-/// The highest the shingle stands beneath stone `index` placed at `at`, where it is above the shingle.
+/// The highest the beach stands beneath stone `index` placed at `at`, where it is above the beach.
 fn beneath(index: usize, at: &Placement) -> f32 {
     stone(index)
         .into_iter()
@@ -606,7 +553,7 @@ fn extent(index: usize) -> (f32, f32) {
 /// Where the building stones lie to begin with, roughly, as the server side lets them settle, by their numbers: the
 /// flagstones in a pile, the broadest at the bottom, each a little turned and off the one below it, as they would be
 /// stacked by hand, and the blocks standing in a row, each its long way out from the trail, so that the beach is kept
-/// clear for the river's stones and nobody walks into them.
+/// clear for the river's stones and the way down to the water.
 fn building_homes() -> Vec<(usize, Placement)> {
     let (_, way, _) = frame();
     let along_beach = Quat::from_rotation_y((-way.y).atan2(way.x));
@@ -737,28 +684,76 @@ pub fn fastest(index: usize) -> f32 {
     tomori_physics::RELEASE_SPEED * heft(index)
 }
 
-/// What the stones rest on: the beach's surface as it is drawn; the ground about it, the trail, the river's bed and its
-/// far bank, as the backdrop draws them; and the river's stones beside it, each its own hull.
-pub fn colliders() -> Vec<Static> {
-    let (corners, triangles) = surface();
-    let mut colliders = vec![Static::mesh(corners, triangles)];
+/// The square about the beach's middle that the stones' world reaches, [`REGION`] either way.
+fn region() -> Vec<Vec2> {
     let middle = at((NEAR + FAR) * 0.5, 0.0);
-    let spacing = 0.5;
-    let columns = (REGION * 2.0 / spacing) as usize + 1;
-    let corner = middle - Vec2::splat(REGION);
-    let heights: Vec<f32> = (0..columns * columns)
-        .map(|index| {
-            let point =
-                corner + Vec2::new((index % columns) as f32, (index / columns) as f32) * spacing;
-            let ground = backdrop::drawn_ground(point).unwrap_or(backdrop::MEADOW);
-            if trail::from_middle(point) < trail::HALF {
-                ground.max(trail::LIFT)
-            } else {
-                ground
-            }
+    [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        .map(|(x, z)| middle + Vec2::new(x, z) * REGION)
+        .to_vec()
+}
+
+const MEADOW_SQUARE: f32 = 1.0;
+
+/// The ground as it is drawn within reach of the beach, which its stones rest on: the meadow, within [`region`], at its
+/// height in squares a metre across, the
+/// foothills' faces about it, the beach's among them, down the bank and across the river's bed to its far bank, and the
+/// trail's track and its edges' slopes; each triangle as it is drawn, so that a stone rests on what is seen.
+pub fn drawn() -> Vec<[Vec3; 3]> {
+    let region = region();
+    let middle = at((NEAR + FAR) * 0.5, 0.0);
+    let near = |corners: &[Vec3; 3]| {
+        corners
+            .iter()
+            .any(|corner| Vec2::new(corner.x, corner.z).distance(middle) < REGION * 1.5 + 2.0)
+    };
+    // The meadow in squares a metre across, rather than a fan of slivers, so that a stone lying on it meets a few of
+    // its triangles, as it does the foothills'.
+    let meadow = backdrop::meadow();
+    let corner = region[0];
+    let side = MEADOW_SQUARE;
+    let squares = (REGION * 2.0 / side) as usize;
+    let mut triangles: Vec<[Vec3; 3]> = (0..squares * squares)
+        .filter_map(|index| {
+            let low = corner + Vec2::new((index % squares) as f32, (index / squares) as f32) * side;
+            let square = [
+                low,
+                low + Vec2::X * side,
+                low + Vec2::ONE * side,
+                low + Vec2::Y * side,
+            ];
+            shapes::cut(&meadow, &square).0
+        })
+        .flat_map(|part| shapes::fan(&part).collect::<Vec<_>>())
+        .collect();
+    triangles.extend(
+        backdrop::ground_triangles()
+            .into_iter()
+            .map(|(_, corners)| corners)
+            .filter(near),
+    );
+    triangles.extend(trail::surface().into_iter().filter(near));
+    triangles
+}
+
+/// What the stones rest on: the ground as it is drawn about the beach ([`drawn`]), one mesh, its corners shared where
+/// its faces meet; and the river's stones beside it, each its own hull.
+pub fn colliders() -> Vec<Static> {
+    let mut corners: Vec<Vec3> = Vec::new();
+    let mut shared = std::collections::HashMap::new();
+    let triangles: Vec<[u32; 3]> = drawn()
+        .into_iter()
+        .map(|triangle| {
+            triangle.map(|corner| {
+                *shared
+                    .entry(corner.to_array().map(f32::to_bits))
+                    .or_insert_with(|| {
+                        corners.push(corner);
+                        corners.len() as u32 - 1
+                    })
+            })
         })
         .collect();
-    colliders.push(Static::heights(corner, spacing, columns, &heights));
+    let mut colliders = vec![Static::mesh(corners, triangles)];
     let corners = backdrop::stone_corners();
     colliders.extend(boulders().into_iter().map(|boulder| {
         let transform = boulder.transform();
@@ -772,9 +767,25 @@ pub fn colliders() -> Vec<Static> {
     colliders
 }
 
-/// The river's water beside the beach, in bands along it at its level in each, which slows and buoys a stone thrown in
-/// and, once it has rested there a minute, takes it back to where it began on the beach.
-pub fn waters() -> Vec<Water> {
+/// How far either side of the beach's middle the dam reach runs along the river, and how far out from the trail's
+/// middle, beyond the river's far bank.
+pub const DAM_ALONG: f32 = HALF_WIDTH + 1.0;
+pub const DAM_OUT: f32 = 8.5;
+
+/// The dam reach, the river beside the beach, on the ground: from the beach across the whole of the channel to its far
+/// bank, which is all of it shallow, 15 cm at its deepest, and within reach of someone standing in the shallows, and
+/// along it [`DAM_ALONG`] either side of the beach's middle. A stone resting in its water stays there, as part of a dam.
+pub fn dam_reach() -> Vec<Vec2> {
+    vec![
+        at(NEAR, -DAM_ALONG),
+        at(DAM_OUT, -DAM_ALONG),
+        at(DAM_OUT, DAM_ALONG),
+        at(NEAR, DAM_ALONG),
+    ]
+}
+
+/// The river beside the beach in bands along it, each its outline and its level, the river's there.
+fn bands() -> Vec<(f32, Vec<Vec2>)> {
     let middle = at((NEAR + FAR) * 0.5, 0.0);
     let bands = 5;
     let band = REGION * 2.0 / bands as f32;
@@ -790,9 +801,45 @@ pub fn waters() -> Vec<Water> {
                 Vec2::new(middle.x + REGION, low + band),
                 Vec2::new(middle.x - REGION, low + band),
             ];
-            Water::below(level, outline).returning(RETURNS)
+            (level, outline)
         })
         .collect()
+}
+
+/// The river's water beside the beach: first its dam reach ([`dam_reach`]), cut along the bands it crosses, each part
+/// at its band's level, which slows and buoys a stone in it, and keeps it; then the bands, which slow and buoy a stone
+/// thrown in and, once it has rested there a minute, take it back to where it began on the beach, as they do one that
+/// comes to rest downstream or upstream of the dam reach. Where water is in two, the first is the water there, so that
+/// anywhere in the dam reach below its band's level is the dam reach's. Its levels are where a dam's rising water would
+/// be raised, the physics proposal's fourth stage.
+pub fn waters() -> Vec<Water> {
+    let bands = bands();
+    let reach: Vec<Vec3> = dam_reach()
+        .iter()
+        .map(|corner| Vec3::new(corner.x, 0.0, corner.y))
+        .collect();
+    let dam = bands.iter().filter_map(|(level, outline)| {
+        let part = shapes::cut(&reach, outline).0?;
+        let part = part.iter().map(|corner| Vec2::new(corner.x, corner.z));
+        Some(Water::below(*level, part.collect()))
+    });
+    dam.collect::<Vec<_>>()
+        .into_iter()
+        .chain(
+            bands
+                .into_iter()
+                .map(|(level, outline)| Water::below(level, outline).returning(RETURNS)),
+        )
+        .collect()
+}
+
+/// Whether a stone resting with its middle at `point` stays there: on the beach, or anywhere out of the water, or in
+/// the river's dam reach, rather than in the river beyond it, which takes it back.
+pub fn stays(point: Vec3) -> bool {
+    waters()
+        .iter()
+        .find(|water| water.contains(point))
+        .is_none_or(|water| water.returns_after.is_none())
 }
 
 /// What changed of the beach's stones, as the farmyard's server side sends it to everyone in the space: the farmyard's
@@ -811,14 +858,21 @@ pub fn shared(state: &serde_json::Value) -> tomori_physics::message::State {
 /// How long a stone rests in the river before it comes back to the beach, in milliseconds.
 pub const RETURNS: u64 = 60_000;
 
+/// How many substeps each of the beach's world's steps takes: twice `tomori-physics`'s default, so that a stone dropped
+/// onto another's tilted top settles where it was put, as a stack on level shingle needs, which costs less than the
+/// beach's world did with four on its shingle and a heightfield beneath it.
+pub const SUBSTEPS: usize = 8;
+
 /// How the beach's world simulates: as `tomori-physics` does by default, a stone lost beyond its region going back, but
-/// with every contact against the shingle's triangles solved against its own, [`Settings::unclustered`], so that a
-/// building stone lying across a bend of a degree or two in the shingle rests rather than creeping along it.
+/// in [`SUBSTEPS`] substeps a step, and with every contact against the ground's triangles solved against its own,
+/// [`Settings::unclustered`], so that a building stone lying across a bend of a degree or two in the ground rests rather
+/// than creeping along it.
 pub fn settings() -> Settings {
     let middle = at((NEAR + FAR) * 0.5, 0.0);
     Settings {
         home: Vec3::new(middle.x, 0.0, middle.y),
         lost_beyond: REGION,
+        substeps: SUBSTEPS,
         ..Settings::default()
     }
     .unclustered()
@@ -828,8 +882,17 @@ pub fn settings() -> Settings {
 pub mod colors {
     use glam::Vec3;
 
-    pub const SHINGLE: Vec3 = Vec3::new(0.2, 0.19, 0.17);
+    /// A stony grey-brown, a little browner than the river's shingle either side.
+    pub const SHINGLE: Vec3 = Vec3::new(0.215, 0.195, 0.165);
     pub const STONE: Vec3 = Vec3::new(0.3, 0.29, 0.27);
+}
+
+/// The colour the ground's face `seed` is drawn within the beach: its shingle, a little lighter or darker, and warmer
+/// or cooler, face by face.
+pub fn shingle(seed: u32) -> Vec3 {
+    let light = 0.88 + scatter(seed.wrapping_add(6200)) * 0.24;
+    let warm = (scatter(seed.wrapping_add(6300)) - 0.5) * 0.03;
+    colors::SHINGLE * light + Vec3::new(warm, warm * 0.4, -warm)
 }
 
 /// How much brighter or darker each of the beach's stones is drawn, and how much warmer or cooler.
@@ -839,14 +902,71 @@ fn shade(index: usize) -> Vec3 {
     colors::STONE * light + Vec3::new(warm, warm * 0.4, -warm)
 }
 
-/// The beach's shingle, as a model of one node, each of its triangles a little lighter or darker, as shingle is.
+/// How many pebbles lie scattered over the beach, drawn only, which nothing rests on and nobody walks round; how many
+/// sides each has; and how wide they are, at least and how much more.
+pub const PEBBLES: usize = 44;
+const PEBBLE_SIDES: usize = 5;
+const PEBBLE_WIDTH: (f32, f32) = (0.05, 0.06);
+/// How far into the ground a pebble's foot is sunk, so that it is never seen to stand above it.
+const PEBBLE_SUNK: f32 = 0.006;
+
+/// Where each pebble lies on the beach, as `(middle, width, seed)`: scattered over it, more of them towards the water,
+/// into the shallows, clear of the trail's edge and of the river's stones.
+pub fn pebbles() -> Vec<(Vec3, f32, u32)> {
+    let boulders = boulders();
+    (0..PEBBLES as u32)
+        .map(|pebble| {
+            let seed = pebble * 17 + 6500;
+            let width = PEBBLE_WIDTH.0 + scatter(seed) * PEBBLE_WIDTH.1;
+            let near = trail::FOOT + width;
+            let out = near + (FAR - 0.05 - near) * scatter(seed + 1).sqrt();
+            let along = (scatter(seed + 2) - 0.5) * 2.0 * (HALF_WIDTH - width);
+            (at(out, along), width, seed)
+        })
+        .filter(|(point, width, _)| {
+            boulders.iter().all(|boulder| {
+                Vec2::new(boulder.at.x, boulder.at.z).distance(*point)
+                    > boulder.size.x * 0.6 + width
+            })
+        })
+        .map(|(point, width, seed)| {
+            let ground = height(point).unwrap_or(backdrop::MEADOW);
+            (Vec3::new(point.x, ground, point.y), width, seed)
+        })
+        .collect()
+}
+
+/// The beach's pebbles, as a model of one node, each a low pyramid of [`PEBBLE_SIDES`] faces, its foot following the
+/// ground and sunk a little into it, a grey or a brown of its own. Its shingle is the ground's own faces, which the
+/// yard and the backdrop draw.
 pub fn model() -> Model {
-    let (corners, triangles) = surface();
     let mut shapes = Shapes::new();
-    for (index, triangle) in triangles.iter().enumerate() {
-        let points = triangle.map(|corner| corners[corner as usize]);
-        let light = 0.85 + scatter(index as u32 + 6200) * 0.3;
-        facing(&mut shapes, &points, Vec3::Y, colors::SHINGLE * light);
+    for (middle, width, seed) in pebbles() {
+        let turn = scatter(seed + 3) * TAU;
+        let squash = 0.6 + scatter(seed + 4) * 0.4;
+        let foot: Vec<Vec3> = (0..PEBBLE_SIDES)
+            .map(|side| {
+                let yaw = side as f32 / PEBBLE_SIDES as f32 * TAU;
+                let reach = width * 0.5 * (0.8 + scatter(seed + 10 + side as u32) * 0.4);
+                let local = Vec2::new(yaw.cos() * reach, yaw.sin() * reach * squash);
+                let local = Vec2::new(
+                    local.x * turn.cos() - local.y * turn.sin(),
+                    local.x * turn.sin() + local.y * turn.cos(),
+                );
+                let point = Vec2::new(middle.x, middle.z) + local;
+                let ground = height(point).unwrap_or(middle.y);
+                Vec3::new(point.x, ground - PEBBLE_SUNK, point.y)
+            })
+            .collect();
+        let top = middle + Vec3::Y * width * (0.3 + scatter(seed + 5) * 0.15);
+        let light = 0.8 + scatter(seed + 6) * 0.5;
+        let warm = (scatter(seed + 7) - 0.5) * 0.1;
+        let color = colors::STONE * light + Vec3::new(warm, warm * 0.4, -warm);
+        for side in 0..PEBBLE_SIDES {
+            let corners = [foot[side], foot[(side + 1) % PEBBLE_SIDES], top];
+            let outward = corners.iter().copied().sum::<Vec3>() / 3.0 - middle;
+            facing(&mut shapes, &corners, outward, color);
+        }
     }
     backdrop::built("beach", shapes)
 }

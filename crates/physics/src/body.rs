@@ -265,6 +265,7 @@ impl Static {
 /// A body of water: everything below `height` within `outline` on the ground, in the environment's own coordinates,
 /// which slows what enters it, with more damping, and buoys it, by the weight of the water it displaces; and, if it
 /// says, takes a body that comes to rest in it back to where it began after a while, as a river does a stone thrown in.
+/// Where a world's waters overlap, the first of them is the water there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Water {
     pub height: f32,

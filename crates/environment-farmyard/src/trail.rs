@@ -33,6 +33,8 @@ pub const HALF: f32 = WIDTH / 2.0;
 /// it, clear of the meadow so that nothing fights it, and its edges' crests above the track.
 pub const LIFT: f32 = 0.008;
 pub const EDGE: f32 = 0.035;
+/// How far from its middle the foot of the track's edge is, where its slope meets the meadow.
+pub const FOOT: f32 = HALF + 0.16;
 /// The height participants stand at on its track: the top of the track as drawn, so that their feet and the ring where a
 /// teleport lands are on it, not beneath it; [`LIFT`] above the yard's earth, less than the centimetre a backstep goes
 /// up or down, so that nothing stops at the gate.
@@ -569,41 +571,57 @@ fn section(point: Vec2, outward: Vec2) -> [Vec3; 6] {
         }
     };
     [
-        at(HALF + 0.16, -0.004),
+        at(FOOT, -0.004),
         at(HALF, crest(1.0)),
         at(HALF - 0.08, LIFT),
         at(-(HALF - 0.08), LIFT),
         at(-HALF, crest(-1.0)),
-        at(-(HALF + 0.16), -0.004),
+        at(-FOOT, -0.004),
     ]
+}
+
+/// The quads of the track along `points`, each with the way out of it, as bands across it, between each band and the
+/// next: by the band they start at, and by their strip across it, from the outer foot of one edge, 0, over its slope,
+/// its crest and the track's middle to the other's crest and its slope, 4.
+fn strips(points: &[(Vec2, Vec2)]) -> Vec<(usize, usize, [Vec3; 4])> {
+    let sections: Vec<[Vec3; 6]> = points
+        .iter()
+        .map(|(point, outward)| section(*point, *outward))
+        .collect();
+    sections
+        .windows(2)
+        .enumerate()
+        .flat_map(|(index, pair)| {
+            (0..5).map(move |strip| {
+                (
+                    index,
+                    strip,
+                    [
+                        pair[0][strip],
+                        pair[0][strip + 1],
+                        pair[1][strip + 1],
+                        pair[1][strip],
+                    ],
+                )
+            })
+        })
+        .collect()
 }
 
 /// The track along `points`, each with the way out of it, as bands across it, quads between each band and the next:
 /// its middle and, either side, its raised edges sloping down to the meadow; drawn as ground from one crest to the
 /// other, [`WIDTH`] wide, but not beyond them, down to the meadow, which participants do not walk on.
 fn track(shapes: &mut Shapes, points: &[(Vec2, Vec2)]) {
-    let sections: Vec<[Vec3; 6]> = points
-        .iter()
-        .map(|(point, outward)| section(*point, *outward))
-        .collect();
-    for (index, pair) in sections.windows(2).enumerate() {
-        for strip in 0..5 {
-            let corners = [
-                pair[0][strip],
-                pair[0][strip + 1],
-                pair[1][strip + 1],
-                pair[1][strip],
-            ];
-            let color = if strip == 2 {
-                colors::TRACK * (0.92 + scatter(index as u32 + 9100) * 0.16)
-            } else {
-                colors::EDGE
-            };
-            if (1..=3).contains(&strip) {
-                shapes.ground(|shapes| facing(shapes, &corners, Vec3::Y, color));
-            } else {
-                facing(shapes, &corners, Vec3::Y, color);
-            }
+    for (index, strip, corners) in strips(points) {
+        let color = if strip == 2 {
+            colors::TRACK * (0.92 + scatter(index as u32 + 9100) * 0.16)
+        } else {
+            colors::EDGE
+        };
+        if (1..=3).contains(&strip) {
+            shapes.ground(|shapes| facing(shapes, &corners, Vec3::Y, color));
+        } else {
+            facing(shapes, &corners, Vec3::Y, color);
         }
     }
 }
@@ -719,9 +737,9 @@ pub fn ground() -> Vec<[Vec3; 3]> {
     shapes().walkable().to_vec()
 }
 
-/// The trail's shapes.
-fn shapes() -> Shapes {
-    let mut shapes = Shapes::new();
+/// The ways the trail's track runs, each point with the way out of it: round the loop, and through the gate, from the
+/// fence to the loop's inner edge.
+fn ways() -> [Vec<(Vec2, Vec2)>; 2] {
     let count = centreline().len();
     let points: Vec<(Vec2, Vec2)> = (0..=count)
         .map(|index| {
@@ -729,8 +747,6 @@ fn shapes() -> Shapes {
             (point, outward)
         })
         .collect();
-    track(&mut shapes, &points);
-    // The way through the gate, from the fence to the loop's inner edge.
     let [_, loop_] = GATEWAY;
     let gateway: Vec<(Vec2, Vec2)> = (0..=2)
         .map(|step| {
@@ -739,7 +755,31 @@ fn shapes() -> Shapes {
             (Vec2::new(loop_.x, z), Vec2::X)
         })
         .collect();
-    track(&mut shapes, &gateway);
+    [points, gateway]
+}
+
+/// What the trail draws on the ground, which what is thrown onto it rests on, each triangle as [`model`] draws it: its
+/// track from one edge's outer foot to the other's, down to the meadow, and its clearings.
+pub fn surface() -> Vec<[Vec3; 3]> {
+    let mut surface = ground();
+    for points in ways() {
+        surface.extend(
+            strips(&points)
+                .into_iter()
+                .filter(|(_, strip, _)| [0, 4].contains(strip))
+                .flat_map(|(_, _, corners)| crate::shapes::fan(&corners).collect::<Vec<_>>()),
+        );
+    }
+    surface
+}
+
+/// The trail's shapes.
+fn shapes() -> Shapes {
+    let mut shapes = Shapes::new();
+    let count = centreline().len();
+    for points in ways() {
+        track(&mut shapes, &points);
+    }
     // The clearings, a little below the track where they meet it.
     for (middle, radius) in clearings() {
         shapes.ground(|shapes| {

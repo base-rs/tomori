@@ -21,6 +21,30 @@ fn eyes() -> Vec<Vec3> {
         .collect()
 }
 
+/// From `eye`, `position` is within the far plane, 2 m short of it, or else, from the beach's slope down to the river,
+/// on the foothills' outer rings across the yard from it, or the bush on them, 46 m and more away, deep in the haze,
+/// within the far plane or less than 1.5 m beyond it, where it cuts them off, as from the waterfall rock.
+fn beyond_from_the_beach(eye: Vec3, position: Vec3) {
+    // The eyes stand as high above the beach's slope as above the yard.
+    let ground = Vec2::new(eye.x, eye.z);
+    let eye = eye + Vec3::Y * crate::beach::height(ground).unwrap_or(0.0).min(0.0);
+    let distance = eye.distance(position);
+    if distance < FAR - 2.0 {
+        return;
+    }
+    let at = Vec2::new(position.x, position.z) - BACKDROP_CENTRE;
+    let towards = ground - BACKDROP_CENTRE;
+    assert!(
+        crate::beach::from_beach(ground) < 1e-3
+            && at.length() > 30.0
+            && at.dot(towards) < 0.0
+            && distance > 46.0
+            && distance < FAR + 1.5,
+        "{eye} {position}: {distance} m, {} m out",
+        at.length()
+    );
+}
+
 /// From the eyes of one standing on the waterfall rock, which is 8 m beyond the trail's reach of the backdrop's middle,
 /// `position` is within the far plane, or else one of the foothills' outer rings across the yard from it, which the
 /// far plane cuts off, 46 m and more away, deep in the haze.
@@ -114,7 +138,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
             );
         }
         for eye in &eyes {
-            assert!(eye.distance(*position) < FAR - 2.0, "{eye} {position}");
+            beyond_from_the_beach(*eye, *position);
         }
         beyond_from_the_rock(*position);
     }
@@ -150,10 +174,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
         assert!(!(at.y > 4.0 && at.x.abs() < 6.0 + reach && at.distance(BACKDROP_CENTRE) < 26.0));
         assert!(clear(at, reach, height), "{plant:?}");
         for eye in &eyes {
-            assert!(
-                eye.distance(plant.at + Vec3::Y * height) < FAR - 2.0,
-                "{plant:?}"
-            );
+            beyond_from_the_beach(*eye, plant.at + Vec3::Y * height);
         }
         beyond_from_the_rock(plant.at + Vec3::Y * height);
         // Nor on the trail, beyond the fence, where participants walk.
@@ -494,7 +515,7 @@ fn the_backdrop_is_modest_for_the_quest() {
     assert_eq!(
         triangles,
         Triangles {
-            foothills: 2880,
+            foothills: 2918,
             plants: 10_862,
             ranges: 1184,
             water: 197,
@@ -504,7 +525,7 @@ fn the_backdrop_is_modest_for_the_quest() {
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 17_072);
+    assert_eq!(triangles.total(), 17_110);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the

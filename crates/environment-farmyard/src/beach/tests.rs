@@ -25,56 +25,159 @@ fn the_beach_lies_beside_the_riverbank_viewpoint_from_the_trail_s_edge_into_the_
     assert!((from_beach(at(FAR + 0.3, HALF_WIDTH + 0.4)) - 0.5).abs() < 1e-4);
 }
 
-#[test]
-fn the_shingle_is_drawn_above_the_ground_everywhere_and_slopes_gently() {
-    let (corners, triangles) = surface();
-    assert_eq!(corners.len(), COLUMNS * ROWS);
-    assert_eq!(triangles.len(), (COLUMNS - 1) * (ROWS - 1) * 2);
-    for step in 0..=40 {
-        for across in 0..=12 {
-            let out = NEAR + (FAR - NEAR) * step as f32 / 40.0;
-            let along = -HALF_WIDTH + 2.0 * HALF_WIDTH * across as f32 / 12.0;
-            let point = at(out, along) + Vec2::splat(1e-4) * (step % 2) as f32;
-            let Some(shingle) = height(point) else {
-                continue;
-            };
-            let drawn = backdrop::drawn_ground(point).unwrap_or(backdrop::MEADOW);
-            assert!(
-                shingle > drawn + 0.002,
-                "{point}: shingle {shingle}, ground {drawn}"
-            );
-        }
-    }
-    // No steeper than a walk down a bank, so that stones lie where they are put.
-    for triangle in &triangles {
-        let [a, b, c] = triangle.map(|corner| corners[corner as usize]);
-        let normal = (b - a).cross(c - a).normalize();
-        assert!(normal.y.abs() > 0.88, "{normal}");
-    }
+/// The points of the beach to sample, a grid over it, a little off its faces' edges.
+fn sampled() -> Vec<Vec2> {
+    (0..=40)
+        .flat_map(|step| {
+            (0..=12).map(move |across| {
+                let out = NEAR + (FAR - NEAR) * step as f32 / 40.0;
+                let along = -HALF_WIDTH + 2.0 * HALF_WIDTH * across as f32 / 12.0;
+                at(out, along) + Vec2::splat(1e-3) * (1 + step % 3) as f32
+            })
+        })
+        .filter(|point| from_beach(*point) < -1e-3)
+        .collect()
+}
+
+/// The triangles of `model` that face up, each as drawn.
+fn facing_up(model: &Model) -> Vec<[Vec3; 3]> {
+    model
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .flat_map(|primitive| {
+            primitive.indices.chunks(3).filter_map(|triangle| {
+                let corners =
+                    [0, 1, 2].map(|corner| primitive.positions[triangle[corner] as usize]);
+                let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+                (normal.normalize_or_zero().y > 0.5).then_some(corners)
+            })
+        })
+        .collect()
 }
 
 #[test]
-fn participants_walk_the_flat_shingle_where_the_backdrop_is_in_view_short_of_the_river_clear_of_its_stones()
- {
+fn the_beach_is_the_ground_s_own_faces_shaded_as_shingle_with_nothing_laid_over_them() {
+    // Its faces cover the beach's outline, each once, at the height the ground is drawn there.
+    let area: f32 = ground_faces()
+        .iter()
+        .flat_map(|face| shapes::fan(face))
+        .map(|[a, b, c]| {
+            (Vec2::new(b.x - a.x, b.z - a.z))
+                .perp_dot(Vec2::new(c.x - a.x, c.z - a.z))
+                .abs()
+                * 0.5
+        })
+        .sum();
+    let outline_area = (FAR - NEAR) * 2.0 * HALF_WIDTH;
+    assert!((area - outline_area).abs() < 1e-2, "{area} {outline_area}");
+    for point in sampled() {
+        let drawn = backdrop::drawn_ground(point).unwrap_or(backdrop::MEADOW);
+        let beach = height(point).unwrap();
+        assert!((beach - drawn).abs() < 1e-4, "{point}: {beach} {drawn}");
+    }
+    assert_eq!(height(at(FAR + 0.05, 0.0)), None);
+    // The meadow and the foothills draw it, once at every point, the meadow's part of it and the foothills' in the
+    // beach's own shingle, a stony grey-brown, and nothing else of the yard or the backdrop is drawn just above it.
+    let ground: Vec<[Vec3; 3]> = facing_up(&crate::props::model())
+        .into_iter()
+        .chain(facing_up(&backdrop::model()))
+        .collect();
+    for point in sampled() {
+        let beach = height(point).unwrap();
+        let over: Vec<f32> = ground
+            .iter()
+            .filter_map(|triangle| on(triangle, point))
+            .filter(|drawn| (drawn - beach).abs() < 0.05)
+            .collect();
+        assert_eq!(over.len(), 1, "{point}: {over:?}");
+        assert!((over[0] - beach).abs() < 1e-4, "{point}");
+    }
+    let shades: Vec<Vec3> = (0..200).map(shingle).collect();
+    for shade in &shades {
+        assert!(
+            shade.x > shade.z && shade.x < 0.3 && shade.z > 0.1,
+            "{shade}"
+        );
+    }
+    assert!(shades.windows(2).any(|pair| pair[0] != pair[1]));
+    // The beach's own model is only its pebbles, a few centimetres across, each on the ground, its foot within it: no
+    // carpet of shingle over the ground.
+    let pebbles = pebbles();
+    assert!(pebbles.len() > PEBBLES * 3 / 4, "{}", pebbles.len());
+    let drawn = model();
+    let primitive = &drawn.meshes[0].primitives[0];
+    assert_eq!(primitive.indices.len() / 3, pebbles.len() * PEBBLE_SIDES);
+    for position in &primitive.positions {
+        let (middle, width, _) = pebbles
+            .iter()
+            .min_by(|a, b| a.0.distance(*position).total_cmp(&b.0.distance(*position)))
+            .unwrap();
+        assert!(middle.distance(*position) < *width, "{position}");
+        let ground = height(Vec2::new(position.x, position.z)).unwrap();
+        assert!(position.y >= ground - PEBBLE_SUNK - 1e-4, "{position}");
+        assert!(position.y < ground + width * 0.5, "{position}");
+    }
+    let flat: f32 = facing_up(&drawn)
+        .iter()
+        .filter(|[a, b, c]| (*b - *a).cross(*c - *a).normalize().y > 0.95)
+        .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() * 0.5)
+        .sum();
+    assert!(flat < 0.01, "{flat}");
+}
+
+#[test]
+fn participants_walk_from_the_trail_down_the_bank_to_the_water_s_edge_and_into_its_shallows() {
     let ground = ground();
-    let (_, all) = surface();
-    // A fifth of it or so, its flat shingle beside the trail, where the whole backdrop is within the far plane.
-    let walked = ground.len();
-    assert!(walked > all.len() / 6 && walked < all.len() / 2, "{walked}");
-    let spread = layout::RIVER_HALF_WIDTH + backdrop::SPREAD;
+    let level = water_level();
+    let steepest = tomori_environment::navmesh::STEEPEST.cos();
+    // All of it the ground as drawn, within the beach beyond the trail's edge, none steeper than Tomori walks, and
+    // into the river no deeper than its shallows.
+    for triangle in &ground {
+        let [a, b, c] = *triangle;
+        let normal = (b - a).cross(c - a).normalize();
+        assert!(normal.y > steepest, "{a} {b} {c}");
+        for corner in triangle {
+            let point = Vec2::new(corner.x, corner.z);
+            assert!(from_beach(point) < 1e-3, "{corner}");
+            assert!(trail::from_middle(point) > trail::FOOT, "{corner}");
+            assert!(corner.y >= level - SHALLOWS - 1e-4, "{corner}");
+            assert!((corner.y - height(point).unwrap()).abs() < 1e-4, "{corner}");
+        }
+    }
     let lowest = ground
         .iter()
         .flatten()
         .map(|corner| corner.y)
         .fold(f32::INFINITY, f32::min);
-    assert!((0.0..0.02).contains(&lowest), "{lowest}");
-    for corner in ground.iter().flatten() {
-        assert!(
-            layout::nearest_river(Vec2::new(corner.x, corner.z)).1 > spread,
-            "{corner}"
-        );
-        assert!(corner.y > water_level());
-    }
+    assert!(lowest < level - SHALLOWS + 0.01, "{lowest}");
+    // Walkable from beside the trail all the way down to the water's edge and a step into it, but for the river's
+    // stones on it, at the height drawn, along a line down the bank clear of them; and not where the river is deeper.
+    let clear = [-1.2, -0.6, 0.0, 0.6, 1.2]
+        .into_iter()
+        .filter(|along| {
+            (0..=40).all(|step| {
+                let point = at(
+                    WALKED + 0.05 + (FAR - WALKED - 0.05) * step as f32 / 40.0,
+                    *along,
+                );
+                height(point).is_none_or(|ground| ground < level - SHALLOWS + 0.005)
+                    || crate::walkable::height_at(point)
+                        .is_some_and(|walked| (walked - height(point).unwrap()).abs() < 1e-3)
+            })
+        })
+        .count();
+    assert!(clear >= 3, "{clear}");
+    let edge = (0..=500)
+        .map(|step| NEAR + (FAR - NEAR) * step as f32 / 500.0)
+        .find(|out| height(at(*out, 0.0)).unwrap() < level)
+        .unwrap();
+    assert!(crate::walkable::height_at(at(edge + 0.05, 0.0)).is_some());
+    let deep = (0..=500)
+        .map(|step| NEAR + (FAR - NEAR) * step as f32 / 500.0)
+        .find(|out| height(at(*out, 0.0)).unwrap() < level - SHALLOWS - 0.01)
+        .unwrap();
+    assert_eq!(crate::walkable::height_at(at(deep, 0.0)), None);
     assert_eq!(solids().len(), boulders().len());
 }
 
@@ -244,27 +347,21 @@ fn the_stones_lie_on_the_beach_apart_from_each_other_and_the_river_s_stones() {
 }
 
 #[test]
-fn the_building_stones_lie_in_a_pile_and_a_row_off_the_trail_and_the_walked_shingle() {
+fn the_building_stones_lie_in_a_pile_and_a_row_on_the_flat_shingle_off_the_trail() {
     let homes = homes();
-    let walked = ground();
-    let on_walked = |point: Vec2| {
-        walked.iter().any(|triangle| {
-            let outline: Vec<Vec2> = triangle
-                .iter()
-                .map(|corner| Vec2::new(corner.x, corner.z))
-                .collect();
-            tomori_physics::body::within(&outline, point)
-        })
-    };
     for (index, home) in homes.iter().enumerate().skip(RIVER) {
-        // Every corner of it within the beach, nearly a metre from the trail's edge, beyond the shingle that is walked,
-        // and above the shingle.
+        // Every corner of it within the beach, half a metre beyond the trail's edge, over the flat shingle, at the
+        // meadow's level short of where the bank begins to slope, and above it.
         for point in stone(index) {
             let point = home.transform_point(point);
             let ground = Vec2::new(point.x, point.z);
             assert!(from_beach(ground) < -0.02, "{index}: {point}");
-            assert!(trail::from_middle(ground) > trail::HALF + 0.9, "{index}");
-            assert!(!on_walked(ground), "{index}: {point}");
+            assert!(trail::from_middle(ground) > trail::FOOT + 0.3, "{index}");
+            let flat = height(ground).unwrap();
+            assert!(
+                (flat - backdrop::MEADOW).abs() < 1e-5,
+                "{index}: {point} {flat}"
+            );
             assert!(point.y > height(ground).unwrap(), "{index}: {point}");
         }
     }
@@ -327,19 +424,88 @@ fn what_the_stones_rest_on_and_the_water_are_within_the_world_s_bounds() {
     assert!(triangles <= tomori_physics::STATIC_TRIANGLES, "{triangles}");
     assert!(colliders.len() >= 2);
     let waters = waters();
-    assert_eq!(waters.len(), 5);
-    // The river beside the beach is water that takes back what rests in it; the beach above it is not.
+    // The dam reach, in parts, one to each band it crosses, then the five bands.
+    let dam = waters
+        .iter()
+        .take_while(|water| water.returns_after.is_none())
+        .count();
+    assert!((1..=3).contains(&dam), "{dam}");
+    assert_eq!(waters.len(), dam + 5);
+    // The river beside the beach is its dam reach, which keeps what rests in it, across the channel to its far bank;
+    // upstream and downstream of it, the river takes back what rests in it; and the beach above it is not water.
     let level = water_level();
-    let river = at(FAR + 1.0, 0.0);
-    let point = Vec3::new(river.x, level - 0.05, river.y);
-    assert!(
-        waters
+    let in_river = |along: f32| {
+        let out = (0..=400)
+            .map(|step| NEAR + 10.0 * step as f32 / 400.0)
+            .min_by(|a, b| {
+                let from = |out: f32| layout::nearest_river(at(out, along)).1;
+                from(*a).total_cmp(&from(*b))
+            })
+            .unwrap();
+        let river = at(out, along);
+        Vec3::new(river.x, level - 0.05, river.y)
+    };
+    for along in [-DAM_ALONG + 0.2, 0.0, DAM_ALONG - 0.2] {
+        let middle = in_river(along);
+        assert!(waters[..dam].iter().any(|water| water.contains(middle)) && stays(middle));
+        let shallows = at(FAR - 0.1, along);
+        assert!(stays(Vec3::new(shallows.x, level - 0.03, shallows.y)));
+    }
+    // Anywhere in the dam reach, at any height below the river's water there, up to its ends, a stone stays, though
+    // the river is higher upstream than beside the beach; just beyond its ends, it returns.
+    for along in [-DAM_ALONG + 0.02, -1.0, 0.0, 1.0, DAM_ALONG - 0.02] {
+        let middle = in_river(along);
+        let surface = waters[dam..]
             .iter()
-            .any(|water| water.contains(point) && water.returns_after == Some(RETURNS))
-    );
+            .find(|water| water.contains(middle.with_y(-10.0)))
+            .unwrap()
+            .height;
+        for below in [0.002, 0.01, 0.05, 0.1] {
+            let point = middle.with_y(surface - below);
+            assert!(stays(point), "{point}");
+        }
+    }
+    for along in [-DAM_ALONG - 0.02, DAM_ALONG + 0.02] {
+        let middle = in_river(along);
+        let surface = waters[dam..]
+            .iter()
+            .find(|water| water.contains(middle.with_y(-10.0)))
+            .unwrap()
+            .height;
+        assert!(!stays(middle.with_y(surface - 0.002)), "{middle}");
+    }
+    // The far bank's water's edge is within the dam reach.
+    let far = (0..=400)
+        .map(|step| FAR + 4.0 * step as f32 / 400.0)
+        .rfind(|out| backdrop::drawn_ground(at(*out, 0.0)).unwrap() < level)
+        .unwrap();
+    assert!(far < DAM_OUT - 0.3, "{far}");
+    for along in [-DAM_ALONG - 1.0, DAM_ALONG + 1.0, DAM_ALONG + 2.5] {
+        let river = in_river(along);
+        assert!(
+            waters
+                .iter()
+                .find(|water| water.contains(river))
+                .is_some_and(|water| water.returns_after == Some(RETURNS)),
+            "{river}"
+        );
+        assert!(!stays(river), "{river}");
+    }
     let beach = at(NEAR + 0.5, 0.0);
     let point = Vec3::new(beach.x, height(beach).unwrap() + 0.05, beach.y);
-    assert!(!waters.iter().any(|water| water.contains(point)));
+    assert!(!waters.iter().any(|water| water.contains(point)) && stays(point));
+    // The dam reach and the ground about it within the world's region, and the ground what is drawn.
+    for corner in dam_reach() {
+        assert!(corner.distance(at((NEAR + FAR) * 0.5, 0.0)) < REGION);
+    }
+    for triangle in drawn() {
+        for corner in triangle {
+            let point = Vec2::new(corner.x, corner.z);
+            if from_beach(point) < -1e-3 && trail::from_middle(point) > trail::FOOT + 1e-3 {
+                assert!((corner.y - height(point).unwrap()).abs() < 1e-4, "{corner}");
+            }
+        }
+    }
     let settings = settings();
     assert_eq!(settings.lost_beyond, REGION);
     assert!(
@@ -358,6 +524,11 @@ fn the_beach_and_its_stones_are_drawn_within_their_budget() {
             .sum()
     };
     let (beach, stones) = (model(), stones_model());
+    println!(
+        "pebbles {}, stones {}",
+        triangles(&beach),
+        triangles(&stones)
+    );
     assert_eq!(stones.nodes.len(), STONES);
     assert_eq!(stones.nodes[RIVER].name.as_deref(), Some("stone-28"));
     assert_eq!(
