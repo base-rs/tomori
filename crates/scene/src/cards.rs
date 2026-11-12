@@ -273,11 +273,11 @@ mod tests {
         }
         assert_eq!(lines, expected);
         for c in 0..6 {
-            for r in 0..16 {
+            for (r, values) in table.rows.iter().enumerate() {
                 let label = format!("COLUMN {}  ROW {}/16", c + 1, r + 1);
                 let start = lines.iter().position(|line| line == &label).unwrap() + 1;
-                let count = wrap(&table.rows[r][c]).len();
-                assert_eq!(lines[start..start + count].concat(), table.rows[r][c]);
+                let count = wrap(&values[c]).len();
+                assert_eq!(lines[start..start + count].concat(), values[c]);
             }
         }
     }
@@ -399,10 +399,10 @@ mod tests {
             .cloned()
             .collect();
         for column in 0..6 {
-            for row in 0..16 {
+            for (row, values) in table.rows.iter().enumerate() {
                 let marker = format!("COLUMN {}  ROW {}/16", column + 1, row + 1);
                 let start = lines.iter().position(|line| line == &marker).unwrap() + 1;
-                let n = wrap(&table.rows[row][column]).len();
+                let n = wrap(&values[column]).len();
                 assert_eq!(lines[start..start + n].concat(), "\\u{1F980}".repeat(40));
             }
         }
