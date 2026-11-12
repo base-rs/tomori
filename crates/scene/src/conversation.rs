@@ -38,7 +38,8 @@ const BODY_ROWS: usize = ROWS - 4;
 /// declare and today's six owners add, and its slots six for each, so that an environment declaring sixteen standard
 /// walls is drawn whole: a wall costs a board, and a slot no more than a board of its own, a few quads each, built and
 /// compared every frame and meshed again as they change or change place in the draw order, beside the panels they
-/// hold, which stay as many. See `design/clients.md`.
+/// hold, which stay as many. It draws sixteen volumes of 1,024 nodes together, until what they cost is measured on the
+/// headset. See `design/clients.md` and `design/diagrams.md`.
 pub const HEADSET_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TODAY
     .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
     .with_projection(
@@ -46,7 +47,8 @@ pub const HEADSET_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TOD
         tomori_protocol::WALL_SLOTS * (1 + 16 + 6),
         tomori_protocol::PROJECTION_FLOATING,
         tomori_protocol::PROJECTION_PANELS,
-    );
+    )
+    .with_volumes(16, 1024);
 
 /// What the desktop window states: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], twice today's walls owners
 /// add, with the Tomori wall and the sixteen an environment may declare, six slots for each, and twice today's floating

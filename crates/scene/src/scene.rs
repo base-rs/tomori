@@ -215,6 +215,9 @@ pub struct Frame<'a> {
     /// The images those panels show that the client holds, by hash, each a PNG for the renderer to decode, once each
     /// however many panels show it. See `design/projection.md`.
     pub images: Vec<(String, std::sync::Arc<[u8]>)>,
+    /// The space's volumes, whose solids are drawn among the opaque bodies; their labels are among `projection`. See
+    /// `design/diagrams.md`.
+    pub volumes: Vec<crate::projection::volume::Drawn>,
     /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
     pub landing: Option<Vec3>,
     /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -1975,11 +1978,17 @@ impl Step {
                 && panel.as_deref() == projected.pointed.as_ref().map(|(id, ..)| id.as_str())
         };
         let views = Hands {
-            right: (projected.pointed.clone(), projected.item, projected.hit),
+            right: (
+                projected.pointed.clone(),
+                projected.item,
+                projected.hit,
+                projected.part.clone(),
+            ),
             left: (
                 projected.left.pointed.clone(),
                 projected.left.item,
                 projected.left.hit,
+                projected.left.part.clone(),
             ),
         };
         // The space's cards stand wherever it shows them; each ray and grip acts on them only while nothing else takes them, such as a panel that hand carries. See `design/github.md`.
@@ -2072,7 +2081,7 @@ impl Step {
         for side in Side::BOTH {
             let ray = casts[side];
             let in_space = points[side];
-            let (panel_pointed, panel_item, projected_hit) = views[side].clone();
+            let (panel_pointed, panel_item, projected_hit, panel_part) = views[side].clone();
             let worker = self
                 .delegation_scene
                 .point_with(side, ray.filter(|_| in_space))
@@ -2245,9 +2254,21 @@ impl Step {
                 let across = projected
                     .across
                     .filter(|_| side == Side::Right && pointed_here(&panel));
-                panel.clone().map(|panel| match (item, row, across) {
-                    (_, _, Some(across)) => tomori_protocol::Resource::chart_at(panel, across),
-                    (Some(line), Some(row), _) => {
+                // On a volume, the node or edge the ray meets of the volume it points at.
+                let part = panel_part.filter(|_| {
+                    panel_pointed
+                        .as_ref()
+                        .is_some_and(|(pointed, ..)| panel.as_deref() == Some(pointed.as_str()))
+                });
+                panel.clone().map(|panel| match (item, row, across, part) {
+                    (_, _, _, Some(crate::projection::Part::Node(node))) => {
+                        tomori_protocol::Resource::volume_at(panel, Some(&node), None)
+                    }
+                    (_, _, _, Some(crate::projection::Part::Edge(edge))) => {
+                        tomori_protocol::Resource::volume_at(panel, None, Some(edge))
+                    }
+                    (_, _, Some(across), None) => tomori_protocol::Resource::chart_at(panel, across),
+                    (Some(line), Some(row), ..) => {
                         tomori_protocol::Resource::panel_row(panel, line, row)
                     }
                     _ => tomori_protocol::Resource::panel_at(panel, item),
@@ -2427,7 +2448,7 @@ impl Step {
             .filter(|_| pointed_here(&resolved.right.panel));
         let mut projection = projected.sheets;
         for side in Side::BOTH {
-            let (panel_pointed, _, _) = &views[side];
+            let (panel_pointed, ..) = &views[side];
             let resolved = &resolved[side];
             if side == Side::Right
                 && let Some(readout) = readout.clone()
@@ -2818,6 +2839,7 @@ impl Step {
             cards: board.sheets,
             projection,
             images,
+            volumes: projected.volumes.clone(),
             landing: travel.landing.or_else(|| {
                 crate::pads::ring(&locomotion, pointed_pad).filter(|_| in_space_shown && grown)
             }),
@@ -11567,4 +11589,7 @@ mod tests {
 
     /// The left hand's ray, trigger and grip, which mirror the right's for Tomori's own things.
     mod hands;
+
+    /// Volumes, pointed at as words begin.
+    mod volumes;
 }

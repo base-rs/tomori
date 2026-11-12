@@ -14,6 +14,7 @@ pub mod panel_images;
 pub mod profiler;
 pub mod scene_graphics;
 pub mod scenery;
+pub mod solids;
 #[cfg(any(test, feature = "test-gpu"))]
 pub mod test_gpu;
 #[cfg(test)]

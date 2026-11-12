@@ -355,6 +355,9 @@ fn item_in(
 /// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
 /// [`CodeLayout`]'s.
 pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
+    if let Some(diagram) = &panel.diagram {
+        return volume::fit(panel, diagram, fit);
+    }
     if panel.chart.is_some() {
         return chart::fit(fit);
     }
@@ -373,6 +376,11 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
 /// As [`fit`] says, with the rows of `panel`'s body at the columns its face has, as [`body_lines`] lays them out.
 fn fitted(panel: &Panel, fit: Fit) -> (usize, usize, Vec<Line>) {
     let sized = |(columns, rows): (usize, usize)| (columns, rows, body_lines(panel, columns));
+    // A volume's outline is for clients that draw none: its face has no rows of body to scroll or point at.
+    if let Some(diagram) = &panel.diagram {
+        let (columns, rows) = volume::fit(panel, diagram, fit);
+        return (columns, rows, Vec::new());
+    }
     if panel.chart.is_some() {
         return sized(chart::fit(fit));
     }
@@ -1702,6 +1710,7 @@ impl Default for Hold {
 pub struct Left {
     pub pointed: Option<(String, f32, Vec3)>,
     pub item: Option<u32>,
+    pub part: Option<Part>,
     pub placed: Option<(String, Target)>,
     pub preview: Option<(String, u32)>,
     pub end: Option<Vec3>,
@@ -1714,6 +1723,7 @@ pub struct Left {
 struct Told {
     pointed: Option<(String, f32, Vec3)>,
     item: Option<u32>,
+    part: Option<Part>,
     placed: Option<(String, Target)>,
     end: Option<Vec3>,
     hit: Option<crate::pointing::End>,
@@ -1729,6 +1739,11 @@ pub struct Output {
     pub pointed: Option<(String, f32, Vec3)>,
     /// The line of the body of the panel pointed at that the list item the ray meets begins on, as [`item_at`] finds it.
     pub item: Option<u32>,
+    /// The node or edge of the volume pointed at that the ray meets, which words begun now name. See
+    /// `design/diagrams.md`.
+    pub part: Option<Part>,
+    /// The volumes to draw, their solids among the opaque bodies; their labels are among [`Self::sheets`].
+    pub volumes: Vec<volume::Drawn>,
     /// A panel was pulled off.
     pub picked: bool,
     /// The panel carried turned a snap, or back to square.
@@ -1808,6 +1823,22 @@ pub struct Projector {
     readout: Option<(Arc<Canvas>, chart_readout::Readout, Arc<Canvas>)>,
     /// Each readout last linked to it, by the panel it was drawn over, handed over again while it shows the same.
     linked: HashMap<String, (Arc<Canvas>, chart_readout::Readout, Arc<Canvas>)>,
+    /// What each volume draws, by its panel, built once for each diagram it shows. See `design/diagrams.md`.
+    meshes: HashMap<String, Arc<volume::Mesh>>,
+    /// The node this participant focuses on, of which volume, which only they see; and whether each hand's trigger was
+    /// held last frame, which focuses.
+    focus: Option<(String, usize)>,
+    triggers: Hands<bool>,
+    /// When the projector first drew, from which the flows' movement is timed.
+    started: Option<Instant>,
+}
+
+/// What the ray meets of a volume pointed at: its node, by its id, or its edge, by its index, which words begun now
+/// name to the agent. See `design/diagrams.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Node(String),
+    Edge(u16),
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -1893,9 +1924,12 @@ impl Projector {
             self.faces.clear();
             self.walls = walls::WallFaces::default();
             self.editor.stop();
+            self.meshes.clear();
+            self.focus = None;
             return Output::default();
         };
         self.lay_out(projection);
+        self.keep_meshes(projection);
         // The Tomori wall travelling with the agent folds, travels and unfolds; meanwhile nothing is put on it by hand,
         // nor is it taken hold of, and a wall the editor held lets go of it, as of a wall no longer shown. See
         // `design/projection.md`.
@@ -2034,9 +2068,14 @@ impl Projector {
                             travelling.is_none()
                                 || !matches!(&panel.place, Place::Wall { wall, .. } if wall == TOMORI_WALL)
                         })
+                        // A volume is met where the ray meets its face or, nearer, a node or an edge of it.
                         .filter_map(|((panel, model, fit), size)| {
-                            hit(*model, *size, &ray)
-                                .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
+                            let part = self.meet(panel, *model, *fit, &ray).map(|(_, distance)| distance);
+                            let distance = [hit(*model, *size, &ray), part]
+                                .into_iter()
+                                .flatten()
+                                .reduce(f32::min)?;
+                            Some((*panel, *model, *fit, distance, ray.at(distance)))
                         })
                         // Nothing of a wall beyond a floor or deck is taken, its panels included.
                         .filter(|(panel, _, _, distance, _)| {
@@ -2049,6 +2088,28 @@ impl Projector {
                 let scroll = self.scroll(&panel.id);
                 self.faces_for(panel).item(fit, model, scroll, point)
             });
+            told[side].part = pointed
+                .zip(hand.ray)
+                .and_then(|((panel, model, fit, ..), ray)| {
+                    let (met, _) = self.meet(panel, model, fit, &ray)?;
+                    Some(match met {
+                        volume::Met::Node(node) => Part::Node(panel.diagram.as_ref()?.nodes.get(node)?.id.clone()),
+                        volume::Met::Edge(edge) => Part::Edge(u16::try_from(edge).ok()?),
+                    })
+                });
+            // The trigger, pressed on a node, focuses on it, for this participant alone, or, on the node focused on,
+            // ends the focus.
+            let trigger = hand.free && hand.active && hand.pointing;
+            let pressed = trigger && !self.triggers[side];
+            self.triggers[side] = trigger;
+            if pressed
+                && self.held[side].is_none()
+                && let (Some((panel, ..)), Some(Part::Node(node))) = (pointed, &told[side].part)
+                && let Some(index) = panel.diagram.as_ref().and_then(|diagram| diagram.node(node))
+            {
+                let focus = (panel.id.clone(), index);
+                self.focus = (self.focus.as_ref() != Some(&focus)).then_some(focus);
+            }
             told[side].pointed =
                 pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
             if side == Side::Right {
@@ -2137,6 +2198,7 @@ impl Projector {
             }) {
                 told[side].pointed = None;
                 told[side].item = None;
+                told[side].part = None;
             }
             // A squeeze pulls off the panel pointed at, unless something nearer takes it, or the other hand carries it.
             let other = self.held_in(side.other()).map(str::to_owned);
@@ -2187,6 +2249,32 @@ impl Projector {
             .collect();
         let faces = self.faces_of(projection, &standing, &pointed);
         output.sheets = self.sheets(&walls, &standing, &faces, viewer);
+        // Each volume's solids, and its labels over the panels, and the card of the node this participant focuses on.
+        let time = input
+            .now
+            .saturating_duration_since(*self.started.get_or_insert(input.now))
+            .as_secs_f32();
+        for (panel, model, fit) in &standing {
+            let (Some(diagram), Some(mesh)) = (&panel.diagram, self.meshes.get(&panel.id)) else {
+                continue;
+            };
+            let model = *model * volume::placed(panel, diagram, *fit);
+            let focus = self
+                .focus
+                .as_ref()
+                .filter(|(id, _)| *id == panel.id)
+                .map(|(_, node)| *node);
+            mesh.sheets(model, viewer, focus, &mut output.sheets);
+            output
+                .sheets
+                .extend(focus.and_then(|node| mesh.card(node, model, viewer)));
+            output.volumes.push(volume::Drawn {
+                mesh: mesh.clone(),
+                model,
+                focus,
+                time,
+            });
+        }
         // Pointing at a chart's plot with the right ray, not carrying a panel in that hand, its readout follows the ray,
         // drawn over its face.
         let read = right_pointed
@@ -2274,6 +2362,7 @@ impl Projector {
         let left = std::mem::take(&mut told.left);
         let right = std::mem::take(&mut told.right);
         output.left = Left {
+            part: left.part.filter(|_| left.pointed.is_some()),
             pointed: left.pointed,
             item: left.item,
             placed: left.placed,
@@ -2282,6 +2371,7 @@ impl Projector {
             hit: left.hit,
             hint: left.hint,
         };
+        output.part = right.part.filter(|_| right.pointed.is_some());
         output.pointed = right.pointed;
         output.item = right.item;
         output.placed = right.placed;
@@ -2706,6 +2796,49 @@ impl Projector {
         sheets
     }
 
+    /// Keep what each of `projection`'s volumes draws, building it again where its diagram changed, and forget what
+    /// volumes no longer shown drew, and the focus on one.
+    fn keep_meshes(&mut self, projection: &Projection) {
+        self.meshes.retain(|id, _| {
+            projection
+                .panel(id)
+                .is_some_and(|panel| panel.diagram.is_some())
+        });
+        for panel in &projection.panels {
+            if let Some(diagram) = &panel.diagram
+                && self
+                    .meshes
+                    .get(&panel.id)
+                    .is_none_or(|mesh| mesh.source() != &**diagram)
+            {
+                self.meshes
+                    .insert(panel.id.clone(), Arc::new(volume::Mesh::new(diagram)));
+            }
+        }
+        if let Some((panel, node)) = &self.focus
+            && self
+                .meshes
+                .get(panel)
+                .is_none_or(|mesh| *node >= mesh.diagram().nodes.len())
+        {
+            self.focus = None;
+        }
+    }
+
+    /// The node or edge of `panel`, a volume standing at `model` sized as `fit` says, that `ray` meets first, and how
+    /// far along it; `None` for a panel that is not a volume, or where the ray meets neither.
+    fn meet(&self, panel: &Panel, model: Mat4, fit: Fit, ray: &Ray) -> Option<(volume::Met, f32)> {
+        let diagram = panel.diagram.as_ref()?;
+        self.meshes
+            .get(&panel.id)?
+            .hit(model * volume::placed(panel, diagram, fit), ray)
+    }
+
+    /// The node this participant focuses on, by its volume's identity and its index, if any.
+    pub fn focus(&self) -> Option<(&str, usize)> {
+        self.focus.as_ref().map(|(panel, node)| (panel.as_str(), *node))
+    }
+
     /// The faces of `panel`, which stands, and so has them.
     fn faces_for(&mut self, panel: &Panel) -> &mut faces::Faces {
         self.faces
@@ -2778,6 +2911,7 @@ pub mod editing;
 mod faces;
 mod image;
 mod list;
+pub mod volume;
 pub(crate) use list::RowMarks;
 pub mod travel;
 mod walls;
