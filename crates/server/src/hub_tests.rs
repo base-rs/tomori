@@ -6073,6 +6073,8 @@ fn a_reply_s_code_blocks_are_code_panels_that_the_next_reply_s_replace_unless_pi
     let code = panel.code.as_ref().expect("a code panel");
     assert_eq!((code.language.as_str(), code.lines), ("rust", 3));
     assert!(tomori_protocol::valid_spans(&panel.body, &code.spans));
+    // Its spans are the server's highlighters', which a server built without them does not have.
+    #[cfg(feature = "highlight")]
     assert!(code.spans.contains(&tomori_protocol::Span::new(
         0,
         2,
