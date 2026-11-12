@@ -23,6 +23,10 @@ pub const LIVE_MINUTES: u32 = 7 * 24 * 60;
 /// The widest fixed window a setting gives, in milliseconds: 31 days.
 pub const WINDOW_MS: i64 = 31 * 86_400_000;
 
+/// The most instances an environment shows in a space, shown or resting, as the agent's `copy_panel` makes them, within
+/// the panels it may show.
+pub const INSTANCES: usize = 8;
+
 /// The most settings a wall or a panel holds: one for each parameter a side may declare, and time; those read back from
 /// the state file are held to it too.
 pub const SETTINGS: usize = CONTEXT_PARAMETERS + 1;
@@ -301,6 +305,27 @@ impl Kept {
         })
     }
 
+    /// For an instance, the parameters it depends on, and `time` where it is timed, as it rests; none for any other.
+    pub(super) fn instance_depends(&self) -> Vec<String> {
+        let Some(published) = self
+            .published
+            .as_ref()
+            .filter(|published| published.of.is_some())
+        else {
+            return Vec::new();
+        };
+        let mut depends: Vec<String> = published
+            .depends
+            .iter()
+            .filter(|parameter| *parameter != TIME)
+            .cloned()
+            .collect();
+        if self.timed() {
+            depends.push(TIME.to_owned());
+        }
+        depends
+    }
+
     /// The wall it is on, if it is on one.
     fn wall(&self) -> Option<&str> {
         match &self.place {
@@ -337,11 +362,11 @@ impl Stage {
     }
 
     /// The settings of each panel resting in `environment` that holds any, by its identity and its environment's id for
-    /// it, as it comes back with them.
+    /// it, as it comes back with them, and, for an instance, the environment's id for the panel it is of.
     pub(crate) fn resting_settings(
         &self,
         environment: &str,
-    ) -> impl Iterator<Item = (&str, &str, &Settings)> {
+    ) -> impl Iterator<Item = (&str, &str, &Settings, Option<&str>)> {
         self.rooms
             .get(environment)
             .into_iter()
@@ -352,8 +377,18 @@ impl Stage {
                     resting.panel.as_str(),
                     resting.id.as_str(),
                     &resting.context,
+                    resting.of.as_deref(),
                 )
             })
+    }
+
+    /// The environment's id for the panel the panel `panel` shown in `environment` is an instance of, if it is one.
+    pub(crate) fn instance_of(&self, environment: &str, panel: &str) -> Option<&str> {
+        self.kept(environment, panel)?
+            .published
+            .as_ref()?
+            .of
+            .as_deref()
     }
 
     /// The panel `panel`'s own settings in `environment`, every one stored, if its environment published it.
@@ -513,7 +548,7 @@ impl Stage {
             .iter()
             .filter_map(|kept| {
                 let published = kept.published.as_ref()?;
-                if published.depends.is_empty() && !kept.timed() {
+                if (published.depends.is_empty() && !kept.timed()) || published.gone.is_some() {
                     return None;
                 }
                 let wall = kept.wall().and_then(|wall| room.contexts.get(wall));
@@ -539,12 +574,169 @@ impl Stage {
                 } else {
                     Time::Follows
                 };
-                Some((
-                    published.id.clone(),
-                    tomori_environment::Context::new(&published.id, bindings, time),
-                ))
+                let context = match &published.of {
+                    Some(of) => {
+                        tomori_environment::Context::instance(&published.id, of, bindings, time)
+                    }
+                    None => tomori_environment::Context::new(&published.id, bindings, time),
+                };
+                Some((published.id.clone(), context))
             })
+            .chain(room.resting.iter().filter_map(|resting| {
+                // An instance resting, so that a side started again learns of it and publishes it again: bound as it
+                // was shown, by its own settings and else its wall's, for those parameters its side declares.
+                let of = resting.of.as_ref()?;
+                let wall = match &resting.place {
+                    super::Placed::Wall { wall, .. } => room.contexts.get(wall),
+                    super::Placed::Free { .. } => None,
+                };
+                let setting = |parameter: &str| {
+                    resting
+                        .context
+                        .get(parameter)
+                        .or_else(|| wall.and_then(|wall| wall.get(parameter)))
+                };
+                let bindings = resting
+                    .depends
+                    .iter()
+                    .filter(|parameter| *parameter != TIME && shown(parameter, &room.parameters))
+                    .map(|parameter| {
+                        (
+                            parameter.clone(),
+                            setting(parameter).map_or(Binding::Follows, Setting::binding),
+                        )
+                    })
+                    .collect();
+                let time = if resting.depends.iter().any(|parameter| parameter == TIME) {
+                    setting(TIME).map_or(Time::Follows, Setting::time)
+                } else {
+                    Time::Follows
+                };
+                Some((
+                    resting.id.clone(),
+                    tomori_environment::Context::instance(&resting.id, of, bindings, time),
+                ))
+            }))
             .collect()
+    }
+
+    /// Copy the panel `panel` its environment published in `walls`' environment, as an instance of it with `settings`
+    /// of its own, over those of the panel's own it keeps, to `to`, under an id the server mints, as `~7`, which its
+    /// side publishes to and is told of ([`Stage::contexts`]); an instance's copy is another of the panel it is of.
+    /// Returns the instance's identity and its environment's id for it, or why it is refused: a panel not shown here, one
+    /// its environment did not publish, one that depends on nothing, so that a copy would show the same, a destination on
+    /// the Tomori wall, which holds no environment's panels, a setting [`Setting::checked`] refuses or one of a parameter
+    /// it does not depend on, no settings or only those the panel shows already, by its own or its wall's, more than
+    /// [`INSTANCES`] instances, shown or resting, and more than the panels an environment may show. The copy shows what
+    /// the panel shows until its side publishes it, without the panel's reference nor its rows' keys and references,
+    /// and none of its rows is chosen until then. See `design/panel-context.md`.
+    pub(crate) fn copy_panel(
+        &mut self,
+        walls: &Walls<'_>,
+        panel: &str,
+        settings: Vec<(String, Setting)>,
+        to: &super::Destination,
+    ) -> Result<(String, String), &'static str> {
+        if self.view("", walls, 0).panel(panel).is_none() {
+            return Err("That panel is not here.");
+        }
+        let declared = self.parameters(walls.environment).to_vec();
+        let source = self
+            .here(walls.environment)
+            .find(|kept| kept.id == panel)
+            .filter(|kept| kept.published.is_some())
+            .ok_or("Only a panel its environment published is copied with a context.")?
+            .clone();
+        let published = source.published.as_ref().expect("filtered above");
+        if published.depends.is_empty() && !source.timed() {
+            return Err("That panel depends on no context, so a copy of it would show the same.");
+        }
+        if settings.is_empty() {
+            return Err("Say the context the copy shows, at least one setting.");
+        }
+        let wall = source
+            .wall()
+            .and_then(|wall| self.room(walls.environment).contexts.get(wall).cloned());
+        let effective = |parameter: &str| {
+            source
+                .context
+                .get(parameter)
+                .or_else(|| wall.as_ref().and_then(|wall| wall.get(parameter)))
+                .cloned()
+        };
+        let mut same = true;
+        let mut context = source.context.clone();
+        for (parameter, setting) in settings {
+            let depends = if parameter == TIME {
+                source.timed()
+            } else {
+                published.depends.contains(&parameter)
+            };
+            if !depends {
+                return Err("That panel does not depend on that parameter.");
+            }
+            let setting = setting.checked(&parameter, &declared)?;
+            same &= effective(&parameter).as_ref() == Some(&setting);
+            context.insert(parameter.clone(), setting);
+        }
+        // A panel shown in the context it is shown in already is that panel, not another instance of it.
+        if same {
+            return Err(
+                "That panel shows that context already, so a copy of it would show the same.",
+            );
+        }
+        let room = self.room(walls.environment);
+        let instances = room
+            .panels
+            .iter()
+            .filter(|kept| {
+                kept.published
+                    .as_ref()
+                    .is_some_and(|published| published.of.is_some())
+            })
+            .count()
+            + room
+                .resting
+                .iter()
+                .filter(|resting| resting.of.is_some())
+                .count();
+        if instances >= INSTANCES {
+            return Err("An environment shows at most 8 copies of its panels in a space.");
+        }
+        let shown = room
+            .panels
+            .iter()
+            .filter(|kept| kept.published.is_some())
+            .count();
+        if shown >= super::published::PUBLISHED {
+            return Err("An environment publishes at most 32 panels in a space.");
+        }
+        // Onto the Tomori wall, by any name, is the status wall's, which holds no environment's panels.
+        if matches!(self.resolve(walls, to), super::Spot::Status(_)) {
+            return Err("The Tomori wall holds no environment's panels.");
+        }
+        let instance = format!("~{}", self.tick());
+        let identity = format!("panel-{}", self.tick());
+        let mut kept = source;
+        kept.id = identity.clone();
+        kept.context = context;
+        kept.pinned = false;
+        kept.arranged = false;
+        let published = kept.published.as_mut().expect("filtered above");
+        published.of = Some(published.of.take().unwrap_or_else(|| published.id.clone()));
+        published.id = instance.clone();
+        // Until its side publishes it, it shows its panel's content, but nothing that names its panel's rows or itself
+        // in its side's terms, which would be taken as the copy's.
+        published.copied = true;
+        published.reference = None;
+        for row in published.rows.iter_mut().flatten() {
+            row.key = None;
+            row.fields.clear();
+            row.reference = None;
+        }
+        self.put(walls, kept, to);
+        self.bound(walls.environment);
+        Ok((identity, instance))
     }
 }
 

@@ -13,7 +13,7 @@ use tomori_environment::chart::{Chart, TimeAxis};
 use tomori_environment::{
     Binding, ContextParameter, Intent, Panel, Result, ServerSide, Space, Time,
 };
-use tomori_protocol::{Pose, ServerMessage};
+use tomori_protocol::{ClientMessage, Pose, ServerMessage};
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 use tomori_server::{Environment, EnvironmentWall};
 
@@ -49,6 +49,16 @@ impl ServerSide for Console {
                     .lock()
                     .unwrap()
                     .push((intent.participant(), context.clone()));
+                // An instance it is told of, it shows in its context, under the id the server gave it.
+                if let (Some(of), Some(Binding::Fixed(region))) =
+                    (context.of(), context.binding("region"))
+                {
+                    let chart = Chart::new(181).with_time(TimeAxis::Live { step_ms: 5_000 });
+                    space.publish(
+                        Panel::chart(context.panel(), format!("{of} · {region}"), chart)
+                            .depends_on(["region"]),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -371,5 +381,189 @@ fn the_agent_reads_every_setting_and_sets_a_wall_s_or_a_panel_s_context_in_utc()
     assert_eq!(
         live["setting"],
         json!({"parameter": "time", "live_minutes": 60})
+    );
+}
+
+#[test]
+fn the_agent_copies_a_panel_with_a_context_and_builds_walls_each_with_its_own() {
+    let declare = Arc::new(Mutex::new(Some(parameters(true))));
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let side = Console {
+        declare: declare.clone(),
+        told: told.clone(),
+    };
+    let server = TestServer::with_tokens_and_tools(false, |server| {
+        server.with_environments([Environment::new("sky", "Console")
+            .with_walls([
+                EnvironmentWall::new(Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])),
+                EnvironmentWall::new(Pose::at([-2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])),
+            ])
+            .with_server_side(side)])
+    });
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
+    let mut ada = TestClient::open_with(
+        server.address,
+        &[("Authorization", &format!("Bearer {owner}"))],
+    );
+    ada.hello_projected("ada", "Ada");
+    ada.create_space("Studio");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&server.backend.started()[0]);
+    let tool = |name: &str, arguments: Value| call(&server, &token, &session, name, arguments);
+    let contexts = || tool("contexts", json!({}))["structuredContent"].clone();
+    eventually(|| (contexts()["parameters"].as_array()?.len() == 2).then_some(()));
+    // What it takes, as its schema declares.
+    for (arguments, refused) in [
+        (
+            json!({"panel": "Latency", "context": "EU-WEST1"}),
+            "context is a list of at most 4 settings",
+        ),
+        (
+            json!({"panel": "Latency", "context": [{"parameter": "region", "value": "EU-WEST1"}, {"parameter": "region", "value": "AP-SOUTH1"}]}),
+            "context sets each parameter once.",
+        ),
+        (
+            json!({"panel": "Latency", "context": [{"parameter": "region"}]}),
+            "Each setting of a context says one of value, live_minutes, or from and to together.",
+        ),
+        (
+            json!({"panel": "Latency", "context": [{"parameter": "region", "follow": true}]}),
+            "follow",
+        ),
+        (
+            json!({"panel": "Rota", "context": []}),
+            "That panel depends on no context",
+        ),
+        (
+            json!({"panel": "Latency", "context": [{"parameter": "region", "value": "EU-WEST1"}], "place": "wall status wall"}),
+            "Tomori wall",
+        ),
+        (json!({"panel": 5}), "This tool needs panel, as text."),
+        (json!({"panel": "p".repeat(2000)}), "too long"),
+        (json!({"panel": "Latency", "place": 5}), "place is text."),
+        (
+            json!({"panel": "Nothing like it"}),
+            "There is no such panel here.",
+        ),
+        (
+            json!({"panel": "Latency", "place": "upside down"}),
+            "Tomori does not know where \"upside down\" is",
+        ),
+        (
+            json!({"panel": "Latency", "place": "beside Nobody"}),
+            "Nobody",
+        ),
+    ] {
+        let failed = failure(&tool("copy_panel", arguments.clone()));
+        eprintln!("COPY {arguments}: {failed}");
+        assert!(failed.contains(refused), "{arguments}: {failed}");
+    }
+    // Copied for AP-SOUTH1 onto the other wall: an instance its side is told of, publishes and keeps updated.
+    let copied = tool(
+        "copy_panel",
+        json!({"panel": "Latency", "context": [{"parameter": "region", "value": "AP-SOUTH1"}], "place": "wall environment wall 2"}),
+    )["structuredContent"]
+        .clone();
+    let instance = copied["instance"].as_str().unwrap().to_owned();
+    assert!(instance.starts_with('~'), "{copied}");
+    assert_eq!(copied["title"], "Latency");
+    let copy = copied["panel"].as_str().unwrap().to_owned();
+    eventually(|| {
+        told.lock()
+            .unwrap()
+            .iter()
+            .any(|(by, context)| {
+                *by == 0 && context.panel() == instance && context.of() == Some("latency")
+            })
+            .then_some(())
+    });
+    let titled = eventually(|| {
+        let read = tool("panels", json!({"panel": copy}))["structuredContent"].clone();
+        (read["panels"][0]["title"] == "latency · AP-SOUTH1").then_some(read)
+    });
+    assert_eq!(titled["panels"][0]["title"], "latency · AP-SOUTH1");
+    let listed = contexts();
+    let instanced = listed["panels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|panel| panel["panel"] == json!(copy))
+        .cloned()
+        .unwrap();
+    assert_eq!(instanced["instance_of"], "latency");
+    assert_eq!(
+        instanced["settings"],
+        json!([{"parameter": "region", "value": "AP-SOUTH1", "shown": true}])
+    );
+    // Without a context, or with one the panel shows already, a copy would show the same, and is refused; a session in
+    // no space copies nothing.
+    let plain = failure(&tool(
+        "copy_panel",
+        json!({"panel": "Latency", "place": "wall environment wall 1"}),
+    ));
+    assert_eq!(
+        plain,
+        "Say the context the copy shows, at least one setting."
+    );
+    let again = failure(&tool(
+        "copy_panel",
+        json!({"panel": copy, "context": [{"parameter": "region", "value": "AP-SOUTH1"}]}),
+    ));
+    assert!(again.contains("shows that context already"), "{again}");
+    let nobody = call(
+        &server,
+        &token,
+        "nobody",
+        "copy_panel",
+        json!({"panel": "Latency"}),
+    );
+    assert_eq!(nobody["isError"], true);
+    // A notice says what was copied.
+    let notices = tool("panels", json!({}))["structuredContent"]["panels"].to_string();
+    assert!(notices.contains("The agent copied the panel"), "{notices}");
+    // Ada stands at home, looking along −Z, for the layout to stand before her.
+    ada.send(&ClientMessage::Presence {
+        head: Pose::upright_facing([0.0, 1.6, 0.0], [0.0, 1.6, -1.0]),
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    eventually(|| {
+        tool("presence", json!({}))["structuredContent"]["people"][0]
+            .get("head")
+            .cloned()
+    });
+    // Two walls, each with its own window, built in one step; one refused builds nothing.
+    let malformed = failure(&tool(
+        "create_layout",
+        json!({"place": "front Ada", "walls": [{"id": "first", "columns": 2, "rows": 1, "context": "x"}]}),
+    ));
+    assert!(malformed.starts_with("context is a list"), "{malformed}");
+    let refused = failure(&tool(
+        "create_layout",
+        json!({"place": "front Ada", "walls": [{"id": "first", "columns": 2, "rows": 1, "context": [{"parameter": "region", "value": "MARS-1"}]}]}),
+    ));
+    assert_eq!(refused, "That is not one of the parameter's choices.");
+    let built = tool(
+        "create_layout",
+        json!({"place": "front Ada", "walls": [
+            {"id": "first", "columns": 2, "rows": 1, "context": [{"parameter": "time", "from": "2026-11-12T02:20:00Z", "to": "2026-11-12T02:50:00Z"}]},
+            {"id": "second", "columns": 2, "rows": 1, "attach": {"to": "first", "edge": "right"}, "context": [{"parameter": "time", "from": "2026-11-12T04:10:00Z", "to": "2026-11-12T04:40:00Z"}]},
+        ]}),
+    );
+    assert_ne!(built["isError"], true, "{built}");
+    let walls = contexts()["walls"].clone();
+    let windows: Vec<Value> = walls
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|wall| wall["settings"][0]["from"].clone())
+        .collect();
+    assert_eq!(
+        windows,
+        [json!("2026-11-12T02:20:00Z"), json!("2026-11-12T04:10:00Z")]
     );
 }

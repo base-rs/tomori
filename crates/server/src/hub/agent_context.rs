@@ -208,26 +208,34 @@ impl Hub {
                 let settings = stage
                     .panel_settings(environment, &panel.id)
                     .filter(|settings| !(panel.context.is_empty() && settings.is_empty()))?;
-                Some(json!({
+                let mut told = json!({
                     "panel": panel.id,
                     "title": crate::presence::title(panel),
                     "settings": settings_json(settings, declared),
                     "shows": panel.context.iter().map(chip_json).collect::<Vec<_>>(),
-                }))
+                });
+                if let Some(of) = stage.instance_of(environment, &panel.id) {
+                    told["instance_of"] = json!(of);
+                }
+                Some(told)
             })
             .collect();
         // And each resting, as its side has not published it in this run, with the settings it comes back with.
         panels.extend(
             stage
                 .resting_settings(environment)
-                .map(|(panel, id, settings)| {
-                    json!({
+                .map(|(panel, id, settings, of)| {
+                    let mut told = json!({
                         "panel": panel,
                         "id": id,
                         "resting": true,
                         "note": "resting: its environment has not shown it since it last ran",
                         "settings": settings_json(settings, declared),
-                    })
+                    });
+                    if let Some(of) = of {
+                        told["instance_of"] = json!(of);
+                    }
+                    told
                 }),
         );
         let mut told = json!({
@@ -330,6 +338,104 @@ impl Hub {
             "It was already so, so nothing changed and there is nothing to tell."
         });
         Ok(result)
+    }
+}
+
+impl Hub {
+    /// Take away, in every space, each copy of a panel its environment withdrew longer ago than
+    /// `stage::published::WITHDRAWN_SECS` before `now`, in seconds since the epoch, its side told so.
+    pub(crate) fn sweep_withdrawn(&self, now: u64) {
+        let environments = self.environments();
+        let mut state = self.lock();
+        let ids: Vec<String> = state
+            .spaces
+            .iter()
+            .map(|record| record.model.id.clone())
+            .collect();
+        for space in ids {
+            let record = state.space_mut(&space).expect("listed above");
+            let environment = record.model.environment.clone();
+            if record.stage.lapse_withdrawn(&environment, now) {
+                record.stage.settle(&environments.walls(&environment));
+                log::info!("Copies of withdrawn panels in space {space} were taken away.");
+                state.touch_projection(&space);
+            }
+        }
+    }
+
+    /// The `copy_panel` tool: copy the panel `panel` names in the calling session's space as an instance of it with
+    /// `settings` of its own, to where `place` says, as `move_panel` takes it, or else the wall it is on, or beside
+    /// whoever asked where it floats, for everyone in it, a notice saying so and its side told of the instance.
+    pub(crate) fn agent_copy_panel(
+        &self,
+        session: &str,
+        panel: &str,
+        place: Option<&str>,
+        settings: Vec<(String, Setting)>,
+    ) -> Result<Value, String> {
+        let mut state = self.lock();
+        let space = self.calling_space(&state, session)?;
+        let people = state.heads(&space);
+        let origin = state.asking(&space);
+        let record = state.space_mut(&space).expect("found above");
+        let environments = self.environments();
+        let walls = environments.walls(&record.model.environment);
+        let projection = record.versioned(&environments, crate::cards::unix_now());
+        let id = super::agent_panels::find(&projection, panel)?;
+        let shown = projection.panel(&id).expect("a panel found is shown");
+        let title = crate::presence::title(shown);
+        let to = match (place, &shown.place) {
+            (None, tomori_protocol::Place::Wall { wall, .. }) => crate::stage::Destination::Wall {
+                wall: wall.clone(),
+                slot: None,
+            },
+            (place, _) => {
+                let placement = super::tools::placement(place.unwrap_or("beside"))?;
+                record.panel_destination(
+                    &environments,
+                    &placement,
+                    0,
+                    super::anchors::Surroundings {
+                        asker: origin.as_ref(),
+                        people: &people,
+                        projection: &projection,
+                        solids: &record.panel_solids(&environments),
+                    },
+                )?
+            }
+        };
+        let described: Vec<String> = settings
+            .iter()
+            .map(|(parameter, setting)| described(parameter, Some(setting)))
+            .collect();
+        let (copy, instance) = record
+            .stage
+            .copy_panel(&walls, &id, settings, &to)
+            .map_err(str::to_owned)?;
+        let title = crate::space::one_line(&title, 80);
+        // A copy is made only with a setting.
+        let with = format!(", with {}", described.join(" and "));
+        let content = notice(format!("The agent copied the panel \"{title}\"{with}."));
+        let now = crate::cards::unix_now();
+        let notice = record.stage.project_notice(&walls, NOTICE, content, now);
+        log::info!(
+            "The agent of space {space} copied {id} as {copy}, instance {instance}{with}; projected {notice}."
+        );
+        let after = record.stage.view(&space, &walls, now);
+        let place = json!(after.panel(&copy).map(|panel| &panel.place));
+        drop(environments);
+        state.touch_projection(&space);
+        drop(state);
+        self.keep();
+        Ok(json!({
+            "space": space,
+            "panel": copy,
+            "instance": instance,
+            "of": id,
+            "title": title,
+            "place": place,
+            "next": "Everyone sees the copy and its chips, and a notice on the status wall says what you copied; tell everyone in the space in a sentence what you copied, and where.",
+        }))
     }
 }
 

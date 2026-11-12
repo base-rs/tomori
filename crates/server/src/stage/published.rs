@@ -42,7 +42,29 @@ pub(super) struct Published {
     /// The parameters it depends on, by their ids, in the order it named them. See `design/panel-context.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) depends: Vec<String>,
+    /// For an instance the server made of one of its environment's panels, as the agent's `copy_panel` makes, the
+    /// environment's id for that panel. See `design/panel-context.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) of: Option<String>,
+    /// For an instance just copied, that its side has not published it yet: it shows its panel's content, without the
+    /// keys and references of its rows, and none of them is chosen until its side publishes it in its own context.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) copied: bool,
+    /// For an instance whose panel its side retracted, when, in seconds since the epoch: it shows it was withdrawn, takes
+    /// no more updates nor choices, and is taken away [`WITHDRAWN_SECS`] later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) gone: Option<u64>,
 }
+
+/// Why a row of an instance its side has not published yet is not chosen: what it shows is its panel's, not its own.
+pub const COPYING: &str =
+    "That copy is not ready yet: its environment has not shown it in its context.";
+
+/// How long an instance whose panel was retracted stays, saying so, before it is taken away, in seconds.
+pub const WITHDRAWN_SECS: u64 = 300;
+
+/// What an instance's title says once its panel was retracted.
+pub const WITHDRAWN: &str = " (source withdrawn)";
 
 /// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
 /// id for it, its text, cleaned and cut, the reference the agent can inspect it by, if it has one, whether a
@@ -404,6 +426,13 @@ pub(super) struct Resting {
     /// How many runs of its side that published others have ended without publishing it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(super) missed: u32,
+    /// For an instance, the environment's id for the panel it is an instance of, kept so that it comes back one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) of: Option<String>,
+    /// For an instance, the parameters it depends on, `time` among them where it is timed, so that it is told again
+    /// bound as it was shown, its wall's settings and all, as its side starts again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) depends: Vec<String>,
     /// Its own context's settings, kept so that it comes back so set. See `design/panel-context.md`.
     #[serde(
         default,
@@ -456,6 +485,11 @@ impl Resting {
             pinned: kept.pinned,
             arranged: kept.arranged,
             missed: 0,
+            of: kept
+                .published
+                .as_ref()
+                .and_then(|published| published.of.clone()),
+            depends: kept.instance_depends(),
             context: kept.context.clone(),
         }
     }
@@ -487,7 +521,8 @@ impl Publishing {
         let depends = panel.depends().to_vec();
         super::context::dependencies(&depends)?;
         let (id, title, body, chart, wall, slot, reference) = panel.into_parts();
-        if !tomori_environment::valid_panel_id(&id) {
+        // An instance the server made is published to by the id it minted, which no panel of the side's own takes.
+        if !(tomori_environment::valid_panel_id(&id) || tomori_environment::is_instance(&id)) {
             return Err(format!(
                 "A panel's id is 1 to {} ASCII letters, digits, - and _.",
                 tomori_environment::PANEL_ID_BYTES
@@ -614,6 +649,16 @@ impl Stage {
         if shown.contains(&id) || waiting.contains(&id) {
             return Ok(());
         }
+        // A side makes no instance: it publishes to one the server made, shown or resting.
+        // Or one dismissed, as a participant may dismiss a copy, or once its panel was withdrawn: ignored.
+        let resting = self.rooms.get(walls.environment).is_some_and(|room| {
+            room.resting.iter().any(|resting| resting.id == id) || room.dismissed.contains(id)
+        });
+        if tomori_environment::is_instance(id) && !resting {
+            return Err(
+                "That instance is not here: only the server makes instances, as the agent copies a panel.",
+            );
+        }
         let others = waiting
             .iter()
             .filter(|waiting| !shown.contains(waiting))
@@ -642,6 +687,10 @@ impl Stage {
         self.admits(walls, &publishing, &[])?;
         let wall = format!("environment-{}", publishing.wall);
         if self.unchanged(walls.environment, &publishing) {
+            // An instance its side publishes as it was copied is its side's now all the same.
+            if let Some(published) = self.published_mut(walls.environment, publishing.id()) {
+                published.copied = false;
+            }
             return Ok(Change::Unchanged);
         }
         let Publishing {
@@ -672,6 +721,9 @@ impl Stage {
             highlighted,
             columns,
             depends,
+            of: None,
+            copied: false,
+            gone: None,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -680,7 +732,12 @@ impl Stage {
         }) {
             kept.updated = Some(now);
             kept.content = content;
-            kept.published = Some(published);
+            // An instance stays one of what it was made of.
+            let of = kept
+                .published
+                .as_ref()
+                .and_then(|published| published.of.clone());
+            kept.published = Some(Published { of, ..published });
             return Ok(Change::Updated);
         }
         let resting = room
@@ -710,6 +767,10 @@ impl Stage {
             kept.created = resting.created;
             kept.pinned = resting.pinned;
             kept.context = resting.context;
+            kept.published
+                .as_mut()
+                .expect("a panel published is kept with what makes it so")
+                .of = resting.of;
             match resting.place {
                 Placed::Free { pose } => {
                     self.float(walls, kept, pose);
@@ -765,6 +826,11 @@ impl Stage {
         room.dismissed.contains(&publishing.id)
             || room.panels.iter().any(|kept| {
                 kept.published.as_ref().is_some_and(|published| {
+                    published.id == publishing.id && published.gone.is_some()
+                })
+            })
+            || room.panels.iter().any(|kept| {
+                kept.published.as_ref().is_some_and(|published| {
                     published.id == publishing.id
                         && published.chart == publishing.chart
                         && published.reference == publishing.reference
@@ -792,6 +858,65 @@ impl Stage {
         room.panels.len() < before
     }
 
+    /// The panel its environment published as `id` in `environment`, shown, to change.
+    fn published_mut(&mut self, environment: &str, id: &str) -> Option<&mut Published> {
+        self.room(environment)
+            .panels
+            .iter_mut()
+            .filter_map(|kept| kept.published.as_mut())
+            .find(|published| published.id == id)
+    }
+
+    /// Mark each instance of the panel its environment published as `id` in `environment`, which it retracted, as
+    /// withdrawn at `now`, in seconds since the epoch: its title says so, and it takes no more updates nor choices until
+    /// [`Stage::lapse_withdrawn`] takes it away; one resting is forgotten. Returns how many shown it marked.
+    pub(crate) fn withdraw(&mut self, environment: &str, id: &str, now: u64) -> usize {
+        let Some(room) = self.rooms.get_mut(environment) else {
+            return 0;
+        };
+        room.resting
+            .retain(|resting| resting.of.as_deref() != Some(id));
+        let mut marked = 0;
+        let copies = room.panels.iter_mut().filter(|kept| {
+            kept.published.as_ref().is_some_and(|published| {
+                published.of.as_deref() == Some(id) && published.gone.is_none()
+            })
+        });
+        for kept in copies {
+            let published = kept.published.as_mut().expect("filtered above");
+            published.gone = Some(now);
+            published.copied = false;
+            kept.content.title.push_str(WITHDRAWN);
+            kept.updated = Some(now);
+            marked += 1;
+        }
+        marked
+    }
+
+    /// Take away each instance in `environment` withdrawn [`WITHDRAWN_SECS`] or more before `now`, in seconds since the
+    /// epoch, as dismissed, so that its side is told and what it publishes to it after is ignored. Returns whether it
+    /// took any.
+    pub(crate) fn lapse_withdrawn(&mut self, environment: &str, now: u64) -> bool {
+        let Some(room) = self.rooms.get_mut(environment) else {
+            return false;
+        };
+        let mut lapsed = Vec::new();
+        room.panels.retain(|kept| match &kept.published {
+            Some(published)
+                if published
+                    .gone
+                    .is_some_and(|gone| now.saturating_sub(gone) >= WITHDRAWN_SECS) =>
+            {
+                lapsed.push(published.id.clone());
+                false
+            }
+            _ => true,
+        });
+        let any = !lapsed.is_empty();
+        room.dismissed.extend(lapsed);
+        any
+    }
+
     /// End the run of the environment's side in `environment`, as the space leaves it or its side stops: what the run
     /// published rests, shown no more until a side publishes it again, and, where it published anything, what rested
     /// before that it did not publish again is missed by one more run, forgotten after [`RESTING_RUNS`], while a run
@@ -804,6 +929,8 @@ impl Stage {
         room.parameters.clear();
         let mut resting = Vec::new();
         room.panels.retain(|kept| match &kept.published {
+            // An instance withdrawn is not kept to come back.
+            Some(published) if published.gone.is_some() => false,
             Some(published) => {
                 resting.push(Resting::of(kept, &published.id));
                 false
@@ -963,6 +1090,12 @@ impl Stage {
             .ok_or("That row is no longer on the list.")?;
         if !row.choosable {
             return Err("That row cannot be chosen.");
+        }
+        if published.gone.is_some() {
+            return Err("That copy's panel was withdrawn.");
+        }
+        if published.copied {
+            return Err(COPYING);
         }
         Ok((&published.id, &row.id))
     }

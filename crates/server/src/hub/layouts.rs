@@ -70,9 +70,24 @@ impl Hub {
         let middles = |extent: tomori_protocol::group::Extent, radius: Option<f32>| {
             crate::presence::layout_middles(&head, looking, extent.right - extent.left, radius)
         };
+        // Each wall's context, checked before any wall is built, so that one refused builds nothing.
+        let declared = record.stage.parameters(walls.environment).to_vec();
+        for wall in &planned {
+            for (parameter, setting) in &wall.context {
+                setting.clone().checked(parameter, &declared)?;
+            }
+        }
         let ids = record
             .stage
             .compose(&walls, &planned, &middles, head.position)?;
+        for (wall, id) in planned.iter().zip(&ids) {
+            for (parameter, setting) in &wall.context {
+                record
+                    .stage
+                    .set_wall_context(&walls, id, parameter, Some(setting.clone()))
+                    .expect("a wall just built takes a setting checked above");
+            }
+        }
         let now = crate::cards::unix_now();
         let after = record.stage.view(&space, &walls, now);
         let described: Vec<Value> = planned
