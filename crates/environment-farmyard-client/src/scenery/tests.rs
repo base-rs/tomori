@@ -7,7 +7,9 @@
 //! beside it, with `-chickens` added to its name; `TOMORI_FARMYARD_COOP_PREVIEW` saves the coop by its ramp and in at its
 //! window, with hens on the ramp and in a nest, as `-1.png`, and the path's stones, as `-2.png`;
 //! `TOMORI_FARMYARD_CAMPSITE_PREVIEW` saves the campsite from the lookout's log seat, a marshmallow toasting over its
-//! bonfire; and `TOMORI_FARMYARD_BEACH_PREVIEW` a little dolmen of the beach's building stones on its shingle.
+//! bonfire; `TOMORI_FARMYARD_BEACH_PREVIEW` a little dolmen of the beach's building stones on its shingle; and
+//! `TOMORI_FARMYARD_UPPER_TERRACE_PREVIEW` the waterfall from its rock, looking up, as `-1.png`, the upper falls from
+//! where one arrives on the terrace above it, as `-2.png`, and the yard from the terrace's flat rock, as `-3.png`.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -882,6 +884,97 @@ fn the_river_lies_in_its_channel_below_the_trail_and_the_waterfall_rock_stands_i
         let pool = tint(&pictures[1], within(seen_at(views[1], beside)));
         assert!(pool.z > pool.x + 18.0 && pool.y > pool.x + 12.0, "{pool}");
         assert!(top.x > pool.x * 1.5 && top.y < top.x + 10.0, "{top} {pool}");
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// Where the upper terrace is seen from, as `(eye, target)`: on the waterfall rock, looking up at the waterfall that is
+/// the way up; where one arrives on the terrace, facing the upper falls; and sitting on its flat rock, looking out over
+/// the yard.
+fn upper_terrace_views() -> [(Vec3, Vec3); 3] {
+    use tomori_environment_farmyard::terrace;
+    let rock = layout::WATERFALL_ROCK + Vec3::Y * 1.6;
+    let arrival = terrace::arrival() + Vec3::Y * 1.6;
+    let (along, across) = terrace::SEAT;
+    let seat = terrace::on_fall(along, across);
+    [
+        (rock, layout::WATERFALL_LIP + Vec3::Y * 0.5),
+        (arrival, layout::UPPER_FALLS - Vec3::Y * 1.2),
+        (
+            Vec3::new(seat.x, layout::TERRACE + 1.2, seat.y),
+            layout::ARRIVAL + Vec3::Y * 0.5,
+        ),
+    ]
+}
+
+#[test]
+fn the_upper_terrace_stands_above_the_waterfall_with_its_own_falls_before_it() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = Target::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            PICTURE.0,
+            PICTURE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        );
+        let farmyard =
+            Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(0.0));
+        let views = upper_terrace_views();
+        let pictures: Vec<Vec<u8>> = views
+            .into_iter()
+            .map(|view| capture_sized(&device, &queue, &farmyard, 4, view, picture()))
+            .collect();
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_UPPER_TERRACE_PREVIEW") {
+            for (index, pixels) in pictures.iter().enumerate() {
+                let picture =
+                    image::RgbaImage::from_raw(PICTURE.0, PICTURE.1, pixels.clone()).unwrap();
+                picture
+                    .save(path.replace(".png", &format!("-{}.png", index + 1)))
+                    .unwrap();
+            }
+        }
+        let within = |at: (f32, f32)| {
+            assert!(
+                (0.02..0.98).contains(&at.0) && (0.02..0.98).contains(&at.1),
+                "{at:?}"
+            );
+            at
+        };
+        // From the rock, the waterfall, the way up, is brighter than the cliff either side of it.
+        let (outward, right) = tomori_environment_farmyard::backdrop::fall_axes();
+        let beside = |at: Vec3, side: f32| {
+            let offset = right * side - outward * 0.2;
+            at + Vec3::new(offset.x, 0.0, offset.y)
+        };
+        let middle = layout::WATERFALL + Vec3::Y * 1.0;
+        let fall = about(&pictures[0], within(seen_at(views[0], middle)));
+        for side in [-2.6, 2.6] {
+            let cliff = about(
+                &pictures[0],
+                within(seen_at(views[0], beside(middle, side))),
+            );
+            assert!(fall > cliff * 1.3, "{fall} {cliff}");
+        }
+        // On the terrace, the upper falls before one are brighter than the upper cliff either side of them, and the
+        // floor at one's feet is drawn, its moss and stone darker than the falls.
+        let upper = layout::UPPER_FALLS;
+        let falls = about(&pictures[1], within(seen_at(views[1], upper)));
+        for side in [-1.6, 1.6] {
+            let cliff = about(&pictures[1], within(seen_at(views[1], beside(upper, side))));
+            assert!(falls > cliff * 1.3, "{falls} {cliff}");
+        }
+        let (eye, _) = views[1];
+        let ahead = ((upper - eye) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+        let underfoot = Vec3::new(eye.x, layout::TERRACE, eye.z) + ahead * 1.5;
+        let floor = about(&pictures[1], within(seen_at(views[1], underfoot)));
+        assert!(floor > 0.5 && floor < falls, "{floor} {falls}");
+        // From its flat rock, the yard is seen below the horizon, over the terrace's edge, drawn.
+        let seen = within(seen_at(views[2], layout::ARRIVAL));
+        assert!(seen.1 > 0.5, "{seen:?}");
+        assert!(about(&pictures[2], seen) > 0.0);
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

@@ -165,7 +165,7 @@ mod tests {
             [
                 ("sky", "Sky", 1),
                 ("minimal", "Grid", 1),
-                ("farmyard", "Farmyard", 10)
+                ("farmyard", "Farmyard", 11)
             ]
         );
         // The farmyard alone has a server side, for its chickens.

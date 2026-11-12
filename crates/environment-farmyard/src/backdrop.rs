@@ -287,8 +287,105 @@ pub(crate) fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color
     }
 }
 
+/// The patch of the mountain about the stream and the upper pool, along the waterfall's way from just behind its lip to
+/// the upper cliff's foot, and across it either side, which the foothills' rings are too coarse to draw: drawn finely
+/// from [`ground`] instead ([`patch`]), a little above it, the foothills' own corners on the waterfall's way within it
+/// sunk beneath it ([`SUNK_BENEATH`]).
+pub const PATCH: [[f32; 2]; 2] = [
+    [layout::CLIFF[1] + 0.15, layout::UPPER_CLIFF[0]],
+    [-2.0, 1.9],
+];
+/// How many cells the patch is drawn in, along the waterfall's way and across it.
+const PATCH_CELLS: [usize; 2] = [20, 14];
+/// How far above [`ground`] the patch is drawn, so that the foothills beneath it never show through it.
+const PATCH_LIFT: f32 = 0.04;
+/// How far the foothills' corners beneath the patch sink below the ground there, so that the foothills' coarse faces lie
+/// beneath it: those on the waterfall's way, where the stream and the upper pool are cut, far enough that the faces
+/// either side of them do too; the rest within it less, and those along the waterfall's lip, whose faces are the cliff's
+/// below the patch's edge, a little, so little that it shows nowhere beside it.
+const SUNK_BENEATH: [f32; 3] = [0.6, 0.3, 0.1];
+
+/// How far the foothills' corner at `point` sinks beneath the patch: on the waterfall's way, behind its lip and short of
+/// the upper cliff, the most; about it, to the patch's edges, less; along the lip, a little; and nowhere else.
+fn sunk_beneath(point: Vec2) -> f32 {
+    let (along, across) = on_the_fall(point);
+    let [[first, last], [left, right]] = PATCH;
+    let beneath = (left - 0.1..=right + 0.1).contains(&across);
+    if across.abs() < 0.9 && along > layout::CLIFF[1] + 0.5 && along < layout::UPPER_CLIFF[0] - 0.5
+    {
+        SUNK_BENEATH[0]
+    } else if beneath && (first..=last + 0.1).contains(&along) {
+        SUNK_BENEATH[1]
+    } else if beneath && (first - 0.3..first).contains(&along) {
+        SUNK_BENEATH[2]
+    } else {
+        0.0
+    }
+}
+
+/// The corner of the patch `along` and `across` its cells, on [`ground`], a little above it.
+fn patch_corner(along: usize, across: usize) -> Vec3 {
+    let [[first, last], [left, right]] = PATCH;
+    let [rows, columns] = PATCH_CELLS;
+    let (outward, side) = fall_axes();
+    let point = BACKDROP_CENTRE
+        + outward * (first + (last - first) * along as f32 / rows as f32)
+        + side * (left + (right - left) * across as f32 / columns as f32);
+    Vec3::new(point.x, ground(point) + PATCH_LIFT, point.y)
+}
+
+/// The two triangles the patch's cell `along` and `across` is cut into.
+fn patch_cell(along: usize, across: usize) -> [[Vec3; 3]; 2] {
+    let [a, b, c, d] = [
+        patch_corner(along, across),
+        patch_corner(along + 1, across),
+        patch_corner(along + 1, across + 1),
+        patch_corner(along, across + 1),
+    ];
+    [[a, b, c], [a, c, d]]
+}
+
+/// The patch's triangles, each as drawn: stone by the water, rock where it is steep, and bush, as the mountain about it.
+pub fn patch() -> Vec<[Vec3; 3]> {
+    let [rows, columns] = PATCH_CELLS;
+    (0..rows)
+        .flat_map(|along| (0..columns).flat_map(move |across| patch_cell(along, across)))
+        .collect()
+}
+
+/// How high the patch is drawn at `point`, from its triangle there, or `None` beyond it.
+fn patch_height(point: Vec2) -> Option<f32> {
+    let [[first, last], [left, right]] = PATCH;
+    let [rows, columns] = PATCH_CELLS;
+    let (along, across) = on_the_fall(point);
+    let row = (along - first) / (last - first) * rows as f32;
+    let column = (across - left) / (right - left) * columns as f32;
+    if !(0.0..=rows as f32).contains(&row) || !(0.0..=columns as f32).contains(&column) {
+        return None;
+    }
+    let (row, column) = (
+        (row as usize).min(rows - 1),
+        (column as usize).min(columns - 1),
+    );
+    patch_cell(row, column)
+        .into_iter()
+        .find_map(|corners| on(&corners, point))
+}
+
+/// How high the triangle `corners` is at `point`, seen from above, if it is over it.
+fn on([a, b, c]: &[Vec3; 3], point: Vec2) -> Option<f32> {
+    let flat = |corner: &Vec3| Vec2::new(corner.x, corner.z);
+    let (a2, b2, c2) = (flat(a), flat(b), flat(c));
+    let area = (b2 - a2).perp_dot(c2 - a2);
+    let u = (b2 - point).perp_dot(c2 - point) / area;
+    let v = (c2 - point).perp_dot(a2 - point) / area;
+    let w = 1.0 - u - v;
+    (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
+}
+
 /// The point of the foothills' ground on ring `ring` of [`RINGS`], at segment `segment` of [`SEGMENTS`] round it: on
-/// [`ground`], level with the meadow, [`MEADOW`], on the first ring, and a little rough further out, but along the river.
+/// [`ground`], level with the meadow, [`MEADOW`], on the first ring, and a little rough further out, but along the river
+/// and on the mountain behind the waterfall, and sunk beneath the patch about the stream and the upper pool.
 fn vertex(ring: usize, segment: usize) -> Vec3 {
     let radius = RINGS[ring];
     let point = BACKDROP_CENTRE + way(segment as f32 / SEGMENTS as f32 * TAU) * radius;
@@ -299,7 +396,7 @@ fn vertex(ring: usize, segment: usize) -> Vec3 {
     let height = if ring == 0 {
         MEADOW
     } else {
-        ground(point) + jitter * rough
+        ground(point) + jitter * rough - sunk_beneath(point)
     };
     Vec3::new(point.x, height, point.y)
 }
@@ -324,8 +421,14 @@ pub fn meadow() -> Vec<Vec3> {
 }
 
 /// How high the foothills' ground is drawn at `point`, from its triangle there, which follows [`ground`] only at its
-/// corners; `None` within the meadow inside the first ring, or beyond the last.
+/// corners, or the patch's about the stream and the upper pool, which is drawn over it; `None` within the meadow inside
+/// the first ring, or beyond the last.
 pub fn drawn_ground(point: Vec2) -> Option<f32> {
+    patch_height(point).or_else(|| foothills_ground(point))
+}
+
+/// How high the foothills' own ground is drawn at `point`, from its triangle there, beneath the patch too.
+fn foothills_ground(point: Vec2) -> Option<f32> {
     let offset = point - BACKDROP_CENTRE;
     let radius = offset.length();
     let ring = RINGS.windows(2).position(|pair| radius <= pair[1])?;
@@ -345,15 +448,7 @@ pub fn drawn_ground(point: Vec2) -> Option<f32> {
             ];
             cell((ring, segment), corners)
         })
-        .find_map(|[a, b, c]| {
-            let flat = |corner: Vec3| Vec2::new(corner.x, corner.z);
-            let (a2, b2, c2) = (flat(a), flat(b), flat(c));
-            let area = (b2 - a2).perp_dot(c2 - a2);
-            let u = (b2 - point).perp_dot(c2 - point) / area;
-            let v = (c2 - point).perp_dot(a2 - point) / area;
-            let w = 1.0 - u - v;
-            (u >= -1e-5 && v >= -1e-5 && w >= -1e-5).then_some(a.y * u + b.y * v + c.y * w)
-        })
+        .find_map(|corners| on(&corners, point))
 }
 
 /// The foothills' ground as it is drawn: each of its cells' two triangles, ring by ring and segment by segment, with
@@ -412,6 +507,27 @@ fn foothills(shapes: &mut Shapes) {
                 crate::beach::shingle(index as u32 + 1),
             );
         }
+    }
+    // The patch about the stream and the upper pool, over the foothills' corners sunk beneath it.
+    for (index, corners) in patch().into_iter().enumerate() {
+        let normal = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .normalize();
+        let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
+        let at = Vec2::new(middle.x, middle.z);
+        let pool = at.distance(Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z));
+        let wet = middle.y < layout::UPPER_POOL.y + 0.2
+            || pool < layout::UPPER_POOL_RADIUS + 0.4
+            || from_stream(at).0 < 0.9;
+        let color = if normal.y.abs() < 0.6 {
+            colors::ROCK
+        } else if wet {
+            colors::SHINGLE
+        } else {
+            colors::BUSH
+        };
+        let shade = 0.92 + scatter(index as u32 + 19_000) * 0.16;
+        facing(shapes, &corners, Vec3::Y, color * shade);
     }
 }
 

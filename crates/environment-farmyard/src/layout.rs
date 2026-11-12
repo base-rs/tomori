@@ -475,8 +475,8 @@ pub const UPPER_TOP: f32 = 9.5;
 /// The upper pool at the upper cliff's foot, on the waterfall's way, its middle at its water's level, which is the
 /// water's as it leaves the waterfall's lip, and how wide it is to its shore: its overflow runs straight to the lip and
 /// over it, so that the two falls are one stream.
-pub const UPPER_POOL: Vec3 = Vec3::new(-3.681, CLIFF_TOP + 0.08, -31.959);
-pub const UPPER_POOL_RADIUS: f32 = 1.2;
+pub const UPPER_POOL: Vec3 = Vec3::new(-3.72, CLIFF_TOP + 0.08, -32.2562);
+pub const UPPER_POOL_RADIUS: f32 = 1.1;
 /// Where the upper falls' water leaves the lip of the upper cliff, where it meets the upper pool, and the middle of its
 /// fall, where a sound of it comes from.
 pub const UPPER_FALLS_LIP: Vec3 = Vec3::new(-3.981, UPPER_TOP, -34.239);

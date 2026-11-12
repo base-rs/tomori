@@ -61,7 +61,7 @@ fn the_terrace_is_a_floor_of_its_own_at_its_height_on_the_mountain_at_the_top_of
         .sum();
     assert!((drawn - enclosed).abs() < 1e-3, "{drawn} {enclosed}");
     assert!((TERRACE - layout::POOL.y - 7.2).abs() < 1e-5);
-    assert!(TERRACE - layout::UPPER_POOL.y > 0.3);
+    const { assert!(TERRACE - layout::UPPER_POOL.y > 0.3) };
     // Its walkable ground is all at its height, and about 30 square metres, 7 m across and 4 m and more deep.
     let floor = floor();
     let area: f32 = floor
@@ -79,8 +79,8 @@ fn the_terrace_is_a_floor_of_its_own_at_its_height_on_the_mountain_at_the_top_of
     );
     let span = spans.1 - spans.0;
     assert!(span.x > 4.0 && span.y > 7.0, "{span}");
-    // Beneath its floor, the mountain's ground as it is drawn lies below it, a little or as far as its sides reach down,
-    // so that the floor never flickers against the ground and no gap shows beneath its edge.
+    // Beneath its floor, the mountain's ground as it is drawn lies below it, by a centimetre and a half and more, as far
+    // as its sides reach down, so that the floor never flickers against the ground and no gap shows beneath its edge.
     let mut sampled = 0;
     for x in -80..80 {
         for z in -400..-200 {
@@ -91,7 +91,7 @@ fn the_terrace_is_a_floor_of_its_own_at_its_height_on_the_mountain_at_the_top_of
             sampled += 1;
             let drawn = backdrop::drawn_ground(point).unwrap();
             assert!(
-                (TERRACE - SIDES..=TERRACE - 0.02).contains(&drawn),
+                (TERRACE - SIDES..=TERRACE - 0.015).contains(&drawn),
                 "{point} {drawn}"
             );
         }
@@ -215,13 +215,19 @@ fn its_stones_ferns_flat_rock_and_cairn_stand_on_its_floor_and_are_kept_clear_of
             );
         }
     }
-    // Its ferns at its back corners, its front corner and by the stream, the trees' crowns over the floor 2.2 m and more
-    // above it.
+    // Its ferns at its back and front corners and by the stream, and across the stream over the waterfall's lip, on
+    // the mountain's ground as drawn there, the trees' crowns over the floor 2.2 m and more above it.
     let ferns = ferns();
     assert_eq!(ferns.iter().filter(|fern| fern.kind.is_tree()).count(), 2);
     for fern in &ferns {
         let at = Vec2::new(fern.at.x, fern.at.z);
-        assert!(floor(at), "{fern:?}");
+        let (along, across) = backdrop::on_the_fall(at);
+        let over_the_lip = across < 0.0 && along < layout::CLIFF[1] + 3.0;
+        assert!(floor(at) || over_the_lip, "{fern:?}");
+        if !contains(at) {
+            let drawn = backdrop::drawn_ground(at).unwrap();
+            assert!((fern.at.y - drawn).abs() < 0.1, "{fern:?} {drawn}");
+        }
         if fern.kind.is_tree() {
             let crown = fern.solids()[1];
             assert!(crown.low[1] > TERRACE + 2.2 - 1e-3, "{fern:?}");
@@ -245,10 +251,13 @@ fn its_stones_ferns_flat_rock_and_cairn_stand_on_its_floor_and_are_kept_clear_of
     let [_, down] = targets();
     assert!((down.foot.y + down.height - cairn_top() - 0.05).abs() < 1e-5);
     assert!(cairn_top() - TERRACE > 0.5);
-    // Drawn as one model, its floor, sides, flat rock and cairn, in 148 triangles.
+    // Drawn as one model, its floor, sides, flat rock and cairn, in 148 triangles, none of them facing down, so that
+    // the flat rock's and the cairn's tops are lit from above.
     let model = model();
-    let triangles: usize = model.meshes[0].primitives[0].indices.len() / 3;
+    let primitive = &model.meshes[0].primitives[0];
+    let triangles: usize = primitive.indices.len() / 3;
     assert_eq!(triangles, 148, "the count the documentation gives");
+    assert!(primitive.normals.iter().all(|normal| normal.y > -0.01));
 }
 
 #[test]
@@ -351,6 +360,7 @@ fn its_anchor_stands_behind_whoever_arrives_facing_them() {
     assert_eq!(place.notify_within, None);
     // Over the terrace's floor.
     assert!(contains(flat(place.at)));
+    assert_eq!(from_floor(flat(place.at)), 0.0);
     // Among the trail's, after the waterfall rock's.
     let places = crate::trail::places();
     assert_eq!(places[3], place);

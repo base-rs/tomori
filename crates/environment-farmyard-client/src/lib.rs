@@ -837,10 +837,10 @@ mod tests {
             for across in 0..44 {
                 let point =
                     terrace::on_fall(23.9 + along as f32 * 0.25, 1.6 + across as f32 * 0.25);
-                if let Some(height) = walkable::height_at(point) {
-                    if height > layout::TERRACE - 0.1 {
-                        floor_points.push(Vec3::new(point.x, height, point.y));
-                    }
+                if let Some(height) = walkable::height_at(point)
+                    && height > layout::TERRACE - 0.1
+                {
+                    floor_points.push(Vec3::new(point.x, height, point.y));
                 }
             }
         }

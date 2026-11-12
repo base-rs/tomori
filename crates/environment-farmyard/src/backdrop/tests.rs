@@ -396,6 +396,47 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
 }
 
 #[test]
+fn the_patch_about_the_stream_and_the_upper_pool_is_drawn_over_the_foothills_beneath_it() {
+    // Every 10 cm of it, the foothills' own ground lies beneath it, and it follows the ground, a little above it, within
+    // the reach of its cells' corners.
+    let [[first, last], [left, right]] = PATCH;
+    let (outward, side) = fall_axes();
+    let mut sampled = 0;
+    for along in 0..((last - first) * 10.0) as i32 {
+        for across in 0..((right - left) * 10.0) as i32 {
+            let point = BACKDROP_CENTRE
+                + outward * (first + along as f32 * 0.1 + 0.05)
+                + side * (left + across as f32 * 0.1 + 0.05);
+            let drawn = drawn_ground(point).unwrap();
+            let beneath = foothills_ground(point).unwrap();
+            assert!(beneath < drawn + 1e-3, "{point} {drawn} {beneath}");
+            assert!(
+                (drawn - super::ground(point)).abs() < 0.2,
+                "{point} {drawn}"
+            );
+            sampled += 1;
+        }
+    }
+    assert!(sampled > 2000);
+    // Its water: the upper pool's surface over its basin about its middle, and the stream's over its bed, as drawn.
+    let pool = Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z);
+    assert!(drawn_ground(pool).unwrap() < layout::UPPER_POOL.y - 0.15);
+    let foot = Vec2::new(layout::UPPER_FALLS_FOOT.x, layout::UPPER_FALLS_FOOT.z);
+    assert!(
+        drawn_ground(foot).unwrap() < layout::UPPER_POOL.y,
+        "{}",
+        drawn_ground(foot).unwrap()
+    );
+    for along in [24.6, 25.5, 26.5] {
+        let at = BACKDROP_CENTRE + outward * along;
+        assert!(
+            drawn_ground(at).unwrap() < layout::UPPER_POOL.y - 0.02,
+            "{along}"
+        );
+    }
+}
+
+#[test]
 fn the_sounds_are_named_where_the_waterfall_the_pool_the_river_and_the_bush_are() {
     let sounds = layout::sounds();
     let named = |name: &str| sounds.iter().filter(|(each, _)| *each == name).count();
@@ -562,7 +603,7 @@ fn the_backdrop_is_modest_for_the_quest() {
     assert_eq!(
         triangles,
         Triangles {
-            foothills: 3072,
+            foothills: 3632,
             plants: 10_862,
             ranges: 1184,
             water: 253,
@@ -573,7 +614,7 @@ fn the_backdrop_is_modest_for_the_quest() {
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 17_588);
+    assert_eq!(triangles.total(), 18_148);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the

@@ -199,11 +199,12 @@ fn shapes() -> Shapes {
             + outward * sin * SEAT_SIZE.z * reach;
         lift(point, TERRACE + height)
     };
+    // Turning from across the fall towards the yard, anticlockwise seen from above, as a slab is drawn.
     let base: Vec<Vec3> = (0..6).map(|side| corner(side, 1.0, -0.05)).collect();
     let top: Vec<Vec3> = (0..6).map(|side| corner(side, 0.82, SEAT_SIZE.y)).collect();
-    let (base, top) = wound(base, top);
     shapes.slab(&base, &top, paints::WORN);
-    // The cairn: four flat stones, each smaller than the one below it, each turned its own way.
+    // The cairn: four flat stones, each smaller than the one below it, each turned its own way, anticlockwise seen from
+    // above.
     let (along, across) = CAIRN;
     let mut level = TERRACE - 0.03;
     for (index, (reach, thick)) in CAIRN_STONES.iter().enumerate() {
@@ -217,22 +218,11 @@ fn shapes() -> Shapes {
         let top: Vec<Vec3> = (0..7)
             .map(|side| corner(side, reach * 0.8, *thick))
             .collect();
-        let (base, top) = wound(base, top);
         let shade = 0.9 + scatter(index as u32 + 18_310) * 0.25;
         shapes.slab(&base, &top, paints::WORN * shade);
         level += thick - 0.01;
     }
     shapes
-}
-
-/// `base` and `top`, wound anticlockwise seen from above, as a slab is drawn.
-fn wound(mut base: Vec<Vec3>, mut top: Vec<Vec3>) -> (Vec<Vec3>, Vec<Vec3>) {
-    let normal = (base[1] - base[0]).cross(base[2] - base[0]);
-    if normal.y < 0.0 {
-        base.reverse();
-        top.reverse();
-    }
-    (base, top)
 }
 
 /// The terrace, as a model of one node whose mesh draws it all: its floor and its sides, the flat rock and the cairn.
@@ -283,13 +273,14 @@ pub fn stones() -> Vec<Stone> {
         .collect()
 }
 
-/// The terrace's ferns, drawn with the ferns near the trail and swaying with them: a ponga and a mamaku at its back
-/// corners, beneath the upper cliff, their crowns high over the floor, and ground ferns at its front corner, by the
-/// stream and at its back, each placed by hand, at its edges, since the terrace is small.
+/// The terrace's ferns, drawn with the ferns near the trail and swaying with them: a ponga at its back corner, beneath
+/// the upper cliff, its crown high over the floor, a mamaku across the stream from it, over the waterfall's lip, and
+/// ground ferns at its front corner, by the stream and at its back, each placed by hand, at its edges, since the
+/// terrace is small, and out of the way from where one arrives to the upper falls.
 pub fn ferns() -> Vec<Fern> {
     const PLACES: [(Kind, f32, f32, f32); 5] = [
         (Kind::Ponga, 27.2, 10.9, 0.95),
-        (Kind::Mamaku, 28.55, 2.5, 0.9),
+        (Kind::Mamaku, 25.5, -1.9, 0.9),
         (Kind::CrownFern, 24.6, 11.1, 0.85),
         (Kind::HenAndChickens, 26.9, 2.25, 0.8),
         (Kind::Kiokio, 28.4, 6.4, 0.75),
