@@ -5322,6 +5322,234 @@ fn a_side_s_parameters_show_on_its_panels_chips_and_it_is_told_how_each_panel_is
 }
 
 #[test]
+fn contexts_lists_every_stored_setting_of_walls_hidden_and_panels_resting_too() {
+    use tomori_environment::ContextParameter;
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([
+                crate::EnvironmentWall::new(upright([3.0, 1.4, -4.0]))
+                    .with_grid(tomori_protocol::Grid::from((1, 2))),
+                crate::EnvironmentWall::new(upright([-3.0, 1.4, -4.0])),
+            ])
+            .with_server_side(Recording(Arc::default())),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    hub.channel_set_context(
+        &outlet,
+        vec![ContextParameter::new("region", "Region", "US-EAST1")],
+        start,
+    )
+    .unwrap();
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::text("pods", "Pods", "- pod-7")
+            .depends_on(["region"])
+            .on_wall(1, None),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let fixed = |value: &str| crate::stage::context::Setting::Fixed {
+        value: value.into(),
+    };
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        let pods = record.stage.view("s", &walls, 0).panels[0].id.clone();
+        record
+            .stage
+            .set_wall_context(&walls, "environment-1", "region", Some(fixed("EU-WEST1")))
+            .unwrap();
+        record
+            .stage
+            .set_panel_context(&walls, &pods, "region", Some(fixed("AP-SOUTH1")))
+            .unwrap();
+    }
+    // The yard now declaring one wall, the other's setting is kept and listed as not shown.
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([crate::EnvironmentWall::new(upright([3.0, 1.4, -4.0]))
+                .with_grid(tomori_protocol::Grid::from((1, 2)))]),
+    ]));
+    let read = hub.tool_contexts("session").unwrap();
+    assert_eq!(
+        read["walls"],
+        serde_json::json!([{
+            "wall": "environment-1",
+            "id": "environment-1",
+            "shown": false,
+            "note": "not shown: the environment doesn't show this wall now",
+            "settings": [{"parameter": "region", "value": "EU-WEST1", "shown": true}],
+        }])
+    );
+    // Its panel resting, as its side's run ended, its setting is listed with it.
+    {
+        let mut state = hub.lock();
+        state.space_mut(&id).unwrap().stage.rest("yard");
+    }
+    let read = hub.tool_contexts("session").unwrap();
+    let panels = read["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0]["id"], "pods");
+    assert_eq!(panels[0]["resting"], true);
+    assert_eq!(
+        panels[0]["settings"],
+        serde_json::json!([{"parameter": "region", "value": "AP-SOUTH1", "shown": false, "note": "not shown: the environment doesn't declare it now"}])
+    );
+}
+
+#[test]
+fn contexts_of_every_wall_and_panel_at_their_longest_are_cut_to_what_the_agent_reads() {
+    use tomori_environment::ContextParameter;
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let roomy = |x: f32| {
+        crate::EnvironmentWall::new(upright([x, 1.4, -4.0]))
+            .with_grid(tomori_protocol::Grid::from((8, 3)))
+    };
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([roomy(3.0), roomy(-3.0)])
+            .with_server_side(Recording(Arc::default())),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    // Every value at its longest, each character one JSON escapes in two, and as many choices as a parameter offers.
+    let long = |index: usize| {
+        format!(
+            "{}{index:02}",
+            "\"".repeat(tomori_environment::CONTEXT_VALUE_CHARS - 2)
+        )
+    };
+    let parameters: Vec<ContextParameter> = ["a", "b", "c"]
+        .into_iter()
+        .map(|parameter| {
+            ContextParameter::new(
+                parameter,
+                "\"".repeat(tomori_environment::CONTEXT_LABEL_CHARS),
+                long(0),
+            )
+            .with_choices((0..tomori_environment::CONTEXT_CHOICES).map(long))
+        })
+        .collect();
+    for panel in 0..crate::stage::PUBLISHED {
+        let published = tomori_environment::Panel::text(format!("p{panel}"), "\"".repeat(80), "x")
+            .depends_on(["a", "b", "c", "time"])
+            .on_wall(panel as u32 % 2, None);
+        hub.channel_publish_at(&outlet, published, start).unwrap();
+    }
+    hub.flush_publishes(start);
+    hub.channel_set_context(&outlet, parameters, start + Duration::from_secs(1))
+        .unwrap();
+    let fixed = |index: usize| crate::stage::context::Setting::Fixed { value: long(index) };
+    let window = crate::stage::context::Setting::Window {
+        from_ms: crate::stage::context::WINDOW_MS - 1,
+        to_ms: 2 * crate::stage::context::WINDOW_MS - 1,
+    };
+    let added = {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        let panels: Vec<String> = record
+            .stage
+            .view("s", &walls, 0)
+            .panels
+            .into_iter()
+            .map(|panel| panel.id)
+            .collect();
+        assert_eq!(panels.len(), crate::stage::PUBLISHED);
+        let mut walled: Vec<String> = vec!["environment-0".into(), "environment-1".into()];
+        for index in 0..crate::stage::ADDED_WALLS {
+            let pose = upright([
+                (index % 10) as f32 * 2.0 - 9.0,
+                1.4,
+                2.0 + (index / 10) as f32 * 3.0,
+            ]);
+            walled.push(record.stage.add_wall(&walls, &pose, None).unwrap());
+        }
+        for (index, target) in panels.iter().enumerate() {
+            for parameter in ["a", "b", "c"] {
+                record
+                    .stage
+                    .set_panel_context(&walls, target, parameter, Some(fixed(index % 16)))
+                    .unwrap();
+            }
+            record
+                .stage
+                .set_panel_context(&walls, target, "time", Some(window.clone()))
+                .unwrap();
+        }
+        for wall in &walled {
+            for parameter in ["a", "b", "c"] {
+                record
+                    .stage
+                    .set_wall_context(&walls, wall, parameter, Some(fixed(15)))
+                    .unwrap();
+            }
+            record
+                .stage
+                .set_wall_context(&walls, wall, "time", Some(window.clone()))
+                .unwrap();
+        }
+        walled.len()
+    };
+    let read = hub.tool_contexts("session").unwrap();
+    let sent = crate::hub::agent_panels::sent(&read);
+    assert!(
+        sent <= crate::hub::agent_panels::LISTING_BYTES,
+        "{sent} bytes"
+    );
+    let (walls, panels) = (
+        read["walls"].as_array().unwrap().len(),
+        read["panels"].as_array().unwrap().len(),
+    );
+    assert!(panels < crate::stage::PUBLISHED);
+    // Every panel left out, the walls after them are left out too, the first kept.
+    assert!(
+        panels == 0 && 0 < walls && walls < added,
+        "{panels} panels, {walls} walls"
+    );
+    let cut = read["cut"].as_str().unwrap();
+    assert!(
+        cut.starts_with(&format!(
+            "{} panels and {} walls are left out to fit",
+            crate::stage::PUBLISHED - panels,
+            added - walls
+        )),
+        "{cut}"
+    );
+    // Every parameter and its choices are told whole.
+    assert_eq!(read["parameters"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        read["parameters"][2]["choices"].as_array().unwrap().len(),
+        tomori_environment::CONTEXT_CHOICES
+    );
+}
+
+#[test]
 fn moves_past_a_participant_s_rate_wait_and_a_side_started_again_is_told_where_its_panels_rest() {
     use tomori_environment::PanelPlace;
     let Yard {

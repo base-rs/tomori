@@ -33,6 +33,7 @@ use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
 pub(crate) mod agent_actions;
+pub(crate) mod agent_context;
 pub(crate) mod agent_inspect;
 mod agent_names;
 mod agent_pairing;

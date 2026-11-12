@@ -208,13 +208,6 @@ impl Setting {
         Ok(Self::Fixed { value })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the agent's tools set contexts, in the change after this one"
-        )
-    )]
     /// It as the parameter `parameter`, declared as `declared` says, keeps it, or why not: what [`Setting::sound`]
     /// refuses, a parameter its side does not declare now, and a value not among its choices where it declares any.
     pub(crate) fn checked(
@@ -274,13 +267,6 @@ pub(crate) fn shown(parameter: &str, declared: &[Parameter]) -> bool {
 /// Set `parameter` in `settings` to `setting`, or let it follow with `None`. Returns whether that changed anything, or
 /// why it is refused: a setting [`Setting::checked`] refuses. Since only a declared parameter or time takes one, and a
 /// side declares at most [`CONTEXT_PARAMETERS`], a wall or a panel holds at most [`SETTINGS`].
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the agent's tools set contexts, in the change after this one"
-    )
-)]
 fn set(
     settings: &mut Settings,
     parameter: &str,
@@ -339,6 +325,43 @@ impl Stage {
         changed
     }
 
+    /// Every wall's settings in `environment`, by the wall's identity, every one stored, shown here now or not.
+    pub(crate) fn wall_contexts(
+        &self,
+        environment: &str,
+    ) -> impl Iterator<Item = (&String, &Settings)> {
+        self.rooms
+            .get(environment)
+            .into_iter()
+            .flat_map(|room| room.contexts.iter())
+    }
+
+    /// The settings of each panel resting in `environment` that holds any, by its identity and its environment's id for
+    /// it, as it comes back with them.
+    pub(crate) fn resting_settings(
+        &self,
+        environment: &str,
+    ) -> impl Iterator<Item = (&str, &str, &Settings)> {
+        self.rooms
+            .get(environment)
+            .into_iter()
+            .flat_map(|room| room.resting.iter())
+            .filter(|resting| !resting.context.is_empty())
+            .map(|resting| {
+                (
+                    resting.panel.as_str(),
+                    resting.id.as_str(),
+                    &resting.context,
+                )
+            })
+    }
+
+    /// The panel `panel`'s own settings in `environment`, every one stored, if its environment published it.
+    pub(crate) fn panel_settings(&self, environment: &str, panel: &str) -> Option<&Settings> {
+        self.kept(environment, panel)
+            .and_then(|kept| kept.published.as_ref().map(|_| &kept.context))
+    }
+
     /// The parameters `environment`'s side declares now.
     pub(crate) fn parameters(&self, environment: &str) -> &[Parameter] {
         self.rooms
@@ -346,13 +369,6 @@ impl Stage {
             .map_or(&[], |room| room.parameters.as_slice())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the agent's tools set contexts, in the change after this one"
-        )
-    )]
     /// Set the wall `wall` in `walls`' environment to `setting` for `parameter`, or let it follow with `None`. Returns
     /// whether that changed anything, or why it is refused: a wall not shown there, the Tomori wall, which holds no
     /// environment's panels, and what [`Setting::checked`] refuses or one setting too many.
@@ -379,13 +395,6 @@ impl Stage {
         changed
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the agent's tools set contexts, in the change after this one"
-        )
-    )]
     /// Set the panel `panel` shown in `walls`' environment to `setting` for `parameter`, or let it follow with `None`.
     /// Returns whether that changed anything, or why it is refused: a panel not shown there, one its environment did not
     /// publish, a parameter it does not depend on, and what [`Setting::checked`] refuses or one setting too many.

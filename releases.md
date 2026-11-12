@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Ask Tomori what a wall shows, and to change it.** Tomori can now read and set what an environment's walls and panels show: ask it to show EU-WEST1 on a wall, or 02:20 to 02:50 UTC, or a live hour, and it fixes that wall's or panel's context for everyone. It can also list every setting, including ones the environment doesn't show right now. See `design/panel-context.md`.
+
 - **Fixed foveated rendering on the Quest.** The headset now shades the edges of each eye, which the lenses blur, with fewer fragments than pixels, leaving the middle sharp, so that the eyes took a fifth less of the GPU's frame on a Quest 3, 6.7 ms rather than 8.3 ms; text you look at stays sharp. The default is high; start Tomori with `adb shell am start -n com.codeotaku.tomori/android.app.NativeActivity -e tomori.foveation medium` (or `none`, `low`, or `high:own` for Tomori's own density map where the runtime gives one) to compare. Desktop runtimes draw as before. See `design/rendering.md`.
 
 - **The agent and its workers stay bright at a distance.** Across the farmyard, the agent's swarm, its workers and their satellites no longer fade to dark as you walk away from them: they fade only into the environment's haze, as the workbench beside them does, rather than turning darker than it, and their particles stay at least a pixel across, so the cloud doesn't thin out. See `design/rendering.md`.
