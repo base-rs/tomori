@@ -472,6 +472,8 @@ fn an_update_by_the_tool_moves_a_panel_only_where_place_says_and_never_one_put_b
         wall: Some("tomori".into()),
         slot: Some(5),
         pose: None,
+        size: None,
+        revision: None,
     });
     panels(&ada, |panels| {
         panels
@@ -500,6 +502,8 @@ fn an_update_by_the_tool_moves_a_panel_only_where_place_says_and_never_one_put_b
             [0.5, 1.5, -1.5],
             [0.0, 1.6, 0.0],
         )),
+        size: None,
+        revision: None,
     });
     panels(&ada, |panels| {
         panels
@@ -697,6 +701,8 @@ fn a_tick_or_an_update_from_a_version_since_changed_is_refused_rather_than_land_
         wall: None,
         slot: None,
         pose: Some(Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0])),
+        size: None,
+        revision: None,
     });
     let moved = panels(&ada, |panels| panels[0].version > rewritten)[0].version;
     assert!(

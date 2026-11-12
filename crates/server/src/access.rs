@@ -286,6 +286,8 @@ mod tests {
                 wall: None,
                 slot: None,
                 pose: Some(Pose::default()),
+                size: None,
+                revision: None,
             },
             ClientMessage::DismissPanel {
                 panel: "panel-1".into(),

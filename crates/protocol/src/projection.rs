@@ -721,7 +721,18 @@ pub struct Panel {
     /// `design/diagrams.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagram: Option<Box<crate::diagram::Diagram>>,
+    /// How large it floats, as a proportion of its own size, where a participant stretched or shrank it with both
+    /// hands: within [`FLOAT_SIZES`], and absent for its own size. Only a panel floating has one, since a wall's slot
+    /// sizes the panels in it. An older client ignores it, drawing the panel at its own size. See
+    /// `design/projection.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
 }
+
+/// How small and how large a floating panel is stretched, as a proportion of its own size ([`Panel::size`]): never so
+/// small that its text is smaller than half a standard slot's, as a wall's never is ([`crate::wall::LEAST_TEXT`]), and
+/// at most four times as large, for reading from across a room.
+pub const FLOAT_SIZES: (f32, f32) = (crate::wall::LEAST_TEXT, 4.0);
 
 /// The most columns of a list panel a client lays out ([`Panel::columns`]); the rest are left out.
 pub const LIST_COLUMNS: usize = 8;
@@ -943,7 +954,36 @@ impl Panel {
             rows: Vec::new(),
             columns: Vec::new(),
             diagram: None,
+            size: None,
         }
+    }
+
+    /// The panel, floating `size` times as large as its own size, within [`FLOAT_SIZES`], or at its own size for
+    /// `None`, 1, or a size that is not finite.
+    pub fn with_size(mut self, size: Option<f32>) -> Self {
+        self.size = size
+            .filter(|size| size.is_finite() && (size - 1.0).abs() > 1e-4)
+            .map(|size| size.clamp(FLOAT_SIZES.0, FLOAT_SIZES.1));
+        self
+    }
+
+    /// How large it is drawn floating, as a proportion of its own size: its [`Panel::size`] within [`FLOAT_SIZES`], or 1.
+    /// On a wall, its slot sizes it instead.
+    ///
+    /// ```
+    /// use tomori_protocol::{FLOAT_SIZES, Panel, Place, Pose};
+    ///
+    /// let pose = Pose::upright_facing([0.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
+    /// let panel = Panel::new("p", "Notes", "", Place::Free { pose });
+    /// assert_eq!(panel.floating_size(), 1.0);
+    /// assert_eq!(panel.clone().with_size(Some(1.5)).floating_size(), 1.5);
+    /// assert_eq!(panel.clone().with_size(Some(40.0)).floating_size(), FLOAT_SIZES.1);
+    /// assert_eq!(panel.clone().with_size(Some(f32::NAN)).size, None);
+    /// ```
+    pub fn floating_size(&self) -> f32 {
+        self.size
+            .filter(|size| size.is_finite())
+            .map_or(1.0, |size| size.clamp(FLOAT_SIZES.0, FLOAT_SIZES.1))
     }
 
     /// The panel, a list panel of `rows`, each on its line of the body, in order.
@@ -996,6 +1036,7 @@ impl Panel {
             rows,
             columns,
             diagram,
+            size,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -1012,6 +1053,7 @@ impl Panel {
             && *rows == other.rows
             && *columns == other.columns
             && *diagram == other.diagram
+            && *size == other.size
             && charts
     }
 
@@ -1078,6 +1120,34 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_floating_panel_s_size_is_sent_only_where_it_has_one_and_read_within_its_bounds() {
+        let pose = Pose::upright_facing([0.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
+        let panel = Panel::new("p", "Notes", "", Place::Free { pose });
+        // At its own size it says none, as an older server sends it.
+        let json = serde_json::to_value(&panel).unwrap();
+        assert!(json.get("size").is_none());
+        assert_eq!(panel.clone().with_size(Some(1.0)).size, None);
+        let sized = panel.clone().with_size(Some(1.5));
+        assert_eq!(serde_json::to_value(&sized).unwrap()["size"], 1.5);
+        // A newer or stranger server's is read within the bounds a floating panel has.
+        let mut read = json.clone();
+        read["size"] = serde_json::json!(9.0);
+        let read: Panel = serde_json::from_value(read).unwrap();
+        assert_eq!(read.floating_size(), FLOAT_SIZES.1);
+        let mut small = json;
+        small["size"] = serde_json::json!(0.01);
+        let small: Panel = serde_json::from_value(small).unwrap();
+        assert_eq!(small.floating_size(), FLOAT_SIZES.0);
+        let nonsense = Panel {
+            size: Some(f32::INFINITY),
+            ..panel.clone()
+        };
+        assert_eq!(nonsense.floating_size(), 1.0);
+        // Its size is part of its structure.
+        assert!(!panel.same_structure(&sized));
+    }
 
     #[test]
     fn a_projection_has_a_stable_wire_format_and_tolerates_newer_values() {
@@ -1419,6 +1489,8 @@ mod tests {
                     wall: Some(TOMORI_WALL.into()),
                     slot: None,
                     pose: None,
+                    size: None,
+                    revision: None,
                 },
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "wall": "tomori"}),
             ),
@@ -1428,6 +1500,8 @@ mod tests {
                     wall: Some(TOMORI_WALL.into()),
                     slot: Some(4),
                     pose: None,
+                    size: None,
+                    revision: None,
                 },
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "wall": "tomori", "slot": 4}),
             ),
@@ -1437,6 +1511,8 @@ mod tests {
                     wall: None,
                     slot: None,
                     pose: Some(pose),
+                    size: None,
+                    revision: None,
                 },
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "pose": pose_json}),
             ),

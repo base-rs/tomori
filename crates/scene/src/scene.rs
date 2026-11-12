@@ -857,8 +857,12 @@ impl Step {
                 });
             let rung = precedence::Grab::first(|rung| match rung {
                 precedence::Grab::Transcript => side == Side::Right && wrist_active,
+                // What the other hand holds, this hand's ray on it or the hand touching it, is the carrying's too: the
+                // squeeze takes hold of it with both hands.
                 precedence::Grab::Carried => {
-                    self.projector.carrying_in(side) || self.board.held_in(side).is_some()
+                    self.projector.carrying_in(side)
+                        || self.projector.joins(side)
+                        || self.board.held_in(side).is_some()
                 }
                 precedence::Grab::Tomori => self.hands[side].aim == precedence::Aim::Tomori,
                 precedence::Grab::Environment => target.is_some(),
@@ -1876,9 +1880,13 @@ impl Step {
         let points = Hands::from_fn(|side| world[side] && !(side == aimer && travel.aiming));
         // What is projected stands wherever the space shows it; the rays and grips act on it only while nothing else takes them, and not while that hand carries a card. A card a ray met nearer last frame takes that hand's grip. See `design/projection.md`.
         conversation.observe_head(senses.head_pose.map(Into::into));
-        // A change to a wall the server refused is drawn as the server has it at once, not as sent.
+        // A change to a wall the server refused is drawn as the server has it at once, not as sent, and so is a panel's
+        // size.
         if let Some(wall) = conversation.take_refused_wall() {
             self.projector.refused_wall(&wall);
+        }
+        if let Some(panel) = conversation.take_refused_panel() {
+            self.projector.refused_panel(&panel);
         }
         // The teleport pad each ray meets, if any, which nothing nearer takes, below; a panel behind it is not pulled
         // off, as one behind a card is not. A ray pointing down still meets the pads and targets on the floor, as the
@@ -1955,6 +1963,16 @@ impl Step {
         }
         if projected.turned {
             feedback.emit(feedback::Event::Hover, now);
+        }
+        // Taking hold with the second hand is felt on it, as taking hold is, and so is reaching the least or the most both
+        // hands may size what they hold.
+        for (event, side) in [
+            (feedback::Event::Choose, projected.joined),
+            (feedback::Event::Hover, projected.bounded),
+        ] {
+            if let Some(side) = side {
+                feedback.emit_on(event, side.into(), now);
+            }
         }
         for side in Side::BOTH {
             if self.projector.held_in(side).is_some() && !held_before[side] {
@@ -7755,6 +7773,8 @@ mod tests {
                 wall: Some(tomori_protocol::TOMORI_WALL.into()),
                 slot: Some(3),
                 pose: None,
+                size: None,
+                revision: None,
             })]
         );
     }
@@ -8750,7 +8770,7 @@ mod tests {
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(matches!(
             conversation.take_actions().as_slice(),
-            [Action::Send(tomori_protocol::ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_) })] if panel == "panel-1"
+            [Action::Send(tomori_protocol::ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_), .. })] if panel == "panel-1"
         ));
         // A card nearer on the ray is pointed at and picked up instead.
         project(&mut conversation);

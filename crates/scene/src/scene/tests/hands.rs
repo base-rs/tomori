@@ -211,12 +211,12 @@ fn the_left_grip_pulls_off_carries_and_lets_go_of_a_panel_as_the_right_does_each
     assert_eq!(step.projector.held_in(Hand::Left), None);
     assert!(matches!(
         conversation.take_actions().as_slice(),
-        [Action::Send(ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_) })] if panel == "panel-2"
+        [Action::Send(ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_), .. })] if panel == "panel-2"
     ));
 }
 
 #[test]
-fn a_second_grip_on_the_panel_the_other_hand_carries_is_nobody_s() {
+fn a_second_grip_on_the_panel_the_other_hand_carries_takes_hold_of_it_with_both() {
     let mut conversation = two_panels();
     let mut step = Step::default();
     let now = Instant::now();
@@ -235,7 +235,8 @@ fn a_second_grip_on_the_panel_the_other_hand_carries_is_nobody_s() {
         FRAME,
     );
     assert_eq!(step.projector.held_in(Hand::Right), Some("panel-1"));
-    // The left ray on the panel the right carries ends on it; its grip takes nothing, and the panel stays in the right.
+    // The left ray on the panel the right carries ends on it, and its grip takes hold of it too, as the carrying's,
+    // felt on the left; the panel stays the right hand's, held with both.
     let frame = step.update(
         &rays(Some(AHEAD), Some(AHEAD), (1.0, 0.0)),
         &mut conversation,
@@ -249,15 +250,77 @@ fn a_second_grip_on_the_panel_the_other_hand_carries_is_nobody_s() {
             .and_then(|arrival| arrival.left_ray)
             .is_some_and(|ray| ray.hit)
     );
+    let mut feedback = felt();
     step.update(
         &rays(Some(AHEAD), Some(AHEAD), (1.0, 1.0)),
+        &mut conversation,
+        &mut feedback,
+        now,
+        FRAME,
+    );
+    assert_eq!(
+        step.last_grab,
+        Some((Hand::Left, precedence::Grab::Carried))
+    );
+    assert!(step.projector.two_handed());
+    assert_eq!(step.projector.held_in(Hand::Left), None);
+    assert_eq!(step.projector.held_in(Hand::Right), Some("panel-1"));
+    assert!(
+        feedback
+            .haptics(now + Duration::from_secs(1))
+            .iter()
+            .any(|(hand, _)| *hand == Side::Left)
+    );
+    // Its left stick is the carrying's meanwhile, travelling nowhere, and its ray shows while it holds.
+    assert!(step.projector.carrying_in(Hand::Left));
+    // Let go of both, it floats where it is, sent once.
+    step.update(
+        &rays(Some(AHEAD), Some(AHEAD), (0.0, 0.0)),
         &mut conversation,
         &mut felt(),
         now,
         FRAME,
     );
-    assert_eq!(step.projector.held_in(Hand::Left), None);
+    assert!(!step.projector.two_handed() && step.projector.held().is_none());
+    assert!(matches!(
+        conversation.take_actions().as_slice(),
+        [Action::Send(ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_), .. })] if panel == "panel-1"
+    ));
+}
+
+#[test]
+fn the_left_hand_touching_the_panel_the_right_carries_takes_hold_of_it_whatever_its_ray_is_on() {
+    let mut conversation = two_panels();
+    let mut step = Step::default();
+    let now = Instant::now();
+    step.update(
+        &rays(Some(AHEAD), None, (0.0, 0.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
+    step.update(
+        &rays(Some(AHEAD), None, (1.0, 0.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
     assert_eq!(step.projector.held_in(Hand::Right), Some("panel-1"));
+    // The left hand at the panel's face, pointing up and away from it.
+    let touching = |grip: f32| Senses {
+        left_ray: Ray::new(AHEAD + Vec3::Z * 0.05, Vec3::new(0.0, 1.0, 1.0)),
+        ..rays(Some(AHEAD), None, (1.0, grip))
+    };
+    step.update(&touching(0.0), &mut conversation, &mut felt(), now, FRAME);
+    assert!(step.projector.joins(Hand::Left));
+    step.update(&touching(1.0), &mut conversation, &mut felt(), now, FRAME);
+    assert_eq!(
+        step.last_grab,
+        Some((Hand::Left, precedence::Grab::Carried))
+    );
+    assert!(step.projector.two_handed());
 }
 
 #[test]
@@ -585,4 +648,84 @@ fn outside_a_space_either_trigger_draws_the_swarm_towards_its_own_hand_the_first
         FRAME,
     );
     assert_eq!(frame.marker, Some(right));
+}
+
+#[test]
+fn both_hands_stretch_a_panel_to_its_largest_felt_on_both_and_its_size_is_sent_as_they_let_go() {
+    let mut conversation = two_panels();
+    let mut step = Step::default();
+    let now = Instant::now();
+    let hands = |apart: f32, grips: (f32, f32)| {
+        let (left, right) = (
+            Vec3::new(-apart / 2.0, 1.3, -0.3),
+            Vec3::new(apart / 2.0, 1.3, -0.3),
+        );
+        Senses {
+            ray: Ray::new(right, AHEAD - right),
+            left_ray: Ray::new(left, AHEAD - left),
+            ..rays(None, None, grips)
+        }
+    };
+    step.update(
+        &hands(0.4, (1.0, 0.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
+    step.update(
+        &hands(0.4, (1.0, 1.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
+    assert!(step.projector.two_handed());
+    // Spread wide, it reaches the largest a floating panel may be, which ticks on the hand that stretched it.
+    let mut feedback = felt();
+    step.update(
+        &hands(3.0, (1.0, 1.0)),
+        &mut conversation,
+        &mut feedback,
+        now,
+        FRAME,
+    );
+    let ticks = feedback.haptics(now + Duration::from_secs(1));
+    assert!(
+        ticks.iter().any(|(hand, _)| *hand == Side::Left),
+        "{ticks:?}"
+    );
+    // Let go, it is sent at that size, with the version both hands took hold of it at.
+    conversation.take_actions();
+    step.update(
+        &hands(3.0, (0.0, 0.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
+    let actions = conversation.take_actions();
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [Action::Send(ClientMessage::PlacePanel { panel, size: Some(size), revision: Some(_), .. })]
+                if panel == "panel-1" && *size == tomori_protocol::FLOAT_SIZES.1
+        ),
+        "{actions:?}"
+    );
+    // Refused, as the panel changed since, it is drawn as the server has it at once.
+    conversation.apply(tomori_client::Event::Message(ServerMessage::Error {
+        error: "That panel changed as you resized it; take hold of it again.".into(),
+        space: None,
+        panel: Some("panel-1".into()),
+        wall: None,
+    }));
+    step.update(
+        &hands(3.0, (0.0, 0.0)),
+        &mut conversation,
+        &mut felt(),
+        now,
+        FRAME,
+    );
+    assert_eq!(conversation.take_refused_panel(), None);
 }

@@ -383,6 +383,8 @@ fn panels_at_an_anchor_float_in_its_cluster_move_with_it_and_are_left_floating_a
         wall: None,
         slot: None,
         pose: Some(upright([0.5, 1.4, -1.0])),
+        size: None,
+        revision: None,
     });
     assert!(
         hub.lock()

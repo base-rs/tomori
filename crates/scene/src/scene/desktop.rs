@@ -1293,6 +1293,8 @@ mod tests {
                 wall: Some("deck".into()),
                 slot: Some(1),
                 pose: None,
+                size: None,
+                revision: None,
             })]
         );
     }

@@ -804,6 +804,13 @@ pub enum ClientMessage {
     /// wall, leave it floating at `pose`, in the space's coordinates, for everyone in the space. Participants only, and
     /// only to a server whose [`crate::SpaceState::projection`] is set. An older server, which knows no `slot`, puts it in
     /// the wall's most prominent free slot.
+    ///
+    /// Left floating, it may say a `size`, as a participant stretched or shrank it with both hands: as large as that,
+    /// as a proportion of its own size, within [`crate::FLOAT_SIZES`] ([`crate::Panel::size`]), and then also, as
+    /// `revision`, the panel's [`crate::Panel::version`] it saw as the second hand took hold of it, so that the server
+    /// refuses the change where the panel has changed since, naming the panel in its [`ServerMessage::Error`], and sends
+    /// the projection again. Without a size, a panel left floating keeps the size it had; put on a wall, it loses it.
+    /// An older server ignores both, leaving it floating at its own size.
     PlacePanel {
         panel: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -812,6 +819,10 @@ pub enum ClientMessage {
         slot: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pose: Option<Pose>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
     },
     /// Dismiss the panel `panel`, for everyone in the space. Participants only, and only to a server whose
     /// [`crate::SpaceState::projection`] is set.

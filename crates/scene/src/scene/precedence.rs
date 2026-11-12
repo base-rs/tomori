@@ -204,7 +204,8 @@ impl Ladder for A {
 pub(crate) enum Grab {
     /// The right wrist's transcript while it shows: the squeeze detaches or reattaches it.
     Transcript,
-    /// A projected panel, a wall or a card carried: the squeeze is the carrying's.
+    /// A projected panel, a wall or a card carried, or what the other hand holds, this hand's ray on it or the hand
+    /// touching it: the squeeze is the carrying's, and takes hold of it with both hands.
     Carried,
     /// Anything of Tomori's the ray is on, such as a panel, which the squeeze pulls off, a wall's board or handles, which
     /// it takes hold of, a card, which it picks up, or a worker: the squeeze is Tomori's, and never reaches the
