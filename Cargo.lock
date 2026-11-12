@@ -4173,6 +4173,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "spade",
  "tomori-assets",
  "tomori-environment",
  "tomori-physics",

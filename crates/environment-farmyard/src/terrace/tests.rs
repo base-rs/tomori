@@ -38,7 +38,7 @@ fn walked() -> Vec<Vec2> {
 fn the_terrace_is_a_floor_of_its_own_at_its_height_on_the_mountain_at_the_top_of_the_falls() {
     // Drawn as ground at its height, 7.2 m above the pool, every face of it level, within its outline.
     let ground = ground();
-    assert_eq!(ground.len(), OUTLINE.len() * 2);
+    assert_eq!(ground.len(), faces().len());
     for triangle in &ground {
         let normal = (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
         assert!(normal.y > 0.0 && normal.x == 0.0 && normal.z == 0.0);
@@ -103,6 +103,75 @@ fn the_terrace_is_a_floor_of_its_own_at_its_height_on_the_mountain_at_the_top_of
 fn on_the_fall(point: Vec2) -> Vec2 {
     let (along, across) = backdrop::on_the_fall(point);
     Vec2::new(along, across)
+}
+
+/// The corner `point` is, by its bits, so that the faces sharing it are found.
+fn key(point: Vec3) -> [u32; 3] {
+    point.to_array().map(f32::to_bits)
+}
+
+#[test]
+fn the_terrace_s_floor_is_even_faces_with_no_star_of_slivers_about_any_corner() {
+    // The maintainer saw a star on the headset, the floor fanned from one corner in long slivers: now no corner is shared
+    // by more than eight faces, no angle of any face is under 25°, and every face is within a half and twice the size of
+    // the lattice's, 0.6 m across.
+    let ground = ground();
+    let mut shared = std::collections::HashMap::new();
+    for corner in ground.iter().flatten() {
+        *shared.entry(key(*corner)).or_insert(0) += 1;
+    }
+    let most = shared.values().copied().max().unwrap();
+    assert!(most <= 8, "{most}");
+    let lattice = 3f32.sqrt() / 4.0 * SPACING * SPACING;
+    for triangle in &ground {
+        for index in 0..3 {
+            let [a, b, c] = [0, 1, 2].map(|step| triangle[(index + step) % 3]);
+            let angle = (b - a).angle_between(c - a).to_degrees();
+            assert!(angle > 25.0 - 1e-3, "{triangle:?} {angle}");
+        }
+        let [a, b, c] = *triangle;
+        let area = (b - a).cross(c - a).length() * 0.5;
+        assert!(
+            (lattice * 0.5..lattice * 2.0).contains(&area),
+            "{triangle:?} {area} {lattice}"
+        );
+    }
+    // Its faces meet edge to edge, each inner edge shared by two of them, and its outer edges are its edge's pieces,
+    // each once, which its sides share too, so that the floor is one closed surface, joined to its sides corner to
+    // corner.
+    let mut edges = std::collections::HashMap::new();
+    for [a, b, c] in &ground {
+        for (from, to) in [(a, b), (b, c), (c, a)] {
+            let (from, to) = (key(*from), key(*to));
+            *edges
+                .entry(if from < to { (from, to) } else { (to, from) })
+                .or_insert(0) += 1;
+        }
+    }
+    assert!(edges.values().all(|count| *count <= 2));
+    let mut outer: Vec<_> = edges
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(edge, _)| *edge)
+        .collect();
+    let edge = edge();
+    let lift = |point: Vec2| key(Vec3::new(point.x, TERRACE, point.y));
+    let mut pieces: Vec<_> = (0..edge.len())
+        .map(|index| {
+            let (from, to) = (lift(edge[index]), lift(edge[(index + 1) % edge.len()]));
+            if from < to { (from, to) } else { (to, from) }
+        })
+        .collect();
+    outer.sort();
+    pieces.sort();
+    assert_eq!(outer, pieces);
+    for index in 0..edge.len() {
+        let length = edge[index].distance(edge[(index + 1) % edge.len()]);
+        assert!(
+            (SPACING * 0.4..=SPACING + 1e-4).contains(&length),
+            "{length}"
+        );
+    }
 }
 
 #[test]
@@ -251,12 +320,12 @@ fn its_stones_ferns_flat_rock_and_cairn_stand_on_its_floor_and_are_kept_clear_of
     let [_, down] = targets();
     assert!((down.foot.y + down.height - cairn_top() - 0.05).abs() < 1e-5);
     assert!(cairn_top() - TERRACE > 0.5);
-    // Drawn as one model, its floor, sides, flat rock and cairn, in 148 triangles, none of them facing down, so that
+    // Drawn as one model, its floor, sides, flat rock and cairn, in 414 triangles, none of them facing down, so that
     // the flat rock's and the cairn's tops are lit from above.
     let model = model();
     let primitive = &model.meshes[0].primitives[0];
     let triangles: usize = primitive.indices.len() / 3;
-    assert_eq!(triangles, 148, "the count the documentation gives");
+    assert_eq!(triangles, 414, "the count the documentation gives");
     assert!(primitive.normals.iter().all(|normal| normal.y > -0.01));
 }
 

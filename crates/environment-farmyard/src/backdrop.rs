@@ -346,7 +346,7 @@ fn fine_corner(ring: usize, row: usize, segment: usize, column: usize) -> Vec3 {
 }
 
 /// The triangles the foothills' cell from `ring` and `segment` is drawn in: its rows and columns, if it is drawn finely;
-/// one beside those, a fan taking in the fine corners along the edge it shares with them; and any other, the two of
+/// one beside those, taking in the fine corners along the edge it shares with them ([`zipped`]); and any other, the two of
 /// [`cell`].
 fn cell_triangles(ring: usize, segment: usize) -> Vec<[Vec3; 3]> {
     let next = (segment + 1) % SEGMENTS;
@@ -399,16 +399,31 @@ fn cell_triangles(ring: usize, segment: usize) -> Vec<[Vec3; 3]> {
         None
     };
     match shared {
-        // Fanned from its last corner, which is beside the shared edge's start, so that the fan stays within the cell.
-        Some(corners) => {
-            let apex = corners[corners.len() - 1];
-            corners[..corners.len() - 1]
-                .windows(2)
-                .map(|pair| [apex, pair[0], pair[1]])
-                .collect()
-        }
+        Some(corners) => zipped(&corners),
         None => cell((ring, segment), [a, b, c, d]).to_vec(),
     }
+}
+
+/// The triangles of a cell beside the fine cells, its `corners` in order round it: the shared edge's, from its start to
+/// its end, then the cell's other two. Its first half is fanned from the last corner, which is beside the shared edge's
+/// start, and its second from the one before, which is beside its end, a triangle between them bridging the cell, so
+/// that no corner takes more than half the edge's pieces, as a fan from one corner would, in long thin slivers.
+fn zipped(corners: &[Vec3]) -> Vec<[Vec3; 3]> {
+    let count = corners.len();
+    let (near, far) = (corners[count - 1], corners[count - 2]);
+    let edge = &corners[..count - 2];
+    let middle = (edge.len() - 1) / 2;
+    let mut triangles: Vec<[Vec3; 3]> = edge[..=middle]
+        .windows(2)
+        .map(|pair| [near, pair[0], pair[1]])
+        .collect();
+    triangles.push([near, edge[middle], far]);
+    triangles.extend(
+        edge[middle..]
+            .windows(2)
+            .map(|pair| [far, pair[0], pair[1]]),
+    );
+    triangles
 }
 
 /// The foothills' triangles, each cell's in turn, as drawn, found once.

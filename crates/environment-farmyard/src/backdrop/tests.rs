@@ -460,6 +460,19 @@ fn the_foothills_are_one_closed_surface_drawn_finely_about_the_stream_and_the_up
         }
     }
     assert_eq!(open, SEGMENTS * 2);
+    // No corner of a cell beside the fine cells is shared by more than five of its triangles, as up to eight were when it
+    // was fanned from one corner, so that none draws a star of slivers.
+    for (index, cell) in foothills_triangles().iter().enumerate() {
+        if fine(index / SEGMENTS, index % SEGMENTS) {
+            continue;
+        }
+        let mut shared: std::collections::HashMap<_, usize> = std::collections::HashMap::new();
+        for corner in cell.iter().flatten() {
+            *shared.entry(key(*corner)).or_default() += 1;
+        }
+        let most = shared.values().copied().max().unwrap();
+        assert!(most <= 5, "{most} {cell:?}");
+    }
     // The fine cells' corners are on the ground, finely enough to draw the stream's channel and the pool's basin.
     let cells: Vec<_> = (0..RINGS.len() - 1)
         .flat_map(|ring| (0..SEGMENTS).map(move |segment| (ring, segment)))
@@ -678,7 +691,7 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 18.9 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
+    // Under the budget, about 19.1 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
     // each kind of plant with all its instances but the tree ferns, which the ferns draw, the river's stones, all
     // instances of one, the upper terrace's among them, the waterfall rock, the trail, the upper terrace, the water,
     // above the waterfall too, and the ranges; and the stations' plaques, five small draws of text.
@@ -693,11 +706,11 @@ fn the_backdrop_is_modest_for_the_quest() {
             stones: 885,
             rock: 40,
             trail: 1144,
-            terrace: 148,
+            terrace: 414,
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 18_866);
+    assert_eq!(triangles.total(), 19_132);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the
