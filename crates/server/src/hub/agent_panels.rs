@@ -165,6 +165,8 @@ fn summarized(
         "code"
     } else if panel.chart.is_some() {
         "chart"
+    } else if panel.diagram.is_some() {
+        "diagram"
     } else {
         "text"
     };
@@ -208,6 +210,11 @@ fn summarized(
     }
     if let Some(code) = &panel.code {
         described["language"] = json!(code.language);
+    }
+    // A volume's nodes and edges, counted; its outline is its body.
+    if let Some(diagram) = &panel.diagram {
+        described["node_count"] = json!(diagram.nodes.len());
+        described["edge_count"] = json!(diagram.edges.len());
     }
     described
 }
@@ -496,6 +503,11 @@ impl Hub {
             .content(&walls, &id)
             .cloned()
             .ok_or("A code panel cannot be updated in place: project a new one.")?;
+        if content.diagram.is_some() {
+            return Err(
+                "A diagram is updated with show_diagram, or a diagram block, of its id.".to_owned(),
+            );
+        }
         // Changed since the version the agent read, the update is refused, rather than tick another item than it named.
         let current = projection.panel(&id).expect("a panel found").version;
         if let Some(read) = update.version

@@ -952,7 +952,15 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
     // as no data; on a text panel, where it is pointed across says nothing.
     let across = |id: &str, across: u16| {
         stage
-            .describe_at(&walls, id, (None, None, Some(across)), 120)
+            .describe_at(
+                &walls,
+                id,
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                120,
+            )
             .unwrap()
     };
     assert!(
@@ -1066,7 +1074,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
     };
     let across = |title: &str, across: u16| {
         stage
-            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .describe_at(
+                &walls,
+                &id(title),
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
             .unwrap()
     };
     // Now, on its wall: the hour's and five minutes' charts, then at most three in all, never the other wall's.
@@ -1092,7 +1108,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
     );
     let across = |title: &str, across: u16| {
         stage
-            .describe_at(&walls, &id(title), (None, None, Some(across)), 0)
+            .describe_at(
+                &walls,
+                &id(title),
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
             .unwrap()
     };
     let frozen = across("frozen", 9_000);
@@ -1119,7 +1143,15 @@ fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_th
         .id;
     assert!(
         !stage
-            .describe_at(&walls, &bare, (None, None, Some(5_000)), 0)
+            .describe_at(
+                &walls,
+                &bare,
+                crate::stage::Pointed {
+                    across: Some(5_000),
+                    ..crate::stage::Pointed::default()
+                },
+                0
+            )
             .unwrap()
             .contains("linked")
     );
@@ -1262,6 +1294,8 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
         ),
         slug: Some("a".repeat(blocks::ID_CHARS)),
         image: None,
+        diagram: None,
+        warnings: Vec::new(),
     };
     // A chart of every series at every point, as a live chart is, its lines unbroken.
     let mut plotted = largest_chart();
@@ -2531,7 +2565,16 @@ fn pointing_at_a_row_by_its_id_describes_that_row_wherever_it_now_is() {
     let id = stage.view("s", &walls, 0).panels[0].id.clone();
     let describe = |line: Option<u32>, row: Option<&str>| {
         stage
-            .describe_at(&walls, &id, (line, row, None), 0)
+            .describe_at(
+                &walls,
+                &id,
+                crate::stage::Pointed {
+                    line,
+                    row,
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
             .unwrap()
     };
     // Named by its id, the row is the one the participant saw, whatever is on that line now.

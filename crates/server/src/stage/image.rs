@@ -28,6 +28,8 @@ impl Content {
             code: None,
             slug: None,
             image: Some(image),
+            diagram: None,
+            warnings: Vec::new(),
         }
     }
 }
@@ -123,6 +125,8 @@ mod tests {
             code: Some(tomori_protocol::Code::new("rust", 2)),
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         };
         stage.project_reply(&walls, vec![code.clone()], None, 0);
         stage.project_reply(&walls, vec![code], None, 0);

@@ -214,6 +214,7 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

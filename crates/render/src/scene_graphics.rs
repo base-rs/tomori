@@ -304,6 +304,7 @@ pub fn draw(
     renderer.set_blink(frame.blink);
     renderer.set_home_ring(Some(frame.home_ring));
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
+    renderer.update_volumes(queue, &frame.volumes);
     renderer.set_presentation_page(frame.card);
     renderer.set_presentation_content_page(frame.content);
     renderer.set_dials(frame.dials);
@@ -360,6 +361,7 @@ mod tests {
     mod padlock_floor;
     mod timers;
     mod turning;
+    mod volumes;
 
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {
@@ -1448,6 +1450,7 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,

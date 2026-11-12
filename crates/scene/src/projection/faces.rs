@@ -396,6 +396,10 @@ impl Layout {
     ) -> (Canvas, Option<PlotArea>) {
         count(0, 1);
         let border = Some(border);
+        // A volume's face is its heading and the plate its diagram stands in front of.
+        if let Some(diagram) = &panel.diagram {
+            return (super::volume::face(panel, diagram, self.fit, border), None);
+        }
         match (&self.code, &panel.chart, &panel.image) {
             (Some(layout), ..) => {
                 let mut canvas = code_face(panel, layout, self.fit, scroll);

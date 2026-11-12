@@ -38,7 +38,8 @@ const BODY_ROWS: usize = ROWS - 4;
 /// declare and today's six owners add, and its slots six for each, so that an environment declaring sixteen standard
 /// walls is drawn whole: a wall costs a board, and a slot no more than a board of its own, a few quads each, built and
 /// compared every frame and meshed again as they change or change place in the draw order, beside the panels they
-/// hold, which stay as many. See `design/clients.md`.
+/// hold, which stay as many. It draws sixteen volumes of 1,024 nodes together, until what they cost is measured on the
+/// headset. See `design/clients.md` and `design/diagrams.md`.
 pub const HEADSET_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TODAY
     .with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32)
     .with_projection(
@@ -46,7 +47,8 @@ pub const HEADSET_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TOD
         tomori_protocol::WALL_SLOTS * (1 + 16 + 6),
         tomori_protocol::PROJECTION_FLOATING,
         tomori_protocol::PROJECTION_PANELS,
-    );
+    )
+    .with_volumes(16, 1024);
 
 /// What the desktop window states: frames of up to [`tomori_protocol::MOST_FRAME_BYTES`], twice today's walls owners
 /// add, with the Tomori wall and the sixteen an environment may declare, six slots for each, and twice today's floating
@@ -59,7 +61,8 @@ pub const DESKTOP_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TOD
         tomori_protocol::WALL_SLOTS * (1 + 16 + 12),
         2 * tomori_protocol::PROJECTION_FLOATING,
         2 * tomori_protocol::PROJECTION_PANELS,
-    );
+    )
+    .with_volumes(16, 1024);
 
 /// The longest instructions an owner gives a space, as the server limits them.
 const INSTRUCTIONS_BYTES: usize = 4096;
@@ -13488,10 +13491,21 @@ mod tests {
             use tomori_protocol::{Limits, MOST_FRAME_BYTES};
             let longest = Limits::TODAY.with_frame_bytes(MOST_FRAME_BYTES as u32);
             let mut conversation = joined();
-            // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each.
-            assert_eq!(HEADSET_LIMITS, longest.with_projection(23, 138, 12, 90));
+            // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each; and sixteen
+            // volumes of 1,024 nodes together.
+            assert_eq!(
+                HEADSET_LIMITS,
+                longest
+                    .with_projection(23, 138, 12, 90)
+                    .with_volumes(16, 1024)
+            );
             assert_eq!(Session::limits(&conversation), HEADSET_LIMITS);
-            assert_eq!(DESKTOP_LIMITS, longest.with_projection(29, 174, 24, 180));
+            assert_eq!(
+                DESKTOP_LIMITS,
+                longest
+                    .with_projection(29, 174, 24, 180)
+                    .with_volumes(16, 1024)
+            );
             conversation.set_limits(DESKTOP_LIMITS);
             assert_eq!(Session::limits(&conversation), DESKTOP_LIMITS);
         }

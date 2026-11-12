@@ -148,6 +148,8 @@ impl Lines {
             code: Some(Code::new(language.clone(), total)),
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         };
         Some(Found::code(content, Source { language, lines }).placed(self.place))
     }

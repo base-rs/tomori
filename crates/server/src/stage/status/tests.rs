@@ -24,6 +24,8 @@ fn content(title: &str) -> Content {
         code: None,
         slug: None,
         image: None,
+        diagram: None,
+        warnings: Vec::new(),
     }
 }
 

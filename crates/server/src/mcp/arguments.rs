@@ -37,6 +37,11 @@ impl<'a> Arguments<'a> {
         self.value.get(name)
     }
 
+    /// The arguments whole, as they were given, for a tool that reads them as a model of its own.
+    pub(super) fn value(self) -> &'a Value {
+        self.value
+    }
+
     /// The object argument `name`, if it is given, read as arguments of its own.
     pub(super) fn object(self, name: &str) -> Option<Self> {
         let value = self.get(name).filter(|value| !value.is_null())?;

@@ -498,6 +498,8 @@ impl Hub {
             code: None,
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         };
         let panel = record
             .stage

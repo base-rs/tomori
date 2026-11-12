@@ -467,6 +467,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "workers",
             "remove_workers",
             "show_image",
+            "show_diagram",
             "set_timer",
             "timers",
             "cancel_timer"

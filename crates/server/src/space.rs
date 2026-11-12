@@ -218,11 +218,18 @@ impl Attended {
             (Resolved::Worker { id, .. }, Resolved::Worker { id: other, .. })
             | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. })
             | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. })
-            | (Resolved::Panel { id, .. }, Resolved::Panel { id: other, .. })
             | (Resolved::Gathered { anchor: id, .. }, Resolved::Gathered { anchor: other, .. })
             | (Resolved::Timer { name: id, .. }, Resolved::Timer { name: other, .. }) => {
                 id == other
             }
+            // Two parts of one panel, as each hand points at a node of one volume, are two.
+            (
+                Resolved::Panel { id, description },
+                Resolved::Panel {
+                    id: other,
+                    description: described,
+                },
+            ) => id == other && description == described,
             _ => false,
         }
     }
@@ -270,8 +277,7 @@ pub const CONTEXT_CHARS: usize = 1_000;
 /// How a panel attended to is described: by its identity, the line of its body pointed at, the row's id and where across
 /// a chart's time axis, as the client named them, from the stage's own store, or `None` where the space does not show
 /// it.
-pub type DescribePanel<'a> =
-    dyn Fn(&str, Option<u32>, Option<&str>, Option<u16>) -> Option<String> + 'a;
+pub type DescribePanel<'a> = dyn Fn(&str, crate::stage::Pointed<'_>) -> Option<String> + 'a;
 
 /// Which workers a cluster anchor's "+N more" sign gathers, by the anchor's name, each by session, in the order of their
 /// slots, as the space lays its clusters out, or `None` where it has no such anchor or the sign gathers none.
@@ -1774,7 +1780,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
-        self.attended_with(resource, cards, objects, &|_, _, _, _| None, &|_| None)
+        self.attended_with(resource, cards, objects, &|_, _| None, &|_| None)
     }
 
     /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
@@ -1835,6 +1841,8 @@ impl SpaceModel {
                 line,
                 row,
                 across,
+                node,
+                edge,
                 ..
             } if panel.len() <= limits::IDENTIFIER_BYTES => {
                 let row = row
@@ -1842,7 +1850,19 @@ impl SpaceModel {
                     .filter(|row| row.len() <= tomori_environment::ROW_ID_BYTES);
                 Some(Attended(Resolved::Panel {
                     id: panel.clone(),
-                    description: panels(panel, *line, row, *across)?,
+                    description: panels(
+                        panel,
+                        crate::stage::Pointed {
+                            line: *line,
+                            row,
+                            across: *across,
+                            // A node is named by its id, which is dropped where it is longer than any.
+                            node: node
+                                .as_deref()
+                                .filter(|node| node.len() <= tomori_protocol::diagram::ID_BYTES),
+                            edge: *edge,
+                        },
+                    )?,
                 }))
             }
             // Its workers are those the space's own layout gathers into it, each as the space knows it now.
@@ -1888,7 +1908,7 @@ impl SpaceModel {
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
-        self.resolve_with(attention, cards, objects, &|_, _, _, _| None, &|_| None)
+        self.resolve_with(attention, cards, objects, &|_, _| None, &|_| None)
     }
 
     /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, and "+N more" signs
@@ -2073,6 +2093,12 @@ impl SpaceModel {
             self.notes.pop_front();
         }
         self.notes.push_back((panel.to_owned(), line, note));
+    }
+
+    /// What the agent is told of a panel it projected, as `note` says, before the next words spoken in the space, as of a
+    /// tick: a later note of the same panel replaces it. See `design/diagrams.md`.
+    pub fn note_panel(&mut self, panel: &str, note: String) {
+        self.note_tick(panel, u32::MAX, note);
     }
 
     /// The notes waiting for the next words, for tests.
@@ -3944,7 +3970,7 @@ mod tests {
             ],
             None,
             None,
-            &|_, _, _, _| None,
+            &|_, _| None,
             &gathered,
         );
         assert_eq!(attention.len(), 1);
@@ -3967,7 +3993,7 @@ mod tests {
             &[tomori_protocol::Resource::gathered("home")],
             None,
             None,
-            &|_, _, _, _| None,
+            &|_, _| None,
             &|_| Some(vec!["ses_00".to_owned()]),
         );
         space.apply(Event::WorkersChanged {
@@ -5143,10 +5169,19 @@ mod tests {
     #[test]
     fn a_panel_attended_to_is_described_as_the_stage_describes_it_once() {
         let space = model();
-        let describe = |panel: &str, _: Option<u32>, row: Option<&str>, across: Option<u16>| {
+        let describe = |panel: &str, at: crate::stage::Pointed<'_>| {
             (panel == "panel-1").then(|| {
-                let across = across.map_or(String::new(), |across| format!(" at {across}"));
-                format!("panel \"Status\"{}{across}", row.unwrap_or_default())
+                let across = at
+                    .across
+                    .map_or(String::new(), |across| format!(" at {across}"));
+                let node = at.node.map_or(String::new(), |node| format!(" on {node}"));
+                let edge = at
+                    .edge
+                    .map_or(String::new(), |edge| format!(" along {edge}"));
+                format!(
+                    "panel \"Status\"{}{across}{node}{edge}",
+                    at.row.unwrap_or_default()
+                )
             })
         };
         let panel = tomori_protocol::Resource::panel("panel-1");
@@ -5200,6 +5235,26 @@ mod tests {
         assert_eq!(
             chart.as_deref(),
             Some("[Pointing at panel \"Status\" at 6000]")
+        );
+        // So are a volume's node, by its id, dropped where it is longer than any, and its edge, by its index.
+        let volume = |node: &str, edge: Option<u16>| {
+            space
+                .attended_with(
+                    &tomori_protocol::Resource::volume_at("panel-1", Some(node), edge),
+                    None,
+                    None,
+                    &describe,
+                    &|_| None,
+                )
+                .map(|attended| context("fake", &[attended], &[]).unwrap())
+        };
+        assert_eq!(
+            volume("octree", Some(2)).as_deref(),
+            Some("[Pointing at panel \"Status\" on octree along 2]")
+        );
+        assert_eq!(
+            volume(&"n".repeat(tomori_protocol::diagram::ID_BYTES + 1), None).as_deref(),
+            Some("[Pointing at panel \"Status\"]")
         );
         // Without the stage, a panel is not resolved.
         assert!(

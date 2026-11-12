@@ -203,6 +203,13 @@ pub enum Resource {
         row: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         across: Option<u16>,
+        /// On a volume, the node the ray meets, by its id, so that the server describes it from its own copy of the
+        /// diagram; an older server ignores it. See `design/diagrams.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+        /// On a volume, the edge the ray meets, by its index among the diagram's edges.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<u16>,
     },
     /// The "+N more" sign of a cluster anchor's cluster, by the anchor's name, which stands for the workers gathered
     /// into it: the server names them, their titles and sessions, from its own layout of the cluster. An older server
@@ -276,6 +283,8 @@ impl Resource {
             line: None,
             row: None,
             across: None,
+            node: None,
+            edge: None,
         }
     }
 
@@ -297,6 +306,8 @@ impl Resource {
             line: None,
             row: None,
             across: Some(across),
+            node: None,
+            edge: None,
         }
     }
 
@@ -308,6 +319,34 @@ impl Resource {
             line,
             row: None,
             across: None,
+            node: None,
+            edge: None,
+        }
+    }
+
+    /// The volume whose [`crate::Panel::id`] is `panel`, pointed at on its node `node`, by the node's id, or its edge
+    /// `edge`, by its index among the diagram's edges.
+    ///
+    /// ```
+    /// use tomori_protocol::Resource;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::volume_at("panel-7", Some("octree"), None)).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-7", "node": "octree"})
+    /// );
+    /// assert_eq!(
+    ///     serde_json::to_value(Resource::volume_at("panel-7", None, Some(3))).unwrap(),
+    ///     serde_json::json!({"kind": "panel", "panel": "panel-7", "edge": 3})
+    /// );
+    /// ```
+    pub fn volume_at(panel: impl Into<String>, node: Option<&str>, edge: Option<u16>) -> Self {
+        Self::Panel {
+            panel: panel.into(),
+            line: None,
+            row: None,
+            across: None,
+            node: node.map(str::to_owned),
+            edge,
         }
     }
 
@@ -329,6 +368,8 @@ impl Resource {
             line: Some(line),
             row: Some(row.into()),
             across: None,
+            node: None,
+            edge: None,
         }
     }
 }
@@ -487,6 +528,11 @@ pub enum ClientMessage {
         /// sent one, and are sent an image panel as a text panel of its caption instead. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         images: bool,
+        /// Whether this client draws volumes, panels with depth whose [`crate::Panel::diagram`] it is sent, within its
+        /// [`crate::Limits::volumes`] and [`crate::Limits::nodes`]. Absent from older clients, which are sent each volume
+        /// as a text panel of its outline. See `design/diagrams.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        diagrams: bool,
         /// Whether this client applies [`ServerMessage::ProjectionPatch`] to the projection it holds, asking with
         /// [`ClientMessage::ResyncProjection`] for the whole projection when it cannot. Absent from older clients, which
         /// would refuse a patch and are sent the whole [`ServerMessage::Projection`] whenever it changes, as before. See
@@ -1845,6 +1891,7 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -1962,6 +2009,7 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2037,6 +2085,7 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2079,6 +2128,7 @@ mod tests {
             pairing_window: true,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2139,6 +2189,7 @@ mod tests {
             pairing_window: false,
             speech_held: false,
             images: false,
+            diagrams: false,
             projection_patches: false,
             live_panels: false,
             limits: None,
@@ -2166,6 +2217,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,

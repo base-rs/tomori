@@ -625,6 +625,9 @@ struct ConnectionRecord {
     speech_held: bool,
     /// Whether the client said in Hello that it shows image panels, fetching their images. See `design/projection.md`.
     images: bool,
+    /// Whether the client said in Hello that it draws volumes, sent their diagrams within its limits. See
+    /// `design/diagrams.md`.
+    diagrams: bool,
     /// Whether the client said in Hello that it reads what is projected and applies patches to it. See
     /// `design/projection.md`.
     patches: bool,
@@ -3392,6 +3395,7 @@ impl Hub {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 patches: false,
                 live_panels: false,
                 limits: Limits::TODAY,
@@ -3633,6 +3637,7 @@ impl Hub {
                 pairing_window,
                 speech_held,
                 images,
+                diagrams,
                 projection_patches,
                 live_panels,
                 limits,
@@ -3645,6 +3650,7 @@ impl Hub {
                     record.pairing_window = pairing_window;
                     record.speech_held = speech_held;
                     record.images = images;
+                    record.diagrams = diagrams;
                     record.patches = projection && projection_patches;
                     record.live_panels = record.patches && live_panels;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
@@ -4135,11 +4141,7 @@ impl Hub {
                             &attention,
                             state.cards_of(&space),
                             record.channel.as_ref(),
-                            &|panel, line, row, across| {
-                                record
-                                    .stage
-                                    .describe_at(&walls, panel, (line, row, across), now)
-                            },
+                            &|panel, at| record.stage.describe_at(&walls, panel, at, now),
                             &|anchor| record.gathered(&environments, anchor),
                         )
                     }
@@ -4248,14 +4250,7 @@ impl Hub {
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
-                                    &|panel, line, row, across| {
-                                        space.stage.describe_at(
-                                            &walls,
-                                            panel,
-                                            (line, row, across),
-                                            now,
-                                        )
-                                    },
+                                    &|panel, at| space.stage.describe_at(&walls, panel, at, now),
                                     &|anchor| space.gathered(&environments, anchor),
                                 )
                             })
@@ -6471,13 +6466,27 @@ impl Hub {
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         let solids = record.panel_solids(&environments);
+        let mut notes = Vec::new();
         for (contents, origin) in replies {
             let projection = record.stage.view(space, &walls, now);
             // How many of the reply's panels went to each anchor before, so that each takes a slot of its own there.
             let mut anchored: Vec<String> = Vec::new();
+            let mut warned: Vec<crate::stage::Content> = Vec::new();
             let placed = contents
                 .into_iter()
-                .map(|(content, place)| {
+                .map(|(mut content, place)| {
+                    // A volume is laid out as it is projected, from where the one it changes stood, if it changes one.
+                    if content.diagram.is_some() {
+                        let previous = content
+                            .slug
+                            .as_deref()
+                            .and_then(|slug| record.stage.named_diagram(walls.environment, slug));
+                        content.lay_out(previous);
+                    }
+                    warned.push(crate::stage::Content {
+                        warnings: std::mem::take(&mut content.warnings),
+                        ..content.clone()
+                    });
                     // A placement that names someone who has not reported, or a wall or anchor not here, is as none.
                     let said = place.and_then(|place| {
                         let before = match &place {
@@ -6512,13 +6521,25 @@ impl Hub {
                     (content, to, placed)
                 })
                 .collect();
-            for (id, updated) in record.stage.project_placed(&walls, placed, now) {
+            for ((id, updated), content) in record
+                .stage
+                .project_placed(&walls, placed, now)
+                .into_iter()
+                .zip(&warned)
+            {
+                // What was wrong with a volume's block, the agent is told before the next words.
+                if let Some(note) = content.warned(&id) {
+                    notes.push((id.clone(), note));
+                }
                 if updated {
                     log::info!("Space {space} updated {id} in place.");
                 } else {
                     log::info!("Space {space} projected {id}.");
                 }
             }
+        }
+        for (id, note) in notes {
+            record.model.note_panel(&id, note);
         }
         // Those put at an anchor stand in its cluster, which may lay it out again.
         record.settle(&environments);
@@ -7136,6 +7157,22 @@ impl Hub {
                         .collect();
                     projection = Arc::new(plain);
                 }
+                // And each volume past what it draws, or every one, if it draws none, as its outline.
+                let (diagrams, limits) = state
+                    .connections
+                    .get(&connection)
+                    .map_or((false, Limits::TODAY), |record| {
+                        (record.diagrams, record.limits)
+                    });
+                if projection
+                    .panels
+                    .iter()
+                    .any(|panel| panel.diagram.is_some())
+                {
+                    let mut plain = (*projection).clone();
+                    plain.panels = crate::stage::within_volumes(plain.panels, diagrams, &limits);
+                    projection = Arc::new(plain);
+                }
                 let live = state
                     .connections
                     .get(&connection)
@@ -7253,6 +7290,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7357,6 +7395,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7431,6 +7470,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,
@@ -7472,6 +7512,7 @@ mod tests {
                     pairing_window: false,
                     speech_held: false,
                     images: false,
+                    diagrams: false,
                     projection_patches: false,
                     live_panels: false,
                     limits: None,
@@ -7676,6 +7717,7 @@ mod tests {
                 pairing_window: false,
                 speech_held: false,
                 images: false,
+                diagrams: false,
                 projection_patches: false,
                 live_panels: false,
                 limits: None,

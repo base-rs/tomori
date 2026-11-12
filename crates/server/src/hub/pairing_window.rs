@@ -256,6 +256,8 @@ impl Hub {
                 code: None,
                 slug: None,
                 image: None,
+                diagram: None,
+                warnings: Vec::new(),
             };
             // Opening it again replaces the notice rather than adding another. See `design/projection.md`.
             let panel = record.stage.project_notice(

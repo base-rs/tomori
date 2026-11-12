@@ -16,6 +16,7 @@ mod cards;
 mod channel;
 mod command;
 mod connection;
+mod diagram;
 mod door;
 mod environments;
 mod events;

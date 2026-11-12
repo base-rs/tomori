@@ -715,6 +715,12 @@ pub struct Panel {
     /// text, as any list. See `design/panel-actions.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<ListColumn>,
+    /// What makes it a volume, a panel with depth, if it is one: its diagram, laid out by the server. Its body is the
+    /// diagram's outline, which a client that draws no volumes shows; the server sends it only to a client whose
+    /// `Hello` sets `diagrams`, within its [`crate::Limits::volumes`] and [`crate::Limits::nodes`]. See
+    /// `design/diagrams.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagram: Option<Box<crate::diagram::Diagram>>,
 }
 
 /// The most columns of a list panel a client lays out ([`Panel::columns`]); the rest are left out.
@@ -936,6 +942,7 @@ impl Panel {
             chart: None,
             rows: Vec::new(),
             columns: Vec::new(),
+            diagram: None,
         }
     }
 
@@ -988,6 +995,7 @@ impl Panel {
             chart,
             rows,
             columns,
+            diagram,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -1003,6 +1011,7 @@ impl Panel {
             && *image == other.image
             && *rows == other.rows
             && *columns == other.columns
+            && *diagram == other.diagram
             && charts
     }
 
@@ -1020,6 +1029,12 @@ impl Panel {
     /// The panel, a chart panel of `chart`, its body a summary of it.
     pub fn with_chart(mut self, chart: crate::chart::Chart) -> Self {
         self.chart = Some(Box::new(chart));
+        self
+    }
+
+    /// The panel, a volume of `diagram`, its body its outline.
+    pub fn with_diagram(mut self, diagram: crate::diagram::Diagram) -> Self {
+        self.diagram = Some(Box::new(diagram));
         self
     }
 

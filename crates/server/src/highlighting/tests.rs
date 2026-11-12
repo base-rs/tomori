@@ -75,6 +75,7 @@ fn projecting(server: &TestServer, participant: &str) -> TestClient {
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

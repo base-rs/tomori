@@ -146,6 +146,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         pairing_window: false,
         speech_held: false,
         images: false,
+        diagrams: false,
         projection_patches: false,
         live_panels: false,
         limits: None,

@@ -15,18 +15,18 @@ use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
+pub(crate) struct Vertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Instance {
-    position: [f32; 3],
-    scale: [f32; 3],
-    color: [f32; 3],
-    basis: [[f32; 3]; 3],
+pub(crate) struct Instance {
+    pub(crate) position: [f32; 3],
+    pub(crate) scale: [f32; 3],
+    pub(crate) color: [f32; 3],
+    pub(crate) basis: [[f32; 3]; 3],
 }
 
 impl Default for Instance {
@@ -208,6 +208,7 @@ pub struct Renderer {
     cubes_culled: bool,
     /// The GPU's time for each frame, and what each drew; see `design/rendering.md`.
     profiler: crate::profiler::Profiler,
+    solids: crate::solids::Solids,
 }
 
 /// Where a cube of Tomori's own may be drawn: the unit cube, scaled, turned by its basis and moved to its position.
@@ -386,6 +387,7 @@ impl Renderer {
             samples,
         );
         let panels = crate::ui_panel::Pipeline::shared(device, format, &glyphs, samples);
+        let solids = crate::solids::Solids::new(device);
         let images =
             crate::panel_images::PanelImages::new(device, format, samples, panels.transforms());
         let blink_pipeline = blink_pipeline(device, format, samples);
@@ -438,6 +440,7 @@ impl Renderer {
             cubes_culled: false,
             // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
             profiler: crate::profiler::Profiler::new(device, queue, !cfg!(target_os = "android")),
+            solids,
         }
     }
 
@@ -456,6 +459,21 @@ impl Renderer {
     /// once a minute; see `design/rendering.md`.
     pub fn gpu_summary(&mut self) -> Option<String> {
         self.profiler.summary()
+    }
+
+    /// The frame's volumes, whose solids are drawn among the opaque bodies, within their budget. See
+    /// `design/diagrams.md`.
+    pub fn update_volumes(
+        &mut self,
+        queue: &wgpu::Queue,
+        volumes: &[tomori_scene::projection::volume::Drawn],
+    ) {
+        self.solids.update(queue, volumes);
+    }
+
+    /// How many triangles the frame's volumes' solids take, and how many volumes it drew without them.
+    pub fn volume_counts(&self) -> (usize, usize) {
+        self.solids.counts()
     }
 
     /// This frame's panels show the images `shown`, by hash, each with its PNG: decode and upload them, within the
@@ -1030,6 +1048,8 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
             pass.draw(0..self.vertex_count, 0..self.shown.len() as u32);
+            // Volumes' solids, by the same pipeline, are opaque bodies too.
+            self.solids.draw(&mut pass);
             self.controllers.draw(&mut pass);
             self.profiler.mark(&mut pass, profiled, eye, 1);
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
@@ -1491,7 +1511,7 @@ fn swarm_instances(swarm: &Swarm, scene: &mut Vec<Instance>) {
     }
 }
 
-fn cube() -> Vec<Vertex> {
+pub(crate) fn cube() -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(36);
     for (normal, u, v) in [
         (glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z),
