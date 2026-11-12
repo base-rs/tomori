@@ -257,6 +257,18 @@ fn the_eye_is_where_every_ray_of_its_view_begins() {
 }
 
 #[test]
+fn tomori_s_cubes_are_hazed_as_the_farmyard_s_models_are() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let lit = lighting();
+        assert!(lit.haze_density > 0.0);
+        assert_eq!(
+            target(&device, &queue, 1).haze(),
+            lit.haze.extend(lit.haze_density)
+        );
+    });
+}
+
+#[test]
 fn the_farmyard_is_an_evening_yard_with_a_warmly_lit_red_coop() {
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

@@ -99,8 +99,25 @@ fn oriented_shader() -> String {
     include_str!("swarm.wgsl")
         .replace("    @location(4) color: vec3<f32>,", "    @location(4) color: vec3<f32>,\n    @location(5) basis_x: vec3<f32>,\n    @location(6) basis_y: vec3<f32>,\n    @location(7) basis_z: vec3<f32>,")
         .replace("    var out: VertexOutput;", "    let rotation = mat3x3<f32>(basis_x, basis_y, basis_z);\n    var out: VertexOutput;")
-        .replace("position + vertex * scale", "position + rotation * (vertex * scale)")
+        .replace("position + vertex * drawn", "position + rotation * (vertex * drawn)")
         .replace("out.normal = normal;", "out.normal = rotation * normal;")
+}
+
+/// The bytes of an eye's camera: its matrix from the scene to its clip space, which every pipeline bound to it reads,
+/// and, for Tomori's cubes, where the eye is, the environment's haze and half its view's height in pixels, padded to a
+/// multiple of 16 bytes.
+const CAMERA_SIZE: u64 = 112;
+
+/// An eye's camera, as `swarm.wgsl` reads it: `scene_to_clip`, the eye it sees from, `haze`, the environment's scenery's
+/// (see [`crate::scenery::Scenery::haze`]), by which its cubes are hazed as the scenery is, and half of `height`, its
+/// view's height in pixels, by which no cube is drawn smaller than a pixel. See `design/rendering.md`.
+fn camera(scene_to_clip: Mat4, haze: glam::Vec4, height: u32) -> [f32; 28] {
+    let mut camera = [0.0; 28];
+    camera[..16].copy_from_slice(&scene_to_clip.to_cols_array());
+    camera[16..19].copy_from_slice(&crate::scenery::eye(scene_to_clip).to_array());
+    camera[20..24].copy_from_slice(&haze.to_array());
+    camera[24] = height as f32 * 0.5;
+    camera
 }
 
 /// The samples per pixel the headset and desktop window draw with unless told otherwise: 4, for multisample anti-aliasing.
@@ -283,11 +300,11 @@ impl Renderer {
             label: Some("eye camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
+                    min_binding_size: wgpu::BufferSize::new(CAMERA_SIZE),
                 },
                 count: None,
             }],
@@ -295,7 +312,7 @@ impl Renderer {
         let cameras = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("eye camera"),
-                size: 64,
+                size: CAMERA_SIZE,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -1008,6 +1025,11 @@ impl Renderer {
             label: Some("swarm frame"),
         });
         let multisampled = self.multisampled.as_ref();
+        // Tomori's cubes are hazed as the environment's scenery is, in its coordinates, which its carriage moves without
+        // stretching, so that distances are the same in the space's.
+        let haze = self
+            .scenery()
+            .map_or(glam::Vec4::ZERO, |scenery| scenery.haze());
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if let Some(scenery) = self.scenery() {
@@ -1033,7 +1055,7 @@ impl Renderer {
             queue.write_buffer(
                 &self.cameras[eye],
                 0,
-                bytemuck::cast_slice(&scene_to_clip.to_cols_array()),
+                bytemuck::cast_slice(&camera(scene_to_clip, haze, self.size.1)),
             );
             // Each panel's model is in the same space as the eyes' matrices.
             for ((panel, model), _) in panels.iter().zip(&visible).filter(|(_, seen)| **seen) {
@@ -1571,6 +1593,9 @@ pub(crate) fn cube() -> Vec<Vertex> {
     }
     vertices
 }
+
+#[cfg(test)]
+mod distance;
 
 #[cfg(test)]
 mod tests {
@@ -3799,7 +3824,7 @@ mod tests {
             );
         }
         let shader = oriented_shader();
-        assert!(shader.contains("rotation * (vertex * scale)"));
+        assert!(shader.contains("rotation * (vertex * drawn)"));
         assert!(shader.contains("out.normal = rotation * normal;"));
         assert!(shader.contains("@location(7) basis_z"));
     }
