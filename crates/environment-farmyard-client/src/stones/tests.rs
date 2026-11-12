@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::*;
 use glam::Quat;
 use tomori_physics::message::{
-    Holding as Changed, Intent, Landed, LetGo, Shared, Snapshot, State, Update,
+    Holding as Changed, Intent, Landed, LetGo, Shared, Snapshot, State, Take, Update,
 };
 use tomori_physics::{Encoded, Held, PULL_TIME, Precision};
 use tomori_scene::client_side::{Actions, Grab, Phase, Side};
@@ -119,27 +119,20 @@ fn a_stone_taken_within_reach_is_held_where_the_hand_closed_on_it_and_thrown_as_
     let shown = stones.shown(&[], &[], start, 1_000);
     assert!(shown[0].transform.w_axis.truncate().distance(at) < 1e-3);
     assert_eq!(stones.within_reach(at), None);
-    // A second taking in the same hand, or of a stone held, takes nothing.
-    assert!(
-        stones
-            .update(
-                [&grab(1, hand, Phase::Began, Side::Left)].into_iter(),
-                Some(5),
-                start,
-                1_000
-            )
-            .is_empty()
-    );
-    assert!(
-        stones
-            .update(
-                [&grab(0, hand, Phase::Began, Side::Right)].into_iter(),
-                Some(5),
-                start,
-                1_000
-            )
-            .is_empty()
-    );
+    // A second taking in the same hand, of another stone or of the one it holds, takes nothing. (The other hand's grip
+    // on it passes it: see below.)
+    for stone in [1, 0] {
+        assert!(
+            stones
+                .update(
+                    [&grab(stone, hand, Phase::Began, Side::Left)].into_iter(),
+                    Some(5),
+                    start,
+                    1_000
+                )
+                .is_empty()
+        );
+    }
     // Moving the hand up and out at 2 m/s, it is let go moving so, and foreseen as it flies.
     let mut now = start;
     for step in 1..=6 {
@@ -662,6 +655,247 @@ fn a_stone_the_server_side_says_this_participant_holds_with_no_hand_of_theirs_is
         20,
     );
     assert!(stones.holding[0].as_ref().is_some_and(|held| held.agreed));
+}
+
+/// What the side says of stone 0 as participant 5 holds it in `hand` at `epoch`, or nobody does.
+fn holding_said(epoch: u32, hand: Option<tomori_physics::Side>) -> Update {
+    Update {
+        holding: vec![Changed {
+            body: 0,
+            epoch,
+            held: hand.map(|hand| Held {
+                by: 5,
+                hand,
+                offset: Encoded::default(),
+            }),
+        }],
+        ..Default::default()
+    }
+}
+
+/// Stone 0 taken by participant 5's left hand where it lies, agreed at epoch 4, and the hand.
+fn in_left(start: Instant) -> (Stones, Hand) {
+    let mut stones = shared();
+    let hand = hand_at(lying(0).position + Vec3::Y * 0.03);
+    stones.update(
+        [&grab(0, hand, Phase::Began, Side::Left)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    stones.changed(10, &holding_said(4, Some(tomori_physics::Side::Left)), 20);
+    assert!(stones.holding[0].as_ref().is_some_and(|held| held.agreed));
+    stones.shown(&[], &[], start, 0);
+    (stones, hand)
+}
+
+#[test]
+fn a_stone_in_one_hand_is_passed_to_the_other_as_it_grips_it_where_it_took_it_and_passed_back() {
+    let start = Instant::now();
+    let (mut stones, left) = in_left(start);
+    let was = stones.shown(&[], &[], start, 0)[0].transform;
+    // The right hand 12 cm beyond its faces, farther than a lying stone is reached from, but within the pass's reach.
+    let at = lying(0);
+    let (width, _) = beach::size(0);
+    let near = at.position + Vec3::new(width * 0.5 + 0.12, 0.0, 0.0);
+    let touch = Beach::touch(0, &at, near);
+    assert!(
+        touch > REACH && touch <= crate::loose::PASS_REACH,
+        "{touch}"
+    );
+    assert_eq!(stones.within_reach(near), None);
+    assert_eq!(stones.within_reach_of(Side::Left, near), None);
+    assert_eq!(
+        stones.within_reach_of(Side::Right, near),
+        Some("stone-0".to_owned())
+    );
+    // Beyond the pass's reach, not.
+    let far = at.position + Vec3::new(width * 0.5 + 0.3, 0.0, 0.0);
+    assert_eq!(stones.within_reach_of(Side::Right, far), None);
+    // The right grip closes on it: passed to the right hand at once, at the epoch the left hand holds it at, held where
+    // the right hand took it, so that it is drawn just where it was, with nothing let go.
+    let right = hand_at(near);
+    let soon = start + Duration::from_millis(10);
+    let intents = stones.update(
+        [&grab(0, right, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        soon,
+        0,
+    );
+    let [Intent::Take(take)] = intents[..] else {
+        panic!("{intents:?}")
+    };
+    assert_eq!(
+        (take.body, take.epoch, take.hand),
+        (0, 4, tomori_physics::Side::Right)
+    );
+    let offset = take.offset.placement(Precision::Rest);
+    assert!(placed(&right).then(&offset).position.distance(at.position) < 1e-3);
+    assert_eq!(
+        (
+            stones.held_in(tomori_physics::Side::Left),
+            stones.held_in(tomori_physics::Side::Right)
+        ),
+        (None, Some(0))
+    );
+    assert_eq!(stones.passed(), [Side::Right]);
+    assert!(stones.passed().is_empty());
+    let now = stones.shown(&[], &[], soon, 0)[0].transform;
+    assert!(now.w_axis.distance(was.w_axis) < 1e-3, "{now:?} {was:?}");
+    // The left grip, still closed, holds nothing now: moving it, or letting it go, does nothing to the stone.
+    let away = hand_at(left.position + Vec3::new(-0.3, 0.0, 0.0));
+    for phase in [Phase::Changed, Phase::Ended] {
+        assert!(
+            stones
+                .update(
+                    [&grab(0, away, phase, Side::Left)].into_iter(),
+                    Some(5),
+                    soon,
+                    0
+                )
+                .is_empty()
+        );
+    }
+    // The side agrees; long after, nothing is let go of again unasked.
+    stones.changed(30, &holding_said(5, Some(tomori_physics::Side::Right)), 40);
+    assert!(stones.holding[1].as_ref().is_some_and(|held| held.agreed));
+    assert!(
+        stones
+            .update(std::iter::empty(), Some(5), start + ASTRAY * 3, 0)
+            .is_empty()
+    );
+    assert_eq!(stones.held_in(tomori_physics::Side::Right), Some(0));
+    // The left grip, let go and squeezed again on it, takes it back.
+    let later = start + ASTRAY * 3;
+    stones.shown(&[], &[], later, 0);
+    let back = stones.update(
+        [&grab(0, hand_at(at.position), Phase::Began, Side::Left)].into_iter(),
+        Some(5),
+        later,
+        0,
+    );
+    assert!(
+        matches!(
+            back[..],
+            [Intent::Take(Take {
+                epoch: 5,
+                hand: tomori_physics::Side::Left,
+                ..
+            })]
+        ),
+        "{back:?}"
+    );
+    assert_eq!(stones.held_in(tomori_physics::Side::Left), Some(0));
+    assert_eq!(stones.passed(), [Side::Left]);
+}
+
+#[test]
+fn a_stone_in_one_hand_is_passed_to_the_other_whose_ray_is_on_it_flying_to_its_palm() {
+    let start = Instant::now();
+    let (mut stones, _) = in_left(start);
+    let at = lying(0).position;
+    // The right ray, from a hand most of a metre away, meets it: the right hand's alone, as the left holds it.
+    let from = at + Vec3::new(0.8, 0.3, 0.0);
+    let ray = Ray::new(from, (at - from).normalize()).unwrap();
+    assert_eq!(stones.pick(&ray), None);
+    assert_eq!(stones.pick_by(Side::Left, &ray), None);
+    let picked = stones.pick_by(Side::Right, &ray).unwrap();
+    assert_eq!(picked.object, "stone-0");
+    assert!(picked.actions.contains(Actions::GRAB));
+    let right = hand_at(from);
+    let intents = stones.update(
+        [&grab(0, right, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    let [Intent::Take(take)] = intents[..] else {
+        panic!("{intents:?}")
+    };
+    assert_eq!((take.epoch, take.hand), (4, tomori_physics::Side::Right));
+    let palm = take.offset.placement(Precision::Rest).position;
+    assert!(palm.z < -0.03 && palm.length() < 0.2, "{palm}");
+    // Where the left hand held it, never let go, then in the right hand once it has flown there.
+    let drawn = |stones: &mut Stones, now| {
+        stones.shown(&[], &[], now, 0)[0]
+            .transform
+            .w_axis
+            .truncate()
+    };
+    assert!(drawn(&mut stones, start).distance(at) < 1e-3);
+    let flown = start + Duration::from_secs_f32(PULL_TIME + 0.05);
+    stones.update(
+        [&grab(0, right, Phase::Changed, Side::Right)].into_iter(),
+        Some(5),
+        flown,
+        0,
+    );
+    let held = placed(&right).then(&take.offset.placement(Precision::Rest));
+    assert!(drawn(&mut stones, flown).distance(held.position) < 1e-3);
+    assert_eq!(stones.held_in(tomori_physics::Side::Left), None);
+}
+
+#[test]
+fn only_a_free_hand_of_the_participant_who_holds_it_passes_a_stone() {
+    let start = Instant::now();
+    let at = lying(0).position;
+    // A hand holding another stone, or a visitor, passes nothing.
+    let (mut stones, _) = in_left(start);
+    let other = hand_at(lying(1).position + Vec3::Y * 0.03);
+    stones.update(
+        [&grab(1, other, Phase::Began, Side::Right)].into_iter(),
+        Some(5),
+        start,
+        0,
+    );
+    assert_eq!(stones.held_in(tomori_physics::Side::Right), Some(1));
+    assert_eq!(stones.within_reach_of(Side::Left, at), None);
+    let near = hand_at(at);
+    assert!(
+        stones
+            .update(
+                [&grab(0, near, Phase::Began, Side::Right)].into_iter(),
+                Some(5),
+                start,
+                0
+            )
+            .is_empty()
+    );
+    let (mut stones, _) = in_left(start);
+    assert!(
+        stones
+            .update(
+                [&grab(0, near, Phase::Began, Side::Right)].into_iter(),
+                None,
+                start,
+                0
+            )
+            .is_empty()
+    );
+    assert_eq!(stones.held_in(tomori_physics::Side::Left), Some(0));
+    // Another's stone, in their hand, is no hand of this participant's to pass from: stage 3's handover.
+    let mut theirs = state();
+    theirs.bodies[0].held = Some(Held {
+        by: 7,
+        hand: tomori_physics::Side::Left,
+        offset: Encoded::default(),
+    });
+    let mut stones = Stones::new();
+    stones.share(&theirs);
+    stones.update(std::iter::empty(), Some(5), start, 0);
+    assert_eq!(stones.within_reach_of(Side::Right, at), None);
+    let down = Ray::new(at + Vec3::Y, Vec3::NEG_Y).unwrap();
+    assert_eq!(stones.pick_by(Side::Right, &down), None);
+    assert!(
+        stones
+            .update(
+                [&grab(0, near, Phase::Began, Side::Right)].into_iter(),
+                Some(5),
+                start,
+                0
+            )
+            .is_empty()
+    );
 }
 
 #[test]

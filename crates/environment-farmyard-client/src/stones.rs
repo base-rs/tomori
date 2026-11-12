@@ -48,7 +48,11 @@ impl Shapes for Beach {
     }
 
     fn reach(body: u32, placement: &Placement, hand: Vec3) -> f32 {
-        reach(body, placement, hand)
+        reach(body, placement, hand, REACH)
+    }
+
+    fn touch(body: u32, placement: &Placement, hand: Vec3) -> f32 {
+        reach(body, placement, hand, crate::loose::PASS_REACH)
     }
 
     /// Within reach, held where the hand closed on it; otherwise pulled to the palm, turned as it was.
@@ -98,11 +102,11 @@ impl Stones {
 }
 
 /// How far a hand at `hand` is from the hull of stone `stone` placed at `placement`: from its faces, as
-/// [`beach::outside`] measures it, unless it is nowhere near.
-fn reach(stone: u32, placement: &Placement, hand: Vec3) -> f32 {
+/// [`beach::outside`] measures it, unless it is nowhere near, farther than `within`.
+fn reach(stone: u32, placement: &Placement, hand: Vec3, within: f32) -> f32 {
     let (width, height) = beach::size(stone as usize);
     let near = hand.distance(placement.position) - width.max(height) * 0.6;
-    if near > REACH {
+    if near > within {
         return near;
     }
     beach::outside(stone as usize, placement.inverse().transform_point(hand))

@@ -181,6 +181,9 @@ pub enum Event {
     LimitCritical,
     /// The agent finished speaking a reply this participant heard, and is idle: it is their turn. See [`Feedback::observe_turn`].
     YourTurn,
+    /// The grip of this hand took an environment's object from the participant's other hand, as a stone passed from hand
+    /// to hand: felt as a light tap on the hand that took it, and silent.
+    Passed(Hand),
 }
 
 /// One vibration of a pattern: when it starts after the event, how long it lasts (`None` is the shortest the controller can), and how strongly, from 0 to 1.
@@ -211,7 +214,7 @@ impl Event {
             | Self::LimitWarning
             | Self::LimitCritical
             | Self::YourTurn => Hand::Left,
-            Self::NotSent(hand) | Self::Shown(hand) => hand,
+            Self::NotSent(hand) | Self::Shown(hand) | Self::Passed(hand) => hand,
             Self::Hover
             | Self::Choose
             | Self::Sent
@@ -249,6 +252,7 @@ impl Event {
             Self::Hover
             | Self::RecordingStops
             | Self::Shown(_)
+            | Self::Passed(_)
             | Self::LimitWarning
             | Self::LimitCritical => None,
             Self::Choose => Some(Earcon::Choose),
@@ -276,7 +280,7 @@ impl Event {
             }],
             Self::Choose => const { &[pulse(0, 20, 0.5)] },
             Self::RecordingStarts => const { &[pulse(0, 25, 0.6)] },
-            Self::RecordingStops => const { &[pulse(0, 15, 0.35)] },
+            Self::RecordingStops | Self::Passed(_) => const { &[pulse(0, 15, 0.35)] },
             // The stop tap was just felt.
             Self::Sent | Self::CatchingUp => &[],
             Self::NotSent(_) => const { &[pulse(0, 30, 0.7), pulse(110, 30, 0.7)] },
@@ -694,7 +698,7 @@ mod tests {
         Duration::from_millis(milliseconds)
     }
 
-    const EVENTS: [Event; 19] = [
+    const EVENTS: [Event; 21] = [
         Event::Hover,
         Event::Choose,
         Event::RecordingStarts,
@@ -714,6 +718,8 @@ mod tests {
         Event::LimitWarning,
         Event::LimitCritical,
         Event::YourTurn,
+        Event::Passed(Hand::Left),
+        Event::Passed(Hand::Right),
     ];
 
     #[test]
@@ -744,6 +750,8 @@ mod tests {
                 (Hand::Left, None, 1),
                 (Hand::Left, None, 2),
                 (Hand::Left, Some(Earcon::YourTurn), 1),
+                (Hand::Left, None, 1),
+                (Hand::Right, None, 1),
             ]
         );
         for event in EVENTS {
@@ -799,6 +807,8 @@ mod tests {
                 Direction::Left,
                 Direction::Left,
                 Direction::Agent,
+                Direction::Left,
+                Direction::Right,
             ]
         );
     }

@@ -531,6 +531,12 @@ impl World {
     /// fewer than [`HELD_LIMIT`] bodies: out of the simulation, touching nothing, until they let go, and anything resting
     /// on it woken. Returns its epoch now.
     ///
+    /// One they hold in their other hand, at the epoch they hold it at, is passed to the hand that takes it now, as their
+    /// free hand grips what the other holds ([`World::passing`]): still held, never falling nor touching anything, at the
+    /// offset the new hand took it at, checked within that hand's reach of where the other holds it, its epoch raised,
+    /// and the other hand holding nothing. One someone else holds is refused, a handover from another's hand being the
+    /// physics proposal's third stage.
+    ///
     /// One they hold already, by the world's account, they take again, in the hand that takes it now, at the epoch they
     /// hold it at or the one their letting go of it would have made: their client let go of it, but its letting go never
     /// arrived or was refused, as one intent too many, so that they would otherwise never take it again until their client
@@ -613,6 +619,19 @@ impl World {
             held: entry.held,
         });
         Ok(entry.epoch)
+    }
+
+    /// Whether `take`, by participant `by`, passes body `take.body` from one of their hands to the other: they hold it in
+    /// the other hand, by the world's account, at the epoch they ask at, so that [`World::take`] moves it to the hand
+    /// that takes it, rather than taking it again after a letting go that never arrived.
+    pub fn passing(&self, by: u32, take: &Take) -> bool {
+        self.index(take.body).is_ok_and(|index| {
+            let entry = &self.entries[index];
+            entry.epoch == take.epoch
+                && entry
+                    .held
+                    .is_some_and(|held| held.by == by && held.hand != take.hand)
+        })
     }
 
     /// Body `let_go.body` let go by its holder `by`, last [`Seen`] as `seen`, at the epoch their taking made, as

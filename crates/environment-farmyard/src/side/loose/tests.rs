@@ -103,3 +103,38 @@ fn what_is_taken_and_let_go_is_named_as_its_noun_says_and_what_was_let_go_is_sai
     assert!(loose.released().is_empty());
     assert!(loose.world_mut().moving());
 }
+
+#[test]
+fn a_body_passed_from_one_hand_to_the_other_is_logged_as_passed() {
+    let now = Instant::now();
+    let mut loose = blocks(now);
+    let ada = Presence::new(
+        3,
+        Pose::at([0.0, 1.5, 0.4]),
+        Some(Pose::at([-0.1, 0.1, 0.0])),
+        Some(Pose::at([0.0, 0.1, 0.0])),
+        now,
+    );
+    let take = |epoch, hand| {
+        Intent::Take(Take {
+            body: 7,
+            epoch,
+            hand,
+            offset: Encoded::default(),
+        })
+    };
+    let presence = std::slice::from_ref(&ada);
+    loose.answer(3, take(0, Side::Right), presence);
+    assert_eq!(
+        loose.answer(3, take(1, Side::Left), presence),
+        "Participant 3 passed stick 0 to their left hand, at epoch 2."
+    );
+    // Nothing was let go on the way.
+    assert!(loose.released().is_empty());
+    assert!(!loose.world_mut().moving());
+    // Someone else's grip on it is refused, as a handover is stage 3's.
+    assert_eq!(
+        loose.answer(4, take(2, Side::Right), presence),
+        "Participant 4's taking of stick 0 with their right hand, at epoch 2, was refused: participant 3 holds it."
+    );
+}

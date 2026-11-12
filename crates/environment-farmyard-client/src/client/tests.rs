@@ -448,6 +448,36 @@ fn the_beach_s_stones_come_with_the_farmyard_s_state_and_are_taken_with_either_g
     );
     assert_eq!(output.intents[0].value()["take"]["body"], 2);
     assert_eq!(output.intents[0].value()["take"]["hand"], "left");
+    assert!(output.passed.is_empty());
+    // Held in the left hand, the right hand reaches it and its ray meets it, the left's not; the right grip passes it
+    // to the right hand, felt on that hand.
+    assert_eq!(client.within_reach(at), None);
+    assert_eq!(client.within_reach_of(Side::Left, at), None);
+    assert_eq!(
+        client.within_reach_of(Side::Right, at).as_deref(),
+        Some("stone-2")
+    );
+    assert_eq!(
+        client
+            .pick_by(Side::Right, &ray)
+            .map(|picked| picked.object),
+        Some("stone-2".to_owned())
+    );
+    assert_ne!(
+        client.pick_by(Side::Left, &ray).map(|picked| picked.object),
+        Some("stone-2".to_owned())
+    );
+    let output = client.update(
+        Input::new(Vec::new(), epoch)
+            .with_grab(Some(
+                Grab::new("stone-2", hand, Phase::Began).of(Side::Right),
+            ))
+            .as_participant(Some(4)),
+    );
+    assert_eq!(output.intents[0].value()["take"]["hand"], "right");
+    // At the epoch the left hand's taking makes, as the left hand holds it at.
+    assert_eq!(output.intents[0].value()["take"]["epoch"], 1);
+    assert_eq!(output.passed, [Side::Right]);
     // A stone landing, as the server side announces it, is heard where it is.
     let event = beach::Event {
         clock: 5_100,

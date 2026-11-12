@@ -280,6 +280,54 @@ fn a_stick_let_go_falls_and_comes_to_rest_where_it_lies_as_toasted_as_it_was() {
 }
 
 #[test]
+fn a_stick_passed_to_the_other_hand_stays_as_toasted_and_toasts_on_from_that_hand() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    let epoch = taken(&mut sticks, 0, now);
+    let over = toasting(campsite::heart());
+    let (_, later) = run(&mut sticks, &[holding(3, over, now)], now, 4.0);
+    let toast = sticks.toast(0);
+    assert!(toast > 0.15);
+    // Their left hand, beside the right, grips it by the shaft, where it took it: passed, nothing let go, as toasted.
+    let both = |left: Placement, right: Placement, at: Instant| {
+        let pose = |hand: Placement| tomori_protocol::Pose {
+            position: hand.position.to_array(),
+            orientation: hand.rotation.to_array(),
+        };
+        Presence::new(
+            3,
+            tomori_protocol::Pose::at((right.position + Vec3::new(0.0, 0.5, 0.4)).to_array()),
+            Some(pose(left)),
+            Some(pose(right)),
+            at,
+        )
+    };
+    let beside = Placement::at(over.position + Vec3::new(0.0, 0.0, -0.15));
+    let stick = campsite::grip();
+    let offset = beside.inverse().then(&over.then(&stick));
+    let pass = serde_json::to_string(&Intent::Take(Take {
+        body: campsite::body(0),
+        epoch,
+        hand: Side::Left,
+        offset: offset.encoded(Precision::Rest),
+    }))
+    .unwrap();
+    assert!(sticks.ask(3, &pass, &[both(beside, over, later)]));
+    assert_eq!(
+        sticks
+            .world()
+            .held(campsite::body(0))
+            .map(|held| (held.by, held.hand)),
+        Some((3, Side::Left))
+    );
+    assert_eq!(sticks.toast(0), toast);
+    // Held over the fire by the left hand alone, the right gone elsewhere, it toasts on.
+    let elsewhere = Placement::at(over.position + Vec3::new(0.6, -0.3, 0.3));
+    run(&mut sticks, &[both(beside, elsewhere, later)], later, 2.0);
+    assert!(sticks.toast(0) > toast, "{}", sticks.toast(0));
+}
+
+#[test]
 fn a_stick_put_back_by_its_log_fades_onto_it_and_has_a_fresh_marshmallow() {
     let now = Instant::now();
     let mut sticks = Sticks::new(now);

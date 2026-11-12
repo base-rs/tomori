@@ -2126,7 +2126,11 @@ impl Step {
                 .as_ref()
                 .zip(ray.or(lowered).filter(|_| in_space && held_card.is_none()))
                 // The client side picks in the environment's own coordinates.
-                .and_then(|(client, ray)| client.side.pick(&arrangement.carriage.unplace_ray(&ray)))
+                .and_then(|(client, ray)| {
+                    client
+                        .side
+                        .pick_by(side.into(), &arrangement.carriage.unplace_ray(&ray))
+                })
                 .filter(|picked| {
                     ray.is_some() || picked.actions.contains(crate::client_side::Actions::GRAB)
                 })
@@ -2364,7 +2368,8 @@ impl Step {
                 senses.controllers[controller_of(hand)]
                     .filter(|pose| world[hand] && pose.valid())
                     .and_then(|pose| {
-                        side.within_reach(
+                        side.within_reach_of(
+                            hand.into(),
                             arrangement
                                 .carriage
                                 .unplace(Vec3::from_array(pose.position)),
@@ -2668,6 +2673,10 @@ impl Step {
                 for (sound, position) in output.sounds {
                     let position = arrangement.carriage.place(Vec3::from_array(position));
                     feedback.ambient(sound, position.to_array(), now);
+                }
+                // An object passed from one hand to the other is felt on the hand that took it.
+                for side in output.passed {
+                    feedback.emit_on(feedback::Event::Passed(side), side, now);
                 }
                 output.drawn
             }

@@ -12,7 +12,7 @@ use std::time::Instant;
 use glam::Vec3;
 use tomori_assets::Instance;
 use tomori_scene::channel::Update;
-use tomori_scene::client_side::{ClientSide, Input, Output, Picked, Sound};
+use tomori_scene::client_side::{ClientSide, Input, Output, Picked, Side, Sound};
 use tomori_scene::pointing::Ray;
 
 use tomori_environment_farmyard::chicken::{CLUCK, Chicken, SQUAWK};
@@ -221,10 +221,9 @@ impl FarmyardClient {
             })
             .collect()
     }
-}
 
-impl ClientSide for FarmyardClient {
-    fn pick(&self, ray: &Ray) -> Option<Picked> {
+    /// What `ray` meets first of the chickens, or else `sticks` or `stones`, what it meets of those.
+    fn picked(&self, ray: &Ray, sticks: Option<Picked>, stones: Option<Picked>) -> Option<Picked> {
         self.controllers
             .iter()
             .zip(&self.names)
@@ -238,15 +237,39 @@ impl ClientSide for FarmyardClient {
                 .intersect(ray)
                 .map(|distance| Picked::new(format!("chicken-{index}"), name.clone(), distance))
             })
-            .chain(self.sticks.pick(ray))
-            .chain(self.stones.pick(ray))
+            .chain(sticks)
+            .chain(stones)
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+}
+
+impl ClientSide for FarmyardClient {
+    fn pick(&self, ray: &Ray) -> Option<Picked> {
+        self.picked(ray, self.sticks.pick(ray), self.stones.pick(ray))
+    }
+
+    /// What the ray of the hand `side` meets first, as [`FarmyardClient::pick`], or a stick or stone this participant
+    /// holds in their other hand, which its grip passes to it.
+    fn pick_by(&self, side: Side, ray: &Ray) -> Option<Picked> {
+        self.picked(
+            ray,
+            self.sticks.pick_by(side, ray),
+            self.stones.pick_by(side, ray),
+        )
     }
 
     fn within_reach(&self, hand: Vec3) -> Option<String> {
         self.sticks
             .within_reach(hand)
             .or_else(|| self.stones.within_reach(hand))
+    }
+
+    /// What the hand `side` at `hand` takes: a stick or stone within reach of it, or one this participant holds in their
+    /// other hand that it is near.
+    fn within_reach_of(&self, side: Side, hand: Vec3) -> Option<String> {
+        self.sticks
+            .within_reach_of(side, hand)
+            .or_else(|| self.stones.within_reach_of(side, hand))
     }
 
     fn update(&mut self, input: Input<'_>) -> Output {
@@ -318,6 +341,10 @@ impl ClientSide for FarmyardClient {
         }
         for (sound, at) in self.landed.drain(..) {
             output = output.with_sound(sound, at);
+        }
+        // A stick or stone passed from one hand to the other is felt on the hand that took it.
+        for side in self.sticks.passed().into_iter().chain(self.stones.passed()) {
+            output = output.with_pass(side);
         }
         let stones = self
             .stones

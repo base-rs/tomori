@@ -16,7 +16,7 @@ use glam::{Mat4, Vec3};
 use tomori_physics::Placement;
 use tomori_physics::message::Intent;
 use tomori_physics::mirror::Fade;
-use tomori_scene::client_side::{Grab, Hand, Picked, Sound};
+use tomori_scene::client_side::{Grab, Hand, Picked, Side, Sound};
 use tomori_scene::pointing::{Ray, Shape};
 
 pub use crate::loose::{Loose, Shapes};
@@ -74,8 +74,14 @@ impl Shapes for Rack {
         Pose::of(placement).from_handle(hand)
     }
 
+    /// Anywhere along it, as the other hand holds its handle.
+    fn touch(_body: u32, placement: &Placement, hand: Vec3) -> f32 {
+        Pose::of(placement).from_stick(hand)
+    }
+
     /// By its handle, along the hand, however it was taken: flying there from where it was, as a stone pulled along the
-    /// ray does, so that a stick taken anywhere along its handle settles into the fist.
+    /// ray does, so that a stick taken anywhere along its handle settles into the fist. One passed from the other hand is
+    /// held where the hand took it instead (see [`Loose`]).
     fn held(_body: u32, _at: &Placement, _hand: &Placement, _within: bool) -> (Placement, bool) {
         (campsite::grip(), true)
     }
@@ -146,22 +152,50 @@ impl Sticks {
         if self.toast.is_empty() {
             return None;
         }
-        let bonfire = Shape::Sphere {
+        self.loose
+            .pick(ray)
+            .into_iter()
+            .chain(self.bonfire(ray))
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    /// Where `ray` meets the bonfire, if it does.
+    fn bonfire(&self, ray: &Ray) -> Option<Picked> {
+        Shape::Sphere {
             center: campsite::heart(),
             radius: 0.35,
         }
         .intersect(ray)
-        .map(|distance| Picked::new("bonfire", "the bonfire", distance));
+        .map(|distance| Picked::new("bonfire", "the bonfire", distance))
+    }
+
+    /// What the ray of the hand `side` meets first of the campsite, as [`Sticks::pick`] does, or the stick this
+    /// participant holds in their other hand, which its grip passes to it.
+    pub fn pick_by(&self, side: Side, ray: &Ray) -> Option<Picked> {
+        if self.toast.is_empty() {
+            return None;
+        }
         self.loose
-            .pick(ray)
+            .pick_by(side, ray)
             .into_iter()
-            .chain(bonfire)
+            .chain(self.bonfire(ray))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
 
     /// The free stick whose handle a hand at `hand` is within [`REACH`] of, the nearest.
     pub fn within_reach(&self, hand: Vec3) -> Option<String> {
         self.loose.within_reach(hand)
+    }
+
+    /// The stick the hand `side`, at `hand`, takes, as [`Loose::within_reach_of`] says: a free one by its handle, or the
+    /// one this participant holds in their other hand anywhere along it.
+    pub fn within_reach_of(&self, side: Side, hand: Vec3) -> Option<String> {
+        self.loose.within_reach_of(side, hand)
+    }
+
+    /// The hands that took a stick from the other hand since this was last asked.
+    pub fn passed(&mut self) -> Vec<Side> {
+        self.loose.passed()
     }
 
     /// A frame at `now`, the farmyard's clock at `clock`: the grips on sticks this frame, by this participant,

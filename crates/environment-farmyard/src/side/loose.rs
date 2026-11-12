@@ -5,7 +5,7 @@
 //! sticks: a `tomori-physics` world of them; participants' taking and letting go, each checked against where the side
 //! last saw them; whatever a participant who has left, or whose presence has gone quiet, held, let go where their hand
 //! was; what changed, gathered and said at most [`tomori_physics::SNAPSHOT_RATE`] times a second; and, in the server's
-//! log, each taking and letting go, taken or refused and why, at most [`LOG_BURST`] at once and [`LOG_RATE`] a second.
+//! log, each taking, passing from one hand to the other and letting go, taken or refused and why, at most [`LOG_BURST`] at once and [`LOG_RATE`] a second.
 //! See `design/physics.md`.
 use std::time::{Duration, Instant};
 
@@ -202,9 +202,13 @@ impl Loose {
                     .world
                     .held(take.body)
                     .is_some_and(|held| held.by == participant);
+                let passing = self.world.passing(participant, &take);
                 let side = hand(take.hand);
                 let body = one(take.body);
                 match self.world.take(participant, &take, seen.as_ref()) {
+                    Ok(epoch) if passing => format!(
+                        "Participant {participant} passed {body} to their {side} hand, at epoch {epoch}."
+                    ),
                     Ok(epoch) if again => format!(
                         "Participant {participant} took {body} again, with their {side} hand, at epoch {epoch}, as \
                          their letting go of it never arrived."
