@@ -18,14 +18,16 @@ pub(super) struct Vertex {
     pub(super) light_uv: [f32; 2],
 }
 
-// The same description is used by the build-time baker and runtime mesh builder.
-#[allow(dead_code)]
+/// The scene, as both the build script's light baker and the runtime's mesh read it: its vertices, and the faces and
+/// cuboids the baker casts its rays against.
 pub(super) struct Scene {
     pub vertices: Vec<Vertex>,
     pub faces: Vec<Face>,
     pub objects: Vec<Cuboid>,
 }
 
+/// A cuboid the light baker casts rays against. Only the baker reads it, in the build script and the tests, so the
+/// library's build alone finds its fields unread; `expect` would go unfulfilled in the build script, which reads them.
 #[allow(dead_code)]
 pub(super) struct Cuboid {
     pub center: Vec3,
@@ -51,6 +53,8 @@ impl Tile {
     }
 }
 
+/// A face of a cuboid, with its chart in the lightmap, which the light baker lights; read, as [`Cuboid`] is, only by the
+/// baker.
 #[allow(dead_code)]
 pub(super) struct Face {
     pub corner: Vec3,
