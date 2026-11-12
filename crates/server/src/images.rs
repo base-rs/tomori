@@ -264,6 +264,10 @@ pub struct ImageStore {
     memory: Mutex<Memory>,
     /// The images shown when the store was last swept, so that it is swept again only when they change.
     swept: Mutex<Option<BTreeSet<String>>>,
+    /// Held while an image is written to the directory: a write goes through a temporary file named after the image,
+    /// which two spaces keeping the same image at once would otherwise share, one renaming it part written or finding it
+    /// gone.
+    writing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -315,6 +319,7 @@ impl ImageStore {
             let file = Self::file(&directory, hash);
             // One already kept is the same image; written again, it is marked new, so that it is not swept before its panel
             // is projected.
+            let _writing = self.writing.lock().expect("never left poisoned");
             tomori_security::write_private(&file, &prepared.png)
                 .map_err(|error| format!("Tomori could not keep the image: {error}."))?;
         }
