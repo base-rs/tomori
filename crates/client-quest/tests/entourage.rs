@@ -28,7 +28,7 @@ use tomori_environment_farmyard_client::layout;
 use tomori_protocol::{
     Anchors, ConnectionRole, EnvironmentInfo, Panel, Participant, Place, Pose, Projection,
     ServerMessage, SpaceState, TOMORI_WALL, Wall, WallKind, WallShape, Worker, WorkerState,
-    entourage,
+    cluster, entourage,
 };
 use tomori_render::{
     graphics::Renderer,
@@ -90,7 +90,7 @@ fn carried(at: Vec3) -> Pose {
 
 /// The Tomori wall's home in the farmyard, as the server stands it: beneath the agent's home.
 fn home_wall() -> Pose {
-    entourage::wall_beneath(&carried(layout::AGENT_HOME), entourage::FLOOR)
+    entourage::wall_beneath(&carried(layout::AGENT_HOME), cluster::FLOOR)
 }
 
 /// The Tomori wall at `pose`, as the server sends it: six slots curved along an arc of 2.3 m.
@@ -233,8 +233,8 @@ fn summoning() -> Vec3 {
 /// stands it, which its own tests check.
 fn summons_by(eyes: [f32; 3]) -> (Pose, Pose) {
     let at = Vec3::from_array(eyes) + summoning() * 1.6 - Vec3::Y * 0.9;
-    let agent = entourage::summoned(at.to_array(), eyes, entourage::FLOOR);
-    let beneath = entourage::wall_beneath(&agent, entourage::FLOOR).position;
+    let agent = entourage::summoned(at.to_array(), eyes, cluster::FLOOR);
+    let beneath = entourage::wall_beneath(&agent, cluster::FLOOR).position;
     (
         agent,
         Pose::upright_facing(beneath, [eyes[0], beneath[1], eyes[2]]),
@@ -965,7 +965,7 @@ fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seat
             let (agent, wall) = summons_by(eyes.to_array());
             let label = format!("summoned, eyes {height} m up");
             assert!(
-                (agent.position[1] - entourage::summoned_height(height, entourage::FLOOR)).abs()
+                (agent.position[1] - entourage::summoned_height(height, cluster::FLOOR)).abs()
                     < 1e-5
             );
             assert!(agent.position[1] >= entourage::LOWEST_AGENT - 1e-5);
@@ -1188,7 +1188,7 @@ fn a_home_floating_high_with_its_ring_under_it_has_its_ring_at_the_swarm_s_foot_
             assert!(Vec3::from_array(frame.agent).distance(agent) < 0.05);
             let drawn_ring = frame.home_ring;
             let height = if ring == RingAt::Floor {
-                entourage::FLOOR
+                cluster::FLOOR
             } else {
                 5.3 - RING_BELOW
             };

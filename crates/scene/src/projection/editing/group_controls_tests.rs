@@ -256,7 +256,7 @@ fn a_group_shows_one_bar_over_none_of_its_slots_and_handles_over_none_however_fa
                     "{context}: the bar of {}",
                     bearer.id
                 );
-                let floor = tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+                let floor = tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
                 assert!(bar.middle.y - bar.size / 2.0 >= floor, "{context}");
                 raised += usize::from(bar.middle.y > highest);
                 for wall in &walls {

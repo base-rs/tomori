@@ -125,8 +125,8 @@ fn the_farmyards_home_ring_is_drawn_on_the_earth_about_the_middle_of_its_workben
     // And the yard's earth is the space's floor, which the ring is drawn on however high the agent's home stands.
     let earth = carriage.place(Vec3::new(layout::WORKBENCH.x, 0.0, layout::WORKBENCH.y));
     assert!(
-        (earth.y - tomori_protocol::entourage::FLOOR).abs() < 1e-6,
+        (earth.y - tomori_protocol::cluster::FLOOR).abs() < 1e-6,
         "{earth}"
     );
-    assert!(ring.centre.y > tomori_protocol::entourage::FLOOR + 1.0);
+    assert!(ring.centre.y > tomori_protocol::cluster::FLOOR + 1.0);
 }

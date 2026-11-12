@@ -55,7 +55,7 @@ impl LockSpot {
         let x = left + (right - left) * self.along;
         let at = along(wall, x).0 + Vec3::Y * y;
         let above = frame.transform_point3(at).y - size / 2.0
-            >= tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+            >= tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
         (!joined(edge) && above && around.clear(x, y, size)).then_some((x, y))
     }
 }
@@ -498,7 +498,7 @@ impl Edges {
             .transform_point3(along(wall, 0.0).0 + Vec3::Y * bottom)
             .y
             - size / 2.0;
-        let raised = low < tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+        let raised = low < tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
         Self {
             size,
             pitch,
@@ -772,7 +772,7 @@ fn lay_out(wall: &Wall, frame: Mat4, around: &Around) -> (Vec<(Handle, Spot)>, f
             let dragged = around.keep == Some(handle);
             let clear = handle == Handle::Lock || around.clear(x, y, size);
             let above = frame.transform_point3(spot.at).y - size / 2.0
-                >= tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+                >= tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
             (dragged || (clear && above)).then_some((handle, spot))
         })
         .collect();

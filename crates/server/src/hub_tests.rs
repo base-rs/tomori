@@ -7080,8 +7080,7 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         .pop()
         .expect("sent as the environment changes");
     // The environment gives the Tomori wall no home of its own, so it stands beneath the agent's.
-    let beneath =
-        tomori_protocol::entourage::wall_beneath(&agent, tomori_protocol::entourage::FLOOR);
+    let beneath = tomori_protocol::entourage::wall_beneath(&agent, tomori_protocol::cluster::FLOOR);
     assert_eq!(moved.walls[0].pose, beneath);
     // The space's own edits to it, its grid and tilt, stand over that home.
     ada.send(ClientMessage::SetWall {

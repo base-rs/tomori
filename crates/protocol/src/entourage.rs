@@ -11,21 +11,18 @@
 //! `design/projection.md`.
 //!
 //! ```
-//! use tomori_protocol::{Pose, entourage};
+//! use tomori_protocol::{Pose, cluster::FLOOR, entourage};
 //!
 //! // The default layout: the agent 1.4 m up, 2.3 m ahead of home, facing home, and its wall beneath it, at 0.52 m.
 //! let agent = Pose::at([0.0, 1.4, -2.3]).facing_towards([0.0, 1.4, 0.0]);
-//! let wall = entourage::wall_beneath(&agent, entourage::FLOOR);
+//! let wall = entourage::wall_beneath(&agent, FLOOR);
 //! assert!((wall.position[1] - 0.52).abs() < 1e-5);
 //! assert_eq!([wall.position[0], wall.position[2]], [0.0, -2.3]);
 //! // Summoned by someone seated, their eyes 1 m up, the agent stands high enough for its wall beneath it.
-//! assert_eq!(entourage::summoned_height(1.0, entourage::FLOOR), entourage::LOWEST_AGENT);
+//! assert_eq!(entourage::summoned_height(1.0, FLOOR), entourage::LOWEST_AGENT);
 //! ```
 use crate::projection::layout::{ARC_SCALE, SLOT_SIZE};
 use crate::{Pose, Wall};
-
-/// The floor participants stand on, in a space's coordinates: home's, at its origin.
-pub const FLOOR: f32 = 0.0;
 
 /// How far the swarm reaches about its middle, at most, in any of its shapes and as it drifts, in metres: across, to
 /// either side of the way it faces; up and down; and towards and away from whoever it faces.
@@ -162,6 +159,7 @@ pub fn slot_corners(wall: &Wall) -> Vec<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::FLOOR;
     use crate::wall::{ARC_GRID, ARC_SCALE};
     use crate::{TOMORI_WALL, WallKind, WallShape};
 

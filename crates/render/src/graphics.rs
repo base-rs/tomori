@@ -3589,7 +3589,7 @@ mod tests {
                 radius: tomori_protocol::cluster::RING,
                 towards: glam::Vec3::Z,
                 sweep: std::f32::consts::TAU,
-                height: tomori_protocol::entourage::FLOOR,
+                height: tomori_protocol::cluster::FLOOR,
             };
             renderer.set_home_ring(Some(ring));
             // The ring's cubes, on the space's floor beneath home, though home stands 0.1 m above the swarm's usual
