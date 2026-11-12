@@ -461,6 +461,25 @@ fn on_an_environment_s_ground_it_follows_someone_up_onto_a_terrace_and_home_agai
             "{via:?}"
         );
         assert!(!ground.open(spot.position, home));
+        // On its way, it is along the way to the waypoint, a second's glide from where it was.
+        let home_pose = crate::hub::agent_home(&Default::default());
+        let second = arrived + Duration::from_secs(1);
+        let on_its_way = {
+            let state = hub.lock();
+            let following = &state.space(&space).unwrap().following;
+            assert!(following.moving(None, home_pose, second));
+            following.at(None, home_pose, second).position
+        };
+        let towards: Vec<f32> = (0..3).map(|axis| via[axis] - spot.position[axis]).collect();
+        let length = towards
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        for axis in 0..3 {
+            let expected = spot.position[axis] + towards[axis] / length * GLIDE;
+            assert!((on_its_way[axis] - expected).abs() < 1e-3, "{on_its_way:?}");
+        }
         hub.flush_snapshots(start + Duration::from_secs(200));
         assert_eq!(hub.lock().space(&space).unwrap().following.via, None);
         assert_eq!(last_state(&client).expect("told").via, None);
