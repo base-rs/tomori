@@ -333,3 +333,24 @@ fn the_label_stands_where_it_covers_less_of_the_series_about_the_time_pointed_at
     let short = Readout::new(&high, &plot, 3.0, (306.0, 40.0));
     assert!(short.label[1] >= 0.0 && short.label[1] + short.label[3] <= 40.0);
 }
+
+#[test]
+fn a_linked_readout_reads_as_its_chart_does_with_its_line_and_frame_fainter() {
+    let chart = fixtures::pressure();
+    let plot = plotted(&chart);
+    let readout = Readout::new(&chart, &plot, 60.0, BOUNDS);
+    let linked = readout.clone().linked();
+    assert!(!readout.linked && linked.linked);
+    assert_eq!(
+        (&linked.lines, &linked.dots, linked.x),
+        (&readout.lines, &readout.dots, readout.x)
+    );
+    let face = Canvas::new(34, 0.01);
+    let alpha = |canvas: &Canvas| match canvas.shapes[0] {
+        Shape::Stroke { color, .. } => color[3],
+        _ => panic!("its line first"),
+    };
+    let (own, faint) = (readout.overlay(&face), linked.overlay(&face));
+    assert!((alpha(&faint) - alpha(&own) * LINKED).abs() < 1e-6);
+    assert_eq!(own.labels, faint.labels);
+}

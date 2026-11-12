@@ -8,7 +8,7 @@
 //! recoloured, without laying anything out. See `design/rendering.md`.
 use std::sync::Arc;
 
-use tomori_protocol::Panel;
+use tomori_protocol::{Chart, Panel};
 
 use super::{
     CODE_PADDING, CODE_PIXEL, CodeLayout, Fit, chart, code_columns, code_face, fitted, image,
@@ -247,6 +247,14 @@ impl Faces {
         self.at(fit);
         self.sizes[0].readout(&self.key.0, model, point)
     }
+
+    /// Its chart's readout at `at`, a point's index or a share of the way between two, sized as `fit` says, linked to the
+    /// readout of another chart pointed at, as [`Layout::readout_at`] draws it, of the panel as it was last followed.
+    pub(super) fn linked(&mut self, fit: Fit, at: f32) -> Option<(Arc<Canvas>, Readout)> {
+        self.at(fit);
+        let (face, readout) = self.sizes[0].readout_at(&self.key.0, at)?;
+        Some((face, readout.linked()))
+    }
 }
 
 /// A panel's face laid out at one size: its code, or its body's rows at the columns its face has, its columns and rows
@@ -413,17 +421,7 @@ impl Layout {
         point: glam::Vec3,
     ) -> Option<(f32, Arc<Canvas>, Readout)> {
         // Every face pointed at is drawn, as the frame draws it first; only a chart's has a plot.
-        let (
-            Some(Face {
-                canvas,
-                plot: Some(plot),
-                ..
-            }),
-            Some(chart),
-        ) = (self.face.as_ref(), panel.chart.as_ref())
-        else {
-            return None;
-        };
+        let (canvas, plot, chart) = self.plotted(panel)?;
         let (width, height) = canvas.size();
         let local = model.inverse().transform_point3(point);
         // Across, to the nearest font pixel, so that a hand nearly still keeps the readout drawn.
@@ -432,11 +430,41 @@ impl Layout {
             (height / 2.0 - local.y) / canvas.pixel - canvas.padding.1 as f32,
         ];
         let at = plot.at(inside)?;
+        Some((at, canvas.clone(), Self::read(canvas, plot, chart, at)))
+    }
+
+    /// The readout of its chart at `at`, a point's index or a share of the way between two, drawn from the face last
+    /// drawn and where its plot is, without laying anything out; `None` for a panel of no chart or not yet drawn.
+    fn readout_at(&self, panel: &Panel, at: f32) -> Option<(Arc<Canvas>, Readout)> {
+        self.plotted(panel)
+            .map(|(canvas, plot, chart)| (canvas.clone(), Self::read(canvas, plot, chart, at)))
+    }
+
+    /// The face last drawn, where its plot is and `panel`'s chart, if it is a chart's face.
+    fn plotted<'a>(
+        &'a self,
+        panel: &'a Panel,
+    ) -> Option<(&'a Arc<Canvas>, &'a PlotArea, &'a Chart)> {
+        match (self.face.as_ref(), panel.chart.as_deref()) {
+            (
+                Some(Face {
+                    canvas,
+                    plot: Some(plot),
+                    ..
+                }),
+                Some(chart),
+            ) => Some((canvas, plot, chart)),
+            _ => None,
+        }
+    }
+
+    /// `chart`'s readout at `at` over `canvas`, its plot drawn at `plot`.
+    fn read(canvas: &Canvas, plot: &PlotArea, chart: &Chart, at: f32) -> Readout {
         let bounds = (
             (canvas.columns * CELL_WIDTH) as f32,
             (canvas.rows.len() * CELL_HEIGHT) as f32,
         );
-        Some((at, canvas.clone(), Readout::new(chart, plot, at, bounds)))
+        Readout::new(chart, plot, at, bounds)
     }
 
     /// The line of its panel's body that the list item where the ray meets it, at `point`, drawn with `model` and

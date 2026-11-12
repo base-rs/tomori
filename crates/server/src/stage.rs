@@ -987,6 +987,54 @@ fn valid_within(pose: &Pose, reach: f32) -> Option<Pose> {
     ))
 }
 
+/// The most charts linked to one pointed at that its description reads, as a participant's client draws their readouts
+/// at the same time.
+pub const LINKED_READINGS: usize = 3;
+
+/// The longest reading of a chart linked to one pointed at, its title and what it reads, in characters.
+const LINKED_READING_CHARS: usize = 120;
+
+/// What the charts shown in `shown` that share the time of `pointed` read at `time`, as its readout is linked to theirs,
+/// by their time axes, never their labels: live charts on its wall, by how long before now, where it is live, or fixed
+/// windows anywhere, by the instant, where it is one, that cover the time,
+/// at most [`LINKED_READINGS`], each its title and reading, in quotes, cut to [`LINKED_READING_CHARS`]. See the linked
+/// time cursor in `design/projection.md`.
+fn linked_readings(
+    shown: &tomori_protocol::Projection,
+    pointed: &tomori_protocol::Panel,
+    time: Option<tomori_protocol::chart::ChartTime>,
+) -> Vec<String> {
+    let Some(time) = time else {
+        return Vec::new();
+    };
+    let wall = |panel: &tomori_protocol::Panel| match &panel.place {
+        Place::Wall { wall, .. } => Some(wall.clone()),
+        _ => None,
+    };
+    let here = wall(pointed);
+    shown
+        .panels
+        .iter()
+        .filter(|panel| {
+            panel.id != pointed.id
+                && (matches!(time, tomori_protocol::chart::ChartTime::Instant { .. })
+                    || (here.is_some() && wall(panel) == here))
+        })
+        .filter_map(|panel| {
+            let chart = panel.chart.as_ref()?;
+            let at = chart.at_time(time)?;
+            Some(format!(
+                "\"{}\"",
+                crate::space::one_line(
+                    &format!("{}: {}", panel.title, chart.read_at(at)),
+                    LINKED_READING_CHARS
+                )
+            ))
+        })
+        .take(LINKED_READINGS)
+        .collect()
+}
+
 /// How long ago `seconds` was, as the agent is told.
 fn ago(seconds: u64) -> String {
     match seconds {
@@ -2670,6 +2718,13 @@ impl Stage {
                     tomori_protocol::chart::READING_CHARS
                 )
             ));
+            let linked = linked_readings(&shown, panel, chart.time_of(chart.at_across(across)));
+            if !linked.is_empty() {
+                details.push_str(&format!(
+                    "; linked charts at that time: {}",
+                    linked.join(", ")
+                ));
+            }
         }
         // An image panel's size, and its caption in quotes, as it is the agent's text.
         if let Some(image) = &panel.image {

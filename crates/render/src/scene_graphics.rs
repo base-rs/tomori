@@ -356,6 +356,7 @@ mod tests {
     mod cards;
     mod chart_readout;
     mod image_sharpness;
+    mod linked_cursor;
     mod padlock_floor;
     mod timers;
     mod turning;
