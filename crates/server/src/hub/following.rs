@@ -828,11 +828,7 @@ impl Hub {
             .space_mut(space)
             .expect("found above")
             .following
-            .terrain = captured
-            .scene
-            .ground
-            .clone()
-            .map(|ground| (ground, captured.home));
+            .terrain = captured.scene.ground.clone().zip(Some(captured.home));
         let name = state.participants[participant].name.clone();
         let handle = crate::presence::handle(&name, state.participants[participant].tag);
         state.agent_pin(space, now, Some(handle));
@@ -915,7 +911,7 @@ impl Hub {
             .space_mut(space)
             .expect("found above")
             .following
-            .terrain = scene.ground.map(|ground| (ground, home));
+            .terrain = scene.ground.zip(Some(home));
     }
 
     /// What the agent of `space` keeps clear of now, the environment's solids, the walls shown, the panels floating and
@@ -1308,7 +1304,7 @@ impl HubState {
         };
         let route = follow::route(agent.position, spot.position, scene);
         following.start(agent.position, record.summoned, spot.position, route, now);
-        following.terrain = scene.ground.clone().map(|ground| (ground, captured.home));
+        following.terrain = scene.ground.clone().zip(Some(captured.home));
         following.facing = None;
         following.glance = None;
         following.quiet = None;

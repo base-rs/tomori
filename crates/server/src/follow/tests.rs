@@ -726,6 +726,31 @@ fn a_huddle_on_the_terrace_is_served_on_the_terrace() {
 }
 
 #[test]
+fn a_huddle_at_the_terrace_s_edge_is_served_on_the_terrace_and_one_strung_out_along_the_line_beside_it()
+ {
+    // Ada and Bob stand half a metre in from the terrace's edge; the agent is in the yard beyond it.
+    let ada = speaker([9.5, 5.6, -6.5], [9.5, 5.6, -10.0]);
+    let bob = speaker([9.5, 5.6, -7.5], [9.5, 5.6, -10.0]);
+    let scene = levels(&[ada.head.position, bob.head.position]);
+    let served = huddle([14.0, 1.7, -7.0], &[ada, bob], &scene).expect("clear");
+    let [x, y, z] = served.position;
+    assert_eq!(
+        scene.ground.as_ref().unwrap().level_at(x, z, 4.0),
+        Some(4.0),
+        "{served:?}"
+    );
+    assert!((y - 5.7).abs() < 1e-4, "{served:?}");
+    // Five in a row along the line to it: out along the line it never stands 2 m from the nearest of them within 6 m
+    // of their middle, so it swings beside them.
+    let row: Vec<Speaker> = (0..5)
+        .map(|at| speaker([0.0, 1.6, at as f32 * 2.5], [0.0, 1.6, -3.0]))
+        .collect();
+    let heads: Vec<[f32; 3]> = row.iter().map(|speaker| speaker.head.position).collect();
+    let served = huddle([0.0, 1.7, 30.0], &row, &levels(&heads)).expect("clear");
+    assert!(served.position[0].abs() > 1.0, "{served:?}");
+}
+
+#[test]
 fn standing_over_no_ground_it_stands_beside_them_at_their_eyes() {
     // Flying beyond the yard's edge, over nothing.
     let ada = [21.0, 3.0, 0.0];

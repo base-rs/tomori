@@ -464,6 +464,13 @@ fn on_an_environment_s_ground_it_follows_someone_up_onto_a_terrace_and_home_agai
         hub.flush_snapshots(start + Duration::from_secs(200));
         assert_eq!(hub.lock().space(&space).unwrap().following.via, None);
         assert_eq!(last_state(&client).expect("told").via, None);
+        // Sent home again, home, it goes by none.
+        let again = start + Duration::from_secs(201);
+        assert!(
+            !hub.lock()
+                .agent_home(&space, "it was sent home again", again)
+        );
+        assert_eq!(hub.lock().space(&space).unwrap().following.via, None);
     }
 }
 

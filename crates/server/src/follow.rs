@@ -476,10 +476,7 @@ pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pos
         }
     };
     let panels = scene.panels_near(eyes);
-    let floor = scene
-        .underfoot(eyes)
-        .filter(|_| scene.ground.is_some())
-        .unwrap_or(entourage::FLOOR);
+    let floor = scene.underfoot(eyes).unwrap_or(entourage::FLOOR);
     let y = scene.beside_height(eyes[1], object[1], floor);
     DISTANCES
         .iter()

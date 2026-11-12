@@ -1120,11 +1120,12 @@ impl Environments {
     /// The walkable ground of the environment `id`, carried into a space's coordinates as its solids are, if it gives
     /// it, none when it is not offered.
     pub(crate) fn ground(&self, id: &str) -> Option<crate::follow::Ground> {
-        let environment = self.get(id)?;
-        Some(crate::follow::Ground::new(
-            environment.navmesh.clone()?,
-            environment.carriage(),
-        ))
+        self.get(id).and_then(|environment| {
+            environment
+                .navmesh
+                .clone()
+                .map(|mesh| crate::follow::Ground::new(mesh, environment.carriage()))
+        })
     }
 
     /// The solids of the environment `id`, carried into a space's coordinates, none when it is not offered.
