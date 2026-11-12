@@ -47,6 +47,14 @@ impl Footprint {
         }
     }
 
+    /// How far `point` is from it, on the ground, or nothing within it.
+    pub fn distance(&self, point: Vec2) -> f32 {
+        (self.low - point)
+            .max(point - self.high)
+            .max(Vec2::ZERO)
+            .length()
+    }
+
     /// Whether it and `other` overlap.
     pub fn overlaps(&self, other: &Self) -> bool {
         self.low.cmplt(other.high).all() && other.low.cmplt(self.high).all()
@@ -589,6 +597,17 @@ mod tests {
     /// Whether `point`, seen from above, is on the walkable ground.
     fn on(point: Vec2) -> bool {
         crate::walkable::height_at(point).is_some()
+    }
+
+    #[test]
+    fn a_footprint_s_distance_is_nothing_within_it_and_across_the_ground_to_its_nearest_edge_or_corner()
+     {
+        let footprint = Footprint::new([0.0, 0.0], [2.0, 1.0]);
+        assert_eq!(footprint.distance(Vec2::new(1.0, 0.5)), 0.0);
+        assert_eq!(footprint.distance(Vec2::new(2.0, 1.0)), 0.0);
+        assert_eq!(footprint.distance(Vec2::new(3.5, 0.5)), 1.5);
+        assert_eq!(footprint.distance(Vec2::new(1.0, -2.0)), 2.0);
+        assert_eq!(footprint.distance(Vec2::new(5.0, 5.0)), 5.0);
     }
 
     #[test]

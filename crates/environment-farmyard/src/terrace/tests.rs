@@ -309,10 +309,10 @@ fn its_stones_ferns_flat_rock_and_cairn_stand_on_its_floor_and_are_kept_clear_of
         if low[1] > TERRACE + tomori_environment::navmesh::HEADROOM {
             continue;
         }
-        let (low, high) = (Vec2::new(low[0], low[2]), Vec2::new(high[0], high[2]));
+        let solid = layout::Footprint::new([low[0], low[2]], [high[0], high[2]]);
         for point in &walked {
-            let apart = (low - *point).max(*point - high).max(Vec2::ZERO).length();
-            assert!(apart > layout::CLEARANCE - 0.11, "{point} {low} {high}");
+            let apart = solid.distance(*point);
+            assert!(apart > layout::CLEARANCE - 0.11, "{point} {solid:?}");
         }
     }
     // The flat rock is low enough to sit on, and the cairn as tall as it is pointed at.

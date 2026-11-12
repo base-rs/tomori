@@ -106,15 +106,6 @@ fn from_trail(point: Vec2) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// How far `point` is from the fence, on the ground, outside it.
-fn beyond_fence(point: Vec2) -> f32 {
-    let fence = layout::FENCE;
-    (fence.low - point)
-        .max(point - fence.high)
-        .max(Vec2::ZERO)
-        .length()
-}
-
 /// How near the eyes the backdrop is laid out to stand, from anywhere participants stand: the headset's far plane when it
 /// was laid out, and now, as every client draws out to 2 km, the bound that keeps it compact and within its haze.
 const BOUND: f32 = 50.0;
@@ -180,7 +171,7 @@ fn the_backdrop_stands_beyond_the_fence_within_its_bound() {
     let ground = &foothills.meshes[0].primitives[0];
     for position in &ground.positions {
         assert!(
-            beyond_fence(Vec2::new(position.x, position.z)) > 2.5,
+            layout::FENCE.distance(Vec2::new(position.x, position.z)) > 2.5,
             "{position}"
         );
         let at = Vec2::new(position.x, position.z);
@@ -385,7 +376,10 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
     }
     // It runs round the yard, never nearer the fence than 7.5 m.
     for point in layout::river_line(8) {
-        assert!(beyond_fence(Vec2::new(point.x, point.z)) > 7.5, "{point}");
+        assert!(
+            layout::FENCE.distance(Vec2::new(point.x, point.z)) > 7.5,
+            "{point}"
+        );
     }
     // The water: the river's surface at its levels, the waterfall from above its lip to the pool, and foam on the pool.
     let water = water();
@@ -592,7 +586,10 @@ fn the_sounds_are_named_where_the_waterfall_the_pool_the_river_and_the_bush_are(
     let plants = plants();
     for (name, at) in &sounds {
         // All beyond the fence, 7 m and more from it.
-        assert!(beyond_fence(Vec2::new(at.x, at.z)) > 7.0, "{name} {at}");
+        assert!(
+            layout::FENCE.distance(Vec2::new(at.x, at.z)) > 7.0,
+            "{name} {at}"
+        );
         if *name == "bush" {
             // On the ground, among the bush's plants.
             let ground = Vec2::new(at.x, at.z);
