@@ -1525,9 +1525,14 @@ pub fn bush() -> Vec<Fern> {
         .collect()
 }
 
-/// Every fern drawn: those near the trail, with their koru, and the bush's.
+/// Every fern drawn: those near the trail, with their koru, the bush's and the upper terrace's
+/// ([`crate::terrace::ferns`]).
 pub fn all() -> Vec<Fern> {
-    ferns().into_iter().chain(bush()).collect()
+    ferns()
+        .into_iter()
+        .chain(bush())
+        .chain(crate::terrace::ferns())
+        .collect()
 }
 
 /// How many triangles the ferns draw for eyes at `eyes`, [`all`] of them, each in the detail it is drawn in there; or,

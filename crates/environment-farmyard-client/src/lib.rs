@@ -25,8 +25,10 @@ pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple William
 /// `tomori-environment-farmyard`'s `walkable` derives it, at the heights it is drawn, so that whoever stands or lands
 /// there, and the ring where they would, is on what is drawn; through the gate, on the way out declared by hand, and
 /// about the campsite's fire; turning in snaps; between the yard and the lookout at the trail's far end by a pair of
-/// teleport pads; and onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat. See
-/// Tomori's `design/locomotion.md` and `tomori-environment-farmyard`'s `context/trail.md`.
+/// teleport pads; onto the waterfall rock, by pointing at it, and back to the lookout by pointing at its seat; and up to
+/// the terrace above the waterfall by pointing at the falling water from the rock, and back down onto the rock by
+/// pointing at the cairn by its lip, each pointed at only from near it. See Tomori's `design/locomotion.md` and
+/// `tomori-environment-farmyard`'s `context/trail.md` and `context/terrace.md`.
 pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
     use tomori_scene::locomotion::{Locomotion, Pad, Surface, Target};
     let mut surfaces = vec![Surface::mesh(
@@ -47,12 +49,19 @@ pub fn locomotion() -> tomori_scene::locomotion::Locomotion {
             }),
     );
     let pads = trail::pads().map(|pad| Pad::at(pad.centre).named(pad.name).facing(pad.facing));
-    let targets = trail::targets().map(|target| {
-        Target::object(target.foot, target.radius, target.height)
-            .arriving(target.arrival)
-            .named(target.name)
-            .facing(target.facing)
-    });
+    let targets = trail::targets()
+        .into_iter()
+        .chain(tomori_environment_farmyard::terrace::targets())
+        .map(|target| {
+            let object = Target::object(target.foot, target.radius, target.height)
+                .arriving(target.arrival)
+                .named(target.name)
+                .facing(target.facing);
+            match target.within {
+                Some(reach) => object.within(reach),
+                None => object,
+            }
+        });
     Locomotion::teleport(surfaces)
         .with_pads([pads])
         .with_targets(targets)
@@ -164,7 +173,7 @@ mod tests {
         };
         // The ground the farmyard draws, the trail's way out and the places to stand about the campsite's fire, all
         // within the centimetre a backstep goes up or down of the yard's earth, but the track's edges, which rise to
-        // their crests.
+        // their crests, and the upper terrace's floor, at its own height above the waterfall.
         assert_eq!(
             surfaces.len(),
             1 + trail::way_out().len() + tomori_environment_farmyard::campsite::standing().len()
@@ -182,6 +191,7 @@ mod tests {
                             || beach(Vec2::new(corner.x, corner.z)).is_some_and(|shingle| {
                                 (shingle - corner.y).abs() < 1e-4 && corner.y > lowest - 1e-4
                             })
+                            || (corner.y - layout::TERRACE).abs() < 1e-5
                     }))
                 }
                 None => assert!((0.0..0.009).contains(&surface.height())),
@@ -695,19 +705,25 @@ mod tests {
                 assert!(!walkable(point), "{point}");
             }
         }
-        // Two targets, used as the profile is carried into a space, where participants arrive at home, within its
-        // bounds: the rock, arriving on its top, as high as it is drawn, facing the waterfall; and the lookout's seat,
-        // arriving on the trail before it, facing the pool.
+        // Four targets, used as the profile is carried into a space, where participants arrive at home, within its
+        // bounds: the rock, arriving on its top, as high as it is drawn, facing the waterfall; the lookout's seat,
+        // arriving on the trail before it, facing the pool; and the upper terrace's two, the waterfall and its cairn.
         let arrival = tomori_protocol::Pose::at(layout::ARRIVAL.to_array())
             .facing_towards(layout::ARRIVAL_FACING.to_array());
         let carriage = tomori_scene::anchors::Anchor::carriage(&arrival).unwrap();
         let carried = profile.carried(&carriage);
         assert_eq!(carried.pads().count(), 1);
         let targets: Vec<_> = carried.targets().collect();
-        assert_eq!(targets.len(), 2);
-        for target in &targets {
+        assert_eq!(targets.len(), 4);
+        for (index, target) in targets.iter().enumerate() {
+            // The rock's and the lookout's within 20 m of home, as before the terrace; the terrace's within 30 m.
+            let bound = if index < 2 {
+                19.9
+            } else {
+                tomori_scene::anchors::REACH - 1.0
+            };
             let arrival = target.arrival();
-            assert!(arrival.abs().max_element() < 19.9, "{arrival}");
+            assert!(arrival.abs().max_element() < bound, "{arrival}");
         }
         let (rock, back) = (targets[0], targets[1]);
         assert_eq!(
@@ -782,5 +798,172 @@ mod tests {
                 assert!(!walkable(ray.at(crossed)), "{from} {to}");
             }
         }
+    }
+    #[test]
+    fn the_upper_terrace_is_reached_only_by_pointing_at_the_waterfall_from_its_rock_and_left_by_its_cairn()
+     {
+        use glam::Vec3;
+        use tomori_environment_farmyard::{terrace, walkable};
+        use tomori_scene::locomotion::Locomotion;
+        use tomori_scene::pointing::Ray;
+
+        use super::layout;
+        let profile = super::locomotion();
+        let Locomotion::Teleport { surfaces, .. } = &profile else {
+            unreachable!("the farmyard teleports");
+        };
+        let on_terrace = |at: Vec3| (at.y - layout::TERRACE).abs() < 1e-3;
+        // The terrace's walkable ground, every 25 cm of it, and everywhere else participants stand, below it.
+        let corners: Vec<Vec3> = walkable::navmesh()
+            .triangles()
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let floor: Vec<Vec3> = corners
+            .iter()
+            .filter(|corner| corner.y > layout::TERRACE - 0.1)
+            .copied()
+            .collect();
+        let below: Vec<Vec3> = corners
+            .iter()
+            .filter(|corner| corner.y < layout::TERRACE - 1.0)
+            .copied()
+            .chain([layout::WATERFALL_ROCK])
+            .collect();
+        assert!(floor.len() > 20 && below.len() > 1000);
+        let mut floor_points = Vec::new();
+        for along in 0..24 {
+            for across in 0..44 {
+                let point =
+                    terrace::on_fall(23.9 + along as f32 * 0.25, 1.6 + across as f32 * 0.25);
+                if let Some(height) = walkable::height_at(point) {
+                    if height > layout::TERRACE - 0.1 {
+                        floor_points.push(Vec3::new(point.x, height, point.y));
+                    }
+                }
+            }
+        }
+        assert!(floor_points.len() > 300, "{}", floor_points.len());
+        // Aimed with the stick from anywhere below, a teleport never lands on it: its floor is above every eye there, and
+        // a ray lands only on a surface it meets from above.
+        for from in below.iter().step_by(7) {
+            let eyes = *from + Vec3::Y * 1.9;
+            for to in floor_points.iter().step_by(23) {
+                let Some(ray) = Ray::new(eyes, *to - eyes) else {
+                    continue;
+                };
+                if let Some(landing) = profile.landing(&ray) {
+                    assert!(!on_terrace(landing), "{from} {to} {landing}");
+                }
+            }
+        }
+        // On it, a teleport aimed at its floor lands there, within a millimetre of what is drawn; and a backstep from
+        // anywhere on it steps along it or nowhere, never off it.
+        let arrival = terrace::arrival();
+        let eyes = arrival + Vec3::Y * 1.6;
+        for to in floor_points.iter().step_by(11) {
+            if to.distance(arrival) < 0.5 {
+                continue;
+            }
+            let landing = profile
+                .landing(&Ray::new(eyes, *to - eyes).unwrap())
+                .unwrap();
+            assert!(landing.distance(*to) < 1e-3, "{to} {landing}");
+        }
+        for at in floor_points.iter().step_by(3) {
+            let head = *at + Vec3::Y * 1.6;
+            for step in 0..8 {
+                let yaw = step as f32 / 8.0 * std::f32::consts::TAU;
+                let facing = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                if let Some(step) = profile.backstep(head, facing, at.y) {
+                    let to = *at + step;
+                    let floor = walkable::height_at(glam::Vec2::new(to.x, to.z));
+                    assert!(
+                        floor.is_some_and(|floor| on_terrace(to.with_y(floor))),
+                        "{at} {step}"
+                    );
+                }
+            }
+        }
+        // Up: the waterfall, pointed at only from its rock, wherever one stands on it, not from anywhere else below, nor
+        // from the terrace; the ray from the rock to its falling water crosses no surface first. The targets are used as
+        // the profile is carried into a space, the terrace within its bounds from where participants arrive, so each
+        // place is carried there to be checked against them.
+        let arrival = tomori_protocol::Pose::at(layout::ARRIVAL.to_array())
+            .facing_towards(layout::ARRIVAL_FACING.to_array());
+        let carriage = tomori_scene::anchors::Anchor::carriage(&arrival).unwrap();
+        let place = |at: Vec3| carriage.place(at);
+        let carried = profile.carried(&carriage);
+        let targets: Vec<_> = carried.targets().collect();
+        assert_eq!(targets.len(), 4);
+        let (up, down) = (targets[2], targets[3]);
+        assert_eq!(
+            (up.name(), down.name()),
+            (Some("Upper terrace"), Some("Waterfall rock"))
+        );
+        let rock = layout::WATERFALL_ROCK;
+        let [declared, _] = terrace::targets();
+        for step in 0..8 {
+            let yaw = step as f32 / 8.0 * std::f32::consts::TAU;
+            let standing = rock + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * layout::ROCK_TOP;
+            for height in [1.1, 1.6, 1.9] {
+                let hand = standing + Vec3::Y * height;
+                assert!(up.reached_from(place(hand)), "{hand}");
+                // No surface lies anywhere beneath or above the ray's way to the fall, to cross it first.
+                let to = declared.foot + Vec3::Y * 2.0;
+                for along in 0..=40 {
+                    let at = hand.lerp(to, along as f32 / 40.0);
+                    assert!(
+                        surfaces
+                            .iter()
+                            .all(|surface| surface.height_at(at).is_none()),
+                        "{hand} {at}"
+                    );
+                }
+            }
+        }
+        for from in below.iter().filter(|at| at.distance(rock) > 0.5) {
+            for height in [0.9, 1.9] {
+                assert!(!up.reached_from(place(*from + Vec3::Y * height)), "{from}");
+            }
+        }
+        for at in &floor {
+            assert!(!up.reached_from(place(*at + Vec3::Y * 1.3)));
+        }
+        // It takes one onto the terrace, facing the upper falls, which is a surface there.
+        assert!(up.arrival().distance(place(terrace::arrival())) < 1e-4);
+        assert!(!up.arrives_on_top());
+        assert!(surfaces.iter().any(|surface| {
+            surface
+                .height_at(terrace::arrival())
+                .is_some_and(|height| (height - layout::TERRACE).abs() < 1e-3)
+        }));
+        let facing = |yaw: f32| Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+        let towards = |to: Vec3, from: Vec3| {
+            ((place(to) - place(from)) * Vec3::new(1.0, 0.0, 1.0)).normalize()
+        };
+        let arrived = terrace::arrival();
+        assert!(facing(up.yaw().unwrap()).dot(towards(layout::UPPER_FALLS, arrived)) > 0.999);
+        // Down: the cairn, pointed at from most of the terrace and from nowhere below, taking one onto the rock's top,
+        // which the rock's own target is the floor of, facing the waterfall.
+        let pointed = floor_points
+            .iter()
+            .filter(|at| down.reached_from(place(**at + Vec3::Y * 1.3)))
+            .count();
+        assert!(pointed * 2 > floor_points.len(), "{pointed}");
+        for from in &below {
+            assert!(!down.reached_from(place(*from + Vec3::Y * 1.9)));
+        }
+        assert!(down.arrival().distance(place(rock)) < 1e-4);
+        assert!(!down.arrives_on_top() && targets[0].arrives_on_top());
+        assert!(
+            surfaces
+                .iter()
+                .all(|surface| surface.height_at(rock).is_none())
+        );
+        assert!(facing(down.yaw().unwrap()).dot(towards(layout::WATERFALL, rock)) > 0.999);
+        // Its cairn's top is drawn where it is pointed at.
+        assert!((down.foot().y + down.height() - terrace::cairn_top() - 0.05).abs() < 1e-5);
     }
 }

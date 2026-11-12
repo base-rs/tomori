@@ -23,12 +23,13 @@ fn band() -> Vec<Vec2> {
         .collect()
 }
 
-/// The solids of the yard and the trail, the plants', the pines' and the tree ferns'.
+/// The solids of the yard, the trail and the upper terrace, the plants', the pines' and the tree ferns'.
 fn solids() -> Vec<tomori_environment::sightlines::Solid> {
     use tomori_environment::sightlines::Solid;
     let mut solids: Vec<Solid> = layout::solids()
         .into_iter()
         .chain(super::solids())
+        .chain(crate::terrace::solids())
         .map(|(low, high)| Solid::new(low, high))
         .collect();
     solids.extend(backdrop::plants().iter().map(backdrop::Plant::solid));
@@ -377,6 +378,7 @@ fn its_posts_and_seat_keep_the_backdrop_s_views_open_and_its_places_have_room() 
             "riverbank",
             "pool-lookout",
             "waterfall-rock",
+            "upper-terrace",
             "station-1",
             "station-2",
             "station-3",

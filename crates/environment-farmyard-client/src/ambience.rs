@@ -130,7 +130,13 @@ fn with(found: &[(&str, &str)]) -> Ambience {
             .every(Duration::from_secs(every[0]), Duration::from_secs(every[1]))
             .around(&canopy, BUSH_SPREAD)
     };
-    let waterfall = at("waterfall").next().unwrap_or_default();
+    // The waterfall from the middle of its fall, and above it from the upper falls along the stream to its lip, which
+    // the terrace between them hears: one sound, from wherever along the two falls is nearest, rather than the same
+    // loop twice, which would ring against itself where both were heard.
+    let waterfall: Vec<[f32; 3]> = at("upper-falls")
+        .chain([layout::WATERFALL_LIP.to_array()])
+        .chain(at("waterfall"))
+        .collect();
     // The beds are a quiet bed beneath everything. The water and the birds are placed, and lose to distance what the
     // beds do not, about 17 dB for the river 15 m from the yard and 19 dB for the waterfall 26 m away, and 21 dB for
     // a bird in the canopy 20 to 30 m away; so the water is raised to be heard a few decibels beneath the beds from
@@ -140,7 +146,7 @@ fn with(found: &[(&str, &str)]) -> Ambience {
         .with_bed(Bed::new(slot("bush")).gain(-10.0))
         .with_loop(Loop::along(slot("river"), &river).radius(35.0).gain(5.0))
         .with_loop(
-            Loop::at(slot("waterfall"), waterfall)
+            Loop::along(slot("waterfall"), &waterfall)
                 .radius(60.0)
                 .gain(8.0),
         )

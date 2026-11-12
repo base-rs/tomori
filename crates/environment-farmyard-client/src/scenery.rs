@@ -28,6 +28,7 @@ use tomori_environment_farmyard::coop::{self, Coop};
 use tomori_environment_farmyard::ferns::{self, Detail, Fern};
 use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
+use tomori_environment_farmyard::terrace;
 use tomori_environment_farmyard::trail;
 use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
 use tomori_scene::ui_text::{Row, Style};
@@ -710,14 +711,16 @@ pub(crate) fn fern_instances(
     (instances, draws)
 }
 
-/// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the river's stones, the
-/// waterfall rock, the trail, the water and the ranges.
+/// The backdrop beyond the fence: its foothills, each kind of plant with all its instances, the river's stones, with the
+/// upper terrace's, the waterfall rock, the trail, the upper terrace, the water, above the waterfall too, and the
+/// ranges.
 struct Backdrop {
     foothills: Drawn,
     plants: Vec<Drawn>,
     stones: Drawn,
     rock: Drawn,
     trail: Drawn,
+    terrace: Drawn,
     water: Triangles,
     ranges: Triangles,
 }
@@ -753,6 +756,7 @@ impl Backdrop {
             .collect();
         let stones: Vec<Mat4> = backdrop::stones()
             .iter()
+            .chain(&terrace::stones())
             .map(backdrop::Stone::transform)
             .collect();
         let stones = Drawn::placed(device, queue, models, &Arc::new(backdrop::stone()), &stones);
@@ -770,9 +774,17 @@ impl Backdrop {
             &Arc::new(trail::model()),
             Mat4::IDENTITY,
         );
+        let terrace = Drawn::new(
+            device,
+            queue,
+            models,
+            &Arc::new(terrace::model()),
+            Mat4::IDENTITY,
+        );
         let shader = device.create_shader_module(wgpu::include_wgsl!("water.wgsl"));
         let water: Vec<WaterVertex> = backdrop::water()
             .into_iter()
+            .chain(backdrop::upper_water())
             .map(|point| WaterVertex {
                 position: point.position.to_array(),
                 color: point.color.extend(point.kind).to_array(),
@@ -827,6 +839,7 @@ impl Backdrop {
             stones,
             rock,
             trail,
+            terrace,
             water,
             ranges,
         }
@@ -1286,8 +1299,8 @@ impl Scenery for Farmyard {
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
         // Nearest first, so that what they hide is not shaded: the yard, the coop and the chickens, the trail, the ferns
-        // about it, then the foothills, the bush, the river's stones and the waterfall rock beyond, the water, then the
-        // sky, only where nothing nearer has been drawn, and the ranges at its depth.
+        // about it, then the upper terrace, the foothills, the bush, the river's stones and the waterfall rock beyond,
+        // the water, then the sky, only where nothing nearer has been drawn, and the ranges at its depth.
         let backdrop = &self.backdrop;
         for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
             .into_iter()
@@ -1304,7 +1317,7 @@ impl Scenery for Farmyard {
         }
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         self.ferns.draw(pass);
-        for drawn in [&backdrop.foothills]
+        for drawn in [&backdrop.terrace, &backdrop.foothills]
             .into_iter()
             .chain(&backdrop.plants)
             .chain([&backdrop.stones, &backdrop.rock])

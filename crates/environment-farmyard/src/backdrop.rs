@@ -30,10 +30,12 @@ use crate::shapes::Shapes;
 pub const BUDGET: usize = 22_000;
 
 /// How far from [`BACKDROP_CENTRE`] each ring of the foothills' ground is: the first just beyond the fence's corners,
-/// at the meadow's level, the cliff's foot and lip among them ([`layout::CLIFF`]), and the last within 50 m of the eyes,
-/// the headset's far plane, from anywhere participants land in the yard.
-pub const RINGS: [f32; 16] = [
-    11.5, 13.0, 14.5, 16.0, 17.5, 19.0, 20.5, 22.0, 23.5, 25.0, 26.5, 28.5, 30.5, 32.5, 34.5, 36.0,
+/// at the meadow's level, the cliff's foot and lip among them ([`layout::CLIFF`]), and the upper cliff's behind the
+/// terrace ([`layout::UPPER_CLIFF`]), and the last within 50 m of the eyes, the headset's far plane, from anywhere
+/// participants land in the yard.
+pub const RINGS: [f32; 17] = [
+    11.5, 13.0, 14.5, 16.0, 17.5, 19.0, 20.5, 22.0, 23.5, 25.0, 26.5, 28.5, 29.5, 30.5, 32.5, 34.5,
+    36.0,
 ];
 /// How many segments each ring is drawn in, so that the waterfall's way, [`layout::WATERFALL_AZIMUTH`], is one of them.
 pub const SEGMENTS: usize = 96;
@@ -96,10 +98,58 @@ fn ridge(azimuth: f32) -> f32 {
 
 /// How far `point` is along the waterfall's way from [`BACKDROP_CENTRE`], and how far across it, on the ground.
 fn by_waterfall(point: Vec2) -> (f32, f32) {
-    let offset = point - BACKDROP_CENTRE;
-    let outward = way(layout::WATERFALL_AZIMUTH);
-    (offset.dot(outward), offset.perp_dot(outward).abs())
+    let (along, across) = on_the_fall(point);
+    (along, across.abs())
 }
+
+/// The waterfall's way from [`BACKDROP_CENTRE`], on the ground, and the way across it to the right, as one faces the
+/// fall from the yard.
+pub fn fall_axes() -> (Vec2, Vec2) {
+    let outward = way(layout::WATERFALL_AZIMUTH);
+    (outward, Vec2::new(-outward.y, outward.x))
+}
+
+/// How far `point` is along the waterfall's way from [`BACKDROP_CENTRE`], and how far across it, to the right as one
+/// faces the fall from the yard, on the ground.
+pub fn on_the_fall(point: Vec2) -> (f32, f32) {
+    let offset = point - BACKDROP_CENTRE;
+    let (outward, right) = fall_axes();
+    (offset.dot(outward), offset.dot(right))
+}
+
+/// How high the foothills' ground lies beneath the terrace's floor, a little below it, so that the floor is drawn on it
+/// without flickering: the mountain's at the top of the falls.
+pub const TERRACE_GROUND: f32 = layout::TERRACE - 0.05;
+
+/// How far the mountain behind the waterfall rises at `point`, from none to all of it: across the waterfall's way, wider
+/// to its right, where the terrace is, from the cliff's foot to its lip, and out to where it falls away into the ridge.
+fn mountain(point: Vec2) -> f32 {
+    let (along, across) = on_the_fall(point);
+    let radius = point.distance(BACKDROP_CENTRE);
+    let wide = (1.0 - smoothstep(5.0, 12.0, -across)) * (1.0 - smoothstep(12.0, 17.0, across));
+    wide * (1.0 - smoothstep(33.0, 36.5, radius))
+        * smoothstep(layout::CLIFF[0], layout::CLIFF[1], along)
+}
+
+/// How far `point` is from the stream that runs from the upper pool's middle to the waterfall's lip, on the ground, and
+/// how far along it from the lip, from none to all of it.
+fn from_stream(point: Vec2) -> (f32, f32) {
+    let lip = Vec2::new(layout::WATERFALL_LIP.x, layout::WATERFALL_LIP.z);
+    let head = Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z);
+    let along = head - lip;
+    let t = ((point - lip).dot(along) / along.length_squared()).clamp(0.0, 1.0);
+    (point.distance(lip + along * t), t)
+}
+
+/// How far either side of the waterfall's way the notch it leaves the cliff by is as low as its lip, and how far it
+/// rises to the terrace's ground.
+const NOTCH: [f32; 2] = [1.2, 2.2];
+
+/// How deep the stream's bed lies below its water, so that it is the waterfall's lip where it leaves; and how far from
+/// its middle its bed reaches and its banks rise to the terrace's ground, at the lip, as wide as the waterfall leaving
+/// it, and at the upper pool, narrower.
+const STREAM_DEPTH: f32 = 0.08;
+const STREAM_BANKS: [[f32; 2]; 2] = [[0.9, 1.35], [0.3, 0.7]];
 
 /// How far above its water every bank's top stands at least, so that the water lies in a channel below the land, the
 /// trail and the yard, rather than above them.
@@ -199,13 +249,31 @@ pub fn ground(point: Vec2) -> f32 {
     height = banked(height, POOL.y, pool, (RIM, POOL_DEPTH), outflow);
     let beyond = smoothstep(POOL_RADIUS + 0.6, RIM[2], pool);
     height = banked(height, nearest.y, distance, (BANKS, RIVER_DEPTH), beyond);
-    // The cliff, from its foot to its lip, and the knoll behind it, as high as its top, falling away beyond.
-    let (along, across) = by_waterfall(point);
-    let spur = (1.0 - smoothstep(5.0, 12.0, across))
-        * (1.0 - smoothstep(layout::CLIFF[1] + 1.5, layout::CLIFF[1] + 5.0, along));
-    let top = height + (layout::CLIFF_TOP - height).max(0.0) * spur;
-    let rise = smoothstep(layout::CLIFF[0], layout::CLIFF[1], along);
-    height + (top - height) * rise
+    // The mountain behind the waterfall: its cliff, from its foot to its lip, the terrace's ground at the top of the
+    // falls, but for the notch the water leaves by, as high as the cliff's top was before the terrace, so that the
+    // waterfall falls as it did; the upper cliff behind it and the knoll above that, falling away beyond into the ridge.
+    let (along, across) = on_the_fall(point);
+    let upper = smoothstep(layout::UPPER_CLIFF[0], layout::UPPER_CLIFF[1], radius)
+        * (1.0 - smoothstep(4.0, 8.0, -across))
+        * (1.0 - smoothstep(11.0, 14.0, across));
+    let notch = (1.0 - smoothstep(NOTCH[0], NOTCH[1], across.abs()))
+        * (1.0 - smoothstep(layout::CLIFF[1] + 1.1, layout::CLIFF[1] + 2.1, along));
+    let level = TERRACE_GROUND + (layout::UPPER_TOP - TERRACE_GROUND) * upper;
+    let level = level + (layout::CLIFF_TOP - level) * notch;
+    let height = height + (level - height).max(0.0) * mountain(point);
+    // The upper pool's basin, and the stream's channel from it to the waterfall's lip, cut into the terrace's ground,
+    // whose banks stand as far above their water as the river's do.
+    let cut = |height: f32, depth: f32, distance: f32, [bed, bank]: [f32; 2]| {
+        let floor = layout::UPPER_POOL.y - depth;
+        height.min(floor + (height - floor) * smoothstep(bed, bank, distance))
+    };
+    let pool = point.distance(Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z));
+    let shore = layout::UPPER_POOL_RADIUS;
+    let height = cut(height, POOL_DEPTH, pool, [shore - 0.5, shore + 0.2]);
+    let (distance, along) = from_stream(point);
+    let [lip, head] = STREAM_BANKS;
+    let banks = [0, 1].map(|edge| lip[edge] + (head[edge] - lip[edge]) * along);
+    cut(height, STREAM_DEPTH, distance, banks)
 }
 
 /// A flat polygon through `corners`, lit from the side `outward` points to, whichever way they wind.
@@ -224,8 +292,9 @@ pub(crate) fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color
 fn vertex(ring: usize, segment: usize) -> Vec3 {
     let radius = RINGS[ring];
     let point = BACKDROP_CENTRE + way(segment as f32 / SEGMENTS as f32 * TAU) * radius;
-    let rough =
-        smoothstep(25.0, 30.0, radius) * smoothstep(3.0, 6.0, layout::nearest_river(point).1);
+    let rough = smoothstep(25.0, 30.0, radius)
+        * smoothstep(3.0, 6.0, layout::nearest_river(point).1)
+        * (1.0 - mountain(point));
     let jitter = (scatter((ring * SEGMENTS + segment) as u32 + 7000) - 0.5) * 0.6;
     let height = if ring == 0 {
         MEADOW
@@ -236,8 +305,11 @@ fn vertex(ring: usize, segment: usize) -> Vec3 {
 }
 
 /// The two triangles the cell of the foothills' ground from `ring` and `segment` is cut into, from its corners on that
-/// ring, `a` and `b`, and the next, `c` and `d`, the diagonal alternating from cell to cell.
+/// ring, `a` and `b`, and the next, `c` and `d`, the diagonal alternating from cell to cell, but for the cells from the
+/// upper cliff's foot, which keep the way they were cut before its ring was added, so that the river's channel beyond
+/// is drawn as it was.
 fn cell((ring, segment): (usize, usize), [a, b, c, d]: [Vec3; 4]) -> [[Vec3; 3]; 2] {
+    let ring = ring - usize::from(RINGS[ring] >= layout::UPPER_CLIFF[0]);
     if (ring + segment) % 2 == 0 {
         [[a, d, c], [a, c, b]]
     } else {
@@ -721,11 +793,15 @@ pub fn views() -> Vec<([f32; 3], [f32; 3])> {
 /// the water, off the waterfall's cliff and out of the way to it, and clear of the sightlines [`views`] keeps open.
 pub fn open(point: Vec2, reach: f32, height: f32) -> bool {
     let (along, across) = by_waterfall(point);
-    // Nothing before the waterfall, nor on the knoll behind it, where it would stand against the peaks beyond.
-    let cliff = across < 6.0 + reach && along > 15.0 && along < layout::CLIFF[1] + 6.0;
+    // Nothing before the waterfall, nor on the knoll behind it, where it would stand against the peaks beyond, nor on
+    // the terrace at the top of the falls or beside it.
+    let cliff = across < 6.0 + reach && along > 15.0 && along < layout::UPPER_CLIFF[1] + 2.5;
+    if cliff || crate::terrace::from_floor(point) < reach + 1.5 {
+        return false;
+    }
     let wet = layout::nearest_river(point).1 < RIVER_HALF_WIDTH + 1.6 + reach * 0.3
         || point.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS + 0.6 + reach;
-    if cliff || wet {
+    if wet {
         return false;
     }
     let ground = ground(point);
@@ -1489,9 +1565,158 @@ pub fn water() -> Vec<Water> {
     triangles
 }
 
+/// The water above the waterfall, drawn with the rest of the water: the upper pool at the upper cliff's foot, its
+/// ripples spreading from the upper falls; the stream from its shore to the waterfall's lip, at its level, where the
+/// waterfall takes it over; and the upper falls, over the upper cliff's lip and down its face into the pool, foaming at
+/// its foot.
+pub fn upper_water() -> Vec<Water> {
+    let mut triangles = Vec::new();
+    let point = |position: Vec3, color: Vec3, kind: f32, flow: Vec2| Water {
+        position,
+        color,
+        kind,
+        flow,
+    };
+    let quad = |triangles: &mut Vec<Water>, corners: [Water; 4]| {
+        triangles.extend([
+            corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
+        ]);
+    };
+    let (outward, across) = fall_axes();
+    let at = |along: f32, side: f32, y: f32| {
+        let ground = BACKDROP_CENTRE + outward * along + across * side;
+        Vec3::new(ground.x, y, ground.y)
+    };
+    // The pool, reaching beneath its shore, its ripples spreading from the falls' foot.
+    let pool = layout::UPPER_POOL;
+    let foot = Vec2::new(layout::UPPER_FALLS_FOOT.x, layout::UPPER_FALLS_FOOT.z);
+    let middle = pool + Vec3::Y * 0.02;
+    let ripple = |at: Vec3| Vec2::new(0.0, Vec2::new(at.x, at.z).distance(foot));
+    for side in 0..10 {
+        let corner = |side: u32| {
+            let yaw = side as f32 / 10.0 * TAU;
+            middle + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * (layout::UPPER_POOL_RADIUS + 0.3)
+        };
+        let (a, b) = (corner(side), corner(side + 1));
+        triangles.extend([
+            point(middle, colors::WATER, SURFACE, ripple(middle)),
+            point(a, colors::WATER, SURFACE, ripple(a)),
+            point(b, colors::WATER, SURFACE, ripple(b)),
+        ]);
+    }
+    // The stream, from the pool's shore to where the waterfall takes it, just behind its lip, as wide as the
+    // waterfall is there, reaching beneath its banks.
+    let (head, mouth) = (
+        on_the_fall(Vec2::new(pool.x, pool.z)).0 - layout::UPPER_POOL_RADIUS,
+        layout::CLIFF[1] + 0.9,
+    );
+    let reaches: [f32; 4] = [0.0, 0.3, 0.65, 1.0];
+    for pair in reaches.windows(2) {
+        let (from, to) = (
+            head + (mouth - head) * pair[0],
+            head + (mouth - head) * pair[1],
+        );
+        let flow = |along: f32, side: f32| Vec2::new(side, head - along);
+        quad(
+            &mut triangles,
+            [
+                point(
+                    at(from, -0.6, pool.y),
+                    colors::WATER,
+                    SURFACE,
+                    flow(from, -0.6),
+                ),
+                point(at(to, -0.6, pool.y), colors::WATER, SURFACE, flow(to, -0.6)),
+                point(at(to, 0.6, pool.y), colors::WATER, SURFACE, flow(to, 0.6)),
+                point(
+                    at(from, 0.6, pool.y),
+                    colors::WATER,
+                    SURFACE,
+                    flow(from, 0.6),
+                ),
+            ],
+        );
+    }
+    // The upper falls, from just behind the upper cliff's lip, over it and down in front of its face, narrower than
+    // the waterfall below, fanning a little as it falls.
+    let [low, high] = layout::UPPER_CLIFF;
+    let bottom = pool.y - 0.3;
+    let face = |y: f32| low + (high - low) * (y - bottom) / (layout::UPPER_TOP - bottom);
+    let top = layout::UPPER_TOP + 0.08;
+    let fall = [
+        (high + 0.6, top),
+        (face(layout::UPPER_TOP) - 0.12, top),
+        (face(8.8) - 0.4, 8.8),
+        (face(7.7) - 0.35, 7.7),
+        (face(pool.y) - 0.3, pool.y + 0.02),
+    ];
+    const COLUMNS: usize = 3;
+    let spread = |row: usize, column: usize| {
+        let side = column as f32 / COLUMNS as f32 * 2.0 - 1.0;
+        let wide = 0.3 + 0.2 * row as f32 / (fall.len() - 1) as f32;
+        let ragged = 1.0 + (scatter((row * 8 + column) as u32 + 1700) - 0.5) * 0.3;
+        side * wide * if row == 0 { 1.0 } else { ragged }
+    };
+    let shade = |row: usize, column: usize| {
+        let edge = (column as f32 / COLUMNS as f32 * 2.0 - 1.0).abs();
+        let lip = if row == 1 { 1.5 } else { 1.0 };
+        colors::FALLING * lip * (1.1 - 0.45 * edge)
+    };
+    let mut down = 0.0;
+    for (row, pair) in fall.windows(2).enumerate() {
+        let length = Vec2::new(pair[1].0 - pair[0].0, pair[1].1 - pair[0].1).length();
+        for column in 0..COLUMNS {
+            let corner = |row: usize, column: usize, (along, y): (f32, f32), down: f32| {
+                let lane = column as f32 / COLUMNS as f32 * 2.0 - 1.0;
+                point(
+                    at(along, spread(row, column), y),
+                    shade(row, column),
+                    FALLING,
+                    Vec2::new(lane, down),
+                )
+            };
+            quad(
+                &mut triangles,
+                [
+                    corner(row, column, pair[0], down),
+                    corner(row, column + 1, pair[0], down),
+                    corner(row + 1, column + 1, pair[1], down + length),
+                    corner(row + 1, column, pair[1], down + length),
+                ],
+            );
+        }
+        down += length;
+    }
+    // Foam about its foot, on the pool.
+    let (along, _) = fall[fall.len() - 1];
+    let splash = at(along, 0.0, pool.y + 0.05);
+    for side in 0..8 {
+        let ring = |side: u32, radius: f32| {
+            let yaw = side as f32 / 8.0 * TAU;
+            splash + Vec3::new(yaw.sin() * radius, 0.0, yaw.cos() * radius)
+        };
+        let flow = |side: u32, radius: f32| Vec2::new(side as f32 / 8.0 * TAU * radius, radius);
+        quad(
+            &mut triangles,
+            [
+                point(ring(side, 0.12), colors::FOAM, FOAM, flow(side, 0.12)),
+                point(
+                    ring(side + 1, 0.12),
+                    colors::FOAM,
+                    FOAM,
+                    flow(side + 1, 0.12),
+                ),
+                point(ring(side + 1, 0.6), colors::FOAM, FOAM, flow(side + 1, 0.6)),
+                point(ring(side, 0.6), colors::FOAM, FOAM, flow(side, 0.6)),
+            ],
+        );
+    }
+    triangles
+}
+
 /// How many triangles each part of the backdrop draws: the foothills' ground, every plant but the tree ferns, which are
-/// counted with the ferns ([`crate::ferns::triangles`]), the ranges, the water, the river's stones, the waterfall rock
-/// and the trail.
+/// counted with the ferns ([`crate::ferns::triangles`]), the ranges, the water, above the waterfall too, the river's
+/// stones, with the terrace's, the waterfall rock, the trail and the terrace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Triangles {
     pub foothills: usize,
@@ -1501,6 +1726,7 @@ pub struct Triangles {
     pub stones: usize,
     pub rock: usize,
     pub trail: usize,
+    pub terrace: usize,
 }
 
 impl Triangles {
@@ -1525,10 +1751,11 @@ impl Triangles {
                 })
                 .sum(),
             ranges: ranges().len() / 3,
-            water: water().len() / 3,
-            stones: count(&stone()) * stones().len(),
+            water: (water().len() + upper_water().len()) / 3,
+            stones: count(&stone()) * (stones().len() + crate::terrace::stones().len()),
             rock: count(&rock()),
             trail: count(&crate::trail::model()),
+            terrace: count(&crate::terrace::model()),
         }
     }
 
@@ -1541,6 +1768,7 @@ impl Triangles {
             + self.stones
             + self.rock
             + self.trail
+            + self.terrace
     }
 }
 

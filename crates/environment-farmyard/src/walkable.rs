@@ -10,15 +10,17 @@
 use glam::{Vec2, Vec3};
 use tomori_environment::navmesh::{Navmesh, Obstacle};
 
-use crate::{beach, campsite, layout, props, trail};
+use crate::{beach, campsite, layout, props, terrace, trail};
 
 /// What the farmyard draws as ground, which participants walk on: the yard's packed earth ([`props::ground`]), the
-/// trail's track from crest to crest and its clearings ([`trail::ground`]), and the beach's shingle down towards the
-/// river ([`beach::ground`]).
+/// trail's track from crest to crest and its clearings ([`trail::ground`]), the beach's shingle down towards the
+/// river ([`beach::ground`]), and the upper terrace's floor, at the top of the falls ([`terrace::ground`]), a region of
+/// its own, joined to none of the rest.
 pub fn ground() -> Vec<[Vec3; 3]> {
     let mut ground = props::ground();
     ground.extend(trail::ground());
     ground.extend(beach::ground());
+    ground.extend(terrace::ground());
     ground
 }
 
@@ -27,8 +29,9 @@ pub fn ground() -> Vec<[Vec3; 3]> {
 /// posts, so that the earth stops [`layout::FENCE_CLEARANCE`] short of its line, and the gate's posts; and, beside the
 /// trail, its stations' posts with their plaques, the lookout's seat and the waterfall rock, the plants, pines and tree
 /// ferns' trunks and crowns beside it ([`trail::beside`], [`crate::ferns::solids`]), the campsite's fire and seat, and
-/// the river's stones on the beach, each as tall as it stands, by [`layout::CLEARANCE`]. The ground ferns, decoration,
-/// are not among them, standing off the ground by more than the clearance.
+/// the river's stones on the beach, and on the upper terrace its stones, flat rock, cairn and ferns ([`terrace::solids`]),
+/// each as tall as it stands, by [`layout::CLEARANCE`]. The ground ferns beside the trail, decoration, are not among
+/// them, standing off the ground by more than the clearance.
 pub fn obstacles() -> Vec<Obstacle> {
     let cuboid =
         |low: Vec3, high: Vec3| Obstacle::cuboid(low, high).with_clearance(layout::CLEARANCE);
@@ -93,6 +96,7 @@ pub fn obstacles() -> Vec<Obstacle> {
             .chain(trail::beside())
             .chain(campsite::solids())
             .chain(beach::solids())
+            .chain(terrace::solids())
             .map(|(low, high)| cuboid(Vec3::from(low), Vec3::from(high))),
     );
     obstacles
@@ -121,10 +125,16 @@ mod tests {
         // each of its points, round the loop and out through the gate, and its clearings, each of nine sides.
         let line = trail::centreline().len();
         let shingle = beach::ground();
-        assert_eq!(ground.len(), 2 + 3 * 2 * (line + 2) + 6 * 7 + shingle.len());
+        let floor = terrace::ground();
+        assert_eq!(
+            ground.len(),
+            2 + 3 * 2 * (line + 2) + 6 * 7 + shingle.len() + floor.len()
+        );
         // None of it slopes more than the edges' crests, which rise 35 mm over 80 mm, and all of it is within the
-        // crests' height of the earth, but the beach's shingle, which slopes down towards the river.
-        for [a, b, c] in &ground[..ground.len() - shingle.len()] {
+        // crests' height of the earth, but the beach's shingle, which slopes down towards the river, and the upper
+        // terrace's floor, level at its own height, above the waterfall.
+        let below = ground.len() - shingle.len() - floor.len();
+        for [a, b, c] in &ground[..below] {
             let normal = (*b - *a).cross(*c - *a).normalize();
             assert!(normal.y.abs() > 0.9, "{a} {b} {c}");
             for corner in [a, b, c] {
@@ -165,7 +175,16 @@ mod tests {
                 + trail::beside().len()
                 + campsite::solids().len()
                 + beach::solids().len()
+                + terrace::solids().len()
         );
+        assert!(
+            ground[ground.len() - floor.len()..]
+                .iter()
+                .flatten()
+                .all(|corner| corner.y == layout::TERRACE)
+        );
+        let floor = height_at(terrace::on_fall(26.0, 5.5)).unwrap();
+        assert!((floor - layout::TERRACE).abs() < 1e-5, "{floor}");
         // The beach is walked on its shingle, as high as it is drawn.
         let on = beach::at(beach::NEAR + 1.0, 0.3);
         let walked = height_at(on).unwrap();
