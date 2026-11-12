@@ -178,9 +178,10 @@ impl Scene {
     /// Where the agent's middle at `x` and `z` stands for someone whose eyes are at `eyes`, on the floor `floor`: the
     /// eyes it stands for there, as high above the floor beneath it as theirs stand above theirs, and that floor. With no
     /// ground, theirs and the space's floor; on the ground, over a floor there on their level, that floor; over no
-    /// floor near no other level, as over a meadow beside a path, theirs, at their eyes over their floor; over or beside
-    /// only floors on other levels, as beyond a deck's edge, none where `level`, and otherwise as over none; and,
-    /// standing over no floor themselves, a little beneath their eyes.
+    /// floor near no other level, on the space's floor's level, as over a meadow beside a path, theirs, at their eyes
+    /// over their floor; over or beside only floors on other levels, as beyond a deck's edge, or over no floor on a
+    /// [`raised`] level, as beyond a terrace's edge, none where `level`, and otherwise as over none; and, standing over
+    /// no floor themselves, a little beneath their eyes.
     fn standing(
         &self,
         x: f32,
@@ -193,7 +194,7 @@ impl Scene {
             (None, _) => Some((eyes[1], entourage::FLOOR)),
             (Some(ground), Some(floor)) => match ground.level_at(x, z, floor) {
                 Some(there) => Some((there + eyes[1] - floor, there)),
-                None if level && ground.off_level(x, z, floor) => None,
+                None if level && (raised(floor) || ground.off_level(x, z, floor)) => None,
                 None => Some((eyes[1], floor)),
             },
             (Some(_), None) => Some((eyes[1], eyes[1] - tomori_environment::sightlines::EYES)),
@@ -657,10 +658,10 @@ pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
         .fold(middle[1], f32::max);
     let length = level(along).max(1e-3);
     let (across_x, across_z) = (-along[2] / length, along[0] / length);
-    let raised = scene
+    let over = scene
         .ground
         .iter()
-        .flat_map(|_| raised(from, to))
+        .flat_map(|_| lifts(from, to))
         .collect::<Vec<_>>();
     [
         [middle[0], tallest + OVER, middle[2]],
@@ -676,15 +677,22 @@ pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
         ],
     ]
     .into_iter()
-    .chain(raised)
+    .chain(over)
     .find(|via| open(from, *via) && open(*via, to))
     .map_or_else(streamed, Route::Via)
+}
+
+/// Whether `floor` is a raised level's, more than [`ground::LEVEL`] above the space's floor, where participants arrive,
+/// as a deck or a terrace, beyond whose edge there is a drop; rather than the space's floor's own level, whose walkable
+/// ground is narrower than what is drawn about it, as a path through a meadow.
+fn raised(floor: f32) -> bool {
+    floor > entourage::FLOOR + ground::LEVEL
 }
 
 /// The waypoints over the ground tried between `from` and `to`, in order: above where it sets off, so that it rises
 /// first, then above where it goes, so that it travels then descends, then above the middle of the way; at the higher
 /// of the two, then [`LIFT`] higher each time, [`LIFTS`] times.
-fn raised(from: [f32; 3], to: [f32; 3]) -> impl Iterator<Item = [f32; 3]> {
+fn lifts(from: [f32; 3], to: [f32; 3]) -> impl Iterator<Item = [f32; 3]> {
     let top = from[1].max(to[1]);
     (0..=LIFTS).flat_map(move |lift| {
         let y = top + lift as f32 * LIFT;
@@ -699,7 +707,7 @@ fn raised(from: [f32; 3], to: [f32; 3]) -> impl Iterator<Item = [f32; 3]> {
 }
 
 /// The waypoint by which the agent's way from `from` to `to` keeps above `ground`, where the straight way does not,
-/// as when it passes below a deck or through a raised level's edge: the first of [`raised`] by which both halves keep
+/// as when it passes below a deck or through a raised level's edge: the first of [`lifts`] by which both halves keep
 /// clear of it, or else the highest, over the middle of the way; none where the straight way keeps clear, or there is
 /// no ground.
 pub(crate) fn over_ground(
@@ -711,9 +719,9 @@ pub(crate) fn over_ground(
     if ground.open(from, to) {
         return None;
     }
-    raised(from, to)
+    lifts(from, to)
         .find(|via| ground.open(from, *via) && ground.open(*via, to))
-        .or_else(|| raised(from, to).last())
+        .or_else(|| lifts(from, to).last())
 }
 
 /// How near `point` comes to the segment from `from` to `to`.

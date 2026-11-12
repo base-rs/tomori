@@ -803,9 +803,44 @@ fn over_the_ground_no_waypoint_is_needed_where_the_way_is_clear_nor_where_there_
         )),
         None,
     );
-    let last = raised([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]).last();
+    let last = lifts([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]).last();
     assert_eq!(
         over_ground([0.0, 0.0, 0.0], [2.0, 0.0, 0.0], Some(&shut)),
         last
     );
+}
+
+#[test]
+fn on_a_raised_level_with_nothing_beneath_its_edge_it_stands_on_it_but_at_the_space_s_floor_over_nothing_beside_it()
+ {
+    // A platform 6 m across with no ground about it at all: high, as a terrace over falls, or at the space's floor, as
+    // a path through a meadow.
+    let platform = |height: f32| {
+        let corner = |x: f32, z: f32| glam::Vec3::new(x, height, z);
+        Ground::new(
+            std::sync::Arc::new(tomori_environment::navmesh::Navmesh::from_triangles([
+                [corner(-3.0, -3.0), corner(3.0, -3.0), corner(3.0, 3.0)],
+                [corner(-3.0, -3.0), corner(3.0, 3.0), corner(-3.0, 3.0)],
+            ])),
+            None,
+        )
+    };
+    for (height, on) in [(5.0, true), (0.2, false)] {
+        // Ada stands half a metre in from its edge; the agent comes from beyond it.
+        let ada = [2.5, height + 1.6, 0.0];
+        let scene = open(&[ada]).on(Some(platform(height)));
+        let spot = spot(
+            [8.0, height + 1.7, 0.0],
+            &speaker(ada, [2.5, ada[1], -3.0]),
+            &scene,
+        )
+        .expect("clear");
+        let [x, y, z] = spot.position;
+        assert!((y - (height + 1.6 + RISE)).abs() < 1e-4, "{spot:?}");
+        let over = scene.ground.as_ref().unwrap().level_at(x, z, height);
+        assert_eq!(over.is_some(), on, "{height}: {spot:?}");
+        if !on {
+            assert!((x - 4.5).abs() < 1e-4, "{spot:?}");
+        }
+    }
 }
