@@ -686,20 +686,13 @@ type DiscoveryFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = Discove
 /// The service a connection's requests and reads go to: its HTTP client,
 /// where it is and with what credentials, the connection's cancellation, which
 /// ends them all with it, and its timers.
-struct Service<'a, 'c, S> {
+#[derive(Clone, Copy)]
+struct Service<'a, 'c, T> {
     client: &'a Client<'c>,
     resolved: &'a Resolved,
     cancellation: &'a Cancellation,
-    timers: &'a S,
+    timers: T,
 }
-
-impl<S> Clone for Service<'_, '_, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S> Copy for Service<'_, '_, S> {}
 
 /// Open the server's global event stream, then serve it and the commands,
 /// polling the stream, the command channel, the requests in flight, reads and
@@ -1194,7 +1187,7 @@ fn start_commands<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let mut kept = VecDeque::new();
     while let Some((command, held)) = waiting.pop_front() {

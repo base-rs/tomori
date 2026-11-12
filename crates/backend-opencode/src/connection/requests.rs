@@ -110,7 +110,7 @@ pub(super) fn prepare_command<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) -> Option<Request<'a>> {
     let Service {
         client,

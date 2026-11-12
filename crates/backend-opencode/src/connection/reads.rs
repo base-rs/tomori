@@ -62,7 +62,7 @@ pub(super) struct ResyncResult {
 /// incomplete. Its workers are listed for the rest of the time: a family too
 /// large to walk in time is returned in part, with the walk to go on with.
 async fn bounded_snapshot<S: Timers>(
-    service: Service<'_, '_, S>,
+    service: Service<'_, '_, &S>,
     id: &str,
     modes: Modes,
     local: &Cancellation,
@@ -183,7 +183,7 @@ pub(super) fn schedule_snapshot<'a, S: Timers>(
     id: String,
     identity: &Arc<AtomicU64>,
     reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let Service { cancellation, .. } = service;
     let Some(registration) = registrations
@@ -250,7 +250,7 @@ pub(super) fn start_resyncs<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     resyncs: &mut ResyncFutures<'a>,
     sequence: &Arc<AtomicU64>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let Service {
         client,
@@ -568,7 +568,7 @@ pub(super) fn due_discoveries(
 pub(super) fn start_discoveries<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     discoveries: &mut DiscoveryFutures<'a>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let Service {
         client,
@@ -653,7 +653,7 @@ pub(super) fn finish_discovery(
 pub(super) fn start_restores<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     restores: &mut RestoreFutures<'a>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let Service {
         client,
@@ -734,7 +734,7 @@ type WorkerRecords = (Vec<Value>, Vec<Value>, Vec<Value>);
 pub(super) fn start_activity_syncs<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     activities: &mut ActivityFutures<'a>,
-    service: Service<'a, '_, S>,
+    service: Service<'a, '_, &'a S>,
 ) {
     let Service {
         client,
