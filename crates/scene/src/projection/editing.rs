@@ -95,6 +95,15 @@ const HANDLE_REACH: f32 = 0.8;
 /// that walls far away show nothing.
 pub const PADLOCK_NEAR: f32 = 3.0;
 
+/// How far apart, at most, the places a locked wall's padlock may stand along its top and bottom edges are, in metres:
+/// its corners, and between them along a wall wider than this, so that wherever an owner stands along it one is within
+/// a metre of the point of its edge nearest them.
+pub const PADLOCK_SPACING: f32 = 2.0;
+
+/// How much nearer the viewer another of a locked wall's padlock's places must be than where it stands for it to move
+/// there, in metres, so that it stays put as they move about and does not flicker between two.
+pub const PADLOCK_STAY: f32 = 0.3;
+
 /// Whether a surface among `surfaces` stands between `from` and `to`, crossing the line between them, as the floor of a
 /// deck stands between a participant on it and a wall beneath it.
 fn hidden(surfaces: Option<&Locomotion>, from: Vec3, to: Vec3) -> bool {
@@ -164,8 +173,8 @@ pub enum Handle {
     /// slider, its slots as they were; moving up or down does nothing.
     Text,
     /// The padlock a row beyond its top left corner, open, on a wall taken hold of: squeezed by an owner, it locks the
-    /// wall, for everyone. A locked wall, never taken hold of, shows it alone and closed to an owner near it, whose
-    /// squeeze unlocks it.
+    /// wall, for everyone. A locked wall, never taken hold of, shows it alone and closed to an owner near it, at
+    /// whichever of its [`padlock_points`] is nearest them, whose squeeze unlocks it.
     Lock,
     /// Beside the padlock of an environment's own wall unlocked, for an owner: puts it back where and as the environment
     /// has it, locked.
@@ -237,14 +246,64 @@ pub fn carried(wall: &Wall, rights: Rights) -> bool {
 }
 
 /// A locked wall's padlock as last laid out, with what it was laid out from: the wall, where it stood and the other
-/// walls of its group, so that it is laid out again only when one of them changes.
+/// walls of its group, so that it is laid out again only when one of them changes. It holds every place the padlock may
+/// stand, as [`padlock_points`] lays them out, and which of them it stands at, as the viewer last moved it.
 #[derive(Clone, Debug)]
 struct PadlockLayout {
     wall: Wall,
     frame: Mat4,
     members: Vec<Wall>,
-    models: Vec<Mat4>,
+    places: Vec<PadlockPlace>,
     size: f32,
+    at: usize,
+}
+
+/// A place a locked wall's padlock may stand: its face's model, unscaled, and whether it is below the wall, so that
+/// what it says stands below it, clear of the wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PadlockPlace {
+    model: Mat4,
+    below: bool,
+    /// Where along its edge it stands, or `None` for where [`handle_points_with`] puts it.
+    spot: Option<LockSpot>,
+}
+
+/// Where along a wall's top or bottom edge its padlock stands, from beyond its left end (0) to beyond its right (1), so
+/// that the padlock of a wall unlocked there stays there as the wall is taken hold of and changed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LockSpot {
+    top: bool,
+    along: f32,
+}
+
+impl LockSpot {
+    /// Where it stands on `wall`'s surface, standing at `frame`, from its pose, among what is `around` it, with its
+    /// handles `size` across: on the row above its top or below its bottom, or `None` where another wall of its group
+    /// is joined across that edge, where it would stand over another wall's slots or by its group's bar, or within
+    /// [`FLOOR_CLEARANCE`] of the floor.
+    fn place(self, wall: &Wall, frame: Mat4, around: &Around, size: f32) -> Option<(f32, f32)> {
+        let Edges {
+            pitch,
+            side,
+            bottom,
+            lock,
+            ..
+        } = Edges::of(wall, frame);
+        let joined = |edge: Edge| around.joined.contains(&edge);
+        let half = wall.size().0 / 2.0;
+        let left = if joined(Edge::Left) { -half } else { -side };
+        let right = if joined(Edge::Right) { half } else { side };
+        let (edge, y) = if self.top {
+            (Edge::Top, lock)
+        } else {
+            (Edge::Bottom, bottom - pitch)
+        };
+        let x = left + (right - left) * self.along;
+        let at = along(wall, x).0 + Vec3::Y * y;
+        let above = frame.transform_point3(at).y - size / 2.0
+            >= tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+        (!joined(edge) && above && around.clear(x, y, size)).then_some((x, y))
+    }
 }
 
 /// A change to a wall a participant made, to send: each left out stays as it is.
@@ -350,6 +409,9 @@ pub struct Editor {
     bar: Option<String>,
     /// The locked wall whose padlock the ray meets, by identity.
     padlock: Option<String>,
+    /// Where along its edge the padlock of the wall taken hold of stands, where an owner unlocked it there, so that it
+    /// stays where it was rather than jumping to beyond its top left corner.
+    lock_spot: Option<LockSpot>,
     /// When B asked to remove the wall carried, which holds panels, so that another press confirms it.
     confirm: Option<Instant>,
     /// The other walls of the group of the wall carried, each as it stood and where it stood from the wall carried.
@@ -587,14 +649,128 @@ fn handle_models(
     keep: Option<Handle>,
     controls: LockControls,
 ) -> (Vec<(Handle, Mat4)>, f32) {
+    handle_models_at(wall, frame, walls, keep, controls, None)
+}
+
+/// Where each of `wall`'s handles stands, as [`handle_models`] lays them out, but for its padlock, at `lock` along its
+/// edge, where it stood as it was unlocked, and the control that puts it back beside it, where it stands there.
+fn handle_models_at(
+    wall: &Wall,
+    frame: Mat4,
+    walls: &[&Wall],
+    keep: Option<Handle>,
+    controls: LockControls,
+    lock: Option<LockSpot>,
+) -> (Vec<(Handle, Mat4)>, f32) {
     let mut around = Around::of(wall, frame, walls, keep);
     around.controls = controls;
+    around.lock = lock;
     let (spots, size) = lay_out(wall, frame, &around);
     let models = spots
         .into_iter()
         .map(|(handle, spot)| (handle, spot.model(frame)))
         .collect();
     (models, size)
+}
+
+/// Where a locked wall's padlock may stand, `wall` standing at `frame` among `walls` as they are drawn, as a face's
+/// model, unscaled, and how large it is: first where [`handle_points_with`] puts it, a row beyond its top left corner;
+/// then along the row above its top edge and the row below its bottom edge, from beyond one corner to beyond the
+/// other, at most [`PADLOCK_SPACING`] apart, as a curved wall runs. In a group, none stands along an edge another
+/// wall is joined across, beyond its own slots where one is joined beside it, or over another wall's slots or by its
+/// group's bar; and none within [`FLOOR_CLEARANCE`] of the floor. The owner sees it at whichever is nearest them.
+fn padlock_places(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> (Vec<PadlockPlace>, f32) {
+    let controls = LockControls {
+        padlock: true,
+        reset: false,
+    };
+    let mut around = Around::of(wall, frame, walls, None);
+    around.controls = controls;
+    let (laid, size) = lay_out(wall, frame, &around);
+    let mut spots: Vec<(Spot, Option<LockSpot>)> = laid
+        .into_iter()
+        .filter(|(handle, _)| *handle == Handle::Lock)
+        .map(|(_, spot)| (spot, None))
+        .collect();
+    let side = Edges::of(wall, frame).side;
+    // As many as keep them at most `PADLOCK_SPACING` apart from beyond one end to beyond the other.
+    let across = if around.joined.contains(&Edge::Left) {
+        wall.size().0 / 2.0
+    } else {
+        side
+    } + if around.joined.contains(&Edge::Right) {
+        wall.size().0 / 2.0
+    } else {
+        side
+    };
+    let steps = (across / PADLOCK_SPACING).ceil().max(1.0) as u32;
+    for top in [true, false] {
+        for step in 0..=steps {
+            let lock = LockSpot {
+                top,
+                along: step as f32 / steps as f32,
+            };
+            let Some((x, y)) = lock.place(wall, frame, &around, size) else {
+                continue;
+            };
+            let (at, runs) = along(wall, x);
+            let spot = Spot {
+                at: at + Vec3::Y * y,
+                runs,
+            };
+            if spots
+                .iter()
+                .all(|(other, _)| other.at.distance(spot.at) > size)
+            {
+                spots.push((spot, Some(lock)));
+            }
+        }
+    }
+    let places = spots
+        .into_iter()
+        .map(|(spot, lock)| PadlockPlace {
+            model: spot.model(frame),
+            below: spot.at.y < 0.0,
+            spot: lock,
+        })
+        .collect();
+    (places, size)
+}
+
+/// Where a locked wall's padlock may stand, `wall` standing at `frame` among `walls` as they are drawn, and how large it
+/// is: the first where [`handle_points_with`] puts it, and the rest along its top and bottom edges. See
+/// `design/projection.md`.
+pub fn padlock_points(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> (Vec<Vec3>, f32) {
+    let (places, size) = padlock_places(wall, frame, walls);
+    let points = places
+        .into_iter()
+        .map(|place| place.model.w_axis.truncate())
+        .collect();
+    (points, size)
+}
+
+/// Where an owner at `viewer` first sees a locked wall's padlock, `wall` standing at `frame` among `walls`: the place of
+/// [`padlock_points`] nearest them, the first of those as near, or `None` where it stands nowhere.
+pub fn padlock_point(wall: &Wall, frame: Mat4, walls: &[&Wall], viewer: Vec3) -> Option<Vec3> {
+    let (points, _) = padlock_points(wall, frame, walls);
+    points
+        .get(nearest_place(points.iter().copied(), viewer))
+        .copied()
+}
+
+/// Which of `points` is nearest `viewer`, the first of those as near.
+fn nearest_place(points: impl Iterator<Item = Vec3>, viewer: Vec3) -> usize {
+    points
+        .map(|point| point.distance(viewer))
+        .enumerate()
+        .fold((0, f32::INFINITY), |best, (index, distance)| {
+            if distance < best.1 {
+                (index, distance)
+            } else {
+                best
+            }
+        })
+        .0
 }
 
 /// Where `wall`'s grab bar stands, the wall standing at `frame`, as [`handle_points`] lays it out with its handles.
@@ -624,6 +800,8 @@ struct Around {
     bar: Option<PlacedBar>,
     /// The lock's controls it shows.
     controls: LockControls,
+    /// Where along its edge its padlock stands, where it was unlocked there.
+    lock: Option<LockSpot>,
 }
 
 impl Around {
@@ -658,6 +836,7 @@ impl Around {
             keep,
             bar,
             controls: LockControls::default(),
+            lock: None,
         }
     }
 
@@ -960,6 +1139,9 @@ fn lay_out(wall: &Wall, frame: Mat4, around: &Around) -> (Vec<(Handle, Spot)>, f
         half,
         lock,
     } = Edges::of(wall, frame);
+    let moved = around
+        .lock
+        .and_then(|lock| lock.place(wall, frame, around, size));
     let joined = |edge: Edge| around.joined.contains(&edge);
     let (left, right, up, down) = (
         joined(Edge::Left),
@@ -1026,7 +1208,14 @@ fn lay_out(wall: &Wall, frame: Mat4, around: &Around) -> (Vec<(Handle, Spot)>, f
                 let towards = if left && !right { -1.0 } else { 1.0 };
                 let inward = if handle == Handle::Reset { pitch } else { 0.0 };
                 let row = if up && !down { bottom - pitch } else { lock };
-                (towards * (inward - side), row)
+                let home = (towards * (inward - side), row);
+                // Where it was unlocked along its edge, the control that puts it back beside it, inwards, and left
+                // out, as any handle is, where that is not clear.
+                match (moved, handle) {
+                    (Some(at), Handle::Lock) => at,
+                    (Some((x, y)), _) => (if x > 0.0 { x - pitch } else { x + pitch }, y),
+                    _ => home,
+                }
             }
         })
     };
@@ -1624,7 +1813,8 @@ impl Editor {
             .and_then(|id| walls.iter().find(|(wall, _)| wall.id == *id))
             .and_then(|(wall, frame)| {
                 let controls = LockControls::of(wall, rights);
-                let (models, size) = handle_models(wall, *frame, &all, None, controls);
+                let (models, size) =
+                    handle_models_at(wall, *frame, &all, None, controls, self.lock_spot);
                 nearest_handle(&models, size, ray)
             })
             .map(|(_, along)| along);
@@ -1660,6 +1850,7 @@ impl Editor {
         self.hovered = None;
         self.bar = None;
         self.padlock = None;
+        self.lock_spot = None;
         self.wall.take().is_some()
     }
 
@@ -1722,66 +1913,86 @@ impl Editor {
     }
 
     /// The padlocks of the locked walls among `walls`, as drawn, that a participant with `rights` sees, each with its
-    /// wall, as its face's model and size: for an owner, where the server locks walls, each standing within
-    /// [`PADLOCK_NEAR`] of `viewer`, where the padlock of the wall taken hold of stands, with none of `surfaces` between
-    /// `viewer` and the padlock or the middle of its wall, so that a wall beneath a deck shows nothing to an owner on
-    /// it, however near. Anyone else, and an owner further away, sees none, as a locked wall shows nothing else. Each is
-    /// laid out once and kept until its wall, where it stands or its group changes.
+    /// wall, as its face's model and size, and whether it stands below its wall: for an owner, where the server locks
+    /// walls, each at whichever of its [`padlock_points`] is nearest `viewer`, moving to another only where that is
+    /// [`PADLOCK_STAY`] nearer, and shown only within [`PADLOCK_NEAR`] of `viewer` there, with none of `surfaces`
+    /// between `viewer` and the padlock or the middle of its wall, so that a wall beneath a deck shows nothing to an
+    /// owner on it, however near. Anyone else, and an owner further away, sees none, as a locked wall shows nothing
+    /// else. Each is laid out once and kept until its wall, where it stands or its group changes; as the viewer moves,
+    /// only which of its places it stands at changes.
     fn padlocks<'a>(
         &mut self,
         walls: &[(&'a Wall, Mat4)],
         viewer: Vec3,
         surfaces: Option<&Locomotion>,
         rights: Rights,
-    ) -> Vec<(&'a Wall, Mat4, f32)> {
+    ) -> Vec<(&'a Wall, Mat4, f32, bool)> {
         if !(rights.adjust && rights.locks && rights.lock) {
             return Vec::new();
         }
         let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
         self.padlock_layouts
             .retain(|id, _| all.iter().any(|wall| wall.is_locked() && wall.id == *id));
-        let controls = LockControls {
-            padlock: true,
-            reset: false,
-        };
         let mut padlocks = Vec::new();
         for (wall, frame) in walls.iter().filter(|(wall, _)| wall.is_locked()) {
             let members = super::boards::members(wall, &all);
-            let kept = self.padlock_layouts.get(&wall.id).filter(|kept| {
+            let kept = self.padlock_layouts.get(&wall.id).is_some_and(|kept| {
                 kept.wall == **wall
                     && kept.frame == *frame
                     && kept.members.iter().eq(members.iter().copied())
             });
-            let (models, size) = match kept {
-                Some(kept) => (kept.models.clone(), kept.size),
-                None => {
-                    let (models, size) = handle_models(wall, *frame, &all, None, controls);
-                    let models: Vec<Mat4> = models.into_iter().map(|(_, model)| model).collect();
-                    self.padlock_layouts.insert(
-                        wall.id.clone(),
-                        PadlockLayout {
-                            wall: (*wall).clone(),
-                            frame: *frame,
-                            members: members.into_iter().cloned().collect(),
-                            models: models.clone(),
-                            size,
-                        },
-                    );
-                    (models, size)
-                }
+            if !kept {
+                let (places, size) = padlock_places(wall, *frame, &all);
+                let at = nearest_place(
+                    places.iter().map(|place| place.model.w_axis.truncate()),
+                    viewer,
+                );
+                self.padlock_layouts.insert(
+                    wall.id.clone(),
+                    PadlockLayout {
+                        wall: (*wall).clone(),
+                        frame: *frame,
+                        members: members.into_iter().cloned().collect(),
+                        places,
+                        size,
+                        at,
+                    },
+                );
+            }
+            let Some(layout) = self
+                .padlock_layouts
+                .get_mut(&wall.id)
+                .filter(|layout| !layout.places.is_empty())
+            else {
+                continue;
             };
-            let middle = frame.w_axis.truncate();
-            padlocks.extend(
-                models
-                    .into_iter()
-                    .filter(|model| {
-                        let padlock = model.w_axis.truncate();
-                        padlock.distance(viewer) <= PADLOCK_NEAR
-                            && !hidden(surfaces, viewer, padlock)
-                            && !hidden(surfaces, viewer, middle)
-                    })
-                    .map(|model| (*wall, model, size)),
+            // It moves to the place nearest the viewer only where that is nearer by `PADLOCK_STAY` than where it is, or
+            // at once where it would not be seen where it is, beyond reach or hidden, so that it shows wherever the
+            // place nearest them would.
+            let point = |index: usize| layout.places[index].model.w_axis.truncate();
+            let distance = |index: usize| point(index).distance(viewer);
+            let nearest = nearest_place(
+                layout
+                    .places
+                    .iter()
+                    .map(|place| place.model.w_axis.truncate()),
+                viewer,
             );
+            if distance(layout.at) > PADLOCK_NEAR
+                || hidden(surfaces, viewer, point(layout.at))
+                || distance(layout.at) - distance(nearest) > PADLOCK_STAY
+            {
+                layout.at = nearest;
+            }
+            let place = layout.places[layout.at];
+            let padlock = place.model.w_axis.truncate();
+            let middle = frame.w_axis.truncate();
+            if padlock.distance(viewer) <= PADLOCK_NEAR
+                && !hidden(surfaces, viewer, padlock)
+                && !hidden(surfaces, viewer, middle)
+            {
+                padlocks.push((*wall, place.model, layout.size, place.below));
+            }
         }
         padlocks
     }
@@ -1852,7 +2063,8 @@ impl Editor {
             (&editing, ray, &self.drag, &self.carry)
         {
             let controls = LockControls::of(wall, input.rights);
-            let (models, size) = handle_models(wall, *frame, &all, None, controls);
+            let (models, size) =
+                handle_models_at(wall, *frame, &all, None, controls, self.lock_spot);
             met = nearest_handle(&models, size, &ray)
                 .filter(|(_, along)| !beyond(input.surfaces, &ray, *along));
         }
@@ -1868,7 +2080,7 @@ impl Editor {
             .and_then(|ray| {
                 padlocks
                     .iter()
-                    .filter_map(|(wall, model, size)| {
+                    .filter_map(|(wall, model, size, _)| {
                         nearest_handle(&[(Handle::Lock, *model)], *size, &ray)
                             .map(|(_, along)| (*wall, along))
                     })
@@ -1929,9 +2141,11 @@ impl Editor {
                             .map(|(_, frame)| frame.w_axis.truncate());
                         let clear = middle
                             .into_iter()
-                            .chain(self.padlock_layouts.get(&wall.id).into_iter().flat_map(
-                                |kept| kept.models.iter().map(|model| model.w_axis.truncate()),
-                            ))
+                            .chain(self.padlock_layouts.get(&wall.id).and_then(|kept| {
+                                kept.places
+                                    .get(kept.at)
+                                    .map(|place| place.model.w_axis.truncate())
+                            }))
                             .all(|point| !hidden(input.surfaces, input.viewer, point));
                         (ray.at(along), input.rights.lock && clear)
                     })
@@ -2041,6 +2255,11 @@ impl Editor {
                     reset: false,
                 });
                 self.stop();
+                self.lock_spot = self
+                    .padlock_layouts
+                    .get(&wall.id)
+                    .and_then(|kept| kept.places.get(kept.at))
+                    .and_then(|place| place.spot);
                 self.wall = Some(wall.id.clone());
                 self.pending = Some((wall.clone().with_locked(false), input.now));
             } else if let Some(ray) = ray.filter(|_| self.drag.is_none() && self.carry.is_none()) {
@@ -2508,11 +2727,13 @@ impl Editor {
             let all: Vec<&Wall> = shown.iter().collect();
             let keep = self.drag.as_ref().map(|drag| drag.handle);
             let controls = LockControls::of(wall, input.rights);
-            let (points, _) = handle_points_among_with(wall, *frame, &all, keep, controls);
-            let at = points
+            let (models, _) = handle_models_at(wall, *frame, &all, keep, controls, self.lock_spot);
+            let at = models
                 .iter()
                 .find(|(shown, _)| *shown == handle)
-                .map_or(frame.transform_point3(Vec3::ZERO), |(_, at)| *at);
+                .map_or(frame.transform_point3(Vec3::ZERO), |(_, model)| {
+                    model.w_axis.truncate()
+                });
             let along = (at - ray.origin).dot(ray.direction).max(0.0);
             output.end = Some(ray.at(along));
             output.hit = Some(match self.drag {
@@ -2554,11 +2775,11 @@ impl Editor {
     fn sheets(
         &mut self,
         walls: &[(&Wall, Mat4)],
-        padlocks: &[(&Wall, Mat4, f32)],
+        padlocks: &[(&Wall, Mat4, f32, bool)],
         input: &Input<'_>,
     ) -> Vec<Sheet> {
         let mut sheets = Vec::new();
-        for (wall, model, size) in padlocks {
+        for (wall, model, size, below) in padlocks {
             let on = self.padlock.as_deref() == Some(wall.id.as_str());
             let key = (Handle::Lock, on, true);
             let canvas = self
@@ -2573,15 +2794,20 @@ impl Editor {
                 canvas: Some(canvas),
             });
             if on {
-                // Above the padlock, clear of it, as the padlock is above its wall.
+                // Beyond the padlock, clear of it, as the padlock is beyond its wall: above it, or below one below,
+                // unless that would reach within `FLOOR_CLEARANCE` of the floor, when it stands above it too.
                 let up = model.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
-                let edge = model.w_axis.truncate() + up * size * HANDLE_REACH;
-                sheets.push(hint_beside(
-                    bar_label_for(input.controls, wall, input.rights),
-                    edge,
-                    input.viewer,
-                    1.0,
-                ));
+                let middle = model.w_axis.truncate();
+                let label = bar_label_for(input.controls, wall, input.rights);
+                let under = middle - up * size * HANDLE_REACH;
+                let low = under.y - hint_height(&label, under, input.viewer)
+                    < tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+                let (edge, side) = if *below && !low {
+                    (under, -1.0)
+                } else {
+                    (middle + up * size * HANDLE_REACH, 1.0)
+                };
+                sheets.push(hint_beside(label, edge, input.viewer, side));
             }
         }
         let all: Vec<&Wall> = walls.iter().map(|(wall, _)| *wall).collect();
@@ -2670,7 +2896,7 @@ impl Editor {
         }
         let keep = self.drag.as_ref().map(|drag| drag.handle);
         let controls = LockControls::of(wall, input.rights);
-        let (models, size) = handle_models(wall, frame, &all, keep, controls);
+        let (models, size) = handle_models_at(wall, frame, &all, keep, controls, self.lock_spot);
         let points: Vec<(Handle, Vec3)> = models
             .iter()
             .map(|(handle, model)| (*handle, model.w_axis.truncate()))
@@ -2916,6 +3142,13 @@ fn hint_beside(mut canvas: Canvas, edge: Vec3, viewer: Vec3, side: f32) -> Sheet
         model: Some(facing(edge + Vec3::Y * side * tall / 2.0, viewer, 1.0)),
         canvas: Some(crate::frame_timing::drawn(canvas)),
     }
+}
+
+/// How tall `canvas` is drawn as a hint at `edge`, seen from `viewer`, as [`hint_beside`] draws it.
+fn hint_height(canvas: &Canvas, edge: Vec3, viewer: Vec3) -> f32 {
+    let mut canvas = canvas.clone();
+    canvas.pixel = HINT_ANGLE * edge.distance(viewer).max(0.1);
+    canvas.size().1
 }
 
 /// Where a wall carried stands with others: in a group, which it carries, and snapping beside another wall.

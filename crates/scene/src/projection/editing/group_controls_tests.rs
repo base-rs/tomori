@@ -516,6 +516,23 @@ fn a_wall_s_padlock_in_a_group_stands_clear_of_the_walls_joined_to_it_and_always
         .find(|(handle, ..)| *handle == Handle::Lock)
         .unwrap();
     assert!(x > width / 2.0 && y > height / 2.0, "{x} {y}");
+    // Of the places an owner may see it at, none stands along an edge another wall is joined across, nor beyond its
+    // slots beside one joined to its side.
+    for (walls, top) in [(&stacked, true), (&beside, false)] {
+        let all: Vec<&Wall> = walls.iter().collect();
+        let frame = model(&walls[0].frame()).unwrap();
+        let (points, _) = padlock_points(&walls[0], frame, &all);
+        assert!(points.len() > 1);
+        for point in points {
+            let local = frame.inverse().transform_point3(point);
+            let clear = if top {
+                local.y < 0.0
+            } else {
+                local.x >= -width / 2.0 - 1e-4
+            };
+            assert!(clear, "{local}");
+        }
+    }
     // Joined on every side, it still shows, so that a wall that will not change says why.
     let surrounded = group_of(
         ahead(3.0),
@@ -541,6 +558,10 @@ fn a_wall_s_padlock_in_a_group_stands_clear_of_the_walls_joined_to_it_and_always
             .collect::<Vec<_>>(),
         [Handle::Lock]
     );
+    let all: Vec<&Wall> = surrounded.iter().collect();
+    let locked = surrounded[0].clone().with_locked(true);
+    let (points, _) = padlock_points(&locked, model(&locked.frame()).unwrap(), &all);
+    assert_eq!(points.len(), 1);
 }
 
 #[test]

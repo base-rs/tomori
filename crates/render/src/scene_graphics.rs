@@ -358,6 +358,7 @@ mod tests {
     mod chart_readout;
     mod image_sharpness;
     mod linked_cursor;
+    mod padlock_corner;
     mod padlock_floor;
     mod timers;
     mod turning;
@@ -1977,7 +1978,9 @@ mod tests {
         const WIDTH: u32 = 960;
         const HEIGHT: u32 = 720;
         use tomori_protocol::{Panel, Place, Wall, WallKind};
-        use tomori_scene::projection::editing::{Handle, LOCKED, LockControls, handle_points_with};
+        use tomori_scene::projection::editing::{
+            Handle, LOCKED, LockControls, handle_points_with, padlock_point,
+        };
         let middle = Vec3::new(-0.2, 1.45, -2.1);
         let wall = Wall::new(
             "environment-0",
@@ -2003,7 +2006,8 @@ mod tests {
         };
         let (points, _) = handle_points_with(&wall, frame, lock);
         assert_eq!(points.len(), 1);
-        let padlock = points[0].1;
+        // Drawn at the place nearest the owner, at home.
+        let padlock = padlock_point(&wall, frame, &[&wall], arrival::HOME).unwrap();
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
