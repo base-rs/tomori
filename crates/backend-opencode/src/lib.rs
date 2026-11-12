@@ -38,20 +38,14 @@ pub struct Config {
     pub url: Option<String>,
 }
 
-/// One connection to the OpenCode server, shared by every session it hosts.
-struct Connection {
-    commands: connection::Commands,
-    /// The thread, kept alive for the connection's lifetime.
-    #[allow(dead_code)]
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
 /// The OpenCode backend.
 pub struct OpenCode {
     config: Config,
-    /// `None` until the first use; `Some(Ok(_))` once the thread is running;
-    /// `Some(Err(_))` once the backend has been shut down.
-    connection: Mutex<Option<std::result::Result<Connection, Error>>>,
+    /// The commands of the one connection to the OpenCode server, shared by
+    /// every session it hosts: `None` until the first use; `Some(Ok(_))` once
+    /// its thread is running, which ends once they are all dropped or shut
+    /// down; `Some(Err(_))` once the backend has been shut down.
+    connection: Mutex<Option<std::result::Result<connection::Commands, Error>>>,
 }
 
 /// Why a request fails once the backend has been shut down.
@@ -66,7 +60,7 @@ impl OpenCode {
     }
 
     /// The shared connection's commands channel, starting the thread on first
-    /// use. The sender is cloned out so no borrow of the locked `Connection`
+    /// use. The sender is cloned out so no borrow of the locked commands
     /// escapes the guard.
     fn connection(&self) -> Result<connection::Commands> {
         let mut guard = self
@@ -74,7 +68,7 @@ impl OpenCode {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.as_mut() {
-            Some(Ok(connection)) => Ok(connection.commands.clone()),
+            Some(Ok(commands)) => Ok(commands.clone()),
             Some(Err(error)) => Err(error.clone()),
             None => {
                 // Resolved again before every connection attempt: a restarted
@@ -83,7 +77,9 @@ impl OpenCode {
                 let resolve: connection::Resolve = Box::new(move || resolver.next());
                 let (commands, receiver) = connection::Commands::new();
                 // Refused for this request only: the next starts it again.
-                let thread = system::spawn("opencode-connection", move || {
+                // The thread is detached: it ends once every sender of its
+                // commands is dropped, or on shutdown.
+                system::spawn("opencode-connection", move || {
                     connection::run_thread(resolve, receiver);
                 })
                 .map_err(|error| {
@@ -92,11 +88,7 @@ impl OpenCode {
                         format!("could not start the connection thread: {error}"),
                     )
                 })?;
-                let value = Connection {
-                    commands: commands.clone(),
-                    thread: Some(thread),
-                };
-                *guard = Some(Ok(value));
+                *guard = Some(Ok(commands.clone()));
                 Ok(commands)
             }
         }
@@ -217,7 +209,7 @@ impl Backend for OpenCode {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.as_ref() {
-            Some(Ok(connection)) => connection.commands.shutdown(),
+            Some(Ok(commands)) => commands.shutdown(),
             // Never start a connection once shutting down.
             _ => *guard = Some(Err(Error::new(ErrorKind::Closed, SHUT_DOWN))),
         }
