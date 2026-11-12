@@ -1737,8 +1737,9 @@ fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
 }
 
 /// From anywhere within the space's bounds, everything the farmyard draws, its yard, its pines, its backdrop, the bush
-/// on its foothills among it, and its upper terrace, is far within the far plane, and its haze has hidden it entirely, to a thousandth, at a
-/// tenth of the far plane, so that whichever way the head turns nothing far away is cut off: it fades into the haze.
+/// on its foothills among it, its trail, campsite, beach and water, and its upper terrace, is far within the far plane,
+/// and its haze has hidden it entirely, to a thousandth, at a tenth of the far plane, so that whichever way the head
+/// turns nothing far away is cut off: it fades into the haze.
 #[test]
 fn the_farmyard_fades_into_its_haze_long_before_the_far_plane() {
     use tomori_scene::depth::FAR;
@@ -1746,7 +1747,11 @@ fn the_farmyard_fades_into_its_haze_long_before_the_far_plane() {
     for model in [
         backdrop::model(),
         props::model(),
-        tomori_environment_farmyard::terrace::model(),
+        terrace::model(),
+        trail::model(),
+        campsite::model(),
+        beach::model(),
+        beach::stones_model(),
     ] {
         let instance = Instance::new(Arc::new(model));
         for draw in instance.draws() {
@@ -1760,6 +1765,12 @@ fn the_farmyard_fades_into_its_haze_long_before_the_far_plane() {
             }
         }
     }
+    points.extend(
+        backdrop::water()
+            .into_iter()
+            .chain(backdrop::upper_water())
+            .map(|point| point.position),
+    );
     points.extend(
         backdrop::plants()
             .iter()
