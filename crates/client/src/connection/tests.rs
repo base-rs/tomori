@@ -1190,6 +1190,59 @@ fn the_speaker_keeps_the_ambience_and_its_level_for_this_player_and_the_next() {
     );
 }
 
+#[test]
+fn a_poll_keeps_its_slowest_part_by_what_it_was() {
+    assert_eq!(Kind::of(&Action::EndUtterance).name(), "EndUtterance");
+    assert_eq!(Kind::of(&Action::Send(ClientMessage::Leave)).name(), "Send");
+    assert_eq!(
+        Kind::event(&Event::Message(ServerMessage::Ping { nonce: 1 })).name(),
+        "Ping",
+        "a message by its own kind"
+    );
+    let receiving = Event::Receiving {
+        received: 1,
+        length: 2,
+    };
+    assert_eq!(Kind::event(&receiving).name(), "Receiving");
+    assert_eq!(Kind::named("tick").name(), "tick");
+    assert_eq!(
+        Kind::named(&"a".repeat(40)).name(),
+        "a".repeat(32),
+        "a name is cut"
+    );
+    assert_eq!(format!("{:?}", Kind::named("cues")), "cues");
+    let mut slowest = None;
+    Slowest::keep(
+        &mut slowest,
+        Kind::named("tick"),
+        Instant::now() - Duration::from_millis(5),
+    );
+    Slowest::keep(&mut slowest, Kind::named("cues"), Instant::now());
+    let longest = slowest.expect("a part was kept");
+    assert_eq!(longest.what, Kind::named("tick"), "the slowest is kept");
+    assert!(longest.took >= Duration::from_millis(5));
+    let said = Slowest {
+        what: Kind::named("ProjectionPatch"),
+        took: Duration::from_micros(4210),
+    };
+    assert_eq!(said.to_string(), "ProjectionPatch 4.21 ms");
+    // A connection keeps its polls' slowest part until it is asked, each action timed by its kind.
+    let mut session = Script::default();
+    let mut connection = kept(
+        &mut session,
+        Store::new(None),
+        None,
+        None,
+        Scripted::default(),
+        Nowhere,
+    );
+    assert_eq!(connection.slowest(), None);
+    session.push(Action::SetAgentMuted(true));
+    connection.poll(true, &mut session);
+    assert!(connection.slowest().is_some());
+    assert_eq!(connection.slowest(), None);
+}
+
 /// An echo test for a live microphone opened at `opened`, as it starts.
 fn echo_test(routed: bool) -> EchoTest {
     EchoTest {

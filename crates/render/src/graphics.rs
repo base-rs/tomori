@@ -145,6 +145,13 @@ pub fn requested_samples(value: Option<&str>) -> u32 {
     }
 }
 
+/// A frame's draws for the eyes, encoded by [`Renderer::encode`] and not yet submitted.
+#[must_use = "a frame encoded is drawn only once it is submitted"]
+pub struct Encoded {
+    commands: wgpu::CommandBuffer,
+    profiled: Option<crate::profiler::Frame>,
+}
+
 pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
@@ -944,6 +951,7 @@ impl Renderer {
         self.controllers.set_model(device, queue, hand, model);
     }
 
+    /// Draw the eyes `matrices` see into `targets`: [`Self::encode`], then [`Self::submit`] at once.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -953,6 +961,31 @@ impl Renderer {
         scene_to_space: Mat4,
         panels: &[(&crate::ui_panel::Panel, Mat4)],
     ) -> wgpu::SubmissionIndex {
+        let encoded = self.encode(device, queue, targets, matrices, scene_to_space, panels);
+        self.submit(queue, encoded)
+    }
+
+    /// Submit the eyes' draws [`Self::encode`] made, to be drawn after whatever was submitted before, and read their
+    /// timestamps back once the GPU has written them.
+    pub fn submit(&mut self, queue: &wgpu::Queue, encoded: Encoded) -> wgpu::SubmissionIndex {
+        let submitted = queue.submit([encoded.commands]);
+        self.profiler.submitted(encoded.profiled);
+        submitted
+    }
+
+    /// Cull and encode the eyes `matrices` see, drawn into `targets`, for [`Self::submit`]: all of a frame's work for
+    /// the CPU but the submission, so that the headset does it while the GPU still draws the frame before, and waits for
+    /// that only to submit. What it writes to buffers is written as the next submission starts, after the frames
+    /// already submitted have drawn, so the frame before draws as it was. See `design/rendering.md`.
+    pub fn encode(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        targets: &[wgpu::TextureView],
+        matrices: &[Mat4],
+        scene_to_space: Mat4,
+        panels: &[(&crate::ui_panel::Panel, Mat4)],
+    ) -> Encoded {
         assert_eq!(targets.len(), matrices.len());
         assert!((1..=2).contains(&targets.len()));
         // The glyphs that this frame's meshes were built with, which may be new.
@@ -1119,9 +1152,10 @@ impl Renderer {
             }
         }
         self.profiler.resolve(&mut encoder, profiled);
-        let submitted = queue.submit([encoder.finish()]);
-        self.profiler.submitted(profiled);
-        submitted
+        Encoded {
+            commands: encoder.finish(),
+            profiled,
+        }
     }
 
     /// Cull, against one frustum enclosing all the eyes `matrices` see, what the scenery and the avatar draw and Tomori's

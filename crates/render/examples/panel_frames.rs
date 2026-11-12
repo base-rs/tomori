@@ -168,6 +168,7 @@ fn main() {
     let mut projector = Projector::default();
     let start = Instant::now();
     let (mut scene, mut upload, mut render) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut encode, mut submit) = (Vec::new(), Vec::new());
     let mut sheets = 0;
     for frame in 0..frames + 60 {
         let time = frame as f32 / 72.0;
@@ -208,7 +209,7 @@ fn main() {
             glam::camera::rh::proj::directx::perspective(1.6, 1.0, 0.05, 50.0)
                 * glam::camera::rh::view::look_at_mat4(eye, eye - Vec3::Z, Vec3::Y)
         });
-        renderer.render(
+        let encoded = renderer.encode(
             device,
             queue,
             &eyes,
@@ -216,6 +217,8 @@ fn main() {
             glam::Mat4::IDENTITY,
             &panels.list(glam::Mat4::IDENTITY),
         );
+        let encoding = Instant::now();
+        renderer.submit(queue, encoded);
         let rendered = Instant::now();
         // The GPU draws while the next frame is stepped, as the headset's does; here it is waited for, untimed, so that
         // frames do not queue up.
@@ -225,19 +228,23 @@ fn main() {
             scene.push(laid - began);
             upload.push(uploaded - laid);
             render.push(rendered - uploaded);
+            encode.push(encoding - uploaded);
+            submit.push(rendered - encoding);
         }
         sheets = output.sheets.len();
     }
     let mut total: Vec<Duration> = scene.iter().zip(&upload).map(|(a, b)| *a + *b).collect();
-    let (scene, upload, render) = (
+    let (scene, upload, render, encode, submit) = (
         summary(&mut scene),
         summary(&mut upload),
         summary(&mut render),
+        summary(&mut encode),
+        summary(&mut submit),
     );
     let total = summary(&mut total);
     let count = projection.panels.len().max(1) as f64;
     println!(
-        "{} panels, {sheets} sheets, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet",
+        "{} panels, {sheets} sheets, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet, of which encoding {:.3} ms (p95 {:.3}) and submitting {:.3} ms (p95 {:.3})",
         projection.panels.len(),
         scene.0,
         scene.1,
@@ -249,5 +256,9 @@ fn main() {
         render.0,
         render.1,
         render.0 / sheets as f64,
+        encode.0,
+        encode.1,
+        submit.0,
+        submit.1,
     );
 }

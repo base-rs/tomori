@@ -209,9 +209,15 @@ impl Participant {
         if let Some(due) = self.frame_log.record(Instant::now())
             && let Some(summary) = self.frame_times.summary()
         {
+            // And the longest part of polling the connection, which says what a long poll was.
+            let slowest = self
+                .connection
+                .slowest()
+                .map(|slowest| format!("; slowest poll: {slowest}"));
             log::info!(
-                "Desktop frames, {}; {summary}",
-                frame_timing::rate(due.rate())
+                "Desktop frames, {}; {summary}{}",
+                frame_timing::rate(due.rate()),
+                slowest.unwrap_or_default()
             );
             // What those frames cost the GPU, and what they drew, which every frame drawn has; see `design/rendering.md`.
             self.renderer
